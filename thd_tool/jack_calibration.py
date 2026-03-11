@@ -87,6 +87,47 @@ class Calibration:
         cal.ref_dbfs          = data.get("ref_dbfs", -10.0)
         return cal
 
+    @classmethod
+    def load_output_only(cls, output_channel, freq, path=None):
+        """Load the first calibration that matches output_channel + freq, any input channel."""
+        path = path or DEFAULT_CAL_PATH
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            all_cals = json.load(f)
+        prefix = f"out{output_channel}_in"
+        suffix = f"_{freq:.0f}hz"
+        for key, data in all_cals.items():
+            if isinstance(data, dict) and key.startswith(prefix) and key.endswith(suffix):
+                in_ch = data.get("input_channel", 0)
+                cal   = cls(output_channel=output_channel, input_channel=in_ch, freq=freq)
+                cal.vrms_at_0dbfs_out = data.get("vrms_at_0dbfs_out")
+                cal.vrms_at_0dbfs_in  = data.get("vrms_at_0dbfs_in")
+                cal.ref_dbfs          = data.get("ref_dbfs", -10.0)
+                return cal
+        return None
+
+    @classmethod
+    def load_all(cls, path=None):
+        """Return list of all stored Calibration objects."""
+        path = path or DEFAULT_CAL_PATH
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            all_cals = json.load(f)
+        result = []
+        for key, data in all_cals.items():
+            if not isinstance(data, dict):
+                continue
+            cal = cls(output_channel=data.get("output_channel", 0),
+                      input_channel=data.get("input_channel",  0),
+                      freq=data.get("freq", 1000))
+            cal.vrms_at_0dbfs_out = data.get("vrms_at_0dbfs_out")
+            cal.vrms_at_0dbfs_in  = data.get("vrms_at_0dbfs_in")
+            cal.ref_dbfs          = data.get("ref_dbfs", -10.0)
+            result.append(cal)
+        return result
+
     def summary(self):
         import math
         print(f"\n  -- Calibration  [{self.key}] ----------------------------------")

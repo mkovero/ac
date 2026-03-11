@@ -6,8 +6,7 @@ from datetime import datetime
 
 from .parse            import parse, ParseError, USAGE
 from .config           import load as load_config, save as save_config, show as show_config
-from .jack_calibration import run_calibration_jack
-from .jack_calibration import Calibration
+from .jack_calibration import run_calibration_jack, Calibration
 from .jack_measure     import jack_sweep_level, jack_sweep_frequency, jack_monitor, jack_monitor_spectrum
 from .audio            import find_ports, port_name, JackEngine
 from .io               import save_csv, print_summary
@@ -148,6 +147,28 @@ def cmd_setup(cmd, cfg):
     print("  Saved.")
 
 
+def cmd_calibrate_show(_cmd, _cfg):
+    from .jack_calibration import DEFAULT_CAL_PATH
+    cals = Calibration.load_all()
+    if not cals:
+        print(f"\n  No calibrations stored  ({DEFAULT_CAL_PATH})\n")
+        return
+    print(f"\n  Stored calibrations  ({DEFAULT_CAL_PATH})\n")
+    for cal in cals:
+        print(f"  [{cal.key}]")
+        if cal.output_ok:
+            v = cal.vrms_at_0dbfs_out
+            print(f"    Output: 0 dBFS = {v*1000:.3f} mVrms  =  {vrms_to_dbu(v):+.2f} dBu")
+        else:
+            print(f"    Output: not calibrated")
+        if cal.input_ok:
+            v = cal.vrms_at_0dbfs_in
+            print(f"    Input:  0 dBFS = {v*1000:.3f} mVrms  =  {vrms_to_dbu(v):+.2f} dBu")
+        else:
+            print(f"    Input:  not calibrated")
+        print()
+
+
 def cmd_calibrate(cmd, cfg):
     _require_jack()
     freq   = cmd["freq"]
@@ -237,9 +258,7 @@ def cmd_generate_sine(cmd, cfg):
     out_ports = []
     print()
     for ch in channels:
-        cal   = Calibration.load(output_channel=ch,
-                                 input_channel=cfg["input_channel"],
-                                 freq=freq)
+        cal   = Calibration.load_output_only(output_channel=ch, freq=freq)
         vrms  = _level_to_vrms(level, cal)
         dbfs  = max(-60.0, min(-0.5, _level_to_dbfs(level, cal)))
         pname = port_name(playback, ch)
@@ -329,6 +348,7 @@ HANDLERS = {
     "devices":          cmd_devices,
     "setup":            cmd_setup,
     "calibrate":        cmd_calibrate,
+    "calibrate_show":   cmd_calibrate_show,
     "sweep_level":      cmd_sweep_level,
     "sweep_frequency":  cmd_sweep_frequency,
     "monitor_thd":      cmd_monitor_thd,

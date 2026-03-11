@@ -158,6 +158,8 @@ ABBREVS = {
     "si": "sine",
     # show plot after command
     "sh": "show",
+    # calibrate show
+    "ls": "list",
     # setup / devices
     "se": "setup", "set": "setup",
     "d": "devices", "dev": "devices", "devs": "devices",
@@ -212,6 +214,10 @@ def parse(argv):
 
     args = list(argv)
     verb = _expand(args.pop(0))
+
+    # "ac calibrate show" / "ac cal show" -- check before _extract_show strips "show"
+    if verb == "calibrate" and args and _expand(args[0]) in ("show", "list"):
+        return {"cmd": "calibrate_show"}
 
     # strip optional trailing "show" keyword anywhere in args
     args, show_plot = _extract_show(args)
@@ -374,6 +380,7 @@ ac -- audio bench tool
   ac monitor spectrum <level> <freq> [<interval>]
   ac generate sine <level> [<freq>]
   ac calibrate     [output N] [input N] [<freq>] [<level>]
+  ac calibrate show
 
 Units:
   frequency : 20hz  1khz  20000hz
@@ -405,6 +412,7 @@ Examples:
   ac m sp -12dbfs 1khz
   ac generate sine 0dbu 1khz
   ac g si 0dbu
+  ac calibrate show
   ac calibrate 1khz
   ac calibrate output 1 input 2 1khz
   ac cal out 1 in 2
