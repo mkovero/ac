@@ -66,6 +66,13 @@ def analyze(recording, sr=SAMPLERATE, fundamental=FUNDAMENTAL_HZ,
 
     clipping = bool(np.any(np.abs(mono[trim:-trim]) >= 0.9999))
 
+    # AC-coupling flag: 2nd harmonic dominates (>80% of THD) at low frequencies (<50 Hz).
+    # This indicates capacitor coupling causing waveform asymmetry, not real distortion.
+    ac_coupled = False
+    if fundamental < 50.0 and len(h_amps) >= 1:
+        h2_pct = h_amps[0] / f1_amp * 100.0
+        ac_coupled = (h2_pct / thd) > 0.80 if thd > 0 else False
+
     return {
         "fundamental_hz":    fundamental,
         "fundamental_dbfs":  fund_dbfs,
@@ -77,4 +84,5 @@ def analyze(recording, sr=SAMPLERATE, fundamental=FUNDAMENTAL_HZ,
         "spectrum":          spec,
         "freqs":             freqs,
         "clipping":          clipping,
+        "ac_coupled":        ac_coupled,
     }

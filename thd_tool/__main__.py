@@ -1,6 +1,16 @@
-# __main__.py
-from .cli import main
+# __main__.py  -- supports both:
+#   python -m thd_tool <ac-style args>   (new)
+#   python -m thd_tool --input 0 ...     (legacy argparse)
+import sys
+
+def main():
+    # If first arg looks like a legacy --flag, use old cli
+    if len(sys.argv) > 1 and sys.argv[1].startswith("--"):
+        from .cli import main as legacy_main
+        legacy_main()
+    else:
+        from .ac import main as ac_main
+        ac_main()
 
 if __name__ == "__main__":
     main()
-

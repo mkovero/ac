@@ -1,3 +1,5 @@
 thd_tool/old
 thd_tool/old2
 thd_tool/__pycache__
+*.png
+*.csv

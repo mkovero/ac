@@ -1,22 +1,22 @@
-# calibration.py
+# jack_calibration.py  -- calibration + Calibration class (JACK backend)
 import json
 import os
 import numpy as np
-import sounddevice as sd
-from .signal import make_sine
+from .audio      import JackEngine, find_ports, port_name
 from .conversions import fmt_vrms, vrms_to_dbu, fmt_vpp, dbfs_to_vrms
-from .constants import SAMPLERATE, DURATION
 
 DEFAULT_CAL_PATH = os.path.expanduser("~/.config/thd_tool/cal.json")
 
+
+# ---------------------------------------------------------------------------
+# Calibration data class
+# ---------------------------------------------------------------------------
 
 def _cal_key(output_channel, input_channel, freq):
     return f"out{output_channel}_in{input_channel}_{freq:.0f}hz"
 
 
 class Calibration:
-    """Maps dBFS <-> Vrms for output and input via DMM readings."""
-
     def __init__(self, output_channel=0, input_channel=0, freq=1000):
         self.output_channel    = output_channel
         self.input_channel     = input_channel
@@ -24,8 +24,7 @@ class Calibration:
         self.vrms_at_0dbfs_out = None
         self.vrms_at_0dbfs_in  = None
         self.ref_dbfs          = -10.0
-        self.dmm_ratio         = 1.0   # vrms_out_dmm / vrms_in_dmm
-
+        self.dmm_ratio         = 1.0
 
     @property
     def key(self):
@@ -42,25 +41,21 @@ class Calibration:
     def out_vrms(self, dbfs):
         return dbfs_to_vrms(dbfs, self.vrms_at_0dbfs_out) if self.output_ok else None
 
-    @property
-    def gain_correction(self):
-        """Factor to normalize input Vrms to the same scale as output Vrms."""
-        return self.dmm_ratio
-
     def in_vrms(self, linear_rms):
-        """True physical Vrms at input jack, DMM-anchored. 0 dBu = 0.775 Vrms."""
         if not self.input_ok:
             return None
         return linear_rms * self.vrms_at_0dbfs_in
 
+    @property
+    def gain_correction(self):
+        return self.dmm_ratio
+
     def save(self, path=None):
         path = path or DEFAULT_CAL_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Load existing file so we don't clobber other keys
         try:
             with open(path) as f:
                 all_cals = json.load(f)
-            # Strip any stale flat top-level keys from old pre-keyed format
             stale = [k for k, v in all_cals.items() if not isinstance(v, dict)]
             for k in stale:
                 del all_cals[k]
@@ -90,9 +85,9 @@ class Calibration:
         if key not in all_cals:
             return None
         data = all_cals[key]
-        cal = cls(output_channel=output_channel,
-                  input_channel=input_channel,
-                  freq=freq)
+        cal  = cls(output_channel=output_channel,
+                   input_channel=input_channel,
+                   freq=freq)
         cal.vrms_at_0dbfs_out = data.get("vrms_at_0dbfs_out")
         cal.vrms_at_0dbfs_in  = data.get("vrms_at_0dbfs_in")
         cal.ref_dbfs          = data.get("ref_dbfs", -10.0)
@@ -100,6 +95,7 @@ class Calibration:
         return cal
 
     def summary(self):
+        import math
         print(f"\n  -- Calibration  [{self.key}] ----------------------------------")
         if self.output_ok:
             v = self.vrms_at_0dbfs_out
@@ -107,19 +103,24 @@ class Calibration:
                   f"  =  {vrms_to_dbu(v):+.2f} dBu"
                   f"  =  {fmt_vpp(v)}")
         else:
-            print("  Output: not calibrated  (dBFS only)")
+            print("  Output: not calibrated")
         if self.input_ok:
             v = self.vrms_at_0dbfs_in
             print(f"  Input:  0 dBFS = {fmt_vrms(v)}"
                   f"  =  {vrms_to_dbu(v):+.2f} dBu"
                   f"  =  {fmt_vpp(v)}")
         else:
-            print("  Input:  not calibrated  (dBFS only)")
+            print("  Input:  not calibrated")
         if self.output_ok and self.input_ok:
             gc = self.gain_correction
-            print(f"  Gain correction: {gc:.4f}x  ({20*__import__('math').log10(gc):+.2f} dB applied to input)")
+            print(f"  Gain correction: {gc:.4f}x"
+                  f"  ({20*math.log10(gc):+.2f} dB applied to input)")
         print("  --------------------------------------------------------------\n")
 
+
+# ---------------------------------------------------------------------------
+# DMM input helper
+# ---------------------------------------------------------------------------
 
 def _parse_dmm(prompt):
     while True:
@@ -134,40 +135,45 @@ def _parse_dmm(prompt):
             else:
                 return float(raw)
         except ValueError:
-            print("  Try:  0.245  or  245mV  or  245m  — press Enter to skip")
+            print("  Try:  0.245  or  245mV  or  245m  -- press Enter to skip")
 
 
-def run_calibration(output_device, input_device,
-                    output_channel=0, input_channel=0,
-                    ref_dbfs=-10.0, freq=1000):
+# ---------------------------------------------------------------------------
+# Calibration procedure
+# ---------------------------------------------------------------------------
+
+def run_calibration_jack(output_channel=0, input_channel=0,
+                         ref_dbfs=-10.0, freq=1000):
+    from .signal import make_sine
+    from .constants import SAMPLERATE
+
     cal          = Calibration(output_channel=output_channel,
                                input_channel=input_channel,
                                freq=freq)
     cal.ref_dbfs = ref_dbfs
     amplitude    = 10.0 ** (ref_dbfs / 20.0)
-    tone         = make_sine(amplitude, freq, DURATION)
+
+    playback, capture = find_ports()
+    out_port = port_name(playback, output_channel)
+    in_port  = port_name(capture,  input_channel)
 
     print(f"\n{'='*64}")
     print(f"  CALIBRATION  --  {freq:.0f} Hz tone at {ref_dbfs:.0f} dBFS")
     print(f"  Key: {cal.key}")
     print(f"{'='*64}")
-
     print(f"\n  STEP 1 -- Output voltage  (loaded)")
     print(f"  Connect output -> input with your loopback cable first.")
-    print(f"  Then probe the OUTPUT jack with DMM. Press Ctrl+C when stable.\n")
+    print(f"  Probe the OUTPUT jack with DMM and enter the reading below.\n")
+
+    engine = JackEngine()
+    engine.set_tone(freq, amplitude)
+    engine.start(output_port=out_port, input_port=in_port)
 
     try:
-        print("  > Playing -- Ctrl+C to stop and enter reading...")
-        while True:
-            sd.play(tone, samplerate=SAMPLERATE, device=output_device,
-                    mapping=[output_channel + 1])
-            sd.wait()
-    except KeyboardInterrupt:
-        sd.stop()
-        import time; time.sleep(1.0)
-        print()
+        vrms_out = _parse_dmm("  DMM reading at output (e.g. 245mV or 0.245): ")
+    finally:
+        engine.set_silence()
 
-    vrms_out = _parse_dmm("  DMM reading at output (e.g. 245mV or 0.245): ")
     if vrms_out is None:
         print("  Skipped -- output uncalibrated, levels shown as dBFS only.")
     else:
@@ -181,37 +187,39 @@ def run_calibration(output_device, input_device,
     print(f"\n  STEP 2 -- Loopback capture  (auto)")
     print(f"  Capturing loopback to derive input scaling...\n")
 
-    import time; time.sleep(0.5)
-    sd.stop()
+    engine.set_tone(freq, amplitude)
+    duration = max(1.0, 10.0 / freq)
 
     try:
-        rec = sd.playrec(tone, samplerate=SAMPLERATE,
-                         input_mapping=[input_channel + 1],
-                         output_mapping=[output_channel + 1],
-                         device=(input_device, output_device),
-                         dtype="float32")
-        sd.wait()
+        data = engine.capture_block(duration)
     except Exception as e:
-        print(f"\n  !! Loopback failed: {e}")
+        print(f"\n  !! Loopback capture failed: {e}")
         print("  Input calibration skipped.")
+        engine.set_silence()
+        engine.stop()
         cal.summary()
         return cal
 
-    mono           = rec[:, 0].astype(np.float64)
+    engine.set_silence()
+    engine.stop()
+
+    mono           = data.astype(np.float64)
     trim           = int(len(mono) * 0.05)
     rec_linear_rms = float(np.sqrt(np.mean(mono[trim:-trim] ** 2)))
     rec_dbfs       = 20.0 * np.log10(max(rec_linear_rms, 1e-12))
+    drop_db        = rec_dbfs - ref_dbfs
 
-    if cal.output_ok:
-        # Derive input scaling from output DMM reading + digital loopback ratio.
-        # ratio = how many dB the ADC recorded vs what the DAC played (both in dBFS).
-        # vrms_at_0dbfs_in = vrms_at_0dbfs_out / ratio  so that
-        # linear_rms * vrms_at_0dbfs_in gives the same absolute voltage as the output.
+    print(f"  Loopback: {rec_dbfs:.2f} dBFS  ({drop_db:+.2f} dB vs played)")
+
+    if drop_db < -40.0:
+        print(f"\n  !! Signal too low ({drop_db:.1f} dB drop) -- input channel probably wrong")
+        print(f"  !! Check:  ac setup  and verify input channel matches your cable.")
+        print(f"  Input calibration skipped.\n")
+    elif cal.output_ok:
         import math
-        ratio                = 10.0 ** ((rec_dbfs - ref_dbfs) / 20.0)
+        ratio                = 10.0 ** (drop_db / 20.0)
         cal.vrms_at_0dbfs_in = cal.vrms_at_0dbfs_out / ratio
         vrms_seen            = dbfs_to_vrms(rec_dbfs, cal.vrms_at_0dbfs_in)
-        print(f"  Loopback: {rec_dbfs:.2f} dBFS  ({rec_dbfs - ref_dbfs:+.2f} dB vs played)")
         print(f"  Input jack: {fmt_vrms(vrms_seen)}"
               f"  =  {vrms_to_dbu(vrms_seen):+.2f} dBu")
         print(f"  0 dBFS reference -> {fmt_vrms(cal.vrms_at_0dbfs_in)}"
