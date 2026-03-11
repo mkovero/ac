@@ -252,7 +252,7 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
     amplitude = 10.0 ** (level_dbfs / 20.0)
     engine, _, _ = _engine_from_cfg(cfg)
     engine.set_tone(freq, amplitude)
-    duration = max(1.0, interval)
+    duration = max(0.1, interval)
 
     plt.ion()
     fig, ax = plt.subplots(figsize=(13, 5), facecolor=_BG)
@@ -282,7 +282,8 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
         vlines.append(ax.axvline(hf, color=_RED, linestyle="--", linewidth=0.7, alpha=0.5))
 
     title_obj = ax.set_title(f"  {freq:.0f} Hz  |  capturing...", color=_TITLE)
-    plt.tight_layout()
+    # Fixed margins — tight_layout shifts when title length changes
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.88, bottom=0.12)
     plt.pause(0.001)
 
     print(f"  {freq:.0f} Hz  |  {level_dbfs:.1f} dBFS  |  Ctrl+C to stop\n")
