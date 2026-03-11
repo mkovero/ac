@@ -35,6 +35,8 @@ Examples:
     parser.add_argument("--output-dir",     type=str,   default=".")
     parser.add_argument("--live",           action="store_true")
     parser.add_argument("--live-level",     type=float, default=-12.0)
+    parser.add_argument("--live-interval",  type=float, default=1.0,
+                        help="Display update interval in seconds (default 1.0). ""Analysis window is always DURATION (1s).")
     parser.add_argument("--set-output",     type=str,   default=None, metavar="TARGET")
     parser.add_argument("--tolerance",      type=float, default=1.0)
 
@@ -92,6 +94,7 @@ Examples:
             freq           = args.freq,
             cal            = cal,
             target_vrms    = target_vrms if args.set_output else None,
+            interval       = args.live_interval,
         )
         return
 
