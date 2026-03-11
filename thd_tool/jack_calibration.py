@@ -153,10 +153,10 @@ class Calibration:
 # ---------------------------------------------------------------------------
 
 def _try_dmm_read(dmm_host):
-    """Try to read AC Vrms from the configured DMM. Returns float or None."""
+    """Take 3 averaged AC Vrms readings from the DMM. Returns float or None."""
     try:
         from . import dmm as _dmm
-        vrms = _dmm.read_ac_vrms(dmm_host)
+        vrms = _dmm.read_ac_vrms(dmm_host, n=3)
         return vrms
     except Exception as e:
         print(f"  DMM read failed: {e}")
@@ -224,6 +224,10 @@ def run_calibration_jack(output_channel=0, input_channel=0,
     engine = JackEngine()
     engine.set_tone(freq, amplitude)
     engine.start(output_ports=out_port, input_port=in_port)
+
+    # Let the analog output settle before reading (DAC transient + RC settling)
+    import time
+    time.sleep(0.5)
 
     try:
         vrms_out = _parse_dmm("  DMM reading at output (e.g. 245mV or 0.245): ", dmm_host=dmm_host)

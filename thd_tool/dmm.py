@@ -23,12 +23,13 @@ def identify(host, port=DEFAULT_PORT, timeout=3.0):
         return _query(sock, "*IDN?")
 
 
-def read_ac_vrms(host, port=DEFAULT_PORT, timeout=10.0):
+def read_ac_vrms(host, port=DEFAULT_PORT, timeout=10.0, n=3):
     """
-    Configure the DMM for AC voltage and return one reading in Vrms.
-    Uses default resolution (5.5 digits) which is fast (~100 ms) and
-    more than sufficient for calibration (< 0.01% error).
+    Configure the DMM for AC voltage, take n readings, return the average.
+    Keeping the socket open across readings avoids reconnect overhead and
+    gives the DMM multiple independent aperture windows for better accuracy.
     """
     with socket.create_connection((host, port), timeout=timeout) as sock:
-        result = _query(sock, "MEAS:VOLT:AC?", timeout=timeout)
-    return float(result)
+        readings = [float(_query(sock, "MEAS:VOLT:AC?", timeout=timeout))
+                    for _ in range(n)]
+    return sum(readings) / len(readings)
