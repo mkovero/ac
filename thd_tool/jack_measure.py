@@ -306,7 +306,8 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
 
             if "error" in r:
                 title_obj.set_text(f"  {freq:.0f} Hz  |  {r['error']}")
-                plt.pause(0.05)
+                fig.canvas.draw()
+                fig.canvas.flush_events()
                 continue
 
             spec_db = 20.0 * np.log10(np.maximum(r["spectrum"][1:], 1e-12))
@@ -327,7 +328,8 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
                 f"{freq:.0f} Hz{in_dbu_s}  |  "
                 f"THD: {r['thd_pct']:.4f}%  |  THD+N: {r['thdn_pct']:.4f}%{clip_s}"
             )
-            plt.pause(0.001)
+            fig.canvas.draw()
+            fig.canvas.flush_events()
 
     except KeyboardInterrupt:
         pass
