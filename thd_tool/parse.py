@@ -182,6 +182,26 @@ def _extract_show(args):
     return cleaned, show
 
 
+def _parse_channels(token):
+    """Parse a channel spec into a sorted list of 0-based ints.
+
+    Examples:
+        "11"      -> [11]
+        "0,2,5"   -> [0, 2, 5]
+        "0-11"    -> [0, 1, 2, ..., 11]
+        "0-3,7"   -> [0, 1, 2, 3, 7]
+    """
+    channels = set()
+    for part in token.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            channels.update(range(int(lo), int(hi) + 1))
+        else:
+            channels.add(int(part))
+    return sorted(channels)
+
+
 def parse(argv):
     """
     Parse argv (sys.argv[1:]) and return a dict describing the command.
@@ -264,14 +284,20 @@ def parse(argv):
         if not args:
             raise ParseError("generate needs a noun: sine")
         noun   = _expand(args.pop(0))
-        tokens = _classify_all(args)
         if noun == "sine":
-            level = _pull(tokens, "level", optional=True) or ("dbu", 0.0)  # 0dBu -- converted at runtime
+            # Check for a channel spec before classifying tokens:
+            # looks like "11", "0-11", "0,2,5", "0-3,7" -- no suffix, contains digit
+            channels = None
+            if args and re.match(r'^[\d][\d,\-]*$', args[0]):
+                channels = args.pop(0)
+            tokens = _classify_all(args)
+            level = _pull(tokens, "level", optional=True) or ("dbu", 0.0)
             freq  = _pull(tokens, "freq",  optional=True) or 1000.0
             if tokens:
                 raise ParseError(f"unexpected token(s): {tokens}")
             return {"cmd": "generate_sine",
                     "level": level, "freq": freq,
+                    "channels": channels,
                     "show_plot": show_plot}
         else:
             raise ParseError(f"unknown generate noun: {noun!r}  (sine)")

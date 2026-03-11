@@ -207,22 +207,40 @@ def cmd_monitor_thd(cmd, cfg):
 def cmd_generate_sine(cmd, cfg):
     _require_jack()
     from .conversions import fmt_vrms, fmt_vpp
+    from .parse import _parse_channels
 
-    freq  = cmd["freq"]
-    cal   = _load_cal(cfg, freq)
-    vrms  = _level_to_vrms(cmd["level"], cal)
-    dbfs  = max(-60.0, min(-0.5, _level_to_dbfs(cmd["level"], cal)))
-
+    freq    = cmd["freq"]
+    level   = cmd["level"]
     playback, _ = find_ports()
-    out_port    = port_name(playback, cfg["output_channel"])
-    print(f"  Output: ch {cfg['output_channel']}  ({out_port})")
-    print(f"  {freq:.0f} Hz  |  {fmt_vrms(vrms)}  =  {vrms_to_dbu(vrms):+.2f} dBu"
-          f"  =  {fmt_vpp(vrms)}  ({dbfs:.1f} dBFS)")
-    print(f"\n  Playing... Ctrl+C to stop.\n")
+
+    # Channel spec: explicit arg from parser, or fall back to configured output
+    ch_spec  = cmd.get("channels")
+    channels = _parse_channels(ch_spec) if ch_spec is not None else [cfg["output_channel"]]
+
+    # Resolve level and show per-channel info (each channel may have its own cal)
+    out_ports = []
+    print()
+    for ch in channels:
+        cal   = Calibration.load(output_channel=ch,
+                                 input_channel=cfg["input_channel"],
+                                 freq=freq)
+        vrms  = _level_to_vrms(level, cal)
+        dbfs  = max(-60.0, min(-0.5, _level_to_dbfs(level, cal)))
+        pname = port_name(playback, ch)
+        out_ports.append((pname, dbfs))
+        cal_tag = (f"{vrms_to_dbu(vrms):+.2f} dBu"
+                   if cal and cal.output_ok else f"{dbfs:.1f} dBFS (uncal)")
+        print(f"  ch {ch:>3}  {pname:<32}  {freq:.0f} Hz  {fmt_vrms(vrms):>14}  {cal_tag}")
+
+    # Engine plays one tone -- use first channel's dBFS as amplitude reference
+    amplitude = 10.0 ** (out_ports[0][1] / 20.0)
+    hw_ports  = [p for p, _ in out_ports]
+
+    print(f"\n  Playing {len(channels)} channel(s)... Ctrl+C to stop.\n")
 
     engine = JackEngine()
-    engine.set_tone(freq, 10.0 ** (dbfs / 20.0))
-    engine.start(output_port=out_port)
+    engine.set_tone(freq, amplitude)
+    engine.start(output_ports=hw_ports)
     try:
         import threading
         threading.Event().wait()
@@ -256,7 +274,7 @@ def cmd_monitor_level(cmd, cfg):
 
     engine       = JackEngine()
     engine.set_tone(freq, 10.0 ** (dbfs / 20.0))
-    engine.start(output_port=out_port, input_port=in_port)
+    engine.start(output_ports=out_port, input_port=in_port)
     duration     = max(DURATION, cmd["interval"])
     update_every = max(1, round(cmd["interval"] / DURATION))
     block        = 0

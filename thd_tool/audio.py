@@ -1,17 +1,9 @@
 # audio.py  -- JACK-based audio engine
-# Replaces the sounddevice playrec calls with a continuous duplex stream.
-#
-# Architecture:
-#   - JackEngine runs a persistent client with process callback
-#   - Output: loops a pre-computed tone buffer endlessly
-#   - Input:  fills a ringbuffer; callers pull blocks from it
-#   - No open/close between measurements -- just swap the tone and drain the ring
-
 import threading
 import numpy as np
 import jack
 
-RINGBUFFER_SECONDS = 4   # how much input history to keep
+RINGBUFFER_SECONDS = 4
 
 
 class JackEngine:
@@ -20,21 +12,22 @@ class JackEngine:
         self._sr          = self._client.samplerate
         self._blocksize   = self._client.blocksize
 
-        # Ports -- connected by caller after activation
-        self._out_port    = self._client.outports.register("out_0")
+        # Output ports -- one per hardware channel we drive.
+        # Populated lazily in start(); _out_ports is a list so the
+        # process callback can write the same tone to all of them.
+        self._out_ports   = []
         self._in_port     = self._client.inports.register("in_0")
 
-        # Output tone -- numpy array, looped
+        # Output tone -- one cycle-aligned buffer, looped on all outputs
         self._tone        = np.zeros(self._blocksize, dtype=np.float32)
         self._tone_pos    = 0
         self._tone_lock   = threading.Lock()
 
         # Input ringbuffer
         rb_frames         = int(self._sr * RINGBUFFER_SECONDS)
-        self._ringbuf     = jack.RingBuffer(rb_frames * 4)  # 4 bytes per float32
+        self._ringbuf     = jack.RingBuffer(rb_frames * 4)
         self._capture_on  = False
 
-        # Xrun counter
         self.xruns        = 0
 
         self._client.set_process_callback(self._process)
@@ -58,13 +51,36 @@ class JackEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, output_port=None, input_port=None):
-        """Activate and optionally connect to hardware ports."""
+    def start(self, output_ports=None, input_port=None):
+        """Activate and connect to hardware ports.
+
+        output_ports: str (single port name) or list of str.
+        input_port:   str or None.
+        """
+        # Normalise to list
+        if output_ports is None:
+            out_list = []
+        elif isinstance(output_ports, str):
+            out_list = [output_ports]
+        else:
+            out_list = list(output_ports)
+
+        # Register exactly as many JACK output ports as we need
+        for i in range(len(self._out_ports), len(out_list)):
+            self._out_ports.append(
+                self._client.outports.register(f"out_{i}")
+            )
+
         self._client.activate()
-        if output_port:
-            self._client.connect(self._out_port, output_port)
+
+        for jack_port, hw_port in zip(self._out_ports, out_list):
+            self._client.connect(jack_port, hw_port)
         if input_port:
             self._client.connect(input_port, self._in_port)
+
+    # Keep backward-compatible single-port kwarg
+    def start_mono(self, output_port=None, input_port=None):
+        self.start(output_ports=output_port, input_port=input_port)
 
     def stop(self):
         try:
@@ -84,13 +100,8 @@ class JackEngine:
     # ------------------------------------------------------------------
 
     def set_tone(self, freq, amplitude, duration_seconds=None):
-        """
-        Set the output tone. Generates one full cycle-aligned buffer.
-        duration_seconds is ignored (tone loops forever) but kept for
-        API compatibility with the old playrec style.
-        """
-        n = self._sr
-        t = np.arange(n) / self._sr
+        n    = self._sr
+        t    = np.arange(n) / self._sr
         tone = (amplitude * np.sin(2 * np.pi * freq * t)).astype(np.float32)
         with self._tone_lock:
             self._tone     = tone
@@ -106,8 +117,6 @@ class JackEngine:
     # ------------------------------------------------------------------
 
     def start_capture(self):
-        """Clear ringbuffer and start filling it."""
-        # drain
         self._ringbuf.read(self._ringbuf.read_space)
         self._capture_on = True
 
@@ -115,10 +124,6 @@ class JackEngine:
         self._capture_on = False
 
     def read_capture(self, n_frames):
-        """
-        Block until n_frames are available, return float32 numpy array.
-        Raises RuntimeError on xrun during capture.
-        """
         n_bytes = n_frames * 4
         while self._ringbuf.read_space < n_bytes:
             threading.Event().wait(0.005)
@@ -126,7 +131,6 @@ class JackEngine:
         return np.frombuffer(raw, dtype=np.float32).copy()
 
     def capture_block(self, duration_seconds):
-        """Convenience: play tone, capture duration_seconds, return array."""
         n = int(duration_seconds * self._sr)
         self.start_capture()
         data = self.read_capture(n)
@@ -134,28 +138,31 @@ class JackEngine:
         return data
 
     # ------------------------------------------------------------------
-    # JACK callbacks
+    # JACK process callback
     # ------------------------------------------------------------------
 
     def _process(self, frames):
-        # --- output ---
+        # Output -- write same tone to every registered output port
         with self._tone_lock:
             tone = self._tone
             pos  = self._tone_pos
-        out  = self._out_port.get_array()
-        tlen = len(tone)
+        tlen    = len(tone)
         written = 0
+        # build one block first, then copy to all ports
+        block = np.empty(frames, dtype=np.float32)
         while written < frames:
             chunk = min(frames - written, tlen - pos)
-            out[written:written + chunk] = tone[pos:pos + chunk]
+            block[written:written + chunk] = tone[pos:pos + chunk]
             written += chunk
             pos = (pos + chunk) % tlen
         with self._tone_lock:
             self._tone_pos = pos
+        for port in self._out_ports:
+            port.get_array()[:] = block
 
-        # --- input ---
+        # Input
         if self._capture_on:
-            data = self._in_port.get_array().astype(np.float32)
+            data    = self._in_port.get_array().astype(np.float32)
             n_bytes = data.nbytes
             if self._ringbuf.write_space >= n_bytes:
                 self._ringbuf.write(data.tobytes())
@@ -172,8 +179,7 @@ class JackEngine:
 # ------------------------------------------------------------------
 
 def find_ports(client_name="ac-probe"):
-    """Return lists of available hardware playback and capture ports."""
-    tmp = jack.Client(client_name)
+    tmp      = jack.Client(client_name)
     playback = [p.name for p in tmp.get_ports(is_audio=True, is_input=True,  is_physical=True)]
     capture  = [p.name for p in tmp.get_ports(is_audio=True, is_output=True, is_physical=True)]
     tmp.close()
@@ -181,7 +187,6 @@ def find_ports(client_name="ac-probe"):
 
 
 def port_name(ports, channel_index):
-    """Return port name by 0-based index, or raise a clear error."""
     if channel_index >= len(ports):
         raise ValueError(
             f"Channel {channel_index} out of range -- "
