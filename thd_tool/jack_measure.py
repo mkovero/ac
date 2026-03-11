@@ -300,8 +300,16 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
                 fig.canvas.flush_events()
                 continue
 
-            spec_db = 20.0 * np.log10(np.maximum(r["spectrum"][1:], 1e-12))
-            line.set_xdata(r["freqs"][1:])
+            spec_full  = r["spectrum"][1:]
+            freqs_full = r["freqs"][1:]
+            if len(freqs_full) > 1000:
+                idx = np.unique(np.round(
+                    np.geomspace(1, len(freqs_full), 1000)
+                ).astype(int) - 1)
+                spec_full  = spec_full[idx]
+                freqs_full = freqs_full[idx]
+            spec_db = 20.0 * np.log10(np.maximum(spec_full, 1e-12))
+            line.set_xdata(freqs_full)
             line.set_ydata(spec_db)
 
             # Re-pin harmonic vlines to the actual measured fundamental bin
