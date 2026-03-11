@@ -292,10 +292,9 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
             break
         vlines.append(ax.axvline(hf, color=_RED, linestyle="--", linewidth=0.7, alpha=0.5))
 
-    title_obj = ax.set_title("", color=_TITLE)
+    title_obj = ax.set_title(f"  {freq:.0f} Hz  |  capturing...", color=_TITLE)
     plt.tight_layout()
-    fig.canvas.draw()
-    fig.canvas.flush_events()
+    plt.pause(0.001)
 
     print(f"  {freq:.0f} Hz  |  {level_dbfs:.1f} dBFS  |  Ctrl+C to stop\n")
 
@@ -306,7 +305,7 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
             r    = analyze(rec, sr=sr, fundamental=freq)
 
             if "error" in r:
-                print(f"  !! {r['error']}", end="\r")
+                title_obj.set_text(f"  {freq:.0f} Hz  |  {r['error']}")
                 plt.pause(0.05)
                 continue
 
@@ -328,8 +327,7 @@ def jack_monitor_spectrum(cfg, freq, level_dbfs, cal=None, interval=1.0):
                 f"{freq:.0f} Hz{in_dbu_s}  |  "
                 f"THD: {r['thd_pct']:.4f}%  |  THD+N: {r['thdn_pct']:.4f}%{clip_s}"
             )
-            fig.canvas.draw()
-            fig.canvas.flush_events()
+            plt.pause(0.001)
 
     except KeyboardInterrupt:
         pass
