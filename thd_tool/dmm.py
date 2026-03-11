@@ -30,7 +30,5 @@ def read_ac_vrms(host, port=DEFAULT_PORT, timeout=10.0):
     more than sufficient for calibration (< 0.01% error).
     """
     with socket.create_connection((host, port), timeout=timeout) as sock:
-        # Abort any running measurement first
-        _query(sock, "ABOR")
         result = _query(sock, "MEAS:VOLT:AC?", timeout=timeout)
     return float(result)
