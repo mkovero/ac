@@ -2,6 +2,7 @@
 # CTRL REP port 5556: receives commands, replies with ack
 # DATA PUB port 5557: streams measurement results
 import json
+import os
 import queue
 import threading
 import numpy as np
@@ -11,6 +12,14 @@ from .conversions      import vrms_to_dbu
 from .constants        import WARMUP_REPS
 from .jack_calibration import Calibration
 from .config           import load as load_config, save as save_config
+
+# Max mtime of any .py file in the package — used by client to detect stale servers.
+_PKG_DIR   = os.path.dirname(os.path.abspath(__file__))
+_SRC_MTIME = max(
+    os.path.getmtime(os.path.join(_PKG_DIR, f))
+    for f in os.listdir(_PKG_DIR)
+    if f.endswith(".py")
+)
 
 CTRL_PORT = 5556
 DATA_PORT  = 5557
@@ -310,12 +319,20 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
 # Server main loop
 # ---------------------------------------------------------------------------
 
-def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
+def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
+    """Start the server.
+
+    local=True  — bind to 127.0.0.1 only, no console output (auto-spawned by client)
+    local=False — bind to all interfaces, print status (explicit 'ac server enable')
+    """
     try:
         import zmq
     except ImportError:
-        print("  error: pyzmq not installed — run: pip install pyzmq")
+        if not local:
+            print("  error: pyzmq not installed — run: pip install pyzmq")
         return
+
+    bind_addr = "127.0.0.1" if local else "*"
 
     # Check whether a server is already running on this port
     _probe = zmq.Context()
@@ -325,10 +342,9 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
     _req.connect(f"tcp://localhost:{ctrl_port}")
     try:
         _req.send_json({"cmd": "status"})
-        ack = _req.recv_json()
+        _req.recv_json()
         _req.close(); _probe.term()
-        print(f"  Server already running on port {ctrl_port} "
-              f"(busy={ack.get('busy', '?')}, cmd={ack.get('running_cmd')})")
+        # Another server is already up — nothing to do
         return
     except zmq.Again:
         pass   # nothing there — proceed to bind
@@ -341,17 +357,19 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
     ctx       = zmq.Context()
     sock_ctrl = ctx.socket(zmq.REP)
     try:
-        sock_ctrl.bind(f"tcp://*:{ctrl_port}")
+        sock_ctrl.bind(f"tcp://{bind_addr}:{ctrl_port}")
     except zmq.ZMQError as e:
         sock_ctrl.close(); ctx.term()
-        print(f"  error: cannot bind CTRL port {ctrl_port}: {e}")
+        if not local:
+            print(f"  error: cannot bind CTRL port {ctrl_port}: {e}")
         return
     sock_data = ctx.socket(zmq.PUB)
     try:
-        sock_data.bind(f"tcp://*:{data_port}")
+        sock_data.bind(f"tcp://{bind_addr}:{data_port}")
     except zmq.ZMQError as e:
         sock_ctrl.close(); sock_data.close(); ctx.term()
-        print(f"  error: cannot bind DATA port {data_port}: {e}")
+        if not local:
+            print(f"  error: cannot bind DATA port {data_port}: {e}")
         return
 
     poller = zmq.Poller()
@@ -360,6 +378,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
     pub_q       = queue.Queue()
     cal_q       = queue.Queue()
     stop_ev     = threading.Event()
+    should_quit = [False]
     worker      = [None]        # [Thread or None]
     running_cmd = [None]        # [str or None]
     cfg         = load_config()
@@ -385,7 +404,12 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         name = cmd.get("cmd", "")
 
         if name == "status":
-            return {"ok": True, "busy": _is_busy(), "running_cmd": running_cmd[0]}
+            return {"ok": True, "busy": _is_busy(),
+                    "running_cmd": running_cmd[0], "src_mtime": _SRC_MTIME}
+
+        if name == "quit":
+            should_quit[0] = True
+            return {"ok": True}
 
         if name == "stop":
             stop_ev.set()
@@ -498,9 +522,19 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                     "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
 
         if name == "generate":
+            channels = cmd.get("channels")
+            try:
+                playback, _ = find_ports()
+                if channels:
+                    out_ports = [port_name(playback, ch) for ch in channels]
+                else:
+                    out_ports = [port_name(playback, cfg["output_channel"])]
+            except Exception as e:
+                return {"ok": False, "error": f"port error: {e}"}
+            cmd["_out_ports"] = out_ports
             running_cmd[0] = "generate"
             _spawn(_worker_generate, pub_q, stop_ev, cfg, cmd)
-            return {"ok": True}
+            return {"ok": True, "out_ports": out_ports}
 
         if name == "calibrate":
             running_cmd[0] = "calibrate"
@@ -509,11 +543,12 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         return {"ok": False, "error": f"unknown command: {name!r}"}
 
-    print(f"\n  ZMQ server  CTRL tcp://*:{ctrl_port}  DATA tcp://*:{data_port}")
-    print(f"  Ctrl+C to stop\n")
+    if not local:
+        print(f"\n  ZMQ server  CTRL tcp://*:{ctrl_port}  DATA tcp://*:{data_port}")
+        print(f"  Ctrl+C to stop\n")
 
     try:
-        while True:
+        while not should_quit[0]:
             _drain_pub()
             events = dict(poller.poll(50))
             _drain_pub()
@@ -533,7 +568,8 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             sock_ctrl.send(json.dumps(reply).encode())
 
     except KeyboardInterrupt:
-        print("\n\n  Stopping server...")
+        if not local:
+            print("\n\n  Stopping server...")
         stop_ev.set()
         if worker[0]:
             worker[0].join(timeout=5.0)
@@ -541,4 +577,5 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         sock_ctrl.close()
         sock_data.close()
         ctx.term()
-        print("  Server stopped.")
+        if not local:
+            print("  Server stopped.")

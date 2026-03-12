@@ -318,6 +318,36 @@ def test_monitor_thd_frames(server_client):
 # Monitor spectrum
 # ---------------------------------------------------------------------------
 
+def test_generate_port_info(server_client):
+    """generate ack must include out_ports (list of resolved JACK port names)."""
+    client = server_client
+    ack = client.send_cmd({
+        "cmd":        "generate",
+        "freq_hz":    1000.0,
+        "level_dbfs": -20.0,
+    })
+    assert ack is not None
+    assert ack["ok"] is True
+    assert "out_ports" in ack
+    assert isinstance(ack["out_ports"], list)
+    assert len(ack["out_ports"]) >= 1
+    _stop_and_drain(client)
+
+
+def test_generate_bad_channel_returns_error(server_client):
+    """An out-of-range channel for generate must return ok=False immediately."""
+    client = server_client
+    ack = client.send_cmd({
+        "cmd":        "generate",
+        "freq_hz":    1000.0,
+        "level_dbfs": -20.0,
+        "channels":   [99],
+    })
+    assert ack is not None
+    assert ack["ok"] is False
+    assert "port" in ack.get("error", "").lower() or "range" in ack.get("error", "").lower()
+
+
 def test_monitor_spectrum_frames(server_client):
     """Spectrum monitor should stream spectrum frames."""
     client = server_client

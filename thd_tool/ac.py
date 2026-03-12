@@ -181,31 +181,59 @@ def _save_results(results, label, cal=None, cfg=None, show_plot=False):
                 continue
 
 
+def _src_mtime():
+    """Max mtime of any .py file in this package."""
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    return max(
+        os.path.getmtime(os.path.join(pkg_dir, f))
+        for f in os.listdir(pkg_dir)
+        if f.endswith(".py")
+    )
+
+
+def _spawn_local_server(client):
+    """Start a local-only server process silently, wait up to 3 s."""
+    import subprocess
+    subprocess.Popen(
+        [sys.executable, "-m", "thd_tool", "server", "enable", "--local"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(30):
+        time.sleep(0.1)
+        ack = client.send_cmd({"cmd": "status"}, timeout_ms=200)
+        if ack is not None:
+            return
+    print("  error: could not start server — run manually:  ac server enable")
+    sys.exit(1)
+
+
 def _ensure_server(client):
-    """Ping server; if not responding and host is local, auto-start and wait up to 3 s."""
+    """Ensure a responsive, up-to-date server is running.
+
+    For remote hosts: error if not responding.
+    For localhost: silently auto-start if needed, silently restart if stale.
+    """
     ack = client.send_cmd({"cmd": "status"}, timeout_ms=500)
+
     if ack is not None:
+        # Check whether server was built from older source than what we're running.
+        if ack.get("src_mtime", 0) < _src_mtime() - 0.5:
+            # Stale — ask it to quit then respawn
+            client.send_cmd({"cmd": "quit"}, timeout_ms=1000)
+            time.sleep(0.3)
+            if client._host not in ("localhost", "127.0.0.1"):
+                print(f"  error: remote server is outdated; restart it with:  ac server enable")
+                sys.exit(1)
+            _spawn_local_server(client)
         return
+
     if client._host not in ("localhost", "127.0.0.1"):
         print(f"  error: server not responding at {client._host}:{client._ctrl_port}")
         print(f"  Start it on the remote machine with:  ac server enable")
         sys.exit(1)
-    import subprocess
-    print("  Starting server...", end=" ", flush=True)
-    subprocess.Popen(
-        [sys.executable, "-m", "thd_tool", "server", "enable"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    for _ in range(30):          # up to 3 s in 100 ms steps
-        time.sleep(0.1)
-        ack = client.send_cmd({"cmd": "status"}, timeout_ms=200)
-        if ack is not None:
-            print("OK")
-            return
-    print("failed")
-    print("  Could not start server. Run manually:  ac server enable")
-    sys.exit(1)
+
+    _spawn_local_server(client)
 
 
 def _check_ack(ack, context=""):
@@ -739,18 +767,27 @@ def cmd_generate_sine(cmd, cfg, client):
     if first_dbfs is None:
         first_dbfs = -12.0
 
-    print(f"\n  Playing {len(channels)} channel(s)... Ctrl+C to stop.\n")
-
     ack = _check_ack(client.send_cmd({
         "cmd":        "generate",
         "freq_hz":    freq,
         "level_dbfs": first_dbfs,
         "channels":   channels,
     }))
+    for port in ack.get("out_ports", []):
+        print(f"  → {port}")
+    print(f"\n  Playing {len(channels)} channel(s)... Ctrl+C to stop.\n")
 
     try:
         while True:
-            time.sleep(0.1)
+            try:
+                topic, frame = client.recv_data(timeout_ms=500)
+            except TimeoutError:
+                continue   # still playing
+            if topic == "error":
+                print(f"\n  error: {frame.get('message')}")
+                return
+            if topic == "done":
+                return
     except KeyboardInterrupt:
         client.send_cmd({"cmd": "stop"})
         print("\n  Stopped.")
@@ -852,8 +889,10 @@ def main():
     # --- Commands that don't need a ZMQ connection ---
     if cmd["cmd"] == "server_enable":
         from .server import run_server
+        local = "--local" in sys.argv
         run_server(ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
-                   data_port=cfg.get("zmq_data_port", DATA_PORT))
+                   data_port=cfg.get("zmq_data_port", DATA_PORT),
+                   local=local)
         return
 
     if cmd["cmd"] == "server_set_host":
