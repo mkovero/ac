@@ -327,11 +327,42 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         print("  error: pyzmq not installed — run: pip install pyzmq")
         return
 
+    # Check whether a server is already running on this port
+    _probe = zmq.Context()
+    _req   = _probe.socket(zmq.REQ)
+    _req.setsockopt(zmq.LINGER,   0)
+    _req.setsockopt(zmq.RCVTIMEO, 500)
+    _req.connect(f"tcp://localhost:{ctrl_port}")
+    try:
+        _req.send_json({"cmd": "status"})
+        ack = _req.recv_json()
+        _req.close(); _probe.term()
+        print(f"  Server already running on port {ctrl_port} "
+              f"(busy={ack.get('busy', '?')}, cmd={ack.get('running_cmd')})")
+        return
+    except zmq.Again:
+        pass   # nothing there — proceed to bind
+    finally:
+        try: _req.close()
+        except Exception: pass
+        try: _probe.term()
+        except Exception: pass
+
     ctx       = zmq.Context()
     sock_ctrl = ctx.socket(zmq.REP)
-    sock_ctrl.bind(f"tcp://*:{ctrl_port}")
+    try:
+        sock_ctrl.bind(f"tcp://*:{ctrl_port}")
+    except zmq.ZMQError as e:
+        sock_ctrl.close(); ctx.term()
+        print(f"  error: cannot bind CTRL port {ctrl_port}: {e}")
+        return
     sock_data = ctx.socket(zmq.PUB)
-    sock_data.bind(f"tcp://*:{data_port}")
+    try:
+        sock_data.bind(f"tcp://*:{data_port}")
+    except zmq.ZMQError as e:
+        sock_ctrl.close(); sock_data.close(); ctx.term()
+        print(f"  error: cannot bind DATA port {data_port}: {e}")
+        return
 
     poller = zmq.Poller()
     poller.register(sock_ctrl, zmq.POLLIN)
@@ -469,9 +500,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         return {"ok": False, "error": f"unknown command: {name!r}"}
 
-    print(f"\n  ZMQ server listening:")
-    print(f"    CTRL  tcp://*:{ctrl_port}  (REP)")
-    print(f"    DATA  tcp://*:{data_port}  (PUB)")
+    print(f"\n  ZMQ server  CTRL tcp://*:{ctrl_port}  DATA tcp://*:{data_port}")
     print(f"  Ctrl+C to stop\n")
 
     try:
