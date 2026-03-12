@@ -314,6 +314,7 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
         input_channel=input_channel,
         ref_dbfs=ref_dbfs,
         freq=freq,
+        dmm_host=cfg.get("dmm_host"),
     )
 
 

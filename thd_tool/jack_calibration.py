@@ -298,7 +298,7 @@ def run_calibration_jack(output_channel=0, input_channel=0,
 
 def run_calibration_jack_zmq(pub_q, cal_q,
                               output_channel=0, input_channel=0,
-                              ref_dbfs=-10.0, freq=1000):
+                              ref_dbfs=-10.0, freq=1000, dmm_host=None):
     """Calibration for the ZMQ server: publishes cal_prompt/cal_done instead of
     using input().  pub_q is a queue.Queue; cal_q receives vrms from cal_reply."""
     import json
@@ -322,12 +322,16 @@ def run_calibration_jack_zmq(pub_q, cal_q,
     engine.start(output_ports=out_port, input_port=in_port)
     time.sleep(0.5)   # let analog output settle
 
+    dmm_vrms = None
+    if dmm_host:
+        dmm_vrms = _try_dmm_read(dmm_host)
+
     _pub("cal_prompt", {
         "step": 1,
         "text": (f"STEP 1 — Output voltage (loaded)\n"
                  f"  Connect output -> loopback cable.\n"
                  f"  Probe the OUTPUT jack with DMM and enter reading below."),
-        "dmm_vrms": None,
+        "dmm_vrms": dmm_vrms,
     })
 
     try:
