@@ -273,14 +273,8 @@ def _worker_monitor_spectrum(pub_q, stop_ev, cfg, cmd):
 def _worker_generate(pub_q, stop_ev, cfg, cmd):
     freq       = cmd["freq_hz"]
     level_dbfs = cmd["level_dbfs"]
-    channels   = cmd.get("channels")
     amplitude  = 10.0 ** (level_dbfs / 20.0)
-
-    playback, _ = find_ports()
-    if channels:
-        out_ports = [port_name(playback, ch) for ch in channels]
-    else:
-        out_ports = port_name(playback, cfg["output_channel"])
+    out_ports  = cmd["_out_ports"]   # pre-resolved in handle()
 
     engine = JackEngine()
     try:
