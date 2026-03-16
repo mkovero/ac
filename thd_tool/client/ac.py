@@ -184,9 +184,11 @@ def _save_results(results, label, cal=None, cfg=None, show_plot=False,
     save_csv(results, csv_path)
     plot_results(results, device_name=label, output_path=plot_path, cal=cal)
     if show_plot:
-        # Try pyqtgraph UI first; fall back to image viewer
-        mode = "sweep_frequency" if "frequency" in label else "sweep_level"
-        if not _launch_ui(mode, host=host, data_port=data_port):
+        # UI was already launched before the sweep started (so it could receive
+        # live frames). Only fall back to image viewer if pyqtgraph is absent.
+        try:
+            import pyqtgraph  # noqa: F401
+        except ImportError:
             import subprocess
             for cmd_args in [["eog", "--fullscreen", plot_path],
                              ["feh", plot_path],
@@ -550,6 +552,10 @@ def cmd_sweep_level(cmd, cfg, client):
           f"step {step_db:.1f} dB  |  {freq:.0f} Hz")
     _print_sweep_header(cal_info is not None)
 
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("sweep_level", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+
     ack = _check_ack(client.send_cmd({
         "cmd":        "sweep_level",
         "freq_hz":    freq,
@@ -590,6 +596,10 @@ def cmd_sweep_frequency(cmd, cfg, client):
     print(f"\n  Freq sweep: {cmd['start']:.0f} -> {cmd['stop']:.0f} Hz  "
           f"{cmd['ppd']} pts/decade  |  {level_db:.1f} dBFS")
     _print_freq_header(cal_info is not None)
+
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("sweep_frequency", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
 
     ack = _check_ack(client.send_cmd({
         "cmd":        "sweep_frequency",
