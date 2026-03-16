@@ -1,6 +1,6 @@
 # signal.py
 import numpy as np
-from .constants import SAMPLERATE, DURATION, FUNDAMENTAL_HZ
+from ..constants import SAMPLERATE, DURATION, FUNDAMENTAL_HZ
 
 def make_sine(amplitude, freq=FUNDAMENTAL_HZ, duration=DURATION, sr=SAMPLERATE):
     t    = np.linspace(0, duration, int(sr * duration), endpoint=False)

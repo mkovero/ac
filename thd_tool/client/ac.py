@@ -8,11 +8,11 @@ from datetime import datetime
 
 import numpy as np
 
-from .parse       import parse, ParseError, USAGE
-from .config      import load as load_config, save as save_config, show as show_config
-from .io          import save_csv, print_summary
-from .plotting    import plot_results
-from .conversions import vrms_to_dbu, fmt_vrms
+from .parse        import parse, ParseError, USAGE
+from ..config      import load as load_config, save as save_config, show as show_config
+from .io           import save_csv, print_summary
+from .plotting     import plot_results
+from ..conversions import vrms_to_dbu, fmt_vrms
 
 
 CTRL_PORT = 5556
@@ -107,7 +107,7 @@ def _level_to_dbfs(level, cal_info):
             if not v_out:
                 print("  error: dBu levels require output calibration — run:  ac calibrate")
                 sys.exit(1)
-            from .conversions import dbu_to_vrms
+            from ..conversions import dbu_to_vrms
             vrms = dbu_to_vrms(val)
             return 20.0 * math.log10(vrms / v_out)
     # Vrms
@@ -136,7 +136,7 @@ def _parse_vrms(raw):
 
 def _cal_from_frame(frame):
     """Reconstruct a minimal Calibration object from a sweep_point frame."""
-    from .jack_calibration import Calibration
+    from ..server.jack_calibration import Calibration
     v_out = frame.get("vrms_at_0dbfs_out")
     v_in  = frame.get("vrms_at_0dbfs_in")
     if v_out is None and v_in is None:
@@ -157,7 +157,24 @@ def _numpy_results(results):
     return results
 
 
-def _save_results(results, label, cal=None, cfg=None, show_plot=False):
+def _launch_ui(mode, host="localhost", data_port=DATA_PORT):
+    """Spawn the pyqtgraph UI as a separate process. Returns True on success."""
+    try:
+        import pyqtgraph  # noqa: F401 — check availability only
+    except ImportError:
+        return False
+    import subprocess
+    subprocess.Popen(
+        [sys.executable, "-m", "thd_tool.ui",
+         "--mode", mode, "--host", host, "--port", str(data_port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return True
+
+
+def _save_results(results, label, cal=None, cfg=None, show_plot=False,
+                  host="localhost", data_port=DATA_PORT):
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe     = label.replace(" ", "_")
     out_dir  = (cfg or {}).get("output_dir", ".")
@@ -167,26 +184,30 @@ def _save_results(results, label, cal=None, cfg=None, show_plot=False):
     save_csv(results, csv_path)
     plot_results(results, device_name=label, output_path=plot_path, cal=cal)
     if show_plot:
-        import subprocess
-        for cmd_args in [["eog", "--fullscreen", plot_path],
-                         ["feh", plot_path],
-                         ["xdg-open", plot_path],
-                         ["display", plot_path]]:
-            try:
-                subprocess.Popen(cmd_args,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                break
-            except FileNotFoundError:
-                continue
+        # Try pyqtgraph UI first; fall back to image viewer
+        mode = "sweep_frequency" if "frequency" in label else "sweep_level"
+        if not _launch_ui(mode, host=host, data_port=data_port):
+            import subprocess
+            for cmd_args in [["eog", "--fullscreen", plot_path],
+                             ["feh", plot_path],
+                             ["xdg-open", plot_path],
+                             ["display", plot_path]]:
+                try:
+                    subprocess.Popen(cmd_args,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    break
+                except FileNotFoundError:
+                    continue
 
 
 def _src_mtime():
-    """Max mtime of any .py file in this package."""
-    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    """Max mtime of server-side .py files."""
+    client_dir = os.path.dirname(os.path.abspath(__file__))
+    server_dir = os.path.join(os.path.dirname(client_dir), "server")
     return max(
-        os.path.getmtime(os.path.join(pkg_dir, f))
-        for f in os.listdir(pkg_dir)
+        os.path.getmtime(os.path.join(server_dir, f))
+        for f in os.listdir(server_dir)
         if f.endswith(".py")
     )
 
@@ -361,7 +382,7 @@ def cmd_stop(_cmd, cfg, client):
 
 
 def cmd_dmm_show(_cmd, cfg, client):
-    from .conversions import fmt_vrms, fmt_vpp
+    from ..conversions import fmt_vrms, fmt_vpp
     ack = _check_ack(client.send_cmd({"cmd": "dmm_read"}))
     if ack.get("idn"):
         print(f"\n  {ack['idn']}")
@@ -370,7 +391,7 @@ def cmd_dmm_show(_cmd, cfg, client):
 
 
 def cmd_calibrate_show(_cmd, cfg, client):
-    from .jack_calibration import DEFAULT_CAL_PATH
+    from ..server.jack_calibration import DEFAULT_CAL_PATH
     ack = _check_ack(client.send_cmd({"cmd": "list_calibrations"}))
     cals = ack.get("calibrations", [])
     if not cals:
@@ -553,7 +574,9 @@ def cmd_sweep_level(cmd, cfg, client):
     cal = _cal_from_frame(results[0])
     print_summary(results, "DUT", cal=cal)
     _save_results(results, "sweep_level", cal=cal, cfg=cfg,
-                  show_plot=cmd.get("show_plot", False))
+                  show_plot=cmd.get("show_plot", False),
+                  host=cfg.get("server_host", "localhost"),
+                  data_port=cfg.get("zmq_data_port", DATA_PORT))
 
 
 def cmd_sweep_frequency(cmd, cfg, client):
@@ -592,7 +615,9 @@ def cmd_sweep_frequency(cmd, cfg, client):
     cal = _cal_from_frame(results[0])
     print_summary(results, "DUT", cal=cal)
     _save_results(results, "sweep_frequency", cal=cal, cfg=cfg,
-                  show_plot=cmd.get("show_plot", False))
+                  show_plot=cmd.get("show_plot", False),
+                  host=cfg.get("server_host", "localhost"),
+                  data_port=cfg.get("zmq_data_port", DATA_PORT))
 
 
 def cmd_monitor_thd(cmd, cfg, client):
@@ -606,6 +631,10 @@ def cmd_monitor_thd(cmd, cfg, client):
         level_db = -12.0
     else:
         level_db = _level_to_dbfs(level, cal_info)
+
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("thd", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
 
     ack = _check_ack(client.send_cmd({
         "cmd":        "monitor_thd",
@@ -657,6 +686,10 @@ def cmd_monitor_spectrum(cmd, cfg, client):
     cal_info = _get_cal(client, freq)
     level_db = _level_to_dbfs(cmd["level"], cal_info)
 
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("spectrum", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+
     ack = _check_ack(client.send_cmd({
         "cmd":        "monitor_spectrum",
         "freq_hz":    freq,
@@ -670,18 +703,26 @@ def cmd_monitor_spectrum(cmd, cfg, client):
     sys.stdout.write("\033[?25l\033[2J")
     sys.stdout.flush()
 
+    # Show something while waiting for first frame
+    sys.stdout.write(f"\033[H\033[1;37m  {freq:.0f} Hz  |  {level_db:.1f} dBFS  |  waiting for data...\033[0m")
+    sys.stdout.flush()
+
     def _on_resize(*_):
         sys.stdout.write("\033[2J")
         sys.stdout.flush()
     signal.signal(signal.SIGWINCH, _on_resize)
 
+    error_msg = None
     try:
         while True:
             try:
                 topic, frame = client.recv_data(timeout_ms=2000)
             except TimeoutError:
                 continue
-            if topic not in ("data",):
+            if topic == "error":
+                error_msg = frame.get("message", "unknown error")
+                break
+            if topic != "data":
                 break
             if frame.get("type") != "spectrum":
                 continue
@@ -707,11 +748,14 @@ def cmd_monitor_spectrum(cmd, cfg, client):
         client.send_cmd({"cmd": "stop"})
         sys.stdout.write("\033[?25h\033[2J\033[H")
         sys.stdout.flush()
-        print("  Stopped.")
+        if error_msg:
+            print(f"  Error: {error_msg}")
+        else:
+            print("  Stopped.")
 
 
 def cmd_generate_sine(cmd, cfg, client):
-    from .conversions import fmt_vrms, fmt_vpp
+    from ..conversions import fmt_vrms, fmt_vpp
     from .parse import _parse_channels
 
     freq    = cmd["freq"]
@@ -820,7 +864,7 @@ def cmd_monitor_level(cmd, cfg, client):
 def cmd_server_enable(_cmd, cfg, client):
     """Start the ZMQ server daemon — this is handled before AcClient is created."""
     # Should not reach here; handled in main() before client init.
-    from .server import run_server, CTRL_PORT, DATA_PORT
+    from ..server.server import run_server, CTRL_PORT, DATA_PORT
     run_server(ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
                data_port=cfg.get("zmq_data_port", DATA_PORT))
 
@@ -868,12 +912,12 @@ def main():
         sys.exit(1)
 
     cfg = load_config()
-    from .conversions import set_dbu_ref
+    from ..conversions import set_dbu_ref
     set_dbu_ref(cfg.get("dbu_ref_vrms", 0.77459667))
 
     # --- Commands that don't need a ZMQ connection ---
     if cmd["cmd"] == "server_enable":
-        from .server import run_server
+        from ..server.server import run_server
         local = "--local" in sys.argv
         run_server(ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
                    data_port=cfg.get("zmq_data_port", DATA_PORT),

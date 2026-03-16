@@ -269,7 +269,7 @@ def parse(argv):
         tokens   = _classify_all(args)
         level    = _pull(tokens, "level", optional=True) or ("dbfs", -12.0)
         freq     = _pull(tokens, "freq",  optional=True) or 1000.0
-        interval = _pull(tokens, "time",  optional=True) or 1.0
+        interval = _pull(tokens, "time",  optional=True) or (0.1 if noun == "spectrum" else 1.0)
         if tokens:
             raise ParseError(f"unexpected token(s): {tokens}")
         if noun == "thd":

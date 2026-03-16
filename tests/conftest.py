@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 from unittest.mock import patch
 
-from thd_tool.ac import AcClient
-from thd_tool.server import run_server
+from thd_tool.client.ac import AcClient
+from thd_tool.server.server import run_server
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +88,10 @@ def server_client():
     ctrl_port = _free_port()
     data_port = _free_port()
 
-    with patch("thd_tool.server.JackEngine",   FakeJackEngine), \
-         patch("thd_tool.server.find_ports",   return_value=_FAKE_PORTS), \
-         patch("thd_tool.server.load_config",  return_value=dict(_TEST_CFG)), \
-         patch("thd_tool.server.save_config",  side_effect=lambda u: {**_TEST_CFG, **u}):
+    with patch("thd_tool.server.server.JackEngine",   FakeJackEngine), \
+         patch("thd_tool.server.server.find_ports",   return_value=_FAKE_PORTS), \
+         patch("thd_tool.server.server.load_config",  return_value=dict(_TEST_CFG)), \
+         patch("thd_tool.server.server.save_config",  side_effect=lambda u: {**_TEST_CFG, **u}):
 
         t = threading.Thread(
             target=run_server,

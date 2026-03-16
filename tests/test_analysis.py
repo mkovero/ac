@@ -1,7 +1,7 @@
 """FFT analysis tests with synthetic sine signals — no JACK, no ZMQ."""
 import numpy as np
 import pytest
-from thd_tool.analysis import analyze
+from thd_tool.server.analysis import analyze
 
 
 # ---------------------------------------------------------------------------

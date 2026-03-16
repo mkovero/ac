@@ -1,7 +1,7 @@
 # io.py
 import csv
 import numpy as np
-from .conversions import fmt_vrms, vrms_to_dbu
+from ..conversions import fmt_vrms, vrms_to_dbu
 
 def save_csv(results, path):
     fields = ["drive_db", "out_vrms", "out_dbu",

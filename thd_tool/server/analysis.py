@@ -1,7 +1,7 @@
 # analysis.py
 import numpy as np
 import scipy.signal as sig
-from .constants import SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, FUNDAMENTAL_HZ
+from ..constants import SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, FUNDAMENTAL_HZ
 
 def _find_peak(spectrum, freqs, target_hz, tol_hz=20):
     mask = np.abs(freqs - target_hz) < tol_hz

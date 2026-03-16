@@ -5,8 +5,8 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from .conversions import vrms_to_dbu, fmt_vrms, dbfs_to_vrms
-from .constants import SAMPLERATE
+from ..conversions import vrms_to_dbu, fmt_vrms, dbfs_to_vrms
+from ..constants import SAMPLERATE
 
 # Suppress noisy matplotlib warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")

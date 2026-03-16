@@ -8,10 +8,10 @@ import threading
 import numpy as np
 from .audio            import find_ports, port_name, JackEngine
 from .analysis         import analyze
-from .conversions      import vrms_to_dbu
-from .constants        import WARMUP_REPS
+from ..conversions     import vrms_to_dbu
+from ..constants       import WARMUP_REPS
 from .jack_calibration import Calibration
-from .config           import load as load_config, save as save_config
+from ..config          import load as load_config, save as save_config
 
 # Max mtime of any .py file in the package — used by client to detect stale servers.
 _PKG_DIR   = os.path.dirname(os.path.abspath(__file__))

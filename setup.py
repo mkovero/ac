@@ -5,10 +5,10 @@ setup(
     version="0.2",
     packages=find_packages(),
     install_requires=["sounddevice", "numpy", "scipy", "matplotlib"],
-    extras_require={"dev": ["pytest"]},
+    extras_require={"dev": ["pytest"], "gui": ["pyqtgraph>=0.13"]},
     entry_points={
         "console_scripts": [
-            "ac = thd_tool.ac:main",
+            "ac = thd_tool.client.ac:main",
             "thd = thd_tool.cli:main",   # legacy
         ],
     },

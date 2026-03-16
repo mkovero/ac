@@ -9,7 +9,7 @@ def main():
         from .cli import main as legacy_main
         legacy_main()
     else:
-        from .ac import main as ac_main
+        from .client.ac import main as ac_main
         ac_main()
 
 if __name__ == "__main__":

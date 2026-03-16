@@ -4,8 +4,8 @@
 import numpy as np
 from .audio       import JackEngine, find_ports, port_name
 from .analysis    import analyze
-from .conversions import vrms_to_dbu, fmt_vrms
-from .constants   import WARMUP_REPS
+from ..conversions import vrms_to_dbu, fmt_vrms
+from ..constants   import WARMUP_REPS
 
 
 def _warmup(engine, n_blocks=WARMUP_REPS):

@@ -13,7 +13,7 @@ pip install -e .
 ```
 
 This installs two entry points:
-- `ac` — the main CLI (`thd_tool/ac.py`)
+- `ac` — the main CLI (`thd_tool/client/ac.py`)
 - `thd` — legacy CLI (`thd_tool/cli.py`, kept for backward compat)
 
 Also runnable as `python -m thd_tool`.
@@ -38,43 +38,22 @@ ac s f 20hz 20khz 0dbu show           # abbreviated + open plot
 
 All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`→`s`, `monitor`→`m`, `generate`→`g`, `calibrate`→`c`, `level`→`l`, `frequency`→`f`, `thd`→`t`, `sine`→`si`.
 
-## Architecture
+## Package layout
 
-### Entry flow
+```
+thd_tool/
+  __init__.py          (empty)
+  __main__.py          (dispatches to client.ac or legacy cli)
+  constants.py         (shared)
+  conversions.py       (shared)
+  config.py            (shared)
 
-`parse.py` → `ac.py` → `jack_measure.py` / `jack_calibration.py`
+  server/              (ZMQ server, JACK audio, analysis)
+  client/              (CLI parser, ZMQ client, plotting)
+  ui/                  (pyqtgraph live views)
+```
 
-1. **`parse.py`** — token-based CLI parser. Each CLI token is classified by unit suffix (Hz, kHz, dBu, dBFS, Vrms, mVrms, Vpp, dB, s, ppd). Returns a plain dict describing the command. Designed to translate to C++ later.
-
-2. **`ac.py`** — dispatch table maps command names to handler functions. Handlers convert between unit systems (dBu ↔ dBFS ↔ Vrms) using `conversions.py`, load calibration, call measurement functions, then save CSV + PNG.
-
-3. **`audio.py`** — `JackEngine` class: wraps the `jack` Python library. Manages output ports (one JACK port per hardware channel), one input port, a ring buffer for capture, and a process callback for real-time output of a looped sine buffer. `find_ports()` enumerates physical JACK ports.
-
-4. **`jack_measure.py`** — `jack_sweep_level()`, `jack_sweep_frequency()`, `jack_monitor()`. Each creates a `JackEngine`, iterates over the sweep points, calls `analyze()`, prints a table, and returns a list of result dicts.
-
-5. **`analysis.py`** — `analyze(recording, sr, fundamental)`. FFT-based: computes spectrum with Hann window, finds fundamental and harmonics by peak search, returns THD%, THD+N%, noise floor, clipping flag, ac_coupled flag.
-
-6. **`jack_calibration.py`** — `Calibration` class (load/save keyed by `out{N}_in{M}_{freq}hz` in `~/.config/thd_tool/cal.json`) + interactive `run_calibration_jack()` procedure (play tone → user reads DMM → loopback capture → derive input scaling).
-
-7. **`config.py`** — persistent hardware config at `~/.config/thd_tool/config.json` (output_channel, input_channel, device, dbu_ref_vrms).
-
-8. **`conversions.py`** — unit math: `vrms_to_dbu`, `dbu_to_vrms`, `dbfs_to_vrms`, format helpers.
-
-9. **`plotting.py`** — matplotlib plots saved as PNG alongside CSV output.
-
-10. **`io.py`** — `save_csv()` and `print_summary()`.
-
-### Calibration model
-
-Calibration stores `vrms_at_0dbfs_out` and `vrms_at_0dbfs_in` — the physical voltage corresponding to 0 dBFS full scale. All level conversions multiply/divide by these factors. Without calibration, levels are shown in dBFS only.
-
-### Result dict keys (from `analyze()`)
-
-`fundamental_hz`, `fundamental_dbfs`, `linear_rms`, `thd_pct`, `thdn_pct`, `harmonic_levels`, `noise_floor_dbfs`, `spectrum`, `freqs`, `clipping`, `ac_coupled`. Sweep functions add `drive_db`, `out_vrms`, `out_dbu`, `in_vrms`, `in_dbu`, `gain_db`.
-
-## Dependencies
-
-`jack` (python-jack / CFFI binding to libjack), `numpy`, `scipy`, `matplotlib`.
+See `server/CLAUDE.md`, `client/CLAUDE.md`, `ui/CLAUDE.md` for subpackage docs.
 
 ## Legacy / old code
 

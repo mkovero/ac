@@ -1,6 +1,6 @@
 """Tests for the Calibration class — uses tmp_path for isolation."""
 import pytest
-from thd_tool.jack_calibration import Calibration
+from thd_tool.server.jack_calibration import Calibration
 from thd_tool.conversions import dbfs_to_vrms
 
 

@@ -1,6 +1,6 @@
 """Parser unit tests — no I/O, no JACK, pure Python."""
 import pytest
-from thd_tool.parse import parse, ParseError
+from thd_tool.client.parse import parse, ParseError
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ def test_monitor_spectrum_abbreviations():
     assert r["cmd"]   == "monitor_spectrum"
     assert r["level"] == ("dbfs", -12.0)
     assert r["freq"]  == 1000.0
-    assert r["interval"] == 1.0   # default
+    assert r["interval"] == 0.1   # default for spectrum
 
 
 # ---------------------------------------------------------------------------

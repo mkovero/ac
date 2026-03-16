@@ -3,7 +3,7 @@ import json
 import os
 import numpy as np
 from .audio      import JackEngine, find_ports, port_name
-from .conversions import fmt_vrms, vrms_to_dbu, fmt_vpp, dbfs_to_vrms
+from ..conversions import fmt_vrms, vrms_to_dbu, fmt_vpp, dbfs_to_vrms
 
 DEFAULT_CAL_PATH = os.path.expanduser("~/.config/thd_tool/cal.json")
 
@@ -73,8 +73,11 @@ class Calibration:
         path = path or DEFAULT_CAL_PATH
         if not os.path.exists(path):
             return None
-        with open(path) as f:
-            all_cals = json.load(f)
+        try:
+            with open(path) as f:
+                all_cals = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return None
         key = _cal_key(output_channel, input_channel, freq)
         if key not in all_cals:
             return None
@@ -93,8 +96,11 @@ class Calibration:
         path = path or DEFAULT_CAL_PATH
         if not os.path.exists(path):
             return None
-        with open(path) as f:
-            all_cals = json.load(f)
+        try:
+            with open(path) as f:
+                all_cals = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return None
         prefix = f"out{output_channel}_in"
         suffix = f"_{freq:.0f}hz"
         for key, data in all_cals.items():
@@ -113,8 +119,11 @@ class Calibration:
         path = path or DEFAULT_CAL_PATH
         if not os.path.exists(path):
             return []
-        with open(path) as f:
-            all_cals = json.load(f)
+        try:
+            with open(path) as f:
+                all_cals = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return []
         result = []
         for key, data in all_cals.items():
             if not isinstance(data, dict):
@@ -201,7 +210,7 @@ def _parse_dmm(prompt, dmm_host=None):
 def run_calibration_jack(output_channel=0, input_channel=0,
                          ref_dbfs=-10.0, freq=1000, dmm_host=None):
     from .signal import make_sine
-    from .constants import SAMPLERATE
+    from ..constants import SAMPLERATE
 
     cal          = Calibration(output_channel=output_channel,
                                input_channel=input_channel,
