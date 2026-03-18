@@ -20,6 +20,7 @@ DEFAULTS = {
     "range_start_hz": 20.0,
     "range_stop_hz":  20000.0,
     "server_enabled": False,
+    "gpio_port":      None,
 }
 
 

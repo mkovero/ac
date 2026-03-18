@@ -399,6 +399,8 @@ def parse(argv):
                     raise ParseError(f"setup dburef: expected voltage e.g. 775mv or 0.775v, got {val!r}")
             elif key == "dmm":
                 result["dmm_host"] = val
+            elif key == "gpio":
+                result["gpio_port"] = None if val.lower() in ("none", "off", "disable", "disabled") else val
             elif key == "range":
                 # ac setup range <start:freq> <stop:freq>
                 try:
@@ -413,7 +415,7 @@ def parse(argv):
                 except ValueError:
                     raise ParseError(f"setup range: expected frequency for stop, got {stop_val!r}")
             else:
-                raise ParseError(f"setup: unknown key {key!r}  (output | input | device | dburef | dmm | range)")
+                raise ParseError(f"setup: unknown key {key!r}  (output | input | device | dburef | dmm | gpio | range)")
         return result
 
     elif verb == "server":

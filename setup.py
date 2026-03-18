@@ -4,7 +4,7 @@ setup(
     name="thd_tool",
     version="0.2",
     packages=find_packages(),
-    install_requires=["sounddevice", "numpy", "scipy", "matplotlib"],
+    install_requires=["sounddevice", "numpy", "scipy", "matplotlib", "pyserial"],
     extras_require={"dev": ["pytest"], "gui": ["pyqtgraph>=0.13"]},
     entry_points={
         "console_scripts": [

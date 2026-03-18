@@ -359,6 +359,7 @@ def cmd_setup(cmd, cfg, client):
     if "input"        in cmd: update["input_channel"]   = cmd["input"]
     if "dbu_ref_vrms" in cmd: update["dbu_ref_vrms"]    = cmd["dbu_ref_vrms"]
     if "dmm_host"     in cmd: update["dmm_host"]        = cmd["dmm_host"]
+    if "gpio_port"    in cmd: update["gpio_port"]       = cmd["gpio_port"]
     if "range_start"  in cmd: update["range_start_hz"]  = cmd["range_start"]
     if "range_stop"   in cmd: update["range_stop_hz"]   = cmd["range_stop"]
     ack = _check_ack(client.send_cmd({"cmd": "setup", "update": update}))
@@ -371,9 +372,21 @@ def cmd_setup(cmd, cfg, client):
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = srv_cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")
+    gpio = srv_cfg.get("gpio_port")
+    print(f"  GPIO port:     {gpio if gpio else '(not configured)'}")
     print(f"  Range:         {srv_cfg.get('range_start_hz', 20):.0f} – {srv_cfg.get('range_stop_hz', 20000):.0f} Hz")
     if update:
         print("  Saved.")
+
+    if "gpio_port" in cmd:
+        port = cmd["gpio_port"]
+        gpio_ack = client.send_cmd({"cmd": "gpio_setup", "port": port}, timeout_ms=5000)
+        if gpio_ack and gpio_ack.get("ok"):
+            print(f"  GPIO: {'started on ' + port if port else 'stopped'}")
+        elif gpio_ack:
+            print(f"  GPIO: {gpio_ack.get('error', 'error')}")
+        else:
+            print(f"  GPIO: server not responding")
     print()
 
 

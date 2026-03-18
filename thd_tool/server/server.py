@@ -413,10 +413,21 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
     mon = sock_ctrl.get_monitor_socket(zmq.EVENT_ACCEPTED | zmq.EVENT_DISCONNECTED)
     connections = {}   # endpoint -> connect_time (float)
     state = {
-        "bind_addr": bind_addr,
-        "ctrl_ep":   f"tcp://{bind_addr}:{ctrl_port}",
-        "data_ep":   f"tcp://{bind_addr}:{data_port}",
+        "bind_addr":    bind_addr,
+        "ctrl_ep":      f"tcp://{bind_addr}:{ctrl_port}",
+        "data_ep":      f"tcp://{bind_addr}:{data_port}",
+        "gpio_handler": None,
     }
+
+    # Auto-start GPIO if a port is configured
+    if cfg.get("gpio_port"):
+        try:
+            from ..gpio.gpio import GpioHandler
+            _gpio = GpioHandler(cfg["gpio_port"])
+            _gpio.start()
+            state["gpio_handler"] = _gpio
+        except Exception:
+            pass   # don't abort server startup on GPIO error
 
     poller = zmq.Poller()
     poller.register(sock_ctrl, zmq.POLLIN)
@@ -697,6 +708,21 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                     "clients":       list(connections.keys()),
                     "workers":       list(workers.keys())}
 
+        if name == "gpio_setup":
+            port = cmd.get("port")
+            if state["gpio_handler"] is not None:
+                state["gpio_handler"].stop()
+                state["gpio_handler"] = None
+            if port:
+                try:
+                    from ..gpio.gpio import GpioHandler
+                    handler = GpioHandler(port)
+                    handler.start()
+                    state["gpio_handler"] = handler
+                except Exception as e:
+                    return {"ok": False, "error": str(e)}
+            return {"ok": True}
+
         return {"ok": False, "error": f"unknown command: {name!r}"}
 
     try:
@@ -742,6 +768,8 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         for w in workers.values():
             w["thread"].join(timeout=5.0)
     finally:
+        if state["gpio_handler"] is not None:
+            state["gpio_handler"].stop()
         sock_ctrl.disable_monitor()
         mon.close()
         sock_ctrl.close()
