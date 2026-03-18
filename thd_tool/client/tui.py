@@ -22,9 +22,11 @@ class SpectrumRenderer:
     _PEAK_HOLD   = 6      # frames before peak starts falling
     _PEAK_DECAY  = 1.5    # dB per frame after hold expires
 
-    def __init__(self, db_min=-100, db_max=0):
+    def __init__(self, db_min=-100, db_max=0, start_freq=20.0, end_freq=24000.0):
         self.db_min     = db_min
         self.db_max     = db_max
+        self.f_lo       = start_freq
+        self.f_hi       = end_freq
         self._smooth_db = None   # (N,) smoothed bar levels, dB
         self._peak_db   = None   # (N,) peak hold levels, dB
         self._peak_age  = None   # (N,) frames since each peak was set
@@ -41,16 +43,17 @@ class SpectrumRenderer:
         bar_cols    = max(cols - left_margin - 1, 4)
         bar_rows    = max(rows - 3, 2)
 
-        f_hi         = min(sr / 2, 24000)
-        raw_lin      = self._log_bin(freqs, spectrum_linear, bar_cols, f_hi=f_hi)
+        f_lo         = self.f_lo
+        f_hi         = min(sr / 2, self.f_hi)
+        raw_lin      = self._log_bin(freqs, spectrum_linear, bar_cols, f_lo=f_lo, f_hi=f_hi)
         raw_db       = 20.0 * np.log10(np.maximum(raw_lin, 1e-12))
-        harmonic_set = self._harmonic_columns(harmonic_freqs, bar_cols, f_hi=f_hi)
+        harmonic_set = self._harmonic_columns(harmonic_freqs, bar_cols, f_lo=f_lo, f_hi=f_hi)
 
         smooth_db, peak_db = self._update_state(raw_db, bar_cols)
 
         status = self._status_line(thd_pct, thdn_pct, in_dbu, fundamental_hz, cols)
         bars   = self._bar_block(smooth_db, peak_db, bar_cols, bar_rows, harmonic_set)
-        freq_l = self._freq_labels(bar_cols, left_margin, f_hi)
+        freq_l = self._freq_labels(bar_cols, left_margin, f_hi, f_lo=f_lo)
 
         lines = [status, ""]
         lines += bars

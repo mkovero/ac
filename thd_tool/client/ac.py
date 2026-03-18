@@ -551,55 +551,76 @@ def _print_freq_row(frame):
 
 
 def cmd_sweep_level(cmd, cfg, client):
-    freq     = cmd["freq"]
     cal_info = _get_cal(client)
-    if cal_info:
-        print("  Loaded calibration from server.")
-    else:
-        print("  No calibration found — levels in dBFS only.")
     start_db = _level_to_dbfs(cmd["start"], cal_info)
     stop_db  = _level_to_dbfs(cmd["stop"],  cal_info)
-    step     = cmd["step"]
-    step_db  = step[1] if isinstance(step, tuple) else float(step)
+    freq     = cmd["freq"]
+    duration = cmd.get("duration", 1.0)
 
-    print(f"\n  Level sweep: {start_db:.1f} -> {stop_db:.1f} dBFS  "
-          f"step {step_db:.1f} dB  |  {freq:.0f} Hz")
-    _print_sweep_header(cal_info is not None)
-
-    if cmd.get("show_plot"):
-        host = cfg.get("server_host", "localhost")
-        _launch_ui("sweep_level", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+    print(f"\n  Sweep: {start_db:.1f} → {stop_db:.1f} dBFS  |  {freq:.0f} Hz  |  {duration:.1f}s")
 
     ack = _check_ack(client.send_cmd({
         "cmd":        "sweep_level",
         "freq_hz":    freq,
         "start_dbfs": start_db,
         "stop_dbfs":  stop_db,
-        "step_db":    step_db,
+        "duration":   duration,
     }))
-    print(f"  Output: {ack['out_port']}  →  Input: {ack['in_port']}")
+    print(f"  Output: {ack['out_port']}")
+    print(f"  Sweeping... Ctrl+C to stop.\n")
 
-    results = []
-
-    def on_data(frame):
-        if frame.get("type") == "sweep_point":
-            results.append(frame)
-            _print_sweep_row(frame)
-
-    _collect_stream(client, "sweep_level", on_data, timeout_ms=120000)
-
-    if not results:
-        return
-    _numpy_results(results)
-    cal = _cal_from_frame(results[0])
-    print_summary(results, "DUT", cal=cal)
-    _save_results(results, "sweep_level", cal=cal, cfg=cfg,
-                  show_plot=cmd.get("show_plot", False),
-                  host=cfg.get("server_host", "localhost"),
-                  data_port=cfg.get("zmq_data_port", DATA_PORT))
+    try:
+        while True:
+            try:
+                topic, frame = client.recv_data(timeout_ms=500)
+            except TimeoutError:
+                continue
+            if topic == "error" and frame.get("cmd") in (None, "sweep_level"):
+                print(f"\n  error: {frame.get('message')}")
+                return
+            if topic == "done" and frame.get("cmd") in (None, "sweep_level"):
+                return
+    except KeyboardInterrupt:
+        client.send_cmd({"cmd": "stop", "name": "sweep_level"})
+        print("\n  Stopped.")
 
 
 def cmd_sweep_frequency(cmd, cfg, client):
+    cal_info = _get_cal(client)
+    level_db = _level_to_dbfs(cmd["level"], cal_info)
+    start_hz = cmd["start"] if cmd["start"] is not None else cfg.get("range_start_hz", 20.0)
+    stop_hz  = cmd["stop"]  if cmd["stop"]  is not None else cfg.get("range_stop_hz", 20000.0)
+    duration = cmd.get("duration", 1.0)
+
+    print(f"\n  Sweep: {start_hz:.0f} → {stop_hz:.0f} Hz  |  {level_db:.1f} dBFS  |  {duration:.1f}s")
+
+    ack = _check_ack(client.send_cmd({
+        "cmd":        "sweep_frequency",
+        "start_hz":   start_hz,
+        "stop_hz":    stop_hz,
+        "level_dbfs": level_db,
+        "duration":   duration,
+    }))
+    print(f"  Output: {ack['out_port']}")
+    print(f"  Sweeping... Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            try:
+                topic, frame = client.recv_data(timeout_ms=500)
+            except TimeoutError:
+                continue
+            if topic == "error" and frame.get("cmd") in (None, "sweep_frequency"):
+                print(f"\n  error: {frame.get('message')}")
+                return
+            if topic == "done" and frame.get("cmd") in (None, "sweep_frequency"):
+                return
+    except KeyboardInterrupt:
+        client.send_cmd({"cmd": "stop", "name": "sweep_frequency"})
+        print("\n  Stopped.")
+
+
+def cmd_plot(cmd, cfg, client):
     cal_info = _get_cal(client)
     if cal_info:
         print("  Loaded calibration from server.")
@@ -607,11 +628,10 @@ def cmd_sweep_frequency(cmd, cfg, client):
         print("  No calibration found — levels in dBFS only.")
     level_db = _level_to_dbfs(cmd["level"], cal_info)
 
-    # Fall back to config range if start/stop not specified by user
     start_hz = cmd["start"] if cmd["start"] is not None else cfg.get("range_start_hz", 20.0)
     stop_hz  = cmd["stop"]  if cmd["stop"]  is not None else cfg.get("range_stop_hz", 20000.0)
 
-    print(f"\n  Freq sweep: {start_hz:.0f} -> {stop_hz:.0f} Hz  "
+    print(f"\n  Plot: {start_hz:.0f} → {stop_hz:.0f} Hz  "
           f"{cmd['ppd']} pts/decade  |  {level_db:.1f} dBFS")
     _print_freq_header(cal_info is not None)
 
@@ -620,7 +640,7 @@ def cmd_sweep_frequency(cmd, cfg, client):
         _launch_ui("sweep_frequency", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
 
     ack = _check_ack(client.send_cmd({
-        "cmd":        "sweep_frequency",
+        "cmd":        "plot",
         "start_hz":   start_hz,
         "stop_hz":    stop_hz,
         "level_dbfs": level_db,
@@ -635,70 +655,33 @@ def cmd_sweep_frequency(cmd, cfg, client):
             results.append(frame)
             _print_freq_row(frame)
 
-    _collect_stream(client, "sweep_frequency", on_data, timeout_ms=300000)
+    _collect_stream(client, "plot", on_data, timeout_ms=300000)
 
     if not results:
         return
     _numpy_results(results)
     cal = _cal_from_frame(results[0])
     print_summary(results, "DUT", cal=cal)
-    _save_results(results, "sweep_frequency", cal=cal, cfg=cfg,
+    _save_results(results, "plot", cal=cal, cfg=cfg,
                   show_plot=cmd.get("show_plot", False),
                   host=cfg.get("server_host", "localhost"),
                   data_port=cfg.get("zmq_data_port", DATA_PORT))
 
 
-def cmd_monitor_thd(cmd, cfg, client):
-    freq = cmd["freq"]
-
-    if cmd.get("show_plot"):
-        host = cfg.get("server_host", "localhost")
-        _launch_ui("thd", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
-
-    ack = _check_ack(client.send_cmd({
-        "cmd":      "monitor_thd",
-        "freq_hz":  freq,
-        "interval": cmd["interval"],
-    }))
-    print(f"  Input: {ack['in_port']}")
-    print(f"  {freq:.0f} Hz  |  Ctrl+C to stop\n")
-
-    try:
-        while True:
-            try:
-                topic, frame = client.recv_data(timeout_ms=5000)
-            except TimeoutError:
-                continue
-            if topic in ("done", "error") and frame.get("cmd") in (None, "monitor_thd"):
-                break
-            if topic != "data" or frame.get("type") != "thd_point":
-                continue
-            thd    = frame["thd_pct"]
-            thdn   = frame["thdn_pct"]
-            in_dbu = frame.get("in_dbu")
-            xr     = f"  xruns:{frame['xruns']}" if frame.get("xruns") else ""
-
-            if thd < 0.01:   col = "\033[32m"
-            elif thd < 0.1:  col = "\033[33m"
-            else:             col = "\033[31m"
-            rst = "\033[0m"
-
-            dbu_s = f"{in_dbu:>+7.2f} dBu  " if in_dbu is not None else ""
-            print(f"  {dbu_s}"
-                  f"THD:{col}{thd:>8.4f}%{rst}  "
-                  f"THD+N:{thdn:>8.4f}%{xr}",
-                  end="\r", flush=True)
-    except KeyboardInterrupt:
-        client.send_cmd({"cmd": "stop", "name": "monitor_thd"})
-        print("\n\n  Stopped.")
-
-
-def cmd_monitor_spectrum(cmd, cfg, client):
+def cmd_monitor(cmd, cfg, client):
     import signal
     import sys
     from .tui import SpectrumRenderer
 
-    freq = cmd["freq"]
+    start_freq = cmd.get("start_freq", 20.0)
+    end_freq   = cmd.get("end_freq", 20000.0)
+    interval   = cmd.get("interval", 0.1)
+
+    # Convert min_y/max_y level tokens to dB for the display scale
+    min_y = cmd.get("min_y")
+    max_y = cmd.get("max_y")
+    db_min = min_y[1] if (min_y and isinstance(min_y, tuple)) else -100
+    db_max = max_y[1] if (max_y and isinstance(max_y, tuple)) else 0
 
     if cmd.get("show_plot"):
         host = cfg.get("server_host", "localhost")
@@ -706,18 +689,20 @@ def cmd_monitor_spectrum(cmd, cfg, client):
 
     ack = _check_ack(client.send_cmd({
         "cmd":      "monitor_spectrum",
-        "freq_hz":  freq,
-        "interval": cmd["interval"],
+        "freq_hz":  start_freq,
+        "interval": interval,
     }))
     print(f"  Input: {ack['in_port']}")
-    print(f"  {freq:.0f} Hz  |  Ctrl+C to stop")
+    print(f"  {start_freq:.0f}–{end_freq:.0f} Hz  |  Ctrl+C to stop")
 
-    renderer = SpectrumRenderer()
+    renderer = SpectrumRenderer(db_min=db_min, db_max=db_max,
+                                start_freq=start_freq, end_freq=end_freq)
     sys.stdout.write("\033[?25l\033[2J")
     sys.stdout.flush()
 
-    # Show something while waiting for first frame
-    sys.stdout.write(f"\033[H\033[1;37m  {freq:.0f} Hz  |  waiting for data...\033[0m")
+    sys.stdout.write(
+        f"\033[H\033[1;37m  {start_freq:.0f}–{end_freq:.0f} Hz  |  waiting for data...\033[0m"
+    )
     sys.stdout.flush()
 
     def _on_resize(*_):
@@ -742,8 +727,8 @@ def cmd_monitor_spectrum(cmd, cfg, client):
             if frame.get("type") != "spectrum":
                 continue
 
-            sr           = frame.get("sr", 48000)
-            detected_hz  = frame.get("freq_hz", freq)
+            sr             = frame.get("sr", 48000)
+            detected_hz    = frame.get("freq_hz", start_freq)
             harmonic_freqs = [detected_hz * (i + 1) for i in range(10)
                               if detected_hz * (i + 1) < sr / 2]
             out = renderer.render(
@@ -777,6 +762,11 @@ def cmd_generate_sine(cmd, cfg, client):
     freq    = cmd["freq"]
     level   = cmd["level"]
     ch_spec = cmd.get("channels")
+
+    # Resolve None level at runtime: 0 dBu if calibrated, else -20 dBFS
+    if level is None:
+        default_cal = _get_cal(client)
+        level = ("dbu", 0.0) if default_cal else ("dbfs", -20.0)
 
     # Fetch server config to know which channels + calibration
     ack_status = client.send_cmd({"cmd": "status"})
@@ -843,6 +833,11 @@ def cmd_generate_pink(cmd, cfg, client):
     level   = cmd["level"]
     ch_spec = cmd.get("channels")
 
+    # Resolve None level at runtime: 0 dBu if calibrated, else -20 dBFS
+    if level is None:
+        default_cal = _get_cal(client)
+        level = ("dbu", 0.0) if default_cal else ("dbfs", -20.0)
+
     ack_setup = client.send_cmd({"cmd": "setup", "update": {}})
     srv_cfg   = (ack_setup or {}).get("config", {}) if ack_setup else {}
 
@@ -897,37 +892,6 @@ def cmd_generate_pink(cmd, cfg, client):
         print("\n  Stopped.")
 
 
-def cmd_monitor_level(cmd, cfg, client):
-    freq = cmd["freq"]
-
-    ack = _check_ack(client.send_cmd({
-        "cmd":      "monitor_thd",
-        "freq_hz":  freq,
-        "interval": cmd["interval"],
-    }))
-    print(f"  Input: {ack['in_port']}")
-    print(f"  {freq:.0f} Hz  |  Ctrl+C to stop\n")
-
-    try:
-        while True:
-            try:
-                topic, frame = client.recv_data(timeout_ms=5000)
-            except TimeoutError:
-                continue
-            if topic == "done" or topic == "error":
-                break
-            if topic != "data" or frame.get("type") != "thd_point":
-                continue
-            in_dbu = frame.get("in_dbu")
-            dbfs   = frame.get("fundamental_dbfs", 0)
-            if in_dbu is not None:
-                print(f"  In: {in_dbu:>+7.2f} dBu", end="\r", flush=True)
-            else:
-                print(f"  In: {dbfs:>+7.2f} dBFS", end="\r", flush=True)
-    except KeyboardInterrupt:
-        client.send_cmd({"cmd": "stop", "name": "monitor_thd"})
-        print("\n\n  Stopped.")
-
 
 def cmd_server_enable(_cmd, cfg, client):
     ack = _check_ack(client.send_cmd({"cmd": "server_enable"}))
@@ -980,11 +944,10 @@ HANDLERS = {
     "calibrate_show":     cmd_calibrate_show,
     "sweep_level":        cmd_sweep_level,
     "sweep_frequency":    cmd_sweep_frequency,
-    "monitor_thd":        cmd_monitor_thd,
-    "monitor_spectrum":   cmd_monitor_spectrum,
+    "plot":               cmd_plot,
+    "monitor":            cmd_monitor,
     "generate_sine":      cmd_generate_sine,
     "generate_pink":      cmd_generate_pink,
-    "monitor_level":      cmd_monitor_level,
     "server_enable":      cmd_server_enable,
     "server_disable":     cmd_server_disable,
     "server_connections": cmd_server_connections,

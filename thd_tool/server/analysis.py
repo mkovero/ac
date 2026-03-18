@@ -37,7 +37,7 @@ def analyze(recording, sr=SAMPLERATE, fundamental=FUNDAMENTAL_HZ,
     spec_nn = spec.copy()
     bw      = max(1, int(fundamental * 0.1 / (sr / len(mono))))
     spec_nn[max(0, f1_bin - bw): min(len(spec_nn), f1_bin + bw)] = 0.0
-    thdn    = np.sqrt(np.mean(spec_nn ** 2)) / f1_amp * 100.0
+    thdn    = np.sqrt(np.sum(spec_nn ** 2)) / f1_amp * 100.0
 
     fund_dbfs  = 20.0 * np.log10(max(float(f1_amp), 1e-12))
 

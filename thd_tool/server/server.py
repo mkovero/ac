@@ -26,9 +26,9 @@ CTRL_PORT = 5556
 DATA_PORT  = 5557
 
 # Concurrency classification
-OUTPUT_CMDS = {"generate", "generate_pink"}
+OUTPUT_CMDS = {"generate", "generate_pink", "sweep_level", "sweep_frequency"}
 INPUT_CMDS  = {"monitor_thd", "monitor_spectrum"}
-EXCLUSIVE   = {"sweep_level", "sweep_frequency", "calibrate"}
+EXCLUSIVE   = {"plot", "calibrate"}
 AUDIO_CMDS  = OUTPUT_CMDS | INPUT_CMDS | EXCLUSIVE
 
 
@@ -99,48 +99,71 @@ def _sweep_point_frame(r, cal, n, cmd_name, level_dbfs, freq_hz=None):
 # Worker functions (run in background threads)
 # ---------------------------------------------------------------------------
 
-def _worker_sweep_level(pub_q, stop_ev, cfg, cmd):
+def _worker_sweep_level_gen(pub_q, stop_ev, cfg, cmd):
+    """Output-only level sweep: ramps amplitude from start→stop over duration at fixed freq."""
     freq      = cmd["freq_hz"]
     start_db  = cmd["start_dbfs"]
     stop_db   = cmd["stop_dbfs"]
-    step_db   = cmd["step_db"]
     duration  = cmd.get("duration", 1.0)
-    cal       = Calibration.load(output_channel=cfg["output_channel"],
-                                 input_channel=cfg["input_channel"])
-
-    levels_db = np.arange(start_db, stop_db + step_db * 0.5, step_db)
     out_port  = cmd["_out_port"]
-    in_port   = cmd["_in_port"]
-    xruns = 0
-    n = 0
+
     engine = JackEngine()
     try:
-        engine.start(output_ports=out_port, input_port=in_port)
-        for level_db in levels_db:
-            if stop_ev.is_set():
+        engine.start(output_ports=out_port)
+        start_amp = 10.0 ** (start_db / 20.0)
+        stop_amp  = 10.0 ** (stop_db  / 20.0)
+        engine.set_tone(freq, start_amp)
+        t_start = time.time()
+        while not stop_ev.is_set():
+            elapsed = time.time() - t_start
+            if elapsed >= duration:
                 break
-            engine.set_tone(freq, 10.0 ** (level_db / 20.0))
-            _warmup(engine)
-            data = engine.capture_block(duration)
-            rec  = data.reshape(-1, 1)
-            r    = analyze(rec, sr=engine.samplerate, fundamental=freq)
-            if "error" in r:
-                continue
-            r["drive_db"] = level_db
-            frame = _sweep_point_frame(r, cal, n, "sweep_level", level_db, freq_hz=freq)
-            _pub(pub_q, "data", frame)
-            n += 1
-        xruns = engine.xruns
+            t_norm = elapsed / duration
+            db_now = start_db + (stop_db - start_db) * t_norm
+            engine.set_tone(freq, 10.0 ** (db_now / 20.0))
+            time.sleep(0.01)
     except Exception as e:
         _pub(pub_q, "error", {"cmd": "sweep_level", "message": str(e)})
         return
     finally:
         engine.set_silence()
         engine.stop()
-    _pub(pub_q, "done", {"cmd": "sweep_level", "n_points": n, "xruns": xruns})
+    _pub(pub_q, "done", {"cmd": "sweep_level"})
 
 
-def _worker_sweep_frequency(pub_q, stop_ev, cfg, cmd):
+def _worker_sweep_frequency_gen(pub_q, stop_ev, cfg, cmd):
+    """Output-only frequency sweep: chirps from start→stop over duration at fixed level."""
+    start_hz   = cmd["start_hz"]
+    stop_hz    = cmd["stop_hz"]
+    level_dbfs = cmd["level_dbfs"]
+    duration   = cmd.get("duration", 1.0)
+    amplitude  = 10.0 ** (level_dbfs / 20.0)
+    out_port   = cmd["_out_port"]
+
+    engine = JackEngine()
+    try:
+        engine.start(output_ports=out_port)
+        engine.set_tone(float(start_hz), amplitude)
+        t_start = time.time()
+        while not stop_ev.is_set():
+            elapsed = time.time() - t_start
+            if elapsed >= duration:
+                break
+            t_norm = elapsed / duration
+            freq = start_hz * (stop_hz / start_hz) ** t_norm
+            engine.set_tone(float(freq), amplitude)
+            time.sleep(0.01)
+    except Exception as e:
+        _pub(pub_q, "error", {"cmd": "sweep_frequency", "message": str(e)})
+        return
+    finally:
+        engine.set_silence()
+        engine.stop()
+    _pub(pub_q, "done", {"cmd": "sweep_frequency"})
+
+
+def _worker_plot(pub_q, stop_ev, cfg, cmd):
+    """Blocking point-by-point frequency measurement (formerly sweep_frequency)."""
     start_hz   = cmd["start_hz"]
     stop_hz    = cmd["stop_hz"]
     level_dbfs = cmd["level_dbfs"]
@@ -173,18 +196,18 @@ def _worker_sweep_frequency(pub_q, stop_ev, cfg, cmd):
             if "error" in r:
                 continue
             r["drive_db"] = level_dbfs
-            frame = _sweep_point_frame(r, cal, n, "sweep_frequency", level_dbfs,
+            frame = _sweep_point_frame(r, cal, n, "plot", level_dbfs,
                                        freq_hz=float(freq))
             _pub(pub_q, "data", frame)
             n += 1
         xruns = engine.xruns
     except Exception as e:
-        _pub(pub_q, "error", {"cmd": "sweep_frequency", "message": str(e)})
+        _pub(pub_q, "error", {"cmd": "plot", "message": str(e)})
         return
     finally:
         engine.set_silence()
         engine.stop()
-    _pub(pub_q, "done", {"cmd": "sweep_frequency", "n_points": n, "xruns": xruns})
+    _pub(pub_q, "done", {"cmd": "plot", "n_points": n, "xruns": xruns})
 
 
 def _worker_monitor_thd(pub_q, stop_ev, cfg, cmd):
@@ -573,6 +596,14 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         # and include port names in the ack.
         if name in ("sweep_level", "sweep_frequency"):
             try:
+                playback, _ = find_ports()
+                out_port = port_name(playback, cfg["output_channel"])
+            except Exception as e:
+                return {"ok": False, "error": f"port error: {e}"}
+            cmd["_out_port"] = out_port
+
+        if name == "plot":
+            try:
                 playback, capture = find_ports()
                 out_port = port_name(playback, cfg["output_channel"])
                 in_port  = port_name(capture,  cfg["input_channel"])
@@ -602,12 +633,15 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             cmd["_out_ports"] = out_ports
 
         if name == "sweep_level":
-            _spawn("sweep_level", _worker_sweep_level, pub_q, cfg, cmd)
-            return {"ok": True,
-                    "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
+            _spawn("sweep_level", _worker_sweep_level_gen, pub_q, cfg, cmd)
+            return {"ok": True, "out_port": cmd["_out_port"]}
 
         if name == "sweep_frequency":
-            _spawn("sweep_frequency", _worker_sweep_frequency, pub_q, cfg, cmd)
+            _spawn("sweep_frequency", _worker_sweep_frequency_gen, pub_q, cfg, cmd)
+            return {"ok": True, "out_port": cmd["_out_port"]}
+
+        if name == "plot":
+            _spawn("plot", _worker_plot, pub_q, cfg, cmd)
             return {"ok": True,
                     "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
 

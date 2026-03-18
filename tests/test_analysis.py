@@ -107,3 +107,50 @@ def test_noise_floor_below_fundamental():
     r   = analyze(rec, sr=48000, fundamental=1000)
     # Noise floor should be meaningfully below the fundamental
     assert r["noise_floor_dbfs"] < r["fundamental_dbfs"] - 10.0
+
+
+# ---------------------------------------------------------------------------
+# THD+N tests
+# ---------------------------------------------------------------------------
+
+def test_thdn_ge_thd():
+    """THD+N must always be >= THD since THD+N includes noise in addition to harmonics."""
+    rec = make_recording(freq=1000, amp=0.1, harmonics=[(2, 0.005), (3, 0.002)])
+    r   = analyze(rec, sr=48000, fundamental=1000)
+    assert "error" not in r
+    assert r["thdn_pct"] >= r["thd_pct"], (
+        f"THD+N ({r['thdn_pct']:.6f}%) < THD ({r['thd_pct']:.6f}%) — impossible"
+    )
+
+
+def test_thdn_known_value():
+    """Synthetic signal with known harmonics: THD+N should be close to THD, not ~150x smaller."""
+    # 1% 2nd harmonic + 0.5% 3rd harmonic  → THD ≈ 1.118%
+    # THD+N should be within an order of magnitude of THD (not 100x smaller)
+    rec = make_recording(freq=1000, amp=0.5,
+                         harmonics=[(2, 0.005), (3, 0.0025)])
+    r   = analyze(rec, sr=48000, fundamental=1000)
+    assert "error" not in r
+    thd  = r["thd_pct"]
+    thdn = r["thdn_pct"]
+    # THD+N must be at least half of THD (noise floor adds a little)
+    assert thdn >= thd * 0.5, (
+        f"THD+N ({thdn:.6f}%) is more than 2x smaller than THD ({thd:.6f}%) — "
+        "likely np.mean vs np.sum bug"
+    )
+    # And not absurdly large (less than 10x THD)
+    assert thdn < thd * 10.0
+
+
+def test_thdn_pure_sine_reasonable():
+    """Pure sine THD+N should be >= THD and less than 1%."""
+    rec = make_recording(freq=1000, amp=0.1)
+    r   = analyze(rec, sr=48000, fundamental=1000)
+    assert "error" not in r
+    thdn = r["thdn_pct"]
+    # THD+N must always be >= THD (it includes noise + harmonics)
+    assert thdn >= r["thd_pct"], (
+        f"THD+N ({thdn:.8f}%) < THD ({r['thd_pct']:.8f}%) — impossible"
+    )
+    # Sanity: not unreasonably large for a clean sine
+    assert thdn < 1.0

@@ -76,9 +76,11 @@ def test_setup_update_and_restore(server_client):
 
 
 def test_get_calibration_not_found(server_client):
+    # Use an out-of-range channel combo that will never have a calibration file
     ack = server_client.send_cmd({
-        "cmd":    "get_calibration",
-        "freq_hz": 99999.0,
+        "cmd":            "get_calibration",
+        "output_channel": 17,
+        "input_channel":  18,
     })
     assert ack is not None
     assert ack["ok"]    is True
@@ -104,48 +106,45 @@ def test_unknown_command(server_client):
 # ---------------------------------------------------------------------------
 
 def test_sweep_level_frames(server_client):
-    """3-point sweep should produce exactly 3 sweep_point frames + 1 done."""
+    """sweep_level is output-only: ack has out_port (no in_port), sends done when finished."""
     client = server_client
     ack = client.send_cmd({
         "cmd":        "sweep_level",
         "freq_hz":    1000.0,
         "start_dbfs": -20.0,
         "stop_dbfs":  -16.0,
-        "step_db":     2.0,
+        "duration":    0.1,   # short ramp for the test
+    })
+    assert ack["ok"] is True
+    assert "out_port" in ack and ack["out_port"]
+    assert "in_port"  not in ack   # output-only: no input port
+
+    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=5000)
+    topics = [t for t, _ in frames]
+    assert "done" in topics or "error" in topics
+
+    # No sweep_point data frames — sweep is non-blocking output-only
+    data_frames = [(t, f) for t, f in frames if t == "data"]
+    assert len(data_frames) == 0
+
+
+def test_plot_fields(server_client):
+    """plot (blocking measurement) emits sweep_point frames with required fields."""
+    client = server_client
+    ack = client.send_cmd({
+        "cmd":        "plot",
+        "start_hz":   20.0,
+        "stop_hz":    200.0,
+        "level_dbfs": -20.0,
+        "ppd":         2,
     })
     assert ack["ok"] is True
     assert "out_port" in ack and ack["out_port"]
     assert "in_port"  in ack and ack["in_port"]
 
-    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=15000)
-    topics = [t for t, _ in frames]
-
-    assert "done" in topics or "error" in topics
-    data_frames = [(t, f) for t, f in frames if t == "data"]
-    # At least 2 of 3 sweep points received (ZMQ PUB may drop the very first
-    # published message before the SUB receive-buffer is fully primed).
-    assert len(data_frames) >= 2
-    # done frame confirms the server processed all 3 points
-    done_frames = [f for t, f in frames if t == "done"]
-    if done_frames:
-        assert done_frames[0].get("n_points") == 3
-
-
-def test_sweep_level_fields(server_client):
-    """Each sweep_point frame must contain the required fields."""
-    client = server_client
-    ack = client.send_cmd({
-        "cmd":        "sweep_level",
-        "freq_hz":    1000.0,
-        "start_dbfs": -20.0,
-        "stop_dbfs":  -18.0,
-        "step_db":     2.0,
-    })
-    assert ack["ok"] is True
-
-    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=15000)
+    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
     data_frames = [f for t, f in frames if t == "data"]
-    assert data_frames, "expected at least one sweep_point"
+    assert data_frames, "expected at least one sweep_point from plot"
 
     for f in data_frames:
         assert f.get("type") == "sweep_point"
@@ -161,28 +160,26 @@ def test_sweep_level_fields(server_client):
 # ---------------------------------------------------------------------------
 
 def test_sweep_frequency_frames(server_client):
-    """Short frequency sweep should return at least 1 data frame + done."""
+    """sweep_frequency is output-only chirp: ack has out_port (no in_port), sends done."""
     client = server_client
     ack = client.send_cmd({
         "cmd":        "sweep_frequency",
         "start_hz":    20.0,
         "stop_hz":    200.0,
         "level_dbfs": -20.0,
-        "ppd":         3,       # 1 decade × 3 ppd ≈ 3 points
+        "duration":    0.1,   # short chirp for the test
     })
     assert ack["ok"] is True
     assert "out_port" in ack and ack["out_port"]
-    assert "in_port"  in ack and ack["in_port"]
+    assert "in_port"  not in ack   # output-only: no input port
 
-    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
+    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=5000)
     topics = [t for t, _ in frames]
     assert "done" in topics or "error" in topics
 
+    # No measurement data frames — sweep is non-blocking output-only
     data_frames = [f for t, f in frames if t == "data"]
-    assert len(data_frames) >= 1
-    # Every sweep_point should carry freq_hz
-    for f in data_frames:
-        assert "freq_hz" in f or "fundamental_hz" in f
+    assert len(data_frames) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +187,7 @@ def test_sweep_frequency_frames(server_client):
 # ---------------------------------------------------------------------------
 
 def test_monitor_thd_port_info(server_client):
-    """monitor_thd ack must include out_port and in_port."""
+    """monitor_thd ack must include in_port (input-only — no out_port)."""
     client = server_client
     ack = client.send_cmd({
         "cmd":        "monitor_thd",
@@ -199,8 +196,8 @@ def test_monitor_thd_port_info(server_client):
         "interval":   0.05,
     })
     assert ack["ok"] is True
-    assert "out_port" in ack and ack["out_port"]
     assert "in_port"  in ack and ack["in_port"]
+    assert "out_port" not in ack   # monitor is input-only
     _stop_and_drain(client)
 
 
@@ -214,7 +211,7 @@ def test_bad_channel_returns_error(server_client):
         "freq_hz":    1000.0,
         "start_dbfs": -20.0,
         "stop_dbfs":  -18.0,
-        "step_db":     2.0,
+        "duration":    1.0,
     })
     # Restore
     client.send_cmd({"cmd": "setup", "update": {"output_channel": 0}})
@@ -224,7 +221,7 @@ def test_bad_channel_returns_error(server_client):
 
 
 def test_busy_guard(server_client):
-    """Starting a second command while server is busy must return ok=False."""
+    """Starting a second exclusive command while server is busy must return ok=False."""
     client = server_client
 
     # Start an infinite monitor
@@ -236,13 +233,13 @@ def test_busy_guard(server_client):
     })
     assert ack1["ok"] is True
 
-    # Immediately try to start a sweep while busy
+    # Immediately try to start a plot (exclusive) while monitor is busy
     ack2 = client.send_cmd({
-        "cmd":        "sweep_level",
-        "freq_hz":    1000.0,
-        "start_dbfs": -20.0,
-        "stop_dbfs":  -18.0,
-        "step_db":     2.0,
+        "cmd":        "plot",
+        "start_hz":   20.0,
+        "stop_hz":    200.0,
+        "level_dbfs": -20.0,
+        "ppd":         2,
     })
     assert ack2 is not None
     assert ack2["ok"] is False
@@ -259,13 +256,13 @@ def test_stop_sweep(server_client):
     """After sending stop the server must eventually publish a done frame."""
     client = server_client
 
-    # Large sweep so it might still be running when we stop
+    # Long ramp so it's likely still running when we stop
     ack = client.send_cmd({
         "cmd":        "sweep_level",
         "freq_hz":    1000.0,
         "start_dbfs": -60.0,
         "stop_dbfs":    0.0,
-        "step_db":      1.0,
+        "duration":    10.0,   # 10-second ramp
     })
     assert ack["ok"] is True
 

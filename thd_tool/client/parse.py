@@ -149,11 +149,12 @@ ABBREVS = {
     "m": "monitor", "mon": "monitor",
     "g": "generate", "gen": "generate",
     "c": "calibrate", "cal": "calibrate",
+    "p": "plot", "pl": "plot",
     "ser": "server",
     # sweep nouns
     "l": "level", "lev": "level",
     "f": "frequency", "freq": "frequency",
-    # monitor nouns
+    # monitor nouns (backward compat — stripped, no longer subcommands)
     "t": "thd",
     "sp": "spectrum", "spec": "spectrum",
     # generate nouns
@@ -238,62 +239,71 @@ def parse(argv):
         tokens = _classify_all(args)
 
         if noun == "level":
-            # ac sweep level [<start:level> <stop:level> [<freq:freq>] [<step:step>]]
-            start = _pull(tokens, "level", optional=True) or ("dbfs", -40.0)
-            stop  = _pull(tokens, "level", optional=True) or ("dbfs",   0.0)
-            freq  = _pull(tokens, "freq",  optional=True) or 1000.0
-            step  = _pull(tokens, "step",  optional=True) or ("db", 2.0)
+            # ac sweep level [<start:level> <stop:level> [<freq:freq>] [<duration:time>]]
+            start    = _pull(tokens, "level", optional=True) or ("dbfs", -40.0)
+            stop     = _pull(tokens, "level", optional=True) or ("dbfs",   0.0)
+            freq     = _pull(tokens, "freq",  optional=True) or 1000.0
+            duration = _pull(tokens, "time",  optional=True) or 1.0
             if tokens:
                 raise ParseError(f"unexpected token(s): {tokens}")
             return {"cmd": "sweep_level",
                     "start": start, "stop": stop,
-                    "freq": freq, "step": step,
+                    "freq": freq, "duration": duration,
                     "show_plot": show_plot}
 
         elif noun == "frequency":
-            # ac sweep frequency [<start:freq> <stop:freq>] [<level:level>] [<ppd:ppd>]
+            # ac sweep frequency [<start:freq> <stop:freq>] [<level:level>] [<duration:time>]
             # start/stop default to None so client can fall back to config range
-            start = _pull(tokens, "freq",  optional=True)
-            stop  = _pull(tokens, "freq",  optional=True)
-            level = _pull(tokens, "level", optional=True) or ("dbfs", -12.0)
-            ppd   = _pull(tokens, "ppd",   optional=True) or 10
+            start    = _pull(tokens, "freq",  optional=True)
+            stop     = _pull(tokens, "freq",  optional=True)
+            level    = _pull(tokens, "level", optional=True) or ("dbfs", -20.0)
+            duration = _pull(tokens, "time",  optional=True) or 1.0
             if tokens:
                 raise ParseError(f"unexpected token(s): {tokens}")
             return {"cmd": "sweep_frequency",
                     "start": start, "stop": stop,
-                    "level": level, "ppd": ppd,
+                    "level": level, "duration": duration,
                     "show_plot": show_plot}
 
         else:
             raise ParseError(f"unknown sweep noun: {noun!r}  (level | frequency)")
 
     elif verb == "monitor":
-        if not args:
-            raise ParseError("monitor needs a noun: thd | spectrum")
-        noun   = _expand(args.pop(0))
-        tokens   = _classify_all(args)
-        level    = _pull(tokens, "level", optional=True) or ("dbfs", -12.0)
-        freq     = _pull(tokens, "freq",  optional=True) or 1000.0
-        interval = _pull(tokens, "time",  optional=True) or (0.1 if noun == "spectrum" else 1.0)
+        # Optional backward-compat noun (thd/spectrum/level) — accepted but ignored,
+        # all variants now emit cmd:"monitor" with a unified spectrum display.
+        if args and _expand(args[0]) in ("thd", "spectrum", "level"):
+            args.pop(0)
+        tokens     = _classify_all(args)
+        # up to 2 freq tokens (start/end), 1 time (interval), up to 2 level (minY/maxY)
+        start_freq = _pull(tokens, "freq",  optional=True)
+        end_freq   = _pull(tokens, "freq",  optional=True)
+        interval   = _pull(tokens, "time",  optional=True) or 0.1
+        min_y      = _pull(tokens, "level", optional=True)
+        max_y      = _pull(tokens, "level", optional=True)
         if tokens:
             raise ParseError(f"unexpected token(s): {tokens}")
-        if noun == "thd":
-            return {"cmd": "monitor_thd",
-                    "level": level, "freq": freq,
-                    "interval": interval,
-                    "show_plot": show_plot}
-        elif noun == "level":
-            return {"cmd": "monitor_level",
-                    "level": level, "freq": freq,
-                    "interval": interval,
-                    "show_plot": show_plot}
-        elif noun == "spectrum":
-            return {"cmd": "monitor_spectrum",
-                    "level": level, "freq": freq,
-                    "interval": interval,
-                    "show_plot": show_plot}
-        else:
-            raise ParseError(f"unknown monitor noun: {noun!r}  (thd | level | spectrum)")
+        return {"cmd": "monitor",
+                "start_freq": start_freq or 20.0,
+                "end_freq":   end_freq   or 20000.0,
+                "interval":   interval,
+                "min_y":      min_y,
+                "max_y":      max_y,
+                "show_plot":  show_plot}
+
+    elif verb == "plot":
+        # ac plot [<start:freq> <stop:freq>] [<level:level>] [<ppd:ppd>]
+        # Blocking point-by-point measurement sweep (formerly ac sweep frequency)
+        tokens = _classify_all(args)
+        start  = _pull(tokens, "freq",  optional=True)
+        stop   = _pull(tokens, "freq",  optional=True)
+        level  = _pull(tokens, "level", optional=True) or ("dbfs", -20.0)
+        ppd    = _pull(tokens, "ppd",   optional=True) or 10
+        if tokens:
+            raise ParseError(f"unexpected token(s): {tokens}")
+        return {"cmd": "plot",
+                "start": start, "stop": stop,
+                "level": level, "ppd": ppd,
+                "show_plot": show_plot}
 
     elif verb == "generate":
         if not args:
@@ -306,7 +316,7 @@ def parse(argv):
             if args and re.match(r'^[\d][\d,\-]*$', args[0]):
                 channels = args.pop(0)
             tokens = _classify_all(args)
-            level = _pull(tokens, "level", optional=True) or ("dbu", 0.0)
+            level = _pull(tokens, "level", optional=True)   # None = resolve at runtime
             freq  = _pull(tokens, "freq",  optional=True) or 1000.0
             if tokens:
                 raise ParseError(f"unexpected token(s): {tokens}")
@@ -319,7 +329,7 @@ def parse(argv):
             if args and re.match(r'^[\d][\d,\-]*$', args[0]):
                 channels = args.pop(0)
             tokens = _classify_all(args)
-            level = _pull(tokens, "level", optional=True) or ("dbu", 0.0)
+            level = _pull(tokens, "level", optional=True)   # None = resolve at runtime
             if tokens:
                 raise ParseError(f"unexpected token(s): {tokens}")
             return {"cmd": "generate_pink",
@@ -432,7 +442,7 @@ def parse(argv):
         return {"cmd": "server_set_host", "host": host}
 
     else:
-        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | generate | calibrate | setup | devices | server)")
+        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | plot | generate | calibrate | setup | devices | server)")
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +452,12 @@ def parse(argv):
 USAGE = """\
 ac -- audio bench tool
 
-  ac sweep level   <start> <stop> <freq> [<step>]
-  ac sweep frequency <start> <stop> <level> [<ppd>]
-  ac monitor thd   <freq> [<interval>]       (input-only)
-  ac monitor spectrum <freq> [<interval>]    (input-only)
-  ac generate sine [<channels>] <level> [<freq>]
-  ac generate pink [<channels>] <level>
+  ac sweep level   <start> <stop> <freq> [<duration>]   (output-only ramp)
+  ac sweep frequency <start> <stop> <level> [<duration>] (output-only chirp)
+  ac plot  [<start> <stop>] [<level>] [<ppd>]           (blocking measurement)
+  ac monitor [<startFreq> [<endFreq>]] [<interval>] [<minY> [<maxY>]]
+  ac generate sine [<channels>] [<level>] [<freq>]
+  ac generate pink [<channels>] [<level>]
   ac calibrate     [output N] [input N] [<freq>] [<level>]
   ac calibrate show
   ac server enable          (bind server to all interfaces, save config)
@@ -458,43 +468,45 @@ ac -- audio bench tool
 Units:
   frequency : 20hz  1khz  20000hz
   level     : 0dbu  -12dbfs  775mvrms  1vrms  2vpp
-  step      : 2db   0.5db
-  ppd       : 10ppd  (points per decade)
-  interval  : 0.2s  1s
+  duration  : 1s  0.5s
+  ppd       : 10ppd  (points per decade, for ac plot)
+  interval  : 0.2s  (update interval for ac monitor)
 
 Abbreviations:
-  sweep->s  monitor->m  generate->g  calibrate->c
-  level->l  frequency->f  thd->t  spectrum->sp  sine->si  pink->pk
+  sweep->s  monitor->m  generate->g  calibrate->c  plot->p
+  level->l  frequency->f  sine->si  pink->pk
 
 Notes:
-  Monitors are input-only. Use ac generate sine/pink in a second shell for output.
+  ac sweep is non-blocking (output only). Use ac plot for blocking measurements.
+  ac monitor auto-detects fundamental; old nouns (thd/spectrum) still accepted.
   dBu and Vrms levels require prior calibration (ac calibrate).
   dBFS levels work without calibration.
+  generate level defaults to 0dBu if calibrated, -20dBFS otherwise.
 
 Examples:
   ac devices
   ac setup output 11 input 0 device 0
   ac sweep level -20dbu 6dbu 1khz
-  ac sweep level -40dbfs 0dbfs 1khz 2db
+  ac sweep level -40dbfs 0dbfs 1khz 2s
   ac sweep frequency 20hz 20khz 0dbu
-  ac sweep frequency 20hz 20khz 0dbu 20ppd
+  ac sweep frequency 20hz 20khz 0dbu 5s
   ac s f 20hz 20khz 0dbu
+  ac plot 20hz 20khz 0dbu 20ppd
+  ac plot 20hz 20khz 0dbu
+  ac p 20hz 20khz
   ac generate sine 0dbu 1khz
   ac g si 0dbu
   ac generate pink 0dbu
   ac g pk -12dbfs
-  ac monitor thd 1khz
-  ac monitor thd 1khz 0.2s
-  ac m t 1khz 0.2s
-  ac monitor spectrum 1khz
-  ac m sp 1khz
+  ac monitor
+  ac monitor 1khz
+  ac monitor 20hz 20khz 0.2s
+  ac m 1khz
   ac calibrate show
   ac calibrate 1khz
-  ac calibrate output 1 input 2 1khz
   ac cal out 1 in 2
   ac dmm
 
-  ac devices
   ac setup output 11 input 0 device 0
   ac setup output 1   # change just one value
   ac setup dmm 172.19.92.100
