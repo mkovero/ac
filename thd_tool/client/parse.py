@@ -149,6 +149,7 @@ ABBREVS = {
     "m": "monitor", "mon": "monitor",
     "g": "generate", "gen": "generate",
     "c": "calibrate", "cal": "calibrate",
+    "ser": "server",
     # sweep nouns
     "l": "level", "lev": "level",
     "f": "frequency", "freq": "frequency",
@@ -406,14 +407,25 @@ def parse(argv):
         return result
 
     elif verb == "server":
-        # ac server enable          -- start the ZMQ server daemon
+        # ac server enable          -- tell server to bind publicly
+        # ac server disable         -- tell server to bind locally only
+        # ac server connections     -- show server state
         # ac server 1.2.3.4         -- set server host and save to config
         # ac server                 -- set server host to localhost (default)
+        _SERVER_SUBS = {
+            "e": "enable", "en": "enable", "start": "enable", "daemon": "enable",
+            "d": "disable", "dis": "disable",
+            "c": "connections", "con": "connections",
+        }
         if not args:
             return {"cmd": "server_set_host", "host": "localhost"}
-        sub = args[0].lower()
-        if sub in ("enable", "start", "daemon"):
+        sub = _SERVER_SUBS.get(args[0].lower(), args[0].lower())
+        if sub == "enable":
             return {"cmd": "server_enable"}
+        if sub == "disable":
+            return {"cmd": "server_disable"}
+        if sub == "connections":
+            return {"cmd": "server_connections"}
         host = args.pop(0)
         if args:
             raise ParseError(f"unexpected token(s) after host: {args}")
@@ -438,7 +450,9 @@ ac -- audio bench tool
   ac generate pink [<channels>] <level>
   ac calibrate     [output N] [input N] [<freq>] [<level>]
   ac calibrate show
-  ac server enable          (start ZMQ server daemon on this machine)
+  ac server enable          (bind server to all interfaces, save config)
+  ac server disable         (bind server to localhost only, save config)
+  ac server connections     (show listen mode, connected clients, active workers)
   ac server [<host>]        (connect to server at host, default: localhost)
 
 Units:
@@ -485,7 +499,10 @@ Examples:
   ac setup output 1   # change just one value
   ac setup dmm 172.19.92.100
   ac setup range 20hz 20khz
-  ac server enable           # start server daemon (blocking)
+  ac server enable           # bind to all interfaces (saves config)
+  ac server disable          # bind to localhost only (saves config)
+  ac server connections      # show listen mode, clients, workers
+  ac ser c                   # same, abbreviated
   ac server 192.168.1.5      # point future ac commands at that host
   ac server                  # point at localhost (default)
 """

@@ -4,6 +4,10 @@
 import sys
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--serve":
+        from .server.server import run_server
+        run_server()
+        sys.exit(0)
     # If first arg looks like a legacy --flag, use old cli
     if len(sys.argv) > 1 and sys.argv[1].startswith("--"):
         from .cli import main as legacy_main

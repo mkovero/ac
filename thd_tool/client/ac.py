@@ -218,7 +218,7 @@ def _spawn_local_server(client):
     """Start a local-only server process silently, wait up to 3 s."""
     import subprocess
     subprocess.Popen(
-        [sys.executable, "-m", "thd_tool", "server", "enable", "--local"],
+        [sys.executable, "-m", "thd_tool", "--serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -227,7 +227,7 @@ def _spawn_local_server(client):
         ack = client.send_cmd({"cmd": "status"}, timeout_ms=200)
         if ack is not None:
             return
-    print("  error: could not start server — run manually:  ac server enable")
+    print("  error: could not start server")
     sys.exit(1)
 
 
@@ -252,7 +252,6 @@ def _ensure_server(client):
 
     if client._host not in ("localhost", "127.0.0.1"):
         print(f"  error: server not responding at {client._host}:{client._ctrl_port}")
-        print(f"  Start it on the remote machine with:  ac server enable")
         sys.exit(1)
 
     _spawn_local_server(client)
@@ -931,15 +930,39 @@ def cmd_monitor_level(cmd, cfg, client):
 
 
 def cmd_server_enable(_cmd, cfg, client):
-    """Start the ZMQ server daemon — this is handled before AcClient is created."""
-    # Should not reach here; handled in main() before client init.
-    from ..server.server import run_server, CTRL_PORT, DATA_PORT
-    run_server(ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
-               data_port=cfg.get("zmq_data_port", DATA_PORT))
+    ack = _check_ack(client.send_cmd({"cmd": "server_enable"}))
+    addr = ack.get("bind_addr", "*")
+    ctrl_port = cfg.get("zmq_ctrl_port", CTRL_PORT)
+    data_port = cfg.get("zmq_data_port", DATA_PORT)
+    print(f"  Server now listening on all interfaces  "
+          f"(tcp://{addr}:{ctrl_port} + tcp://{addr}:{data_port})")
+    print(f"  Config saved.")
+
+
+def cmd_server_disable(_cmd, cfg, client):
+    ack = _check_ack(client.send_cmd({"cmd": "server_disable"}))
+    print(f"  Server now listening on localhost only")
+    print(f"  Config saved.")
+
+
+def cmd_server_connections(_cmd, cfg, client):
+    ack = _check_ack(client.send_cmd({"cmd": "server_connections"}))
+    mode    = ack.get("listen_mode", "?")
+    ctrl_ep = ack.get("ctrl_endpoint", "?")
+    data_ep = ack.get("data_endpoint", "?")
+    clients = ack.get("clients", [])
+    workers = ack.get("workers", [])
+    print(f"\n  Listen:  {mode}  ({ctrl_ep} + {data_ep})")
+    print(f"  Clients: {len(clients)}")
+    for c in clients:
+        print(f"    {c}")
+    active = ', '.join(workers) if workers else "(none)"
+    print(f"  Active:  {active}")
+    print()
 
 
 def cmd_server_set_host(cmd, cfg, client):
-    """Save server host to local config — also handled before AcClient."""
+    """Save server host to local config — handled before AcClient."""
     # Should not reach here; handled in main().
     pass
 
@@ -949,19 +972,22 @@ def cmd_server_set_host(cmd, cfg, client):
 # ---------------------------------------------------------------------------
 
 HANDLERS = {
-    "devices":          cmd_devices,
-    "setup":            cmd_setup,
-    "stop":             cmd_stop,
-    "dmm_show":         cmd_dmm_show,
-    "calibrate":        cmd_calibrate,
-    "calibrate_show":   cmd_calibrate_show,
-    "sweep_level":      cmd_sweep_level,
-    "sweep_frequency":  cmd_sweep_frequency,
-    "monitor_thd":      cmd_monitor_thd,
-    "monitor_spectrum": cmd_monitor_spectrum,
-    "generate_sine":    cmd_generate_sine,
-    "generate_pink":    cmd_generate_pink,
-    "monitor_level":    cmd_monitor_level,
+    "devices":            cmd_devices,
+    "setup":              cmd_setup,
+    "stop":               cmd_stop,
+    "dmm_show":           cmd_dmm_show,
+    "calibrate":          cmd_calibrate,
+    "calibrate_show":     cmd_calibrate_show,
+    "sweep_level":        cmd_sweep_level,
+    "sweep_frequency":    cmd_sweep_frequency,
+    "monitor_thd":        cmd_monitor_thd,
+    "monitor_spectrum":   cmd_monitor_spectrum,
+    "generate_sine":      cmd_generate_sine,
+    "generate_pink":      cmd_generate_pink,
+    "monitor_level":      cmd_monitor_level,
+    "server_enable":      cmd_server_enable,
+    "server_disable":     cmd_server_disable,
+    "server_connections": cmd_server_connections,
 }
 
 
@@ -986,14 +1012,6 @@ def main():
     set_dbu_ref(cfg.get("dbu_ref_vrms", 0.77459667))
 
     # --- Commands that don't need a ZMQ connection ---
-    if cmd["cmd"] == "server_enable":
-        from ..server.server import run_server
-        local = "--local" in sys.argv
-        run_server(ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
-                   data_port=cfg.get("zmq_data_port", DATA_PORT),
-                   local=local)
-        return
-
     if cmd["cmd"] == "server_set_host":
         host = cmd["host"]
         save_config({"server_host": host})

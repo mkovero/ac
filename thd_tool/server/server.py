@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import threading
+import time
 import numpy as np
 from .audio            import find_ports, port_name, JackEngine
 from .analysis         import analyze
@@ -337,20 +338,19 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
 # Server main loop
 # ---------------------------------------------------------------------------
 
-def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
-    """Start the server.
+def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
+    """Start the server. Always runs silently (auto-spawned by client via --serve).
 
-    local=True  — bind to 127.0.0.1 only, no console output (auto-spawned by client)
-    local=False — bind to all interfaces, print status (explicit 'ac server enable')
+    Binds to * if server_enabled=True in config, otherwise 127.0.0.1.
     """
     try:
         import zmq
+        from zmq.utils.monitor import recv_monitor_message
     except ImportError:
-        if not local:
-            print("  error: pyzmq not installed — run: pip install pyzmq")
         return
 
-    bind_addr = "127.0.0.1" if local else "*"
+    cfg = load_config()
+    bind_addr = "*" if cfg.get("server_enabled", False) else "127.0.0.1"
 
     # Check whether a server is already running on this port
     _probe = zmq.Context()
@@ -376,28 +376,65 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
     sock_ctrl = ctx.socket(zmq.REP)
     try:
         sock_ctrl.bind(f"tcp://{bind_addr}:{ctrl_port}")
-    except zmq.ZMQError as e:
+    except zmq.ZMQError:
         sock_ctrl.close(); ctx.term()
-        if not local:
-            print(f"  error: cannot bind CTRL port {ctrl_port}: {e}")
         return
     sock_data = ctx.socket(zmq.PUB)
     try:
         sock_data.bind(f"tcp://{bind_addr}:{data_port}")
-    except zmq.ZMQError as e:
+    except zmq.ZMQError:
         sock_ctrl.close(); sock_data.close(); ctx.term()
-        if not local:
-            print(f"  error: cannot bind DATA port {data_port}: {e}")
         return
+
+    # Monitor socket for tracking connected clients
+    mon = sock_ctrl.get_monitor_socket(zmq.EVENT_ACCEPTED | zmq.EVENT_DISCONNECTED)
+    connections = {}   # endpoint -> connect_time (float)
+    state = {
+        "bind_addr": bind_addr,
+        "ctrl_ep":   f"tcp://{bind_addr}:{ctrl_port}",
+        "data_ep":   f"tcp://{bind_addr}:{data_port}",
+    }
 
     poller = zmq.Poller()
     poller.register(sock_ctrl, zmq.POLLIN)
+    poller.register(mon, zmq.POLLIN)
 
     pub_q       = queue.Queue()
     cal_q       = queue.Queue()
     should_quit = [False]
     workers     = {}   # {cmd_name: {"thread": Thread, "stop": Event}}
-    cfg         = load_config()
+
+    def _rebind(new_addr):
+        """Rebind both sockets to new_addr. Rollback on failure. Returns True on success."""
+        if new_addr == state["bind_addr"]:
+            return True   # already in requested mode
+        old_ctrl_ep = state["ctrl_ep"]
+        old_data_ep = state["data_ep"]
+        new_ctrl_ep = f"tcp://{new_addr}:{ctrl_port}"
+        new_data_ep = f"tcp://{new_addr}:{data_port}"
+        try:
+            sock_ctrl.unbind(old_ctrl_ep)
+            sock_ctrl.bind(new_ctrl_ep)
+        except zmq.ZMQError:
+            try: sock_ctrl.bind(old_ctrl_ep)
+            except Exception: pass
+            return False
+        try:
+            sock_data.unbind(old_data_ep)
+            sock_data.bind(new_data_ep)
+        except zmq.ZMQError:
+            # rollback ctrl then restore data
+            try: sock_data.bind(old_data_ep)
+            except Exception: pass
+            try: sock_ctrl.unbind(new_ctrl_ep)
+            except Exception: pass
+            try: sock_ctrl.bind(old_ctrl_ep)
+            except Exception: pass
+            return False
+        state["bind_addr"] = new_addr
+        state["ctrl_ep"]   = new_ctrl_ep
+        state["data_ep"]   = new_data_ep
+        return True
 
     def _drain_pub():
         while True:
@@ -438,8 +475,11 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
         if name == "status":
             _cleanup_workers()
             alive = list(workers.keys())
+            addr  = state["bind_addr"]
             return {"ok": True, "busy": bool(alive),
-                    "running_cmd": alive[0] if alive else None, "src_mtime": _SRC_MTIME}
+                    "running_cmd": alive[0] if alive else None, "src_mtime": _SRC_MTIME,
+                    "listen_mode": "public" if addr == "*" else "local",
+                    "server_enabled": cfg.get("server_enabled", False)}
 
         if name == "quit":
             should_quit[0] = True
@@ -597,17 +637,55 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
             _spawn("calibrate", _worker_calibrate, pub_q, cal_q, cfg, cmd)
             return {"ok": True}
 
-        return {"ok": False, "error": f"unknown command: {name!r}"}
+        if name == "server_enable":
+            save_config({"server_enabled": True})
+            cfg = load_config()
+            _rebind("*")
+            addr = state["bind_addr"]
+            return {"ok": True, "bind_addr": addr,
+                    "listen_mode": "public" if addr == "*" else "local"}
 
-    if not local:
-        print(f"\n  ZMQ server  CTRL tcp://*:{ctrl_port}  DATA tcp://*:{data_port}")
-        print(f"  Ctrl+C to stop\n")
+        if name == "server_disable":
+            save_config({"server_enabled": False})
+            cfg = load_config()
+            _rebind("127.0.0.1")
+            addr = state["bind_addr"]
+            return {"ok": True, "bind_addr": addr,
+                    "listen_mode": "public" if addr == "*" else "local"}
+
+        if name == "server_connections":
+            _cleanup_workers()
+            addr = state["bind_addr"]
+            return {"ok": True,
+                    "listen_mode":   "public" if addr == "*" else "local",
+                    "ctrl_endpoint": state["ctrl_ep"],
+                    "data_endpoint": state["data_ep"],
+                    "clients":       list(connections.keys()),
+                    "workers":       list(workers.keys())}
+
+        return {"ok": False, "error": f"unknown command: {name!r}"}
 
     try:
         while not should_quit[0]:
             _drain_pub()
             events = dict(poller.poll(50))
             _drain_pub()
+
+            # Process monitor events (connection tracking)
+            if mon in events:
+                while True:
+                    try:
+                        msg = recv_monitor_message(mon, flags=zmq.NOBLOCK)
+                        event    = msg["event"]
+                        endpoint = msg.get("endpoint", b"")
+                        if isinstance(endpoint, bytes):
+                            endpoint = endpoint.decode("utf-8", errors="replace")
+                        if event == zmq.EVENT_ACCEPTED:
+                            connections[endpoint] = time.time()
+                        elif event == zmq.EVENT_DISCONNECTED:
+                            connections.pop(endpoint, None)
+                    except zmq.Again:
+                        break
 
             if sock_ctrl not in events:
                 continue
@@ -624,16 +702,14 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
             sock_ctrl.send(json.dumps(reply).encode())
 
     except KeyboardInterrupt:
-        if not local:
-            print("\n\n  Stopping server...")
         for w in workers.values():
             w["stop"].set()
         cal_q.put(None)
         for w in workers.values():
             w["thread"].join(timeout=5.0)
     finally:
+        sock_ctrl.disable_monitor()
+        mon.close()
         sock_ctrl.close()
         sock_data.close()
         ctx.term()
-        if not local:
-            print("  Server stopped.")
