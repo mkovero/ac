@@ -54,8 +54,8 @@ def _downsample_spectrum(spec, freqs, max_pts=1000):
 
 def _sweep_point_frame(r, cal, n, cmd_name, level_dbfs, freq_hz=None):
     """Build a sweep_point DATA frame from an analyze() result dict."""
-    out_vrms  = cal.out_vrms(level_dbfs) if cal else None
-    in_vrms   = cal.in_vrms(r["linear_rms"]) if cal else None
+    out_vrms  = cal.out_vrms(level_dbfs, freq_hz) if cal else None
+    in_vrms   = cal.in_vrms(r["linear_rms"], freq_hz) if cal else None
     in_dbu    = vrms_to_dbu(in_vrms)  if in_vrms  is not None else None
     out_dbu   = vrms_to_dbu(out_vrms) if out_vrms is not None else None
     gain_db   = (in_dbu - out_dbu
@@ -105,8 +105,7 @@ def _worker_sweep_level(pub_q, stop_ev, cfg, cmd):
     step_db   = cmd["step_db"]
     duration  = cmd.get("duration", 1.0)
     cal       = Calibration.load(output_channel=cfg["output_channel"],
-                                 input_channel=cfg["input_channel"],
-                                 freq=freq)
+                                 input_channel=cfg["input_channel"])
 
     levels_db = np.arange(start_db, stop_db + step_db * 0.5, step_db)
     out_port  = cmd["_out_port"]
@@ -127,7 +126,7 @@ def _worker_sweep_level(pub_q, stop_ev, cfg, cmd):
             if "error" in r:
                 continue
             r["drive_db"] = level_db
-            frame = _sweep_point_frame(r, cal, n, "sweep_level", level_db)
+            frame = _sweep_point_frame(r, cal, n, "sweep_level", level_db, freq_hz=freq)
             _pub(pub_q, "data", frame)
             n += 1
         xruns = engine.xruns
@@ -147,8 +146,7 @@ def _worker_sweep_frequency(pub_q, stop_ev, cfg, cmd):
     ppd        = cmd.get("ppd", 10)
     duration   = cmd.get("duration", 1.0)
     cal        = Calibration.load(output_channel=cfg["output_channel"],
-                                  input_channel=cfg["input_channel"],
-                                  freq=1000)
+                                  input_channel=cfg["input_channel"])
 
     n_decades = np.log10(stop_hz / start_hz)
     n_points  = max(2, int(round(n_decades * ppd)))
@@ -192,8 +190,7 @@ def _worker_monitor_thd(pub_q, stop_ev, cfg, cmd):
     freq     = cmd["freq_hz"]
     interval = cmd.get("interval", 1.0)
     cal      = Calibration.load(output_channel=cfg["output_channel"],
-                                input_channel=cfg["input_channel"],
-                                freq=freq)
+                                input_channel=cfg["input_channel"])
     duration = max(0.1, interval)
     in_port  = cmd["_in_port"]
     engine = JackEngine()
@@ -205,7 +202,7 @@ def _worker_monitor_thd(pub_q, stop_ev, cfg, cmd):
             r    = analyze(rec, sr=engine.samplerate, fundamental=freq)
             if "error" in r:
                 continue
-            in_vrms = cal.in_vrms(r["linear_rms"]) if (cal and cal.input_ok) else None
+            in_vrms = cal.in_vrms(r["linear_rms"], freq) if (cal and cal.input_ok) else None
             in_dbu  = vrms_to_dbu(in_vrms)         if in_vrms is not None    else None
             _pub(pub_q, "data", {
                 "type":              "thd_point",
@@ -230,8 +227,7 @@ def _worker_monitor_spectrum(pub_q, stop_ev, cfg, cmd):
     freq     = cmd["freq_hz"]
     interval = cmd.get("interval", 0.2)
     cal      = Calibration.load(output_channel=cfg["output_channel"],
-                                input_channel=cfg["input_channel"],
-                                freq=freq)
+                                input_channel=cfg["input_channel"])
     duration = max(0.05, interval)
     in_port  = cmd["_in_port"]
     engine = JackEngine()
@@ -244,7 +240,7 @@ def _worker_monitor_spectrum(pub_q, stop_ev, cfg, cmd):
             if "error" in r:
                 continue
             spec_ds, freqs_ds = _downsample_spectrum(r["spectrum"][1:], r["freqs"][1:])
-            in_vrms = cal.in_vrms(r["linear_rms"]) if (cal and cal.input_ok) else None
+            in_vrms = cal.in_vrms(r["linear_rms"], freq) if (cal and cal.input_ok) else None
             in_dbu  = vrms_to_dbu(in_vrms)         if in_vrms is not None    else None
             _pub(pub_q, "data", {
                 "type":     "spectrum",
@@ -324,6 +320,8 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
         ref_dbfs=ref_dbfs,
         freq=freq,
         dmm_host=cfg.get("dmm_host"),
+        range_start_hz=cfg.get("range_start_hz", 20.0),
+        range_stop_hz=cfg.get("range_stop_hz", 20000.0),
     )
 
 
@@ -461,8 +459,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
         if name == "get_calibration":
             out_ch = cmd.get("output_channel", cfg["output_channel"])
             in_ch  = cmd.get("input_channel",  cfg["input_channel"])
-            freq   = cmd.get("freq_hz", 1000.0)
-            cal    = Calibration.load(output_channel=out_ch, input_channel=in_ch, freq=freq)
+            cal    = Calibration.load(output_channel=out_ch, input_channel=in_ch)
             if cal is None:
                 return {"ok": True, "found": False}
             return {"ok": True, "found": True,
@@ -474,9 +471,14 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT, local=False):
         if name == "list_calibrations":
             cals = Calibration.load_all()
             return {"ok": True, "calibrations": [
-                {"key": c.key,
+                {"key":               c.key,
                  "vrms_at_0dbfs_out": c.vrms_at_0dbfs_out,
-                 "vrms_at_0dbfs_in":  c.vrms_at_0dbfs_in}
+                 "vrms_at_0dbfs_in":  c.vrms_at_0dbfs_in,
+                 "response_pts":      len(c.response_curve) if c.response_curve else 0,
+                 "response_range":    [c.response_curve[0][0], c.response_curve[-1][0]]
+                                      if c.response_curve else None,
+                 "response_max_dev":  max(abs(d) for f, d in c.response_curve)
+                                      if c.response_curve else None}
                 for c in cals
             ]}
 

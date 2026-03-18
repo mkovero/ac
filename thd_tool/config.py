@@ -17,6 +17,8 @@ DEFAULTS = {
     "input_channel":  0,
     "dbu_ref_vrms":   DBU_REF_EXACT,
     "dmm_host":       None,
+    "range_start_hz": 20.0,
+    "range_stop_hz":  20000.0,
 }
 
 
@@ -51,4 +53,5 @@ def show(cfg):
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")
+    print(f"  Range:         {cfg.get('range_start_hz', 20):.0f} – {cfg.get('range_stop_hz', 20000):.0f} Hz")
     print()

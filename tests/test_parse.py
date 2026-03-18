@@ -50,8 +50,9 @@ def test_sweep_frequency():
 def test_sweep_frequency_defaults():
     r = parse(["sweep", "frequency"])
     assert r["cmd"]   == "sweep_frequency"
-    assert r["start"] == 20.0
-    assert r["stop"]  == 20000.0
+    # start/stop default to None; client falls back to config range
+    assert r["start"] is None
+    assert r["stop"]  is None
     assert r["level"] == ("dbfs", -12.0)
     assert r["ppd"]   == 10
 

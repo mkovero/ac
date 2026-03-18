@@ -88,9 +88,9 @@ class AcClient:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_cal(client, freq_hz):
+def _get_cal(client):
     """Fetch calibration from server for the server's configured channels."""
-    ack = client.send_cmd({"cmd": "get_calibration", "freq_hz": freq_hz})
+    ack = client.send_cmd({"cmd": "get_calibration"})
     if ack and ack.get("ok") and ack.get("found"):
         return ack
     return None
@@ -355,11 +355,13 @@ def cmd_devices(_cmd, cfg, client):
 
 def cmd_setup(cmd, cfg, client):
     update = {}
-    if "device"       in cmd: update["device"]         = cmd["device"]
-    if "output"       in cmd: update["output_channel"] = cmd["output"]
-    if "input"        in cmd: update["input_channel"]  = cmd["input"]
-    if "dbu_ref_vrms" in cmd: update["dbu_ref_vrms"]   = cmd["dbu_ref_vrms"]
-    if "dmm_host"     in cmd: update["dmm_host"]       = cmd["dmm_host"]
+    if "device"       in cmd: update["device"]          = cmd["device"]
+    if "output"       in cmd: update["output_channel"]  = cmd["output"]
+    if "input"        in cmd: update["input_channel"]   = cmd["input"]
+    if "dbu_ref_vrms" in cmd: update["dbu_ref_vrms"]    = cmd["dbu_ref_vrms"]
+    if "dmm_host"     in cmd: update["dmm_host"]        = cmd["dmm_host"]
+    if "range_start"  in cmd: update["range_start_hz"]  = cmd["range_start"]
+    if "range_stop"   in cmd: update["range_stop_hz"]   = cmd["range_stop"]
     ack = _check_ack(client.send_cmd({"cmd": "setup", "update": update}))
     srv_cfg = ack.get("config", {})
     ref = srv_cfg.get("dbu_ref_vrms", 0.77459667)
@@ -370,6 +372,7 @@ def cmd_setup(cmd, cfg, client):
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = srv_cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")
+    print(f"  Range:         {srv_cfg.get('range_start_hz', 20):.0f} – {srv_cfg.get('range_stop_hz', 20000):.0f} Hz")
     if update:
         print("  Saved.")
     print()
@@ -412,6 +415,13 @@ def cmd_calibrate_show(_cmd, cfg, client):
             print(f"    Input:  0 dBFS = {fmt_vrms(v):>14}  =  {vrms_to_dbu(v):+.2f} dBu")
         else:
             print(f"    Input:  not calibrated")
+        n_pts = c.get("response_pts", 0)
+        if n_pts:
+            rng = c.get("response_range")
+            dev = c.get("response_max_dev")
+            rng_s = f"{rng[0]:.0f}–{rng[1]:.0f} Hz" if rng else ""
+            dev_s = f"±{dev:.2f} dB" if dev is not None else ""
+            print(f"    Response: {n_pts} pts  {rng_s}  {dev_s}")
         print()
 
 
@@ -421,7 +431,7 @@ def cmd_calibrate(cmd, cfg, client):
     out_ch  = cmd.get("output_channel")
     in_ch   = cmd.get("input_channel")
 
-    cal_info = _get_cal(client, freq)
+    cal_info = _get_cal(client)
     if isinstance(level, tuple) and level[0] == "dbfs":
         ref_dbfs = level[1]
     elif cal_info:
@@ -441,7 +451,9 @@ def cmd_calibrate(cmd, cfg, client):
     try:
         while True:
             topic, frame = client.recv_data(timeout_ms=120000)
-            if topic == "cal_prompt":
+            if topic == "cal_progress":
+                print(f"\n  {frame.get('text', 'Working...')}", flush=True)
+            elif topic == "cal_prompt":
                 print(f"\n  {frame['text']}\n")
                 if frame.get("dmm_vrms") is not None:
                     hint = f"{frame['dmm_vrms'] * 1000:.4f} mVrms"
@@ -463,6 +475,9 @@ def cmd_calibrate(cmd, cfg, client):
                 v = frame.get("vrms_at_0dbfs_in")
                 if v:
                     print(f"  Input:  0 dBFS = {fmt_vrms(v)}  =  {vrms_to_dbu(v):+.2f} dBu")
+                n_pts = frame.get("response_pts", 0)
+                if n_pts:
+                    print(f"  Response curve: {n_pts} pts")
                 err = frame.get("error")
                 if err:
                     print(f"  Note: {err}")
@@ -538,7 +553,7 @@ def _print_freq_row(frame):
 
 def cmd_sweep_level(cmd, cfg, client):
     freq     = cmd["freq"]
-    cal_info = _get_cal(client, freq)
+    cal_info = _get_cal(client)
     if cal_info:
         print("  Loaded calibration from server.")
     else:
@@ -586,14 +601,18 @@ def cmd_sweep_level(cmd, cfg, client):
 
 
 def cmd_sweep_frequency(cmd, cfg, client):
-    cal_info = _get_cal(client, 1000.0)
+    cal_info = _get_cal(client)
     if cal_info:
         print("  Loaded calibration from server.")
     else:
         print("  No calibration found — levels in dBFS only.")
     level_db = _level_to_dbfs(cmd["level"], cal_info)
 
-    print(f"\n  Freq sweep: {cmd['start']:.0f} -> {cmd['stop']:.0f} Hz  "
+    # Fall back to config range if start/stop not specified by user
+    start_hz = cmd["start"] if cmd["start"] is not None else cfg.get("range_start_hz", 20.0)
+    stop_hz  = cmd["stop"]  if cmd["stop"]  is not None else cfg.get("range_stop_hz", 20000.0)
+
+    print(f"\n  Freq sweep: {start_hz:.0f} -> {stop_hz:.0f} Hz  "
           f"{cmd['ppd']} pts/decade  |  {level_db:.1f} dBFS")
     _print_freq_header(cal_info is not None)
 
@@ -603,8 +622,8 @@ def cmd_sweep_frequency(cmd, cfg, client):
 
     ack = _check_ack(client.send_cmd({
         "cmd":        "sweep_frequency",
-        "start_hz":   cmd["start"],
-        "stop_hz":    cmd["stop"],
+        "start_hz":   start_hz,
+        "stop_hz":    stop_hz,
         "level_dbfs": level_db,
         "ppd":        cmd["ppd"],
     }))
@@ -773,7 +792,6 @@ def cmd_generate_sine(cmd, cfg, client):
         cal_ack = client.send_cmd({
             "cmd":            "get_calibration",
             "output_channel": ch,
-            "freq_hz":        freq,
         })
         cal_info = cal_ack if (cal_ack and cal_ack.get("found")) else None
         dbfs = _level_to_dbfs(level, cal_info)
@@ -836,7 +854,6 @@ def cmd_generate_pink(cmd, cfg, client):
         cal_ack = client.send_cmd({
             "cmd":            "get_calibration",
             "output_channel": ch,
-            "freq_hz":        1000.0,
         })
         cal_info = cal_ack if (cal_ack and cal_ack.get("found")) else None
         dbfs = _level_to_dbfs(level, cal_info)

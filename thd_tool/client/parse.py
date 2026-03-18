@@ -171,6 +171,7 @@ ABBREVS = {
     "d": "devices", "dev": "devices", "devs": "devices",
     "o": "output", "out": "output",
     "i": "input",  "in":  "input",
+    "r": "range", "ra": "range",
 }
 
 
@@ -250,8 +251,9 @@ def parse(argv):
 
         elif noun == "frequency":
             # ac sweep frequency [<start:freq> <stop:freq>] [<level:level>] [<ppd:ppd>]
-            start = _pull(tokens, "freq",  optional=True) or 20.0
-            stop  = _pull(tokens, "freq",  optional=True) or 20000.0
+            # start/stop default to None so client can fall back to config range
+            start = _pull(tokens, "freq",  optional=True)
+            stop  = _pull(tokens, "freq",  optional=True)
             level = _pull(tokens, "level", optional=True) or ("dbfs", -12.0)
             ppd   = _pull(tokens, "ppd",   optional=True) or 10
             if tokens:
@@ -386,8 +388,21 @@ def parse(argv):
                     raise ParseError(f"setup dburef: expected voltage e.g. 775mv or 0.775v, got {val!r}")
             elif key == "dmm":
                 result["dmm_host"] = val
+            elif key == "range":
+                # ac setup range <start:freq> <stop:freq>
+                try:
+                    result["range_start"] = _parse_freq(val)
+                except ValueError:
+                    raise ParseError(f"setup range: expected frequency for start, got {val!r}")
+                if not remaining:
+                    raise ParseError("setup range: needs two frequencies (start stop)")
+                stop_val = remaining.pop(0)
+                try:
+                    result["range_stop"] = _parse_freq(stop_val)
+                except ValueError:
+                    raise ParseError(f"setup range: expected frequency for stop, got {stop_val!r}")
             else:
-                raise ParseError(f"setup: unknown key {key!r}  (output | input | device | dburef | dmm)")
+                raise ParseError(f"setup: unknown key {key!r}  (output | input | device | dburef | dmm | range)")
         return result
 
     elif verb == "server":
@@ -469,6 +484,7 @@ Examples:
   ac setup output 11 input 0 device 0
   ac setup output 1   # change just one value
   ac setup dmm 172.19.92.100
+  ac setup range 20hz 20khz
   ac server enable           # start server daemon (blocking)
   ac server 192.168.1.5      # point future ac commands at that host
   ac server                  # point at localhost (default)
