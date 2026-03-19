@@ -17,9 +17,9 @@ OUTPUT_PINS = [13, 14, 15]
 PIN_STOP     = 2
 PIN_GEN_SINE = 3
 PIN_GEN_PINK = 20
-PIN_LED_SINE = 13
-PIN_LED_PINK = 14
-PIN_LED_BUSY = 15
+PIN_LED_SINE = 11
+PIN_LED_PINK = 10
+PIN_LED_BUSY = 13
 
 CTRL_PORT = 5556
 DATA_PORT = 5557
@@ -223,7 +223,7 @@ class GpioHandler:
                 if not self._sine_active:
                     if self._pink_active:
                         self._log("stopping pink before starting sine")
-                        self._send_zmq({"cmd": "stop"})
+                        self._send_zmq({"cmd": "stop", "name": "generate_pink"})
                         self._pink_active = False
                     self._log(f"button: SINE -> generate 1 kHz @ {self._level_dbfs:.2f} dBFS ch {self._out_channel}")
                     self._sine_active = True
@@ -245,7 +245,7 @@ class GpioHandler:
                 if not self._pink_active:
                     if self._sine_active:
                         self._log("stopping sine before starting pink")
-                        self._send_zmq({"cmd": "stop"})
+                        self._send_zmq({"cmd": "stop", "name": "generate"})
                         self._sine_active = False
                     self._log(f"button: PINK -> generate_pink @ {self._level_dbfs:.2f} dBFS ch {self._out_channel}")
                     self._pink_active = True
