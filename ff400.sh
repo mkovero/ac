@@ -67,6 +67,11 @@ esac
 
 echo "=== Fireface 400 init  (card $CARD, level mode: $LEVEL_NAME) ==="
 
+# ── Ensure snd-fireface-ctl service is running (bridges ALSA → FireWire hw) ──
+systemctl --user restart snd-fireface-ctl.service
+sleep 1
+echo "  snd-fireface-ctl:   restarted"
+
 # ── Output / input reference levels ──────────────────────────────────────────
 amixer -c $CARD cset numid=93 $LEVEL_IDX >/dev/null  # line-output-level
 amixer -c $CARD cset numid=94 $LEVEL_IDX >/dev/null  # headphone-output-level
@@ -87,6 +92,12 @@ amixer -c $CARD cset numid=92 off,off >/dev/null  # line-3/4-pad   → off
 amixer -c $CARD cset numid=90 off,off >/dev/null  # mic-1/2-powering (phantom) → off
 echo "  line-3/4 inst/pad:  off"
 echo "  phantom power:      off"
+
+# ── Output volume (numid 8, 18 channels, unity = 32768 = 0 dB) ───────────────
+amixer -c $CARD cset numid=8 \
+    32768,32768,32768,32768,32768,32768,32768,32768,32768,\
+    32768,32768,32768,32768,32768,32768,32768,32768,32768 >/dev/null
+echo "  output-volume:      unity (32768) × 18"
 
 # ── PCM stream → hardware output routing (identity, 32768 = 0 dB) ────────────
 # numid 63..80 = mixer:stream-source-gain index 0..17
