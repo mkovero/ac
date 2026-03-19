@@ -362,10 +362,12 @@ def _detect_card_name():
 
 def cmd_devices(_cmd, cfg, client):
     ack = _check_ack(client.send_cmd({"cmd": "devices"}), "devices")
-    playback = ack.get("playback", [])
-    capture  = ack.get("capture",  [])
-    out_ch   = ack.get("output_channel", 0)
-    in_ch    = ack.get("input_channel",  0)
+    playback    = ack.get("playback", [])
+    capture     = ack.get("capture",  [])
+    out_ch      = ack.get("output_channel", 0)
+    in_ch       = ack.get("input_channel",  0)
+    out_sticky  = ack.get("output_port")
+    in_sticky   = ack.get("input_port")
 
     card = _detect_card_name()
     hw_play, hw_cap = _KNOWN_LAYOUTS.get(card, (None, None))
@@ -375,13 +377,23 @@ def cmd_devices(_cmd, cfg, client):
             return f"  [{names[i]}]"
         return ""
 
+    def sticky_note(sticky, ports, ch):
+        if not sticky:
+            return ""
+        if sticky in ports:
+            actual_idx = ports.index(sticky)
+            if actual_idx != ch:
+                return f"  (reordered: now ch {actual_idx})"
+            return ""
+        return "  (sticky port not found)"
+
     print("\n  JACK ports:")
-    print(f"  Configured:  output ch {out_ch}  ->  "
-          f"{playback[out_ch] if out_ch < len(playback) else '??'}"
-          f"{hw(hw_play, out_ch)}")
-    print(f"               input  ch {in_ch}  ->  "
-          f"{capture[in_ch] if in_ch < len(capture) else '??'}"
-          f"{hw(hw_cap, in_ch)}")
+    out_name = playback[out_ch] if out_ch < len(playback) else "??"
+    in_name  = capture[in_ch]  if in_ch  < len(capture)  else "??"
+    out_suf  = (f"  ->  {out_sticky}" if out_sticky else "") + sticky_note(out_sticky, playback, out_ch)
+    in_suf   = (f"  ->  {in_sticky}"  if in_sticky  else "") + sticky_note(in_sticky,  capture,  in_ch)
+    print(f"  Configured:  output ch {out_ch}  ->  {out_name}{hw(hw_play, out_ch)}{out_suf}")
+    print(f"               input  ch {in_ch}  ->  {in_name}{hw(hw_cap, in_ch)}{in_suf}")
     print("\n  Playback:")
     for i, p in enumerate(playback):
         mark = "  <--" if i == out_ch else ""

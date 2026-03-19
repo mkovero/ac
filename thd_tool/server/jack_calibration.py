@@ -3,7 +3,7 @@ import json
 import math
 import os
 import numpy as np
-from .audio      import JackEngine, find_ports, port_name
+from .audio      import JackEngine, find_ports, port_name, resolve_port
 from ..conversions import fmt_vrms, vrms_to_dbu, fmt_vpp, dbfs_to_vrms
 
 DEFAULT_CAL_PATH = os.path.expanduser("~/.config/thd_tool/cal.json")
@@ -249,7 +249,8 @@ def _parse_dmm(prompt, dmm_host=None):
 
 def run_calibration_jack(output_channel=0, input_channel=0,
                          ref_dbfs=-10.0, freq=1000, dmm_host=None,
-                         range_start_hz=20.0, range_stop_hz=20000.0):
+                         range_start_hz=20.0, range_stop_hz=20000.0,
+                         output_port=None, input_port=None):
     from .signal import make_sine
     from ..constants import SAMPLERATE
 
@@ -260,8 +261,8 @@ def run_calibration_jack(output_channel=0, input_channel=0,
     amplitude    = 10.0 ** (ref_dbfs / 20.0)
 
     playback, capture = find_ports()
-    out_port = port_name(playback, output_channel)
-    in_port  = port_name(capture,  input_channel)
+    out_port = resolve_port(playback, output_port, output_channel)
+    in_port  = resolve_port(capture,  input_port,  input_channel)
 
     print(f"\n{'='*64}")
     print(f"  CALIBRATION  --  {freq:.0f} Hz tone at {ref_dbfs:.0f} dBFS")
@@ -379,7 +380,8 @@ def run_calibration_jack(output_channel=0, input_channel=0,
 def run_calibration_jack_zmq(pub_q, cal_q,
                               output_channel=0, input_channel=0,
                               ref_dbfs=-10.0, freq=1000, dmm_host=None,
-                              range_start_hz=20.0, range_stop_hz=20000.0):
+                              range_start_hz=20.0, range_stop_hz=20000.0,
+                              output_port=None, input_port=None):
     """Calibration for the ZMQ server: publishes cal_prompt/cal_done instead of
     using input().  pub_q is a queue.Queue; cal_q receives vrms from cal_reply."""
     import json
@@ -395,8 +397,8 @@ def run_calibration_jack_zmq(pub_q, cal_q,
     amplitude    = 10.0 ** (ref_dbfs / 20.0)
 
     playback, capture = find_ports()
-    out_port = port_name(playback, output_channel)
-    in_port  = port_name(capture,  input_channel)
+    out_port = resolve_port(playback, output_port, output_channel)
+    in_port  = resolve_port(capture,  input_port,  input_channel)
 
     engine = JackEngine()
     engine.set_tone(freq, amplitude)

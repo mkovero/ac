@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 import numpy as np
-from .audio            import find_ports, port_name, JackEngine
+from .audio            import find_ports, port_name, resolve_port, JackEngine
 from .analysis         import analyze
 from ..conversions     import vrms_to_dbu
 from ..constants       import WARMUP_REPS
@@ -354,6 +354,8 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
         dmm_host=cfg.get("dmm_host"),
         range_start_hz=cfg.get("range_start_hz", 20.0),
         range_stop_hz=cfg.get("range_stop_hz", 20000.0),
+        output_port=cfg.get("output_port"),
+        input_port=cfg.get("input_port"),
     )
 
 
@@ -571,13 +573,24 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                         "playback":       playback,
                         "capture":        capture,
                         "output_channel": cfg["output_channel"],
-                        "input_channel":  cfg["input_channel"]}
+                        "input_channel":  cfg["input_channel"],
+                        "output_port":    cfg.get("output_port"),
+                        "input_port":     cfg.get("input_port")}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
         if name == "setup":
             update = cmd.get("update", {})
             if update:
+                if "output_channel" in update or "input_channel" in update:
+                    try:
+                        playback, capture = find_ports()
+                        if "output_channel" in update:
+                            update["output_port"] = port_name(playback, update["output_channel"])
+                        if "input_channel" in update:
+                            update["input_port"] = port_name(capture, update["input_channel"])
+                    except Exception:
+                        pass  # non-fatal: fall back to index-only
                 cfg = save_config(update)
             return {"ok": True, "config": dict(cfg)}
 
@@ -608,7 +621,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         if name in ("sweep_level", "sweep_frequency"):
             try:
                 playback, _ = find_ports()
-                out_port = port_name(playback, cfg["output_channel"])
+                out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
             cmd["_out_port"] = out_port
@@ -616,8 +629,8 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         if name == "plot":
             try:
                 playback, capture = find_ports()
-                out_port = port_name(playback, cfg["output_channel"])
-                in_port  = port_name(capture,  cfg["input_channel"])
+                out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
+                in_port  = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
             cmd["_out_port"] = out_port
@@ -626,7 +639,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         if name in ("monitor_thd", "monitor_spectrum"):
             try:
                 _, capture = find_ports()
-                in_port = port_name(capture, cfg["input_channel"])
+                in_port = resolve_port(capture, cfg.get("input_port"), cfg["input_channel"])
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
             cmd["_in_port"] = in_port
@@ -638,7 +651,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                 if channels:
                     out_ports = [port_name(playback, ch) for ch in channels]
                 else:
-                    out_ports = [port_name(playback, cfg["output_channel"])]
+                    out_ports = [resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])]
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
             cmd["_out_ports"] = out_ports

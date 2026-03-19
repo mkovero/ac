@@ -208,3 +208,10 @@ def port_name(ports, channel_index):
             f"only {len(ports)} ports available: {ports}"
         )
     return ports[channel_index]
+
+
+def resolve_port(ports, sticky_name, fallback_index):
+    """Return port name: by sticky name if present and found, else by index."""
+    if sticky_name and sticky_name in ports:
+        return sticky_name
+    return port_name(ports, fallback_index)

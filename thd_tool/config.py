@@ -22,6 +22,8 @@ DEFAULTS = {
     "device":         0,
     "output_channel": 0,
     "input_channel":  0,
+    "output_port":    None,   # sticky JACK port name, e.g. "Fireface400 (123):AN1"
+    "input_port":     None,
     "dbu_ref_vrms":   DBU_REF_EXACT,
     "dmm_host":       None,
     "range_start_hz": 20.0,
@@ -58,8 +60,10 @@ def show(cfg):
     ref = cfg.get("dbu_ref_vrms", DBU_REF_EXACT)
     print(f"\n  -- Hardware config --")
     print(f"  Device:         {cfg['device']}")
-    print(f"  Output channel: {cfg['output_channel']}")
-    print(f"  Input channel:  {cfg['input_channel']}")
+    print(f"  Output channel: {cfg['output_channel']}"
+          + (f"  ->  {cfg['output_port']}" if cfg.get("output_port") else ""))
+    print(f"  Input channel:  {cfg['input_channel']}"
+          + (f"  ->  {cfg['input_port']}" if cfg.get("input_port") else ""))
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")
