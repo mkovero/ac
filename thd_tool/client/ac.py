@@ -187,25 +187,61 @@ def _save_results(results, label, cal=None, cfg=None, show_plot=False,
     csv_path  = os.path.join(out_dir, f"{safe}_{ts}.csv")
     plot_path = os.path.join(out_dir, f"{safe}_{ts}.png")
     save_csv(results, csv_path)
-    plot_results(results, device_name=label, output_path=plot_path, cal=cal)
-    if show_plot:
-        # UI was already launched before the sweep started (so it could receive
-        # live frames). Only fall back to image viewer if pyqtgraph is absent.
+    # show=True opens an interactive matplotlib window after saving (only when
+    # pyqtgraph is absent — the pyqtgraph UI is already running from before the sweep).
+    plot_results(results, device_name=label, output_path=plot_path, cal=cal,
+                 show=(show_plot and not _has_pyqtgraph()))
+
+
+def _make_q_listener():
+    """
+    Spawn a daemon thread that watches stdin for 'q'.
+    Returns (stop_event, restore_fn).
+    - stop_event: threading.Event, set when 'q' is pressed or restore is called
+    - restore_fn: call in finally to restore terminal attrs
+    """
+    import threading
+    import select
+    import termios
+    import tty
+    stop_event = threading.Event()
+    fd = sys.stdin.fileno()
+    try:
+        saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd)          # individual keypresses; Ctrl+C still sends SIGINT
+    except Exception:
+        return stop_event, lambda: None   # not a real tty (CI, pipe, etc.)
+
+    def _listen():
         try:
-            import pyqtgraph  # noqa: F401
-        except ImportError:
-            import subprocess
-            for cmd_args in [["eog", "--fullscreen", plot_path],
-                             ["feh", plot_path],
-                             ["xdg-open", plot_path],
-                             ["display", plot_path]]:
-                try:
-                    subprocess.Popen(cmd_args,
-                                     stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
-                    break
-                except FileNotFoundError:
-                    continue
+            while not stop_event.is_set():
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    ch = os.read(fd, 1)
+                    if ch.lower() == b'q':
+                        stop_event.set()
+        except Exception:
+            pass
+
+    threading.Thread(target=_listen, daemon=True).start()
+
+    def _restore():
+        stop_event.set()
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except Exception:
+            pass
+
+    return stop_event, _restore
+
+
+def _has_pyqtgraph():
+    """Return True if pyqtgraph is importable."""
+    try:
+        import pyqtgraph  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _src_mtime():
@@ -585,10 +621,15 @@ def cmd_sweep_level(cmd, cfg, client):
         "duration":   duration,
     }))
     print(f"  Output: {ack['out_port']}")
-    print(f"  Sweeping... Ctrl+C to stop.\n")
+    print(f"  Sweeping... Ctrl+C or q to stop.\n")
 
+    q_stop, q_restore = _make_q_listener()
     try:
         while True:
+            if q_stop.is_set():
+                client.send_cmd({"cmd": "stop", "name": "sweep_level"})
+                print("\n  Stopped.")
+                return
             try:
                 topic, frame = client.recv_data(timeout_ms=500)
             except TimeoutError:
@@ -601,6 +642,8 @@ def cmd_sweep_level(cmd, cfg, client):
     except KeyboardInterrupt:
         client.send_cmd({"cmd": "stop", "name": "sweep_level"})
         print("\n  Stopped.")
+    finally:
+        q_restore()
 
 
 def cmd_sweep_frequency(cmd, cfg, client):
@@ -620,10 +663,15 @@ def cmd_sweep_frequency(cmd, cfg, client):
         "duration":   duration,
     }))
     print(f"  Output: {ack['out_port']}")
-    print(f"  Sweeping... Ctrl+C to stop.\n")
+    print(f"  Sweeping... Ctrl+C or q to stop.\n")
 
+    q_stop, q_restore = _make_q_listener()
     try:
         while True:
+            if q_stop.is_set():
+                client.send_cmd({"cmd": "stop", "name": "sweep_frequency"})
+                print("\n  Stopped.")
+                return
             try:
                 topic, frame = client.recv_data(timeout_ms=500)
             except TimeoutError:
@@ -636,6 +684,8 @@ def cmd_sweep_frequency(cmd, cfg, client):
     except KeyboardInterrupt:
         client.send_cmd({"cmd": "stop", "name": "sweep_frequency"})
         print("\n  Stopped.")
+    finally:
+        q_restore()
 
 
 def cmd_plot(cmd, cfg, client):
@@ -711,7 +761,7 @@ def cmd_monitor(cmd, cfg, client):
         "interval": interval,
     }))
     print(f"  Input: {ack['in_port']}")
-    print(f"  {start_freq:.0f}–{end_freq:.0f} Hz  |  Ctrl+C to stop")
+    print(f"  {start_freq:.0f}–{end_freq:.0f} Hz  |  Ctrl+C or q to stop")
 
     renderer = SpectrumRenderer(db_min=db_min, db_max=db_max,
                                 start_freq=start_freq, end_freq=end_freq)
@@ -719,7 +769,7 @@ def cmd_monitor(cmd, cfg, client):
     sys.stdout.flush()
 
     sys.stdout.write(
-        f"\033[H\033[1;37m  {start_freq:.0f}–{end_freq:.0f} Hz  |  waiting for data...\033[0m"
+        f"\033[H\033[1;37m  {start_freq:.0f}–{end_freq:.0f} Hz  |  waiting for data...  [q] quit\033[0m"
     )
     sys.stdout.flush()
 
@@ -728,9 +778,12 @@ def cmd_monitor(cmd, cfg, client):
         sys.stdout.flush()
     signal.signal(signal.SIGWINCH, _on_resize)
 
+    q_stop, q_restore = _make_q_listener()
     error_msg = None
     try:
         while True:
+            if q_stop.is_set():
+                break
             try:
                 topic, frame = client.recv_data(timeout_ms=2000)
             except TimeoutError:
@@ -771,6 +824,7 @@ def cmd_monitor(cmd, cfg, client):
             print(f"  Error: {error_msg}")
         else:
             print("  Stopped.")
+        q_restore()
 
 
 def cmd_generate_sine(cmd, cfg, client):
@@ -826,10 +880,15 @@ def cmd_generate_sine(cmd, cfg, client):
     }))
     for port in ack.get("out_ports", []):
         print(f"  → {port}")
-    print(f"\n  Playing {len(channels)} channel(s)... Ctrl+C to stop.\n")
+    print(f"\n  Playing {len(channels)} channel(s)... Ctrl+C or q to stop.\n")
 
+    q_stop, q_restore = _make_q_listener()
     try:
         while True:
+            if q_stop.is_set():
+                client.send_cmd({"cmd": "stop", "name": "generate"})
+                print("\n  Stopped.")
+                return
             try:
                 topic, frame = client.recv_data(timeout_ms=500)
             except TimeoutError:
@@ -842,6 +901,8 @@ def cmd_generate_sine(cmd, cfg, client):
     except KeyboardInterrupt:
         client.send_cmd({"cmd": "stop", "name": "generate"})
         print("\n  Stopped.")
+    finally:
+        q_restore()
 
 
 def cmd_generate_pink(cmd, cfg, client):
@@ -892,10 +953,15 @@ def cmd_generate_pink(cmd, cfg, client):
     }))
     for port in ack.get("out_ports", []):
         print(f"  → {port}")
-    print(f"\n  Playing pink noise on {len(channels)} channel(s)... Ctrl+C to stop.\n")
+    print(f"\n  Playing pink noise on {len(channels)} channel(s)... Ctrl+C or q to stop.\n")
 
+    q_stop, q_restore = _make_q_listener()
     try:
         while True:
+            if q_stop.is_set():
+                client.send_cmd({"cmd": "stop", "name": "generate_pink"})
+                print("\n  Stopped.")
+                return
             try:
                 topic, frame = client.recv_data(timeout_ms=500)
             except TimeoutError:
@@ -908,6 +974,8 @@ def cmd_generate_pink(cmd, cfg, client):
     except KeyboardInterrupt:
         client.send_cmd({"cmd": "stop", "name": "generate_pink"})
         print("\n  Stopped.")
+    finally:
+        q_restore()
 
 
 

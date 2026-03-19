@@ -22,6 +22,15 @@ _ORANGE     = "#e67e22"
 _PURPLE     = "#a29bfe"
 _RED        = "#e74c3c"
 
+_FREQ_TICKS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+
+
+def _hz_fmt(x, _):
+    if x >= 1000:
+        v = x / 1000
+        return f"{v:.0f}k" if v == int(v) else f"{v:.1f}k"
+    return f"{x:.0f}"
+
 
 def _style_ax(ax):
     ax.set_facecolor(_PANEL_BG)
@@ -38,7 +47,7 @@ def _pct_fmt(y, _):
     return f"{y:.4f}%"
 
 
-def plot_results(results, device_name="DUT", output_path=None, cal=None):
+def plot_results(results, device_name="DUT", output_path=None, cal=None, show=False):
     if not results:
         return
 
@@ -49,16 +58,16 @@ def plot_results(results, device_name="DUT", output_path=None, cal=None):
     is_freq_sweep = "freq" in valid[0] and len(set(r.get("drive_db", 0) for r in valid)) <= 2
 
     if is_freq_sweep:
-        _plot_freq_sweep(valid, device_name, output_path, cal)
+        _plot_freq_sweep(valid, device_name, output_path, cal, show=show)
     else:
-        _plot_level_sweep(valid, device_name, output_path, cal)
+        _plot_level_sweep(valid, device_name, output_path, cal, show=show)
 
 
 # ---------------------------------------------------------------------------
 # Frequency sweep plot
 # ---------------------------------------------------------------------------
 
-def _plot_freq_sweep(results, device_name, output_path, cal):
+def _plot_freq_sweep(results, device_name, output_path, cal, show=False):
     use_in = cal is not None and cal.input_ok
 
     freqs_x = [r["freq"] for r in results]
@@ -76,11 +85,17 @@ def _plot_freq_sweep(results, device_name, output_path, cal):
     ax_gain = fig.add_subplot(gs[1])
     ax_thdn = fig.add_subplot(gs[2])
 
+    x_lo = max(10, min(freqs_x) * 0.8)
+    x_hi = min(SAMPLERATE / 2, max(freqs_x) * 1.2)
+
     for ax in [ax_thd, ax_gain, ax_thdn]:
         _style_ax(ax)
         ax.set_xscale("log")
-        ax.set_xlim(max(10, min(freqs_x) * 0.8), min(SAMPLERATE / 2, max(freqs_x) * 1.2))
+        ax.set_xlim(x_lo, x_hi)
         ax.set_xlabel("Frequency (Hz)")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(_hz_fmt))
+        ax.xaxis.set_minor_formatter(plt.FuncFormatter(_hz_fmt))
+        ax.set_xticks([t for t in _FREQ_TICKS if x_lo <= t <= x_hi])
 
     # THD
     ax_thd.plot(freqs_x, thd, color=_BLUE, linewidth=1.5, marker="o", markersize=4)
@@ -106,14 +121,51 @@ def _plot_freq_sweep(results, device_name, output_path, cal):
         ax_thdn.set_ylim(bottom=0)
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
-    _save_or_show(fig, output_path)
+    _save_or_show(fig, output_path, show=show)
 
 
 # ---------------------------------------------------------------------------
 # Level sweep plot
 # ---------------------------------------------------------------------------
 
-def _plot_level_sweep(results, device_name, output_path, cal):
+def _draw_spectrum(ax, r, title):
+    """Draw spectrum for result r into ax (used for initial render and click updates)."""
+    if r.get("spectrum") is None:
+        return
+    ax.cla()
+    _style_ax(ax)
+    spec  = r["spectrum"].copy()
+    freqs = r["freqs"]
+    f1    = r.get("fundamental_hz", 0) or 1
+    mask  = np.abs(freqs - f1) < f1 * 0.03
+    spec[mask] = 1e-12
+    spec_db = 20.0 * np.log10(np.maximum(spec, 1e-12))
+    ax.plot(freqs, spec_db, color=_BLUE, linewidth=0.8)
+
+    labeled = 0
+    for i, (hf, ha) in enumerate((r.get("harmonic_levels") or [])[:6]):
+        h_db  = 20.0 * np.log10(max(ha, 1e-12))
+        label = f"H{i+2}" if labeled < 4 else None
+        ax.axvline(hf, color=_RED, linestyle="--", linewidth=0.8, alpha=0.6, label=label)
+        ax.annotate(f"H{i+2}\n{h_db:.0f}dB",
+                    xy=(hf, h_db), xytext=(4, 0),
+                    textcoords="offset points",
+                    color=_RED, fontsize=6, va="center")
+        labeled += 1
+
+    ax.set_xscale("log")
+    ax.set_xlim(20, SAMPLERATE / 2)
+    ax.set_ylim(-140, 10)
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Level (dBFS)")
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(_hz_fmt))
+    ax.set_xticks([t for t in _FREQ_TICKS if t <= SAMPLERATE / 2])
+    ax.set_title(title)
+    if labeled > 0:
+        ax.legend(facecolor="#1e2530", labelcolor="white", fontsize=8, ncol=5)
+
+
+def _plot_level_sweep(results, device_name, output_path, cal, show=False):
     use_dbu = cal is not None and cal.output_ok
     use_in  = cal is not None and cal.input_ok
 
@@ -187,51 +239,44 @@ def _plot_level_sweep(results, device_name, output_path, cal):
     ax_level.legend(facecolor="#1e2530", labelcolor="white", fontsize=8)
     _set_x(ax_level)
 
-    # Spectrum of last valid point
-    last    = results[-1]
-    spec    = last["spectrum"].copy()
-    freqs   = last["freqs"]
-    f1      = last["fundamental_hz"]
-    mask    = np.abs(freqs - f1) < f1 * 0.03
-    spec[mask] = 1e-12
-    spec_db = 20.0 * np.log10(np.maximum(spec, 1e-12))
-    ax_spec.plot(freqs, spec_db, color=_BLUE, linewidth=0.8)
-
-    labeled = 0
-    for i, (hf, ha) in enumerate(last["harmonic_levels"][:6]):
-        h_db = 20.0 * np.log10(max(ha, 1e-12))
-        label = f"H{i+2}" if labeled < 4 else None
-        ax_spec.axvline(hf, color=_RED, linestyle="--", linewidth=0.8,
-                        alpha=0.6, label=label)
-        ax_spec.annotate(f"H{i+2}\n{h_db:.0f}dB",
-                         xy=(hf, h_db), xytext=(4, 0),
-                         textcoords="offset points",
-                         color=_RED, fontsize=6, va="center")
-        labeled += 1
-
-    ax_spec.set_xscale("log")
-    ax_spec.set_xlim(20, SAMPLERATE / 2)
-    ax_spec.set_ylim(-140, 10)
-    ax_spec.set_xlabel("Frequency (Hz)")
-    ax_spec.set_ylabel("Level (dBFS)")
-
+    # Initial spectrum: last valid point
     last_x = f"{x_vals[-1]:+.1f} dBu" if use_dbu else f"{x_vals[-1]:.0f} dBFS"
-    ax_spec.set_title(
-        f"Spectrum at {last_x}"
-        f"  --  THD={last['thd_pct']:.3f}%  THD+N={last['thdn_pct']:.3f}%"
-    )
-    if labeled > 0:
-        ax_spec.legend(facecolor="#1e2530", labelcolor="white", fontsize=8, ncol=5)
+    _draw_spectrum(ax_spec, results[-1],
+                   f"Spectrum at {last_x}"
+                   f"  --  THD={results[-1]['thd_pct']:.3f}%  THD+N={results[-1]['thdn_pct']:.3f}%")
+
+    # Click-to-spectrum: click a point on any top subplot to update spectrum view;
+    # double-click resets to the last point.
+    def _on_click(event):
+        if event.inaxes not in (ax_thd, ax_thdn, ax_level):
+            return
+        if event.dblclick or event.xdata is None:
+            idx = len(results) - 1
+        else:
+            idx = min(range(len(x_vals)), key=lambda i: abs(x_vals[i] - event.xdata))
+        r   = results[idx]
+        xv  = x_vals[idx]
+        lbl = f"{xv:+.1f} dBu" if use_dbu else f"{xv:.0f} dBFS"
+        _draw_spectrum(ax_spec, r,
+                       f"Spectrum at {lbl}  --  THD={r['thd_pct']:.3f}%  THD+N={r['thdn_pct']:.3f}%")
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("button_press_event", _on_click)
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
-    _save_or_show(fig, output_path)
+    _save_or_show(fig, output_path, show=show)
 
 
-def _save_or_show(fig, output_path):
+def _save_or_show(fig, output_path, show=False):
     if output_path:
         fig.savefig(output_path, dpi=150, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
         print(f"  Plot saved -> {output_path}")
+        if show:
+            try:
+                plt.show()
+            except Exception:
+                pass
     else:
         plt.show()
     plt.close(fig)
