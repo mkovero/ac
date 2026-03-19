@@ -4,6 +4,7 @@
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import numpy as np
@@ -421,24 +422,25 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         "gpio_handler": None,
     }
 
-    # Auto-start GPIO if a port is configured
-    if cfg.get("gpio_port"):
-        try:
-            from ..gpio.gpio import GpioHandler
-            _gpio = GpioHandler(cfg["gpio_port"])
-            _gpio.start()
-            state["gpio_handler"] = _gpio
-        except Exception:
-            pass   # don't abort server startup on GPIO error
-
-    poller = zmq.Poller()
-    poller.register(sock_ctrl, zmq.POLLIN)
-    poller.register(mon, zmq.POLLIN)
-
     pub_q       = queue.Queue()
     cal_q       = queue.Queue()
     should_quit = [False]
     workers     = {}   # {cmd_name: {"thread": Thread, "stop": Event}}
+
+    # Auto-start GPIO if a port is configured
+    if cfg.get("gpio_port"):
+        try:
+            from ..gpio.gpio import GpioHandler
+            _gpio = GpioHandler(cfg["gpio_port"],
+                                log_fn=lambda msg: pub_q.put(b"gpio " + json.dumps({"msg": msg}).encode()))
+            _gpio.start()
+            state["gpio_handler"] = _gpio
+        except Exception as e:
+            print(f"[GPIO] auto-start failed: {e}", file=sys.stderr)
+
+    poller = zmq.Poller()
+    poller.register(sock_ctrl, zmq.POLLIN)
+    poller.register(mon, zmq.POLLIN)
 
     def _rebind(new_addr):
         """Rebind both sockets to new_addr. Rollback on failure. Returns True on success."""
@@ -721,6 +723,12 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                     "clients":       list(connections.keys()),
                     "workers":       list(workers.keys())}
 
+        if name == "gpio_status":
+            handler = state.get("gpio_handler")
+            if handler is None:
+                return {"ok": True, "active": False}
+            return {"ok": True, "active": True, **handler.status}
+
         if name == "gpio_setup":
             port = cmd.get("port")
             if state["gpio_handler"] is not None:
@@ -729,7 +737,10 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             if port:
                 try:
                     from ..gpio.gpio import GpioHandler
-                    handler = GpioHandler(port)
+                    handler = GpioHandler(
+                        port,
+                        log_fn=lambda msg: pub_q.put(b"gpio " + json.dumps({"msg": msg}).encode()),
+                    )
                     handler.start()
                     state["gpio_handler"] = handler
                 except Exception as e:

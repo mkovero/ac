@@ -484,8 +484,15 @@ def parse(argv):
             raise ParseError(f"diff: unexpected extra args: {args}")
         return {"cmd": "session_diff", "name_a": name_a, "name_b": name_b}
 
+    elif verb == "gpio":
+        result = {"cmd": "gpio"}
+        if args and args[0].lower() == "log":
+            args.pop(0)
+            result["gpio_log"] = True
+        return result
+
     else:
-        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | plot | generate | calibrate | setup | devices | server | new | sessions | use | rm | diff)")
+        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | plot | generate | calibrate | setup | devices | server | new | sessions | use | rm | diff | gpio)")
 
 
 # ---------------------------------------------------------------------------

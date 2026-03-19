@@ -1235,6 +1235,36 @@ def cmd_session_diff(cmd, cfg):
         print()
 
 
+def cmd_gpio(cmd, cfg, client):
+    if cmd.get("gpio_log"):
+        print("  [GPIO log — Ctrl-C to stop]\n")
+        try:
+            while True:
+                topic, frame = client.recv_data(timeout_ms=5000)
+                if topic == "gpio":
+                    print(f"  {frame.get('msg', str(frame))}")
+        except KeyboardInterrupt:
+            pass
+        except TimeoutError:
+            print("  (no GPIO events in 5 s)")
+        return
+
+    ack = _check_ack(client.send_cmd({"cmd": "gpio_status"}), "gpio_status")
+    if not ack.get("active"):
+        print("\n  GPIO: not active\n")
+        return
+    active = []
+    if ack.get("sine_active"): active.append("SINE")
+    if ack.get("pink_active"): active.append("PINK")
+    dead = ack.get("serial_dead", False)
+    print(f"\n  GPIO status:")
+    print(f"  Port:    {ack.get('port')}{'  [DEAD]' if dead else ''}")
+    print(f"  Channel: {ack.get('channel')}")
+    print(f"  Level:   {ack.get('level_dbfs'):.2f} dBFS")
+    print(f"  Active:  {', '.join(active) if active else 'idle'}")
+    print()
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -1255,6 +1285,7 @@ HANDLERS = {
     "server_enable":      cmd_server_enable,
     "server_disable":     cmd_server_disable,
     "server_connections": cmd_server_connections,
+    "gpio":               cmd_gpio,
 }
 
 
