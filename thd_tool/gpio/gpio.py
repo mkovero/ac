@@ -221,6 +221,10 @@ class GpioHandler:
 
             elif pin == PIN_GEN_SINE:
                 if not self._sine_active:
+                    if self._pink_active:
+                        self._log("stopping pink before starting sine")
+                        self._send_zmq({"cmd": "stop"})
+                        self._pink_active = False
                     self._log(f"button: SINE -> generate 1 kHz @ {self._level_dbfs:.2f} dBFS ch {self._out_channel}")
                     self._sine_active = True
                     self._update_leds()   # optimistic
@@ -239,6 +243,10 @@ class GpioHandler:
 
             elif pin == PIN_GEN_PINK:
                 if not self._pink_active:
+                    if self._sine_active:
+                        self._log("stopping sine before starting pink")
+                        self._send_zmq({"cmd": "stop"})
+                        self._sine_active = False
                     self._log(f"button: PINK -> generate_pink @ {self._level_dbfs:.2f} dBFS ch {self._out_channel}")
                     self._pink_active = True
                     self._update_leds()   # optimistic
