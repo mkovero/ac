@@ -2,7 +2,9 @@
 # Drop-in replacements for the sounddevice-based sweep.py / live.py functions.
 
 import numpy as np
-from .audio       import JackEngine, find_ports, port_name
+from .audio       import get_engine_class, get_port_helpers
+JackEngine = get_engine_class()
+find_ports, port_name, _ = get_port_helpers()
 from .analysis    import analyze
 from ..conversions import vrms_to_dbu, fmt_vrms
 from ..constants   import WARMUP_REPS

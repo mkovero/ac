@@ -216,3 +216,50 @@ def resolve_port(ports, sticky_name, fallback_index):
     if sticky_name and sticky_name in ports:
         return sticky_name
     return port_name(ports, fallback_index)
+
+
+# ------------------------------------------------------------------
+# Backend detection + factory
+# ------------------------------------------------------------------
+
+_cached_backend = None
+
+
+def _detect_backend():
+    """Return 'jack' or 'sounddevice'. Checks config first, then probes."""
+    global _cached_backend
+    if _cached_backend is not None:
+        return _cached_backend
+    from ..config import load as load_config
+    forced = load_config().get("backend")
+    if forced in ("jack", "sounddevice"):
+        _cached_backend = forced
+        return forced
+    try:
+        import jack
+        c = jack.Client("ac-probe-detect")
+        c.close()
+        _cached_backend = "jack"
+    except Exception:
+        _cached_backend = "sounddevice"
+    return _cached_backend
+
+
+def get_engine_class(backend=None):
+    """Return the engine class for the given (or auto-detected) backend."""
+    if backend is None:
+        backend = _detect_backend()
+    if backend == "jack":
+        return JackEngine
+    from .sd_audio import SoundDeviceEngine
+    return SoundDeviceEngine
+
+
+def get_port_helpers(backend=None):
+    """Return (find_ports, port_name, resolve_port) for the given backend."""
+    if backend is None:
+        backend = _detect_backend()
+    if backend == "jack":
+        return find_ports, port_name, resolve_port
+    from . import sd_audio
+    return sd_audio.find_ports, sd_audio.port_name, sd_audio.resolve_port

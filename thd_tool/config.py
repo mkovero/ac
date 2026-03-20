@@ -31,6 +31,7 @@ DEFAULTS = {
     "server_enabled": False,
     "gpio_port":      None,
     "session":        None,
+    "backend":        None,   # None = auto-detect (JACK first, then sounddevice)
 }
 
 
