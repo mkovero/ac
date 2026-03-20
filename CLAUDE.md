@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is `thd_tool` — a Python CLI for audio bench measurements (THD, THD+N, level sweeps, frequency sweeps) using a JACK audio backend.
+This is `thd_tool` — a Python CLI for audio bench measurements (THD, THD+N, level sweeps, frequency sweeps). Supports JACK and sounddevice (PortAudio) audio backends with auto-detection.
 
 ## Install
 
@@ -20,13 +20,13 @@ Also runnable as `python -m thd_tool`.
 
 ## Usage (quick reference)
 
-JACK must be running before any measurement command:
+Audio backend is auto-detected: JACK if available, otherwise sounddevice (PortAudio). Force via config `"backend": "jack"` or `"backend": "sounddevice"`. When using JACK, it must be running first:
 ```bash
 jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ```
 
 ```bash
-ac devices                              # list JACK ports
+ac devices                              # list audio ports
 ac setup output 11 input 0             # save port config
 ac calibrate 1khz                      # interactive calibration
 ac sweep level -20dbu 6dbu 1khz       # level sweep
@@ -48,7 +48,7 @@ thd_tool/
   conversions.py       (shared)
   config.py            (shared)
 
-  server/              (ZMQ server, JACK audio, analysis)
+  server/              (ZMQ server, audio backends, analysis)
   client/              (CLI parser, ZMQ client, plotting)
   ui/                  (pyqtgraph live views)
 ```

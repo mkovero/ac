@@ -1,6 +1,6 @@
 # ac — audio measurement CLI
 
-Command-line toolkit for audio bench measurements over JACK.
+Command-line toolkit for audio bench measurements.
 
 THD, THD+N, level 'n frequency sweeps, live spectrum.
 
@@ -12,7 +12,24 @@ The `ip` of audio — terse, positional, unit-tagged arguments.
 pip install -e .
 ```
 
-This gives you the `ac` command. JACK must be running:
+This gives you the `ac` command.
+
+## Audio backend
+
+`ac` auto-detects the audio backend at startup:
+
+| Backend | When used | Platforms |
+|---------|-----------|-----------|
+| **JACK** (`jack-client`) | Preferred when a JACK server is running | Linux (native or PipeWire) |
+| **sounddevice** (PortAudio) | Fallback when JACK is unavailable | Linux, macOS, Windows |
+
+To force a backend, set `"backend"` in `~/.config/thd_tool/config.json`:
+
+```json
+{ "backend": "sounddevice" }
+```
+
+When using JACK, the server must be running before any measurement:
 
 ```bash
 jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
@@ -21,7 +38,7 @@ jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ## Quick start
 
 ```bash
-ac devices                          # see what JACK ports exist
+ac devices                          # list available audio ports
 ac setup output 11 input 0          # tell ac which channels to use
 ac calibrate 1khz                   # interactive level cal (enables dBu)
 ac plot 20hz 20khz 0dbu 20ppd show  # measure THD vs frequency, open plot
@@ -33,7 +50,7 @@ ac m sh                             # live spectrum, pyqtgraph window
 
 | Command | What it does |
 |---------|-------------|
-| `devices` | List JACK ports |
+| `devices` | List audio ports |
 | `setup` | Configure hardware — output, input, range, dmm (SCPI), gpio |
 | `calibrate` | Interface calibration |
 | `generate` | Play a sine or pink noise tone |
@@ -78,7 +95,7 @@ ac diff amp1 amp2   # compare
 
 ## Server
 
-`ac` is client/server — the server manages JACK and runs analysis.
+`ac` is client/server — the server manages audio I/O and runs analysis.
 It auto-spawns locally. For remote use:
 
 ```bash
@@ -88,5 +105,5 @@ ac server 192.168.1.5     # connect to remote server
 
 ## Dependencies
 
-numpy, scipy, matplotlib, pyzmq, JACK (via `jack-client`).
-Optional: pyqtgraph for live GUI views.
+numpy, scipy, matplotlib, sounddevice, pyzmq.
+Optional: `jack-client` (for JACK backend), `pyqtgraph` (for live GUI views).

@@ -11,7 +11,8 @@ Entry point: `ac server enable` (blocking) or auto-spawned by the client as a su
 | File | Purpose |
 |------|---------|
 | `server.py` | ZMQ REP+PUB main loop, command dispatch, worker spawn |
-| `audio.py` | `JackEngine` (JACK real-time I/O), `find_ports()`, `port_name()` |
+| `audio.py` | `JackEngine` (JACK real-time I/O), `find_ports()`, `port_name()`, backend factory (`get_engine_class()`, `get_port_helpers()`) |
+| `sd_audio.py` | `SoundDeviceEngine` (PortAudio fallback), matching duck-typed contract |
 | `analysis.py` | `analyze(recording, sr, fundamental)` — FFT THD/THD+N |
 | `jack_measure.py` | `jack_sweep_level/frequency/monitor` — legacy direct functions |
 | `jack_calibration.py` | `Calibration` class + `run_calibration_jack_zmq()` |
@@ -46,4 +47,4 @@ Sweep worker frames add: `drive_db`, `out_vrms`, `out_dbu`, `in_vrms`, `in_dbu`,
 
 ## Dependencies
 
-`jack` (python-jack / CFFI binding to libjack), `numpy`, `scipy`, `zmq`
+`numpy`, `scipy`, `zmq`, `sounddevice`. Optional: `jack` (python-jack / CFFI binding to libjack) for JACK backend

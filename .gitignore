@@ -5,3 +5,8 @@ thd_tool/old2
 *.egg-info/
 *.png
 *.csv
+.env
+*.key
+*.pem
+.vscode/
+.idea/
