@@ -159,10 +159,6 @@ ABBREVS = {
     # sweep nouns
     "l": "level", "lev": "level",
     "f": "frequency", "freq": "frequency",
-    # monitor nouns (backward compat — stripped, no longer subcommands)
-    "t": "thd",
-    "sp": "spectrum", "spec": "spectrum",
-    "gr": "graph",
     # generate nouns
     "si": "sine",
     "pk": "pink",
@@ -275,15 +271,6 @@ def parse(argv):
             raise ParseError(f"unknown sweep noun: {noun!r}  (level | frequency)")
 
     elif verb == "monitor":
-        # Optional backward-compat noun (thd/spectrum/level) — accepted but ignored,
-        # all variants now emit cmd:"monitor" with a unified spectrum display.
-        # "graph" launches the pyqtgraph UI instead of the TUI.
-        graph_mode = False
-        if args and _expand(args[0]) in ("thd", "spectrum", "level"):
-            args.pop(0)
-        elif args and _expand(args[0]) == "graph":
-            args.pop(0)
-            graph_mode = True
         tokens     = _classify_all(args)
         # up to 2 freq tokens (start/end), 1 time (interval), up to 2 level (minY/maxY)
         start_freq = _pull(tokens, "freq",  optional=True)
@@ -299,8 +286,7 @@ def parse(argv):
                 "interval":   interval,
                 "min_y":      min_y,
                 "max_y":      max_y,
-                "show_plot":  show_plot or graph_mode,
-                "graph":      graph_mode}
+                "show_plot":  show_plot}
 
     elif verb == "plot":
         # ac plot [<start:freq> <stop:freq>] [<level:level>] [<ppd:ppd>]
@@ -512,8 +498,7 @@ ac -- audio bench tool
   ac sweep level   <start> <stop> <freq> [<duration>]   (output-only ramp)
   ac sweep frequency <start> <stop> <level> [<duration>] (output-only chirp)
   ac plot  [<start> <stop>] [<level>] [<ppd>]           (blocking measurement)
-  ac monitor [<startFreq> [<endFreq>]] [<interval>] [<minY> [<maxY>]]
-  ac monitor graph [<startFreq> [<endFreq>]] [<interval>]   (pyqtgraph fullscreen)
+  ac monitor [<startFreq> [<endFreq>]] [<interval>] [<minY> [<maxY>]]  [show]
   ac generate sine [<channels>] [<level>] [<freq>]
   ac generate pink [<channels>] [<level>]
   ac calibrate     [output N] [input N] [<freq>] [<level>]
@@ -544,8 +529,8 @@ Abbreviations:
 
 Notes:
   ac sweep is non-blocking (output only). Use ac plot for blocking measurements.
-  ac monitor auto-detects fundamental; old nouns (thd/spectrum) still accepted.
-  ac monitor graph (gr) opens a fullscreen pyqtgraph spectrum window instead of TUI.
+  ac monitor auto-detects fundamental.
+  ac monitor show opens a fullscreen pyqtgraph spectrum window instead of TUI.
   dBu and Vrms levels require prior calibration (ac calibrate).
   dBFS levels work without calibration.
   generate level defaults to 0dBu if calibrated, -20dBFS otherwise.

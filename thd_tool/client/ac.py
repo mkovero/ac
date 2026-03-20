@@ -777,9 +777,9 @@ def cmd_monitor(cmd, cfg, client):
     print(f"  Input: {ack['in_port']}")
     print(f"  {start_freq:.0f}–{end_freq:.0f} Hz  |  Ctrl+C or q to stop")
 
-    if cmd.get("graph"):
-        # Graph mode: pyqtgraph UI is the display; terminal just waits quietly.
-        print("  Graph window open — press q/ESC in the window or Ctrl+C here to stop.")
+    if cmd.get("show_plot"):
+        # pyqtgraph UI is the display; terminal just waits quietly.
+        print("  Window open — press q/ESC in the window or Ctrl+C here to stop.")
         q_stop, q_restore = _make_q_listener()
         try:
             while True:
