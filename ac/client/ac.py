@@ -537,7 +537,10 @@ def cmd_calibrate(cmd, cfg, client):
                     vrms = _parse_vrms(raw) if raw else dmm_vrms
                 else:
                     while True:
-                        raw = input("  DMM reading (e.g. 245mV or 0.245): ").strip()
+                        raw = input("  DMM reading (e.g. 245mV or 0.245, Enter to skip): ").strip()
+                        if not raw:
+                            vrms = None
+                            break
                         vrms = _parse_vrms(raw)
                         if vrms is not None:
                             break

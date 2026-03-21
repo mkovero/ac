@@ -410,30 +410,25 @@ def run_calibration_jack_zmq(pub_q, cal_q,
     time.sleep(0.5)   # let analog output settle
 
     try:
-        if dmm_host:
-            # Step 1: output voltage via DMM
-            dmm_vrms = _try_dmm_read(dmm_host)
-            _pub("cal_prompt", {
-                "step": 1,
-                "text": (f"STEP 1 — Output voltage (loaded)\n"
-                         f"  Connect output -> loopback cable.\n"
-                         f"  Probe the OUTPUT jack with DMM and enter reading below."),
-                "dmm_vrms": dmm_vrms,
-            })
-            try:
-                vrms_out = cal_q.get(timeout=120)
-            except Exception:
-                vrms_out = None
-            finally:
-                engine.set_silence()
-
-            if vrms_out is None:
-                _pub("cal_done", {"key": cal.key, "error": "output cal skipped"})
-                return cal
-
-            cal.vrms_at_0dbfs_out = vrms_out / (10.0 ** (ref_dbfs / 20.0))
-        else:
+        # Step 1: output voltage (optional — Enter skips if no DMM)
+        dmm_vrms = _try_dmm_read(dmm_host) if dmm_host else None
+        _pub("cal_prompt", {
+            "step": 1,
+            "text": (f"STEP 1 — Output voltage (loaded)\n"
+                     f"  Connect output -> loopback cable.\n"
+                     f"  Probe the OUTPUT jack with DMM and enter reading below."
+                     + ("" if dmm_host else "\n  (no DMM configured — press Enter to skip)")),
+            "dmm_vrms": dmm_vrms,
+        })
+        try:
+            vrms_out = cal_q.get(timeout=120)
+        except Exception:
+            vrms_out = None
+        finally:
             engine.set_silence()
+
+        if vrms_out is not None:
+            cal.vrms_at_0dbfs_out = vrms_out / (10.0 ** (ref_dbfs / 20.0))
 
         # Step 2: loopback capture at reference freq (also used as response curve reference)
         engine.set_tone(freq, amplitude)
