@@ -36,6 +36,18 @@ Entry point: `ds` (or `python -m ds`).
 | `ds rm <filename>` | Remove a file from ds/files/ |
 | `ds fetch [query]` | Web search for service manuals/schematics |
 
+## Configuration
+
+ds reads `~/.config/thd_tool/config.json`, which is created and managed by `ac`. See [`../config.example.jsonc`](../config.example.jsonc) for the full schema with comments.
+
+Quick start from scratch:
+
+```bash
+ac setup output 11 input 0   # creates config.json
+ac new my-amp                 # sets active session
+ds status                     # ds picks it up automatically
+```
+
 ## Relationship to ac
 
 - Reads `~/.config/thd_tool/config.json` for the active session name

@@ -1,0 +1,48 @@
+// ~/.config/thd_tool/config.json
+//
+// Created and managed by `ac` commands — ds only reads it.
+// This file does not exist until you run your first ac command.
+//
+// From scratch:
+//   ac setup output 11 input 0      # creates config.json with device/channel settings
+//   ac new my-amp                   # sets "session" key, creates session directory
+//
+// After that, `ds` picks up the active session automatically.
+//
+{
+  // Audio device index (from `ac devices`)
+  "device": 0,
+
+  // Channel indices for playback and capture
+  "output_channel": 11,
+  "input_channel": 0,
+
+  // Sticky JACK port names — auto-populated during setup when using JACK
+  "output_port": null,
+  "input_port": null,
+
+  // Audio backend: "jack", "sounddevice", or null (auto-detect)
+  "backend": null,
+
+  // Active session name — this is the only key ds reads
+  // Set by: ac new <name>, ac use <name>
+  // Cleared by: ac rm <name> (if it was the active one)
+  "session": "my-amp",
+
+  // 0 dBu reference voltage in Vrms (default: sqrt(0.001 * 600))
+  "dbu_ref_vrms": 0.77459667,
+
+  // Default sweep range
+  "range_start_hz": 20.0,
+  "range_stop_hz": 20000.0,
+
+  // Optional: DMM host for remote calibration
+  "dmm_host": null,
+
+  // Optional: serial port for GPIO relay control
+  "gpio_port": null,
+
+  // ZMQ server settings (for remote operation)
+  "server_enabled": false,
+  "server_host": "localhost"
+}
