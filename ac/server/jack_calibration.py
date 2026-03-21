@@ -410,32 +410,32 @@ def run_calibration_jack_zmq(pub_q, cal_q,
     time.sleep(0.5)   # let analog output settle
 
     try:
-        dmm_vrms = None
         if dmm_host:
+            # Step 1: output voltage via DMM
             dmm_vrms = _try_dmm_read(dmm_host)
+            _pub("cal_prompt", {
+                "step": 1,
+                "text": (f"STEP 1 — Output voltage (loaded)\n"
+                         f"  Connect output -> loopback cable.\n"
+                         f"  Probe the OUTPUT jack with DMM and enter reading below."),
+                "dmm_vrms": dmm_vrms,
+            })
+            try:
+                vrms_out = cal_q.get(timeout=120)
+            except Exception:
+                vrms_out = None
+            finally:
+                engine.set_silence()
 
-        _pub("cal_prompt", {
-            "step": 1,
-            "text": (f"STEP 1 — Output voltage (loaded)\n"
-                     f"  Connect output -> loopback cable.\n"
-                     f"  Probe the OUTPUT jack with DMM and enter reading below."),
-            "dmm_vrms": dmm_vrms,
-        })
+            if vrms_out is None:
+                _pub("cal_done", {"key": cal.key, "error": "output cal skipped"})
+                return cal
 
-        try:
-            vrms_out = cal_q.get(timeout=120)
-        except Exception:
-            vrms_out = None
-        finally:
+            cal.vrms_at_0dbfs_out = vrms_out / (10.0 ** (ref_dbfs / 20.0))
+        else:
             engine.set_silence()
 
-        if vrms_out is None:
-            _pub("cal_done", {"key": cal.key, "error": "output cal skipped"})
-            return cal
-
-        cal.vrms_at_0dbfs_out = vrms_out / (10.0 ** (ref_dbfs / 20.0))
-
-        # Step 2: loopback capture at reference freq
+        # Step 2: loopback capture at reference freq (also used as response curve reference)
         engine.set_tone(freq, amplitude)
         duration = max(1.0, 10.0 / freq)
         try:
@@ -456,18 +456,18 @@ def run_calibration_jack_zmq(pub_q, cal_q,
         drop_db        = rec_dbfs - ref_dbfs
 
         if drop_db >= -40.0:
-            ratio                = 10.0 ** (drop_db / 20.0)
-            cal.vrms_at_0dbfs_in = cal.vrms_at_0dbfs_out / ratio
+            if cal.vrms_at_0dbfs_out is not None:
+                ratio                = 10.0 ** (drop_db / 20.0)
+                cal.vrms_at_0dbfs_in = cal.vrms_at_0dbfs_out / ratio
 
             # Step 3: automated response sweep
-            _pub("cal_progress", {
-                "step": 3,
-                "text": f"Measuring response curve ({range_start_hz:.0f}–{range_stop_hz:.0f} Hz)...",
-            })
-            n_pts        = 30
-            sweep_freqs  = np.geomspace(range_start_hz, range_stop_hz, n_pts)
+            n_pts       = 30
+            sweep_freqs = np.geomspace(range_start_hz, range_stop_hz, n_pts)
             response_curve = []
-            for f_sw in sweep_freqs:
+            for i, f_sw in enumerate(sweep_freqs):
+                _pub("cal_progress", {
+                    "step": 3, "n": i + 1, "total": n_pts, "freq_hz": float(f_sw),
+                })
                 dur_sw = max(0.3, 5.0 / f_sw)
                 engine.set_tone(float(f_sw), amplitude)
                 try:

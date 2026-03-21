@@ -516,13 +516,25 @@ def cmd_calibrate(cmd, cfg, client):
         while True:
             topic, frame = client.recv_data(timeout_ms=120000)
             if topic == "cal_progress":
-                print(f"\n  {frame.get('text', 'Working...')}", flush=True)
+                if "n" in frame:
+                    n, total = frame["n"], frame["total"]
+                    hz = frame.get("freq_hz", 0)
+                    freq_str = f"{hz/1000:.1f} kHz" if hz >= 1000 else f"{hz:.0f} Hz"
+                    bar_w  = 24
+                    filled = int(bar_w * n / total)
+                    bar    = "█" * filled + "░" * (bar_w - filled)
+                    end    = "\n" if n == total else ""
+                    print(f"\r  Response curve  [{bar}] {n:>2}/{total}  {freq_str:<9}",
+                          end=end, flush=True)
+                else:
+                    print(f"\n  {frame.get('text', 'Working...')}", flush=True)
             elif topic == "cal_prompt":
                 print(f"\n  {frame['text']}\n")
-                if frame.get("dmm_vrms") is not None:
-                    hint = f"{frame['dmm_vrms'] * 1000:.4f} mVrms"
+                dmm_vrms = frame.get("dmm_vrms")
+                if dmm_vrms is not None:
+                    hint = f"{dmm_vrms * 1000:.4f} mVrms"
                     raw  = input(f"  Enter to accept ({hint}), or override: ").strip()
-                    vrms = _parse_vrms(raw) if raw else frame["dmm_vrms"]
+                    vrms = _parse_vrms(raw) if raw else dmm_vrms
                 else:
                     while True:
                         raw = input("  DMM reading (e.g. 245mV or 0.245): ").strip()
