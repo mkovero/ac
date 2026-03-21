@@ -8,7 +8,7 @@ JackEngine = get_engine_class()
 find_ports, port_name, resolve_port = get_port_helpers()
 from ..conversions import fmt_vrms, vrms_to_dbu, fmt_vpp, dbfs_to_vrms
 
-DEFAULT_CAL_PATH = os.path.expanduser("~/.config/thd_tool/cal.json")
+DEFAULT_CAL_PATH = os.path.expanduser("~/.config/ac/cal.json")
 
 
 # ---------------------------------------------------------------------------

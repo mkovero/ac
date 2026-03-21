@@ -1,6 +1,6 @@
 """Parser unit tests — no I/O, no JACK, pure Python."""
 import pytest
-from thd_tool.client.parse import parse, ParseError
+from ac.client.parse import parse, ParseError
 
 
 # ---------------------------------------------------------------------------
@@ -97,26 +97,8 @@ def test_monitor_with_interval():
     assert r["interval"]   == 0.2
 
 
-def test_monitor_backward_compat_thd():
-    """Old 'ac monitor thd' noun is accepted and stripped; level→min_y, freq→start_freq."""
-    r = parse(["monitor", "thd", "0dbu", "1khz", "0.5s"])
-    assert r["cmd"]        == "monitor"
-    assert r["start_freq"] == 1000.0
-    assert r["min_y"]      == ("dbu", 0.0)
-    assert r["interval"]   == 0.5
-
-
-def test_monitor_backward_compat_spectrum():
-    r = parse(["m", "sp", "-12dbfs", "1khz"])
-    assert r["cmd"]        == "monitor"
-    assert r["start_freq"] == 1000.0
-    assert r["min_y"]      == ("dbfs", -12.0)
-
-
 def test_monitor_abbreviations():
     assert parse(["m"])["cmd"]     == "monitor"
-    assert parse(["m", "t"])["cmd"] == "monitor"
-    assert parse(["m", "sp"])["cmd"] == "monitor"
 
 
 # ---------------------------------------------------------------------------

@@ -1,17 +1,17 @@
 # config.py
 # Persistent hardware configuration. Stored alongside calibration in
-# ~/.config/thd_tool/config.json
+# ~/.config/ac/config.json
 import json
 import os
 
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/thd_tool/config.json")
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/ac/config.json")
 
 # Exact mathematical 0 dBu = sqrt(0.001 * 600) = 0.77459667 Vrms
 # Convention value used on most datasheets: 0.775 Vrms
 # Some broadcast gear uses 0.7752 Vrms
 DBU_REF_EXACT = 0.77459667
 
-SESSION_BASE = os.path.expanduser("~/.local/share/thd_tool/sessions")
+SESSION_BASE = os.path.expanduser("~/.local/share/ac/sessions")
 
 
 def session_dir(name):

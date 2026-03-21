@@ -1,6 +1,6 @@
 # ds — diagnostic sessions
 
-Companion CLI for `ac` (thd_tool). Reads ac config and session directories to provide AI-powered analysis, notes, file management, and session diffing. Never writes to ac's data or requires ZMQ.
+Companion CLI for `ac`. Reads ac config and session directories to provide AI-powered analysis, notes, file management, and session diffing. Never writes to ac's data or requires ZMQ.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ Required for `analyze`, `ask`, `diff`, and `fetch` commands.
 
 ## Install
 
-Installed alongside thd_tool:
+Installed alongside ac:
 
 ```bash
 pip install -e .
@@ -38,7 +38,7 @@ Entry point: `ds` (or `python -m ds`).
 
 ## Configuration
 
-ds reads `~/.config/thd_tool/config.json`, which is created and managed by `ac`. See [`../config.example.jsonc`](../config.example.jsonc) for the full schema with comments.
+ds reads `~/.config/ac/config.json`, which is created and managed by `ac`. See [`../config.example.jsonc`](../config.example.jsonc) for the full schema with comments.
 
 Quick start from scratch:
 
@@ -50,7 +50,7 @@ ds status                     # ds picks it up automatically
 
 ## Relationship to ac
 
-- Reads `~/.config/thd_tool/config.json` for the active session name
-- Reads session directories under `~/.local/share/thd_tool/sessions/`
+- Reads `~/.config/ac/config.json` for the active session name
+- Reads session directories under `~/.local/share/ac/sessions/`
 - Stores its own data in a `ds/` subdirectory within each session
 - No ZMQ connection, no audio I/O, no writes to ac data

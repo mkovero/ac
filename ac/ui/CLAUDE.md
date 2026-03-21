@@ -2,7 +2,7 @@
 
 ## Architecture
 
-Separate process spawned by `ac.py` via `python -m thd_tool.ui --mode <mode> --host <host> --port <port>`. Subscribes to the ZMQ PUB socket and renders live data.
+Separate process spawned by `ac.py` via `python -m ac.ui --mode <mode> --host <host> --port <port>`. Subscribes to the ZMQ PUB socket and renders live data.
 
 Entry point: `app.py:main()` (also called from `__main__.py`).
 

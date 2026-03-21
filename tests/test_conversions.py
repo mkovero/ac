@@ -1,7 +1,7 @@
 """Unit tests for conversions.py — pure math, no I/O."""
 import math
 import pytest
-from thd_tool.conversions import (
+from ac.conversions import (
     vrms_to_dbu, dbu_to_vrms, dbfs_to_vrms, fmt_vrms,
     set_dbu_ref, get_dbu_ref,
 )

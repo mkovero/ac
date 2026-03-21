@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is `thd_tool` — a Python CLI for audio bench measurements (THD, THD+N, level sweeps, frequency sweeps). Supports JACK and sounddevice (PortAudio) audio backends with auto-detection.
+This is `ac` — a Python CLI for audio bench measurements (THD, THD+N, level sweeps, frequency sweeps). Supports JACK and sounddevice (PortAudio) audio backends with auto-detection.
 
 ## Install
 
@@ -13,10 +13,10 @@ pip install -e .
 ```
 
 This installs two entry points:
-- `ac` — the main CLI (`thd_tool/client/ac.py`)
-- `thd` — legacy CLI (`thd_tool/cli.py`, kept for backward compat)
+- `ac` — the main CLI (`ac/client/ac.py`)
+- `thd` — legacy CLI (`ac/cli.py`, kept for backward compat)
 
-Also runnable as `python -m thd_tool`.
+Also runnable as `python -m ac`.
 
 ## Usage (quick reference)
 
@@ -41,7 +41,7 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ## Package layout
 
 ```
-thd_tool/
+ac/
   __init__.py          (empty)
   __main__.py          (dispatches to client.ac or legacy cli)
   constants.py         (shared)
@@ -57,13 +57,13 @@ See `server/CLAUDE.md`, `client/CLAUDE.md`, `ui/CLAUDE.md` for subpackage docs.
 
 ## Legacy / old code
 
-`thd_tool/old/` and `thd_tool/old2/` are historical snapshots; ignore them.
+`ac/old/` and `ac/old2/` are historical snapshots; ignore them.
 
 ---
 
 ## Room measurement scripts (OSM + Babyface)
 
-These shell scripts live in `scripts/` and are independent of `thd_tool`. They wire up a RME Babyface (ALSA card 1) with OpenSoundMeter (OSM) over JACK for room/speaker measurements.
+These shell scripts live in `scripts/` and are independent of `ac`. They wire up a RME Babyface (ALSA card 1) with OpenSoundMeter (OSM) over JACK for room/speaker measurements.
 
 ### Scripts
 
@@ -98,14 +98,14 @@ Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to
 Companion tool to `ac`. Lives in `ds/`. Installed as the `ds` command via setup.py.
 
 **Relationship to ac:**
-- Reads `~/.config/thd_tool/config.json` to get the active session name (`session` key)
-- Reads `~/.local/share/thd_tool/sessions/<name>/` for ac-produced files
+- Reads `~/.config/ac/config.json` to get the active session name (`session` key)
+- Reads `~/.local/share/ac/sessions/<name>/` for ac-produced files
 - Never writes to ac config or session dirs outside its own `ds/` subdirectory
-- No ZMQ, no dependency on thd_tool internals
+- No ZMQ, no dependency on ac internals
 
 **Session directory layout:**
 ```
-~/.local/share/thd_tool/sessions/<name>/
+~/.local/share/ac/sessions/<name>/
   *.csv, *.png          # ac owns these
   ds/
     session.json        # device metadata, notes, file registry

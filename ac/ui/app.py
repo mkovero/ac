@@ -1,10 +1,10 @@
-"""thd_tool.ui — real-time measurement GUI entry point.
+"""ac.ui — real-time measurement GUI entry point.
 
 Usage:
-    python -m thd_tool.ui --mode spectrum --host localhost --port 5557
-    python -m thd_tool.ui --mode thd      --host localhost --port 5557
-    python -m thd_tool.ui --mode sweep_frequency --host localhost --port 5557
-    python -m thd_tool.ui --mode sweep_level     --host localhost --port 5557
+    python -m ac.ui --mode spectrum --host localhost --port 5557
+    python -m ac.ui --mode thd      --host localhost --port 5557
+    python -m ac.ui --mode sweep_frequency --host localhost --port 5557
+    python -m ac.ui --mode sweep_level     --host localhost --port 5557
 """
 import argparse
 import json
@@ -102,7 +102,7 @@ class ZmqReceiver:
 # ---------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(prog="thd_tool.ui")
+    ap = argparse.ArgumentParser(prog="ac.ui")
     ap.add_argument("--mode",  required=True,
                     choices=["spectrum", "thd", "sweep_frequency", "sweep_level"])
     ap.add_argument("--host",  default="localhost")

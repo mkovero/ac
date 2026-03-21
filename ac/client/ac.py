@@ -169,7 +169,7 @@ def _launch_ui(mode, host="localhost", data_port=DATA_PORT):
         return False
     import subprocess
     subprocess.Popen(
-        [sys.executable, "-m", "thd_tool.ui",
+        [sys.executable, "-m", "ac.ui",
          "--mode", mode, "--host", host, "--port", str(data_port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -259,7 +259,7 @@ def _spawn_local_server(client):
     """Start a local-only server process silently, wait up to 3 s."""
     import subprocess
     subprocess.Popen(
-        [sys.executable, "-m", "thd_tool", "--serve"],
+        [sys.executable, "-m", "ac", "--serve"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

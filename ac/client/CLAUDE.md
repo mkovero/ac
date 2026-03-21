@@ -22,7 +22,7 @@ Shared modules (imported as `from ..x import ...`):
 Cross-subpackage imports:
 - `from ..server.jack_calibration import Calibration` (used in `_cal_from_frame`)
 - `from ..server.jack_calibration import DEFAULT_CAL_PATH` (used in calibrate_show)
-- `from ..server.server import run_server` (used in server_enable handler)
+- `from ..server.engine import run_server` (used in server_enable handler)
 
 ## CLI grammar
 

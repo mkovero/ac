@@ -23,7 +23,7 @@ This gives you the `ac` command.
 | **JACK** (`jack-client`) | Preferred when a JACK server is running | Linux (native or PipeWire) |
 | **sounddevice** (PortAudio) | Fallback when JACK is unavailable | Linux, macOS, Windows |
 
-To force a backend, set `"backend"` in `~/.config/thd_tool/config.json`:
+To force a backend, set `"backend"` in `~/.config/ac/config.json`:
 
 ```json
 { "backend": "sounddevice" }

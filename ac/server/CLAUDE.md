@@ -2,7 +2,7 @@
 
 ## Architecture
 
-`server.py` is the main loop: it binds a ZMQ REP socket (ctrl) and PUB socket (data), receives JSON commands from clients, dispatches to worker threads, and streams results back over the PUB socket.
+`engine.py` is the main loop: it binds a ZMQ REP socket (ctrl) and PUB socket (data), receives JSON commands from clients, dispatches to worker threads, and streams results back over the PUB socket.
 
 Entry point: `ac server enable` (blocking) or auto-spawned by the client as a subprocess with `--local`.
 
@@ -10,7 +10,7 @@ Entry point: `ac server enable` (blocking) or auto-spawned by the client as a su
 
 | File | Purpose |
 |------|---------|
-| `server.py` | ZMQ REP+PUB main loop, command dispatch, worker spawn |
+| `engine.py` | ZMQ REP+PUB main loop, command dispatch, worker spawn |
 | `audio.py` | `JackEngine` (JACK real-time I/O), `find_ports()`, `port_name()`, backend factory (`get_engine_class()`, `get_port_helpers()`) |
 | `sd_audio.py` | `SoundDeviceEngine` (PortAudio fallback), matching duck-typed contract |
 | `analysis.py` | `analyze(recording, sr, fundamental)` — FFT THD/THD+N |
@@ -19,7 +19,7 @@ Entry point: `ac server enable` (blocking) or auto-spawned by the client as a su
 | `signal.py` | `make_sine()` — sine buffer generator |
 | `dmm.py` | SCPI socket client for Keysight 34461A DMM |
 
-Shared modules (at `thd_tool/` root, imported as `from ..constants import ...`):
+Shared modules (at `ac/` root, imported as `from ..constants import ...`):
 `constants.py`, `conversions.py`, `config.py`
 
 ## ZMQ protocol
@@ -33,7 +33,7 @@ Commands: `status`, `quit`, `stop`, `devices`, `setup`, `get_calibration`, `list
 
 ## Calibration model
 
-`Calibration` stores `vrms_at_0dbfs_out` and `vrms_at_0dbfs_in` — physical voltage at 0 dBFS full scale. Key format: `out{N}_in{M}_{freq}hz`. Stored in `~/.config/thd_tool/cal.json`.
+`Calibration` stores `vrms_at_0dbfs_out` and `vrms_at_0dbfs_in` — physical voltage at 0 dBFS full scale. Key format: `out{N}_in{M}_{freq}hz`. Stored in `~/.config/ac/cal.json`.
 
 ## Result dict keys (from `analyze()`)
 
