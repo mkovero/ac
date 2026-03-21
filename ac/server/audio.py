@@ -1,13 +1,13 @@
 # audio.py  -- JACK-based audio engine
 import threading
 import numpy as np
-import jack
 
 RINGBUFFER_SECONDS = 4
 
 
 class JackEngine:
     def __init__(self, client_name="ac"):
+        import jack
         self._client      = jack.Client(client_name)
         self._sr          = self._client.samplerate
         self._blocksize   = self._client.blocksize
@@ -195,7 +195,11 @@ class JackEngine:
 # ------------------------------------------------------------------
 
 def find_ports(client_name="ac-probe"):
-    tmp      = jack.Client(client_name)
+    import jack
+    try:
+        tmp = jack.Client(client_name)
+    except jack.JackOpenError:
+        raise RuntimeError("JACK server is not running") from None
     playback = [p.name for p in tmp.get_ports(is_audio=True, is_input=True,  is_physical=True)]
     capture  = [p.name for p in tmp.get_ports(is_audio=True, is_output=True, is_physical=True)]
     tmp.close()
@@ -225,23 +229,27 @@ def resolve_port(ports, sticky_name, fallback_index):
 _cached_backend = None
 
 
-def _detect_backend():
-    """Return 'jack' or 'sounddevice'. Checks config first, then probes."""
+def _detect_backend(reset=False):
+    """Return 'jack' or 'sounddevice'.
+
+    On Linux: always 'jack'. sounddevice is not supported (ALSA concurrency).
+    On other platforms: config override, then sounddevice default.
+    """
     global _cached_backend
+    if reset:
+        _cached_backend = None
     if _cached_backend is not None:
+        return _cached_backend
+    import sys
+    if sys.platform == "linux":
+        _cached_backend = "jack"
         return _cached_backend
     from ..config import load as load_config
     forced = load_config().get("backend")
     if forced in ("jack", "sounddevice"):
         _cached_backend = forced
         return forced
-    try:
-        import jack
-        c = jack.Client("ac-probe-detect")
-        c.close()
-        _cached_backend = "jack"
-    except Exception:
-        _cached_backend = "sounddevice"
+    _cached_backend = "sounddevice"
     return _cached_backend
 
 
@@ -255,10 +263,10 @@ def get_engine_class(backend=None):
     return SoundDeviceEngine
 
 
-def get_port_helpers(backend=None):
+def get_port_helpers(backend=None, reset=False):
     """Return (find_ports, port_name, resolve_port) for the given backend."""
     if backend is None:
-        backend = _detect_backend()
+        backend = _detect_backend(reset=reset)
     if backend == "jack":
         return find_ports, port_name, resolve_port
     from . import sd_audio

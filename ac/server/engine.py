@@ -570,7 +570,8 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         if name == "devices":
             try:
-                playback, capture = find_ports()
+                _fp, _, _ = get_port_helpers(reset=True)
+                playback, capture = _fp()
                 return {"ok": True,
                         "playback":       playback,
                         "capture":        capture,
