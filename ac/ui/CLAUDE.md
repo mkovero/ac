@@ -12,7 +12,6 @@ Entry point: `app.py:main()` (also called from `__main__.py`).
 |------|---------|
 | `app.py` | `main()`, dark palette, `ZmqReceiver` thread, view dispatch |
 | `spectrum.py` | `SpectrumView` — live FFT with peak hold and harmonic markers |
-| `thd.py` | `ThdView` — rolling THD%/THD+N% strip chart |
 | `sweep.py` | `SweepView` — 2×2 sweep grid with point-click spectrum detail |
 
 ## Color palette (defined in `app.py`)
@@ -30,7 +29,6 @@ RED="#e74c3c"   AMBER="#ffb43c"   GREEN="#2ecc71"  YELLOW="#f1c40f"
 ## View specs
 
 - **SpectrumView**: log-x FFT, smoothing mirrors `tui.py` (`_FALL_ALPHA=0.20`, `_PEAK_HOLD=6`, `_PEAK_DECAY=1.5`), harmonic `InfiniteLine` markers, mouse crosshair readout
-- **ThdView**: 120-point rolling buffer, Y-range hysteresis (instant expand, slow contract), clip indicator label
 - **SweepView**: 2×2 `GraphicsLayoutWidget`, log-x for freq sweep, clipped points shown as red X scatter, click-to-inspect spectrum in bottom-right panel
 
 ## Dependencies

@@ -2,7 +2,6 @@
 
 Usage:
     python -m ac.ui --mode spectrum --host localhost --port 5557
-    python -m ac.ui --mode thd      --host localhost --port 5557
     python -m ac.ui --mode sweep_frequency --host localhost --port 5557
     python -m ac.ui --mode sweep_level     --host localhost --port 5557
 """
@@ -127,9 +126,6 @@ def main():
     if args.mode == "spectrum":
         from .spectrum import SpectrumView
         view = SpectrumView()
-    elif args.mode == "thd":
-        from .thd import ThdView
-        view = ThdView()
     else:
         from .sweep import SweepView
         view = SweepView(mode=args.mode)
