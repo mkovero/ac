@@ -497,19 +497,19 @@ USAGE = """\
 ac — audio measurement CLI
 
 Commands:
-  devices                              list audio ports
-  setup <key> <val> ...                configure (output, input, reference, range, dmm, gpio)
-  calibrate [output N] [input N]       interactive level calibration
-  calibrate show                       show stored calibration
-  generate sine [ch] [level] [freq]    play sine tone
-  generate pink [ch] [level]           play pink noise
-  sweep level <start> <stop> [freq]    output-only level ramp
-  sweep frequency <start> <stop> [level]  output-only chirp
-  plot [<start> <stop>] [level] [ppd]  blocking THD measurement
-  transfer [<start> <stop>] [level]    H1 transfer function (requires reference port)
-  monitor [<start> <stop>] [interval]  live spectrum (TUI or show)
-  stop                                 stop active generator/measurement
-  dmm                                  read AC Vrms from configured DMM
+  devices                                       list available audio ports
+  setup [output <N>] [input <N>] [reference <N>]
+        [range <startFreq stopFreq>]
+        [dmm <ipaddr>] [gpio <serialDevice>]    configure ports and peripherals
+  calibrate [output <N> input <N>] [show]       level calibration
+  generate <sine|pink> [ch] [level] [freq]      output sine/pink
+  sweep level <start> <stop> [freq]             sweep level with fixed frequency
+  sweep frequency <startFreq stopFreq> [level]  sweep frequency with fixed level
+  plot [<startFreq stopFreq>] [level] [ppd]     point-by-point THD measurement
+  transfer [<startFreq stopFreq>] [level]       H1 transfer function (requires reference)
+  monitor [<startFreq stopFreq>] [interval]     live spectrum (TUI or show)
+  stop                                          stop active generator/measurement
+  dmm                                           read AC Vrms from configured DMM over SCPI
 
 Units:  20hz 1khz  |  0dbu -12dbfs 775mvrms 1vrms  |  1s  |  10ppd
         append "show" to open pyqtgraph window
