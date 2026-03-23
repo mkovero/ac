@@ -58,8 +58,8 @@ def _downsample_spectrum(spec, freqs, max_pts=1000):
 
 def _sweep_point_frame(r, cal, n, cmd_name, level_dbfs, freq_hz=None):
     """Build a sweep_point DATA frame from an analyze() result dict."""
-    out_vrms  = cal.out_vrms(level_dbfs, freq_hz) if cal else None
-    in_vrms   = cal.in_vrms(r["linear_rms"], freq_hz) if cal else None
+    out_vrms  = cal.out_vrms(level_dbfs) if cal else None
+    in_vrms   = cal.in_vrms(r["linear_rms"]) if cal else None
     in_dbu    = vrms_to_dbu(in_vrms)  if in_vrms  is not None else None
     out_dbu   = vrms_to_dbu(out_vrms) if out_vrms is not None else None
     gain_db   = (in_dbu - out_dbu
@@ -229,7 +229,7 @@ def _worker_monitor_thd(pub_q, stop_ev, cfg, cmd):
             r    = analyze(rec, sr=engine.samplerate, fundamental=freq)
             if "error" in r:
                 continue
-            in_vrms = cal.in_vrms(r["linear_rms"], freq) if (cal and cal.input_ok) else None
+            in_vrms = cal.in_vrms(r["linear_rms"]) if (cal and cal.input_ok) else None
             in_dbu  = vrms_to_dbu(in_vrms)         if in_vrms is not None    else None
             _pub(pub_q, "data", {
                 "type":              "thd_point",
@@ -275,7 +275,7 @@ def _worker_monitor_spectrum(pub_q, stop_ev, cfg, cmd):
             if "error" in r:
                 continue
             spec_ds, freqs_ds = _downsample_spectrum(r["spectrum"][1:], r["freqs"][1:])
-            in_vrms = cal.in_vrms(r["linear_rms"], detected) if (cal and cal.input_ok) else None
+            in_vrms = cal.in_vrms(r["linear_rms"]) if (cal and cal.input_ok) else None
             in_dbu  = vrms_to_dbu(in_vrms)         if in_vrms is not None    else None
             _pub(pub_q, "data", {
                 "type":     "spectrum",
@@ -418,8 +418,6 @@ def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
         input_channel=input_channel,
         ref_dbfs=ref_dbfs,
         dmm_host=cfg.get("dmm_host"),
-        range_start_hz=cfg.get("range_start_hz", 20.0),
-        range_stop_hz=cfg.get("range_stop_hz", 20000.0),
         output_port=cfg.get("output_port"),
         input_port=cfg.get("input_port"),
     )
@@ -632,12 +630,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             return {"ok": True, "calibrations": [
                 {"key":               c.key,
                  "vrms_at_0dbfs_out": c.vrms_at_0dbfs_out,
-                 "vrms_at_0dbfs_in":  c.vrms_at_0dbfs_in,
-                 "response_pts":      len(c.response_curve) if c.response_curve else 0,
-                 "response_range":    [c.response_curve[0][0], c.response_curve[-1][0]]
-                                      if c.response_curve else None,
-                 "response_max_dev":  max(abs(d) for f, d in c.response_curve)
-                                      if c.response_curve else None}
+                 "vrms_at_0dbfs_in":  c.vrms_at_0dbfs_in}
                 for c in cals
             ]}
 

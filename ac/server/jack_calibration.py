@@ -1,6 +1,5 @@
 # jack_calibration.py  -- calibration + Calibration class (JACK backend)
 import json
-import math
 import os
 import numpy as np
 from .audio      import get_engine_class, get_port_helpers
@@ -27,7 +26,6 @@ class Calibration:
         self.vrms_at_0dbfs_out = None
         self.vrms_at_0dbfs_in  = None
         self.ref_dbfs          = -10.0
-        self.response_curve    = None     # list of (freq_hz, delta_db) or None
 
     @property
     def key(self):
@@ -41,37 +39,14 @@ class Calibration:
     def input_ok(self):
         return self.vrms_at_0dbfs_in is not None
 
-    def response_db(self, freq_hz):
-        """Interpolate response curve at freq_hz. Returns delta_db (0.0 if no curve)."""
-        if not self.response_curve:
-            return 0.0
-        freqs  = [f for f, d in self.response_curve]
-        deltas = [d for f, d in self.response_curve]
-        log_freq  = math.log10(max(freq_hz, 1.0))
-        log_freqs = [math.log10(max(f, 1.0)) for f in freqs]
-        if log_freq <= log_freqs[0]:
-            return deltas[0]
-        if log_freq >= log_freqs[-1]:
-            return deltas[-1]
-        for i in range(len(log_freqs) - 1):
-            if log_freqs[i] <= log_freq <= log_freqs[i + 1]:
-                t = (log_freq - log_freqs[i]) / (log_freqs[i + 1] - log_freqs[i])
-                return deltas[i] + t * (deltas[i + 1] - deltas[i])
-        return deltas[-1]
-
-    def out_vrms(self, dbfs, freq_hz=None):
+    def out_vrms(self, dbfs):
         if not self.output_ok:
             return None
-        if freq_hz is not None:
-            return dbfs_to_vrms(dbfs - self.response_db(freq_hz), self.vrms_at_0dbfs_out)
         return dbfs_to_vrms(dbfs, self.vrms_at_0dbfs_out)
 
-    def in_vrms(self, linear_rms, freq_hz=None):
+    def in_vrms(self, linear_rms):
         if not self.input_ok:
             return None
-        if freq_hz is not None:
-            delta = self.response_db(freq_hz)
-            return linear_rms * self.vrms_at_0dbfs_in / (10.0 ** (delta / 20.0))
         return linear_rms * self.vrms_at_0dbfs_in
 
     def save(self, path=None):
@@ -92,7 +67,6 @@ class Calibration:
             "vrms_at_0dbfs_out": self.vrms_at_0dbfs_out,
             "vrms_at_0dbfs_in":  self.vrms_at_0dbfs_in,
             "ref_dbfs":          self.ref_dbfs,
-            "response_curve":    self.response_curve,
         }
         with open(path, "w") as f:
             json.dump(all_cals, f, indent=2)
@@ -117,9 +91,6 @@ class Calibration:
         cal.vrms_at_0dbfs_out = data.get("vrms_at_0dbfs_out")
         cal.vrms_at_0dbfs_in  = data.get("vrms_at_0dbfs_in")
         cal.ref_dbfs          = data.get("ref_dbfs", -10.0)
-        rc = data.get("response_curve")
-        if rc:
-            cal.response_curve = [(float(f), float(d)) for f, d in rc]
         return cal
 
     @classmethod
@@ -191,11 +162,6 @@ class Calibration:
                   f"  =  {fmt_vpp(v)}")
         else:
             print("  Input:  not calibrated")
-        if self.response_curve:
-            deltas = [d for f, d in self.response_curve]
-            print(f"  Response: {len(self.response_curve)} pts, "
-                  f"{self.response_curve[0][0]:.0f}–{self.response_curve[-1][0]:.0f} Hz, "
-                  f"±{max(abs(d) for d in deltas):.2f} dB")
         print("  --------------------------------------------------------------\n")
 
 
@@ -251,7 +217,6 @@ def _parse_dmm(prompt, dmm_host=None):
 
 def run_calibration_jack(output_channel=0, input_channel=0,
                          ref_dbfs=-10.0, dmm_host=None,
-                         range_start_hz=20.0, range_stop_hz=20000.0,
                          output_port=None, input_port=None):
     from .signal import make_sine
     from ..constants import SAMPLERATE
@@ -339,34 +304,6 @@ def run_calibration_jack(output_channel=0, input_channel=0,
             print(f"  0 dBFS reference -> {fmt_vrms(cal.vrms_at_0dbfs_in)}"
                   f"  =  {vrms_to_dbu(cal.vrms_at_0dbfs_in):+.2f} dBu")
 
-            # Step 3: automated response sweep
-            print(f"\n  STEP 3 -- Response curve  (auto)")
-            print(f"  Sweeping {range_start_hz:.0f}–{range_stop_hz:.0f} Hz...\n")
-            n_pts        = 30
-            sweep_freqs  = np.geomspace(range_start_hz, range_stop_hz, n_pts)
-            response_curve = []
-            for f_sw in sweep_freqs:
-                dur_sw = max(0.3, 5.0 / f_sw)
-                engine.set_tone(float(f_sw), amplitude)
-                try:
-                    engine.capture_block(min(0.2, dur_sw))   # warmup
-                    data_sw = engine.capture_block(dur_sw)
-                except Exception:
-                    continue
-                mono_sw = data_sw.astype(np.float64)
-                trim_sw = int(len(mono_sw) * 0.05)
-                if trim_sw * 2 >= len(mono_sw):
-                    trim_sw = 0
-                end_sw = len(mono_sw) - trim_sw if trim_sw else len(mono_sw)
-                lin_sw  = float(np.sqrt(np.mean(mono_sw[trim_sw:end_sw] ** 2)))
-                dbfs_sw = 20.0 * np.log10(max(lin_sw, 1e-12))
-                response_curve.append((float(f_sw), float(dbfs_sw - rec_dbfs)))
-                print(f"  {f_sw:>7.1f} Hz  {dbfs_sw - rec_dbfs:+.2f} dB", flush=True)
-
-            engine.set_silence()
-            cal.response_curve = response_curve
-            print(f"\n  Response curve: {len(response_curve)} pts")
-
     finally:
         engine.set_silence()
         engine.stop()
@@ -383,7 +320,6 @@ def run_calibration_jack(output_channel=0, input_channel=0,
 def run_calibration_jack_zmq(pub_q, cal_q,
                               output_channel=0, input_channel=0,
                               ref_dbfs=-10.0, dmm_host=None,
-                              range_start_hz=20.0, range_stop_hz=20000.0,
                               output_port=None, input_port=None):
     """Calibration for the ZMQ server: publishes cal_prompt/cal_done instead of
     using input().  pub_q is a queue.Queue; cal_q receives vrms from cal_reply."""
@@ -455,39 +391,12 @@ def run_calibration_jack_zmq(pub_q, cal_q,
                 ratio                = 10.0 ** (drop_db / 20.0)
                 cal.vrms_at_0dbfs_in = cal.vrms_at_0dbfs_out / ratio
 
-            # Step 3: automated response sweep
-            n_pts       = 30
-            sweep_freqs = np.geomspace(range_start_hz, range_stop_hz, n_pts)
-            response_curve = []
-            for i, f_sw in enumerate(sweep_freqs):
-                _pub("cal_progress", {
-                    "step": 3, "n": i + 1, "total": n_pts, "freq_hz": float(f_sw),
-                })
-                dur_sw = max(0.3, 5.0 / f_sw)
-                engine.set_tone(float(f_sw), amplitude)
-                try:
-                    engine.capture_block(min(0.2, dur_sw))   # warmup
-                    data_sw = engine.capture_block(dur_sw)
-                except Exception:
-                    continue
-                mono_sw = data_sw.astype(np.float64)
-                trim_sw = int(len(mono_sw) * 0.05)
-                if trim_sw * 2 >= len(mono_sw):
-                    trim_sw = 0
-                end_sw = len(mono_sw) - trim_sw if trim_sw else len(mono_sw)
-                lin_sw  = float(np.sqrt(np.mean(mono_sw[trim_sw:end_sw] ** 2)))
-                dbfs_sw = 20.0 * np.log10(max(lin_sw, 1e-12))
-                response_curve.append((float(f_sw), float(dbfs_sw - rec_dbfs)))
-
-            engine.set_silence()
-            cal.response_curve = response_curve
 
         cal.save()
         _pub("cal_done", {
             "key":               cal.key,
             "vrms_at_0dbfs_out": cal.vrms_at_0dbfs_out,
             "vrms_at_0dbfs_in":  cal.vrms_at_0dbfs_in,
-            "response_pts":      len(cal.response_curve) if cal.response_curve else 0,
         })
         return cal
 

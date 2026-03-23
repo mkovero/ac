@@ -33,7 +33,7 @@ Commands: `status`, `quit`, `stop`, `devices`, `setup`, `get_calibration`, `list
 
 ## Calibration model
 
-`Calibration` stores `vrms_at_0dbfs_out` and `vrms_at_0dbfs_in` — physical voltage at 0 dBFS full scale. Key format: `out{N}_in{M}_{freq}hz`. Stored in `~/.config/ac/cal.json`.
+`Calibration` stores `vrms_at_0dbfs_out` and `vrms_at_0dbfs_in` — scalar physical voltage at 0 dBFS full scale. No per-frequency correction; all commands (sweep, plot, monitor, transfer) use the same `_level_to_dbfs()` → `level_dbfs` → `amplitude` pipeline for stimulus level. Key format: `out{N}_in{M}`. Stored in `~/.config/ac/cal.json`.
 
 ## Result dict keys (from `analyze()`)
 

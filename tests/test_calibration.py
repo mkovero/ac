@@ -57,25 +57,6 @@ def test_load_all(tmp_path):
     assert len(all_cals) == 3
 
 
-# ---------------------------------------------------------------------------
-# response_curve save/load roundtrip
-# ---------------------------------------------------------------------------
-
-def test_response_curve_roundtrip(tmp_path):
-    path = str(tmp_path / "cal.json")
-    cal = Calibration(output_channel=0, input_channel=0)
-    cal.vrms_at_0dbfs_out = 0.245
-    cal.vrms_at_0dbfs_in  = 0.240
-    cal.response_curve = [(100.0, -0.5), (1000.0, 0.0), (10000.0, 0.3)]
-    cal.save(path=path)
-
-    loaded = Calibration.load(output_channel=0, input_channel=0, path=path)
-    assert loaded.response_curve is not None
-    assert len(loaded.response_curve) == 3
-    assert abs(loaded.response_curve[0][1] - (-0.5)) < 1e-9
-    assert abs(loaded.response_curve[1][1] - 0.0) < 1e-9
-    assert abs(loaded.response_curve[2][1] - 0.3) < 1e-9
-
 
 # ---------------------------------------------------------------------------
 # output_ok / input_ok properties
@@ -97,45 +78,6 @@ def test_output_ok_after_setting():
     assert cal.output_ok is True
 
 
-# ---------------------------------------------------------------------------
-# response_db interpolation
-# ---------------------------------------------------------------------------
-
-def test_response_db_no_curve():
-    cal = Calibration()
-    assert cal.response_db(1000.0) == 0.0
-
-
-def test_response_db_exact_point():
-    cal = Calibration()
-    cal.response_curve = [(100.0, -0.5), (1000.0, 0.0), (10000.0, 0.3)]
-    assert abs(cal.response_db(100.0) - (-0.5)) < 1e-9
-    assert abs(cal.response_db(1000.0) - 0.0) < 1e-9
-    assert abs(cal.response_db(10000.0) - 0.3) < 1e-9
-
-
-def test_response_db_interpolation():
-    cal = Calibration()
-    # linear in log-freq from 100 Hz (-0.5 dB) to 10000 Hz (0.5 dB)
-    cal.response_curve = [(100.0, -0.5), (10000.0, 0.5)]
-    # at geometric mean (1000 Hz) should be midpoint: 0.0 dB
-    result = cal.response_db(1000.0)
-    assert abs(result - 0.0) < 1e-6
-
-
-def test_response_db_clamp_low():
-    cal = Calibration()
-    cal.response_curve = [(100.0, -0.5), (1000.0, 0.0)]
-    # below range → clamp to first value
-    assert abs(cal.response_db(10.0) - (-0.5)) < 1e-9
-
-
-def test_response_db_clamp_high():
-    cal = Calibration()
-    cal.response_curve = [(100.0, -0.5), (1000.0, 0.0)]
-    # above range → clamp to last value
-    assert abs(cal.response_db(10000.0) - 0.0) < 1e-9
-
 
 # ---------------------------------------------------------------------------
 # out_vrms / in_vrms helpers
@@ -154,16 +96,6 @@ def test_out_vrms_none_when_uncalibrated():
     assert cal.out_vrms(-20.0) is None
 
 
-def test_out_vrms_with_response():
-    cal = Calibration()
-    cal.vrms_at_0dbfs_out = 0.245
-    # response_db at 50 Hz = -0.3 dB (exact point in curve)
-    cal.response_curve = [(50.0, -0.3), (1000.0, 0.0)]
-    # out_vrms(0.0, 50Hz) = dbfs_to_vrms(0.0 - (-0.3), 0.245) = dbfs_to_vrms(0.3, 0.245)
-    expected = dbfs_to_vrms(0.3, 0.245)
-    result = cal.out_vrms(0.0, freq_hz=50.0)
-    assert result == pytest.approx(expected, rel=1e-6)
-
 
 def test_in_vrms():
     cal = Calibration()
@@ -176,17 +108,6 @@ def test_in_vrms_none_when_uncalibrated():
     cal = Calibration()
     assert cal.in_vrms(0.5) is None
 
-
-def test_in_vrms_with_response():
-    cal = Calibration()
-    cal.vrms_at_0dbfs_in = 0.245
-    # response_db at 50 Hz = -0.3 dB (exact point) → in_vrms = rms * v_in / 10^(-0.3/20)
-    cal.response_curve = [(50.0, -0.3), (1000.0, 0.0)]
-    linear_rms = 0.5
-    delta = -0.3
-    expected = linear_rms * 0.245 / (10.0 ** (delta / 20.0))
-    result = cal.in_vrms(linear_rms, freq_hz=50.0)
-    assert result == pytest.approx(expected, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

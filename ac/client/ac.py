@@ -487,13 +487,6 @@ def cmd_calibrate_show(_cmd, cfg, client):
             print(f"    Input:  0 dBFS = {fmt_vrms(v):>14}  =  {vrms_to_dbu(v):+.2f} dBu")
         else:
             print(f"    Input:  not calibrated")
-        n_pts = c.get("response_pts", 0)
-        if n_pts:
-            rng = c.get("response_range")
-            dev = c.get("response_max_dev")
-            rng_s = f"{rng[0]:.0f}–{rng[1]:.0f} Hz" if rng else ""
-            dev_s = f"±{dev:.2f} dB" if dev is not None else ""
-            print(f"    Response: {n_pts} pts  {rng_s}  {dev_s}")
         print()
 
 
@@ -561,9 +554,6 @@ def cmd_calibrate(cmd, cfg, client):
                 v = frame.get("vrms_at_0dbfs_in")
                 if v:
                     print(f"  Input:  0 dBFS = {fmt_vrms(v)}  =  {vrms_to_dbu(v):+.2f} dBu")
-                n_pts = frame.get("response_pts", 0)
-                if n_pts:
-                    print(f"  Response curve: {n_pts} pts")
                 err = frame.get("error")
                 if err:
                     print(f"  Note: {err}")
