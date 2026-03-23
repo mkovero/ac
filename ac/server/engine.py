@@ -31,7 +31,7 @@ DATA_PORT  = 5557
 # Concurrency classification
 OUTPUT_CMDS = {"generate", "generate_pink", "sweep_level", "sweep_frequency"}
 INPUT_CMDS  = {"monitor_thd", "monitor_spectrum"}
-EXCLUSIVE   = {"plot", "calibrate"}
+EXCLUSIVE   = {"plot", "calibrate", "transfer"}
 AUDIO_CMDS  = OUTPUT_CMDS | INPUT_CMDS | EXCLUSIVE
 
 
@@ -341,6 +341,71 @@ def _worker_generate_pink(pub_q, stop_ev, cfg, cmd):
     _pub(pub_q, "done", {"cmd": "generate_pink"})
 
 
+def _worker_transfer(pub_q, stop_ev, cfg, cmd):
+    """H1 transfer function measurement."""
+    from .transfer import h1_estimate, capture_duration
+
+    level_dbfs = cmd["level_dbfs"]
+    amplitude  = 10.0 ** (level_dbfs / 20.0)
+    out_port   = cmd["_out_port"]
+    in_port    = cmd["_in_port"]
+    ref_port   = cmd["_ref_port"]
+
+    engine = JackEngine()
+    try:
+        engine.start(output_ports=out_port, input_port=in_port,
+                     reference_port=ref_port)
+        sr = engine.samplerate
+        nperseg  = int(sr)
+        noverlap = nperseg // 2
+        duration = capture_duration(16, nperseg, noverlap, sr)
+
+        engine.set_pink_noise(amplitude)
+        _warmup(engine, n_blocks=max(WARMUP_REPS, 4))
+
+        stereo = engine.capture_block_stereo(duration)
+        meas = stereo[:, 0]
+        ref  = stereo[:, 1]
+
+        result = h1_estimate(ref, meas, sr, nperseg=nperseg,
+                             noverlap=noverlap)
+
+        # Downsample for transport
+        freqs = result["freqs"]
+        mag   = result["magnitude_db"]
+        phase = result["phase_deg"]
+        coh   = result["coherence"]
+        if len(freqs) > 2000:
+            idx = np.unique(np.round(
+                np.geomspace(1, len(freqs), 2000)).astype(int) - 1)
+            freqs = freqs[idx]
+            mag   = mag[idx]
+            phase = phase[idx]
+            coh   = coh[idx]
+
+        _pub(pub_q, "data", {
+            "type":          "transfer_result",
+            "cmd":           "transfer",
+            "freqs":         freqs.tolist(),
+            "magnitude_db":  mag.tolist(),
+            "phase_deg":     phase.tolist(),
+            "coherence":     coh.tolist(),
+            "delay_samples": result["delay_samples"],
+            "delay_ms":      result["delay_ms"],
+            "out_port":      out_port,
+            "in_port":       in_port,
+            "ref_port":      ref_port,
+            "xruns":         engine.xruns,
+        })
+    except Exception as e:
+        _pub(pub_q, "error", {"cmd": "transfer", "message": str(e)})
+        return
+    finally:
+        engine.set_silence()
+        engine.stop()
+    _pub(pub_q, "done", {"cmd": "transfer", "xruns": engine.xruns})
+
+
 def _worker_calibrate(pub_q, stop_ev, cal_q, cfg, cmd):
     from .jack_calibration import run_calibration_jack_zmq
     ref_dbfs       = cmd.get("ref_dbfs", -10.0)
@@ -580,25 +645,29 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             try:
                 playback, capture = find_ports()
                 return {"ok": True,
-                        "playback":       playback,
-                        "capture":        capture,
-                        "output_channel": cfg["output_channel"],
-                        "input_channel":  cfg["input_channel"],
-                        "output_port":    cfg.get("output_port"),
-                        "input_port":     cfg.get("input_port")}
+                        "playback":          playback,
+                        "capture":           capture,
+                        "output_channel":    cfg["output_channel"],
+                        "input_channel":     cfg["input_channel"],
+                        "output_port":       cfg.get("output_port"),
+                        "input_port":        cfg.get("input_port"),
+                        "reference_channel": cfg.get("reference_channel"),
+                        "reference_port":    cfg.get("reference_port")}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
         if name == "setup":
             update = cmd.get("update", {})
             if update:
-                if "output_channel" in update or "input_channel" in update:
+                if "output_channel" in update or "input_channel" in update or "reference_channel" in update:
                     try:
                         playback, capture = find_ports()
                         if "output_channel" in update:
                             update["output_port"] = port_name(playback, update["output_channel"])
                         if "input_channel" in update:
                             update["input_port"] = port_name(capture, update["input_channel"])
+                        if "reference_channel" in update:
+                            update["reference_port"] = port_name(capture, update["reference_channel"])
                     except Exception:
                         pass  # non-fatal: fall back to index-only
                 cfg = save_config(update)
@@ -646,6 +715,22 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             cmd["_out_port"] = out_port
             cmd["_in_port"]  = in_port
 
+        if name == "transfer":
+            ref_ch = cfg.get("reference_channel")
+            if ref_ch is None:
+                return {"ok": False,
+                        "error": "reference port not configured — run: ac setup reference <port>"}
+            try:
+                playback, capture = find_ports()
+                out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
+                in_port  = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
+                ref_port = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+            except Exception as e:
+                return {"ok": False, "error": f"port error: {e}"}
+            cmd["_out_port"] = out_port
+            cmd["_in_port"]  = in_port
+            cmd["_ref_port"] = ref_port
+
         if name in ("monitor_thd", "monitor_spectrum"):
             try:
                 _, capture = find_ports()
@@ -678,6 +763,13 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             _spawn("plot", _worker_plot, pub_q, cfg, cmd)
             return {"ok": True,
                     "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
+
+        if name == "transfer":
+            _spawn("transfer", _worker_transfer, pub_q, cfg, cmd)
+            return {"ok": True,
+                    "out_port": cmd["_out_port"],
+                    "in_port":  cmd["_in_port"],
+                    "ref_port": cmd["_ref_port"]}
 
         if name == "monitor_thd":
             _spawn("monitor_thd", _worker_monitor_thd, pub_q, cfg, cmd)

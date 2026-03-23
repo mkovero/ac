@@ -24,6 +24,8 @@ DEFAULTS = {
     "input_channel":  0,
     "output_port":    None,   # sticky JACK port name, e.g. "Fireface400 (123):AN1"
     "input_port":     None,
+    "reference_channel": None,  # capture port index for H1 transfer function reference
+    "reference_port":    None,  # sticky JACK port name for reference
     "dbu_ref_vrms":   DBU_REF_EXACT,
     "dmm_host":       None,
     "range_start_hz": 20.0,
@@ -65,6 +67,10 @@ def show(cfg):
           + (f"  ->  {cfg['output_port']}" if cfg.get("output_port") else ""))
     print(f"  Input channel:  {cfg['input_channel']}"
           + (f"  ->  {cfg['input_port']}" if cfg.get("input_port") else ""))
+    ref_ch = cfg.get("reference_channel")
+    if ref_ch is not None:
+        print(f"  Reference ch:   {ref_ch}"
+              + (f"  ->  {cfg['reference_port']}" if cfg.get("reference_port") else ""))
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")

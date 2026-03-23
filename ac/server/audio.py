@@ -23,10 +23,14 @@ class JackEngine:
         self._tone_pos    = 0
         self._tone_lock   = threading.Lock()
 
-        # Input ringbuffer
+        # Input ringbuffer (measurement channel)
         rb_frames         = int(self._sr * RINGBUFFER_SECONDS)
         self._ringbuf     = jack.RingBuffer(rb_frames * 4)
         self._capture_on  = False
+
+        # Reference channel (registered lazily in start() when needed)
+        self._ref_port    = None
+        self._ref_ringbuf = None
 
         self.xruns        = 0
 
@@ -51,12 +55,15 @@ class JackEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, output_ports=None, input_port=None):
+    def start(self, output_ports=None, input_port=None, reference_port=None):
         """Activate and connect to hardware ports.
 
-        output_ports: str (single port name) or list of str.
-        input_port:   str or None.
+        output_ports:   str (single port name) or list of str.
+        input_port:     str or None — measurement channel.
+        reference_port: str or None — reference channel for H1 transfer function.
         """
+        import jack as _jack
+
         # Normalise to list
         if output_ports is None:
             out_list = []
@@ -71,12 +78,20 @@ class JackEngine:
                 self._client.outports.register(f"out_{i}")
             )
 
+        # Register reference input port if requested
+        if reference_port and self._ref_port is None:
+            self._ref_port = self._client.inports.register("in_1")
+            rb_frames = int(self._sr * RINGBUFFER_SECONDS)
+            self._ref_ringbuf = _jack.RingBuffer(rb_frames * 4)
+
         self._client.activate()
 
         for jack_port, hw_port in zip(self._out_ports, out_list):
             self._client.connect(jack_port, hw_port)
         if input_port:
             self._client.connect(input_port, self._in_port)
+        if reference_port and self._ref_port is not None:
+            self._client.connect(reference_port, self._ref_port)
 
     # Keep backward-compatible single-port kwarg
     def start_mono(self, output_port=None, input_port=None):
@@ -134,6 +149,8 @@ class JackEngine:
 
     def start_capture(self):
         self._ringbuf.read(self._ringbuf.read_space)
+        if self._ref_ringbuf is not None:
+            self._ref_ringbuf.read(self._ref_ringbuf.read_space)
         self._capture_on = True
 
     def stop_capture(self):
@@ -152,6 +169,28 @@ class JackEngine:
         data = self.read_capture(n)
         self.stop_capture()
         return data
+
+    def capture_block_stereo(self, duration_seconds):
+        """Capture measurement + reference channels simultaneously.
+
+        Returns (n_samples, 2) float32 array: col 0 = measurement, col 1 = reference.
+        Raises RuntimeError if reference port is not registered.
+        """
+        if self._ref_ringbuf is None:
+            raise RuntimeError("reference port not registered — call start() with reference_port")
+        n = int(duration_seconds * self._sr)
+        n_bytes = n * 4
+        self.start_capture()
+        # Read both ringbuffers
+        while (self._ringbuf.read_space < n_bytes
+               or self._ref_ringbuf.read_space < n_bytes):
+            threading.Event().wait(0.005)
+        meas_raw = self._ringbuf.read(n_bytes)
+        ref_raw = self._ref_ringbuf.read(n_bytes)
+        self.stop_capture()
+        meas = np.frombuffer(meas_raw, dtype=np.float32).copy()
+        ref = np.frombuffer(ref_raw, dtype=np.float32).copy()
+        return np.column_stack((meas, ref))
 
     # ------------------------------------------------------------------
     # JACK process callback
@@ -176,12 +215,17 @@ class JackEngine:
         for port in self._out_ports:
             port.get_array()[:] = block
 
-        # Input
+        # Input — measurement channel
         if self._capture_on:
             data    = self._in_port.get_array().astype(np.float32)
             n_bytes = data.nbytes
             if self._ringbuf.write_space >= n_bytes:
                 self._ringbuf.write(data.tobytes())
+            # Reference channel (if registered)
+            if self._ref_port is not None and self._ref_ringbuf is not None:
+                ref_data = self._ref_port.get_array().astype(np.float32)
+                if self._ref_ringbuf.write_space >= ref_data.nbytes:
+                    self._ref_ringbuf.write(ref_data.tobytes())
 
     def _xrun(self, delay):
         self.xruns += 1

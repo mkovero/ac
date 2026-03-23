@@ -267,6 +267,69 @@ def _plot_level_sweep(results, device_name, output_path, cal, show=False):
     _save_or_show(fig, output_path, show=show)
 
 
+# ---------------------------------------------------------------------------
+# Transfer function plot
+# ---------------------------------------------------------------------------
+
+def plot_transfer(result, device_name="DUT", output_path=None, show=False):
+    """3-panel plot: magnitude, phase, coherence vs frequency."""
+    freqs = result["freqs"]
+    mag   = result["magnitude_db"]
+    phase = result["phase_deg"]
+    coh   = result["coherence"]
+
+    fig = plt.figure(figsize=(14, 10), facecolor=_DARK_BG)
+    delay_ms = result.get("delay_ms", 0.0)
+    fig.suptitle(f"Transfer Function (H1) — {device_name}   "
+                 f"[delay {delay_ms:.3f} ms]",
+                 color="white", fontsize=14, fontweight="bold", y=0.99)
+
+    gs      = gridspec.GridSpec(3, 1, figure=fig, hspace=0.55)
+    ax_mag  = fig.add_subplot(gs[0])
+    ax_ph   = fig.add_subplot(gs[1])
+    ax_coh  = fig.add_subplot(gs[2])
+
+    x_lo = max(10, freqs[1] * 0.8) if len(freqs) > 1 else 10
+    x_hi = min(SAMPLERATE / 2, freqs[-1] * 1.2)
+
+    for ax in [ax_mag, ax_ph, ax_coh]:
+        _style_ax(ax)
+        ax.set_xscale("log")
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_xlabel("Frequency (Hz)")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(_hz_fmt))
+        ax.xaxis.set_minor_formatter(plt.FuncFormatter(_hz_fmt))
+        ax.set_xticks([t for t in _FREQ_TICKS if x_lo <= t <= x_hi])
+
+    # Magnitude
+    ax_mag.plot(freqs, mag, color=_BLUE, linewidth=1.2)
+    ax_mag.axhline(0, color="#444444", linewidth=1.0, linestyle="--")
+    ax_mag.set_ylabel("Magnitude (dB)")
+    ax_mag.set_title("Magnitude Response")
+    ax_mag.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda y, _: f"{y:+.1f}"))
+
+    # Phase
+    ax_ph.plot(freqs, phase, color=_PURPLE, linewidth=1.2)
+    ax_ph.axhline(0, color="#444444", linewidth=1.0, linestyle="--")
+    ax_ph.set_ylabel("Phase (\u00b0)")
+    ax_ph.set_title("Phase Response")
+    ax_ph.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda y, _: f"{y:+.0f}\u00b0"))
+
+    # Coherence
+    ax_coh.plot(freqs, coh, color=_ORANGE, linewidth=1.2)
+    ax_coh.axhline(0.95, color=_RED, linewidth=1.0, linestyle="--",
+                   alpha=0.7, label="\u03b3\u00b2 = 0.95")
+    ax_coh.set_ylabel("Coherence (\u03b3\u00b2)")
+    ax_coh.set_title("Coherence")
+    ax_coh.set_ylim(-0.05, 1.05)
+    ax_coh.legend(facecolor="#1e2530", labelcolor="white", fontsize=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    _save_or_show(fig, output_path, show=show)
+
+
 def _save_or_show(fig, output_path, show=False):
     if output_path:
         fig.savefig(output_path, dpi=150, bbox_inches="tight",

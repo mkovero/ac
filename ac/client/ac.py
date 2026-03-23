@@ -408,9 +408,10 @@ def cmd_devices(_cmd, cfg, client):
 
 def cmd_setup(cmd, cfg, client):
     update = {}
-    if "device"       in cmd: update["device"]          = cmd["device"]
-    if "output"       in cmd: update["output_channel"]  = cmd["output"]
-    if "input"        in cmd: update["input_channel"]   = cmd["input"]
+    if "device"       in cmd: update["device"]             = cmd["device"]
+    if "output"       in cmd: update["output_channel"]    = cmd["output"]
+    if "input"        in cmd: update["input_channel"]     = cmd["input"]
+    if "reference"    in cmd: update["reference_channel"]  = cmd["reference"]
     if "dbu_ref_vrms" in cmd: update["dbu_ref_vrms"]    = cmd["dbu_ref_vrms"]
     if "dmm_host"     in cmd: update["dmm_host"]        = cmd["dmm_host"]
     if "gpio_port"    in cmd: update["gpio_port"]       = cmd["gpio_port"]
@@ -423,6 +424,11 @@ def cmd_setup(cmd, cfg, client):
     print(f"  Device:         {srv_cfg.get('device', '?')}")
     print(f"  Output channel: {srv_cfg.get('output_channel', '?')}")
     print(f"  Input channel:  {srv_cfg.get('input_channel',  '?')}")
+    ref_ch = srv_cfg.get("reference_channel")
+    if ref_ch is not None:
+        ref_port_name = srv_cfg.get("reference_port", "")
+        print(f"  Reference ch:   {ref_ch}"
+              + (f"  ->  {ref_port_name}" if ref_port_name else ""))
     print(f"  dBu reference: {ref*1000:.4f} mVrms  ({ref:.8f} V)")
     dmm = srv_cfg.get("dmm_host")
     print(f"  DMM host:      {dmm if dmm else '(not configured)'}")
@@ -761,6 +767,67 @@ def cmd_plot(cmd, cfg, client):
                   show_plot=cmd.get("show_plot", False),
                   host=cfg.get("server_host", "localhost"),
                   data_port=cfg.get("zmq_data_port", DATA_PORT))
+
+
+def cmd_transfer(cmd, cfg, client):
+    from .plotting import plot_transfer
+    from .io import save_transfer_csv
+
+    cal_info = _get_cal(client)
+    level_db = _level_to_dbfs(cmd["level"], cal_info)
+
+    start_hz = cmd["start"] if cmd["start"] is not None else cfg.get("range_start_hz", 20.0)
+    stop_hz  = cmd["stop"]  if cmd["stop"]  is not None else cfg.get("range_stop_hz", 20000.0)
+
+    print(f"\n  Transfer function: {start_hz:.0f} → {stop_hz:.0f} Hz  |  {level_db:.1f} dBFS")
+    print(f"  Stimulus: pink noise  |  H1 estimator with Welch averaging")
+
+    ack = _check_ack(client.send_cmd({
+        "cmd":        "transfer",
+        "start_hz":   start_hz,
+        "stop_hz":    stop_hz,
+        "level_dbfs": level_db,
+    }))
+    print(f"  Output: {ack['out_port']}  →  Measurement: {ack['in_port']}  |  Reference: {ack['ref_port']}")
+    print(f"  Capturing... (this takes several seconds)")
+
+    result = None
+
+    def on_data(frame):
+        nonlocal result
+        if frame.get("type") == "transfer_result":
+            result = frame
+
+    _collect_stream(client, "transfer", on_data, timeout_ms=300000)
+
+    if result is None:
+        print("  No result received.")
+        return
+
+    # Convert lists back to numpy arrays
+    for key in ("freqs", "magnitude_db", "phase_deg", "coherence"):
+        if key in result and isinstance(result[key], list):
+            result[key] = np.array(result[key])
+
+    freqs = result["freqs"]
+    coh   = result["coherence"]
+    delay = result.get("delay_ms", 0.0)
+
+    print(f"\n  Delay:     {result.get('delay_samples', 0)} samples  ({delay:.3f} ms)")
+    print(f"  Coherence: mean {np.mean(coh):.3f}  min {np.min(coh):.3f}")
+    print(f"  Points:    {len(freqs)}  ({freqs[0]:.1f} – {freqs[-1]:.0f} Hz)")
+
+    # Save CSV + plot
+    active  = cfg.get("session")
+    out_dir = session_dir(active) if active else cfg.get("output_dir", ".")
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path  = os.path.join(out_dir, f"transfer_{ts}.csv")
+    plot_path = os.path.join(out_dir, f"transfer_{ts}.png")
+
+    save_transfer_csv(result, csv_path)
+    plot_transfer(result, device_name="DUT", output_path=plot_path,
+                  show=cmd.get("show_plot", False))
 
 
 def cmd_monitor(cmd, cfg, client):
@@ -1321,6 +1388,7 @@ HANDLERS = {
     "sweep_level":        cmd_sweep_level,
     "sweep_frequency":    cmd_sweep_frequency,
     "plot":               cmd_plot,
+    "transfer":           cmd_transfer,
     "monitor":            cmd_monitor,
     "generate_sine":      cmd_generate_sine,
     "generate_pink":      cmd_generate_pink,

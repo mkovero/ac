@@ -35,6 +35,7 @@ class SoundDeviceEngine:
         self._in_channels = 1
         self._out_channel_map = []   # list of 0-based channel indices
         self._in_channel_idx = 0
+        self._ref_channel_idx = None  # reference channel for H1 transfer function
 
     # ------------------------------------------------------------------
     # Properties
@@ -52,11 +53,12 @@ class SoundDeviceEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, output_ports=None, input_port=None):
+    def start(self, output_ports=None, input_port=None, reference_port=None):
         """Open and start the sounddevice stream.
 
-        output_ports: str or list of "<device_name>:<channel>" strings, or None.
-        input_port:   str "<device_name>:<channel>" or None.
+        output_ports:   str or list of "<device_name>:<channel>" strings, or None.
+        input_port:     str "<device_name>:<channel>" or None — measurement channel.
+        reference_port: str "<device_name>:<channel>" or None — reference channel.
         """
         if output_ports is None:
             out_list = []
@@ -78,17 +80,27 @@ class SoundDeviceEngine:
         if input_port:
             in_dev, in_ch_idx = _parse_port(input_port)
             self._in_channel_idx = in_ch_idx
+        if reference_port:
+            ref_dev, ref_ch_idx = _parse_port(reference_port)
+            self._ref_channel_idx = ref_ch_idx
+            # Use same input device; ensure enough channels are opened
+            if in_dev is None:
+                in_dev = ref_dev
 
         self._out_device = out_dev
         self._in_device = in_dev
 
         has_output = bool(out_list)
-        has_input = input_port is not None
+        has_input = input_port is not None or reference_port is not None
+
+        max_in_ch = in_ch_idx
+        if self._ref_channel_idx is not None:
+            max_in_ch = max(max_in_ch, self._ref_channel_idx)
 
         if has_output:
             self._out_channels = out_max_ch
         if has_input:
-            self._in_channels = in_ch_idx + 1
+            self._in_channels = max_in_ch + 1
 
         # Validate samplerate support
         device_pair = (
@@ -197,6 +209,23 @@ class SoundDeviceEngine:
         self.start_capture()
         data = self.read_capture(n)
         self.stop_capture()
+        # If two-channel capture is active, return only measurement channel
+        if data.ndim == 2:
+            return data[:, 0]
+        return data
+
+    def capture_block_stereo(self, duration_seconds):
+        """Capture measurement + reference channels simultaneously.
+
+        Returns (n_samples, 2) float32 array: col 0 = measurement, col 1 = reference.
+        Raises RuntimeError if reference port is not registered.
+        """
+        if self._ref_channel_idx is None:
+            raise RuntimeError("reference port not registered — call start() with reference_port")
+        n = int(duration_seconds * self._sr)
+        self.start_capture()
+        data = self.read_capture(n)
+        self.stop_capture()
         return data
 
     # ------------------------------------------------------------------
@@ -229,9 +258,18 @@ class SoundDeviceEngine:
 
         # Input
         if indata is not None and self._capture_on:
-            mono = indata[:, self._in_channel_idx].copy()
-            with self._capture_lock:
-                self._capture_buf.append(mono)
+            if self._ref_channel_idx is not None:
+                # Two-channel capture: col 0 = measurement, col 1 = reference
+                stereo = np.column_stack((
+                    indata[:, self._in_channel_idx].copy(),
+                    indata[:, self._ref_channel_idx].copy(),
+                ))
+                with self._capture_lock:
+                    self._capture_buf.append(stereo)
+            else:
+                mono = indata[:, self._in_channel_idx].copy()
+                with self._capture_lock:
+                    self._capture_buf.append(mono)
 
 
 # ------------------------------------------------------------------

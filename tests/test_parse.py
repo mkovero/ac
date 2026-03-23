@@ -266,3 +266,54 @@ def test_sweep_frequency_old_ppd_token_rejected():
     """Old 'ac sweep frequency ... 20ppd' ppd syntax now raises ParseError."""
     with pytest.raises(ParseError):
         parse(["sweep", "frequency", "20hz", "20khz", "0dbu", "20ppd"])
+
+
+# ---------------------------------------------------------------------------
+# transfer
+# ---------------------------------------------------------------------------
+
+def test_transfer_defaults():
+    r = parse(["transfer"])
+    assert r["cmd"] == "transfer"
+    assert r["start"] is None
+    assert r["stop"] is None
+    assert r["level"] == ("dbfs", -20.0)
+    assert r["show_plot"] is False
+
+
+def test_transfer_with_args():
+    r = parse(["transfer", "20hz", "20khz", "-10dbu"])
+    assert r["cmd"] == "transfer"
+    assert r["start"] == 20.0
+    assert r["stop"] == 20000.0
+    assert r["level"] == ("dbu", -10.0)
+
+
+def test_transfer_abbreviation_tf():
+    assert parse(["tf"])["cmd"] == "transfer"
+
+
+def test_transfer_abbreviation_tr():
+    assert parse(["tr"])["cmd"] == "transfer"
+
+
+def test_transfer_show():
+    r = parse(["transfer", "show"])
+    assert r["cmd"] == "transfer"
+    assert r["show_plot"] is True
+
+
+# ---------------------------------------------------------------------------
+# setup reference
+# ---------------------------------------------------------------------------
+
+def test_setup_reference():
+    r = parse(["setup", "reference", "5"])
+    assert r["cmd"] == "setup"
+    assert r["reference"] == 5
+
+
+def test_setup_reference_abbreviation():
+    r = parse(["se", "ref", "3"])
+    assert r["cmd"] == "setup"
+    assert r["reference"] == 3

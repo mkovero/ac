@@ -18,6 +18,21 @@ def save_csv(results, path):
         w.writerows(rows)
     print(f"  CSV  -> {path}")
 
+def save_transfer_csv(result, path):
+    """Save H1 transfer function result to CSV."""
+    freqs = result["freqs"]
+    mag   = result["magnitude_db"]
+    phase = result["phase_deg"]
+    coh   = result["coherence"]
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["freq_hz", "magnitude_db", "phase_deg", "coherence"])
+        for i in range(len(freqs)):
+            w.writerow([float(freqs[i]), float(mag[i]),
+                        float(phase[i]), float(coh[i])])
+    print(f"  CSV  -> {path}")
+
+
 def print_summary(results, device_name, cal=None):
     if not results:
         return

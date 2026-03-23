@@ -176,6 +176,9 @@ ABBREVS = {
     "o": "output", "out": "output",
     "i": "input",  "in":  "input",
     "r": "range", "ra": "range",
+    "ref": "reference",
+    # transfer function
+    "tf": "transfer", "tr": "transfer",
 }
 
 
@@ -303,6 +306,19 @@ def parse(argv):
                 "level": level, "ppd": ppd,
                 "show_plot": show_plot}
 
+    elif verb == "transfer":
+        # ac transfer [<start:freq> <stop:freq>] [<level:level>]
+        tokens = _classify_all(args)
+        start  = _pull(tokens, "freq",  optional=True)
+        stop   = _pull(tokens, "freq",  optional=True)
+        level  = _pull(tokens, "level", optional=True) or ("dbfs", -20.0)
+        if tokens:
+            raise ParseError(f"unexpected token(s): {tokens}")
+        return {"cmd": "transfer",
+                "start": start, "stop": stop,
+                "level": level,
+                "show_plot": show_plot}
+
     elif verb == "generate":
         if not args:
             raise ParseError("generate needs a noun: sine | pink")
@@ -380,7 +396,7 @@ def parse(argv):
             if not remaining:
                 raise ParseError(f"setup: {key!r} needs a value")
             val = remaining.pop(0)
-            if key in ("output", "input", "device"):
+            if key in ("output", "input", "reference", "device"):
                 try:
                     result[key] = int(val)
                 except ValueError:
@@ -411,7 +427,7 @@ def parse(argv):
                 except ValueError:
                     raise ParseError(f"setup range: expected frequency for stop, got {stop_val!r}")
             else:
-                raise ParseError(f"setup: unknown key {key!r}  (output | input | device | dburef | dmm | gpio | range)")
+                raise ParseError(f"setup: unknown key {key!r}  (output | input | reference | device | dburef | dmm | gpio | range)")
         return result
 
     elif verb == "server":
@@ -483,7 +499,7 @@ def parse(argv):
         return result
 
     else:
-        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | plot | generate | calibrate | setup | devices | server | new | sessions | use | rm | diff | gpio)")
+        raise ParseError(f"unknown command: {verb!r}  (sweep | monitor | plot | transfer | generate | calibrate | setup | devices | server | new | sessions | use | rm | diff | gpio)")
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +511,7 @@ ac — audio measurement CLI
 
 Commands:
   devices                              list audio ports
-  setup <key> <val> ...                configure (output, input, range, dmm, gpio)
+  setup <key> <val> ...                configure (output, input, reference, range, dmm, gpio)
   calibrate [output N] [input N]       interactive level calibration
   calibrate show                       show stored calibration
   generate sine [ch] [level] [freq]    play sine tone
@@ -503,6 +519,7 @@ Commands:
   sweep level <start> <stop> [freq]    output-only level ramp
   sweep frequency <start> <stop> [level]  output-only chirp
   plot [<start> <stop>] [level] [ppd]  blocking THD measurement
+  transfer [<start> <stop>] [level]    H1 transfer function (requires reference port)
   monitor [<start> <stop>] [interval]  live spectrum (TUI or show)
   stop                                 stop active generator/measurement
   dmm                                  read AC Vrms from configured DMM
@@ -510,9 +527,9 @@ Commands:
 Units:  20hz 1khz  |  0dbu -12dbfs 775mvrms 1vrms  |  1s  |  10ppd
         append "show" to open pyqtgraph window
 
-Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot)
+Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) tf/tr(ansfer)
               l(evel) f(requency) si(ne) pk(ink) sh(ow)
-              se(tup) d(evices) st(op)
+              se(tup) d(evices) st(op) ref(erence)
 
 Sessions:  new <name>  sessions  use <name>  rm <name>  diff <a> <b>
 Server:    server enable|disable|connections|<host>
