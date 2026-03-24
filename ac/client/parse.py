@@ -151,8 +151,8 @@ ABBREVS = {
     "pk": "pink",
     # show plot after command
     "sh": "show",
-    # calibrate show
-    "ls": "list",
+    # sessions
+    "ls": "sessions",
     # dmm
     "dmm": "dmm",
     # stop
@@ -217,7 +217,7 @@ def parse(argv):
     verb = _expand(args.pop(0))
 
     # "ac calibrate show" / "ac cal show" -- check before _extract_show strips "show"
-    if verb == "calibrate" and args and _expand(args[0]) in ("show", "list"):
+    if verb == "calibrate" and args and _expand(args[0]) == "show":
         return {"cmd": "calibrate_show"}
 
     # strip optional trailing "show" keyword anywhere in args
@@ -450,7 +450,7 @@ def parse(argv):
             raise ParseError(f"new: unexpected extra args: {args}")
         return {"cmd": "session_new", "name": name}
 
-    elif verb in ("sessions", "list"):
+    elif verb == "sessions":
         return {"cmd": "session_list"}
 
     elif verb == "use":

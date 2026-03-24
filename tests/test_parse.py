@@ -177,10 +177,6 @@ def test_calibrate_show():
     assert r["cmd"] == "calibrate_show"
 
 
-def test_calibrate_list():
-    r = parse(["cal", "list"])
-    assert r["cmd"] == "calibrate_show"
-
 
 # ---------------------------------------------------------------------------
 # server
