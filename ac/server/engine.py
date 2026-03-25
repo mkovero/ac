@@ -408,15 +408,19 @@ def _worker_transfer(pub_q, stop_ev, cfg, cmd):
     """H1 transfer function measurement."""
     from .transfer import h1_estimate, capture_duration
 
-    level_dbfs = cmd["level_dbfs"]
-    amplitude  = 10.0 ** (level_dbfs / 20.0)
-    out_port   = cmd["_out_port"]
-    in_port    = cmd["_in_port"]
-    ref_port   = cmd["_ref_port"]
+    level_dbfs   = cmd["level_dbfs"]
+    amplitude    = 10.0 ** (level_dbfs / 20.0)
+    out_port     = cmd["_out_port"]
+    ref_out_port = cmd["_ref_out_port"]
+    in_port      = cmd["_in_port"]
+    ref_port     = cmd["_ref_port"]
+
+    # Send stimulus to both the measurement output and the reference output
+    out_ports = [out_port, ref_out_port] if ref_out_port != out_port else [out_port]
 
     engine = JackEngine()
     try:
-        engine.start(output_ports=out_port, input_port=in_port,
+        engine.start(output_ports=out_ports, input_port=in_port,
                      reference_port=ref_port)
         sr = engine.samplerate
         nperseg  = int(sr)
@@ -778,14 +782,17 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                         "error": "reference port not configured — run: ac setup reference <port>"}
             try:
                 playback, capture = find_ports()
-                out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
-                in_port  = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
-                ref_port = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+                out_port     = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
+                in_port      = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
+                ref_port     = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+                # Also send stimulus to the playback port that feeds the reference input
+                ref_out_port = resolve_port(playback, None, ref_ch)
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
-            cmd["_out_port"] = out_port
-            cmd["_in_port"]  = in_port
-            cmd["_ref_port"] = ref_port
+            cmd["_out_port"]     = out_port
+            cmd["_ref_out_port"] = ref_out_port
+            cmd["_in_port"]      = in_port
+            cmd["_ref_port"]     = ref_port
 
         if name == "monitor_spectrum":
             try:
@@ -831,9 +838,10 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         if name == "transfer":
             _spawn("transfer", _worker_transfer, pub_q, cfg, cmd)
             return {"ok": True,
-                    "out_port": cmd["_out_port"],
-                    "in_port":  cmd["_in_port"],
-                    "ref_port": cmd["_ref_port"]}
+                    "out_port":     cmd["_out_port"],
+                    "ref_out_port": cmd["_ref_out_port"],
+                    "in_port":      cmd["_in_port"],
+                    "ref_port":     cmd["_ref_port"]}
 
         if name == "monitor_spectrum":
             _spawn("monitor_spectrum", _worker_monitor_spectrum, pub_q, cfg, cmd)
