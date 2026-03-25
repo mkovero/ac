@@ -13,6 +13,12 @@ The `ip` of audio — terse, positional, unit-tagged arguments.
 ## Install
 
 ```bash
+pip install audiocli
+```
+
+Or from source:
+
+```bash
 pip install -e .
 ```
 
