@@ -2,9 +2,13 @@
 
 Command-line toolkit for audio bench measurements.
 
-THD, THD+N, level 'n frequency sweeps, live spectrum.
+THD, THD+N, level 'n frequency sweeps, transfer functions, live spectrum.
 
 The `ip` of audio — terse, positional, unit-tagged arguments.
+
+> **Alpha** — only tested on Linux with JACK (native and PipeWire).
+> sounddevice/PortAudio backend exists but is not exercised yet.
+> macOS and Windows are untested.
 
 ## Install
 
@@ -51,13 +55,17 @@ ac m sh                             # live spectrum, pyqtgraph window
 | Command | What it does |
 |---------|-------------|
 | `devices` | List audio ports |
-| `setup` | Configure hardware — output, input, range, dmm (SCPI), gpio |
+| `setup` | Configure hardware — output, input, reference, range, dmm, gpio |
 | `calibrate` | Interface calibration |
 | `generate` | Play a sine or pink noise tone |
-| `sweep` | Ramp or frequency chirp |
-| `plot` | Point-by-point THD measurement |
-| `monitor` | Live spectrum |
-| `stop` | Stop activities |
+| `sweep` | Level ramp or frequency chirp |
+| `plot` | Point-by-point THD measurement with PNG output |
+| `transfer` | H1 transfer function (magnitude, phase, coherence) |
+| `monitor` | Live spectrum with TUI bar chart |
+| `probe` | Auto-detect analog ports and loopback pairs (DMM + capture scan) |
+| `dmm` | One-off AC Vrms reading from SCPI multimeter |
+| `server` | Enable/disable server, show connections, connect to remote |
+| `stop` | Stop active generator/measurement |
 
 ## Units
 
@@ -77,9 +85,9 @@ Append `show` to any command to open a pyqtgraph window.
 Everything has a short form:
 
 ```
-s(weep)  m(onitor)  g(enerate)  c(alibrate)  p(lot)
+s(weep)  m(onitor)  g(enerate)  c(alibrate)  p(lot)  tf/tr(ansfer)  pr(obe)
 l(evel)  f(requency)  si(ne)  pk(ink)  sh(ow)
-se(tup)  d(evices)  st(op)
+se(tup)  d(evices)  st(op)  ref(erence)
 ```
 
 ## Sessions
