@@ -31,7 +31,7 @@ DATA_PORT  = 5557
 # Concurrency classification
 OUTPUT_CMDS = {"generate", "generate_pink", "sweep_level", "sweep_frequency"}
 INPUT_CMDS  = {"monitor_spectrum"}
-EXCLUSIVE   = {"plot", "calibrate", "transfer", "probe"}
+EXCLUSIVE   = {"plot", "plot_level", "calibrate", "transfer", "probe"}
 AUDIO_CMDS  = OUTPUT_CMDS | INPUT_CMDS | EXCLUSIVE
 
 
@@ -211,6 +211,52 @@ def _worker_plot(pub_q, stop_ev, cfg, cmd):
         engine.set_silence()
         engine.stop()
     _pub(pub_q, "done", {"cmd": "plot", "n_points": n, "xruns": xruns})
+
+
+def _worker_plot_level(pub_q, stop_ev, cfg, cmd):
+    """Blocking point-by-point level sweep at fixed frequency."""
+    freq_hz    = cmd["freq_hz"]
+    start_dbfs = cmd["start_dbfs"]
+    stop_dbfs  = cmd["stop_dbfs"]
+    steps      = cmd.get("steps", 26)
+    duration   = cmd.get("duration", 1.0)
+    cal        = Calibration.load(output_channel=cfg["output_channel"],
+                                  input_channel=cfg["input_channel"])
+
+    levels = np.linspace(start_dbfs, stop_dbfs, steps)
+
+    out_port = cmd["_out_port"]
+    in_port  = cmd["_in_port"]
+    xruns = 0
+    n = 0
+    engine = JackEngine()
+    try:
+        engine.start(output_ports=out_port, input_port=in_port)
+        for level_dbfs in levels:
+            if stop_ev.is_set():
+                break
+            amplitude = 10.0 ** (level_dbfs / 20.0)
+            dur = max(duration, 10.0 / freq_hz)
+            engine.set_tone(float(freq_hz), amplitude)
+            _warmup(engine)
+            data = engine.capture_block(dur)
+            rec  = data.reshape(-1, 1)
+            r    = analyze(rec, sr=engine.samplerate, fundamental=float(freq_hz))
+            if "error" in r:
+                continue
+            r["drive_db"] = float(level_dbfs)
+            frame = _sweep_point_frame(r, cal, n, "plot_level", float(level_dbfs),
+                                       freq_hz=float(freq_hz))
+            _pub(pub_q, "data", frame)
+            n += 1
+        xruns = engine.xruns
+    except Exception as e:
+        _pub(pub_q, "error", {"cmd": "plot_level", "message": str(e)})
+        return
+    finally:
+        engine.set_silence()
+        engine.stop()
+    _pub(pub_q, "done", {"cmd": "plot_level", "n_points": n, "xruns": xruns})
 
 
 def _worker_monitor_spectrum(pub_q, stop_ev, cfg, cmd):
@@ -767,7 +813,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                 return {"ok": False, "error": f"port error: {e}"}
             cmd["_out_port"] = out_port
 
-        if name == "plot":
+        if name in ("plot", "plot_level"):
             try:
                 playback, capture = find_ports()
                 out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
@@ -834,6 +880,11 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         if name == "plot":
             _spawn("plot", _worker_plot, pub_q, cfg, cmd)
+            return {"ok": True,
+                    "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
+
+        if name == "plot_level":
+            _spawn("plot_level", _worker_plot_level, pub_q, cfg, cmd)
             return {"ok": True,
                     "out_port": cmd["_out_port"], "in_port": cmd["_in_port"]}
 

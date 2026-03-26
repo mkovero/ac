@@ -85,9 +85,23 @@ def _parse_ppd(s):
     raise ValueError(f"not a ppd value: {s!r}")
 
 
+def _parse_steps(s):
+    """Return number of steps as int or raise ValueError."""
+    s = s.lower().strip()
+    try:
+        if s.endswith("steps"):
+            return int(float(s[:-5]))
+        if s.endswith("step"):
+            return int(float(s[:-4]))
+    except ValueError:
+        pass
+    raise ValueError(f"not a steps value: {s!r}")
+
+
 def classify(token):
     """Return (type, value) for a token, or raise ValueError if unrecognised."""
-    for kind, fn in [("ppd", _parse_ppd), ("time", _parse_time),
+    for kind, fn in [("ppd", _parse_ppd), ("steps", _parse_steps),
+                     ("time", _parse_time),
                      ("level", _parse_level), ("freq", _parse_freq)]:
         try:
             return (kind, fn(token))
@@ -280,6 +294,21 @@ def parse(argv):
                 "show_plot":  show_plot}
 
     elif verb == "plot":
+        if args and _expand(args[0]) == "level":
+            # ac plot level <start:level> <stop:level> [<freq:freq>] [<steps:steps>]
+            args.pop(0)
+            tokens = _classify_all(args)
+            start  = _pull(tokens, "level", optional=True) or ("dbfs", -40.0)
+            stop   = _pull(tokens, "level", optional=True) or ("dbfs",   0.0)
+            freq   = _pull(tokens, "freq",  optional=True) or 1000.0
+            steps  = _pull(tokens, "steps", optional=True) or 26
+            if tokens:
+                raise ParseError(f"unexpected token(s): {tokens}")
+            return {"cmd": "plot_level",
+                    "start": start, "stop": stop,
+                    "freq": freq, "steps": steps,
+                    "show_plot": show_plot}
+
         # ac plot [<start:freq> <stop:freq>] [<level:level>] [<ppd:ppd>]
         # Blocking point-by-point measurement sweep (formerly ac sweep frequency)
         tokens = _classify_all(args)
@@ -508,7 +537,8 @@ Commands:
   generate        <sine|pink> [ch] [level] [freq]               output sine/pink
   sweep level     <start> <stop> [freq]                         sweep level with fixed frequency
   sweep frequency <freqStart freqStop> [level]                  sweep frequency with fixed level
-  plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD measurement
+  plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD vs frequency
+  plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
   transfer        [<freqStart freqStop>] [level]                H1 transfer function (requires reference)
   monitor         [<freqStart freqStop>] [interval] [show]      live spectrum
   stop                                                          stop active generator/measurement
@@ -537,6 +567,7 @@ Examples:
   ac calibrate
   ac g si 0dbu 1khz
   ac plot 20hz 20khz 0dbu 20ppd show
+  ac plot level -20dbu 6dbu 1khz 26steps show
   ac m sh
   ac s f 20hz 20khz 0dbu"""
 

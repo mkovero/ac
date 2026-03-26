@@ -761,6 +761,54 @@ def cmd_plot(cmd, cfg, client):
                   data_port=cfg.get("zmq_data_port", DATA_PORT))
 
 
+def cmd_plot_level(cmd, cfg, client):
+    cal_info = _get_cal(client)
+    if cal_info:
+        print("  Loaded calibration from server.")
+    else:
+        print("  No calibration found — levels in dBFS only.")
+    start_db = _level_to_dbfs(cmd["start"], cal_info)
+    stop_db  = _level_to_dbfs(cmd["stop"],  cal_info)
+    freq     = cmd["freq"]
+    steps    = cmd["steps"]
+
+    print(f"\n  Plot level: {start_db:.1f} → {stop_db:.1f} dBFS  "
+          f"{freq:.0f} Hz  |  {steps} steps")
+    _print_freq_header(cal_info is not None)
+
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("sweep_level", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+
+    ack = _check_ack(client.send_cmd({
+        "cmd":        "plot_level",
+        "freq_hz":    freq,
+        "start_dbfs": start_db,
+        "stop_dbfs":  stop_db,
+        "steps":      steps,
+    }))
+    print(f"  Output: {ack['out_port']}  →  Input: {ack['in_port']}")
+
+    results = []
+
+    def on_data(frame):
+        if frame.get("type") == "sweep_point":
+            results.append(frame)
+            _print_freq_row(frame)
+
+    _collect_stream(client, "plot_level", on_data, timeout_ms=300000)
+
+    if not results:
+        return
+    _numpy_results(results)
+    cal = _cal_from_frame(results[0])
+    print_summary(results, "DUT", cal=cal)
+    _save_results(results, "plot_level", cal=cal, cfg=cfg,
+                  show_plot=cmd.get("show_plot", False),
+                  host=cfg.get("server_host", "localhost"),
+                  data_port=cfg.get("zmq_data_port", DATA_PORT))
+
+
 def cmd_transfer(cmd, cfg, client):
     from .plotting import plot_transfer
     from .io import save_transfer_csv
@@ -1489,6 +1537,7 @@ HANDLERS = {
     "sweep_level":        cmd_sweep_level,
     "sweep_frequency":    cmd_sweep_frequency,
     "plot":               cmd_plot,
+    "plot_level":         cmd_plot_level,
     "transfer":           cmd_transfer,
     "monitor":            cmd_monitor,
     "generate_sine":      cmd_generate_sine,
