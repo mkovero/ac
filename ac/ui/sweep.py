@@ -202,7 +202,8 @@ class SweepView(QtWidgets.QMainWindow):
         self._thdn_line.setData(xs[show], thdn[show])
 
         if self._p_gain:
-            gain = np.array([p.get("gain_db", np.nan) for p in pts])
+            gain = np.array([p["gain_db"] if p.get("gain_db") is not None
+                             else np.nan for p in pts], dtype=float)
             self._gain_line.setData(xs[show], gain[show])
 
         if clip.any():
@@ -215,7 +216,8 @@ class SweepView(QtWidgets.QMainWindow):
         if not self._done:
             # Gain: auto-range with minimum ±0.5 dB span
             if self._p_gain:
-                gain = np.array([p.get("gain_db", np.nan) for p in pts])
+                gain = np.array([p["gain_db"] if p.get("gain_db") is not None
+                                 else np.nan for p in pts], dtype=float)
                 valid_gain = gain[show]
                 valid_gain = valid_gain[~np.isnan(valid_gain)]
                 if len(valid_gain) > 0:
