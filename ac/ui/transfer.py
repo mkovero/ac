@@ -1,19 +1,26 @@
 """Transfer function view — magnitude, phase, coherence in 3 stacked panels."""
+import json
 import numpy as np
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from .app import (BG, PANEL, TEXT, BLUE, ORANGE, PURPLE, RED,
+from .app import (BG, PANEL, TEXT, BLUE, ORANGE, PURPLE, RED, AMBER,
                   FreqAxis, mono_font, styled_plot, status_label, readout_label)
 
 
 class TransferView(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, host="localhost", ctrl_port=5556, level_dbfs=-10.0):
         super().__init__()
         self.setWindowTitle("Transfer Function")
+        self._host = host
+        self._ctrl_port = ctrl_port
+        self._level_dbfs = level_dbfs
         self._result = None
+        self._capturing = False
+        self._capture_n = 0
         self._build_ui()
+        self._start_capturing()
         self.showFullScreen()
 
     def _build_ui(self):
@@ -24,7 +31,6 @@ class TransferView(QtWidgets.QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self._status = status_label()
-        self._status.setText("  Capturing… (this takes several seconds)")
         layout.addWidget(self._status)
 
         glw = pg.GraphicsLayoutWidget()
@@ -39,6 +45,15 @@ class TransferView(QtWidgets.QMainWindow):
             pos=0, angle=0,
             pen=pg.mkPen("#444444", width=1, style=QtCore.Qt.PenStyle.DashLine))
         self._p_mag.addItem(self._mag_ref)
+
+        # Capture indicator — pulsing ring at top-center of magnitude panel
+        self._pulse_dot = pg.ScatterPlotItem(
+            pos=[], symbol="o", size=14,
+            pen=pg.mkPen(AMBER, width=2), brush=pg.mkBrush(0, 0, 0, 0))
+        self._p_mag.addItem(self._pulse_dot)
+        self._pulse_phase = 0.0
+        self._pulse_timer = QtCore.QTimer()
+        self._pulse_timer.timeout.connect(self._animate_pulse)
 
         glw.nextRow()
 
@@ -79,6 +94,7 @@ class TransferView(QtWidgets.QMainWindow):
         self._p_coh.setXLink(self._p_mag)
 
         self._readout = readout_label()
+        self._readout.setText("  Press Enter to re-capture")
         layout.addWidget(self._readout)
 
         # Crosshair on magnitude plot
@@ -90,8 +106,73 @@ class TransferView(QtWidgets.QMainWindow):
         self._p_mag.addItem(self._hline)
         self._p_mag.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
+    # ------------------------------------------------------------------
+    # Capture indicator animation
+    # ------------------------------------------------------------------
+
+    def _start_capturing(self):
+        self._capturing = True
+        self._pulse_phase = 0.0
+        self._pulse_timer.start(50)
+        self._status.setText("  Capturing…")
+
+    def _stop_capturing(self):
+        self._capturing = False
+        self._pulse_timer.stop()
+        self._pulse_dot.setData(pos=[])
+
+    def _animate_pulse(self):
+        self._pulse_phase += 0.12
+        # Breathe: alpha oscillates between 40 and 220
+        alpha = int(130 + 90 * np.sin(self._pulse_phase))
+        size = 10 + 4 * np.sin(self._pulse_phase)
+        # Position at top-center of the current view
+        vb = self._p_mag.getViewBox().viewRange()
+        cx = (vb[0][0] + vb[0][1]) / 2
+        cy = vb[1][1] - (vb[1][1] - vb[1][0]) * 0.06
+        self._pulse_dot.setData(
+            pos=[(cx, cy)], size=size,
+            pen=pg.mkPen(AMBER, width=2),
+            brush=pg.mkBrush(255, 180, 60, alpha))
+
+    # ------------------------------------------------------------------
+    # Re-capture via ZMQ REQ
+    # ------------------------------------------------------------------
+
+    def _send_transfer_cmd(self):
+        if self._capturing:
+            return
+        self._capture_n += 1
+        self._start_capturing()
+        import threading
+
+        def _do():
+            try:
+                import zmq
+                ctx = zmq.Context()
+                sock = ctx.socket(zmq.REQ)
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.setsockopt(zmq.RCVTIMEO, 5000)
+                sock.connect(f"tcp://{self._host}:{self._ctrl_port}")
+                sock.send(json.dumps({
+                    "cmd": "transfer",
+                    "level_dbfs": self._level_dbfs,
+                }).encode())
+                sock.recv()  # ack
+                sock.close()
+                ctx.term()
+            except Exception:
+                pass
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Frame handler
+    # ------------------------------------------------------------------
+
     def on_frame(self, topic, frame):
         if topic == "error":
+            self._stop_capturing()
             self._status.setText(f"  Error: {frame.get('message', '?')}")
             return
 
@@ -100,13 +181,15 @@ class TransferView(QtWidgets.QMainWindow):
             self._populate(frame)
 
         elif topic == "done" and frame.get("cmd") == "transfer":
+            self._stop_capturing()
             xr = frame.get("xruns", 0)
             xr_s = f"  !! {xr} xrun(s)" if xr else ""
             if self._result:
                 coh = np.array(self._result["coherence"])
                 delay = self._result.get("delay_ms", 0.0)
+                n_s = f"  #{self._capture_n}" if self._capture_n > 1 else ""
                 self._status.setText(
-                    f"  Transfer complete.{xr_s}  "
+                    f"  Transfer complete.{xr_s}{n_s}  "
                     f"Delay: {delay:.3f} ms  |  "
                     f"Coherence: mean {np.mean(coh):.3f}  min {np.min(coh):.3f}")
             else:
@@ -165,6 +248,8 @@ class TransferView(QtWidgets.QMainWindow):
         key = event.key()
         if key in (QtCore.Qt.Key.Key_Q, QtCore.Qt.Key.Key_Escape):
             self.close()
+        elif key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            self._send_transfer_cmd()
         elif key == QtCore.Qt.Key.Key_F11:
             if self.isFullScreen():
                 self.showNormal()

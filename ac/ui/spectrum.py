@@ -28,6 +28,7 @@ class SpectrumView(QtWidgets.QMainWindow):
         self._last_freqs = None
         self._last_log_f = None
         self._last_smooth = None
+        self._y_range_set = False
 
         # Latest metadata
         self._fundamental_hz = None
@@ -132,6 +133,13 @@ class SpectrumView(QtWidgets.QMainWindow):
         self._fill_curve.setData(log_f, smooth_db)
         self._peak_curve.setData(log_f, peak_db)
 
+        # Auto-fit Y range on first frame so noise floor is visible
+        if not self._y_range_set:
+            self._y_range_set = True
+            y_min = max(np.min(smooth_db) - 10, -140)
+            y_max = min(np.max(smooth_db) + 10, 10)
+            self._pw.setYRange(y_min, y_max, padding=0)
+
         # Update harmonic markers
         if f0 != self._fundamental_hz:
             self._fundamental_hz = f0
@@ -229,6 +237,16 @@ class SpectrumView(QtWidgets.QMainWindow):
         else:
             self._readout.setText(f"  Saved: {png_path}")
 
+    def _autorange(self):
+        """Reset zoom to fit current data (Space key)."""
+        self._pw.setXRange(np.log10(20), np.log10(24000), padding=0)
+        if self._last_smooth is not None:
+            y_min = max(np.min(self._last_smooth) - 10, -140)
+            y_max = min(np.max(self._last_smooth) + 10, 10)
+            self._pw.setYRange(y_min, y_max, padding=0)
+        else:
+            self._pw.setYRange(-120, 5, padding=0)
+
     # ------------------------------------------------------------------
     # Keyboard shortcuts
     # ------------------------------------------------------------------
@@ -239,6 +257,8 @@ class SpectrumView(QtWidgets.QMainWindow):
             self.close()
         elif key == QtCore.Qt.Key.Key_S:
             self._save_snapshot()
+        elif key == QtCore.Qt.Key.Key_Space:
+            self._autorange()
         elif key == QtCore.Qt.Key.Key_F11:
             if self.isFullScreen():
                 self.showNormal()

@@ -206,6 +206,8 @@ def main():
     ap.add_argument("--host",  default="localhost")
     ap.add_argument("--port",  type=int, default=5557)
     ap.add_argument("--session-dir", default=None)
+    ap.add_argument("--ctrl-port", type=int, default=5556)
+    ap.add_argument("--level-dbfs", type=float, default=-10.0)
     args = ap.parse_args()
 
     try:
@@ -228,7 +230,8 @@ def main():
         view = SpectrumView(session_dir=args.session_dir)
     elif args.mode == "transfer":
         from .transfer import TransferView
-        view = TransferView()
+        view = TransferView(host=args.host, ctrl_port=args.ctrl_port,
+                            level_dbfs=args.level_dbfs)
     else:
         from .sweep import SweepView
         view = SweepView(mode=args.mode)

@@ -162,7 +162,8 @@ def _numpy_results(results):
     return results
 
 
-def _launch_ui(mode, host="localhost", data_port=DATA_PORT, session_dir=None):
+def _launch_ui(mode, host="localhost", data_port=DATA_PORT, session_dir=None,
+               ctrl_port=CTRL_PORT, level_dbfs=None):
     """Spawn the pyqtgraph UI as a separate process. Returns Popen or None."""
     try:
         import pyqtgraph  # noqa: F401 — check availability only
@@ -173,6 +174,10 @@ def _launch_ui(mode, host="localhost", data_port=DATA_PORT, session_dir=None):
            "--mode", mode, "--host", host, "--port", str(data_port)]
     if session_dir:
         cmd += ["--session-dir", session_dir]
+    if ctrl_port != CTRL_PORT:
+        cmd += ["--ctrl-port", str(ctrl_port)]
+    if level_dbfs is not None:
+        cmd += ["--level-dbfs", str(level_dbfs)]
     return subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -771,7 +776,9 @@ def cmd_transfer(cmd, cfg, client):
 
     if cmd.get("show_plot"):
         host = cfg.get("server_host", "localhost")
-        _launch_ui("transfer", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+        _launch_ui("transfer", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT),
+                   ctrl_port=cfg.get("zmq_ctrl_port", CTRL_PORT),
+                   level_dbfs=level_db)
 
     ack = _check_ack(client.send_cmd({
         "cmd":        "transfer",
