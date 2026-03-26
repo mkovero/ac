@@ -2,11 +2,66 @@
 import json
 import numpy as np
 
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from .app import (BG, PANEL, TEXT, BLUE, ORANGE, PURPLE, RED, AMBER,
                   FreqAxis, mono_font, styled_plot, status_label, readout_label)
+
+
+class _PulseOverlay(QtWidgets.QWidget):
+    """Semi-transparent pulsing ring overlay drawn on top of everything."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+        self._phase = 0.0
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        self._phase = 0.0
+        self.show()
+        self.raise_()
+        self._timer.start(40)
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _tick(self):
+        self._phase += 0.08
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        cx = self.width() / 2
+        cy = self.height() / 2
+        base_r = min(cx, cy) * 0.25
+
+        t = np.sin(self._phase)
+        radius = base_r + base_r * 0.15 * t
+        alpha = int(60 + 40 * t)
+        width = 3.0 + 1.5 * t
+
+        color = QtGui.QColor(255, 180, 60, alpha)
+        p.setPen(QtGui.QPen(color, width))
+        p.setBrush(QtGui.QColor(255, 180, 60, int(alpha * 0.15)))
+        p.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
+
+        # Inner dot
+        dot_alpha = int(90 + 60 * t)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(QtGui.QColor(255, 180, 60, dot_alpha))
+        p.drawEllipse(QtCore.QPointF(cx, cy), 6, 6)
+
+        p.end()
 
 
 class TransferView(QtWidgets.QMainWindow):
@@ -45,15 +100,6 @@ class TransferView(QtWidgets.QMainWindow):
             pos=0, angle=0,
             pen=pg.mkPen("#444444", width=1, style=QtCore.Qt.PenStyle.DashLine))
         self._p_mag.addItem(self._mag_ref)
-
-        # Capture indicator — pulsing ring at top-center of magnitude panel
-        self._pulse_dot = pg.ScatterPlotItem(
-            pos=[], symbol="o", size=14,
-            pen=pg.mkPen(AMBER, width=2), brush=pg.mkBrush(0, 0, 0, 0))
-        self._p_mag.addItem(self._pulse_dot)
-        self._pulse_phase = 0.0
-        self._pulse_timer = QtCore.QTimer()
-        self._pulse_timer.timeout.connect(self._animate_pulse)
 
         glw.nextRow()
 
@@ -106,34 +152,29 @@ class TransferView(QtWidgets.QMainWindow):
         self._p_mag.addItem(self._hline)
         self._p_mag.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
+        # Capture pulse overlay — covers entire window
+        self._pulse = _PulseOverlay(central)
+        self._pulse.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_pulse"):
+            cw = self.centralWidget()
+            if cw:
+                self._pulse.setGeometry(cw.rect())
+
     # ------------------------------------------------------------------
-    # Capture indicator animation
+    # Capture indicator
     # ------------------------------------------------------------------
 
     def _start_capturing(self):
         self._capturing = True
-        self._pulse_phase = 0.0
-        self._pulse_timer.start(50)
+        self._pulse.start()
         self._status.setText("  Capturing…")
 
     def _stop_capturing(self):
         self._capturing = False
-        self._pulse_timer.stop()
-        self._pulse_dot.setData(pos=[])
-
-    def _animate_pulse(self):
-        self._pulse_phase += 0.12
-        # Breathe: alpha oscillates between 40 and 220
-        alpha = int(130 + 90 * np.sin(self._pulse_phase))
-        size = 10 + 4 * np.sin(self._pulse_phase)
-        # Position at top-center of the current view
-        vb = self._p_mag.getViewBox().viewRange()
-        cx = (vb[0][0] + vb[0][1]) / 2
-        cy = vb[1][1] - (vb[1][1] - vb[1][0]) * 0.06
-        self._pulse_dot.setData(
-            pos=[(cx, cy)], size=size,
-            pen=pg.mkPen(AMBER, width=2),
-            brush=pg.mkBrush(255, 180, 60, alpha))
+        self._pulse.stop()
 
     # ------------------------------------------------------------------
     # Re-capture via ZMQ REQ
