@@ -52,6 +52,78 @@ def FreqAxis(orientation="bottom"):
     return _FreqAxis(orientation=orientation)
 
 
+def mono_font(size=9):
+    """Shared monospace font for axis labels."""
+    from pyqtgraph.Qt import QtGui
+    f = QtGui.QFont("Monospace")
+    f.setStyleHint(QtGui.QFont.StyleHint.TypeWriter)
+    f.setPointSize(size)
+    return f
+
+
+def styled_plot(glw, title, ylabel, log_freq=False):
+    """Create a styled PlotItem with consistent look across all views."""
+    import pyqtgraph as pg
+    axisItems = {}
+    if log_freq:
+        axisItems["bottom"] = FreqAxis(orientation="bottom")
+    p = glw.addPlot(title=title, axisItems=axisItems)
+    p.setLabel("left", ylabel, color=TEXT)
+    p.showGrid(x=True, y=True, alpha=0.3)
+    p.getAxis("left").setStyle(tickFont=mono_font())
+    p.getAxis("bottom").setStyle(tickFont=mono_font())
+    if log_freq:
+        p.getAxis("bottom").setLabel("Frequency (Hz)", color=TEXT)
+    return p
+
+
+def add_harmonic_markers(plot, f0, sr, max_harmonics=10):
+    """Add amber dashed vertical lines at harmonic frequencies. Returns list of items."""
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtCore
+    import numpy as np
+    lines = []
+    if not f0:
+        return lines
+    f_hi = min(sr / 2, 24000)
+    for i in range(1, max_harmonics + 1):
+        hf = f0 * (i + 1)
+        if hf > f_hi:
+            break
+        ln = pg.InfiniteLine(
+            pos=np.log10(hf), angle=90,
+            pen=pg.mkPen(AMBER, width=1, style=QtCore.Qt.PenStyle.DashLine),
+            label=f"H{i+1}",
+            labelOpts={"color": AMBER, "position": 0.90,
+                        "movable": False, "fill": None},
+        )
+        plot.addItem(ln)
+        lines.append(ln)
+    return lines
+
+
+def status_label():
+    """Create a styled status label widget."""
+    from pyqtgraph.Qt import QtWidgets
+    lbl = QtWidgets.QLabel("")
+    lbl.setStyleSheet(
+        f"color: white; background: {PANEL}; padding: 4px 8px; "
+        "font-family: monospace; font-size: 13px;"
+    )
+    return lbl
+
+
+def readout_label():
+    """Create a styled readout label widget."""
+    from pyqtgraph.Qt import QtWidgets
+    lbl = QtWidgets.QLabel("")
+    lbl.setStyleSheet(
+        f"color: {TEXT}; background: {PANEL}; padding: 3px 8px; "
+        "font-family: monospace; font-size: 12px;"
+    )
+    return lbl
+
+
 def _build_dark_palette(app):
     from pyqtgraph.Qt import QtGui
     pal = QtGui.QPalette()
@@ -130,7 +202,7 @@ class ZmqReceiver:
 def main():
     ap = argparse.ArgumentParser(prog="ac.ui")
     ap.add_argument("--mode",  required=True,
-                    choices=["spectrum", "thd", "sweep_frequency", "sweep_level"])
+                    choices=["spectrum", "thd", "sweep_frequency", "sweep_level", "transfer"])
     ap.add_argument("--host",  default="localhost")
     ap.add_argument("--port",  type=int, default=5557)
     args = ap.parse_args()
@@ -153,6 +225,9 @@ def main():
     if args.mode == "spectrum":
         from .spectrum import SpectrumView
         view = SpectrumView()
+    elif args.mode == "transfer":
+        from .transfer import TransferView
+        view = TransferView()
     else:
         from .sweep import SweepView
         view = SweepView(mode=args.mode)

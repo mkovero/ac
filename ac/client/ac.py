@@ -759,6 +759,10 @@ def cmd_transfer(cmd, cfg, client):
     print(f"\n  Transfer function: {start_hz:.0f} → {stop_hz:.0f} Hz  |  {level_db:.1f} dBFS")
     print(f"  Stimulus: pink noise  |  H1 estimator with Welch averaging")
 
+    if cmd.get("show_plot"):
+        host = cfg.get("server_host", "localhost")
+        _launch_ui("transfer", host=host, data_port=cfg.get("zmq_data_port", DATA_PORT))
+
     ack = _check_ack(client.send_cmd({
         "cmd":        "transfer",
         "start_hz":   start_hz,

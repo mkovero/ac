@@ -1,10 +1,12 @@
-"""Sweep results view — 2×2 live-accumulating grid with point-click spectrum detail."""
+"""Sweep results view — 3 stacked panels with point-click spectrum detail."""
 import numpy as np
 
-from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
+from pyqtgraph.Qt import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from .app import BG, PANEL, GRID, TEXT, BLUE, ORANGE, PURPLE, RED, AMBER, GREEN, FreqAxis
+from .app import (BG, PANEL, TEXT, BLUE, ORANGE, PURPLE, RED, AMBER,
+                  FreqAxis, mono_font, styled_plot, add_harmonic_markers,
+                  status_label, readout_label)
 
 
 class SweepView(QtWidgets.QMainWindow):
@@ -32,69 +34,37 @@ class SweepView(QtWidgets.QMainWindow):
         layout.setSpacing(4)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Status
-        self._status_label = QtWidgets.QLabel("  Sweep running…")
-        self._status_label.setStyleSheet(
-            f"color: white; background: {PANEL}; padding: 4px 8px; "
-            "font-family: monospace; font-size: 13px;"
-        )
-        layout.addWidget(self._status_label)
+        self._status = status_label()
+        self._status.setText("  Sweep running…")
+        layout.addWidget(self._status)
 
-        # 2×2 grid via GraphicsLayoutWidget
         glw = pg.GraphicsLayoutWidget()
         glw.setBackground(PANEL)
         layout.addWidget(glw, stretch=1)
 
-        def _make_plot(title, ylabel, log_freq=False):
-            axisItems = {}
-            if log_freq:
-                axisItems["bottom"] = FreqAxis(orientation="bottom")
-            p = glw.addPlot(title=title, axisItems=axisItems)
-            p.setLabel("left", ylabel, color=TEXT)
-            p.showGrid(x=True, y=True, alpha=0.3)
-            p.getAxis("left").setStyle(tickFont=_mono_font())
-            p.getAxis("bottom").setStyle(tickFont=_mono_font())
-            if log_freq:
-                p.getAxis("bottom").setLabel("Frequency (Hz)", color=TEXT)
-            else:
-                p.getAxis("bottom").setLabel("Level (dBu / dBFS)", color=TEXT)
-            return p
-
         use_log = self._is_freq
-        self._p_thd  = _make_plot("THD% vs " + ("Freq" if self._is_freq else "Level"),
-                                   "THD (%)", log_freq=use_log)
-        self._p_gain = _make_plot("Gain / Response",
-                                   "Gain (dB)", log_freq=use_log)
-        glw.nextRow()
-        self._p_thdn = _make_plot("THD+N% vs " + ("Freq" if self._is_freq else "Level"),
-                                   "THD+N (%)", log_freq=use_log)
-        self._p_spec  = _make_plot("Spectrum of selected point",
-                                    "Level (dBFS)", log_freq=True)
 
-        # Curves for top-3 plots
-        self._thd_line  = self._p_thd.plot(
+        # Panel 1: THD + THD+N overlaid
+        self._p_thd = styled_plot(glw, "THD / THD+N", "Distortion (%)",
+                                   log_freq=use_log)
+        if not use_log:
+            self._p_thd.getAxis("bottom").setLabel("Level (dBu / dBFS)", color=TEXT)
+        self._thd_line = self._p_thd.plot(
             pen=pg.mkPen(BLUE, width=2), symbol="o",
-            symbolBrush=BLUE, symbolSize=6, symbolPen=None)
-        self._thdn_line = self._p_thdn.plot(
+            symbolBrush=BLUE, symbolSize=5, symbolPen=None, name="THD")
+        self._thdn_line = self._p_thd.plot(
             pen=pg.mkPen(ORANGE, width=2), symbol="o",
-            symbolBrush=ORANGE, symbolSize=6, symbolPen=None)
-        self._gain_line = self._p_gain.plot(
-            pen=pg.mkPen(PURPLE, width=2), symbol="o",
-            symbolBrush=PURPLE, symbolSize=6, symbolPen=None)
-        self._gain_ref  = pg.InfiniteLine(pos=0, angle=0,
-                                           pen=pg.mkPen("#444444", width=1,
-                                                        style=QtCore.Qt.PenStyle.DashLine))
-        self._p_gain.addItem(self._gain_ref)
+            symbolBrush=ORANGE, symbolSize=5, symbolPen=None, name="THD+N")
 
         # Clipped point scatter (red X markers)
-        self._clip_thd  = pg.ScatterPlotItem(symbol="x", pen=pg.mkPen(RED, width=2),
-                                              brush=None, size=12)
+        self._clip_thd = pg.ScatterPlotItem(symbol="x", pen=pg.mkPen(RED, width=2),
+                                             brush=None, size=12)
         self._clip_thdn = pg.ScatterPlotItem(symbol="x", pen=pg.mkPen(RED, width=2),
                                               brush=None, size=12)
         self._p_thd.addItem(self._clip_thd)
-        self._p_thdn.addItem(self._clip_thdn)
+        self._p_thd.addItem(self._clip_thdn)
 
-        # Selection cursor on THD plot
+        # Selection cursor
         self._sel_line = pg.InfiniteLine(
             angle=90, movable=False,
             pen=pg.mkPen("#ffffff", width=1, alpha=100,
@@ -102,20 +72,34 @@ class SweepView(QtWidgets.QMainWindow):
         self._p_thd.addItem(self._sel_line)
         self._sel_line.hide()
 
-        # Spectrum curves
-        self._spec_curve    = self._p_spec.plot(pen=pg.mkPen(BLUE, width=1))
+        glw.nextRow()
+
+        # Panel 2: Gain / Frequency Response
+        self._p_gain = styled_plot(glw, "Frequency Response", "Gain (dB)",
+                                    log_freq=use_log)
+        if not use_log:
+            self._p_gain.getAxis("bottom").setLabel("Level (dBu / dBFS)", color=TEXT)
+        self._gain_line = self._p_gain.plot(
+            pen=pg.mkPen(PURPLE, width=2), symbol="o",
+            symbolBrush=PURPLE, symbolSize=5, symbolPen=None)
+        self._gain_ref = pg.InfiniteLine(
+            pos=0, angle=0,
+            pen=pg.mkPen("#444444", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        self._p_gain.addItem(self._gain_ref)
+
+        glw.nextRow()
+
+        # Panel 3: Spectrum of selected point
+        self._p_spec = styled_plot(glw, "Spectrum of selected point",
+                                    "Level (dBFS)", log_freq=True)
+        self._spec_curve = self._p_spec.plot(pen=pg.mkPen(BLUE, width=1))
         self._spec_harmonic_lines = []
 
         # Click handler on THD plot for point selection
-        self._p_thd.scene().sigMouseClicked.connect(self._on_thd_click)
+        self._p_thd.scene().sigMouseClicked.connect(self._on_click)
 
-        # Readout
-        self._readout_label = QtWidgets.QLabel("")
-        self._readout_label.setStyleSheet(
-            f"color: {TEXT}; background: {PANEL}; padding: 3px 8px; "
-            "font-family: monospace; font-size: 12px;"
-        )
-        layout.addWidget(self._readout_label)
+        self._readout = readout_label()
+        layout.addWidget(self._readout)
 
     # ------------------------------------------------------------------
     # Frame handler
@@ -123,24 +107,22 @@ class SweepView(QtWidgets.QMainWindow):
 
     def on_frame(self, topic, frame):
         if topic == "error":
-            self._status_label.setText(f"  Error: {frame.get('message','?')}")
+            self._status.setText(f"  Error: {frame.get('message','?')}")
             return
 
         if topic == "data" and frame.get("type") == "sweep_point":
             self._points.append(frame)
             self._refresh_plots()
             n = len(self._points)
-            self._status_label.setText(f"  Sweep running… {n} point(s) collected")
+            self._status.setText(f"  Sweep running… {n} point(s) collected")
 
         elif topic == "done":
             self._done = True
             n = len(self._points)
             xr = frame.get("xruns", 0)
             xr_s = f"  !! {xr} xrun(s)" if xr else ""
-            self._status_label.setText(
+            self._status.setText(
                 f"  Sweep complete — {n} points.{xr_s}  Click a point to inspect spectrum.")
-            # Unlock interactive zoom/pan on gain and spectrum only;
-            # _p_thd/_p_thdn stay click-only so sigMouseClicked keeps firing
             for p in [self._p_gain, self._p_spec]:
                 p.setMouseEnabled(x=True, y=True)
 
@@ -149,18 +131,16 @@ class SweepView(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _x_vals(self):
-        """X-axis values: log10(freq) for freq sweep, level (dBu or dBFS) for level."""
         pts = self._points
         if self._is_freq:
             freqs = np.array([p.get("freq_hz", p.get("fundamental_hz", 0)) for p in pts])
             return np.log10(np.maximum(freqs, 1.0))
-        # Level sweep: prefer dBu if calibrated
         if pts and pts[0].get("out_dbu") is not None:
             return np.array([p["out_dbu"] for p in pts])
         return np.array([p.get("drive_db", 0) for p in pts])
 
     def _refresh_plots(self):
-        pts  = self._points
+        pts = self._points
         if not pts:
             return
 
@@ -170,18 +150,15 @@ class SweepView(QtWidgets.QMainWindow):
         gain = np.array([p.get("gain_db", np.nan) for p in pts])
         clip = np.array([bool(p.get("clipping")) for p in pts])
 
-        # Filter clipped/ac_coupled points from main lines (match matplotlib behaviour)
         valid = np.array([not p.get("clipping") and not p.get("ac_coupled")
                           for p in pts])
         if not valid.any():
             valid = np.ones(len(pts), dtype=bool)
 
-        # Pass raw xs — plots with setLogMode(x=True) apply log10 internally
         self._thd_line.setData(xs[valid], thd[valid])
         self._thdn_line.setData(xs[valid], thdn[valid])
         self._gain_line.setData(xs[valid], gain[valid])
 
-        # Clipped scatter: show all clipped points regardless of valid mask
         if clip.any():
             self._clip_thd.setData(xs[clip], thd[clip])
             self._clip_thdn.setData(xs[clip], thdn[clip])
@@ -189,40 +166,38 @@ class SweepView(QtWidgets.QMainWindow):
             self._clip_thd.setData([], [])
             self._clip_thdn.setData([], [])
 
-        # Auto range while sweep is running
         if not self._done:
-            for p in [self._p_thd, self._p_thdn, self._p_gain]:
+            for p in [self._p_thd, self._p_gain]:
                 p.enableAutoRange(enable=True)
 
     # ------------------------------------------------------------------
     # Point selection + spectrum
     # ------------------------------------------------------------------
 
-    def _on_thd_click(self, event):
+    def _on_click(self, event):
         if not self._points:
             return
         pos = event.scenePos()
-        if not self._p_thd.sceneBoundingRect().contains(pos):
-            return
-        mp = self._p_thd.getViewBox().mapSceneToView(pos)
-        click_x = mp.x()
-
-        xs = self._x_vals()
-
-        dists = np.abs(xs - click_x)
-        idx   = int(np.argmin(dists))
-        self._selected_idx = idx
-        self._show_spectrum(idx)
-
-        self._sel_line.setPos(xs[idx])
-        self._sel_line.show()
+        # Accept clicks on any of the top two panels
+        for plot in (self._p_thd, self._p_gain):
+            if plot.sceneBoundingRect().contains(pos):
+                mp = plot.getViewBox().mapSceneToView(pos)
+                click_x = mp.x()
+                xs = self._x_vals()
+                dists = np.abs(xs - click_x)
+                idx = int(np.argmin(dists))
+                self._selected_idx = idx
+                self._show_spectrum(idx)
+                self._sel_line.setPos(xs[idx])
+                self._sel_line.show()
+                return
 
     def _show_spectrum(self, idx):
         pt = self._points[idx]
         freqs = pt.get("freqs")
         spec  = pt.get("spectrum")
         if freqs is None or spec is None:
-            self._readout_label.setText("  (no spectrum data for this point)")
+            self._readout.setText("  (no spectrum data for this point)")
             return
 
         freqs = np.array(freqs, dtype=float)
@@ -239,21 +214,7 @@ class SweepView(QtWidgets.QMainWindow):
         f0 = pt.get("fundamental_hz")
         sr = pt.get("sr", 48000)
         if f0:
-            f_hi = min(sr / 2, 24000)
-            for i in range(1, 10):
-                hf = f0 * (i + 1)
-                if hf > f_hi:
-                    break
-                ln = pg.InfiniteLine(
-                    pos=np.log10(hf), angle=90,
-                    pen=pg.mkPen(AMBER, width=1,
-                                 style=QtCore.Qt.PenStyle.DashLine),
-                    label=f"H{i+1}",
-                    labelOpts={"color": AMBER, "position": 0.90,
-                               "movable": False, "fill": None},
-                )
-                self._p_spec.addItem(ln)
-                self._spec_harmonic_lines.append(ln)
+            self._spec_harmonic_lines = add_harmonic_markers(self._p_spec, f0, sr)
 
         # Readout
         thd  = pt.get("thd_pct",  0.0)
@@ -264,7 +225,7 @@ class SweepView(QtWidgets.QMainWindow):
         else:
             out_dbu = pt.get("out_dbu")
             x_label = f"{out_dbu:+.2f} dBu" if out_dbu is not None else f"{pt.get('drive_db',0):.1f} dBFS"
-        self._readout_label.setText(
+        self._readout.setText(
             f"  Selected: {x_label}   THD: {thd:.4f}%   THD+N: {thdn:.4f}%"
         )
 
@@ -283,13 +244,3 @@ class SweepView(QtWidgets.QMainWindow):
                 self.showFullScreen()
         else:
             super().keyPressEvent(event)
-
-
-# ---------------------------------------------------------------------------
-
-def _mono_font():
-    from pyqtgraph.Qt import QtGui
-    f = QtGui.QFont("Monospace")
-    f.setStyleHint(QtGui.QFont.StyleHint.TypeWriter)
-    f.setPointSize(9)
-    return f

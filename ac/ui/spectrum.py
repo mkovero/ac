@@ -4,7 +4,9 @@ import numpy as np
 from pyqtgraph.Qt import QtCore, QtWidgets
 import pyqtgraph as pg
 
-from .app import BG, PANEL, GRID, TEXT, BLUE, AMBER, RED, FreqAxis
+from .app import (BG, PANEL, TEXT, BLUE, AMBER,
+                  FreqAxis, mono_font, add_harmonic_markers,
+                  status_label, readout_label)
 
 
 # Smoothing constants (mirrored from tui.py)
@@ -42,13 +44,9 @@ class SpectrumView(QtWidgets.QMainWindow):
         layout.setSpacing(4)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # --- Status bar (top) ---
-        self._status_label = QtWidgets.QLabel("  Waiting for data…")
-        self._status_label.setStyleSheet(
-            f"color: white; background: {PANEL}; padding: 4px 8px; "
-            "font-family: monospace; font-size: 13px;"
-        )
-        layout.addWidget(self._status_label)
+        self._status = status_label()
+        self._status.setText("  Waiting for data…")
+        layout.addWidget(self._status)
 
         # --- Plot ---
         freq_axis = FreqAxis(orientation="bottom")
@@ -59,8 +57,8 @@ class SpectrumView(QtWidgets.QMainWindow):
         self._pw.setXRange(np.log10(20), np.log10(24000), padding=0)
         self._pw.setYRange(-120, 5, padding=0)
         self._pw.showGrid(x=True, y=True, alpha=0.3)
-        self._pw.getAxis("left").setStyle(tickFont=_mono_font())
-        self._pw.getAxis("bottom").setStyle(tickFont=_mono_font())
+        self._pw.getAxis("left").setStyle(tickFont=mono_font())
+        self._pw.getAxis("bottom").setStyle(tickFont=mono_font())
         layout.addWidget(self._pw, stretch=1)
 
         # Spectrum fill curve
@@ -88,13 +86,8 @@ class SpectrumView(QtWidgets.QMainWindow):
         self._pw.addItem(self._hline)
         self._pw.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
-        # --- Readout bar (bottom) ---
-        self._readout_label = QtWidgets.QLabel("")
-        self._readout_label.setStyleSheet(
-            f"color: {TEXT}; background: {PANEL}; padding: 3px 8px; "
-            "font-family: monospace; font-size: 12px;"
-        )
-        layout.addWidget(self._readout_label)
+        self._readout = readout_label()
+        layout.addWidget(self._readout)
 
     # ------------------------------------------------------------------
     # Frame handler (called from ZmqReceiver signal)
@@ -102,7 +95,7 @@ class SpectrumView(QtWidgets.QMainWindow):
 
     def on_frame(self, topic, frame):
         if topic == "error":
-            self._status_label.setText(f"  Error: {frame.get('message','?')}")
+            self._status.setText(f"  Error: {frame.get('message','?')}")
             return
         if topic != "data" or frame.get("type") != "spectrum":
             return
@@ -135,14 +128,16 @@ class SpectrumView(QtWidgets.QMainWindow):
         # Update harmonic markers
         if f0 != self._fundamental_hz:
             self._fundamental_hz = f0
-            self._update_harmonic_markers(f0, sr)
+            for line in self._harmonic_lines:
+                self._pw.removeItem(line)
+            self._harmonic_lines = add_harmonic_markers(self._pw, f0, sr)
 
         # Status line
         freq_s = f"{f0:.0f} Hz" if f0 else ""
         dbu_s  = f"  │  {in_dbu:+.2f} dBu"   if in_dbu  is not None else ""
         thd_s  = f"  │  THD: {thd:.4f}%"      if thd     is not None else ""
         thdn_s = f"  │  THD+N: {thdn:.4f}%"   if thdn    is not None else ""
-        self._status_label.setText(f"  {freq_s}{dbu_s}{thd_s}{thdn_s}")
+        self._status.setText(f"  {freq_s}{dbu_s}{thd_s}{thdn_s}")
 
     # ------------------------------------------------------------------
     # Smoothing (fast attack / slow decay + peak hold — mirrors tui.py)
@@ -172,34 +167,6 @@ class SpectrumView(QtWidgets.QMainWindow):
         return self._smooth_db.copy(), self._peak_db.copy()
 
     # ------------------------------------------------------------------
-    # Harmonic markers
-    # ------------------------------------------------------------------
-
-    def _update_harmonic_markers(self, f0, sr):
-        for line in self._harmonic_lines:
-            self._pw.removeItem(line)
-        self._harmonic_lines.clear()
-
-        if not f0:
-            return
-
-        f_hi = min(sr / 2, 24000)
-        for i in range(1, 11):
-            hf = f0 * (i + 1)
-            if hf > f_hi:
-                break
-            line = pg.InfiniteLine(
-                pos=np.log10(hf),
-                angle=90,
-                pen=pg.mkPen(AMBER, width=1, style=QtCore.Qt.PenStyle.DashLine),
-                label=f"H{i+1}",
-                labelOpts={"color": AMBER, "position": 0.92,
-                           "movable": False, "fill": None},
-            )
-            self._pw.addItem(line)
-            self._harmonic_lines.append(line)
-
-    # ------------------------------------------------------------------
     # Mouse crosshair + readout
     # ------------------------------------------------------------------
 
@@ -214,7 +181,7 @@ class SpectrumView(QtWidgets.QMainWindow):
         self._hline.setPos(db)
 
         hz = 10 ** lf
-        self._readout_label.setText(f"  ► {hz:,.1f} Hz   {db:.1f} dBFS")
+        self._readout.setText(f"  \u25b6 {hz:,.1f} Hz   {db:.1f} dBFS")
 
     # ------------------------------------------------------------------
     # Keyboard shortcuts
@@ -231,15 +198,3 @@ class SpectrumView(QtWidgets.QMainWindow):
                 self.showFullScreen()
         else:
             super().keyPressEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _mono_font():
-    from pyqtgraph.Qt import QtGui
-    f = QtGui.QFont("Monospace")
-    f.setStyleHint(QtGui.QFont.StyleHint.TypeWriter)
-    f.setPointSize(9)
-    return f
