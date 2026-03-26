@@ -15,7 +15,6 @@ from .parse        import parse, ParseError, USAGE
 from ..config      import load as load_config, save as save_config
 from ..config      import session_dir, SESSION_BASE
 from .io           import save_csv, print_summary
-from .plotting     import plot_results
 from ..conversions import vrms_to_dbu, fmt_vrms
 
 
@@ -185,20 +184,14 @@ def _launch_ui(mode, host="localhost", data_port=DATA_PORT, session_dir=None,
     )
 
 
-def _save_results(results, label, cal=None, cfg=None, show_plot=False,
-                  host="localhost", data_port=DATA_PORT):
+def _save_results(results, label, cal=None, cfg=None):
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe     = label.replace(" ", "_")
     active   = (cfg or {}).get("session")
     out_dir  = session_dir(active) if active else (cfg or {}).get("output_dir", ".")
     os.makedirs(out_dir, exist_ok=True)
     csv_path  = os.path.join(out_dir, f"{safe}_{ts}.csv")
-    plot_path = os.path.join(out_dir, f"{safe}_{ts}.png")
     save_csv(results, csv_path)
-    # show=True opens an interactive matplotlib window after saving (only when
-    # pyqtgraph is absent — the pyqtgraph UI is already running from before the sweep).
-    plot_results(results, device_name=label, output_path=plot_path, cal=cal,
-                 show=(show_plot and not _has_pyqtgraph()))
 
 
 def _make_q_listener():
@@ -242,14 +235,6 @@ def _make_q_listener():
 
     return stop_event, _restore
 
-
-def _has_pyqtgraph():
-    """Return True if pyqtgraph is importable."""
-    try:
-        import pyqtgraph  # noqa: F401
-        return True
-    except ImportError:
-        return False
 
 
 def _src_mtime():
@@ -738,10 +723,7 @@ def cmd_plot(cmd, cfg, client):
     _numpy_results(results)
     cal = _cal_from_frame(results[0])
     print_summary(results, "DUT", cal=cal)
-    _save_results(results, "plot", cal=cal, cfg=cfg,
-                  show_plot=cmd.get("show_plot", False),
-                  host=cfg.get("server_host", "localhost"),
-                  data_port=cfg.get("zmq_data_port", DATA_PORT))
+    _save_results(results, "plot", cal=cal, cfg=cfg)
 
 
 def cmd_plot_level(cmd, cfg, client):
@@ -786,14 +768,10 @@ def cmd_plot_level(cmd, cfg, client):
     _numpy_results(results)
     cal = _cal_from_frame(results[0])
     print_summary(results, "DUT", cal=cal)
-    _save_results(results, "plot_level", cal=cal, cfg=cfg,
-                  show_plot=cmd.get("show_plot", False),
-                  host=cfg.get("server_host", "localhost"),
-                  data_port=cfg.get("zmq_data_port", DATA_PORT))
+    _save_results(results, "plot_level", cal=cal, cfg=cfg)
 
 
 def cmd_transfer(cmd, cfg, client):
-    from .plotting import plot_transfer
     from .io import save_transfer_csv
 
     cal_info = _get_cal(client)
@@ -852,11 +830,7 @@ def cmd_transfer(cmd, cfg, client):
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path  = os.path.join(out_dir, f"transfer_{ts}.csv")
-    plot_path = os.path.join(out_dir, f"transfer_{ts}.png")
-
     save_transfer_csv(result, csv_path)
-    plot_transfer(result, device_name="DUT", output_path=plot_path,
-                  show=False)
 
 
 def cmd_monitor(cmd, cfg, client):

@@ -21,7 +21,6 @@ dependencies = [
     "sounddevice",
     "numpy",
     "scipy",
-    "matplotlib",
     "pyzmq",
     "pyserial",
 ]

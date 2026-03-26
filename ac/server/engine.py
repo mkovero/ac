@@ -94,7 +94,6 @@ def _sweep_point_frame(r, cal, n, cmd_name, level_dbfs, freq_hz=None):
     }
     if freq_hz is not None:
         frame["freq_hz"] = float(freq_hz)
-        frame["freq"]    = float(freq_hz)   # alias for plotting.py
     return frame
 
 

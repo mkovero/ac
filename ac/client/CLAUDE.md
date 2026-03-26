@@ -14,7 +14,6 @@
 | `parse.py` | Token-based CLI parser, `ABBREVS`, `USAGE` string |
 | `tui.py` | `SpectrumRenderer` — terminal bar chart with peak hold |
 | `io.py` | `save_csv()`, `print_summary()` |
-| `plotting.py` | `plot_results()` — matplotlib PNG generation |
 
 Shared modules (imported as `from ..x import ...`):
 `constants.py`, `conversions.py`, `config.py`
@@ -53,4 +52,4 @@ After a recv timeout the REQ socket must be recreated (`_reconnect_ctrl`).
 
 ## Dependencies
 
-`numpy`, `matplotlib`, `zmq`, optionally `pyqtgraph` (for GUI views)
+`numpy`, `zmq`, `pyqtgraph` (for GUI views)
