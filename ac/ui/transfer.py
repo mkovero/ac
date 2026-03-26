@@ -43,7 +43,7 @@ class _PulseOverlay(QtWidgets.QWidget):
 
         cx = self.width() / 2
         cy = self.height() / 2
-        base_r = min(cx, cy) * 0.25
+        base_r = min(cx, cy) * 0.85
 
         t = np.sin(self._phase)
         radius = base_r + base_r * 0.15 * t
