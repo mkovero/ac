@@ -32,7 +32,7 @@ class _PulseOverlay(QtWidgets.QWidget):
         self.hide()
 
     def _tick(self):
-        self._phase += 0.08
+        self._phase += 0.04
         self.update()
 
     def paintEvent(self, event):
