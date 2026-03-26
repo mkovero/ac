@@ -50,8 +50,7 @@ class _PulseOverlay(QtWidgets.QWidget):
         alpha = int(60 + 40 * t)
         width = 3.0 + 1.5 * t
 
-        color = QtGui.QColor(255, 180, 60, alpha)
-        p.setPen(QtGui.QPen(color, width))
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
         p.setBrush(QtGui.QColor(255, 180, 60, int(alpha * 0.15)))
         p.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
 
