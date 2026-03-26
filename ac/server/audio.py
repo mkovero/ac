@@ -135,9 +135,12 @@ class JackEngine:
     # ------------------------------------------------------------------
 
     def set_tone(self, freq, amplitude, duration_seconds=None):
-        n    = self._sr
-        t    = np.arange(n) / self._sr
-        tone = (amplitude * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+        # Build a cycle-aligned tone buffer (integer number of cycles)
+        # to avoid discontinuities at the loop boundary.
+        n_cycles = max(1, round(freq * 1.0))  # ~1 second worth of cycles
+        n        = round(n_cycles * self._sr / freq)
+        t        = np.arange(n) / self._sr
+        tone     = (amplitude * np.sin(2 * np.pi * freq * t)).astype(np.float32)
         with self._tone_lock:
             self._tone     = tone
             self._tone_pos = 0

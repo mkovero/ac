@@ -167,8 +167,15 @@ class SweepView(QtWidgets.QMainWindow):
             self._clip_thdn.setData([], [])
 
         if not self._done:
-            for p in [self._p_thd, self._p_gain]:
-                p.enableAutoRange(enable=True)
+            self._p_gain.enableAutoRange(enable=True)
+            # Fit THD/THD+N Y-axis tightly to data (avoid defaulting to 0–1)
+            all_vals = np.concatenate([thd[valid], thdn[valid]])
+            if len(all_vals) > 0:
+                ymin = max(0, np.min(all_vals) * 0.8)
+                ymax = np.max(all_vals) * 1.2
+                if ymax - ymin < 0.001:
+                    ymax = ymin + 0.01
+                self._p_thd.setYRange(ymin, ymax)
 
     # ------------------------------------------------------------------
     # Point selection + spectrum
