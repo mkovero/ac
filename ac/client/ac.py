@@ -1525,13 +1525,14 @@ def cmd_test_hardware(cmd, cfg, client):
         "dmm": cmd.get("dmm", False),
     }, timeout_ms=10000), "test_hardware")
 
-    out_port = ack.get("out_port", "?")
-    in_port  = ack.get("in_port", "?")
-    ref_port = ack.get("ref_port", "?")
+    out_port     = ack.get("out_port", "?")
+    ref_out_port = ack.get("ref_out_port", out_port)
+    in_port      = ack.get("in_port", "?")
+    ref_port     = ack.get("ref_port", "?")
 
     print(f"\n  Hardware validation")
     print(f"  Pair A: {out_port} -> {in_port}")
-    print(f"  Pair B: {out_port} -> {ref_port}")
+    print(f"  Pair B: {ref_out_port} -> {ref_port}")
     if cmd.get("dmm"):
         print(f"  DMM:    {cfg.get('dmm_host', '(not configured)')}")
     print()

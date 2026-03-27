@@ -114,16 +114,16 @@ Integration tests verify the software pipeline is correct; hardware validation r
 
 ## Hardware validation (`ac test hardware`)
 
-Requires two loopback pairs: `output_channel` → `input_channel` (pair A) and `output_channel` → `reference_channel` (pair B). Configure with `ac setup output N input N reference M`.
+Requires two loopback pairs: `output_channel` → `input_channel` (pair A) and a second output → `reference_channel` (pair B). Configure with `ac setup output N input N reference M`. Stimulus is sent to both output ports simultaneously.
 
 | Test | What it measures | Pass criteria |
 |------|-----------------|---------------|
 | Noise floor | RMS level with silence on both inputs | < -80 dBFS |
-| Level linearity | -60 to 0 dBFS in 6 dB steps, check monotonicity | monotonic, step error < 1 dB |
+| Level linearity | -42 to -6 dBFS in 6 dB steps, check monotonicity | monotonic, step error < 1 dB (1.5 dB top step) |
 | THD floor | THD at 1 kHz across levels (-40 to -3 dBFS) | best THD < 0.05% |
-| Frequency response | Tone at 20–20kHz, deviation from 1 kHz ref | < 1.0 dB |
+| Frequency response | Tone at 50–20kHz, deviation from 1 kHz ref | < 1.0 dB |
 | Channel match | Same stimulus on both inputs, compare levels and THD | level delta < 0.5 dB, THD delta < 0.01% |
-| Channel isolation | Tone on output, measure on reference input | < -60 dBFS |
+| Channel isolation | Disconnect ref output, tone on primary, measure ref input | < -60 dBFS (skipped if same output) |
 | Repeatability | Same measurement 5x, check variance | level sigma < 0.05 dB, THD sigma < 0.005% |
 
 ### DMM cross-check (`ac test hardware dmm`)

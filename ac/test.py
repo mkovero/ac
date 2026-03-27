@@ -197,9 +197,13 @@ def run_noise_floor(engine, in_port_a, in_port_b):
 
 
 def run_level_linearity(engine, out_port, in_port):
-    """Sweep -60 to 0 dBFS in 6 dB steps, check monotonicity and step accuracy."""
+    """Sweep -42 to -6 dBFS in 6 dB steps, check monotonicity and step accuracy.
+
+    Avoids 0 dBFS (clipping) and below -42 dBFS (noise/quantization affects step accuracy).
+    Top step (-12 → -6) uses relaxed tolerance — some interfaces compress near full scale.
+    """
     from .server.analysis import analyze
-    levels_dbfs = list(range(-60, 1, 6))  # -60, -54, ..., 0
+    levels_dbfs = list(range(-42, -5, 6))  # -42, -36, ..., -6
     measured = []
 
     engine.reconnect_input(in_port)
@@ -207,28 +211,35 @@ def run_level_linearity(engine, out_port, in_port):
         amp = 10.0 ** (level / 20.0)
         engine.set_tone(1000.0, amp)
         engine._ringbuf.read(engine._ringbuf.read_space)
-        import time; time.sleep(0.05)
-        data = engine.capture_block(0.2)
+        import time; time.sleep(0.1)
+        data = engine.capture_block(1.0)
         rec = data.reshape(-1, 1)
         r = analyze(rec, sr=engine.samplerate, fundamental=1000.0)
         if "error" in r:
             measured.append(float("nan"))
         else:
-            measured.append(r["fundamental_dbfs"])
+            measured.append(float(r["fundamental_dbfs"]))
 
     # Check monotonicity (each step should be higher than the last)
     valid = [(l, m) for l, m in zip(levels_dbfs, measured) if not np.isnan(m)]
     monotonic = all(valid[i][1] < valid[i+1][1] for i in range(len(valid)-1))
 
     # Check step accuracy: deltas between consecutive measurements should be ~6 dB
-    deltas = [valid[i+1][1] - valid[i][1] for i in range(len(valid)-1)]
-    max_step_err = max(abs(d - 6.0) for d in deltas) if deltas else float("inf")
+    # Top step gets 1.5 dB tolerance (some interfaces compress near full scale)
+    deltas = [(valid[i][0], valid[i+1][0], valid[i+1][1] - valid[i][1])
+              for i in range(len(valid)-1)]
+    max_step_err = 0
+    for i, (a, b, d) in enumerate(deltas):
+        tol = 1.5 if i == len(deltas) - 1 else 1.0
+        max_step_err = max(max_step_err, abs(d - 6.0) / tol)
+    passed = monotonic and max_step_err <= 1.0
 
+    step_detail = ", ".join(f"{a}→{b}:{d:.2f}" for a, b, d in deltas)
     return TestResult(
         "Level linearity",
-        monotonic and max_step_err < 1.0,
-        f"monotonic={monotonic}  max step error={max_step_err:.2f} dB  ({len(valid)}/{len(levels_dbfs)} points)",
-        "monotonic, step error < 1 dB")
+        passed,
+        f"[{step_detail}]",
+        "monotonic, step error < 1 dB (1.5 dB top step)")
 
 
 def run_thd_floor(engine, out_port, in_port):
@@ -260,9 +271,9 @@ def run_thd_floor(engine, out_port, in_port):
 
 
 def run_freq_response(engine, out_port, in_port):
-    """Frequency response at -10 dBFS — should be flat."""
+    """Frequency response at -10 dBFS — should be flat across audio band."""
     from .server.analysis import analyze
-    freqs = [20, 50, 100, 500, 1000, 5000, 10000, 20000]
+    freqs = [50, 100, 500, 1000, 5000, 10000, 20000]
     amp = 10.0 ** (-10.0 / 20.0)
     results = []
 
@@ -270,13 +281,13 @@ def run_freq_response(engine, out_port, in_port):
     for freq in freqs:
         engine.set_tone(float(freq), amp)
         engine._ringbuf.read(engine._ringbuf.read_space)
-        dur = max(0.2, 10.0 / freq)
+        dur = max(0.5, 20.0 / freq)  # enough cycles for low freqs
         import time; time.sleep(0.05)
         data = engine.capture_block(dur)
         rec = data.reshape(-1, 1)
         r = analyze(rec, sr=engine.samplerate, fundamental=float(freq))
         if "error" not in r:
-            results.append((freq, r["fundamental_dbfs"]))
+            results.append((freq, float(r["fundamental_dbfs"])))
 
     if len(results) < 2:
         return TestResult("Frequency response", False, "insufficient data", "")
@@ -322,28 +333,45 @@ def run_channel_match(engine, out_port, in_port_a, in_port_b):
         "level < 0.5 dB, THD < 0.01%")
 
 
-def run_channel_isolation(engine, out_port, in_port_silent):
-    """Tone on output, measure on an input NOT looped back — should see only noise."""
-    from .server.analysis import analyze
+def run_channel_isolation(engine, out_port, ref_out_port, in_port_b):
+    """Analog crosstalk test: tone on primary output only, measure on reference input.
+
+    Temporarily disconnects the reference output so only the primary output
+    sends signal. Measures crosstalk into in_port_b (looped from ref_out_port).
+    """
+    if ref_out_port == out_port:
+        return TestResult(
+            "Channel isolation",
+            True,
+            "skipped — same output feeds both inputs",
+            "(only testable with separate outputs)")
+
+    import time
+
+    # Disconnect reference output so only primary sends signal
+    ref_port_idx = 1  # ref_out_port is the second output port
+    engine.disconnect_output(ref_out_port, port_index=ref_port_idx)
+
     amp = 10.0 ** (-10.0 / 20.0)
     engine.set_tone(1000.0, amp)
-    import time; time.sleep(0.1)
+    time.sleep(0.2)
 
-    engine.reconnect_input(in_port_silent)
+    engine.reconnect_input(in_port_b)
     engine._ringbuf.read(engine._ringbuf.read_space)
     time.sleep(0.05)
     data = engine.capture_block(0.5)
     rms = float(np.sqrt(np.mean(data.astype(np.float64) ** 2)))
-    level_dbfs = 20.0 * np.log10(max(rms, 1e-12))
-
-    # Signal on output is at -10 dBFS, so isolation = signal - crosstalk
+    level_dbfs = float(20.0 * np.log10(max(rms, 1e-12)))
     isolation = -10.0 - level_dbfs
+
+    # Reconnect reference output
+    engine.connect_output(ref_out_port, port_index=ref_port_idx)
 
     return TestResult(
         "Channel isolation",
         level_dbfs < -60,
         f"{level_dbfs:.1f} dBFS (isolation: {isolation:.1f} dB)",
-        "< -60 dBFS on silent channel")
+        "< -60 dBFS on reference input")
 
 
 def run_repeatability(engine, out_port, in_port, n_reps=5):

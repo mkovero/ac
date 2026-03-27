@@ -39,9 +39,21 @@ AUDIO_CMDS  = OUTPUT_CMDS | INPUT_CMDS | EXCLUSIVE
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+class _NumpyEncoder(json.JSONEncoder):
+    """Handle numpy scalars that slip into frames."""
+    def default(self, o):
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        if isinstance(o, (np.bool_,)):
+            return bool(o)
+        return super().default(o)
+
+
 def _pub(q, topic, frame):
     """Enqueue a DATA frame for the main thread to send."""
-    q.put(topic.encode() + b" " + json.dumps(frame).encode())
+    q.put(topic.encode() + b" " + json.dumps(frame, cls=_NumpyEncoder).encode())
 
 
 def _warmup(engine, n_blocks=WARMUP_REPS):
@@ -458,16 +470,20 @@ def _worker_test_hardware(pub_q, stop_ev, cfg, cmd):
                         run_repeatability, run_dmm_absolute, run_dmm_tracking,
                         run_dmm_freq_response)
 
-    out_port   = cmd["_out_port"]
-    in_port_a  = cmd["_in_port"]
-    in_port_b  = cmd["_ref_port"]
-    dmm_mode   = cmd.get("dmm", False)
-    dmm_host   = cfg.get("dmm_host")
+    out_port     = cmd["_out_port"]
+    ref_out_port = cmd["_ref_out_port"]
+    in_port_a    = cmd["_in_port"]
+    in_port_b    = cmd["_ref_port"]
+    dmm_mode     = cmd.get("dmm", False)
+    dmm_host     = cfg.get("dmm_host")
+
+    # Use both outputs so both loopback pairs receive the stimulus
+    out_ports = [out_port, ref_out_port] if ref_out_port != out_port else [out_port]
 
     engine = None
     try:
         engine = JackEngine(client_name="ac-test")
-        engine.start(output_ports=out_port, input_port=in_port_a)
+        engine.start(output_ports=out_ports, input_port=in_port_a)
 
         tests_run = 0
         tests_pass = 0
@@ -501,11 +517,9 @@ def _worker_test_hardware(pub_q, stop_ev, cfg, cmd):
         if not stop_ev.is_set():
             _emit(run_channel_match(engine, out_port, in_port_a, in_port_b))
 
-        # 6. Channel isolation (tone on out, measure on B which is looped to same out)
-        # Only meaningful if B is on a different output — skip if same output feeds both
-        # For now, always run — if B is looped to the same output, it will show signal (expected)
+        # 6. Channel isolation
         if not stop_ev.is_set():
-            _emit(run_channel_isolation(engine, out_port, in_port_b))
+            _emit(run_channel_isolation(engine, out_port, ref_out_port, in_port_b))
 
         # 7. Repeatability
         if not stop_ev.is_set():
@@ -963,14 +977,16 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                                  "run: ac setup reference <port>  (second loopback input)"}
             try:
                 playback, capture = find_ports()
-                out_port = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
-                in_port  = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
-                ref_port = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+                out_port     = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
+                in_port      = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
+                ref_port     = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+                ref_out_port = resolve_port(playback, None, ref_ch)
             except Exception as e:
                 return {"ok": False, "error": f"port error: {e}"}
-            cmd["_out_port"]  = out_port
-            cmd["_in_port"]   = in_port
-            cmd["_ref_port"]  = ref_port
+            cmd["_out_port"]     = out_port
+            cmd["_in_port"]      = in_port
+            cmd["_ref_port"]     = ref_port
+            cmd["_ref_out_port"] = ref_out_port
 
         if name == "probe":
             try:
@@ -1027,9 +1043,10 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         if name == "test_hardware":
             _spawn("test_hardware", _worker_test_hardware, pub_q, cfg, cmd)
             return {"ok": True,
-                    "out_port": cmd["_out_port"],
-                    "in_port": cmd["_in_port"],
-                    "ref_port": cmd["_ref_port"]}
+                    "out_port":     cmd["_out_port"],
+                    "ref_out_port": cmd["_ref_out_port"],
+                    "in_port":      cmd["_in_port"],
+                    "ref_port":     cmd["_ref_port"]}
 
         if name == "calibrate":
             # Drain stale cal_q entries from previous stop commands
@@ -1124,7 +1141,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
             _post_send.clear()
             reply = handle(cmd)
-            sock_ctrl.send(json.dumps(reply).encode())
+            sock_ctrl.send(json.dumps(reply, cls=_NumpyEncoder).encode())
             for _fn in _post_send:
                 _fn()
             _post_send.clear()
