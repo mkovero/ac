@@ -402,3 +402,37 @@ def test_test_hardware_dmm_abbreviation():
     r = parse(["te", "hw", "dmm"])
     assert r["cmd"] == "test_hardware"
     assert r["dmm"] is True
+
+
+# ---------------------------------------------------------------------------
+# test dut
+# ---------------------------------------------------------------------------
+
+def test_test_dut_defaults():
+    r = parse(["test", "dut"])
+    assert r["cmd"] == "test_dut"
+    assert r["compare"] is False
+    assert r["level"] == ("dbfs", -20.0)
+
+
+def test_test_dut_compare():
+    r = parse(["test", "dut", "compare"])
+    assert r["cmd"] == "test_dut"
+    assert r["compare"] is True
+
+
+def test_test_dut_abbreviation():
+    assert parse(["te", "du"])["cmd"] == "test_dut"
+
+
+def test_test_dut_with_level():
+    r = parse(["test", "dut", "-10dbfs"])
+    assert r["cmd"] == "test_dut"
+    assert r["level"] == ("dbfs", -10.0)
+
+
+def test_test_dut_compare_with_level():
+    r = parse(["test", "dut", "comp", "-10dbu"])
+    assert r["cmd"] == "test_dut"
+    assert r["compare"] is True
+    assert r["level"] == ("dbu", -10.0)

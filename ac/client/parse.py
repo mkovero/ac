@@ -168,6 +168,8 @@ ABBREVS = {
     # test nouns
     "so": "software", "soft": "software",
     "h": "hardware", "hw": "hardware",
+    "du": "dut", "dut": "dut",
+    "comp": "compare",
     # show plot after command
     "sh": "show",
     # sessions
@@ -514,7 +516,7 @@ def parse(argv):
 
     elif verb == "test":
         if not args:
-            raise ParseError("test needs a noun: software | hardware")
+            raise ParseError("test needs a noun: software | hardware | dut")
         noun = _expand(args.pop(0))
         if noun == "software":
             if args:
@@ -528,8 +530,26 @@ def parse(argv):
             if args:
                 raise ParseError(f"test hardware: unexpected argument(s): {args}")
             return {"cmd": "test_hardware", "dmm": dmm}
+        elif noun == "dut":
+            compare = False
+            level = ("dbfs", -20.0)
+            for a in list(args):
+                ea = _expand(a)
+                if ea == "compare":
+                    compare = True
+                    args.remove(a)
+                    continue
+                try:
+                    level = _parse_level(a)
+                    args.remove(a)
+                    continue
+                except ValueError:
+                    pass
+            if args:
+                raise ParseError(f"test dut: unexpected argument(s): {args}")
+            return {"cmd": "test_dut", "compare": compare, "level": level}
         else:
-            raise ParseError(f"unknown test noun: {noun!r}  (software | hardware)")
+            raise ParseError(f"unknown test noun: {noun!r}  (software | hardware | dut)")
 
     elif verb == "probe":
         if args:
@@ -567,6 +587,7 @@ Commands:
   stop                                                          stop active generator/measurement
   test software                                                  validate analysis pipeline (no hardware)
   test hardware   [dmm]                                          hardware validation (requires 2 loopbacks)
+  test dut        [compare] [level]                              DUT characterization (requires 2 loopbacks)
   probe                                                         auto-detect analog ports and loopback pairs
   dmm                                                           read AC Vrms from configured DMM over SCPI
   setup           [output <N>] [input <N>] [reference <N>]

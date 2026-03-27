@@ -31,7 +31,7 @@ DATA_PORT  = 5557
 # Concurrency classification
 OUTPUT_CMDS = {"generate", "generate_pink", "sweep_level", "sweep_frequency"}
 INPUT_CMDS  = {"monitor_spectrum"}
-EXCLUSIVE   = {"plot", "plot_level", "calibrate", "transfer", "probe", "test_hardware"}
+EXCLUSIVE   = {"plot", "plot_level", "calibrate", "transfer", "probe", "test_hardware", "test_dut"}
 AUDIO_CMDS  = OUTPUT_CMDS | INPUT_CMDS | EXCLUSIVE
 
 
@@ -559,6 +559,86 @@ def _worker_test_hardware(pub_q, stop_ev, cfg, cmd):
             engine.stop()
 
 
+def _worker_test_dut(pub_q, stop_ev, dut_q, cfg, cmd):
+    """DUT characterization: gain, THD vs level, freq response, clipping."""
+    from ..test import (run_dut_noise_floor, run_dut_gain, run_dut_thd_vs_level,
+                        run_dut_freq_response, run_dut_clipping_point)
+
+    out_port     = cmd["_out_port"]
+    ref_out_port = cmd["_ref_out_port"]
+    in_port      = cmd["_in_port"]
+    ref_port     = cmd["_ref_port"]
+    compare_mode = cmd.get("compare", False)
+    level_dbfs   = cmd.get("level_dbfs", -20.0)
+
+    out_ports = [out_port, ref_out_port] if ref_out_port != out_port else [out_port]
+
+    # Load calibration for dBu/Vrms display (None if uncalibrated)
+    cal = Calibration.load(output_channel=cfg["output_channel"],
+                           input_channel=cfg["input_channel"])
+
+    engine = None
+    try:
+        engine = JackEngine(client_name="ac-dut")
+        engine.start(output_ports=out_ports, input_port=in_port,
+                     reference_port=ref_port)
+
+        def _run_suite(tag=""):
+            tests_run = 0
+
+            def _emit(result, extra=None):
+                nonlocal tests_run
+                tests_run += 1
+                d = {"type": "test_result", "cmd": "test_dut",
+                     **result.to_dict()}
+                if tag:
+                    d["tag"] = tag
+                if extra:
+                    d.update(extra)
+                _pub(pub_q, "data", d)
+
+            if not stop_ev.is_set():
+                _emit(run_dut_noise_floor(engine, cal))
+            if not stop_ev.is_set():
+                _emit(run_dut_gain(engine, level_dbfs, cal))
+            if not stop_ev.is_set():
+                result, thd_data = run_dut_thd_vs_level(engine, cal)
+                _emit(result)
+            if not stop_ev.is_set():
+                result, tf_data = run_dut_freq_response(engine, level_dbfs, cal)
+                _emit(result)
+            if not stop_ev.is_set():
+                _emit(run_dut_clipping_point(engine, cal))
+
+            return tests_run
+
+        n = _run_suite("dut" if compare_mode else "")
+
+        if compare_mode and not stop_ev.is_set():
+            _pub(pub_q, "data", {"type": "dut_compare_prompt", "cmd": "test_dut",
+                                  "message": "Bypass DUT and press Enter"})
+            # Block until client sends dut_reply (same pattern as cal_q)
+            try:
+                reply = dut_q.get(timeout=300)
+            except Exception:
+                reply = None
+            if reply is None or stop_ev.is_set():
+                _pub(pub_q, "done", {"cmd": "test_dut", "tests_run": n,
+                                     "xruns": engine.xruns})
+                return
+            n += _run_suite("bypass")
+
+        _pub(pub_q, "done", {"cmd": "test_dut", "tests_run": n,
+                             "compare": compare_mode,
+                             "xruns": engine.xruns})
+    except Exception as e:
+        _pub(pub_q, "error", {"cmd": "test_dut", "message": str(e)})
+    finally:
+        if engine is not None:
+            engine.set_silence()
+            engine.stop()
+
+
 def _worker_transfer(pub_q, stop_ev, cfg, cmd):
     """H1 transfer function measurement."""
     from .transfer import h1_estimate, capture_duration
@@ -709,6 +789,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
     pub_q       = queue.Queue()
     cal_q       = queue.Queue()
+    dut_q       = queue.Queue()
     should_quit = [False]
     workers     = {}   # {cmd_name: {"thread": Thread, "stop": Event}}
 
@@ -826,6 +907,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
                 for w in workers.values():
                     w["stop"].set()
                 cal_q.put(None)   # unblock calibration worker if it's waiting
+                dut_q.put(None)   # unblock DUT compare worker if waiting
                 for w in workers.values():
                     w["thread"].join(timeout=5.0)
                 workers.clear()
@@ -833,6 +915,10 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         if name == "cal_reply":
             cal_q.put(cmd.get("vrms"))
+            return {"ok": True}
+
+        if name == "dut_reply":
+            dut_q.put(True)
             return {"ok": True}
 
         if name == "get_calibration":
@@ -988,6 +1074,25 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
             cmd["_ref_port"]     = ref_port
             cmd["_ref_out_port"] = ref_out_port
 
+        if name == "test_dut":
+            ref_ch = cfg.get("reference_channel")
+            if ref_ch is None:
+                return {"ok": False,
+                        "error": "reference channel not configured — "
+                                 "run: ac setup reference <port>  (second loopback input)"}
+            try:
+                playback, capture = find_ports()
+                out_port     = resolve_port(playback, cfg.get("output_port"), cfg["output_channel"])
+                in_port      = resolve_port(capture,  cfg.get("input_port"),  cfg["input_channel"])
+                ref_port     = resolve_port(capture,  cfg.get("reference_port"), ref_ch)
+                ref_out_port = resolve_port(playback, None, ref_ch)
+            except Exception as e:
+                return {"ok": False, "error": f"port error: {e}"}
+            cmd["_out_port"]     = out_port
+            cmd["_in_port"]      = in_port
+            cmd["_ref_port"]     = ref_port
+            cmd["_ref_out_port"] = ref_out_port
+
         if name == "probe":
             try:
                 playback, capture = find_ports()
@@ -1042,6 +1147,20 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
 
         if name == "test_hardware":
             _spawn("test_hardware", _worker_test_hardware, pub_q, cfg, cmd)
+            return {"ok": True,
+                    "out_port":     cmd["_out_port"],
+                    "ref_out_port": cmd["_ref_out_port"],
+                    "in_port":      cmd["_in_port"],
+                    "ref_port":     cmd["_ref_port"]}
+
+        if name == "test_dut":
+            # Drain stale dut_q entries
+            while not dut_q.empty():
+                try:
+                    dut_q.get_nowait()
+                except queue.Empty:
+                    break
+            _spawn("test_dut", _worker_test_dut, pub_q, dut_q, cfg, cmd)
             return {"ok": True,
                     "out_port":     cmd["_out_port"],
                     "ref_out_port": cmd["_ref_out_port"],
@@ -1150,6 +1269,7 @@ def run_server(ctrl_port=CTRL_PORT, data_port=DATA_PORT):
         for w in workers.values():
             w["stop"].set()
         cal_q.put(None)
+        dut_q.put(None)
         for w in workers.values():
             w["thread"].join(timeout=5.0)
     finally:

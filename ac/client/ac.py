@@ -1592,6 +1592,77 @@ def cmd_test_hardware(cmd, cfg, client):
         print("\n  Stopped.")
 
 
+def cmd_test_dut(cmd, cfg, client):
+    """Run DUT characterization via server."""
+    cal_info = _get_cal(client)
+    level_dbfs = _level_to_dbfs(cmd.get("level", ("dbfs", -20.0)), cal_info)
+
+    ack = _check_ack(client.send_cmd({
+        "cmd": "test_dut",
+        "compare": cmd.get("compare", False),
+        "level_dbfs": level_dbfs,
+    }, timeout_ms=10000), "test_dut")
+
+    out_port     = ack.get("out_port", "?")
+    ref_out_port = ack.get("ref_out_port", out_port)
+    in_port      = ack.get("in_port", "?")
+    ref_port     = ack.get("ref_port", "?")
+
+    compare = cmd.get("compare", False)
+    title = "DUT characterization — compare mode" if compare else "DUT characterization"
+    print(f"\n  {title}")
+    print(f"  Signal:    {out_port} \u2192 [DUT] \u2192 {in_port}")
+    print(f"  Reference: {ref_out_port} \u2192 {ref_port}")
+    print()
+
+    tests_done = 0
+    current_tag = None
+
+    try:
+        while True:
+            topic, frame = client.recv_data(timeout_ms=300000)
+            if topic == "data" and frame.get("type") == "test_result":
+                tests_done += 1
+                name = frame["name"]
+                detail = frame["detail"]
+                ok = frame["pass"]
+                tag = "OK" if ok else "ERR"
+                frame_tag = frame.get("tag", "")
+
+                # Print section header for compare mode
+                if compare and frame_tag and frame_tag != current_tag:
+                    current_tag = frame_tag
+                    label = "With DUT" if frame_tag == "dut" else "Bypass"
+                    print(f"\n  [{label}]")
+
+                dots = "." * max(1, 26 - len(name))
+                line = f"  {name} {dots} {detail}"
+                pad = max(1, 78 - len(line))
+                print(f"{line}{' ' * pad}{tag}")
+
+            elif topic == "data" and frame.get("type") == "dut_compare_prompt":
+                msg = frame.get("message", "Bypass DUT and press Enter")
+                input(f"\n  {msg}")
+                client.send_cmd({"cmd": "dut_reply"})
+
+            elif topic == "done":
+                xr = frame.get("xruns", 0)
+                xr_s = f"  !! {xr} xrun(s)" if xr else ""
+                print(f"\n  {tests_done} measurements completed{xr_s}")
+                print()
+                return
+
+            elif topic == "error":
+                print(f"\n  error: {frame.get('message')}")
+                return
+
+    except TimeoutError:
+        print("\n  error: timeout waiting for DUT test results")
+    except KeyboardInterrupt:
+        client.send_cmd({"cmd": "stop"})
+        print("\n  Stopped.")
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -1616,6 +1687,7 @@ HANDLERS = {
     "server_connections": cmd_server_connections,
     "probe":              cmd_probe,
     "test_hardware":      cmd_test_hardware,
+    "test_dut":           cmd_test_dut,
     "gpio":               cmd_gpio,
 }
 

@@ -15,16 +15,19 @@ In addition to pytest, `ac` has built-in self-tests runnable without pytest:
 ac test software              # validates analysis pipeline + conversions (no hardware)
 ac test hardware              # hardware validation (requires 2 loopback pairs)
 ac test hardware dmm          # + cross-check against DMM over SCPI
+ac test dut                   # DUT characterization (requires 2 loopback pairs)
+ac test dut compare           # A/B comparison (prompts to bypass DUT)
+ac test dut -10dbu            # DUT test at specific level
 ```
 
-Short forms: `ac te so`, `ac te h`, `ac te h dmm`
+Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 
 ## Test files
 
 | File | Tests | What it covers |
 |------|-------|----------------|
 | `test_analysis.py` | 28 | FFT analysis: THD, THD+N, harmonics, noise floor, fundamental detection, spectrum downsampling |
-| `test_parse.py` | 53 | CLI token parser: all commands incl. test, abbreviations, defaults, error cases |
+| `test_parse.py` | 58 | CLI token parser: all commands incl. test/dut, abbreviations, defaults, error cases |
 | `test_server_client.py` | 25 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
 | `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
 | `test_conversions.py` | 11 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
@@ -135,6 +138,26 @@ Requires `ac setup dmm <ip>` and calibration (`ac calibrate`).
 | Absolute level | -10 dBFS vs DMM Vrms vs calibration prediction | < 1% error |
 | Level tracking | Sweep -40 to 0 dBFS, DMM vs predicted at each step | < 2% error |
 | Freq response | Same level at 100–20kHz, check DMM reads flat | < 1.0 dB deviation |
+
+## DUT characterization (`ac test dut`)
+
+Requires two loopback pairs (same as hardware test). Signal path: `output_channel` → DUT → `input_channel` (measurement), `reference_channel` output → `reference_channel` input (direct loopback reference). Uses `capture_block_stereo()` for simultaneous measurement + reference capture.
+
+| Test | What it measures | Reports |
+|------|-----------------|---------|
+| Noise floor | DUT output with no stimulus | dBFS |
+| Gain | Level difference between measurement and reference at 1 kHz | dB (+ ref/meas levels) |
+| THD vs level | THD, THD+N, and gain at 1 kHz across drive levels (-40 to -3 dBFS) | best THD%, per-level breakdown |
+| Frequency response | H1 transfer function (pink noise, 4s capture) | deviation range, coherence, delay |
+| Clipping point | Level sweep upward until THD > 1% | onset level in dBFS |
+
+### Compare mode (`ac test dut compare`)
+
+Runs the full 5-measurement suite twice: once with DUT in the signal path, then prompts the user to bypass the DUT and runs again. Results are tagged `[With DUT]` and `[Bypass]` for comparison.
+
+### With direct loopback (no DUT)
+
+Expected results: gain ≈ 0 dB, flat frequency response (±0 dB), coherence = 1.000, delay = 0 ms, very low THD. Useful as a baseline sanity check.
 
 ## Adding tests
 

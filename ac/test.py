@@ -496,3 +496,234 @@ def run_dmm_freq_response(engine, out_port, dmm_host):
         max_dev < 1.0,
         f"max deviation {max_dev:.2f} dB  [{', '.join(parts)}]",
         "< 1.0 dB vs 1 kHz ref")
+
+
+# ---------------------------------------------------------------------------
+# DUT characterization tests (called from server worker)
+# ---------------------------------------------------------------------------
+
+def _dbfs_to_dbu(dbfs, cal):
+    """Convert dBFS to dBu string using calibration, or return dBFS string."""
+    from .conversions import vrms_to_dbu, dbfs_to_vrms
+    if cal and cal.input_ok:
+        vrms = dbfs_to_vrms(dbfs, cal.vrms_at_0dbfs_in)
+        dbu = vrms_to_dbu(vrms)
+        return f"{dbu:+.1f} dBu"
+    return f"{dbfs:.1f} dBFS"
+
+
+def _dbfs_to_vrms_str(dbfs, cal):
+    """Convert dBFS to Vrms string using calibration."""
+    from .conversions import dbfs_to_vrms, fmt_vrms
+    if cal and cal.input_ok:
+        vrms = dbfs_to_vrms(dbfs, cal.vrms_at_0dbfs_in)
+        return fmt_vrms(vrms)
+    return f"{dbfs:.1f} dBFS"
+
+
+def _out_dbfs_to_dbu(dbfs, cal):
+    """Convert output dBFS to dBu string using output calibration."""
+    from .conversions import vrms_to_dbu, dbfs_to_vrms
+    if cal and cal.output_ok:
+        vrms = dbfs_to_vrms(dbfs, cal.vrms_at_0dbfs_out)
+        dbu = vrms_to_dbu(vrms)
+        return f"{dbu:+.1f} dBu"
+    return f"{dbfs:.1f} dBFS"
+
+
+def run_dut_noise_floor(engine, cal=None):
+    """Measure DUT output noise with no stimulus."""
+    import time
+    engine.set_silence()
+    time.sleep(0.2)
+    data = engine.capture_block(1.0)
+    rms = float(np.sqrt(np.mean(data.astype(np.float64) ** 2)))
+    dbfs = float(20.0 * np.log10(max(rms, 1e-12)))
+    level_str = _dbfs_to_dbu(dbfs, cal)
+    return TestResult("Noise floor", True, level_str, "DUT output noise")
+
+
+def run_dut_gain(engine, level_dbfs=-20.0, cal=None):
+    """Measure DUT gain at 1 kHz by comparing measurement vs reference channels."""
+    import time
+    from .server.analysis import analyze
+    amp = 10.0 ** (level_dbfs / 20.0)
+    engine.set_tone(1000.0, amp)
+    time.sleep(0.2)
+    stereo = engine.capture_block_stereo(1.0)
+    meas = stereo[:, 0].reshape(-1, 1)
+    ref = stereo[:, 1].reshape(-1, 1)
+
+    r_meas = analyze(meas, sr=engine.samplerate, fundamental=1000.0)
+    r_ref = analyze(ref, sr=engine.samplerate, fundamental=1000.0)
+    if "error" in r_meas:
+        return TestResult("Gain", False, "no signal at measurement input", "")
+    if "error" in r_ref:
+        return TestResult("Gain", False, "no signal at reference input", "")
+
+    meas_db = float(r_meas["fundamental_dbfs"])
+    ref_db = float(r_ref["fundamental_dbfs"])
+    gain = meas_db - ref_db
+    ref_str = _out_dbfs_to_dbu(ref_db, cal)
+    meas_str = _dbfs_to_dbu(meas_db, cal)
+    return TestResult(
+        "Gain",
+        True,
+        f"{gain:+.1f} dB  (ref: {ref_str} \u2192 meas: {meas_str})",
+        "at 1 kHz")
+
+
+def run_dut_thd_vs_level(engine, cal=None, levels=None):
+    """THD and gain at 1 kHz across multiple drive levels."""
+    import time
+    from .server.analysis import analyze
+    if levels is None:
+        levels = [-40, -30, -20, -10, -6, -3]
+    results = []
+
+    for level in levels:
+        amp = 10.0 ** (level / 20.0)
+        engine.set_tone(1000.0, amp)
+        time.sleep(0.1)
+        stereo = engine.capture_block_stereo(1.0)
+        meas = stereo[:, 0].reshape(-1, 1)
+        ref = stereo[:, 1].reshape(-1, 1)
+        r_meas = analyze(meas, sr=engine.samplerate, fundamental=1000.0)
+        r_ref = analyze(ref, sr=engine.samplerate, fundamental=1000.0)
+        if "error" not in r_meas and "error" not in r_ref:
+            gain = float(r_meas["fundamental_dbfs"]) - float(r_ref["fundamental_dbfs"])
+            results.append({
+                "level": level,
+                "thd": float(r_meas["thd_pct"]),
+                "thdn": float(r_meas["thdn_pct"]),
+                "gain": gain,
+                "meas_dbfs": float(r_meas["fundamental_dbfs"]),
+            })
+
+    if not results:
+        return TestResult("THD vs level", False, "no valid measurements", ""), []
+
+    best_thd = min(r["thd"] for r in results)
+    # Show drive level in dBu if calibrated
+    parts = []
+    for r in results:
+        drive = _out_dbfs_to_dbu(float(r["level"]), cal)
+        parts.append(f"{drive}:{r['thd']:.4f}%/{r['gain']:+.1f}dB")
+    return TestResult(
+        "THD vs level",
+        True,
+        f"best {best_thd:.4f}%  [{', '.join(parts)}]",
+        "THD%/gain at each drive level"), results
+
+
+def run_dut_freq_response(engine, level_dbfs=-20.0, cal=None):
+    """Measure DUT frequency response using H1 transfer function estimate."""
+    import time
+    from .server.transfer import h1_estimate
+    amp = 10.0 ** (level_dbfs / 20.0)
+    engine.set_pink_noise(amp)
+    time.sleep(0.3)
+
+    # Capture 4 seconds for good averaging
+    stereo = engine.capture_block_stereo(4.0)
+    meas = stereo[:, 0].astype(np.float64)
+    ref = stereo[:, 1].astype(np.float64)
+
+    engine.set_silence()
+
+    try:
+        tf = h1_estimate(ref, meas, engine.samplerate)
+    except Exception as e:
+        return TestResult("Frequency response", False, f"H1 failed: {e}", ""), None
+
+    freqs = tf["freqs"]
+    mag = tf["magnitude_db"]
+    coh = tf["coherence"]
+
+    # Characterize within 50 Hz - 20 kHz
+    mask = (freqs >= 50) & (freqs <= 20000)
+    if not np.any(mask):
+        return TestResult("Frequency response", False, "no data in 50-20kHz", ""), None
+
+    mag_band = mag[mask]
+    coh_band = coh[mask]
+    ref_db = float(np.median(mag_band))  # use median as reference
+    dev_plus = float(np.max(mag_band) - ref_db)
+    dev_minus = float(np.min(mag_band) - ref_db)
+    avg_coh = float(np.mean(coh_band))
+
+    tf_data = {
+        "freqs": tf["freqs"].tolist(),
+        "magnitude_db": tf["magnitude_db"].tolist(),
+        "phase_deg": tf["phase_deg"].tolist(),
+        "coherence": tf["coherence"].tolist(),
+        "delay_ms": float(tf["delay_ms"]),
+    }
+
+    level_str = _out_dbfs_to_dbu(level_dbfs, cal)
+    return TestResult(
+        "Frequency response",
+        True,
+        f"{dev_plus:+.1f}/{dev_minus:+.1f} dB  (50-20kHz, coh {avg_coh:.3f}, delay {tf['delay_ms']:.2f}ms)  at {level_str}",
+        "H1 transfer function"), tf_data
+
+
+def run_dut_clipping_point(engine, cal=None):
+    """Find the input level where DUT THD exceeds 1% (clipping onset)."""
+    import time
+    from .server.analysis import analyze
+    from .conversions import dbfs_to_vrms, fmt_vrms
+    levels = list(range(-30, 1, 3))  # -30, -27, ..., 0
+    last_clean = None
+    last_clean_meas_dbfs = None
+    clip_level = None
+    clip_meas_dbfs = None
+
+    for level in levels:
+        amp = 10.0 ** (level / 20.0)
+        engine.set_tone(1000.0, amp)
+        time.sleep(0.1)
+        stereo = engine.capture_block_stereo(0.5)
+        meas = stereo[:, 0].reshape(-1, 1)
+        r = analyze(meas, sr=engine.samplerate, fundamental=1000.0)
+        if "error" in r:
+            continue
+
+        thd = float(r["thd_pct"])
+        meas_dbfs = float(r["fundamental_dbfs"])
+        clipping = r.get("clipping", False)
+        if thd > 1.0 or clipping:
+            clip_level = level
+            clip_meas_dbfs = meas_dbfs
+            break
+        last_clean = level
+        last_clean_meas_dbfs = meas_dbfs
+
+    engine.set_silence()
+
+    if clip_level is not None:
+        onset_out = _out_dbfs_to_dbu(float(clip_level), cal)
+        clean_out = _out_dbfs_to_dbu(float(last_clean), cal) if last_clean is not None else "?"
+        # Show clipping in Vrms at DUT output if calibrated
+        clip_vrms = ""
+        if cal and cal.input_ok and clip_meas_dbfs is not None:
+            v = dbfs_to_vrms(clip_meas_dbfs, cal.vrms_at_0dbfs_in)
+            clip_vrms = f"  DUT out: {fmt_vrms(v)}"
+        return TestResult(
+            "Clipping point",
+            True,
+            f"onset at {onset_out} (last clean: {clean_out}){clip_vrms}",
+            "THD > 1% threshold")
+    elif last_clean is not None:
+        clean_out = _out_dbfs_to_dbu(float(last_clean), cal)
+        clean_vrms = ""
+        if cal and cal.input_ok and last_clean_meas_dbfs is not None:
+            v = dbfs_to_vrms(last_clean_meas_dbfs, cal.vrms_at_0dbfs_in)
+            clean_vrms = f"  DUT out: {fmt_vrms(v)}"
+        return TestResult(
+            "Clipping point",
+            True,
+            f"clean through {clean_out} (no clipping detected){clean_vrms}",
+            "THD > 1% threshold")
+    else:
+        return TestResult("Clipping point", False, "no valid measurements", "")
