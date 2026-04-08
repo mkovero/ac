@@ -10,41 +10,82 @@ A professional audio measurement frontend housed in a **Bosch PA panel enclosure
 
 ### Input CH1/CH2 — Transformer Isolated
 
-```
-XLR → HV series R → zener clamp → impedance switch (relay/Mega) → 600Ω H-pad (0/20/40/60dB dual gang rotary) → Lundahl/Studer 1:1 transformer → INA134 → ┐
-                                                                                                                                                              ├→ relay (Mega) → FF400
-BNC pair 2 → series R → TVS clamp → HiZ buffer (OPA134) ────────────────────────────────────────────────────────────────────────────────────────────────── ┘
+```mermaid
+graph LR
+    XLR1[XLR In] --> R1[HV Series R]
+    R1 --> Z1[Zener Clamp]
+    Z1 --> IMP1[Impedance Switch\n10k/100k relay]
+    IMP1 --> PAD1[H-Pad\n0/20/40/60 dB\ndual gang rotary]
+    PAD1 --> TX1[Transformer\nLundahl/Studer 1:1]
+    TX1 --> INA1[INA134]
+
+    BNC2i[BNC Pair 2 In] --> RS1[Series R]
+    RS1 --> TVS1[TVS Clamp]
+    TVS1 --> BUF1[HiZ Buffer\nOPA134]
+
+    INA1 --> SEL1{Path relay\nMega}
+    BUF1 --> SEL1
+    SEL1 --> FF1[FF400\nCH1/CH2]
 ```
 
 ### Input CH3/CH4 — Direct
 
-```
-XLR → HV series R → zener clamp → impedance switch (relay/Mega) → H-pad (0/20/40/60dB dual gang rotary) → INA134 → ┐
-                                                                                                                      ├→ relay (Mega) → FF400
-BNC pair 2 → series R → TVS clamp → HiZ buffer (OPA134) ──────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    XLR3[XLR In] --> R3[HV Series R]
+    R3 --> Z3[Zener Clamp]
+    Z3 --> IMP3[Impedance Switch\n10k/100k relay]
+    IMP3 --> PAD3[H-Pad\n0/20/40/60 dB\ndual gang rotary]
+    PAD3 --> INA3[INA134]
+
+    BNC2i3[BNC Pair 2 In] --> RS3[Series R]
+    RS3 --> TVS3[TVS Clamp]
+    TVS3 --> BUF3[HiZ Buffer\nOPA134]
+
+    INA3 --> SEL3{Path relay\nMega}
+    BUF3 --> SEL3
+    SEL3 --> FF3[FF400\nCH3/CH4]
 ```
 
 ### Output CH1/CH2 — Transformer Isolated
 
-```
-FF400 → THAT1646 → 100Ω series → Lundahl/Studer 1:1 transformer → relay (Mega) → XLR out
+```mermaid
+graph LR
+    FF4[FF400] --> DRV[THAT1646]
+    DRV --> RS[100Ω Series]
+    RS --> TX[Transformer\nLundahl/Studer 1:1]
+    TX --> REL{Relay\nMega}
+    REL --> XLR[XLR Out]
 ```
 
 ### BNC Pair 1 — AD2 Impedance / Probe Switchable
 
-```
-BNC1 in  → series R → TVS clamp → DPDT toggle ──┬── AD2 impedance input
-                                                  └── HiZ buffer → FF400
+```mermaid
+graph LR
+    BNC1i[BNC1 In] --> RS[Series R]
+    RS --> TVS[TVS Clamp]
+    TVS --> SW1{DPDT Toggle}
+    SW1 -->|AD2 mode| AD2i[AD2 Impedance In]
+    SW1 -->|Probe mode| BUF[HiZ Buffer\nOPA134]
+    BUF --> FF_in[FF400 In]
 
-BNC1 out → DPDT toggle ──┬── AD2 impedance output
-                          └── FF400 output → 100Ω series
+    FF_out[FF400 Out] --> SW2{DPDT Toggle}
+    SW2 -->|AD2 mode| AD2o[AD2 Impedance Out]
+    SW2 -->|Probe mode| RS2[100Ω Series]
+    RS2 --> BNC1o[BNC1 Out]
 ```
 
 ### BNC Pair 2 — Probe Only
 
-```
-BNC2 in  → series R → TVS clamp → HiZ buffer → FF400 input
-BNC2 out → FF400 output → 100Ω series → BNC
+```mermaid
+graph LR
+    BNC2i[BNC2 In] --> RS[Series R]
+    RS --> TVS[TVS Clamp]
+    TVS --> BUF[HiZ Buffer\nOPA134]
+    BUF --> FF_in[FF400 In]
+
+    FF_out[FF400 Out] --> RS2[100Ω Series]
+    RS2 --> BNC2o[BNC2 Out]
 ```
 
 ---
@@ -153,9 +194,16 @@ Mega reports:
 
 ### Power Amp Measurement Workflow
 
-```
-Power amp → external dummy load box → grabber clip cable → XLR CH1/CH2
-  → impedance switch → pad (set 40/60 dB first) → transformer → INA134 → FF400
+```mermaid
+graph LR
+    AMP[Power Amp] --> LOAD[Dummy Load Box]
+    LOAD --> CLIP[Grabber Clip Cable\nXLR male]
+    CLIP --> XLR[XLR CH1/CH2]
+    XLR --> IMP[Impedance Switch]
+    IMP --> PAD[H-Pad\nset 40/60 dB first]
+    PAD --> TX[Transformer\n1:1 isolation]
+    TX --> INA[INA134]
+    INA --> FF[FF400]
 ```
 
 ### Measurement Cables to Make
