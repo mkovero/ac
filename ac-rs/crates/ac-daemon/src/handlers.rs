@@ -217,23 +217,38 @@ pub fn dmm_read(_state: &ServerState) -> Value {
 
 pub fn server_enable(state: &ServerState) -> Value {
     *state.listen_mode.lock().unwrap() = "public".to_string();
+    // Signal the main loop to rebind after this reply is sent
+    let _ = state.rebind_tx.send("*".to_string());
     json!({"ok": true, "bind_addr": "*", "listen_mode": "public"})
 }
 
 pub fn server_disable(state: &ServerState) -> Value {
     *state.listen_mode.lock().unwrap() = "local".to_string();
+    let _ = state.rebind_tx.send("127.0.0.1".to_string());
     json!({"ok": true, "bind_addr": "127.0.0.1", "listen_mode": "local"})
 }
 
 pub fn server_connections(state: &ServerState) -> Value {
     let listen_mode = state.listen_mode.lock().unwrap().clone();
+    let (ctrl_ep, data_ep) = if listen_mode == "public" {
+        (
+            format!("tcp://*:{}", state.ctrl_port),
+            format!("tcp://*:{}", state.data_port),
+        )
+    } else {
+        (
+            format!("tcp://127.0.0.1:{}", state.ctrl_port),
+            format!("tcp://127.0.0.1:{}", state.data_port),
+        )
+    };
+    let workers: Vec<String> = state.workers.lock().unwrap().keys().cloned().collect();
     json!({
         "ok":            true,
         "listen_mode":   listen_mode,
-        "ctrl_endpoint": "tcp://127.0.0.1:5556",
-        "data_endpoint": "tcp://127.0.0.1:5557",
+        "ctrl_endpoint": ctrl_ep,
+        "data_endpoint": data_ep,
         "clients":       [],
-        "workers":       []
+        "workers":       workers,
     })
 }
 

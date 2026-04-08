@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -17,15 +16,23 @@ use crate::workers::WorkerHandle;
 pub const CTRL_PORT: u16 = 5556;
 pub const DATA_PORT: u16 = 5557;
 
-/// Shared server state, cloned into every handler call.
+/// Shared server state, accessible to every handler.
 #[derive(Clone)]
 pub struct ServerState {
-    pub cfg: Arc<Mutex<ac_core::config::Config>>,
-    pub workers: Arc<Mutex<HashMap<String, WorkerHandle>>>,
-    pub pub_tx: Sender<Vec<u8>>,
-    pub src_mtime: f64,
-    pub fake_audio: bool,
+    pub cfg:         Arc<Mutex<ac_core::config::Config>>,
+    pub workers:     Arc<Mutex<HashMap<String, WorkerHandle>>>,
+    /// Worker threads → main thread → PUB socket.
+    pub pub_tx:      Sender<Vec<u8>>,
+    pub src_mtime:   f64,
+    pub fake_audio:  bool,
+    /// Human-readable mode string for `status` / `server_connections` replies.
     pub listen_mode: Arc<Mutex<String>>,
+    /// Signal the main loop to rebind: send the new bind host ("*" or "127.0.0.1").
+    /// The rebind happens AFTER the current CTRL reply is sent (per ZMQ.md spec).
+    pub rebind_tx:   Sender<String>,
+    /// Ports, so handlers can report correct endpoints.
+    pub ctrl_port:   u16,
+    pub data_port:   u16,
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -34,7 +41,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     let ctrl = ctx.socket(zmq::REP).context("CTRL socket")?;
     let data = ctx.socket(zmq::PUB).context("DATA socket")?;
 
-    let bind_host = if local_only { "127.0.0.1" } else { "*" };
+    let mut bind_host = if local_only { "127.0.0.1" } else { "*" }.to_string();
     ctrl.bind(&format!("tcp://{bind_host}:{ctrl_port}"))
         .with_context(|| format!("bind CTRL tcp://{bind_host}:{ctrl_port}"))?;
     data.bind(&format!("tcp://{bind_host}:{data_port}"))
@@ -42,8 +49,8 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
 
     eprintln!("ac-daemon: CTRL tcp://{bind_host}:{ctrl_port}  DATA tcp://{bind_host}:{data_port}");
 
-    // Channel from worker threads → main thread → PUB socket
-    let (pub_tx, pub_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
+    let (pub_tx,    pub_rx):    (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
+    let (rebind_tx, rebind_rx): (Sender<String>,  Receiver<String>)  = crossbeam_channel::unbounded();
 
     let cfg = ac_core::config::load(None).unwrap_or_default();
     let listen_mode = if local_only { "local" } else { "public" }.to_string();
@@ -55,9 +62,11 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         src_mtime:   crate::binary_mtime(),
         fake_audio,
         listen_mode: Arc::new(Mutex::new(listen_mode)),
+        rebind_tx,
+        ctrl_port,
+        data_port,
     };
 
-    // Poll items: CTRL readable
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
 
     loop {
@@ -84,10 +93,9 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
             let reply = dispatch(&msg, &state, &pub_rx, &data);
             let reply_bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
 
-            // Check if we should quit BEFORE sending the reply
             let should_quit = reply.get("_quit").and_then(Value::as_bool).unwrap_or(false);
 
-            // Flush any frames that arrived during dispatch
+            // Flush DATA frames that arrived during dispatch
             while let Ok(frame) = pub_rx.try_recv() {
                 data.send(frame, 0).ok();
             }
@@ -98,6 +106,31 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
                 eprintln!("ac-daemon: quit received, shutting down");
                 break;
             }
+
+            // Rebind AFTER the reply is sent (per ZMQ.md spec)
+            if let Ok(new_host) = rebind_rx.try_recv() {
+                if new_host != bind_host {
+                    let old_ctrl = format!("tcp://{bind_host}:{ctrl_port}");
+                    let old_data = format!("tcp://{bind_host}:{data_port}");
+                    let new_ctrl = format!("tcp://{new_host}:{ctrl_port}");
+                    let new_data = format!("tcp://{new_host}:{data_port}");
+
+                    ctrl.unbind(&old_ctrl).ok();
+                    data.unbind(&old_data).ok();
+
+                    // Give the OS a moment to release the ports before rebinding.
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+
+                    match (ctrl.bind(&new_ctrl), data.bind(&new_data)) {
+                        (Ok(_), Ok(_)) => {
+                            eprintln!("ac-daemon: rebound → CTRL {new_ctrl}  DATA {new_data}");
+                            bind_host = new_host;
+                        }
+                        (Err(e), _) => eprintln!("ac-daemon: rebind CTRL {new_ctrl}: {e}"),
+                        (_, Err(e)) => eprintln!("ac-daemon: rebind DATA {new_data}: {e}"),
+                    }
+                }
+            }
         }
     }
 
@@ -105,7 +138,6 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
 }
 
 fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_sock: &zmq::Socket) -> Value {
-    // Flush any queued DATA frames before processing the command
     while let Ok(frame) = pub_rx.try_recv() {
         data_sock.send(frame, 0).ok();
     }
