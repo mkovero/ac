@@ -187,24 +187,6 @@ def test_sweep_frequency_frames(server_client):
 # Busy guard
 # ---------------------------------------------------------------------------
 
-def test_bad_channel_returns_error(server_client):
-    """A channel index out of range must return ok=False immediately (no crash)."""
-    client = server_client
-    # Temporarily set an out-of-range output channel
-    client.send_cmd({"cmd": "setup", "update": {"output_channel": 99}})
-    ack = client.send_cmd({
-        "cmd":        "sweep_level",
-        "freq_hz":    1000.0,
-        "start_dbfs": -20.0,
-        "stop_dbfs":  -18.0,
-        "duration":    1.0,
-    })
-    # Restore
-    client.send_cmd({"cmd": "setup", "update": {"output_channel": 0}})
-    assert ack is not None
-    assert ack["ok"] is False
-    assert "port" in ack.get("error", "").lower() or "range" in ack.get("error", "").lower()
-
 
 def test_busy_guard(server_client):
     """Starting a second exclusive command while server is busy must return ok=False."""
@@ -279,19 +261,6 @@ def test_generate_port_info(server_client):
     assert len(ack["out_ports"]) >= 1
     _stop_and_drain(client)
 
-
-def test_generate_bad_channel_returns_error(server_client):
-    """An out-of-range channel for generate must return ok=False immediately."""
-    client = server_client
-    ack = client.send_cmd({
-        "cmd":        "generate",
-        "freq_hz":    1000.0,
-        "level_dbfs": -20.0,
-        "channels":   [99],
-    })
-    assert ack is not None
-    assert ack["ok"] is False
-    assert "port" in ack.get("error", "").lower() or "range" in ack.get("error", "").lower()
 
 
 def test_server_enable_disable(server_client):

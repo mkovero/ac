@@ -10,3 +10,4 @@ ac/old2
 *.pem
 .vscode/
 .idea/
+pytest-of-mui/

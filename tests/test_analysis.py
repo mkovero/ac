@@ -1,8 +1,8 @@
 """FFT analysis tests with synthetic sine signals — no JACK, no ZMQ."""
 import numpy as np
 import pytest
-from ac.server.analysis import analyze
-from ac.server.engine import _downsample_spectrum
+from ac.analysis import analyze
+from ac.analysis import _downsample_spectrum
 
 
 # ---------------------------------------------------------------------------

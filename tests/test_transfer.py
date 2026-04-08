@@ -1,7 +1,7 @@
 """H1 transfer function estimator unit tests — pure numpy, no audio hardware."""
 import numpy as np
 import pytest
-from ac.server.transfer import h1_estimate, capture_duration
+from ac.transfer import h1_estimate, capture_duration
 
 
 SR = 48000

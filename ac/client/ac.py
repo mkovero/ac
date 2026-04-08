@@ -140,7 +140,7 @@ def _parse_vrms(raw):
 
 def _cal_from_frame(frame):
     """Reconstruct a minimal Calibration object from a sweep_point frame."""
-    from ..server.jack_calibration import Calibration
+    from ..calibration import Calibration
     v_out = frame.get("vrms_at_0dbfs_out")
     v_in  = frame.get("vrms_at_0dbfs_in")
     if v_out is None and v_in is None:
@@ -460,7 +460,7 @@ def cmd_dmm_show(_cmd, cfg, client):
 
 
 def cmd_calibrate_show(_cmd, cfg, client):
-    from ..server.jack_calibration import DEFAULT_CAL_PATH
+    from ..calibration import DEFAULT_CAL_PATH
     ack = _check_ack(client.send_cmd({"cmd": "list_calibrations"}))
     cals = ack.get("calibrations", [])
     if not cals:

@@ -43,9 +43,9 @@ def _make_sine(freq, amp, sr=48000, duration=1.0, harmonics=()):
 
 def run_software_tests():
     """Run all software tests, yield TestResult objects."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     from .conversions import vrms_to_dbu, dbu_to_vrms, dbfs_to_vrms, vrms_to_vpp
-    from .server.jack_calibration import Calibration
+    from .calibration import Calibration
 
     # 1. THD of known 1% second harmonic
     rec = _make_sine(1000, 0.1, harmonics=[(2, 0.001)])
@@ -175,7 +175,7 @@ def run_software_tests():
 
 def run_noise_floor(engine, in_port_a, in_port_b):
     """Measure noise floor on both inputs with silence on output."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     engine.set_silence()
     import time; time.sleep(0.1)
 
@@ -202,7 +202,7 @@ def run_level_linearity(engine, out_port, in_port):
     Avoids 0 dBFS (clipping) and below -42 dBFS (noise/quantization affects step accuracy).
     Top step (-12 → -6) uses relaxed tolerance — some interfaces compress near full scale.
     """
-    from .server.analysis import analyze
+    from .analysis import analyze
     levels_dbfs = list(range(-42, -5, 6))  # -42, -36, ..., -6
     measured = []
 
@@ -244,7 +244,7 @@ def run_level_linearity(engine, out_port, in_port):
 
 def run_thd_floor(engine, out_port, in_port):
     """THD at 1 kHz across levels — find the sweet spot."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     levels = [-40, -30, -20, -10, -3]
     results = []
 
@@ -272,7 +272,7 @@ def run_thd_floor(engine, out_port, in_port):
 
 def run_freq_response(engine, out_port, in_port):
     """Frequency response at -10 dBFS — should be flat across audio band."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     freqs = [50, 100, 500, 1000, 5000, 10000, 20000]
     amp = 10.0 ** (-10.0 / 20.0)
     results = []
@@ -307,7 +307,7 @@ def run_freq_response(engine, out_port, in_port):
 
 def run_channel_match(engine, out_port, in_port_a, in_port_b):
     """Same stimulus, measure both channels — should agree."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     amp = 10.0 ** (-10.0 / 20.0)
     engine.set_tone(1000.0, amp)
 
@@ -376,7 +376,7 @@ def run_channel_isolation(engine, out_port, ref_out_port, in_port_b):
 
 def run_repeatability(engine, out_port, in_port, n_reps=5):
     """Same measurement N times — check variance."""
-    from .server.analysis import analyze
+    from .analysis import analyze
     amp = 10.0 ** (-10.0 / 20.0)
     engine.set_tone(1000.0, amp)
 
@@ -412,7 +412,7 @@ def run_repeatability(engine, out_port, in_port, n_reps=5):
 
 def run_dmm_absolute(engine, out_port, dmm_host, cal):
     """Generate -10 dBFS 1 kHz, read DMM, compare to calibration prediction."""
-    from .server import dmm as _dmm
+    from . import dmm as _dmm
     if cal is None or not cal.output_ok:
         return TestResult("DMM absolute level", False,
                           "no output calibration", "requires calibration")
@@ -438,7 +438,7 @@ def run_dmm_absolute(engine, out_port, dmm_host, cal):
 
 def run_dmm_tracking(engine, out_port, dmm_host, cal):
     """Sweep level, compare each step against DMM Vrms."""
-    from .server import dmm as _dmm
+    from . import dmm as _dmm
     if cal is None or not cal.output_ok:
         return TestResult("DMM level tracking", False,
                           "no output calibration", "requires calibration")
@@ -469,7 +469,7 @@ def run_dmm_tracking(engine, out_port, dmm_host, cal):
 
 def run_dmm_freq_response(engine, out_port, dmm_host):
     """Same level at multiple frequencies, check DMM reads flat."""
-    from .server import dmm as _dmm
+    from . import dmm as _dmm
     freqs = [100, 1000, 5000, 10000, 20000]
     amp = 10.0 ** (-10.0 / 20.0)
     readings = []
@@ -546,7 +546,7 @@ def run_dut_noise_floor(engine, cal=None):
 def run_dut_gain(engine, level_dbfs=-20.0, cal=None):
     """Measure DUT gain at 1 kHz by comparing measurement vs reference channels."""
     import time
-    from .server.analysis import analyze
+    from .analysis import analyze
     amp = 10.0 ** (level_dbfs / 20.0)
     engine.set_tone(1000.0, amp)
     time.sleep(0.2)
@@ -576,7 +576,7 @@ def run_dut_gain(engine, level_dbfs=-20.0, cal=None):
 def run_dut_thd_vs_level(engine, cal=None, levels=None):
     """THD and gain at 1 kHz across multiple drive levels."""
     import time
-    from .server.analysis import analyze
+    from .analysis import analyze
     if levels is None:
         levels = [-40, -30, -20, -10, -6, -3]
     results = []
@@ -619,7 +619,7 @@ def run_dut_thd_vs_level(engine, cal=None, levels=None):
 def run_dut_freq_response(engine, level_dbfs=-20.0, cal=None):
     """Measure DUT frequency response using H1 transfer function estimate."""
     import time
-    from .server.transfer import h1_estimate
+    from .transfer import h1_estimate
     amp = 10.0 ** (level_dbfs / 20.0)
     engine.set_pink_noise(amp)
     time.sleep(0.3)
@@ -671,7 +671,7 @@ def run_dut_freq_response(engine, level_dbfs=-20.0, cal=None):
 def run_dut_clipping_point(engine, cal=None):
     """Find the input level where DUT THD exceeds 1% (clipping onset)."""
     import time
-    from .server.analysis import analyze
+    from .analysis import analyze
     from .conversions import dbfs_to_vrms, fmt_vrms
     levels = list(range(-30, 1, 3))  # -30, -27, ..., 0
     last_clean = None

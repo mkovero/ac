@@ -1,52 +1,13 @@
-"""Shared fixtures: FakeJackEngine, free ports, session-scoped ZMQ server + client."""
+"""Shared fixtures: session-scoped Rust ac-daemon (--fake-audio) + AcClient."""
+import os
 import socket
-import threading
+import subprocess
+import sys
 import time
 
-import numpy as np
 import pytest
-from unittest.mock import patch
 
 from ac.client.ac import AcClient
-from ac.server.engine import run_server
-
-
-# ---------------------------------------------------------------------------
-# Fake JACK engine — no JACK daemon required
-# ---------------------------------------------------------------------------
-
-class FakeJackEngine:
-    samplerate = 48000
-    blocksize  = 1024
-    xruns      = 0
-
-    def __init__(self, client_name="ac"):
-        self._freq = 1000.0
-        self._amp  = 0.1
-
-    def set_tone(self, f, a):
-        self._freq = float(f)
-        self._amp  = float(a)
-
-    def set_silence(self):
-        pass
-
-    def start(self, output_ports=None, input_port=None):
-        pass
-
-    def stop(self):
-        pass
-
-    def capture_block(self, duration):
-        # Small sleep to prevent spinning in monitor loops and to allow
-        # stop_ev to be checked between iterations.
-        time.sleep(0.01)
-        n   = int(self.samplerate * duration)
-        t   = np.arange(n) / self.samplerate
-        sig = self._amp * np.sin(2 * np.pi * self._freq * t)
-        # Add ~1 % 2nd harmonic so THD analysis returns a realistic value
-        sig += 0.01 * self._amp * np.sin(2 * np.pi * self._freq * 2 * t)
-        return sig.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -62,19 +23,17 @@ def _free_port():
     return port
 
 
-_FAKE_PORTS = (
-    [f"fake_playback_{i}" for i in range(20)],
-    [f"fake_capture_{i}"  for i in range(20)],
-)
-
-# Config used by the test server — channels 0 and 0, guaranteed in range
-_TEST_CFG = {
-    "device":         0,
-    "output_channel": 0,
-    "input_channel":  0,
-    "dbu_ref_vrms":   0.77459667,
-    "dmm_host":       None,
-}
+def _find_daemon():
+    """Locate the ac-daemon binary: $PATH first, then the local dev build."""
+    import shutil
+    daemon = shutil.which("ac-daemon")
+    if daemon:
+        return daemon
+    here = os.path.dirname(os.path.abspath(__file__))
+    dev  = os.path.normpath(os.path.join(here, "..", "ac-rs", "target", "debug", "ac-daemon"))
+    if os.path.isfile(dev) and os.access(dev, os.X_OK):
+        return dev
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -83,34 +42,40 @@ _TEST_CFG = {
 
 @pytest.fixture(scope="session")
 def server_client():
-    """Start a real ZMQ server in a daemon thread (with FakeJackEngine) and
-    return a connected AcClient.  Shared across the entire test session."""
+    """Start ac-daemon --fake-audio on free ports and return a connected AcClient.
+    Shared across the entire test session."""
+    daemon = _find_daemon()
+    if daemon is None:
+        pytest.skip("ac-daemon binary not found — run `cd ac-rs && cargo build -p ac-daemon`")
+
     ctrl_port = _free_port()
     data_port = _free_port()
 
-    with patch("ac.server.engine.JackEngine",   FakeJackEngine), \
-         patch("ac.server.engine.find_ports",   return_value=_FAKE_PORTS), \
-         patch("ac.server.engine.load_config",  return_value=dict(_TEST_CFG)), \
-         patch("ac.server.engine.save_config",  side_effect=lambda u: {**_TEST_CFG, **u}):
+    proc = subprocess.Popen(
+        [daemon, "--local", "--fake-audio",
+         "--ctrl-port", str(ctrl_port),
+         "--data-port", str(data_port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-        t = threading.Thread(
-            target=run_server,
-            kwargs=dict(ctrl_port=ctrl_port, data_port=data_port),
-            daemon=True,
-        )
-        t.start()
+    client = AcClient("localhost", ctrl_port, data_port)
 
-        client = AcClient("localhost", ctrl_port, data_port)
+    # Poll until daemon is ready (up to 5 s)
+    for _ in range(50):
+        ack = client.send_cmd({"cmd": "status"}, timeout_ms=200)
+        if ack is not None:
+            break
+        time.sleep(0.1)
+    else:
+        proc.terminate()
+        pytest.fail("ac-daemon did not start within 5 s")
 
-        # Poll until server responds (allow up to 4 s to cover the 500 ms probe)
-        for _ in range(40):
-            ack = client.send_cmd({"cmd": "status"}, timeout_ms=200)
-            if ack is not None:
-                break
-            time.sleep(0.1)
-        else:
-            pytest.fail("ZMQ test server did not start within 4 s")
+    yield client
 
-        yield client
-
-        client.close()
+    client.close()
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()

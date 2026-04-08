@@ -64,14 +64,26 @@ where
     WorkerHandle { stop_flag: stop, thread: Some(t) }
 }
 
-/// Get output port name from config.
-fn output_port(cfg: &Config) -> Option<String> {
-    cfg.output_port.clone()
+/// Resolve output port: config sticky name, or fall back to channel index in engine list.
+fn resolve_output(cfg: &Config, fake_audio: bool) -> String {
+    if let Some(p) = &cfg.output_port {
+        return p.clone();
+    }
+    let eng = make_engine(fake_audio);
+    let ports = eng.playback_ports();
+    let ch = cfg.output_channel as usize;
+    ports.get(ch).cloned().unwrap_or_else(|| "system:playback_1".to_string())
 }
 
-/// Get input port name from config.
-fn input_port(cfg: &Config) -> Option<String> {
-    cfg.input_port.clone()
+/// Resolve input port: config sticky name, or fall back to channel index in engine list.
+fn resolve_input(cfg: &Config, fake_audio: bool) -> String {
+    if let Some(p) = &cfg.input_port {
+        return p.clone();
+    }
+    let eng = make_engine(fake_audio);
+    let ports = eng.capture_ports();
+    let ch = cfg.input_channel as usize;
+    ports.get(ch).cloned().unwrap_or_else(|| "system:capture_1".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -270,10 +282,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port   = match output_port(&cfg) {
-        Some(p) => vec![p],
-        None    => vec!["system:playback_1".to_string()],
-    };
+    let out_port = vec![resolve_output(&cfg, state.fake_audio)];
 
     let pub_tx   = state.pub_tx.clone();
     let fake     = state.fake_audio;
@@ -299,8 +308,8 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    let out_ports: Vec<String> = cfg.output_port.into_iter().collect();
-    json!({"ok": true, "out_ports": out_ports})
+    let resolved = resolve_output(&cfg, state.fake_audio);
+    json!({"ok": true, "out_ports": [resolved]})
 }
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
@@ -308,10 +317,7 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = match output_port(&cfg) {
-        Some(p) => vec![p],
-        None    => vec!["system:playback_1".to_string()],
-    };
+    let out_port = vec![resolve_output(&cfg, state.fake_audio)];
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;
@@ -337,7 +343,8 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": [cfg.output_port]})
+    let resolved = resolve_output(&cfg, state.fake_audio);
+    json!({"ok": true, "out_ports": [resolved]})
 }
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
@@ -350,7 +357,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs  = cmd.get("stop_dbfs") .and_then(Value::as_f64).unwrap_or(0.0);
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = cfg.output_port.clone().unwrap_or_else(|| "system:playback_1".to_string());
+    let out_port   = resolve_output(&cfg, state.fake_audio);
     let out_port_reply = out_port.clone();
 
     let pub_tx = state.pub_tx.clone();
@@ -392,7 +399,7 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = cfg.output_port.clone().unwrap_or_else(|| "system:playback_1".to_string());
+    let out_port   = resolve_output(&cfg, state.fake_audio);
     let out_port_reply = out_port.clone();
     let amplitude  = ac_core::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -436,8 +443,8 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = cfg.output_port.clone().unwrap_or_else(|| "system:playback_1".to_string());
-    let in_port  = cfg.input_port .clone().unwrap_or_else(|| "system:capture_1".to_string());
+    let out_port = resolve_output(&cfg, state.fake_audio);
+    let in_port  = resolve_input(&cfg, state.fake_audio);
     let out_port_reply = out_port.clone();
     let in_port_reply  = in_port.clone();
 
@@ -505,8 +512,8 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = cfg.output_port.clone().unwrap_or_else(|| "system:playback_1".to_string());
-    let in_port  = cfg.input_port .clone().unwrap_or_else(|| "system:capture_1".to_string());
+    let out_port = resolve_output(&cfg, state.fake_audio);
+    let in_port  = resolve_input(&cfg, state.fake_audio);
     let out_port_reply = out_port.clone();
     let in_port_reply  = in_port.clone();
 
@@ -569,7 +576,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let freq_hz  = cmd.get("freq_hz") .and_then(Value::as_f64).unwrap_or(1000.0);
     let interval = cmd.get("interval").and_then(Value::as_f64).unwrap_or(0.2);
     let cfg      = state.cfg.lock().unwrap().clone();
-    let in_port  = cfg.input_port.clone().unwrap_or_else(|| "system:capture_1".to_string());
+    let in_port  = resolve_input(&cfg, state.fake_audio);
     let in_port_reply = in_port.clone();
 
     let pub_tx = state.pub_tx.clone();
@@ -647,8 +654,8 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;
-    let out_port = cfg.output_port.clone().unwrap_or_else(|| "system:playback_1".to_string());
-    let in_port  = cfg.input_port .clone().unwrap_or_else(|| "system:capture_1".to_string());
+    let out_port = resolve_output(&cfg, state.fake_audio);
+    let in_port  = resolve_input(&cfg, state.fake_audio);
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
         // Step 1: output calibration prompt

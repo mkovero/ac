@@ -1,7 +1,7 @@
 # analysis.py
 import numpy as np
 import scipy.signal as sig
-from ..constants import SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, FUNDAMENTAL_HZ
+from .constants import SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, FUNDAMENTAL_HZ
 
 def _find_peak(spectrum, freqs, target_hz, tol_hz=20):
     mask = np.abs(freqs - target_hz) < tol_hz
@@ -86,3 +86,11 @@ def analyze(recording, sr=SAMPLERATE, fundamental=FUNDAMENTAL_HZ,
         "clipping":          clipping,
         "ac_coupled":        ac_coupled,
     }
+
+
+def _downsample_spectrum(spec, freqs, max_pts=1000):
+    import numpy as np
+    if len(freqs) <= max_pts:
+        return spec, freqs
+    idx = np.unique(np.round(np.geomspace(1, len(freqs), max_pts)).astype(int) - 1)
+    return spec[idx], freqs[idx]

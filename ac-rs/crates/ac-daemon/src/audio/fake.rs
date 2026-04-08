@@ -53,17 +53,18 @@ impl AudioEngine for FakeEngine {
         // Simulate real-time by sleeping
         std::thread::sleep(Duration::from_secs_f64(duration));
 
-        let n = (self.sample_rate as f64 * duration) as usize;
+        let n    = (self.sample_rate as f64 * duration) as usize;
         let freq = self.freq_hz;
-        let amp  = self.amplitude;
+        // If silent, still produce a signal so monitor_spectrum has something to analyze
+        let amp  = if self.amplitude > 0.0 { self.amplitude } else { 0.1 };
         let sr   = self.sample_rate as f64;
 
         let samples: Vec<f32> = (0..n)
             .map(|i| {
                 let t = i as f64 / sr;
-                // Clean sine + tiny 2nd harmonic so THD is non-zero but < 1%
+                // Matches Python FakeJackEngine: 1 % 2nd harmonic so tests see ≈1 % THD
                 let sig = amp * (2.0 * PI * freq * t).sin()
-                        + amp * 0.001 * (4.0 * PI * freq * t).sin();
+                        + amp * 0.01 * (4.0 * PI * freq * t).sin();
                 sig as f32
             })
             .collect();
@@ -73,10 +74,10 @@ impl AudioEngine for FakeEngine {
     fn xruns(&self) -> u32 { self.xruns }
 
     fn playback_ports(&self) -> Vec<String> {
-        vec!["system:playback_1".into(), "system:playback_2".into()]
+        (0..20).map(|i| format!("fake:playback_{i}")).collect()
     }
 
     fn capture_ports(&self) -> Vec<String> {
-        vec!["system:capture_1".into(), "system:capture_2".into()]
+        (0..20).map(|i| format!("fake:capture_{i}")).collect()
     }
 }
