@@ -1,6 +1,6 @@
-# ac-rs — Rust server rewrite plan
+# ac-rs — Rust server
 
-Rewrite `ac/server/` in Rust. The Python client, ZMQ wire protocol, and port numbers stay unchanged. The Rust binary is a drop-in replacement for the Python server process.
+`ac/server/` has been fully replaced by the Rust daemon. The Python client, ZMQ wire protocol, and port numbers are unchanged. `ac-daemon` is the only server implementation.
 
 ---
 
@@ -147,7 +147,8 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 - [x] `get_calibration`, `list_calibrations`
 - [x] `server_enable`, `server_disable`, `server_connections`
 - [x] Python client auto-spawns Rust daemon via `os.execv` (`ac/__main__.py`)
-- [x] All 151 Python tests pass against Python server; 29 Rust unit tests pass
+- [x] Python server (`ac/server/`) deleted; Rust daemon is the only implementation
+- [x] 149 Python tests pass against Rust daemon (`--fake-audio`); 29 Rust unit tests pass
 
 ### Phase 4 — parity
 - [ ] Interactive `calibrate` / `cal_reply` flow (real DMM prompt loop)

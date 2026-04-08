@@ -47,12 +47,15 @@ ac/
   constants.py         (shared)
   conversions.py       (shared)
   config.py            (shared)
+  analysis.py          (FFT analysis, THD/THD+N — shared with tests)
+  calibration.py       (Calibration class, cal.json load/save)
+  transfer.py          (H1 transfer function estimation)
+  dmm.py               (SCPI DMM client)
 
-  server/              (Python ZMQ server — fallback when ac-daemon not found)
   client/              (CLI parser, ZMQ client, plotting)
   ui/                  (pyqtgraph live views)
 
-ac-rs/                 (Rust server rewrite)
+ac-rs/                 (Rust server — the only server implementation)
   PLAN.md              (architecture, implementation status)
   ZMQ.md               (wire protocol reference — authoritative)
   crates/
@@ -60,17 +63,19 @@ ac-rs/                 (Rust server rewrite)
     ac-daemon/         (ZMQ REP+PUB server binary)
 ```
 
-See `server/CLAUDE.md`, `client/CLAUDE.md`, `ui/CLAUDE.md` for Python subpackage docs.
-See `ac-rs/PLAN.md` and `ac-rs/ZMQ.md` for the Rust daemon.
+See `client/CLAUDE.md`, `ui/CLAUDE.md` for Python subpackage docs.
+See `ac-rs/PLAN.md`, `ac-rs/CLAUDE.md`, and `ac-rs/ZMQ.md` for the Rust daemon.
 
 ## Server auto-spawn
 
 When `ac` needs to start a local server, `ac/__main__.py` resolves the daemon in this order:
 1. `ac-daemon` in `$PATH` (production install)
 2. `ac-rs/target/debug/ac-daemon` (local dev build)
-3. Python server fallback (`ac/server/engine.py`)
 
-Build the Rust daemon: `cd ac-rs && cargo build -p ac-daemon`
+If neither is found, `ac` exits with an error. Build the Rust daemon:
+```bash
+cd ac-rs && cargo build -p ac-daemon
+```
 
 ## Legacy / old code
 

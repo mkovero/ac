@@ -5,7 +5,7 @@ Run all tests:
 python -m pytest tests/ -q
 ```
 
-No JACK daemon or audio hardware required — tests use `FakeJackEngine` (synthetic sine + 1% 2nd harmonic) with a real ZMQ server in a daemon thread.
+No JACK daemon or audio hardware required — tests spawn the Rust `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connect via ZMQ.
 
 ## Rust daemon tests
 
@@ -58,7 +58,7 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 |------|-------|----------------|
 | `test_analysis.py` | 28 | FFT analysis: THD, THD+N, harmonics, noise floor, fundamental detection, spectrum downsampling |
 | `test_parse.py` | 58 | CLI token parser: all commands incl. test/dut, abbreviations, defaults, error cases |
-| `test_server_client.py` | 25 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
+| `test_server_client.py` | 21 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
 | `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
 | `test_conversions.py` | 11 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
 
@@ -121,7 +121,7 @@ These tests generate synthetic signals with mathematically known distortion and 
 
 ### Integration: end-to-end THD (test_server_client.py)
 
-FakeJackEngine generates amplitude 0.1 with 1% 2nd harmonic. Through the full pipeline (engine → analyze → sweep_point_frame → ZMQ → client):
+The Rust fake audio engine generates amplitude 0.1 with 1% 2nd harmonic. Through the full pipeline (fake engine → analyze → sweep_point_frame → ZMQ → client):
 
 - **THD ≈ 1.0%** (0.8–1.3% tolerance for transport/rounding)
 - **fundamental_dbfs ≈ -20 dBFS** (±2 dB)
@@ -139,7 +139,7 @@ Without calibration, `gain_db`, `out_dbu`, `in_dbu` are `None` in sweep_point fr
 
 ### Rust daemon calibration flow
 
-`calibrate` in the Rust daemon currently stubs the interactive DMM-prompt loop — it emits a `cal_prompt` frame but does not wait for a real `cal_reply` with a Vrms reading before completing. Full interactive calibration still requires the Python server (`ac-daemon` not found → Python fallback). Manual calibration entry (`ac calibrate`) will be wired properly in a future revision.
+`calibrate` in the Rust daemon currently stubs the interactive DMM-prompt loop — it emits a `cal_prompt` frame but does not wait for a real `cal_reply` with a Vrms reading before completing. Manual calibration entry (`ac calibrate`) will be wired properly in a future revision.
 
 ### Spectrum downsampling (display only)
 
@@ -149,9 +149,9 @@ Without calibration, `gain_db`, `out_dbu`, `in_dbu` are `None` in sweep_point fr
 
 The time-domain subtraction method (subtract reconstructed sines from waveform) has a measurement floor of approximately -38 dBFS for a clean synthetic sine due to windowing artifacts. Real-world signals with broadband noise are measured correctly relative to each other.
 
-### FakeJackEngine
+### Fake audio engine (`--fake-audio`)
 
-Tests use synthetic float32 sine waves, not real audio. The engine doesn't simulate:
+Tests use the Rust `FakeEngine` which produces synthetic float32 sine waves, not real audio. It does not simulate:
 - Actual latency or jitter
 - ADC/DAC nonlinearity
 - Real noise floors
