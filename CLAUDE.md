@@ -43,17 +43,34 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ```
 ac/
   __init__.py          (empty)
-  __main__.py          (dispatches to client.ac or legacy cli)
+  __main__.py          (dispatches to client.ac, legacy cli, or Rust daemon)
   constants.py         (shared)
   conversions.py       (shared)
   config.py            (shared)
 
-  server/              (ZMQ server, audio backends, analysis)
+  server/              (Python ZMQ server — fallback when ac-daemon not found)
   client/              (CLI parser, ZMQ client, plotting)
   ui/                  (pyqtgraph live views)
+
+ac-rs/                 (Rust server rewrite)
+  PLAN.md              (architecture, implementation status)
+  ZMQ.md               (wire protocol reference — authoritative)
+  crates/
+    ac-core/           (pure library: analysis, generator, calibration, config)
+    ac-daemon/         (ZMQ REP+PUB server binary)
 ```
 
-See `server/CLAUDE.md`, `client/CLAUDE.md`, `ui/CLAUDE.md` for subpackage docs.
+See `server/CLAUDE.md`, `client/CLAUDE.md`, `ui/CLAUDE.md` for Python subpackage docs.
+See `ac-rs/PLAN.md` and `ac-rs/ZMQ.md` for the Rust daemon.
+
+## Server auto-spawn
+
+When `ac` needs to start a local server, `ac/__main__.py` resolves the daemon in this order:
+1. `ac-daemon` in `$PATH` (production install)
+2. `ac-rs/target/debug/ac-daemon` (local dev build)
+3. Python server fallback (`ac/server/engine.py`)
+
+Build the Rust daemon: `cd ac-rs && cargo build -p ac-daemon`
 
 ## Legacy / old code
 

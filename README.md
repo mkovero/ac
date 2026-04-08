@@ -145,7 +145,19 @@ ac server enable          # bind to all interfaces on a server
 ac server 192.168.1.5     # connect to remote server
 ```
 
+The server is implemented in Rust (`ac-rs/`). The Python client auto-discovers the
+`ac-daemon` binary (in `$PATH` or `ac-rs/target/debug/ac-daemon`) and spawns it
+instead of the Python server. See `ac-rs/PLAN.md` and `ac-rs/ZMQ.md` for details.
+
+To build the Rust server:
+```bash
+cd ac-rs && cargo build -p ac-daemon
+```
+
 ## Dependencies
 
-numpy, scipy, matplotlib, sounddevice, pyzmq.
+Python: numpy, scipy, matplotlib, sounddevice, pyzmq.
 Optional: `jack-client` (for JACK backend), `pyqtgraph` (for live GUI views).
+
+Rust daemon: libzmq, libjack, Rust toolchain (≥ 1.75).
+The daemon is built separately — see `ac-rs/`.

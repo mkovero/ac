@@ -7,6 +7,36 @@ python -m pytest tests/ -q
 
 No JACK daemon or audio hardware required — tests use `FakeJackEngine` (synthetic sine + 1% 2nd harmonic) with a real ZMQ server in a daemon thread.
 
+## Rust daemon tests
+
+The `ac-core` library has its own unit test suite (29 tests — analysis, generator, calibration, conversions). Run from `ac-rs/`:
+
+```bash
+cd ac-rs
+cargo test -p ac-core
+```
+
+To build the Rust daemon locally (required for the Python client to auto-spawn it):
+
+```bash
+cd ac-rs
+cargo build -p ac-daemon
+# binary lands at ac-rs/target/debug/ac-daemon
+```
+
+The Python client auto-discovers the debug build at `ac-rs/target/debug/ac-daemon` when `ac-daemon` is not in `$PATH`. For production installs, place the release binary in `$PATH`:
+
+```bash
+cargo build -p ac-daemon --release
+sudo install -m 755 target/release/ac-daemon /usr/local/bin/
+```
+
+Use `--fake-audio` to run the daemon without JACK (for integration testing):
+
+```bash
+ac-daemon --local --fake-audio
+```
+
 ## Built-in self-tests
 
 In addition to pytest, `ac` has built-in self-tests runnable without pytest:
@@ -31,6 +61,16 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 | `test_server_client.py` | 25 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
 | `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
 | `test_conversions.py` | 11 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
+
+### Rust unit tests (`ac-core`)
+
+| Module | Tests | What it covers |
+|--------|-------|----------------|
+| `analysis` | 16 | FFT analysis port: THD, THD+N, harmonics, fundamental detection, noise floor, clipping, ac_coupled |
+| `generator` | 4 | Sine RMS, phase start, dBFS→amplitude, pink noise length and crest factor |
+| `calibration` | 5 | Save/load roundtrip, missing key, load_all, out_vrms computation |
+| `config` | 2 | JSON round-trip, missing keys use defaults |
+| `conversions` | 2 | dBu↔Vrms, format helpers |
 
 ## What is verified numerically
 
@@ -96,6 +136,10 @@ Without calibration, `gain_db`, `out_dbu`, `in_dbu` are `None` in sweep_point fr
 - The buggy pattern (`.get("gain_db", np.nan)`) produces `object` arrays — confirming why the gain line vanished
 
 ## Known limitations
+
+### Rust daemon calibration flow
+
+`calibrate` in the Rust daemon currently stubs the interactive DMM-prompt loop — it emits a `cal_prompt` frame but does not wait for a real `cal_reply` with a Vrms reading before completing. Full interactive calibration still requires the Python server (`ac-daemon` not found → Python fallback). Manual calibration entry (`ac calibrate`) will be wired properly in a future revision.
 
 ### Spectrum downsampling (display only)
 

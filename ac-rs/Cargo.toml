@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/ac-core", "crates/ac-daemon"]
+resolver = "2"
