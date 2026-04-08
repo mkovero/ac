@@ -93,6 +93,9 @@ These shell scripts live in `scripts/` and are independent of `ac`. They wire up
 
 Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to 0, PAD off, and all Main-Out channels to 0 except AN1/AN2/PH3/PH4 which are set to 8192 (unity).
 
+## Testing 
+This project is a Python audio measurement tool. Always run the full test suite (`pytest` or similar) after making changes and before committing. Ensure all tests pass.
+
 ## ds — diagnostics session manager
 
 Companion tool to `ac`. Lives in `ds/`. Installed as the `ds` command via setup.py.
