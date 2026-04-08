@@ -27,6 +27,22 @@ impl FakeEngine {
     }
 }
 
+impl FakeEngine {
+    /// Generate `duration` seconds of synthetic signal (phase-offset version).
+    fn make_samples(&self, duration: f64, phase_offset: f64) -> Vec<f32> {
+        let n    = (self.sample_rate as f64 * duration) as usize;
+        let freq = self.freq_hz;
+        let amp  = if self.amplitude > 0.0 { self.amplitude } else { 0.1 };
+        let sr   = self.sample_rate as f64;
+        (0..n).map(|i| {
+            let t = i as f64 / sr + phase_offset;
+            let sig = amp * (2.0 * PI * freq * t).sin()
+                    + amp * 0.01 * (4.0 * PI * freq * t).sin();
+            sig as f32
+        }).collect()
+    }
+}
+
 impl AudioEngine for FakeEngine {
     fn start(&mut self, _output_ports: &[String], _input_port: Option<&str>) -> Result<()> {
         Ok(())
@@ -52,23 +68,15 @@ impl AudioEngine for FakeEngine {
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         // Simulate real-time by sleeping
         std::thread::sleep(Duration::from_secs_f64(duration));
+        Ok(self.make_samples(duration, 0.0))
+    }
 
-        let n    = (self.sample_rate as f64 * duration) as usize;
-        let freq = self.freq_hz;
-        // If silent, still produce a signal so monitor_spectrum has something to analyze
-        let amp  = if self.amplitude > 0.0 { self.amplitude } else { 0.1 };
-        let sr   = self.sample_rate as f64;
-
-        let samples: Vec<f32> = (0..n)
-            .map(|i| {
-                let t = i as f64 / sr;
-                // Matches Python FakeJackEngine: 1 % 2nd harmonic so tests see ≈1 % THD
-                let sig = amp * (2.0 * PI * freq * t).sin()
-                        + amp * 0.01 * (4.0 * PI * freq * t).sin();
-                sig as f32
-            })
-            .collect();
-        Ok(samples)
+    fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
+        std::thread::sleep(Duration::from_secs_f64(duration));
+        // Reference = same signal; measurement = identical (flat 0 dB transfer)
+        let meas = self.make_samples(duration, 0.0);
+        let refch = self.make_samples(duration, 0.0);
+        Ok((meas, refch))
     }
 
     fn xruns(&self) -> u32 { self.xruns }

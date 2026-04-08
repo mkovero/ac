@@ -58,6 +58,5 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 - `calibrate`: emits `cal_prompt` but does not wait for a real `cal_reply` from a DMM
 - `dmm_read`: always returns "no DMM configured"
-- `transfer`, `probe`, `test_hardware`, `test_dut`: not yet implemented
 - GPIO handler: not yet ported
 - CPAL/sounddevice fallback: not yet implemented (JACK only)

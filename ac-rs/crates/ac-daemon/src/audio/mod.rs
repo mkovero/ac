@@ -30,6 +30,36 @@ pub trait AudioEngine: Send + 'static {
     /// Capture audio for `duration` seconds and return the samples.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>>;
 
+    /// Capture two channels simultaneously: (measurement, reference).
+    ///
+    /// Default: both channels are the same mono signal (suitable for loopback testing).
+    /// The JACK backend overrides this to capture from `in` and `in_ref` ports in sync.
+    fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
+        let ch = self.capture_block(duration)?;
+        let clone = ch.clone();
+        Ok((ch, clone))
+    }
+
+    /// Reconnect the measurement input port without restarting the engine.
+    /// Default no-op (used by fake engine; JACK backend overrides).
+    fn reconnect_input(&mut self, _port: &str) -> Result<()> { Ok(()) }
+
+    /// Connect a reference input port (second capture channel for transfer / DUT tests).
+    /// Default no-op.
+    fn add_ref_input(&mut self, _port: &str) -> Result<()> { Ok(()) }
+
+    /// Discard buffered capture samples.
+    /// Default no-op.
+    fn flush_capture(&mut self) {}
+
+    /// Connect our output to an additional destination port.
+    /// Default no-op.
+    fn connect_output(&mut self, _port: &str) -> Result<()> { Ok(()) }
+
+    /// Disconnect our output from a destination port.
+    /// Default no-op.
+    fn disconnect_output(&mut self, _port: &str) {}
+
     /// Number of xruns since start.
     fn xruns(&self) -> u32;
 

@@ -33,6 +33,8 @@ pub struct ServerState {
     /// Ports, so handlers can report correct endpoints.
     pub ctrl_port:   u16,
     pub data_port:   u16,
+    /// Optional channel to signal the running test_dut worker (compare-mode hand-off).
+    pub dut_reply_tx: Arc<Mutex<Option<Sender<()>>>>,
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -56,15 +58,16 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     let listen_mode = if local_only { "local" } else { "public" }.to_string();
 
     let state = ServerState {
-        cfg:         Arc::new(Mutex::new(cfg)),
-        workers:     Arc::new(Mutex::new(HashMap::new())),
+        cfg:          Arc::new(Mutex::new(cfg)),
+        workers:      Arc::new(Mutex::new(HashMap::new())),
         pub_tx,
-        src_mtime:   crate::binary_mtime(),
+        src_mtime:    crate::binary_mtime(),
         fake_audio,
-        listen_mode: Arc::new(Mutex::new(listen_mode)),
+        listen_mode:  Arc::new(Mutex::new(listen_mode)),
         rebind_tx,
         ctrl_port,
         data_port,
+        dut_reply_tx: Arc::new(Mutex::new(None)),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
@@ -173,6 +176,11 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "server_enable"       => handlers::server_enable(state),
         "server_disable"      => handlers::server_disable(state),
         "server_connections"  => handlers::server_connections(state),
+        "transfer"            => handlers::transfer(state, &cmd),
+        "probe"               => handlers::probe(state, &cmd),
+        "test_hardware"       => handlers::test_hardware(state, &cmd),
+        "test_dut"            => handlers::test_dut(state, &cmd),
+        "dut_reply"           => handlers::dut_reply(state),
         other => json!({"ok": false, "error": format!("unknown command: '{other}'")}),
     }
 }
