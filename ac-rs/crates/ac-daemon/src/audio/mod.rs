@@ -5,6 +5,9 @@ pub mod fake;
 #[cfg(feature = "jack-audio")]
 pub mod jack_backend;
 
+#[cfg(feature = "cpal-audio")]
+pub mod cpal_backend;
+
 use anyhow::Result;
 
 /// Minimal trait for audio playback + capture, matching Python's JackEngine duck-type contract.
@@ -70,20 +73,25 @@ pub trait AudioEngine: Send + 'static {
     fn capture_ports(&self) -> Vec<String>;
 }
 
-/// Build an audio engine based on the `fake_audio` flag.
+/// Build an audio engine: fake → JACK (if available) → CPAL → fake.
 pub fn make_engine(fake_audio: bool) -> Box<dyn AudioEngine> {
     if fake_audio {
         return Box::new(fake::FakeEngine::new());
     }
 
     #[cfg(feature = "jack-audio")]
-    {
-        Box::new(jack_backend::JackEngine::new())
+    if jack_backend::JackEngine::available() {
+        return Box::new(jack_backend::JackEngine::new());
     }
 
-    #[cfg(not(feature = "jack-audio"))]
+    #[cfg(feature = "cpal-audio")]
     {
-        eprintln!("ac-daemon: compiled without JACK support, falling back to fake audio");
+        return Box::new(cpal_backend::CpalEngine::new());
+    }
+
+    #[allow(unreachable_code)]
+    {
+        eprintln!("ac-daemon: no audio backend available, falling back to fake audio");
         Box::new(fake::FakeEngine::new())
     }
 }

@@ -43,6 +43,11 @@ pub struct JackEngine {
 }
 
 impl JackEngine {
+    /// Probe whether a JACK server is reachable without starting one.
+    pub fn available() -> bool {
+        jack::Client::new("ac-daemon-probe", jack::ClientOptions::NO_START_SERVER).is_ok()
+    }
+
     pub fn new() -> Self {
         Self {
             sample_rate: 48_000,
