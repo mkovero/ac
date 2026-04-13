@@ -28,13 +28,13 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
 
     let compare_mode = cmd.get("compare").and_then(Value::as_bool).unwrap_or(false);
     let level_dbfs   = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-20.0);
-    let out_port     = resolve_output(&cfg, state.fake_audio);
-    let in_port      = resolve_input(&cfg, state.fake_audio);
-    let ref_port     = match resolve_ref_input(&cfg, state.fake_audio) {
+    let out_port     = resolve_output(&cfg, state);
+    let in_port      = resolve_input(&cfg, state);
+    let ref_port     = match resolve_ref_input(&cfg, state) {
         Some(p) => p,
         None    => in_port.clone(),
     };
-    let ref_out_port = resolve_ref_output(&cfg, state.fake_audio);
+    let ref_out_port = resolve_ref_output(&cfg, state);
     let out_ch       = cfg.output_channel;
     let in_ch        = cfg.input_channel;
 

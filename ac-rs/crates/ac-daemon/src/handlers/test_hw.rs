@@ -27,13 +27,13 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let dmm_mode     = cmd.get("dmm").and_then(Value::as_bool).unwrap_or(false);
-    let out_port     = resolve_output(&cfg, state.fake_audio);
-    let in_port      = resolve_input(&cfg, state.fake_audio);
-    let ref_port     = match resolve_ref_input(&cfg, state.fake_audio) {
+    let out_port     = resolve_output(&cfg, state);
+    let in_port      = resolve_input(&cfg, state);
+    let ref_port     = match resolve_ref_input(&cfg, state) {
         Some(p) => p,
         None    => in_port.clone(),
     };
-    let ref_out_port = resolve_ref_output(&cfg, state.fake_audio);
+    let ref_out_port = resolve_ref_output(&cfg, state);
 
     let pub_tx       = state.pub_tx.clone();
     let fake         = state.fake_audio;

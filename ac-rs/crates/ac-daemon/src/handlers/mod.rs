@@ -104,49 +104,81 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Port cache (Issue #30)
+//
+// JACK port queries open a fresh `ac-daemon-probe` client every call, which
+// costs a full activate/deactivate round-trip (~50–150 ms on a busy jackd).
+// Before this cache, a single `test_hardware` invocation would spin up 4+
+// probe clients just to resolve sticky port names for routing. The cache is
+// populated lazily on first read and refreshed whenever the user issues
+// `devices` (which is the documented way to "rescan hardware").
+// ---------------------------------------------------------------------------
+
+pub(super) fn cached_playback_ports(state: &ServerState) -> Vec<String> {
+    let mut guard = state.playback_ports_cache.lock().unwrap();
+    if guard.is_none() {
+        let eng = make_engine(state.fake_audio);
+        *guard = Some(eng.playback_ports());
+    }
+    guard.clone().unwrap_or_default()
+}
+
+pub(super) fn cached_capture_ports(state: &ServerState) -> Vec<String> {
+    let mut guard = state.capture_ports_cache.lock().unwrap();
+    if guard.is_none() {
+        let eng = make_engine(state.fake_audio);
+        *guard = Some(eng.capture_ports());
+    }
+    guard.clone().unwrap_or_default()
+}
+
+/// Force a rescan on the next port query. Called by `devices`.
+pub(super) fn refresh_port_cache(state: &ServerState) {
+    let eng = make_engine(state.fake_audio);
+    *state.playback_ports_cache.lock().unwrap() = Some(eng.playback_ports());
+    *state.capture_ports_cache .lock().unwrap() = Some(eng.capture_ports());
+}
+
+// ---------------------------------------------------------------------------
 // Port resolution
 // ---------------------------------------------------------------------------
 
 /// Resolve output port: config sticky name, or fall back to channel index in engine list.
-pub(super) fn resolve_output(cfg: &Config, fake_audio: bool) -> String {
+pub(super) fn resolve_output(cfg: &Config, state: &ServerState) -> String {
     if let Some(p) = &cfg.output_port {
         return p.clone();
     }
-    let eng = make_engine(fake_audio);
-    let ports = eng.playback_ports();
+    let ports = cached_playback_ports(state);
     let ch = cfg.output_channel as usize;
     ports.get(ch).cloned().unwrap_or_else(|| "system:playback_1".to_string())
 }
 
 /// Resolve input port: config sticky name, or fall back to channel index in engine list.
-pub(super) fn resolve_input(cfg: &Config, fake_audio: bool) -> String {
+pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> String {
     if let Some(p) = &cfg.input_port {
         return p.clone();
     }
-    let eng = make_engine(fake_audio);
-    let ports = eng.capture_ports();
+    let ports = cached_capture_ports(state);
     let ch = cfg.input_channel as usize;
     ports.get(ch).cloned().unwrap_or_else(|| "system:capture_1".to_string())
 }
 
-pub(super) fn resolve_ref_input(cfg: &Config, fake_audio: bool) -> Option<String> {
+pub(super) fn resolve_ref_input(cfg: &Config, state: &ServerState) -> Option<String> {
     let ch = cfg.reference_channel? as usize;
     if let Some(p) = &cfg.reference_port {
         return Some(p.clone());
     }
-    let eng = make_engine(fake_audio);
-    eng.capture_ports().get(ch).cloned()
+    cached_capture_ports(state).get(ch).cloned()
 }
 
-pub(super) fn resolve_ref_output(cfg: &Config, fake_audio: bool) -> String {
+pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> String {
     if let Some(ch) = cfg.reference_channel {
-        let eng = make_engine(fake_audio);
-        let ports = eng.playback_ports();
+        let ports = cached_playback_ports(state);
         if let Some(p) = ports.get(ch as usize) {
             return p.clone();
         }
     }
-    resolve_output(cfg, fake_audio)
+    resolve_output(cfg, state)
 }
 
 // ---------------------------------------------------------------------------
