@@ -5,10 +5,9 @@ use serde_json::{json, Value};
 
 use ac_core::calibration::Calibration;
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::read_dmm_vrms;
+use super::{cached_capture_ports, cached_playback_ports, read_dmm_vrms, refresh_port_cache};
 
 pub fn status(state: &ServerState) -> Value {
     let workers = state.workers.lock().unwrap();
@@ -49,10 +48,11 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
 }
 
 pub fn devices(state: &ServerState) -> Value {
-    let cfg = state.cfg.lock().unwrap().clone();
-    let engine = make_engine(state.fake_audio);
-    let playback = engine.playback_ports();
-    let capture  = engine.capture_ports();
+    // `devices` is the documented hardware rescan trigger — always refresh.
+    refresh_port_cache(state);
+    let cfg      = state.cfg.lock().unwrap().clone();
+    let playback = cached_playback_ports(state);
+    let capture  = cached_capture_ports(state);
     json!({
         "ok":                true,
         "playback":          playback,

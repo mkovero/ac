@@ -26,7 +26,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx       = state.pub_tx.clone();
     let fake         = state.fake_audio;
-    let out_port     = resolve_output(&cfg, state.fake_audio);
+    let out_port     = resolve_output(&cfg, state);
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {

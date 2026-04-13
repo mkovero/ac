@@ -21,7 +21,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = vec![resolve_output(&cfg, state.fake_audio)];
+    let out_port = vec![resolve_output(&cfg, state)];
 
     let pub_tx   = state.pub_tx.clone();
     let fake     = state.fake_audio;
@@ -47,7 +47,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    let resolved = resolve_output(&cfg, state.fake_audio);
+    let resolved = resolve_output(&cfg, state);
     json!({"ok": true, "out_ports": [resolved]})
 }
 
@@ -56,7 +56,7 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = vec![resolve_output(&cfg, state.fake_audio)];
+    let out_port = vec![resolve_output(&cfg, state)];
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;
@@ -82,7 +82,7 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    let resolved = resolve_output(&cfg, state.fake_audio);
+    let resolved = resolve_output(&cfg, state);
     json!({"ok": true, "out_ports": [resolved]})
 }
 
@@ -96,7 +96,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs  = cmd.get("stop_dbfs") .and_then(Value::as_f64).unwrap_or(0.0);
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = resolve_output(&cfg, state.fake_audio);
+    let out_port   = resolve_output(&cfg, state);
     let out_port_reply = out_port.clone();
 
     let pub_tx = state.pub_tx.clone();
@@ -138,7 +138,7 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = resolve_output(&cfg, state.fake_audio);
+    let out_port   = resolve_output(&cfg, state);
     let out_port_reply = out_port.clone();
     let amplitude  = ac_core::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -182,8 +182,8 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = resolve_output(&cfg, state.fake_audio);
-    let in_port  = resolve_input(&cfg, state.fake_audio);
+    let out_port = resolve_output(&cfg, state);
+    let in_port  = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
     let in_port_reply  = in_port.clone();
 
@@ -250,8 +250,8 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_port = resolve_output(&cfg, state.fake_audio);
-    let in_port  = resolve_input(&cfg, state.fake_audio);
+    let out_port = resolve_output(&cfg, state);
+    let in_port  = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
     let in_port_reply  = in_port.clone();
 
@@ -314,7 +314,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let freq_hz  = cmd.get("freq_hz") .and_then(Value::as_f64).unwrap_or(1000.0);
     let interval = cmd.get("interval").and_then(Value::as_f64).unwrap_or(0.2);
     let cfg      = state.cfg.lock().unwrap().clone();
-    let in_port  = resolve_input(&cfg, state.fake_audio);
+    let in_port  = resolve_input(&cfg, state);
     let in_port_reply = in_port.clone();
 
     let pub_tx = state.pub_tx.clone();

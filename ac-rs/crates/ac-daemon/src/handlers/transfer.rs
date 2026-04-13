@@ -23,13 +23,13 @@ pub fn transfer(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let level_dbfs   = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
-    let out_port     = resolve_output(&cfg, state.fake_audio);
-    let in_port      = resolve_input(&cfg, state.fake_audio);
-    let ref_port     = match resolve_ref_input(&cfg, state.fake_audio) {
+    let out_port     = resolve_output(&cfg, state);
+    let in_port      = resolve_input(&cfg, state);
+    let ref_port     = match resolve_ref_input(&cfg, state) {
         Some(p) => p,
         None    => in_port.clone(), // fallback: use same as input (loopback)
     };
-    let ref_out_port = resolve_ref_output(&cfg, state.fake_audio);
+    let ref_out_port = resolve_ref_output(&cfg, state);
 
     let pub_tx   = state.pub_tx.clone();
     let fake     = state.fake_audio;
@@ -135,7 +135,7 @@ pub fn transfer(state: &ServerState, cmd: &Value) -> Value {
         "out_port":    out_port_r,
         "in_port":     in_port_r,
         "ref_port":    ref_port_r,
-        "ref_out_port": resolve_ref_output(&state.cfg.lock().unwrap(), state.fake_audio),
+        "ref_out_port": resolve_ref_output(&state.cfg.lock().unwrap(), state),
     })
 }
 
@@ -147,10 +147,10 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
     let cfg     = state.cfg.lock().unwrap().clone();
     let dmm_host = cfg.dmm_host.clone();
 
-    let (playback, capture) = {
-        let eng = make_engine(fake);
-        (eng.playback_ports(), eng.capture_ports())
-    };
+    let (playback, capture) = (
+        super::cached_playback_ports(state),
+        super::cached_capture_ports(state),
+    );
     let n_play = playback.len();
     let n_cap  = capture.len();
 
