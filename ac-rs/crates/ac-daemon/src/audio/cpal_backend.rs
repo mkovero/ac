@@ -39,6 +39,12 @@ pub struct CpalEngine {
     _in_stream:  Option<Stream>,
 }
 
+// SAFETY: CpalEngine is created and used entirely within a single worker thread.
+// cpal::Stream is !Send on Linux only as a conservative platform-level marker
+// (guarding against JACK callbacks on some targets); the streams are never
+// shared or moved across threads in our usage.
+unsafe impl Send for CpalEngine {}
+
 impl CpalEngine {
     pub fn new() -> Self {
         Self {
