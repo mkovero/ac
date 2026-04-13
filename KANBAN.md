@@ -91,3 +91,5 @@ _nothing yet_
 - Python client: `ac/client/` — CLI parser + ZMQ REQ/SUB
 - GUI: `ac/ui/` — pyqtgraph, separate process
 - Tests: `pytest tests/ -q` (149 passing, uses --fake-audio)
+
+*Updated: 2026-04-13*
