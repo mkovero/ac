@@ -4,6 +4,7 @@
 //! The Python client (`ac/client/ac.py`) speaks to this daemon unchanged.
 
 mod audio;
+mod gpio;
 mod handlers;
 mod server;
 mod workers;
@@ -39,6 +40,13 @@ fn main() {
         .find(|w| w[0] == "--data-port")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(5557);
+    let gpio_port: Option<String> = args.windows(2)
+        .find(|w| w[0] == "--gpio")
+        .map(|w| w[1].clone());
+
+    if let Some(path) = gpio_port {
+        gpio::spawn(path, ctrl_port, data_port);
+    }
 
     if let Err(e) = run(ctrl_port, data_port, local_only, fake_audio) {
         eprintln!("ac-daemon error: {e:#}");
