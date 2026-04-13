@@ -223,8 +223,18 @@ pub fn list_calibrations(state: &ServerState) -> Value {
     }
 }
 
-pub fn dmm_read(_state: &ServerState) -> Value {
-    json!({"ok": false, "error": "no DMM configured on server — run: ac setup dmm <host>"})
+pub fn dmm_read(state: &ServerState) -> Value {
+    let cfg = state.cfg.lock().unwrap();
+    let host = match &cfg.dmm_host {
+        Some(h) => h.clone(),
+        None => return json!({"ok": false,
+                    "error": "no DMM configured on server — run: ac setup dmm <host>"}),
+    };
+    drop(cfg);
+    match read_dmm_vrms(&host, 3) {
+        Some(v) => json!({"ok": true, "vrms": v, "idn": null}),
+        None    => json!({"ok": false, "error": format!("DMM at {host} did not respond")}),
+    }
 }
 
 pub fn server_enable(state: &ServerState) -> Value {
@@ -641,8 +651,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
-    // Calibration is complex (interactive DMM prompts).
-    // For now return a stub that completes immediately with no readings.
     let cfg    = state.cfg.lock().unwrap().clone();
     let out_ch = cmd.get("output_channel")
         .and_then(Value::as_u64)
@@ -652,33 +660,66 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(cfg.input_channel as u64) as u32;
     let ref_dbfs = cmd.get("ref_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
 
-    let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
-    let out_port = resolve_output(&cfg, state.fake_audio);
-    let in_port  = resolve_input(&cfg, state.fake_audio);
+    let pub_tx       = state.pub_tx.clone();
+    let fake         = state.fake_audio;
+    let out_port     = resolve_output(&cfg, state.fake_audio);
+    let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
-        // Step 1: output calibration prompt
+        // Play reference tone on output port
+        let mut eng = make_engine(fake);
+        if let Err(e) = eng.start(&[out_port.clone()], None) {
+            send_pub(&pub_tx, "error", &json!({"cmd":"calibrate","message":format!("{e}")}));
+            return;
+        }
+        let amp = ac_core::generator::dbfs_to_amplitude(ref_dbfs);
+        eng.set_tone(1000.0, amp);
+
+        // Step 1 — output voltage
+        let (tx1, rx1) = crossbeam_channel::bounded(1);
+        *cal_reply_tx.lock().unwrap() = Some(tx1);
+        let dmm_v1 = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
         send_pub(&pub_tx, "cal_prompt", &json!({
             "step":     1,
-            "text":     "Connect DMM to output. Press Enter to skip or enter Vrms reading.",
-            "dmm_vrms": null,
+            "text":     "Measure output Vrms at DUT input. Enter reading or press Enter to skip.",
+            "dmm_vrms": dmm_v1,
         }));
-
-        // Wait for cal_reply (up to 60 s)
-        // In the stub we just wait for stop or use a fake reading.
-        // Real implementation would wait for a channel signal from cal_reply handler.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while !stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        let out_vrms = wait_cal_reply(&rx1, &stop, 120);
+        *cal_reply_tx.lock().unwrap() = None;
+        if stop.load(Ordering::Relaxed) {
+            eng.set_silence(); eng.stop(); return;
         }
 
-        let key = format!("out{out_ch}_in{in_ch}");
-        send_pub(&pub_tx, "cal_done", &json!({
-            "key":               key,
-            "vrms_at_0dbfs_out": null,
-            "vrms_at_0dbfs_in":  null,
+        // Step 2 — input voltage
+        let (tx2, rx2) = crossbeam_channel::bounded(1);
+        *cal_reply_tx.lock().unwrap() = Some(tx2);
+        let dmm_v2 = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
+        send_pub(&pub_tx, "cal_prompt", &json!({
+            "step":     2,
+            "text":     "Measure input Vrms at DUT output. Enter reading or press Enter to skip.",
+            "dmm_vrms": dmm_v2,
         }));
+        let in_vrms = wait_cal_reply(&rx2, &stop, 120);
+        *cal_reply_tx.lock().unwrap() = None;
+
+        eng.set_silence();
+        eng.stop();
+
+        // Save calibration
+        let mut cal = Calibration::new(out_ch, in_ch);
+        cal.ref_dbfs          = ref_dbfs;
+        cal.vrms_at_0dbfs_out = out_vrms;
+        cal.vrms_at_0dbfs_in  = in_vrms;
+        let save_err = cal.save(None).err().map(|e| e.to_string());
+
+        let key = cal.key();
+        let mut done_frame = json!({
+            "key":               key,
+            "vrms_at_0dbfs_out": out_vrms,
+            "vrms_at_0dbfs_in":  in_vrms,
+        });
+        if let Some(e) = save_err { done_frame["error"] = json!(e); }
+        send_pub(&pub_tx, "cal_done", &done_frame);
         send_pub(&pub_tx, "done", &json!({"cmd":"calibrate"}));
     });
 
@@ -689,9 +730,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true})
 }
 
-pub fn cal_reply(_state: &ServerState, _cmd: &Value) -> Value {
-    // In the full implementation this would signal the calibrate worker.
-    // For now, just acknowledge.
+pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {
+    let vrms = cmd.get("vrms").and_then(Value::as_f64); // None if JSON null or absent
+    let tx = state.cal_reply_tx.lock().unwrap();
+    if let Some(ref t) = *tx {
+        let _ = t.send(vrms);
+    }
     json!({"ok": true})
 }
 
@@ -1088,6 +1132,21 @@ fn read_dmm_vrms(host: &str, n: usize) -> Option<f64> {
         }
     }
     if count > 0 { Some(sum / count as f64) } else { None }
+}
+
+/// Poll a cal_reply channel until a value arrives, stop flag fires, or timeout.
+fn wait_cal_reply(
+    rx:           &crossbeam_channel::Receiver<Option<f64>>,
+    stop:         &Arc<AtomicBool>,
+    timeout_secs: u64,
+) -> Option<f64> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if stop.load(Ordering::Relaxed) { return None; }
+        if std::time::Instant::now() > deadline { return None; }
+        if let Ok(v) = rx.try_recv() { return v; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 // ---------------------------------------------------------------------------

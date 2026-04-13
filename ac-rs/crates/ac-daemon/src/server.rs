@@ -35,6 +35,9 @@ pub struct ServerState {
     pub data_port:   u16,
     /// Optional channel to signal the running test_dut worker (compare-mode hand-off).
     pub dut_reply_tx: Arc<Mutex<Option<Sender<()>>>>,
+    /// Optional channel to signal the running calibrate worker.
+    /// Sends Option<f64>: Some(vrms) = user reading, None = skip.
+    pub cal_reply_tx: Arc<Mutex<Option<Sender<Option<f64>>>>>,
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -68,6 +71,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         ctrl_port,
         data_port,
         dut_reply_tx: Arc::new(Mutex::new(None)),
+        cal_reply_tx: Arc::new(Mutex::new(None)),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];

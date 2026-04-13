@@ -238,14 +238,17 @@ def _make_q_listener():
 
 
 def _src_mtime():
-    """Max mtime of server-side .py files."""
-    client_dir = os.path.dirname(os.path.abspath(__file__))
-    server_dir = os.path.join(os.path.dirname(client_dir), "server")
-    return max(
-        os.path.getmtime(os.path.join(server_dir, f))
-        for f in os.listdir(server_dir)
-        if f.endswith(".py")
-    )
+    """Mtime of the local ac-daemon binary (Rust build)."""
+    import shutil
+    daemon = shutil.which("ac-daemon")
+    if not daemon:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _dev = os.path.normpath(os.path.join(_here, "..", "..", "ac-rs", "target", "debug", "ac-daemon"))
+        if os.path.isfile(_dev):
+            daemon = _dev
+    if daemon:
+        return os.path.getmtime(daemon)
+    return 0.0
 
 
 def _spawn_local_server(client):
