@@ -133,7 +133,7 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 ### Phase 2 — audio backend ✓
 - [x] JACK client: open client, register ports, RT callback → ringbuffer (`audio/jack_backend.rs`)
 - [x] Fake audio backend matching same interface (`audio/fake.rs`) — used by `--fake-audio` and tests
-- [ ] CPAL/sounddevice fallback (not yet implemented)
+- [x] CPAL fallback (`audio/cpal_backend.rs`, issue #21)
 
 ### Phase 3 — ac-daemon ✓
 - [x] ZMQ REP+PUB setup, main loop (`server.rs`)
@@ -150,13 +150,27 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 - [x] Python server (`ac/server/`) deleted; Rust daemon is the only implementation
 - [x] 149 Python tests pass against Rust daemon (`--fake-audio`); 29 Rust unit tests pass
 
-### Phase 4 — parity
-- [ ] Interactive `calibrate` / `cal_reply` flow (real DMM prompt loop)
-- [ ] `dmm_read` — SCPI socket client
-- [ ] `transfer` / `probe` commands
-- [ ] `test_hardware` / `test_dut` commands
-- [ ] CPAL/sounddevice fallback audio backend
-- [ ] GPIO handler port
+### Phase 4 — parity ✓
+- [x] Interactive `calibrate` / `cal_reply` flow (real DMM prompt loop) — issue #14
+- [x] `dmm_read` — SCPI socket client — issue #15
+- [x] `transfer` / `probe` commands — issues #16/#17
+- [x] `test_hardware` / `test_dut` commands — issues #18/#19
+- [x] CPAL fallback audio backend — issue #21
+- [x] GPIO handler port — issue #20
+
+### Known limitations (active backlog)
+
+- JACK process callback not real-time safe (#23) — Mutex + alloc in RT thread;
+  fix is the `ringbuf` SPSC originally specified in "Key design decisions" above
+- xrun counter never incremented (#24)
+- Capture rings grow unbounded on output-only commands (#25)
+- calibrate save errors only surface in cal_done frame (#26)
+- CPAL backend silently no-ops port routing (#27)
+- GPIO REQ socket wedged after first recv timeout (#28)
+- handlers.rs is 1931 LOC; split planned (#29)
+- JACK resolver helpers spawn fresh clients per call (#30)
+- PUB socket default HWM silently drops frames under load (#31)
+- No daemon-level integration tests (#32)
 
 ---
 

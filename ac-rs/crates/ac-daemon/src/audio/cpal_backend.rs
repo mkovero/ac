@@ -111,7 +111,11 @@ fn build_output(
     format: SampleFormat,
     state:  Arc<SharedState>,
 ) -> Result<Stream> {
-    let err = |e| eprintln!("cpal output: {e}");
+    let err_state = state.clone();
+    let err = move |e| {
+        err_state.xruns.fetch_add(1, Ordering::Relaxed);
+        eprintln!("cpal output: {e}");
+    };
     match format {
         SampleFormat::F32 => {
             device.build_output_stream(
@@ -180,7 +184,11 @@ fn build_input(
     channels: usize,
     state:    Arc<SharedState>,
 ) -> Result<Stream> {
-    let err = |e| eprintln!("cpal input: {e}");
+    let err_state = state.clone();
+    let err = move |e| {
+        err_state.xruns.fetch_add(1, Ordering::Relaxed);
+        eprintln!("cpal input: {e}");
+    };
     match format {
         SampleFormat::F32 => {
             device.build_input_stream(
@@ -293,6 +301,11 @@ impl AudioEngine for CpalEngine {
     fn xruns(&self) -> u32 {
         self.state.xruns.load(Ordering::Relaxed) as u32
     }
+
+    // CPAL opens default input/output devices and cannot reroute individual
+    // ports, so handlers that rely on routing must refuse on this backend.
+    fn supports_routing(&self) -> bool { false }
+    fn backend_name(&self) -> &'static str { "cpal" }
 
     fn playback_ports(&self) -> Vec<String> {
         let host = cpal::default_host();

@@ -64,8 +64,6 @@ pub fn spawn(serial_path: String, ctrl_port: u16, data_port: u16) {
 // ---------------------------------------------------------------------------
 
 fn run(serial_path: &str, ctrl_port: u16, data_port: u16) -> anyhow::Result<()> {
-    use serialport::SerialPort;
-
     let read_port = serialport::new(serial_path, 115_200)
         .timeout(Duration::from_millis(100))
         .open()?;
@@ -86,20 +84,17 @@ fn run(serial_path: &str, ctrl_port: u16, data_port: u16) -> anyhow::Result<()> 
     // ZMQ — REQ for commands, SUB for DATA frames
     let zmq_ctx = zmq::Context::new();
 
-    let req = zmq_ctx.socket(zmq::REQ)?;
-    req.set_linger(0)?;
-    req.set_rcvtimeo(2000)?;
-    req.connect(&format!("tcp://127.0.0.1:{ctrl_port}"))?;
+    let mut req = ReqClient::new(zmq_ctx.clone(), format!("tcp://127.0.0.1:{ctrl_port}"))?;
 
     let sub = zmq_ctx.socket(zmq::SUB)?;
     sub.set_subscribe(b"")?;
     sub.set_linger(0)?;
     sub.connect(&format!("tcp://127.0.0.1:{data_port}"))?;
 
-    // Fetch initial level and output channel config
-    let level_dbfs  = resolve_level(&req);
-    let out_channel = fetch_output_channel(&req);
-    eprintln!("gpio: level={level_dbfs:.2} dBFS  out_ch={out_channel}");
+    // Fetch initial config for startup diagnostic; event_processor refreshes
+    // the level on every button press anyway.
+    let out_channel = fetch_output_channel(&mut req);
+    eprintln!("gpio: level={:.2} dBFS  out_ch={}", resolve_level(&mut req), out_channel);
 
     let (ev_tx, ev_rx): (Sender<GpioEvent>, Receiver<GpioEvent>) = bounded(128);
 
@@ -116,7 +111,7 @@ fn run(serial_path: &str, ctrl_port: u16, data_port: u16) -> anyhow::Result<()> 
     }
 
     // Event processor (runs on this thread)
-    event_processor(ev_rx, req, write_port, level_dbfs, out_channel);
+    event_processor(ev_rx, req, write_port, out_channel);
 
     Ok(())
 }
@@ -201,13 +196,13 @@ fn sub_watcher(sub: zmq::Socket, tx: Sender<GpioEvent>) {
 
 fn event_processor(
     rx:          Receiver<GpioEvent>,
-    req:         zmq::Socket,
+    mut req:     ReqClient,
     write_port:  Arc<Mutex<Box<dyn serialport::SerialPort>>>,
-    mut level:   f64,
     out_channel: u32,
 ) {
     let mut sine_active = false;
     let mut pink_active = false;
+    let mut level: f64;
 
     loop {
         let ev = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -231,7 +226,7 @@ fn event_processor(
                 match pin {
                     p if p == PIN_STOP => {
                         eprintln!("gpio: STOP");
-                        send_zmq(&req, json!({"cmd": "stop"}));
+                        req.call(json!({"cmd": "stop"}));
                         sine_active = false;
                         pink_active = false;
                         update_leds(&write_port, false, false);
@@ -241,14 +236,14 @@ fn event_processor(
                         if !sine_active {
                             if pink_active {
                                 eprintln!("gpio: stopping pink before sine");
-                                send_zmq(&req, json!({"cmd": "stop", "name": "generate_pink"}));
+                                req.call(json!({"cmd": "stop", "name": "generate_pink"}));
                                 pink_active = false;
                             }
-                            level = resolve_level(&req);
+                            level = resolve_level(&mut req);
                             eprintln!("gpio: SINE @ {level:.2} dBFS ch {out_channel}");
                             sine_active = true;
                             update_leds(&write_port, true, false);
-                            let ack = send_zmq(&req, json!({
+                            let ack = req.call(json!({
                                 "cmd":        "generate",
                                 "freq_hz":    1000.0,
                                 "level_dbfs": level,
@@ -266,14 +261,14 @@ fn event_processor(
                         if !pink_active {
                             if sine_active {
                                 eprintln!("gpio: stopping sine before pink");
-                                send_zmq(&req, json!({"cmd": "stop", "name": "generate"}));
+                                req.call(json!({"cmd": "stop", "name": "generate"}));
                                 sine_active = false;
                             }
-                            level = resolve_level(&req);
+                            level = resolve_level(&mut req);
                             eprintln!("gpio: PINK @ {level:.2} dBFS ch {out_channel}");
                             pink_active = true;
                             update_leds(&write_port, false, true);
-                            let ack = send_zmq(&req, json!({
+                            let ack = req.call(json!({
                                 "cmd":        "generate_pink",
                                 "level_dbfs": level,
                                 "channels":   [out_channel],
@@ -294,30 +289,62 @@ fn event_processor(
 }
 
 // ---------------------------------------------------------------------------
-// ZMQ helpers (REQ socket — single-threaded use only)
+// ReqClient — REQ socket wrapper that rebuilds on send/recv failure so one
+// slow daemon response does not wedge the button pipeline until restart.
 // ---------------------------------------------------------------------------
 
-fn send_zmq(req: &zmq::Socket, cmd: Value) -> Value {
-    let bytes = match serde_json::to_vec(&cmd) {
-        Ok(b)  => b,
-        Err(e) => { eprintln!("gpio: json encode: {e}"); return json!({"ok": false}); }
-    };
-    if req.send(bytes, 0).is_err() {
-        return json!({"ok": false});
+struct ReqClient {
+    ctx:      zmq::Context,
+    endpoint: String,
+    sock:     zmq::Socket,
+}
+
+impl ReqClient {
+    fn new(ctx: zmq::Context, endpoint: String) -> anyhow::Result<Self> {
+        let sock = Self::connect(&ctx, &endpoint)?;
+        Ok(Self { ctx, endpoint, sock })
     }
-    match req.recv_bytes(0) {
-        Ok(reply) => serde_json::from_slice(&reply).unwrap_or(json!({"ok": false})),
-        Err(_)    => {
-            // REQ socket is broken after a timeout — recreate would require ctx
-            // so just return failure; next call will also fail until daemon restarts
-            json!({"ok": false})
+
+    fn connect(ctx: &zmq::Context, endpoint: &str) -> anyhow::Result<zmq::Socket> {
+        let s = ctx.socket(zmq::REQ)?;
+        s.set_linger(0)?;
+        s.set_rcvtimeo(2000)?;
+        s.set_sndtimeo(2000)?;
+        s.connect(endpoint)?;
+        Ok(s)
+    }
+
+    fn reset(&mut self) {
+        match Self::connect(&self.ctx, &self.endpoint) {
+            Ok(s)  => self.sock = s,
+            Err(e) => eprintln!("gpio: REQ reconnect failed: {e}"),
+        }
+    }
+
+    fn call(&mut self, cmd: Value) -> Value {
+        let bytes = match serde_json::to_vec(&cmd) {
+            Ok(b)  => b,
+            Err(e) => { eprintln!("gpio: json encode: {e}"); return json!({"ok": false}); }
+        };
+        if self.sock.send(bytes, 0).is_err() {
+            eprintln!("gpio: REQ send failed — resetting socket");
+            self.reset();
+            return json!({"ok": false});
+        }
+        match self.sock.recv_bytes(0) {
+            Ok(reply) => serde_json::from_slice(&reply).unwrap_or(json!({"ok": false})),
+            Err(_)    => {
+                eprintln!("gpio: REQ recv timeout — resetting socket");
+                self.reset();
+                json!({"ok": false})
+            }
         }
     }
 }
 
 /// Resolve 0 dBu in dBFS from calibration, or fall back to -20 dBFS.
-fn resolve_level(req: &zmq::Socket) -> f64 {
-    let ack = send_zmq(req, json!({"cmd": "get_calibration"}));
+fn resolve_level(req: &mut ReqClient) -> f64 {
+    let ack = req.call(json!({"cmd": "get_calibration"}));
     if let Some(vrms) = ack.get("vrms_at_0dbfs_out").and_then(Value::as_f64) {
         let vrms_ref = 0.7745966692_f64; // 0 dBu
         let dbfs = 20.0 * (vrms_ref / vrms).log10();
@@ -329,8 +356,8 @@ fn resolve_level(req: &zmq::Socket) -> f64 {
 }
 
 /// Read output_channel from daemon config.
-fn fetch_output_channel(req: &zmq::Socket) -> u32 {
-    let ack = send_zmq(req, json!({"cmd": "setup", "update": {}}));
+fn fetch_output_channel(req: &mut ReqClient) -> u32 {
+    let ack = req.call(json!({"cmd": "setup", "update": {}}));
     ack.get("config")
         .and_then(|c| c.get("output_channel"))
         .and_then(Value::as_u64)

@@ -71,6 +71,16 @@ pub trait AudioEngine: Send + 'static {
 
     /// List of available capture port names.
     fn capture_ports(&self) -> Vec<String>;
+
+    /// Whether this backend honours `reconnect_input`, `add_ref_input`,
+    /// `connect_output`, `disconnect_output`. Backends that default-no-op
+    /// these should return `false` so handlers that depend on routing
+    /// (`probe`, `transfer`, `test_hardware`, `test_dut`) can refuse up-front
+    /// instead of producing silently-wrong measurements.
+    fn supports_routing(&self) -> bool { false }
+
+    /// Human-readable backend name for error messages.
+    fn backend_name(&self) -> &'static str { "unknown" }
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL → fake.

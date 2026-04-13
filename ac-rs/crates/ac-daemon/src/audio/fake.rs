@@ -1,7 +1,15 @@
 //! Fake audio engine for tests and `--fake-audio` mode.
 //!
-//! Generates a synthetic loopback: captures produce a clean sine at the
-//! requested frequency so that `analyze()` yields plausible THD/THD+N values.
+//! Issue #34: the fake backend models routing so that tests can verify
+//! `reconnect_input` / `add_ref_input` / `connect_output` actually changed
+//! the channel the caller will sample.
+//!
+//! Implementation: every "fake:capture_N" / "fake:playback_N" port name
+//! carries a channel index. `capture_block()` synthesizes a sine at
+//! `freq_hz + channel_idx * 100 Hz`, so a test that reroutes from
+//! `fake:capture_0` to `fake:capture_3` and captures at a nominal 1 kHz will
+//! observe energy at 1 300 Hz instead. `capture_stereo()` emits independent
+//! offsets for the measurement and reference channels.
 
 use anyhow::Result;
 use std::f64::consts::PI;
@@ -9,33 +17,54 @@ use std::time::Duration;
 
 use super::AudioEngine;
 
+/// Channel-index → frequency offset, in Hz. Picked so that two channels
+/// never alias into the same FFT bin at common analysis lengths.
+const CHANNEL_OFFSET_HZ: f64 = 100.0;
+
 pub struct FakeEngine {
-    sample_rate: u32,
-    freq_hz:     f64,
-    amplitude:   f64,
-    xruns:       u32,
+    sample_rate:  u32,
+    freq_hz:      f64,
+    amplitude:    f64,
+    xruns:        u32,
+    output_ports: Vec<String>,
+    input_port:   Option<String>,
+    ref_port:     Option<String>,
 }
 
 impl FakeEngine {
     pub fn new() -> Self {
         Self {
-            sample_rate: 48_000,
-            freq_hz:     1_000.0,
-            amplitude:   0.0,
-            xruns:       0,
+            sample_rate:  48_000,
+            freq_hz:      1_000.0,
+            amplitude:    0.0,
+            xruns:        0,
+            output_ports: Vec::new(),
+            input_port:   None,
+            ref_port:     None,
         }
     }
-}
 
-impl FakeEngine {
-    /// Generate `duration` seconds of synthetic signal (phase-offset version).
-    fn make_samples(&self, duration: f64, phase_offset: f64) -> Vec<f32> {
-        let n    = (self.sample_rate as f64 * duration) as usize;
-        let freq = self.freq_hz;
-        let amp  = if self.amplitude > 0.0 { self.amplitude } else { 0.1 };
-        let sr   = self.sample_rate as f64;
+    /// Parse the trailing channel index from a `fake:<kind>_<N>` name.
+    /// Returns 0 when the format doesn't match.
+    fn channel_index(port: &str) -> usize {
+        port.rsplit('_')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
+    fn effective_freq(&self, port: Option<&str>) -> f64 {
+        let ch = port.map(Self::channel_index).unwrap_or(0);
+        self.freq_hz + ch as f64 * CHANNEL_OFFSET_HZ
+    }
+
+    /// Generate `duration` seconds of synthetic signal at the given frequency.
+    fn make_samples_at(&self, freq: f64, duration: f64) -> Vec<f32> {
+        let n   = (self.sample_rate as f64 * duration) as usize;
+        let amp = if self.amplitude > 0.0 { self.amplitude } else { 0.1 };
+        let sr  = self.sample_rate as f64;
         (0..n).map(|i| {
-            let t = i as f64 / sr + phase_offset;
+            let t = i as f64 / sr;
             let sig = amp * (2.0 * PI * freq * t).sin()
                     + amp * 0.01 * (4.0 * PI * freq * t).sin();
             sig as f32
@@ -44,7 +73,9 @@ impl FakeEngine {
 }
 
 impl AudioEngine for FakeEngine {
-    fn start(&mut self, _output_ports: &[String], _input_port: Option<&str>) -> Result<()> {
+    fn start(&mut self, output_ports: &[String], input_port: Option<&str>) -> Result<()> {
+        self.output_ports = output_ports.to_vec();
+        self.input_port   = input_port.map(str::to_string);
         Ok(())
     }
 
@@ -66,20 +97,48 @@ impl AudioEngine for FakeEngine {
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
-        // Simulate real-time by sleeping
         std::thread::sleep(Duration::from_secs_f64(duration));
-        Ok(self.make_samples(duration, 0.0))
+        let freq = self.effective_freq(self.input_port.as_deref());
+        Ok(self.make_samples_at(freq, duration))
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         std::thread::sleep(Duration::from_secs_f64(duration));
-        // Reference = same signal; measurement = identical (flat 0 dB transfer)
-        let meas = self.make_samples(duration, 0.0);
-        let refch = self.make_samples(duration, 0.0);
+        let meas_freq = self.effective_freq(self.input_port.as_deref());
+        // If no explicit ref_port, reference mirrors the generator (channel 0).
+        let ref_freq  = self.effective_freq(self.ref_port.as_deref());
+        let meas  = self.make_samples_at(meas_freq, duration);
+        let refch = self.make_samples_at(ref_freq,  duration);
         Ok((meas, refch))
     }
 
+    fn reconnect_input(&mut self, port: &str) -> Result<()> {
+        self.input_port = Some(port.to_string());
+        Ok(())
+    }
+
+    fn add_ref_input(&mut self, port: &str) -> Result<()> {
+        self.ref_port = Some(port.to_string());
+        Ok(())
+    }
+
+    fn connect_output(&mut self, port: &str) -> Result<()> {
+        if !self.output_ports.iter().any(|p| p == port) {
+            self.output_ports.push(port.to_string());
+        }
+        Ok(())
+    }
+
+    fn disconnect_output(&mut self, port: &str) {
+        self.output_ports.retain(|p| p != port);
+    }
+
+    fn flush_capture(&mut self) {}
+
     fn xruns(&self) -> u32 { self.xruns }
+
+    fn supports_routing(&self) -> bool { true }
+    fn backend_name(&self) -> &'static str { "fake" }
 
     fn playback_ports(&self) -> Vec<String> {
         (0..20).map(|i| format!("fake:playback_{i}")).collect()
@@ -87,5 +146,42 @@ impl AudioEngine for FakeEngine {
 
     fn capture_ports(&self) -> Vec<String> {
         (0..20).map(|i| format!("fake:capture_{i}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_index_parses_trailing_number() {
+        assert_eq!(FakeEngine::channel_index("fake:capture_0"),  0);
+        assert_eq!(FakeEngine::channel_index("fake:capture_7"),  7);
+        assert_eq!(FakeEngine::channel_index("fake:capture_19"), 19);
+        assert_eq!(FakeEngine::channel_index("garbage"),         0);
+    }
+
+    #[test]
+    fn reroute_shifts_effective_frequency() {
+        let mut eng = FakeEngine::new();
+        eng.set_tone(1_000.0, 0.5);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        assert!((eng.effective_freq(eng.input_port.as_deref()) - 1_000.0).abs() < 1e-9);
+        eng.reconnect_input("fake:capture_3").unwrap();
+        assert!((eng.effective_freq(eng.input_port.as_deref()) - 1_300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stereo_channels_are_independent() {
+        let mut eng = FakeEngine::new();
+        eng.set_tone(1_000.0, 0.5);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_2").unwrap();
+        let (meas, refch) = eng.capture_stereo(0.02).unwrap();
+        // Both non-empty and distinct signals.
+        assert!(!meas.is_empty());
+        assert_eq!(meas.len(), refch.len());
+        let diff: f32 = meas.iter().zip(&refch).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.0, "meas and ref channels should differ");
     }
 }

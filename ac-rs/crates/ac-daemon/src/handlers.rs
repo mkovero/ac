@@ -54,7 +54,7 @@ fn check_busy(state: &ServerState, new_cmd: &str) -> Option<String> {
 }
 
 /// Spawn a worker thread and register it.
-fn spawn_worker<F>(state: &ServerState, cmd_name: &str, f: F) -> WorkerHandle
+fn spawn_worker<F>(_state: &ServerState, _cmd_name: &str, f: F) -> WorkerHandle
 where
     F: FnOnce(Arc<AtomicBool>) + Send + 'static,
 {
@@ -117,7 +117,7 @@ pub fn quit(state: &ServerState) -> Value {
 
 pub fn stop(state: &ServerState, cmd: &Value) -> Value {
     let target = cmd.get("name").and_then(Value::as_str);
-    let mut workers = state.workers.lock().unwrap();
+    let workers = state.workers.lock().unwrap();
     if let Some(name) = target {
         if let Some(w) = workers.get(name) {
             w.stop();
@@ -213,7 +213,7 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
     }
 }
 
-pub fn list_calibrations(state: &ServerState) -> Value {
+pub fn list_calibrations(_state: &ServerState) -> Value {
     match Calibration::load_all(None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
         Ok(cals) => {
@@ -717,14 +717,26 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
-        let mut done_frame = json!({
+        let mut cal_done_frame = json!({
             "key":               key,
             "vrms_at_0dbfs_out": out_vrms,
             "vrms_at_0dbfs_in":  in_vrms,
         });
-        if let Some(e) = save_err { done_frame["error"] = json!(e); }
-        send_pub(&pub_tx, "cal_done", &done_frame);
-        send_pub(&pub_tx, "done", &json!({"cmd":"calibrate"}));
+        if let Some(ref e) = save_err { cal_done_frame["error"] = json!(e); }
+        send_pub(&pub_tx, "cal_done", &cal_done_frame);
+
+        // Route terminal frame on save outcome so the Python client, which
+        // treats `done` vs `error` as the authoritative signal, sees failures.
+        match save_err {
+            Some(e) => send_pub(&pub_tx, "error", &json!({
+                "cmd":     "calibrate",
+                "message": format!("save failed: {e}"),
+            })),
+            None => send_pub(&pub_tx, "done", &json!({
+                "cmd": "calibrate",
+                "key": key,
+            })),
+        }
     });
 
     {
@@ -911,6 +923,13 @@ pub fn transfer(state: &ServerState, cmd: &Value) -> Value {
         };
 
         let mut eng = make_engine(fake);
+        if !eng.supports_routing() {
+            send_pub(&pub_tx, "error", &json!({
+                "cmd":     "transfer",
+                "message": format!("{} backend does not support port routing", eng.backend_name()),
+            }));
+            return;
+        }
         if let Err(e) = eng.start(&out_ports, Some(&in_port)) {
             send_pub(&pub_tx, "error", &json!({"cmd":"transfer","message":format!("{e}")}));
             return;
@@ -1022,6 +1041,13 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
         let amplitude = ac_core::generator::dbfs_to_amplitude(-10.0);
 
         let mut eng = make_engine(fake);
+        if !eng.supports_routing() {
+            send_pub(&pub_tx, "error", &json!({
+                "cmd":     "probe",
+                "message": format!("{} backend does not support port routing", eng.backend_name()),
+            }));
+            return;
+        }
         if playback.is_empty() {
             send_pub(&pub_tx, "error", &json!({"cmd":"probe","message":"no playback ports"}));
             return;
@@ -1199,6 +1225,13 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         };
 
         let mut eng = make_engine(fake);
+        if !eng.supports_routing() {
+            send_pub(&pub_tx, "error", &json!({
+                "cmd":     "test_hardware",
+                "message": format!("{} backend does not support port routing", eng.backend_name()),
+            }));
+            return;
+        }
         if let Err(e) = eng.start(&out_ports, Some(&in_port)) {
             send_pub(&pub_tx, "error", &json!({"cmd":"test_hardware","message":format!("{e}")}));
             return;
@@ -1334,6 +1367,13 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         };
 
         let mut eng = make_engine(fake);
+        if !eng.supports_routing() {
+            send_pub(&pub_tx, "error", &json!({
+                "cmd":     "test_dut",
+                "message": format!("{} backend does not support port routing", eng.backend_name()),
+            }));
+            return;
+        }
         if let Err(e) = eng.start(&out_ports, Some(&in_port)) {
             send_pub(&pub_tx, "error", &json!({"cmd":"test_dut","message":format!("{e}")}));
             return;
@@ -1364,13 +1404,6 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                 }));
             }};
         }
-
-        let run_suite = |eng: &mut Box<dyn crate::audio::AudioEngine>, tag: &str| {
-            let mut n = 0usize;
-            let _ = (eng, tag, &cal, &pub_tx, sr, level_dbfs); // suppress unused warnings
-            n
-        };
-        let _ = run_suite; // not used — inline below instead
 
         // Run DUT suite
         if !stop.load(Ordering::Relaxed) {
@@ -1501,7 +1534,7 @@ fn analyze_mono(eng: &mut dyn AudioEngine, freq: f64, duration: f64, sr: u32) ->
 
 // ---- Hardware tests ----
 
-fn hw_noise_floor(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) -> TestResult {
+fn hw_noise_floor(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, _sr: u32) -> TestResult {
     eng.set_silence();
     std::thread::sleep(std::time::Duration::from_millis(100));
     let mut floors = vec![];
@@ -1741,7 +1774,7 @@ fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
 // DUT test functions (port of ac/test.py run_dut_*)
 // ---------------------------------------------------------------------------
 
-fn dut_noise_floor(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration>) -> TestResult {
+fn dut_noise_floor(eng: &mut dyn AudioEngine, _sr: u32, cal: Option<&Calibration>) -> TestResult {
     eng.set_silence();
     std::thread::sleep(std::time::Duration::from_millis(200));
     let rms   = capture_rms(eng, 1.0);
