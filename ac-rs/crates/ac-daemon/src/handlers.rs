@@ -162,8 +162,12 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Some(v) = update.get("input_channel").and_then(Value::as_u64) {
         cfg.input_channel = v as u32;
     }
-    if let Some(v) = update.get("reference_channel").and_then(Value::as_u64) {
-        cfg.reference_channel = Some(v as u32);
+    if let Some(v) = update.get("reference_channel") {
+        if v.is_null() {
+            cfg.reference_channel = None;
+        } else if let Some(n) = v.as_u64() {
+            cfg.reference_channel = Some(n as u32);
+        }
     }
     if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {
         cfg.dbu_ref_vrms = v;
@@ -922,7 +926,9 @@ pub fn transfer(state: &ServerState, cmd: &Value) -> Value {
         let _ = eng.capture_block(0.2); // warmup flush
 
         if stop.load(Ordering::Relaxed) {
-            eng.set_silence(); eng.stop(); return;
+            eng.set_silence(); eng.stop();
+            send_pub(&pub_tx, "done", &json!({"cmd":"transfer","stopped":true}));
+            return;
         }
 
         let (meas, refch) = match eng.capture_stereo(duration) {
@@ -936,7 +942,10 @@ pub fn transfer(state: &ServerState, cmd: &Value) -> Value {
         eng.set_silence();
         eng.stop();
 
-        if stop.load(Ordering::Relaxed) { return; }
+        if stop.load(Ordering::Relaxed) {
+            send_pub(&pub_tx, "done", &json!({"cmd":"transfer","stopped":true}));
+            return;
+        }
 
         let result = ac_core::transfer::h1_estimate(&refch, &meas, sr);
 

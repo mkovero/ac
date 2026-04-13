@@ -554,29 +554,32 @@ def _ensure_reference_channel(client, channel=1):
 
 
 def test_transfer_requires_reference(server_client):
-    """transfer must fail with a helpful error when reference_channel is not set."""
+    """transfer must return ok=False with an informative error when no reference is configured."""
     client = server_client
-    # Clear reference channel
-    ack = client.send_cmd({"cmd": "setup", "update": {"reference_channel": 0}})
-    # Note: channel 0 is the sentinel for 'unset' – daemon may or may not reject;
-    # if it accepts, the transfer command itself should report missing config.
-    # The reliable test: if reference_channel == 0, a real 'not configured' reply
-    # is sent for channel 0. Just check that after a true setup the command works.
-    # (This test only validates that setup round-trips without error.)
+    # Clear reference_channel (null is accepted since setup now handles explicit null)
+    clear = client.send_cmd({"cmd": "setup", "update": {"reference_channel": None}})
+    assert clear is not None and clear["ok"] is True
+    assert clear["config"].get("reference_channel") is None
+
+    ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
     assert ack is not None
+    assert ack["ok"] is False
+    assert "reference" in ack.get("error", "").lower()
 
 
 def test_transfer_frames(server_client):
-    """transfer emits a transfer_result frame with required fields then done."""
+    """transfer emits a transfer_result frame with all required fields then done."""
+    import numpy as np
     client = server_client
     _ensure_reference_channel(client, channel=1)
 
     ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
     assert ack is not None
     assert ack["ok"] is True, f"transfer rejected: {ack.get('error')}"
-    assert "out_port" in ack
-    assert "in_port"  in ack
-    assert "ref_port" in ack
+    assert "out_port"     in ack
+    assert "in_port"      in ack
+    assert "ref_port"     in ack
+    assert "ref_out_port" in ack
 
     frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
     data_frames = [f for t, f in frames if t == "data"]
@@ -584,15 +587,71 @@ def test_transfer_frames(server_client):
 
     tf = next((f for f in data_frames if f.get("type") == "transfer_result"), None)
     assert tf is not None, "no transfer_result frame received"
-    for field in ("freqs", "magnitude_db", "phase_deg", "coherence", "delay_ms"):
+
+    # Required fields present
+    for field in ("freqs", "magnitude_db", "phase_deg", "coherence", "delay_samples", "delay_ms"):
         assert field in tf, f"missing field '{field}' in transfer_result"
-    assert isinstance(tf["freqs"], list) and len(tf["freqs"]) > 0
-    assert isinstance(tf["magnitude_db"], list)
-    assert isinstance(tf["coherence"], list)
+
+    # Basic type checks
+    assert isinstance(tf["freqs"],         list) and len(tf["freqs"]) > 0
+    assert isinstance(tf["magnitude_db"],  list)
+    assert isinstance(tf["coherence"],     list)
+    assert isinstance(tf["delay_samples"], int)
+    assert isinstance(tf["delay_ms"],      float)
+
+    # Array lengths must all match
+    n = len(tf["freqs"])
+    assert len(tf["magnitude_db"]) == n, "magnitude_db length mismatch"
+    assert len(tf["phase_deg"])    == n, "phase_deg length mismatch"
+    assert len(tf["coherence"])    == n, "coherence length mismatch"
+
+    # Downsampling cap
+    assert n <= 2000, f"expected ≤ 2000 frequency points, got {n}"
+
+    # Numeric sanity: coherence in [0, 1]
+    coh = np.array(tf["coherence"])
+    assert np.all(coh >= 0.0), f"coherence below 0: min={coh.min():.4f}"
+    assert np.all(coh <= 1.0), f"coherence above 1: max={coh.max():.4f}"
+
+    # Numeric sanity: magnitude finite (no NaN/inf)
+    mag = np.array(tf["magnitude_db"])
+    assert np.all(np.isfinite(mag)), "non-finite values in magnitude_db"
+
+    # FakeEngine returns identical ref+meas → 0 dB flat transfer, coherence ≈ 1
+    assert np.allclose(mag[1:], 0.0, atol=1.0), \
+        f"FakeEngine should produce ~0 dB transfer; mean={mag[1:].mean():.3f}"
+    assert np.all(coh[1:] > 0.95), \
+        f"FakeEngine identical signals → coherence should be ≈1; min={coh[1:].min():.4f}"
 
     done_frames = [f for t, f in frames if t == "done"]
     assert done_frames, "no done frame from transfer"
     assert done_frames[0]["cmd"] == "transfer"
+
+
+def test_transfer_default_level(server_client):
+    """transfer without explicit level_dbfs must complete successfully (defaults to -10 dBFS)."""
+    client = server_client
+    ack = client.send_cmd({"cmd": "transfer"})   # no level_dbfs
+    assert ack is not None
+    assert ack["ok"] is True, f"transfer rejected: {ack.get('error')}"
+
+    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
+    terminal = [t for t, _ in frames if t in ("done", "error")]
+    assert terminal, "no terminal frame from transfer"
+    assert terminal[-1] == "done", f"expected done, got {terminal[-1]}"
+
+
+def test_transfer_stop_early(server_client):
+    """Stopping a running transfer must produce a done/error terminal frame."""
+    client = server_client
+    ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
+    assert ack["ok"] is True
+
+    client.send_cmd({"cmd": "stop"})
+
+    frames = recv_until(client, done_topics=("done", "error"), max_frames=500, timeout_ms=15000)
+    terminal = [t for t, _ in frames if t in ("done", "error")]
+    assert terminal, "no terminal frame after stopping transfer"
 
 
 # ---------------------------------------------------------------------------
