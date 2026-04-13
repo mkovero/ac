@@ -45,6 +45,12 @@ pub struct ServerState {
     /// Optional channel to signal the running calibrate worker.
     /// Sends Option<f64>: Some(vrms) = user reading, None = skip.
     pub cal_reply_tx: Arc<Mutex<Option<Sender<Option<f64>>>>>,
+    /// Cached port lists. JACK port queries open a fresh probe client every
+    /// call, so before this cache `test_hardware` would build 4+ probe clients
+    /// per invocation just to resolve sticky port names. Populated lazily and
+    /// refreshed by the `devices` command.
+    pub playback_ports_cache: Arc<Mutex<Option<Vec<String>>>>,
+    pub capture_ports_cache:  Arc<Mutex<Option<Vec<String>>>>,
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -80,6 +86,8 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         data_port,
         dut_reply_tx: Arc::new(Mutex::new(None)),
         cal_reply_tx: Arc::new(Mutex::new(None)),
+        playback_ports_cache: Arc::new(Mutex::new(None)),
+        capture_ports_cache:  Arc::new(Mutex::new(None)),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
