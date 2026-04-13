@@ -13,8 +13,15 @@ use serde_json::{json, Value};
 use crate::handlers;
 use crate::workers::WorkerHandle;
 
-pub const CTRL_PORT: u16 = 5556;
-pub const DATA_PORT: u16 = 5557;
+/// ZMQ PUB send high-water-mark. Default libzmq HWM is 1000, which silently
+/// drops terminal frames (`done`, `error`, `cal_done`) mid-sweep when the
+/// Python client lags. 50_000 lets a whole freq sweep buffer in memory before
+/// anything is dropped; the internal backlog log below warns the operator.
+const PUB_HWM: i32 = 50_000;
+
+/// If the worker → main-loop channel ever accumulates this many pending
+/// frames between drains, log once so slow subscribers become visible.
+const PUB_BACKLOG_WARN: usize = 1_000;
 
 /// Shared server state, accessible to every handler.
 #[derive(Clone)]
@@ -45,6 +52,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
 
     let ctrl = ctx.socket(zmq::REP).context("CTRL socket")?;
     let data = ctx.socket(zmq::PUB).context("DATA socket")?;
+    data.set_sndhwm(PUB_HWM).context("set PUB sndhwm")?;
 
     let mut bind_host = if local_only { "127.0.0.1" } else { "*" }.to_string();
     ctrl.bind(&format!("tcp://{bind_host}:{ctrl_port}"))
@@ -75,9 +83,19 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
+    let mut backlog_warned = false;
 
     loop {
         // Drain any pending DATA frames first
+        if pub_rx.len() > PUB_BACKLOG_WARN && !backlog_warned {
+            eprintln!(
+                "ac-daemon: PUB backlog {} pending frames — subscriber is lagging",
+                pub_rx.len()
+            );
+            backlog_warned = true;
+        } else if pub_rx.is_empty() {
+            backlog_warned = false;
+        }
         while let Ok(frame) = pub_rx.try_recv() {
             data.send(frame, 0).ok();
         }

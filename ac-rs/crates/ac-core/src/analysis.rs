@@ -449,4 +449,107 @@ mod tests {
         assert_relative_eq!(r2.thd_pct, r.thd_pct, epsilon = 1e-12);
         assert_relative_eq!(r2.linear_rms, r.linear_rms, epsilon = 1e-12);
     }
+
+    // ------------------------------------------------------------------
+    // Property-based coverage over amplitude/frequency/phase grid.
+    // Issue #33. Tolerances are deliberately loose — we're checking that
+    // analyze() behaves *sanely* across the surface, not bit-exact.
+    // ------------------------------------------------------------------
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn sine_with_phase(freq: f64, amplitude: f64, phase: f64, sr: u32, n: usize) -> Vec<f32> {
+            (0..n)
+                .map(|i| (amplitude * (2.0 * PI * freq * i as f64 / sr as f64 + phase).sin()) as f32)
+                .collect()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// A pure sine, regardless of amplitude/freq/phase, should yield
+            /// `linear_rms ≈ amplitude / √2` within ±0.3 dB.
+            #[test]
+            fn pure_sine_rms_within_tolerance(
+                freq      in 200.0f64..8_000.0,
+                amp_db    in -40.0f64..(-3.0),
+                phase     in 0.0f64..(2.0 * PI),
+            ) {
+                let amp = 10f64.powf(amp_db / 20.0);
+                let samples = sine_with_phase(freq, amp, phase, SR, SR as usize);
+                let r = analyze(&samples, SR, freq, 8).unwrap();
+
+                let expected = amp / std::f64::consts::SQRT_2;
+                let got_db      = 20.0 * r.linear_rms.max(1e-12).log10();
+                let expected_db = 20.0 * expected.max(1e-12).log10();
+                prop_assert!(
+                    (got_db - expected_db).abs() < 0.3,
+                    "RMS off: got {:.3} dB, expected {:.3} dB (freq={freq}, amp={amp}, phase={phase})",
+                    got_db, expected_db
+                );
+            }
+
+            /// THD of a numerically clean sine must stay below 0.1 %.
+            #[test]
+            fn pure_sine_thd_is_low(
+                freq  in 300.0f64..6_000.0,
+                amp   in 0.05f64..0.8,
+                phase in 0.0f64..(2.0 * PI),
+            ) {
+                let samples = sine_with_phase(freq, amp, phase, SR, SR as usize);
+                let r = analyze(&samples, SR, freq, 8).unwrap();
+                prop_assert!(
+                    r.thd_pct < 0.1,
+                    "THD too high: {:.4}% (freq={freq}, amp={amp})", r.thd_pct
+                );
+            }
+
+            /// Every returned field must be finite (no NaN / inf), the
+            /// spectrum must match the expected bin count, and flags must
+            /// be booleans — i.e. analyze never panics on in-range inputs.
+            #[test]
+            fn analyze_is_total_on_sensible_inputs(
+                freq  in 100.0f64..10_000.0,
+                amp   in 0.01f64..0.9,
+                phase in 0.0f64..(2.0 * PI),
+                n_hp  in 1usize..12,
+            ) {
+                let samples = sine_with_phase(freq, amp, phase, SR, SR as usize);
+                let r = analyze(&samples, SR, freq, n_hp).unwrap();
+
+                prop_assert!(r.fundamental_dbfs.is_finite());
+                prop_assert!(r.thd_pct.is_finite());
+                prop_assert!(r.thdn_pct.is_finite());
+                prop_assert!(r.noise_floor_dbfs.is_finite());
+                prop_assert!(r.linear_rms.is_finite());
+                prop_assert_eq!(r.spectrum.len(), SR as usize / 2 + 1);
+                prop_assert_eq!(r.freqs.len(), r.spectrum.len());
+                // THD+N is always at least THD.
+                prop_assert!(r.thdn_pct + 1e-9 >= r.thd_pct);
+            }
+
+            /// Adding a known 2nd-harmonic component at 2% amplitude should
+            /// push THD above 1.5 %.
+            #[test]
+            fn second_harmonic_lifts_thd(
+                freq  in 500.0f64..4_000.0,
+                amp   in 0.1f64..0.5,
+            ) {
+                let n = SR as usize;
+                let samples: Vec<f32> = (0..n).map(|i| {
+                    let t = i as f64 / SR as f64;
+                    let fund = amp * (2.0 * PI * freq * t).sin();
+                    let h2   = amp * 0.02 * (2.0 * PI * 2.0 * freq * t).sin();
+                    (fund + h2) as f32
+                }).collect();
+                let r = analyze(&samples, SR, freq, 8).unwrap();
+                prop_assert!(
+                    r.thd_pct > 1.5,
+                    "expected THD > 1.5% from 2% 2nd harmonic, got {:.3}%", r.thd_pct
+                );
+            }
+        }
+    }
 }

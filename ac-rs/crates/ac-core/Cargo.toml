@@ -15,3 +15,4 @@ rand_distr = "0.4"
 [dev-dependencies]
 approx   = "0.5"
 tempfile = "3"
+proptest = "1"

@@ -54,9 +54,22 @@ shared `workers` map, and returns the CTRL reply immediately.
 
 See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
-## Known gaps vs Python server
+## Backend status
 
-- `calibrate`: emits `cal_prompt` but does not wait for a real `cal_reply` from a DMM
-- `dmm_read`: always returns "no DMM configured"
-- GPIO handler: not yet ported
-- CPAL/sounddevice fallback: not yet implemented (JACK only)
+| Path | State |
+|------|-------|
+| `calibrate` | Full state machine: emits `cal_prompt`, blocks on `cal_reply`, writes cal.json via `Calibration::save()` |
+| `dmm_read` | SCPI client wired (only used when `[dmm]` section is configured; otherwise `no DMM configured`) |
+| GPIO handler | USB2GPIO (Arduino Mega) handler in `gpio.rs`, spawned by `--gpio <port>` |
+| CPAL backend | Runs when JACK unavailable. **Note:** CPAL backend inherits the `AudioEngine` default no-op routing methods — commands that rely on port routing (`probe`, `transfer`, `test_hardware`, `test_dut`) currently behave incorrectly. See issue #27. |
+| `--fake-audio` | Synthetic sine loopback; bypasses routing (see issue #34) |
+
+## Known limitations
+
+- JACK process callback is not real-time safe today (Mutex + alloc on every
+  period). See issue #23 — fix in flight via `ringbuf` SPSC + atomic tone swap.
+- `xruns()` counter is always 0 on both JACK and CPAL (issue #24).
+- Capture rings grow unbounded on long output-only commands (issue #25).
+- `handlers.rs` is 1931 LOC; slated for split into per-concern modules (#29).
+
+For the full backlog see <https://github.com/mkovero/ac/issues?q=is%3Aopen+label%3Abacklog>.

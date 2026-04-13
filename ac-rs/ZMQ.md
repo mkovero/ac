@@ -15,6 +15,16 @@ between any `ac` server (Python or Rust) and any `ac` client.
 **CTRL** is a strict REQ/REP pair: the client sends one JSON object, waits
 for one JSON object reply. No pipelining.
 
+**PUB high-water mark.** The Rust daemon sets `ZMQ_SNDHWM = 50000` on the
+DATA socket (default libzmq HWM is 1000). This is large enough to buffer a
+full frequency sweep of `data` frames plus the terminal `done`/`error`/
+`cal_done` frame even when the subscriber is lagging. If the internal
+worker → main-loop channel ever accumulates more than 1000 pending frames
+between main-loop drains the daemon logs `PUB backlog …` once so the
+operator knows a subscriber is falling behind. Subscribers that exceed HWM
+will still experience drops — clients must treat a missing terminal frame
+as an error after the per-command deadline.
+
 **DATA** frames are UTF-8 strings with a topic prefix:
 
 ```
