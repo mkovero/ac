@@ -1,0 +1,139 @@
+mod app;
+mod data;
+mod render;
+mod theme;
+mod ui;
+
+use std::path::PathBuf;
+
+use app::{App, AppInit, SourceKind};
+use data::store::ChannelStore;
+
+fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let args = Args::parse(std::env::args().skip(1))?;
+    if args.help {
+        print_help();
+        return Ok(());
+    }
+
+    let n_channels = if args.synthetic { args.channels.max(1) } else { 1 };
+    let (inputs, store) = ChannelStore::new(n_channels);
+
+    let source_kind = if args.synthetic {
+        SourceKind::Synthetic
+    } else {
+        SourceKind::Daemon
+    };
+
+    let init = AppInit {
+        store,
+        inputs,
+        source_kind,
+        output_dir: args.output_dir.clone(),
+        endpoint: args.connect.clone(),
+        synthetic_params: Some((args.channels.max(1), args.bins.max(16), args.rate.max(0.5))),
+    };
+
+    let event_loop = winit::event_loop::EventLoop::new()?;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut app = App::new(init);
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+struct Args {
+    help: bool,
+    connect: String,
+    synthetic: bool,
+    channels: usize,
+    bins: usize,
+    rate: f32,
+    output_dir: PathBuf,
+}
+
+impl Args {
+    fn parse(args: impl Iterator<Item = String>) -> anyhow::Result<Self> {
+        let mut out = Args {
+            help: false,
+            connect: "tcp://127.0.0.1:5557".to_string(),
+            synthetic: false,
+            channels: 1,
+            bins: 1000,
+            rate: 10.0,
+            output_dir: default_output_dir(),
+        };
+        let mut it = args.peekable();
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "-h" | "--help" => out.help = true,
+                "--synthetic" => out.synthetic = true,
+                "--connect" => {
+                    out.connect = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--connect requires value"))?;
+                }
+                "--channels" => {
+                    out.channels = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?
+                        .parse()?;
+                }
+                "--bins" => {
+                    out.bins = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--bins requires value"))?
+                        .parse()?;
+                }
+                "--rate" => {
+                    out.rate = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--rate requires value"))?
+                        .parse()?;
+                }
+                "--output-dir" => {
+                    out.output_dir = PathBuf::from(
+                        it.next()
+                            .ok_or_else(|| anyhow::anyhow!("--output-dir requires value"))?,
+                    );
+                }
+                other => anyhow::bail!("unknown argument: {other}"),
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn default_output_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join("ac-screenshots")
+    } else {
+        PathBuf::from("ac-screenshots")
+    }
+}
+
+fn print_help() {
+    println!(
+        "ac-ui — GPU spectrum monitor\n\n\
+Usage: ac-ui [OPTIONS]\n\n\
+Options:\n  \
+  --connect <addr>     ZMQ DATA endpoint [default: tcp://127.0.0.1:5557]\n  \
+  --synthetic          Fake data instead of daemon\n  \
+  --channels <n>       Synthetic channel count [default: 1]\n  \
+  --bins <n>           Synthetic bins per channel [default: 1000]\n  \
+  --rate <hz>          Synthetic update rate [default: 10]\n  \
+  --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
+  -h, --help           Show this help\n\n\
+Keys:\n  \
+  Esc/q            quit\n  \
+  Enter            toggle freeze\n  \
+  Space            toggle peak hold\n  \
+  s                save screenshot + CSV\n  \
+  +/-              adjust dB range\n  \
+  l                cycle layout (grid/overlay/single)\n  \
+  f                toggle fullscreen\n  \
+  Ctrl+Tab         next channel (single mode)\n  \
+  Ctrl+Shift+Tab   prev channel\n"
+    );
+}

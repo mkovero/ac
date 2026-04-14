@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/ac-core", "crates/ac-daemon"]
+members = ["crates/ac-core", "crates/ac-daemon", "crates/ac-ui"]
 resolver = "2"

@@ -177,6 +177,28 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 ## What stays in Python forever
 
 - `ac/client/` — CLI parser, ZMQ REQ client, CSV export, plotting
-- `ac/ui/` — pyqtgraph live views
+- `ac/ui/` — pyqtgraph live views (until ac-ui reaches parity — see below)
 - `ds/` — diagnostics session manager, AI analysis
 - `scripts/` — babyface/OSM shell scripts
+
+---
+
+## ac-ui — Rust GPU spectrum monitor (experimental)
+
+`crates/ac-ui` is a standalone wgpu/winit/egui binary that subscribes to the
+same DATA socket and renders `spectrum` frames via a custom wgpu pipeline
+(log-freq x, linear-dB y, instanced line + fill). Goal: investigate whether
+a GPU renderer can scale to 100 simultaneous spectra at 60 fps and provide
+a keyboard-driven daily driver alongside the Python pyqtgraph UI.
+
+See `/rust-ui-design.md` for the full design. v0.1 covers synthetic-source
+benchmarking plus single-channel real-daemon rendering; multi-channel real
+mode, waterfall, and GPU-timing overlay are deferred. Launched manually:
+
+```
+cargo build -p ac-ui
+./target/debug/ac-ui --synthetic --channels 10
+./target/debug/ac-ui                          # requires a running daemon
+```
+
+Python auto-spawn (`ac/__main__.py`) is untouched.
