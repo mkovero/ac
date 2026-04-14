@@ -17,12 +17,13 @@ pub fn compute(
     if n_channels == 0 {
         return Vec::new();
     }
-    let pad_x = 0.04_f32;
+    let pad_left = 0.055_f32;
+    let pad_right = 0.025_f32;
     let pad_y_top = 0.05_f32;
-    let pad_y_bot = 0.08_f32;
-    let plot_x = pad_x;
+    let pad_y_bot = 0.10_f32;
+    let plot_x = pad_left;
     let plot_y = pad_y_bot;
-    let plot_w = 1.0 - 2.0 * pad_x;
+    let plot_w = 1.0 - pad_left - pad_right;
     let plot_h = 1.0 - pad_y_top - pad_y_bot;
 
     match mode {

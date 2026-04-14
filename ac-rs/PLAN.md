@@ -201,4 +201,10 @@ cargo build -p ac-ui
 ./target/debug/ac-ui                          # requires a running daemon
 ```
 
+Keyboard bindings plus mouse zoom (scroll, with `Shift`/`Ctrl` for single
+axis), left-drag pan, and right-click reset are documented in the design
+doc's Interaction section and in `ac-ui --help`. Phase 2 backlog
+(waterfall, GPU-timing overlay, multi-channel real mode) is tracked in
+`/rust-ui-phase2.md`.
+
 Python auto-spawn (`ac/__main__.py`) is untouched.

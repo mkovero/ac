@@ -134,6 +134,12 @@ Keys:\n  \
   l                cycle layout (grid/overlay/single)\n  \
   f                toggle fullscreen\n  \
   Ctrl+Tab         next channel (single mode)\n  \
-  Ctrl+Shift+Tab   prev channel\n"
+  Ctrl+Shift+Tab   prev channel\n\n\
+Mouse:\n  \
+  Scroll           zoom both axes around cursor\n  \
+  Shift+Scroll     zoom dB axis only\n  \
+  Ctrl+Scroll      zoom frequency axis only\n  \
+  Left-drag        pan view\n  \
+  Right-click      reset view\n"
     );
 }

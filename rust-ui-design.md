@@ -100,7 +100,7 @@ The receiver detects changes and only reallocates then.
 
 ## Interaction
 
-Keyboard-only. No toolbar, no buttons, no mouse-driven chrome.
+Keyboard-first. Mouse supports zoom/pan within the hovered cell.
 
 | Key | Action |
 |-----|--------|
@@ -113,6 +113,18 @@ Keyboard-only. No toolbar, no buttons, no mouse-driven chrome.
 | `Ctrl+Shift+Tab` | Previous channel (single-view mode) |
 | `l` | Cycle layout: grid → overlay → single → grid |
 | `f` | Toggle fullscreen |
+
+| Mouse | Action |
+|-------|--------|
+| Scroll wheel | Zoom both axes around cursor |
+| `Shift` + scroll | Zoom dB axis only |
+| `Ctrl` + scroll | Zoom frequency axis only |
+| Left click + drag | Pan frequency and dB window |
+| Right click | Reset view (defaults from `theme.rs`) |
+
+Zoom and pan mutate the shared `DisplayConfig` (freq_min/max, db_min/max)
+so both the GPU shader and the egui grid labels track the new window
+without any CPU-side vertex rebuild.
 
 ### Screenshot & Export
 

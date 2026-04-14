@@ -1,6 +1,6 @@
 pub const BG: [f32; 4] = [0.039, 0.039, 0.059, 1.0];
-pub const GRID_LABEL: [u8; 3] = [0x5A, 0x5A, 0x6A];
-pub const TEXT: [u8; 3] = [0xB0, 0xB0, 0xBA];
+pub const GRID_LABEL: [u8; 3] = [0x9A, 0x9A, 0xAA];
+pub const TEXT: [u8; 3] = [0xD0, 0xD0, 0xDA];
 pub const CLIP_LED: [u8; 3] = [0xDD, 0x33, 0x33];
 
 pub const CHANNEL_COLORS: [[f32; 4]; 10] = [
@@ -31,9 +31,9 @@ pub fn channel_color(idx: usize) -> [f32; 4] {
     ]
 }
 
-pub const GRID_LABEL_PX: f32 = 10.0;
-pub const STATUS_PX: f32 = 11.0;
-pub const READOUT_PX: f32 = 12.0;
+pub const GRID_LABEL_PX: f32 = 13.0;
+pub const STATUS_PX: f32 = 14.0;
+pub const READOUT_PX: f32 = 15.0;
 
 pub const DEFAULT_DB_MIN: f32 = -140.0;
 pub const DEFAULT_DB_MAX: f32 = 0.0;

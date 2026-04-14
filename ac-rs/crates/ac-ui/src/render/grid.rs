@@ -40,8 +40,8 @@ pub fn draw_grid(
                 format!("{:.0}", f)
             };
             painter.text(
-                Pos2::new(x + 2.0, rect.bottom() - 2.0),
-                egui::Align2::LEFT_BOTTOM,
+                Pos2::new(x, rect.bottom() + 3.0),
+                egui::Align2::CENTER_TOP,
                 label,
                 egui::FontId::monospace(theme::GRID_LABEL_PX),
                 label_color,
@@ -61,8 +61,8 @@ pub fn draw_grid(
         );
         if show_labels {
             painter.text(
-                Pos2::new(rect.left() + 2.0, y - 2.0),
-                egui::Align2::LEFT_BOTTOM,
+                Pos2::new(rect.left() - 3.0, y),
+                egui::Align2::RIGHT_CENTER,
                 format!("{:.0}", db),
                 egui::FontId::monospace(theme::GRID_LABEL_PX),
                 label_color,

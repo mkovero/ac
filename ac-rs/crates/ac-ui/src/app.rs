@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use egui::Color32;
 use triple_buffer::Input;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::dpi::PhysicalPosition;
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -73,6 +74,19 @@ pub struct App {
     notification: Option<(String, Instant)>,
     modifiers: ModifiersState,
     last_render: Instant,
+    cursor_pos: Option<PhysicalPosition<f64>>,
+    drag: Option<DragState>,
+}
+
+#[derive(Clone)]
+struct DragState {
+    start: PhysicalPosition<f64>,
+    start_log_min: f32,
+    start_log_max: f32,
+    start_db_min: f32,
+    start_db_max: f32,
+    cell_w_px: f32,
+    cell_h_px: f32,
 }
 
 impl App {
@@ -94,7 +108,117 @@ impl App {
             notification: None,
             modifiers: ModifiersState::empty(),
             last_render: Instant::now(),
+            cursor_pos: None,
+            drag: None,
         }
+    }
+
+    fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(f32, f32, f32, f32)> {
+        let ctx = self.render_ctx.as_ref()?;
+        let w = ctx.config.width as f32;
+        let h = ctx.config.height as f32;
+        let n = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        if n == 0 {
+            return None;
+        }
+        let cells = layout::compute(self.config.layout, n, self.config.active_channel);
+        for c in &cells {
+            let r = layout::to_pixel_rect(c, w, h);
+            let x = pos.x as f32;
+            let y = pos.y as f32;
+            if x >= r.left() && x <= r.right() && y >= r.top() && y <= r.bottom() {
+                let nx = (x - r.left()) / r.width().max(1.0);
+                let ny = 1.0 - (y - r.top()) / r.height().max(1.0);
+                return Some((nx, ny, r.width(), r.height()));
+            }
+        }
+        None
+    }
+
+    fn apply_zoom(&mut self, scroll_y: f32) {
+        let pos = match self.cursor_pos {
+            Some(p) => p,
+            None => return,
+        };
+        let (nx, ny, _, _) = match self.cell_at(pos) {
+            Some(v) => v,
+            None => return,
+        };
+        let factor = 0.85_f32.powf(scroll_y);
+        let shift = self.modifiers.shift_key();
+        let ctrl = self.modifiers.control_key();
+
+        if !shift {
+            let log_min = self.config.freq_min.max(1.0).log10();
+            let log_max = self.config.freq_max.max(log_min.exp().max(10.0)).log10();
+            let anchor = log_min + nx * (log_max - log_min);
+            let new_span = ((log_max - log_min) * factor).clamp(0.15, 4.5);
+            let new_min = (anchor - nx * new_span).clamp(0.0, 4.5);
+            let new_max = (new_min + new_span).min(4.8);
+            self.config.freq_min = 10.0_f32.powf(new_min).max(1.0);
+            self.config.freq_max = 10.0_f32.powf(new_max);
+        }
+        if !ctrl {
+            let db_min = self.config.db_min;
+            let db_max = self.config.db_max;
+            let anchor = db_min + ny * (db_max - db_min);
+            let new_span = ((db_max - db_min) * factor).clamp(10.0, 240.0);
+            let new_min = (anchor - ny * new_span).max(-240.0);
+            let new_max = (new_min + new_span).min(20.0);
+            self.config.db_min = new_min;
+            self.config.db_max = new_max;
+        }
+    }
+
+    fn begin_drag(&mut self) {
+        let pos = match self.cursor_pos {
+            Some(p) => p,
+            None => return,
+        };
+        let cell = match self.cell_at(pos) {
+            Some(v) => v,
+            None => return,
+        };
+        let log_min = self.config.freq_min.max(1.0).log10();
+        let log_max = self.config.freq_max.max(10.0).log10();
+        self.drag = Some(DragState {
+            start: pos,
+            start_log_min: log_min,
+            start_log_max: log_max,
+            start_db_min: self.config.db_min,
+            start_db_max: self.config.db_max,
+            cell_w_px: cell.2,
+            cell_h_px: cell.3,
+        });
+    }
+
+    fn update_drag(&mut self, pos: PhysicalPosition<f64>) {
+        let drag = match self.drag.clone() {
+            Some(d) => d,
+            None => return,
+        };
+        let dx_px = (pos.x - drag.start.x) as f32;
+        let dy_px = (pos.y - drag.start.y) as f32;
+        let log_span = drag.start_log_max - drag.start_log_min;
+        let db_span = drag.start_db_max - drag.start_db_min;
+        let d_log = -(dx_px / drag.cell_w_px.max(1.0)) * log_span;
+        let d_db = -(dy_px / drag.cell_h_px.max(1.0)) * db_span;
+        let new_log_min = (drag.start_log_min + d_log).clamp(0.0, 4.8 - log_span.min(4.8));
+        let new_log_max = new_log_min + log_span;
+        let new_db_min = (drag.start_db_min + d_db).max(-240.0);
+        let new_db_max = (new_db_min + db_span).min(20.0);
+        self.config.freq_min = 10.0_f32.powf(new_log_min).max(1.0);
+        self.config.freq_max = 10.0_f32.powf(new_log_max);
+        self.config.db_min = new_db_min;
+        self.config.db_max = new_db_max;
+    }
+
+    fn reset_view(&mut self) {
+        self.config.freq_min = theme::DEFAULT_FREQ_MIN;
+        self.config.freq_max = theme::DEFAULT_FREQ_MAX;
+        self.config.db_min = theme::DEFAULT_DB_MIN;
+        self.config.db_max = theme::DEFAULT_DB_MAX;
+        self.notify("view reset");
     }
 
     fn start_data_source(&mut self) {
@@ -521,6 +645,42 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some(position);
+                if self.drag.is_some() {
+                    self.update_drag(position);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.begin_drag();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.drag = None;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.reset_view();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 50.0) as f32,
+                };
+                if scroll != 0.0 {
+                    self.apply_zoom(scroll);
+                }
             }
             WindowEvent::KeyboardInput {
                 event:
