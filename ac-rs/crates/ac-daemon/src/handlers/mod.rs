@@ -42,7 +42,7 @@ pub use audio::{
 pub use calibrate::{cal_reply, calibrate};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
-pub use transfer::{probe, transfer};
+pub use transfer::{probe, transfer, transfer_stream};
 
 // ---------------------------------------------------------------------------
 // Busy guard

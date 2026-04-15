@@ -1,6 +1,6 @@
 use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind};
 
-use crate::data::types::{CellView, DisplayConfig, DisplayFrame, LayoutMode, ViewMode};
+use crate::data::types::{CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, ViewMode};
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
 use crate::ui::stats::StatsSnapshot;
@@ -19,6 +19,8 @@ pub struct OverlayInput<'a> {
     pub frames: &'a [Option<DisplayFrame>],
     pub cell_views: &'a [CellView],
     pub selected: &'a [bool],
+    pub selection_order: &'a [usize],
+    pub transfer: Option<&'a TransferFrame>,
     pub connected: bool,
     pub notification: Option<&'a str>,
     pub timing: Option<StatsSnapshot>,
@@ -35,7 +37,7 @@ const HELP_LINES: &[&str] = &[
     "P              peak hold",
     "S              screenshot + CSV",
     "W              cycle view (spec/water)",
-    "L              cycle layout",
+    "L              cycle layout (grid/ovr/sng/cmp/xfer)",
     "F              fullscreen",
     "D              timing overlay",
     "H              toggle this help",
@@ -247,6 +249,66 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             FontId::monospace(theme::READOUT_PX),
             text_color,
         );
+    }
+
+    if matches!(input.config.layout, LayoutMode::Transfer) {
+        let meas = input.selection_order.first().copied();
+        let refc = input.selection_order.get(1).copied();
+        if meas.is_none() || refc.is_none() {
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "Select 2 channels — Space picks MEAS, then REF",
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        } else if let Some(tf) = input.transfer {
+            // Prominent delay readout — top-center, larger than normal status.
+            let delay_text = format!(
+                "Δt = {:+.2} ms  ({:+} samp)",
+                tf.delay_ms, tf.delay_samples,
+            );
+            painter.text(
+                Pos2::new(screen.center().x, screen.top() + 10.0),
+                Align2::CENTER_TOP,
+                delay_text,
+                FontId::monospace(theme::READOUT_PX * 1.4),
+                text_color,
+            );
+            // MEAS / REF legend (top-left), with channel color swatches.
+            let x0 = screen.left() + 12.0;
+            let mut y = screen.top() + 12.0;
+            let row_h = theme::READOUT_PX + 4.0;
+            for (label, ch) in [("MEAS", meas.unwrap()), ("REF", refc.unwrap())] {
+                let rgba = theme::channel_color(ch);
+                let swatch = Color32::from_rgb(
+                    (rgba[0] * 255.0) as u8,
+                    (rgba[1] * 255.0) as u8,
+                    (rgba[2] * 255.0) as u8,
+                );
+                painter.rect_filled(
+                    Rect::from_min_size(Pos2::new(x0, y + 2.0), egui::vec2(12.0, 12.0)),
+                    CornerRadius::ZERO,
+                    swatch,
+                );
+                painter.text(
+                    Pos2::new(x0 + 18.0, y),
+                    Align2::LEFT_TOP,
+                    format!("{label}: CH{ch}"),
+                    FontId::monospace(theme::READOUT_PX),
+                    text_color,
+                );
+                y += row_h;
+            }
+        } else {
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "waiting for transfer_stream…",
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        }
     }
 
     if matches!(input.config.layout, LayoutMode::Compare) {

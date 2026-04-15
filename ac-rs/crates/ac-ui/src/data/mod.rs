@@ -1,3 +1,4 @@
+pub mod control;
 pub mod receiver;
 pub mod store;
 pub mod synthetic;

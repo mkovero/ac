@@ -1,7 +1,8 @@
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use triple_buffer::{triple_buffer, Input, Output};
 
-use super::types::{DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame};
+use super::types::{DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, TransferFrame};
 
 const PEAK_DECAY_DB_PER_SEC: f32 = 20.0;
 const DB_FLOOR: f32 = -200.0;
@@ -114,5 +115,34 @@ impl ChannelStore {
 
     pub fn read_all(&mut self, config: &DisplayConfig) -> Vec<Option<DisplayFrame>> {
         self.channels.iter_mut().map(|c| c.read(config)).collect()
+    }
+}
+
+/// Shared latest-H1 slot. Receiver writes, main thread reads. Mutex is fine:
+/// update rate is ~0.4 fps and the payload is small (≤ 2000 points × 4 lanes).
+#[derive(Clone, Default)]
+pub struct TransferStore {
+    inner: Arc<Mutex<Option<TransferFrame>>>,
+}
+
+impl TransferStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn write(&self, frame: TransferFrame) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(frame);
+        }
+    }
+
+    pub fn read(&self) -> Option<TransferFrame> {
+        self.inner.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = None;
+        }
     }
 }

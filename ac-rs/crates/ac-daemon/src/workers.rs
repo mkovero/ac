@@ -43,8 +43,8 @@ pub fn cmd_group(name: &str) -> Option<Group> {
     match name {
         "sweep_level" | "sweep_frequency" | "generate" | "generate_pink" => Some(Group::Output),
         "monitor_spectrum" => Some(Group::Input),
-        "plot" | "plot_level" | "calibrate" | "transfer" | "probe"
-        | "test_hardware" | "test_dut" => Some(Group::Exclusive),
+        "plot" | "plot_level" | "calibrate" | "transfer" | "transfer_stream"
+        | "probe" | "test_hardware" | "test_dut" => Some(Group::Exclusive),
         _ => None,
     }
 }

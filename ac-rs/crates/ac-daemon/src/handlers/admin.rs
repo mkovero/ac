@@ -34,17 +34,35 @@ pub fn quit(state: &ServerState) -> Value {
 
 pub fn stop(state: &ServerState, cmd: &Value) -> Value {
     let target = cmd.get("name").and_then(Value::as_str);
-    let workers = state.workers.lock().unwrap();
-    if let Some(name) = target {
-        if let Some(w) = workers.get(name) {
-            w.stop();
-        }
-    } else {
-        for w in workers.values() {
-            w.stop();
+    // Flip each worker's stop flag first — without dropping the lock so we
+    // don't race with `spawn_worker` on the main thread — then move the
+    // handles out so we can join them without the workers map locked.
+    // Joining here (via `Drop` on `WorkerHandle`) is what makes the reply
+    // synchronous with respect to the busy guard: the next command we
+    // receive on the REP socket is guaranteed to see an empty workers map
+    // and can start an `Exclusive`-group worker like `transfer_stream`.
+    let mut joined: Vec<(String, crate::workers::WorkerHandle)> = Vec::new();
+    {
+        let mut workers = state.workers.lock().unwrap();
+        if let Some(name) = target {
+            if let Some(w) = workers.get(name) {
+                w.stop();
+            }
+            if let Some(handle) = workers.remove(name) {
+                joined.push((name.to_string(), handle));
+            }
+        } else {
+            for w in workers.values() {
+                w.stop();
+            }
+            for (name, handle) in workers.drain() {
+                joined.push((name, handle));
+            }
         }
     }
-    json!({"ok": true})
+    let stopped: Vec<String> = joined.iter().map(|(n, _)| n.clone()).collect();
+    drop(joined); // runs Drop → joins the worker threads
+    json!({"ok": true, "stopped": stopped})
 }
 
 pub fn devices(state: &ServerState) -> Value {

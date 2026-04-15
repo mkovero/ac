@@ -7,7 +7,8 @@ mod ui;
 use std::path::PathBuf;
 
 use app::{App, AppInit, SourceKind};
-use data::store::ChannelStore;
+use data::control::CtrlClient;
+use data::store::{ChannelStore, TransferStore};
 use data::types::ViewMode;
 
 fn main() -> anyhow::Result<()> {
@@ -19,8 +20,28 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let n_channels = args.channels.max(1);
+    // When the user hasn't forced `--channels`, query the daemon's capture
+    // port count so the store has one slot per input — otherwise multi-channel
+    // views (compare, transfer) silently cap at 1 and the user hits a wall
+    // they can't diagnose.
+    let n_channels = if let Some(n) = args.channels {
+        n.max(1)
+    } else if args.synthetic {
+        1
+    } else {
+        match probe_daemon_channels(&args.ctrl) {
+            Some(n) if n >= 1 => {
+                log::info!("discovered {n} capture channels from daemon");
+                n
+            }
+            _ => {
+                log::warn!("daemon probe failed; defaulting to 2 channel slots");
+                2
+            }
+        }
+    };
     let (inputs, store) = ChannelStore::new(n_channels);
+    let transfer_store = TransferStore::new();
 
     let source_kind = if args.synthetic {
         SourceKind::Synthetic
@@ -31,10 +52,12 @@ fn main() -> anyhow::Result<()> {
     let init = AppInit {
         store,
         inputs,
+        transfer_store,
         source_kind,
         output_dir: args.output_dir.clone(),
         endpoint: args.connect.clone(),
-        synthetic_params: Some((args.channels.max(1), args.bins.max(16), args.rate.max(0.5))),
+        ctrl_endpoint: args.ctrl.clone(),
+        synthetic_params: Some((n_channels, args.bins.max(16), args.rate.max(0.5))),
         benchmark_secs: args.benchmark,
         initial_view: args.view,
     };
@@ -52,8 +75,11 @@ fn main() -> anyhow::Result<()> {
 struct Args {
     help: bool,
     connect: String,
+    ctrl: String,
     synthetic: bool,
-    channels: usize,
+    /// `None` = auto-detect from daemon's `devices` (or fall back to 2 slots).
+    /// `Some(n)` = hard override from `--channels N`.
+    channels: Option<usize>,
     bins: usize,
     rate: f32,
     output_dir: PathBuf,
@@ -66,8 +92,9 @@ impl Args {
         let mut out = Args {
             help: false,
             connect: "tcp://127.0.0.1:5557".to_string(),
+            ctrl: "tcp://127.0.0.1:5556".to_string(),
             synthetic: false,
-            channels: 1,
+            channels: None,
             bins: 1000,
             rate: 10.0,
             output_dir: default_output_dir(),
@@ -84,11 +111,17 @@ impl Args {
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("--connect requires value"))?;
                 }
-                "--channels" => {
-                    out.channels = it
+                "--ctrl" => {
+                    out.ctrl = it
                         .next()
-                        .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?
-                        .parse()?;
+                        .ok_or_else(|| anyhow::anyhow!("--ctrl requires value"))?;
+                }
+                "--channels" => {
+                    out.channels = Some(
+                        it.next()
+                            .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?
+                            .parse()?,
+                    );
                 }
                 "--bins" => {
                     out.bins = it
@@ -132,6 +165,18 @@ impl Args {
     }
 }
 
+/// Best-effort sync probe of the daemon's `devices` reply to discover how
+/// many capture slots to preallocate. Short timeouts — if the daemon isn't
+/// up yet we fall back to a safe default rather than blocking startup.
+fn probe_daemon_channels(ctrl_endpoint: &str) -> Option<usize> {
+    let ctrl = CtrlClient::connect(ctrl_endpoint).ok()?;
+    let reply = ctrl.send(&serde_json::json!({ "cmd": "devices" })).ok()?;
+    reply
+        .get("capture")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.len())
+}
+
 fn default_output_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join("ac-screenshots")
@@ -146,8 +191,9 @@ fn print_help() {
 Usage: ac-ui [OPTIONS]\n\n\
 Options:\n  \
   --connect <addr>     ZMQ DATA endpoint [default: tcp://127.0.0.1:5557]\n  \
+  --ctrl <addr>        ZMQ CTRL endpoint (REQ) [default: tcp://127.0.0.1:5556]\n  \
   --synthetic          Fake data instead of daemon\n  \
-  --channels <n>       Channel slot count; daemon must emit matching `channel` field [default: 1]\n  \
+  --channels <n>       Channel slot count; daemon must emit matching `channel` field [default: auto from daemon.devices]\n  \
   --bins <n>           Synthetic bins per channel [default: 1000]\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
@@ -158,11 +204,11 @@ Keys:\n  \
   Esc/q            quit\n  \
   Enter            toggle freeze\n  \
   p                toggle peak hold\n  \
-  Space            select channel (for compare layout)\n  \
+  Space            select channel (for compare / transfer layout)\n  \
   s                save screenshot + CSV\n  \
   d                toggle GPU/CPU timing overlay\n  \
   w                cycle view (spectrum/waterfall)\n  \
-  l                cycle layout (grid/overlay/single/compare)\n  \
+  l                cycle layout (grid/overlay/single/compare/transfer)\n  \
   f                toggle fullscreen\n  \
   h                toggle help overlay\n  \
   +/-              adjust dB range\n  \

@@ -71,6 +71,43 @@ pub struct FrameMeta {
     pub xruns: u32,
 }
 
+/// One H1 transfer function estimate from the daemon. Arrives on the `data`
+/// topic with `type == "transfer_stream"` and replaces whatever the UI was
+/// displaying — no averaging in the UI layer, the Welch averaging already
+/// happens daemon-side.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TransferFrame {
+    pub freqs:         Vec<f32>,
+    pub magnitude_db:  Vec<f32>,
+    pub phase_deg:     Vec<f32>,
+    pub coherence:     Vec<f32>,
+    pub delay_samples: i64,
+    pub delay_ms:      f32,
+    pub meas_channel:  u32,
+    pub ref_channel:   u32,
+    pub sr:            u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TransferFrame;
+
+    /// Real-daemon body captured via `transfer_stream` → `/tmp/claude/transfer_body.json`.
+    /// Regression: catch any struct-vs-wire drift (f32/f64 narrowing, missing
+    /// fields) that would silently cause the UI to drop every frame.
+    #[test]
+    fn parse_real_daemon_body() {
+        let body = std::fs::read_to_string("/tmp/claude/transfer_body.json").ok();
+        let Some(body) = body else { return };
+        let tf: TransferFrame = serde_json::from_str(&body)
+            .expect("real transfer_stream body must parse");
+        assert!(!tf.freqs.is_empty());
+        assert_eq!(tf.freqs.len(), tf.magnitude_db.len());
+        assert_eq!(tf.freqs.len(), tf.phase_deg.len());
+        assert_eq!(tf.freqs.len(), tf.coherence.len());
+    }
+}
+
 impl From<&SpectrumFrame> for FrameMeta {
     fn from(f: &SpectrumFrame) -> Self {
         Self {
@@ -95,6 +132,11 @@ pub enum LayoutMode {
     /// with a corner legend. Hidden until the user toggles selections via
     /// Space — the empty case shows a "press Space to select" hint.
     Compare,
+    /// Live H1 transfer function view. Requires exactly two selected channels;
+    /// `selection_order[0]` = meas, `selection_order[1]` = ref. Entering this
+    /// layout with a valid pair starts a `transfer_stream` worker on the
+    /// daemon; leaving it (or swapping the pair) stops/restarts it.
+    Transfer,
 }
 
 impl LayoutMode {
@@ -103,7 +145,8 @@ impl LayoutMode {
             LayoutMode::Grid => LayoutMode::Overlay,
             LayoutMode::Overlay => LayoutMode::Single,
             LayoutMode::Single => LayoutMode::Compare,
-            LayoutMode::Compare => LayoutMode::Grid,
+            LayoutMode::Compare => LayoutMode::Transfer,
+            LayoutMode::Transfer => LayoutMode::Grid,
         }
     }
 }

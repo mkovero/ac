@@ -363,7 +363,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 if stop.load(Ordering::Relaxed) { break; }
                 if channels_worker.len() > 1 {
                     if let Err(e) = eng.reconnect_input(&in_ports_worker[idx]) {
-                        eprintln!("monitor_spectrum: reconnect ch{channel}: {e}");
+                        send_pub(&pub_tx, "error", &json!({
+                            "cmd":     "monitor_spectrum",
+                            "message": format!("reconnect ch{channel}: {e}"),
+                        }));
                         continue;
                     }
                     eng.flush_capture();
@@ -371,7 +374,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 let samples = match eng.capture_block(per_channel_interval) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("monitor_spectrum: capture error on ch{channel}: {e}");
+                        send_pub(&pub_tx, "error", &json!({
+                            "cmd":     "monitor_spectrum",
+                            "message": format!("capture error on ch{channel}: {e}"),
+                        }));
                         return;
                     }
                 };

@@ -1,15 +1,19 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
 
-use super::types::SpectrumFrame;
+use super::store::TransferStore;
+use super::types::{SpectrumFrame, TransferFrame};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
     pub last_frame_ns: AtomicU64,
+    /// Latest unconsumed worker-error message published by the daemon on the
+    /// `error` PUB topic. App drains this every frame to raise a notification.
+    pub last_error: Mutex<Option<String>>,
 }
 
 impl ReceiverStatus {
@@ -17,7 +21,12 @@ impl ReceiverStatus {
         Self {
             connected: AtomicBool::new(false),
             last_frame_ns: AtomicU64::new(0),
+            last_error: Mutex::new(None),
         }
+    }
+
+    pub fn take_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|mut g| g.take())
     }
 }
 
@@ -36,7 +45,11 @@ impl Drop for ReceiverHandle {
     }
 }
 
-pub fn spawn(endpoint: String, inputs: Vec<Input<SpectrumFrame>>) -> ReceiverHandle {
+pub fn spawn(
+    endpoint: String,
+    inputs: Vec<Input<SpectrumFrame>>,
+    transfer: TransferStore,
+) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(ReceiverStatus::new());
     let stop_c = stop.clone();
@@ -57,7 +70,13 @@ pub fn spawn(endpoint: String, inputs: Vec<Input<SpectrumFrame>>) -> ReceiverHan
             }
         };
         if let Err(e) = sub.set_subscribe(b"data") {
-            log::error!("zmq subscribe: {e}");
+            log::error!("zmq subscribe data: {e}");
+            return;
+        }
+        // Also receive worker error frames (`send_pub("error", …)`) so
+        // silent-failing workers surface in the UI.
+        if let Err(e) = sub.set_subscribe(b"error") {
+            log::error!("zmq subscribe error: {e}");
             return;
         }
         if let Err(e) = sub.set_rcvtimeo(200) {
@@ -74,10 +93,68 @@ pub fn spawn(endpoint: String, inputs: Vec<Input<SpectrumFrame>>) -> ReceiverHan
         while !stop_c.load(Ordering::Relaxed) {
             match sub.recv_string(0) {
                 Ok(Ok(msg)) => {
-                    let body = match msg.split_once(' ') {
-                        Some(("data", body)) => body,
-                        _ => continue,
+                    let (topic, body) = match msg.split_once(' ') {
+                        Some((t, b)) => (t, b),
+                        None => continue,
                     };
+                    if topic == "error" {
+                        let text = serde_json::from_str::<serde_json::Value>(body)
+                            .ok()
+                            .and_then(|v| {
+                                let cmd = v.get("cmd").and_then(|c| c.as_str()).map(str::to_string);
+                                let msg = v.get("message").and_then(|m| m.as_str()).map(str::to_string);
+                                match (cmd, msg) {
+                                    (Some(c), Some(m)) => Some(format!("{c}: {m}")),
+                                    (None, Some(m))    => Some(m),
+                                    (Some(c), None)    => Some(c),
+                                    _ => None,
+                                }
+                            })
+                            .unwrap_or_else(|| body.to_string());
+                        log::warn!("daemon error: {text}");
+                        if let Ok(mut g) = status_c.last_error.lock() {
+                            *g = Some(text);
+                        }
+                        continue;
+                    }
+                    if topic != "data" {
+                        continue;
+                    }
+                    // Multiplexed "data" topic: spectrum frames and
+                    // transfer_stream frames share the channel but have
+                    // disjoint shapes. Peek at `type` first — `transfer_stream`
+                    // goes to the TransferStore, everything else defaults to
+                    // the legacy SpectrumFrame deserializer.
+                    let type_tag = serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .as_ref()
+                        .and_then(|v| v.get("type"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string());
+                    if type_tag.as_deref() == Some("transfer_stream") {
+                        match serde_json::from_str::<TransferFrame>(body) {
+                            Ok(tf) => {
+                                log::info!(
+                                    "transfer_stream frame: bins={} delay_ms={:.2} meas={} ref={}",
+                                    tf.freqs.len(),
+                                    tf.delay_ms,
+                                    tf.meas_channel,
+                                    tf.ref_channel,
+                                );
+                                transfer.write(tf);
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "transfer_stream parse failed: {e} — body head: {}",
+                                    &body[..body.len().min(200)]
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let mut frame: SpectrumFrame = match serde_json::from_str(body) {
                         Ok(f) => f,
                         Err(_) => continue,
@@ -154,10 +231,16 @@ fn route_slot(channel: Option<u32>, map: &mut [Option<u32>]) -> Option<usize> {
     None
 }
 
+/// Liveness window must cover the slowest legitimate producer. `monitor_spectrum`
+/// publishes every ~200 ms; `transfer_stream` publishes one H1 estimate per
+/// ~4 s capture block. Anything shorter than the transfer cadence would flip
+/// the status to "disconnected" between every transfer frame.
+const STALE_THRESHOLD_NS: u64 = 6_000_000_000;
+
 fn mark_stale(status: &ReceiverStatus, start: &Instant) {
     let last = status.last_frame_ns.load(Ordering::Relaxed);
     let now = start.elapsed().as_nanos() as u64;
-    if last == 0 || now.saturating_sub(last) > 2_000_000_000 {
+    if last == 0 || now.saturating_sub(last) > STALE_THRESHOLD_NS {
         status.connected.store(false, Ordering::Relaxed);
     }
 }

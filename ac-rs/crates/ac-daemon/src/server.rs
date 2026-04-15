@@ -207,6 +207,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "server_disable"      => handlers::server_disable(state),
         "server_connections"  => handlers::server_connections(state),
         "transfer"            => handlers::transfer(state, &cmd),
+        "transfer_stream"     => handlers::transfer_stream(state, &cmd),
         "probe"               => handlers::probe(state, &cmd),
         "test_hardware"       => handlers::test_hardware(state, &cmd),
         "test_dut"            => handlers::test_dut(state, &cmd),

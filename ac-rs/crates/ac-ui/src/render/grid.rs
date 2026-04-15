@@ -114,7 +114,7 @@ pub fn draw_grid(
 /// Build a log-friendly tick set that stays dense enough to feel useful
 /// regardless of the zoom level: decade×{1,2,5} when the view spans a decade
 /// or more, and 1-2-5 linear ticks inside a sub-decade window.
-fn freq_ticks(fmin: f32, fmax: f32) -> Vec<f32> {
+pub fn freq_ticks(fmin: f32, fmax: f32) -> Vec<f32> {
     if fmin <= 0.0 || fmax <= fmin {
         return Vec::new();
     }
@@ -164,7 +164,7 @@ fn freq_ticks(fmin: f32, fmax: f32) -> Vec<f32> {
     }
 }
 
-fn format_freq_tick(f: f32) -> String {
+pub fn format_freq_tick(f: f32) -> String {
     if f >= 1000.0 {
         let k = f / 1000.0;
         if (k.round() - k).abs() < 1e-3 {

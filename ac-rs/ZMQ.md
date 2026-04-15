@@ -175,7 +175,11 @@ Requests the server process to exit cleanly after the current reply.
 
 ### `stop`
 
-Stops one or all running workers.
+Stops one or all running workers. **Synchronous**: the reply is only sent
+after the targeted worker thread(s) have fully exited and been removed from
+the busy map, so the very next command on the REP socket is guaranteed to see
+a clean slate (e.g. issuing `transfer_stream` immediately after
+`stop name=monitor_spectrum` will no longer be rejected as busy).
 
 **Request**
 ```json
@@ -187,8 +191,11 @@ Stops one or all running workers.
 
 **Reply**
 ```json
-{ "ok": true }
+{ "ok": true, "stopped": ["<worker-name>", ...] }
 ```
+
+`stopped` lists the workers that were actually joined during this call —
+empty if no matching worker was running.
 
 **DATA** — after stop, the worker emits a terminal frame:
 ```json
@@ -697,6 +704,68 @@ Returns current listen mode and connected client endpoints.
 
 ---
 
+### `transfer_stream`
+
+Streaming H1 transfer function estimator. Captures the selected measurement
++ reference input channels and publishes a new `transfer_stream` frame each
+iteration (every `ac_core::transfer::capture_duration(4, sr)` seconds,
+≈ 2.5 s at 48 kHz) until stopped. Exclusive — mutually exclusive with all
+other audio commands.
+
+By default the daemon is **passive** — it does not drive any output. The
+caller is expected to feed stimulus (pink noise, music, sweep, speech, …) into
+the DUT externally and the daemon just observes `ref` → `meas`. Pass
+`drive=true` to restore the self-stimulating pink-noise loopback mode.
+
+**Request**
+```json
+{
+  "cmd":          "transfer_stream",
+  "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
+  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10
+  "meas_channel": <int>,     // capture port index for the measurement signal (DUT output)
+  "ref_channel":  <int>      // capture port index for the reference signal (DUT input)
+}
+```
+
+**Reply**
+```json
+{
+  "ok":           true,
+  "out_port":     "<playback-port>",
+  "meas_port":    "<capture-port>",
+  "ref_port":     "<capture-port>",
+  "meas_channel": <int>,
+  "ref_channel":  <int>
+}
+```
+
+**DATA** — repeated until stopped:
+```json
+// topic: data
+{
+  "type":          "transfer_stream",
+  "cmd":           "transfer_stream",
+  "freqs":         [<float>, ...],     // up to 2000 points
+  "magnitude_db":  [<float>, ...],
+  "phase_deg":     [<float>, ...],
+  "coherence":     [<float>, ...],
+  "delay_samples": <int>,
+  "delay_ms":      <float>,
+  "meas_channel":  <int>,
+  "ref_channel":   <int>,
+  "sr":            <int>
+}
+```
+
+**DATA** — terminal after `stop`:
+```json
+// topic: done
+{ "cmd": "transfer_stream", "stopped": true }
+```
+
+---
+
 ## Busy guard
 
 Audio commands are classified into three concurrency groups:
@@ -705,7 +774,7 @@ Audio commands are classified into three concurrency groups:
 |-------|---------|
 | `OUTPUT` | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
 | `INPUT`  | `monitor_spectrum` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `transfer`, `probe`, `test_hardware`, `test_dut` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `transfer`, `transfer_stream`, `probe`, `test_hardware`, `test_dut` |
 
 Rules:
 - Only one `OUTPUT` command at a time.

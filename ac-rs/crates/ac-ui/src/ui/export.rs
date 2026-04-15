@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::thread;
 
-use crate::data::types::DisplayFrame;
+use crate::data::types::{DisplayFrame, TransferFrame};
 
 pub struct ScreenshotRequest {
     pub output_dir: PathBuf,
@@ -11,6 +11,7 @@ pub struct ScreenshotRequest {
     pub pixels: Vec<u8>,
     pub format: wgpu::TextureFormat,
     pub frames: Vec<Option<DisplayFrame>>,
+    pub transfer: Option<TransferFrame>,
 }
 
 pub fn spawn_save(req: ScreenshotRequest) {
@@ -24,8 +25,9 @@ pub fn spawn_save(req: ScreenshotRequest) {
 fn save(req: ScreenshotRequest) -> anyhow::Result<()> {
     std::fs::create_dir_all(&req.output_dir)?;
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let png_path = req.output_dir.join(format!("spectrum_{stamp}.png"));
-    let csv_path = req.output_dir.join(format!("spectrum_{stamp}.csv"));
+    let prefix = if req.transfer.is_some() { "transfer" } else { "spectrum" };
+    let png_path = req.output_dir.join(format!("{prefix}_{stamp}.png"));
+    let csv_path = req.output_dir.join(format!("{prefix}_{stamp}.csv"));
 
     let rgba = unpad(&req.pixels, req.width, req.height, req.bytes_per_row);
     let rgba = channel_swap_if_needed(rgba, req.format);
@@ -34,7 +36,11 @@ fn save(req: ScreenshotRequest) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))?;
     img.save(&png_path)?;
 
-    write_csv(&csv_path, &req.frames)?;
+    if let Some(tf) = req.transfer.as_ref() {
+        write_transfer_csv(&csv_path, tf)?;
+    } else {
+        write_csv(&csv_path, &req.frames)?;
+    }
     log::info!("saved {} and {}", png_path.display(), csv_path.display());
     Ok(())
 }
@@ -86,6 +92,31 @@ fn write_csv(path: &std::path::Path, frames: &[Option<DisplayFrame>]) -> anyhow:
             row.push_str(&format!("{:.3}", v));
         }
         writeln!(f, "{}", row)?;
+    }
+    Ok(())
+}
+
+fn write_transfer_csv(path: &std::path::Path, tf: &TransferFrame) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(
+        f,
+        "# delay_ms={:.3} delay_samples={} meas_ch={} ref_ch={} sr={}",
+        tf.delay_ms, tf.delay_samples, tf.meas_channel, tf.ref_channel, tf.sr,
+    )?;
+    writeln!(f, "freq_hz,magnitude_db,phase_deg,coherence")?;
+    let n = tf
+        .freqs
+        .len()
+        .min(tf.magnitude_db.len())
+        .min(tf.phase_deg.len())
+        .min(tf.coherence.len());
+    for i in 0..n {
+        writeln!(
+            f,
+            "{:.3},{:.3},{:.3},{:.4}",
+            tf.freqs[i], tf.magnitude_db[i], tf.phase_deg[i], tf.coherence[i],
+        )?;
     }
     Ok(())
 }

@@ -11,11 +11,12 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::data::control::CtrlClient;
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
-use crate::data::store::ChannelStore;
+use crate::data::store::{ChannelStore, TransferStore};
 use crate::data::synthetic::SyntheticHandle;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, TransferFrame, ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::grid;
@@ -51,9 +52,11 @@ impl DataSource {
 pub struct AppInit {
     pub store: ChannelStore,
     pub inputs: Vec<Input<SpectrumFrame>>,
+    pub transfer_store: TransferStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
+    pub ctrl_endpoint: String,
     pub synthetic_params: Option<(usize, usize, f32)>,
     pub benchmark_secs: Option<f64>,
     pub initial_view: ViewMode,
@@ -68,6 +71,26 @@ pub struct App {
     init: Option<AppInit>,
     source: Option<DataSource>,
     store: Option<ChannelStore>,
+    transfer_store: Option<TransferStore>,
+    ctrl_endpoint: String,
+    ctrl: Option<CtrlClient>,
+    /// Cached latest TransferFrame so the renderer can draw a held view during
+    /// freeze. The receiver always writes to `transfer_store` — we snapshot it
+    /// once per redraw when not frozen and keep the snapshot while frozen.
+    transfer_last: Option<TransferFrame>,
+    /// Tracks whether a `transfer_stream` worker is running on the daemon. Set
+    /// on successful start, cleared on stop / layout exit. Used to avoid
+    /// double-starts and to decide whether to send a stop on layout exit.
+    transfer_stream_active: bool,
+    /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
+    /// The UI is a passive SUB by default — without this command the daemon
+    /// publishes nothing and every view stays blank ("disconnected"). We
+    /// pause/resume around `transfer_stream` since that's the `Exclusive`
+    /// group and would otherwise be busy-blocked by the `Input`-group monitor.
+    monitor_spectrum_active: bool,
+    /// Insertion-order view of `selected`. Entry [0] is MEAS, entry [1] is
+    /// REF when layout == Transfer. Drives the `transfer_stream` start pair.
+    selection_order: Vec<usize>,
     config: DisplayConfig,
     cell_views: Vec<CellView>,
     selected: Vec<bool>,
@@ -130,6 +153,7 @@ impl App {
         let output_dir = init.output_dir.clone();
         let benchmark_secs = init.benchmark_secs;
         let show_timing = benchmark_secs.is_some();
+        let ctrl_endpoint = init.ctrl_endpoint.clone();
         let config = DisplayConfig {
             view_mode: init.initial_view,
             ..DisplayConfig::default()
@@ -138,6 +162,13 @@ impl App {
             init: Some(init),
             source: None,
             store: None,
+            transfer_store: None,
+            ctrl_endpoint,
+            ctrl: None,
+            transfer_last: None,
+            transfer_stream_active: false,
+            monitor_spectrum_active: false,
+            selection_order: Vec::new(),
             config,
             cell_views: Vec::new(),
             selected: Vec::new(),
@@ -262,6 +293,7 @@ impl App {
             n,
             self.config.active_channel,
             &self.selected,
+            &self.selection_order,
             self.grid_params(),
         );
         for c in &cells {
@@ -297,6 +329,16 @@ impl App {
                 .enumerate()
                 .filter_map(|(i, sel)| sel.then_some(i))
                 .collect(),
+            // Transfer cell carries the meas channel slot; zoom/pan acts on
+            // the meas CellView (phase/coh sub-panels inherit the frequency
+            // axis from it).
+            LayoutMode::Transfer => {
+                if let Some(&meas) = self.selection_order.first() {
+                    vec![meas.min(n - 1)]
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -495,11 +537,25 @@ impl App {
             Some(t) => t,
             None => return,
         };
+        let in_transfer = matches!(self.config.layout, LayoutMode::Transfer);
         let now_selected = {
             let slot = &mut self.selected[target];
             *slot = !*slot;
             *slot
         };
+        if now_selected {
+            if !self.selection_order.contains(&target) {
+                self.selection_order.push(target);
+            }
+            // In Transfer layout the pair is exactly two channels — if the
+            // user picks a third, drop the oldest so the pair rolls forward.
+            if in_transfer && self.selection_order.len() > 2 {
+                let dropped = self.selection_order.remove(0);
+                self.selected[dropped] = false;
+            }
+        } else {
+            self.selection_order.retain(|&i| i != target);
+        }
         let count = self.selected.iter().filter(|s| **s).count();
         self.notify(&format!(
             "CH{} {} ({} selected)",
@@ -507,6 +563,41 @@ impl App {
             if now_selected { "selected" } else { "unselected" },
             count,
         ));
+        if in_transfer {
+            // Selection change while live: stop any running stream, then (if
+            // the pair is valid) start a fresh one with the new meas/ref.
+            self.send_transfer_stream_stop();
+            if self.selection_order.len() == 2 {
+                let meas = self.selection_order[0];
+                let refc = self.selection_order[1];
+                self.send_transfer_stream_start(meas, refc);
+            }
+        }
+    }
+
+    /// Called after `config.layout` has been advanced by the `l` key. Starts
+    /// the transfer_stream worker when entering Transfer (if the pair is
+    /// ready) and stops it when leaving.
+    fn on_layout_changed(&mut self, prev: LayoutMode, next: LayoutMode) {
+        let entering = !matches!(prev, LayoutMode::Transfer)
+            && matches!(next, LayoutMode::Transfer);
+        let leaving = matches!(prev, LayoutMode::Transfer)
+            && !matches!(next, LayoutMode::Transfer);
+        if entering {
+            if self.selection_order.len() == 2 {
+                let meas = self.selection_order[0];
+                let refc = self.selection_order[1];
+                self.send_transfer_stream_start(meas, refc);
+            } else {
+                self.notify("transfer: pick 2 channels (Space)");
+            }
+        } else if leaving {
+            self.send_transfer_stream_stop();
+            // Resume spectrum publishing that was paused when we entered
+            // Transfer. No-op if it's already running (e.g. the user never
+            // had a valid pair so we never actually stopped it).
+            self.send_monitor_spectrum_start();
+        }
     }
 
     fn start_data_source(&mut self) {
@@ -518,6 +609,8 @@ impl App {
         self.selected = vec![false; init.store.len()];
         self.waterfall_inited = vec![false; init.store.len()];
         self.store = Some(init.store);
+        let transfer_store = init.transfer_store.clone();
+        self.transfer_store = Some(transfer_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -530,10 +623,133 @@ impl App {
                 self.source = Some(DataSource::Synthetic(handle));
             }
             SourceKind::Daemon => {
-                let handle = crate::data::receiver::spawn(init.endpoint, init.inputs);
+                let handle =
+                    crate::data::receiver::spawn(init.endpoint, init.inputs, transfer_store);
                 self.source = Some(DataSource::Receiver(handle));
+                // Kick off daemon-side spectrum publishing — without this the
+                // UI's SUB socket gets nothing and every view stays blank.
+                self.send_monitor_spectrum_start();
             }
         }
+    }
+
+    /// Lazy-connect the CTRL REQ socket on first use. Called from the
+    /// transfer-stream start/stop path. If the daemon isn't up the socket
+    /// connect will still succeed (ZMQ is async) but `send` will time out.
+    fn ensure_ctrl(&mut self) -> Option<&CtrlClient> {
+        if self.ctrl.is_none() {
+            match CtrlClient::connect(&self.ctrl_endpoint) {
+                Ok(c) => self.ctrl = Some(c),
+                Err(e) => {
+                    log::warn!("ctrl client connect failed: {e}");
+                    return None;
+                }
+            }
+        }
+        self.ctrl.as_ref()
+    }
+
+    fn send_transfer_stream_start(&mut self, meas_ch: usize, ref_ch: usize) {
+        if matches!(self.source, Some(DataSource::Synthetic(_))) {
+            self.notify("transfer: needs daemon (not synthetic)");
+            return;
+        }
+        // transfer_stream is `Exclusive` in the daemon's busy_guard; an
+        // already-running `monitor_spectrum` (`Input` group) would cause the
+        // start to be rejected as busy. Pause monitor first, resume on stop.
+        self.send_monitor_spectrum_stop();
+        let Some(ctrl) = self.ensure_ctrl() else { return };
+        // Passive mode: don't ask the daemon to drive the output. The user
+        // wires their own stimulus (pink, sweep, speech, music) into the
+        // meas/ref inputs externally and we just compute H1 against it.
+        let cmd = serde_json::json!({
+            "cmd":          "transfer_stream",
+            "meas_channel": meas_ch as u32,
+            "ref_channel":  ref_ch as u32,
+        });
+        log::info!("transfer_stream: sending start meas={meas_ch} ref={ref_ch}");
+        match ctrl.send(&cmd) {
+            Ok(reply) => {
+                log::info!("transfer_stream reply: {reply}");
+                if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    self.transfer_stream_active = true;
+                    self.notify("transfer_stream: live");
+                } else {
+                    let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
+                    self.notify(&format!("transfer_stream: {err}"));
+                }
+            }
+            Err(e) => {
+                log::warn!("transfer_stream start failed: {e}");
+                self.notify("transfer_stream: ctrl error");
+            }
+        }
+    }
+
+    fn send_transfer_stream_stop(&mut self) {
+        if !self.transfer_stream_active {
+            return;
+        }
+        if let Some(ctrl) = self.ensure_ctrl() {
+            let cmd = serde_json::json!({ "cmd": "stop", "name": "transfer_stream" });
+            let _ = ctrl.send(&cmd);
+        }
+        self.transfer_stream_active = false;
+        if let Some(ts) = self.transfer_store.as_ref() {
+            ts.clear();
+        }
+        self.transfer_last = None;
+    }
+
+    /// Ask the daemon to start publishing spectrum frames. `ac-ui` is a
+    /// passive SUB otherwise — without this call every view stays blank.
+    /// Requests one slot per preallocated channel so the grid / overlay
+    /// layouts can display every input the daemon exposes.
+    fn send_monitor_spectrum_start(&mut self) {
+        if self.monitor_spectrum_active {
+            return;
+        }
+        if matches!(self.source, Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let n = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let channels: Vec<u32> = (0..n as u32).collect();
+        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let cmd = serde_json::json!({
+            "cmd":      "monitor_spectrum",
+            "interval": 0.2,
+            "channels": channels,
+        });
+        log::info!("monitor_spectrum: sending start channels={channels:?}");
+        match ctrl.send(&cmd) {
+            Ok(reply) => {
+                log::info!("monitor_spectrum reply: {reply}");
+                if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    self.monitor_spectrum_active = true;
+                } else {
+                    let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
+                    self.notify(&format!("monitor_spectrum: {err}"));
+                }
+            }
+            Err(e) => {
+                log::warn!("monitor_spectrum start failed: {e}");
+                self.notify("monitor_spectrum: ctrl error");
+            }
+        }
+    }
+
+    fn send_monitor_spectrum_stop(&mut self) {
+        if !self.monitor_spectrum_active {
+            return;
+        }
+        if let Some(ctrl) = self.ensure_ctrl() {
+            let cmd = serde_json::json!({ "cmd": "stop", "name": "monitor_spectrum" });
+            let _ = ctrl.send(&cmd);
+        }
+        self.monitor_spectrum_active = false;
     }
 
     fn init_graphics(&mut self, window: Arc<Window>) {
@@ -578,12 +794,15 @@ impl App {
                 self.pending_screenshot = true;
             }
             KeyCode::KeyL => {
+                let prev = self.config.layout;
                 self.config.layout = self.config.layout.next();
+                self.on_layout_changed(prev, self.config.layout);
                 self.notify(match self.config.layout {
                     LayoutMode::Grid => "layout: grid",
                     LayoutMode::Overlay => "layout: overlay",
                     LayoutMode::Single => "layout: single",
                     LayoutMode::Compare => "layout: compare",
+                    LayoutMode::Transfer => "layout: transfer",
                 });
             }
             KeyCode::KeyF => {
@@ -692,6 +911,17 @@ impl App {
     fn redraw(&mut self) {
         let frame_start = Instant::now();
         let grid_params_snap = self.grid_params();
+        // Drain any worker-error message the receiver picked up on the
+        // `error` PUB topic BEFORE we take any long-lived &mut borrows on
+        // self — notify() is &mut self and the render_ctx borrow below spans
+        // the whole draw body.
+        let pending_error = self.source.as_ref().and_then(|src| src.status()).and_then(|s| s.take_error());
+        if let Some(err) = pending_error {
+            if err.contains("transfer_stream") {
+                self.transfer_stream_active = false;
+            }
+            self.notify(&err);
+        }
         let ctx = match self.render_ctx.as_mut() {
             Some(c) => c,
             None => return,
@@ -713,15 +943,25 @@ impl App {
             self.last_frames.clone()
         };
 
+        if let Some(ts) = self.transfer_store.as_ref() {
+            if !self.config.frozen {
+                if let Some(frame) = ts.read() {
+                    self.transfer_last = Some(frame);
+                }
+            }
+        }
+
         let n_channels = frames.len();
         let cells = layout::compute(
             self.config.layout,
             n_channels,
             self.config.active_channel,
             &self.selected,
+            &self.selection_order,
             grid_params_snap,
         );
         let cells_vec: Vec<_> = cells.clone();
+        let in_transfer_layout = matches!(self.config.layout, LayoutMode::Transfer);
 
         // Track producer cadence from channel-0 new_row arrivals. EMA so a
         // single hiccup doesn't bounce the time axis; guarded to a sane band
@@ -776,12 +1016,17 @@ impl App {
         }
         let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
-        match view_mode {
-            ViewMode::Spectrum => spectrum_uploads.reserve(cells_vec.len()),
-            ViewMode::Waterfall => waterfall_uploads.reserve(cells_vec.len()),
+        if !in_transfer_layout {
+            match view_mode {
+                ViewMode::Spectrum => spectrum_uploads.reserve(cells_vec.len()),
+                ViewMode::Waterfall => waterfall_uploads.reserve(cells_vec.len()),
+            }
         }
 
         for cell in &cells_vec {
+            if in_transfer_layout {
+                break;
+            }
             let frame = match frames.get(cell.channel).and_then(|f| f.as_ref()) {
                 Some(f) if !f.spectrum.is_empty() => f,
                 _ => continue,
@@ -867,6 +1112,12 @@ impl App {
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
         let show_help_snap = self.show_help;
+        let transfer_snap: Option<TransferFrame> = if in_transfer_layout {
+            self.transfer_last.clone()
+        } else {
+            None
+        };
+        let selection_order_snap = self.selection_order.clone();
         let width_px = ctx.config.width as f32;
         let height_px = ctx.config.height as f32;
         let notification = self
@@ -928,6 +1179,17 @@ impl App {
                     .get(cell.channel)
                     .copied()
                     .unwrap_or_default();
+                if matches!(config_snap.layout, LayoutMode::Transfer) {
+                    let color = theme::channel_color(cell.channel);
+                    crate::render::transfer::draw(
+                        &painter,
+                        rect,
+                        &view,
+                        transfer_snap.as_ref(),
+                        color,
+                    );
+                    continue;
+                }
                 let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall)
                     .then(|| grid::WaterfallTimeAxis {
                         row_period_s,
@@ -964,6 +1226,8 @@ impl App {
                     frames: &frames,
                     cell_views: &cell_views_snap,
                     selected: &selected_snap,
+                    selection_order: &selection_order_snap,
+                    transfer: transfer_snap.as_ref(),
                     connected,
                     notification: notification.as_deref(),
                     timing: timing_for_overlay,
@@ -1092,7 +1356,12 @@ impl App {
         }
 
         if let Some(cap) = capture {
-            finalize_capture(ctx, cap, &self.output_dir, &frames);
+            let transfer_for_capture = if in_transfer_layout {
+                self.transfer_last.clone()
+            } else {
+                None
+            };
+            finalize_capture(ctx, cap, &self.output_dir, &frames, transfer_for_capture);
             self.notify("saved");
         }
 
@@ -1176,6 +1445,7 @@ fn finalize_capture(
     job: CaptureJob,
     output_dir: &std::path::Path,
     frames: &[Option<DisplayFrame>],
+    transfer: Option<TransferFrame>,
 ) {
     let slice = job.buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1197,6 +1467,7 @@ fn finalize_capture(
                 pixels,
                 format: job.format,
                 frames: frames.to_vec(),
+                transfer,
             });
         }
         _ => log::error!("screenshot map failed"),
@@ -1325,5 +1596,13 @@ impl ApplicationHandler for App {
         if let Some(ctx) = self.render_ctx.as_ref() {
             ctx.window.request_redraw();
         }
+    }
+
+    fn exiting(&mut self, _elwt: &ActiveEventLoop) {
+        // Best-effort: tell the daemon to stop workers we started so it
+        // doesn't keep capturing after the UI is gone. Network errors here
+        // are fine — the daemon cleans up on its own disconnect timeout.
+        self.send_transfer_stream_stop();
+        self.send_monitor_spectrum_stop();
     }
 }
