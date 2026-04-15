@@ -1,21 +1,36 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
 
-use super::types::SpectrumFrame;
+use super::store::TransferStore;
+use super::types::{SpectrumFrame, TransferFrame};
 
 pub struct SyntheticSource {
     pub n_channels: usize,
     pub n_bins: usize,
     pub update_hz: f32,
+    pub transfer: TransferStore,
 }
 
 pub struct SyntheticHandle {
     stop: Arc<AtomicBool>,
+    /// When `Some((meas, ref))`, the synthetic worker publishes a fake
+    /// `TransferFrame` to the shared `TransferStore` at ~0.5 Hz. `None`
+    /// disables publishing. Driven by `App::send_transfer_stream_start/stop`
+    /// so synthetic mode mirrors the daemon transfer_stream lifecycle.
+    transfer_pair: Arc<Mutex<Option<(u32, u32)>>>,
     join: Option<thread::JoinHandle<()>>,
+}
+
+impl SyntheticHandle {
+    pub fn set_transfer_pair(&self, pair: Option<(u32, u32)>) {
+        if let Ok(mut g) = self.transfer_pair.lock() {
+            *g = pair;
+        }
+    }
 }
 
 impl Drop for SyntheticHandle {
@@ -32,11 +47,17 @@ impl SyntheticSource {
         assert_eq!(inputs.len(), self.n_channels);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = stop.clone();
+        let transfer_pair: Arc<Mutex<Option<(u32, u32)>>> = Arc::new(Mutex::new(None));
+        let transfer_pair_c = transfer_pair.clone();
+        let transfer_store = self.transfer.clone();
         let join = thread::spawn(move || {
             let period = Duration::from_secs_f32(1.0 / self.update_hz.max(0.1));
             let freqs = make_log_freqs(self.n_bins, 20.0, 24000.0);
+            let transfer_freqs = make_log_freqs(1000, 20.0, 20000.0);
             let start = Instant::now();
             let mut frame_idx: u64 = 0;
+            let transfer_period = Duration::from_millis(2500);
+            let mut last_transfer = Instant::now() - transfer_period;
             while !stop_c.load(Ordering::Relaxed) {
                 let t = start.elapsed().as_secs_f32();
                 for (ch, input) in inputs.iter_mut().enumerate() {
@@ -61,11 +82,26 @@ impl SyntheticSource {
                     input.write(frame);
                 }
                 frame_idx += 1;
+
+                // Synthetic transfer: only emit while a pair is set (the UI
+                // enters Transfer layout with a valid meas/ref). Rate-limited
+                // to roughly match the daemon's `capture_duration(4, sr)`
+                // cadence so the overlay delay readout behaves the same way.
+                if last_transfer.elapsed() >= transfer_period {
+                    let pair = transfer_pair_c.lock().ok().and_then(|g| *g);
+                    if let Some((meas, refc)) = pair {
+                        let tf = synth_transfer(&transfer_freqs, meas, refc, t);
+                        transfer_store.write(tf);
+                        last_transfer = Instant::now();
+                    }
+                }
+
                 thread::sleep(period);
             }
         });
         SyntheticHandle {
             stop,
+            transfer_pair,
             join: Some(join),
         }
     }
@@ -116,6 +152,72 @@ fn synth_spectrum(freqs: &[f32], ch: usize, t: f32, frame_idx: u64) -> Vec<f32> 
         out.push(v.clamp(-140.0, 0.0));
     }
     out
+}
+
+/// Fake H1 transfer function. Shape: roughly flat passband with a gentle
+/// 2nd-order resonance bump around 2 kHz and a 1st-order low-pass rolloff
+/// above ~15 kHz. Phase is the minimum-phase contribution of those poles
+/// plus a linear-phase term from a slowly-varying delay. Coherence is high
+/// (>0.9) with band-edge dips. Everything drifts slowly in `t` so the
+/// display looks live.
+fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame {
+    let n = freqs.len();
+    let mut mag = Vec::with_capacity(n);
+    let mut phase = Vec::with_capacity(n);
+    let mut coh = Vec::with_capacity(n);
+
+    // Delay drifts slowly so the Δt readout visibly updates. ~±3 samples
+    // at 48 kHz (~60 µs) — same order of magnitude as a real room
+    // measurement with a few-metre mic distance.
+    let sr = 48000.0_f32;
+    let delay_samples_f = 3.0 * (t * 0.3).sin();
+    let delay_sec = delay_samples_f / sr;
+
+    let f_res = 2000.0 + 50.0 * (t * 0.1).sin();
+    let q = 4.0;
+    let f_lp = 15000.0;
+
+    let mut rng = XorShift::new(
+        0xA17E ^ (meas as u32) ^ ((refc as u32) << 8) ^ ((t * 10.0) as u32),
+    );
+
+    for &f in freqs {
+        // Resonance: 2nd-order bandpass bump, +3 dB peak at f_res.
+        let x = (f / f_res) - (f_res / f);
+        let res_mag = 1.0 / (1.0 + (q * x).powi(2)).sqrt();
+        let res_db = 3.0 * res_mag;
+        let res_phase = -((q * x).atan()).to_degrees();
+
+        // 1st-order low-pass at f_lp.
+        let r = f / f_lp;
+        let lp_mag_db = -10.0 * (1.0 + r * r).log10();
+        let lp_phase = -r.atan().to_degrees();
+
+        // Linear phase from delay (wraps to ±180).
+        let lin_phase = -360.0 * f * delay_sec;
+
+        let jitter = (rng.next_f32() - 0.5) * 0.3;
+        mag.push(res_db + lp_mag_db + jitter);
+        let total_phase = (res_phase + lp_phase + lin_phase).rem_euclid(360.0) - 180.0;
+        phase.push(total_phase);
+
+        // Coherence: 0.95 centre, dips near band edges.
+        let edge = ((f.log10() - 3.0) / 2.0).abs();
+        let c = (0.97 - 0.2 * edge * edge).clamp(0.3, 0.999);
+        coh.push(c + (rng.next_f32() - 0.5) * 0.01);
+    }
+
+    TransferFrame {
+        freqs: freqs.to_vec(),
+        magnitude_db: mag,
+        phase_deg: phase,
+        coherence: coh,
+        delay_samples: delay_samples_f.round() as i64,
+        delay_ms: delay_samples_f * 1000.0 / sr,
+        meas_channel: meas,
+        ref_channel: refc,
+        sr: sr as u32,
+    }
 }
 
 fn find_peak(spectrum: &[f32]) -> (usize, f32) {

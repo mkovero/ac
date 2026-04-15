@@ -59,6 +59,7 @@ pub fn compute(
     active_channel: usize,
     selected: &[bool],
     selection_order: &[usize],
+    active_meas_idx: usize,
     grid: GridParams,
 ) -> Vec<CellRect> {
     if n_channels == 0 {
@@ -81,25 +82,29 @@ pub fn compute(
             })
             .collect(),
         LayoutMode::Transfer => {
-            // Exactly two ordered channels → one full-plot cell labelled by
-            // the meas channel. Renderer splits the cell into mag/phase/coh
-            // sub-panels and reads the H1 data from `TransferStore`. Any
-            // other selection count returns an empty vec so the overlay can
-            // show the hint.
-            if selection_order.len() == 2
-                && selection_order[0] < n_channels
-                && selection_order[1] < n_channels
-            {
-                vec![CellRect {
-                    channel: selection_order[0],
-                    x: plot_x,
-                    y: plot_y,
-                    w: plot_w,
-                    h: plot_h,
-                }]
-            } else {
-                Vec::new()
+            // Convention: last selected = REF, everything before it = meas
+            // list. One meas is "active" (selected via Tab in the app), and
+            // that meas owns the displayed cell. Multiple meas are fine but
+            // only the active one is rendered at a time so the sub-panel
+            // stack stays legible.
+            let n = selection_order.len();
+            if n < 2 {
+                return Vec::new();
             }
+            let meas_count = n - 1;
+            let idx = active_meas_idx.min(meas_count - 1);
+            let meas = selection_order[idx];
+            let refc = selection_order[n - 1];
+            if meas >= n_channels || refc >= n_channels {
+                return Vec::new();
+            }
+            vec![CellRect {
+                channel: meas,
+                x: plot_x,
+                y: plot_y,
+                w: plot_w,
+                h: plot_h,
+            }]
         }
         LayoutMode::Overlay | LayoutMode::Single => {
             let target = if mode == LayoutMode::Single {

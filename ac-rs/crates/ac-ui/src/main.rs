@@ -27,7 +27,10 @@ fn main() -> anyhow::Result<()> {
     let n_channels = if let Some(n) = args.channels {
         n.max(1)
     } else if args.synthetic {
-        1
+        // Default to 2 so the Transfer layout (meas + ref) is usable out of
+        // the box without passing `--channels 2`. Override with `--channels`
+        // for single-channel smoke tests.
+        2
     } else {
         match probe_daemon_channels(&args.ctrl) {
             Some(n) if n >= 1 => {
@@ -208,14 +211,16 @@ Keys:\n  \
   s                save screenshot + CSV\n  \
   d                toggle GPU/CPU timing overlay\n  \
   w                cycle view (spectrum/waterfall)\n  \
-  l                cycle layout (grid/overlay/single/compare/transfer)\n  \
+  l                cycle layout (grid/single/compare*/transfer*)\n  \
   f                toggle fullscreen\n  \
   h                toggle help overlay\n  \
   +/-              adjust dB range\n  \
   [/]              shift waterfall colormap floor\n  \
   Ctrl+R           reset all views and grid sizing\n  \
   Tab              next page (grid) / next channel\n  \
-  Shift+Tab        prev page (grid) / prev channel\n\n\
+  Shift+Tab        prev page (grid) / prev channel / prev meas (transfer)\n\n\
+* compare/transfer only cycle-visible when channels are selected; in\n  \
+   transfer the last Space is REF, earlier picks are meas, Tab rotates meas\n\n\
 Mouse:\n  \
   Scroll (cell)    zoom freq (waterfall) / both axes (spectrum)\n  \
   Scroll (bg)      resize grid cells (grid layout only)\n  \

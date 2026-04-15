@@ -25,7 +25,7 @@ use crate::render::waterfall::{CellUpload as WaterfallCellUpload, WaterfallRende
 use crate::theme;
 use crate::ui::export::{self, ScreenshotRequest};
 use crate::ui::layout::{self, GridParams};
-use crate::ui::overlay::{self, HoverInfo, OverlayInput};
+use crate::ui::overlay::{self, HoverInfo, HoverReadout, OverlayInput};
 use crate::ui::stats::{StatsSnapshot, TimingStats};
 
 pub enum DataSource {
@@ -88,9 +88,16 @@ pub struct App {
     /// pause/resume around `transfer_stream` since that's the `Exclusive`
     /// group and would otherwise be busy-blocked by the `Input`-group monitor.
     monitor_spectrum_active: bool,
-    /// Insertion-order view of `selected`. Entry [0] is MEAS, entry [1] is
-    /// REF when layout == Transfer. Drives the `transfer_stream` start pair.
+    /// Insertion-order view of `selected`. In Transfer layout the convention
+    /// is: the **last** entry is REF, every preceding entry is a meas channel
+    /// the user would like to H1-compare against that ref. Only one meas
+    /// stream runs at a time (daemon worker + display), selected via
+    /// `active_meas_idx`; Tab cycles through the meas list.
     selection_order: Vec<usize>,
+    /// Index into `selection_order[..len-1]` picking which meas channel is
+    /// currently streamed/displayed in Transfer layout. Clamped on every
+    /// consumer read; Tab/Shift+Tab bump it.
+    active_meas_idx: usize,
     config: DisplayConfig,
     cell_views: Vec<CellView>,
     selected: Vec<bool>,
@@ -169,6 +176,7 @@ impl App {
             transfer_stream_active: false,
             monitor_spectrum_active: false,
             selection_order: Vec::new(),
+            active_meas_idx: 0,
             config,
             cell_views: Vec::new(),
             selected: Vec::new(),
@@ -294,6 +302,7 @@ impl App {
             self.config.active_channel,
             &self.selected,
             &self.selection_order,
+            self.active_meas_idx,
             self.grid_params(),
         );
         for c in &cells {
@@ -329,11 +338,12 @@ impl App {
                 .enumerate()
                 .filter_map(|(i, sel)| sel.then_some(i))
                 .collect(),
-            // Transfer cell carries the meas channel slot; zoom/pan acts on
-            // the meas CellView (phase/coh sub-panels inherit the frequency
-            // axis from it).
+            // Transfer cell carries the active meas channel slot; zoom/pan
+            // acts on that meas' CellView (phase/coh sub-panels inherit the
+            // frequency axis from it). Last-selected is REF, everything
+            // before it is a meas — `active_meas_idx` picks the current one.
             LayoutMode::Transfer => {
-                if let Some(&meas) = self.selection_order.first() {
+                if let Some(meas) = self.transfer_active_meas() {
                     vec![meas.min(n - 1)]
                 } else {
                     Vec::new()
@@ -547,12 +557,6 @@ impl App {
             if !self.selection_order.contains(&target) {
                 self.selection_order.push(target);
             }
-            // In Transfer layout the pair is exactly two channels — if the
-            // user picks a third, drop the oldest so the pair rolls forward.
-            if in_transfer && self.selection_order.len() > 2 {
-                let dropped = self.selection_order.remove(0);
-                self.selected[dropped] = false;
-            }
         } else {
             self.selection_order.retain(|&i| i != target);
         }
@@ -564,15 +568,52 @@ impl App {
             count,
         ));
         if in_transfer {
-            // Selection change while live: stop any running stream, then (if
-            // the pair is valid) start a fresh one with the new meas/ref.
-            self.send_transfer_stream_stop();
-            if self.selection_order.len() == 2 {
-                let meas = self.selection_order[0];
-                let refc = self.selection_order[1];
-                self.send_transfer_stream_start(meas, refc);
+            // Selection change while live: clamp the active meas into the
+            // (possibly shrunk) meas list, then hot-swap the running
+            // transfer_stream to match the new pair.
+            let meas_count = self.selection_order.len().saturating_sub(1);
+            if meas_count == 0 {
+                self.active_meas_idx = 0;
+            } else if self.active_meas_idx >= meas_count {
+                self.active_meas_idx = meas_count - 1;
             }
+            self.restart_transfer_stream();
         }
+    }
+
+    /// Active meas channel under the current Transfer convention. `None`
+    /// means the selection is too small (< 2) or the resolved index is
+    /// out-of-range; the overlay hint shows up in that case.
+    fn transfer_active_meas(&self) -> Option<usize> {
+        let n = self.selection_order.len();
+        if n < 2 {
+            return None;
+        }
+        let meas_count = n - 1;
+        let idx = self.active_meas_idx.min(meas_count - 1);
+        Some(self.selection_order[idx])
+    }
+
+    fn transfer_ref_channel(&self) -> Option<usize> {
+        if self.selection_order.len() < 2 {
+            return None;
+        }
+        self.selection_order.last().copied()
+    }
+
+    /// Stop any currently running `transfer_stream` worker and, if the
+    /// selection is still a valid meas/ref pair, start a fresh one with the
+    /// current active meas. Used on selection changes, Tab cycling, and
+    /// layout enter.
+    fn restart_transfer_stream(&mut self) {
+        self.send_transfer_stream_stop();
+        let Some(meas) = self.transfer_active_meas() else {
+            return;
+        };
+        let Some(refc) = self.transfer_ref_channel() else {
+            return;
+        };
+        self.send_transfer_stream_start(meas, refc);
     }
 
     /// Called after `config.layout` has been advanced by the `l` key. Starts
@@ -584,12 +625,13 @@ impl App {
         let leaving = matches!(prev, LayoutMode::Transfer)
             && !matches!(next, LayoutMode::Transfer);
         if entering {
-            if self.selection_order.len() == 2 {
-                let meas = self.selection_order[0];
-                let refc = self.selection_order[1];
-                self.send_transfer_stream_start(meas, refc);
+            // Start from the first meas on fresh entry so the user doesn't
+            // inherit stale Tab state from a previous Transfer session.
+            self.active_meas_idx = 0;
+            if self.transfer_active_meas().is_some() {
+                self.restart_transfer_stream();
             } else {
-                self.notify("transfer: pick 2 channels (Space)");
+                self.notify("transfer: pick ≥ 2 channels (last = REF)");
             }
         } else if leaving {
             self.send_transfer_stream_stop();
@@ -618,6 +660,7 @@ impl App {
                     n_channels: n,
                     n_bins: bins,
                     update_hz: rate,
+                    transfer: transfer_store,
                 };
                 let handle = src.spawn(init.inputs);
                 self.source = Some(DataSource::Synthetic(handle));
@@ -650,8 +693,13 @@ impl App {
     }
 
     fn send_transfer_stream_start(&mut self, meas_ch: usize, ref_ch: usize) {
-        if matches!(self.source, Some(DataSource::Synthetic(_))) {
-            self.notify("transfer: needs daemon (not synthetic)");
+        // Synthetic mode: no daemon involved — tell the synthetic worker to
+        // start writing fake TransferFrames to the shared store. The renderer
+        // and overlay don't care where the frame came from.
+        if let Some(DataSource::Synthetic(h)) = self.source.as_ref() {
+            h.set_transfer_pair(Some((meas_ch as u32, ref_ch as u32)));
+            self.transfer_stream_active = true;
+            self.notify("transfer_stream: live (synthetic)");
             return;
         }
         // transfer_stream is `Exclusive` in the daemon's busy_guard; an
@@ -690,7 +738,9 @@ impl App {
         if !self.transfer_stream_active {
             return;
         }
-        if let Some(ctrl) = self.ensure_ctrl() {
+        if let Some(DataSource::Synthetic(h)) = self.source.as_ref() {
+            h.set_transfer_pair(None);
+        } else if let Some(ctrl) = self.ensure_ctrl() {
             let cmd = serde_json::json!({ "cmd": "stop", "name": "transfer_stream" });
             let _ = ctrl.send(&cmd);
         }
@@ -769,6 +819,44 @@ impl App {
         self.egui_state = Some(egui_state);
     }
 
+    /// Pick the next layout in the cycle given current selection state. The
+    /// raw cycle is Grid → Single → Compare → Transfer → Grid. Overlay is
+    /// skipped entirely (the old 'every channel stacked on one rect' layout
+    /// was judged too gimmicky to be worth a cycle slot). Compare and
+    /// Transfer are only visited when the user has selected enough channels
+    /// for them to be useful (Compare: any; Transfer: ≥ 2). Avoids the
+    /// "I pressed `l` and ended up in an empty view" failure mode.
+    fn next_layout(&self, from: LayoutMode) -> LayoutMode {
+        let any_selected = self.selected.iter().any(|s| *s);
+        let transfer_ready = self.selection_order.len() >= 2;
+        let raw_cycle = [
+            LayoutMode::Grid,
+            LayoutMode::Single,
+            LayoutMode::Compare,
+            LayoutMode::Transfer,
+        ];
+        // Find where we are in the trimmed cycle. `from` might be Overlay
+        // (if a previous version set it) — treat that as "before Grid" so
+        // the next press lands on Grid rather than silently sticking.
+        let start = raw_cycle
+            .iter()
+            .position(|m| *m == from)
+            .map(|i| (i + 1) % raw_cycle.len())
+            .unwrap_or(0);
+        for offset in 0..raw_cycle.len() {
+            let candidate = raw_cycle[(start + offset) % raw_cycle.len()];
+            let allowed = match candidate {
+                LayoutMode::Compare => any_selected,
+                LayoutMode::Transfer => transfer_ready,
+                _ => true,
+            };
+            if allowed {
+                return candidate;
+            }
+        }
+        LayoutMode::Grid
+    }
+
     fn handle_key(&mut self, elwt: &ActiveEventLoop, code: KeyCode) {
         match code {
             KeyCode::Escape | KeyCode::KeyQ => elwt.exit(),
@@ -795,7 +883,7 @@ impl App {
             }
             KeyCode::KeyL => {
                 let prev = self.config.layout;
-                self.config.layout = self.config.layout.next();
+                self.config.layout = self.next_layout(prev);
                 self.on_layout_changed(prev, self.config.layout);
                 self.notify(match self.config.layout {
                     LayoutMode::Grid => "layout: grid",
@@ -865,6 +953,32 @@ impl App {
                         self.notify(&format!("page {}/{}", self.grid_page + 1, pages));
                         return;
                     }
+                }
+                // Transfer layout: Tab/Shift+Tab rotates the active meas
+                // channel and hot-swaps the running transfer_stream worker.
+                // With only one meas selected this is a no-op.
+                if matches!(self.config.layout, LayoutMode::Transfer) {
+                    let meas_count = self.selection_order.len().saturating_sub(1);
+                    if meas_count > 1 {
+                        let delta = if self.modifiers.shift_key() {
+                            meas_count - 1
+                        } else {
+                            1
+                        };
+                        self.active_meas_idx =
+                            (self.active_meas_idx + delta) % meas_count;
+                        let meas = self
+                            .transfer_active_meas()
+                            .unwrap_or(self.config.active_channel);
+                        self.notify(&format!(
+                            "MEAS CH{} ({}/{})",
+                            meas,
+                            self.active_meas_idx + 1,
+                            meas_count,
+                        ));
+                        self.restart_transfer_stream();
+                    }
+                    return;
                 }
                 let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
                 self.config.active_channel = (self.config.active_channel + delta) % n;
@@ -958,6 +1072,7 @@ impl App {
             self.config.active_channel,
             &self.selected,
             &self.selection_order,
+            self.active_meas_idx,
             grid_params_snap,
         );
         let cells_vec: Vec<_> = cells.clone();
@@ -1118,6 +1233,19 @@ impl App {
             None
         };
         let selection_order_snap = self.selection_order.clone();
+        let active_meas_idx_snap = self.active_meas_idx;
+        let active_meas_snap = {
+            // Inline to dodge an otherwise-mutable borrow of `self` held by
+            // `render_ctx.as_mut()` above.
+            let n = selection_order_snap.len();
+            if n >= 2 {
+                let meas_count = n - 1;
+                let idx = active_meas_idx_snap.min(meas_count - 1);
+                Some(selection_order_snap[idx])
+            } else {
+                None
+            }
+        };
         let width_px = ctx.config.width as f32;
         let height_px = ctx.config.height as f32;
         let notification = self
@@ -1152,13 +1280,37 @@ impl App {
             let log_min = view.freq_min.max(1.0).log10();
             let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
             let freq_hz = 10_f32.powf(log_min + nx * (log_max - log_min));
-            let db = view.db_min + ny * (view.db_max - view.db_min);
+            // In Transfer layout the y-axis meaning depends on which
+            // sub-panel the cursor is in — mag shows dB, phase shows degrees,
+            // coh shows 0..1. Outside all three panels (the inter-panel gap)
+            // we fall back to mag dB so the crosshair label stays populated.
+            let readout = if matches!(config_snap.layout, LayoutMode::Transfer) {
+                let cursor = egui::pos2(cx, cy);
+                match crate::render::transfer::hit_test(rect, cursor) {
+                    Some((crate::render::transfer::HitPanel::Phase, v)) => {
+                        HoverReadout::Phase(v)
+                    }
+                    Some((crate::render::transfer::HitPanel::Coherence, v)) => {
+                        HoverReadout::Coherence(v)
+                    }
+                    Some((crate::render::transfer::HitPanel::Magnitude, v)) => {
+                        HoverReadout::Db(v)
+                    }
+                    None => {
+                        let db = view.db_min + ny * (view.db_max - view.db_min);
+                        HoverReadout::Db(db)
+                    }
+                }
+            } else {
+                let db = view.db_min + ny * (view.db_max - view.db_min);
+                HoverReadout::Db(db)
+            };
             Some(HoverInfo {
                 channel,
                 rect,
                 cursor: egui::pos2(cx, cy),
                 freq_hz,
-                db,
+                readout,
             })
         });
 
@@ -1228,6 +1380,8 @@ impl App {
                     selected: &selected_snap,
                     selection_order: &selection_order_snap,
                     transfer: transfer_snap.as_ref(),
+                    active_meas: active_meas_snap,
+                    active_meas_idx: active_meas_idx_snap,
                     connected,
                     notification: notification.as_deref(),
                     timing: timing_for_overlay,

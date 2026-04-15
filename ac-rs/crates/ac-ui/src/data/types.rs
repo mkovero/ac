@@ -139,18 +139,6 @@ pub enum LayoutMode {
     Transfer,
 }
 
-impl LayoutMode {
-    pub fn next(self) -> Self {
-        match self {
-            LayoutMode::Grid => LayoutMode::Overlay,
-            LayoutMode::Overlay => LayoutMode::Single,
-            LayoutMode::Single => LayoutMode::Compare,
-            LayoutMode::Compare => LayoutMode::Transfer,
-            LayoutMode::Transfer => LayoutMode::Grid,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Spectrum,

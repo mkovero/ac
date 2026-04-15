@@ -11,7 +11,17 @@ pub struct HoverInfo {
     pub rect:    Rect,
     pub cursor:  Pos2,
     pub freq_hz: f32,
-    pub db:      f32,
+    pub readout: HoverReadout,
+}
+
+/// The y-axis reading under the hover cursor. Non-transfer layouts always
+/// emit `Db`; Transfer layout classifies which sub-panel the cursor is in and
+/// emits `Phase` (deg) or `Coherence` (0..1) accordingly.
+#[derive(Debug, Clone, Copy)]
+pub enum HoverReadout {
+    Db(f32),
+    Phase(f32),
+    Coherence(f32),
 }
 
 pub struct OverlayInput<'a> {
@@ -21,6 +31,14 @@ pub struct OverlayInput<'a> {
     pub selected: &'a [bool],
     pub selection_order: &'a [usize],
     pub transfer: Option<&'a TransferFrame>,
+    /// Currently active meas channel in the Transfer layout (after clamping
+    /// `active_meas_idx` to the meas list). `None` when the layout isn't
+    /// Transfer or the selection has fewer than 2 channels.
+    pub active_meas: Option<usize>,
+    /// Index into the meas list (`selection_order[..len-1]`) that the user
+    /// last cycled to via Tab. Carried through so the overlay can show
+    /// "MEAS (n/N)" when there are multiple meas channels.
+    pub active_meas_idx: usize,
     pub connected: bool,
     pub notification: Option<&'a str>,
     pub timing: Option<StatsSnapshot>,
@@ -37,7 +55,7 @@ const HELP_LINES: &[&str] = &[
     "P              peak hold",
     "S              screenshot + CSV",
     "W              cycle view (spec/water)",
-    "L              cycle layout (grid/ovr/sng/cmp/xfer)",
+    "L              cycle layout (grid/sng/cmp*/xfer*)",
     "F              fullscreen",
     "D              timing overlay",
     "H              toggle this help",
@@ -252,13 +270,21 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     }
 
     if matches!(input.config.layout, LayoutMode::Transfer) {
-        let meas = input.selection_order.first().copied();
-        let refc = input.selection_order.get(1).copied();
-        if meas.is_none() || refc.is_none() {
+        // New convention: last selection is REF, everything before it is a
+        // meas channel. One meas is "active" at a time (Tab/Shift+Tab cycles).
+        // We need at least one meas + one ref → len >= 2.
+        let n_sel = input.selection_order.len();
+        let refc = if n_sel >= 2 {
+            input.selection_order.last().copied()
+        } else {
+            None
+        };
+        let meas_ch = input.active_meas.filter(|_| refc.is_some());
+        if refc.is_none() {
             painter.text(
                 screen.center(),
                 Align2::CENTER_CENTER,
-                "Select 2 channels — Space picks MEAS, then REF",
+                "Select ≥ 2 channels — last pick is REF (Tab cycles MEAS)",
                 FontId::monospace(theme::READOUT_PX),
                 text_color,
             );
@@ -275,12 +301,24 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 FontId::monospace(theme::READOUT_PX * 1.4),
                 text_color,
             );
-            // MEAS / REF legend (top-left), with channel color swatches.
+            // MEAS / REF legend (top-left), with channel color swatches. In
+            // multi-meas mode we annotate the active meas with `(n/N)`.
+            let meas_count = n_sel - 1;
+            let active_idx = input.active_meas_idx.min(meas_count.saturating_sub(1));
             let x0 = screen.left() + 12.0;
             let mut y = screen.top() + 12.0;
             let row_h = theme::READOUT_PX + 4.0;
-            for (label, ch) in [("MEAS", meas.unwrap()), ("REF", refc.unwrap())] {
-                let rgba = theme::channel_color(ch);
+            let meas_label = if meas_count > 1 {
+                format!("MEAS ({}/{})", active_idx + 1, meas_count)
+            } else {
+                "MEAS".to_string()
+            };
+            let entries: [(String, usize); 2] = [
+                (meas_label, meas_ch.unwrap_or(0)),
+                ("REF".to_string(), refc.unwrap()),
+            ];
+            for (label, ch) in &entries {
+                let rgba = theme::channel_color(*ch);
                 let swatch = Color32::from_rgb(
                     (rgba[0] * 255.0) as u8,
                     (rgba[1] * 255.0) as u8,
@@ -371,12 +409,26 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        let label = format!(
-            "CH{} {} {:+6.1} dB",
-            hover.channel,
-            format_hz(hover.freq_hz),
-            hover.db,
-        );
+        let label = match hover.readout {
+            HoverReadout::Db(v) => format!(
+                "CH{} {} {:+6.1} dB",
+                hover.channel,
+                format_hz(hover.freq_hz),
+                v,
+            ),
+            HoverReadout::Phase(v) => format!(
+                "CH{} {} {:+6.1} deg",
+                hover.channel,
+                format_hz(hover.freq_hz),
+                v,
+            ),
+            HoverReadout::Coherence(v) => format!(
+                "CH{} {} coh {:.3}",
+                hover.channel,
+                format_hz(hover.freq_hz),
+                v,
+            ),
+        };
         // Pin the readout just above-right of the cursor, clamped so it
         // stays inside the hovered cell.
         let anchor = Pos2::new(

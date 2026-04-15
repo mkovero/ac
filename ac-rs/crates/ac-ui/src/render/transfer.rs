@@ -23,12 +23,12 @@ const PHASE_FRAC: f32 = 0.25;
 // Coherence frac = 1.0 - MAG - PHASE (= 0.20).
 const SUB_GAP_PX: f32 = 6.0;
 
-const MAG_MIN_DB: f32 = -40.0;
-const MAG_MAX_DB: f32 = 20.0;
-const PHASE_MIN_DEG: f32 = -180.0;
-const PHASE_MAX_DEG: f32 = 180.0;
-const COH_MIN: f32 = 0.0;
-const COH_MAX: f32 = 1.0;
+pub const MAG_MIN_DB: f32 = -40.0;
+pub const MAG_MAX_DB: f32 = 20.0;
+pub const PHASE_MIN_DEG: f32 = -180.0;
+pub const PHASE_MAX_DEG: f32 = 180.0;
+pub const COH_MIN: f32 = 0.0;
+pub const COH_MAX: f32 = 1.0;
 
 const TRACE_WIDTH: f32 = 1.6;
 
@@ -36,6 +36,36 @@ pub struct SubRects {
     pub mag: Rect,
     pub phase: Rect,
     pub coh: Rect,
+}
+
+/// Which of the three transfer sub-panels the cursor is over, used by the
+/// overlay hover readout so hover in `phase` reads degrees, hover in `coh`
+/// reads the 0..1 coherence, and hover in `mag` reads dB as usual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitPanel {
+    Magnitude,
+    Phase,
+    Coherence,
+}
+
+/// Locate the cursor inside a Transfer plot cell and return the hit panel
+/// along with the y-axis value under the cursor (dB, degrees, or unitless
+/// coherence depending on which sub-panel). Returns `None` when the cursor
+/// is outside all three panels (e.g. inter-panel gap).
+pub fn hit_test(rect: Rect, cursor: Pos2) -> Option<(HitPanel, f32)> {
+    let sub = split_cell(rect);
+    let (panel, sub_rect, y_min, y_max) = if sub.phase.contains(cursor) {
+        (HitPanel::Phase, sub.phase, PHASE_MIN_DEG, PHASE_MAX_DEG)
+    } else if sub.coh.contains(cursor) {
+        (HitPanel::Coherence, sub.coh, COH_MIN, COH_MAX)
+    } else if sub.mag.contains(cursor) {
+        (HitPanel::Magnitude, sub.mag, MAG_MIN_DB, MAG_MAX_DB)
+    } else {
+        return None;
+    };
+    let ny = 1.0 - (cursor.y - sub_rect.top()) / sub_rect.height().max(1.0);
+    let value = y_min + ny.clamp(0.0, 1.0) * (y_max - y_min);
+    Some((panel, value))
 }
 
 pub fn split_cell(rect: Rect) -> SubRects {
