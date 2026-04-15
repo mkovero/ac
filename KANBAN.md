@@ -1,7 +1,7 @@
 # Kanban — ac measurement system
 
 > Maintained alongside GitHub Issues. Labels: `software` `hardware` `testing` `blocker` `phase-4`
-> Last updated: 2026-04-13
+> Last updated: 2026-04-15
 
 ---
 
@@ -61,7 +61,9 @@ _nothing yet_
 
 ## Done
 
-_nothing yet_
+| Title | Area | Landed |
+|-------|------|--------|
+| ac-ui Phase 2: waterfall, GPU timing overlay, benchmark harness, per-cell views, multi-channel real-daemon, `ac ui` dispatch | `software` | 2026-04-15 |
 
 ---
 
@@ -92,4 +94,4 @@ _nothing yet_
 - GUI: `ac/ui/` — pyqtgraph, separate process
 - Tests: `pytest tests/ -q` (149 passing, uses --fake-audio)
 
-*Updated: 2026-04-13*
+*Updated: 2026-04-15*

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use winit::window::Window;
 
+use super::timing::GpuTiming;
+
 pub struct RenderContext {
     pub window: Arc<Window>,
     #[allow(dead_code)]
@@ -12,6 +14,7 @@ pub struct RenderContext {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
+    pub timing: Option<GpuTiming>,
 }
 
 impl RenderContext {
@@ -30,17 +33,25 @@ impl RenderContext {
             })
             .await
             .ok_or_else(|| anyhow::anyhow!("no wgpu adapter"))?;
+        let adapter_features = adapter.features();
+        let want_timing = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let required_features = if want_timing {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("ac-ui device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )
             .await?;
+        let timing = want_timing.then(|| GpuTiming::new(&device, &queue));
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -70,6 +81,7 @@ impl RenderContext {
             queue,
             config,
             size,
+            timing,
         })
     }
 

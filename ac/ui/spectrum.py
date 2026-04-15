@@ -102,6 +102,13 @@ class SpectrumView(QtWidgets.QMainWindow):
             return
         if topic != "data" or frame.get("type") != "spectrum":
             return
+        # Phase 2: daemon may emit frames for multiple channels; this view
+        # renders a single channel. Drop anything that isn't slot 0 / the
+        # channel we were started against. Legacy daemons omit the field —
+        # those frames always pass through.
+        frame_ch = frame.get("channel")
+        if frame_ch is not None and frame_ch != 0:
+            return
 
         freqs    = np.array(frame["freqs"],    dtype=float)
         spec_lin = np.array(frame["spectrum"], dtype=float)

@@ -20,6 +20,72 @@ Deferred from v0.1 and still open:
 Phase 2 closes all of the above and raises the bar on interaction
 ergonomics (crosshair readouts, per-cell view config).
 
+## Status coming out
+
+All five workstreams landed. Summary of what shipped, with pointers to
+the actual code so this doc stops being a plan and starts being an
+index into the real implementation:
+
+- **WS1 multi-channel real** — `ac-daemon/src/handlers/audio.rs::monitor_spectrum`
+  now takes an optional `"channels": [u32, ...]` request array, cycles
+  `reconnect_input` per channel within one worker, and stamps each
+  published `spectrum` frame with `channel` + `n_channels`.
+  `ac-ui/src/data/receiver.rs::route_slot` maps incoming frames onto
+  pre-allocated slots first-come-first-served, so `ac-ui --channels N`
+  now honours real-daemon data. `ac/ui/spectrum.py` and
+  `ac/client/ac.py::cmd_monitor` filter by `channel == input_channel`
+  so the Python TUI/monitor behaviour is unchanged.
+- **WS2 waterfall** — `render/waterfall.rs` + `render/shaders/waterfall.wgsl`
+  implement a per-channel `texture_2d_array<f32>` ring buffer; the
+  fragment shader does log-x bin remap when freqs are log-spaced
+  (synthetic) and linear remap when freqs are linearly spaced
+  (daemon downsample output). The inferno LUT is baked at build time
+  by `crates/ac-ui/build.rs`. `w` cycles between `Spectrum` and
+  `Waterfall` view modes.
+- **WS3 GPU timing + benchmark** — `render/timing.rs` manages a
+  `wgpu::QuerySet` with double-buffered readback; `d` toggles the
+  overlay (falls back to `gpu n/a (TIMESTAMP_QUERY unsupported)` on
+  adapters without the feature). `--benchmark <secs>` in `main.rs`
+  runs for N seconds then prints `fps`, `p50/p95/p99 frame ms`, and
+  mean CPU/GPU ms via `app.benchmark_report()`. Rolling stats live in
+  `ui/stats.rs`.
+- **WS4 interaction polish** — `CellView` replaced the shared
+  `DisplayConfig` freq/db window (per-cell zoom/pan); hover crosshair
+  readout in `ui/overlay.rs`; `Ctrl+R` resets all cells, right-click
+  resets the hovered cell only. Scroll modes: plain=zoom freq+db
+  together (spectrum) / freq only (waterfall); `Shift+Scroll`=zoom dB
+  or colormap; `Ctrl+Scroll`=zoom freq (spectrum) / time window
+  (waterfall). Zoom clamps at the data-driven freq ceiling tracked
+  live in `App::data_freq_ceiling` so waterfall/spectrum honour 48k
+  or 96k daemon output without a CLI flag.
+- **WS5 Python wrapper** — `ac/__main__.py::_resolve_rust_bin` finds
+  `ac-ui` on `$PATH` then in `ac-rs/target/debug/`, and `ac ui ...`
+  replaces the Python process via `os.execvp`. Mirrored in
+  `ac/client/ac.py::main` for the direct-`ac` entrypoint.
+
+Late additions not in the original plan, worth knowing about:
+
+- **Linear→dBFS at receiver boundary** — the daemon publishes
+  `|FFT|/N/wc` linear amplitude, not dB. `data/receiver.rs` now does
+  `20*log10(max(x, 1e-12))` on ingest, matching
+  `ac/ui/spectrum.py:131`. Without this, the UI fed raw linear values
+  straight into the dB-assuming colormap/axis pipeline and everything
+  read as "max loudness".
+- **Adaptive grid ticks** — `render/grid.rs::freq_ticks` generates
+  decade×{1,2,5} ticks when the visible span is ≥1 decade and
+  1-2-5 nice linear ticks otherwise, so zooming into a sub-decade
+  window still shows labels instead of going blank. `time_ticks` does
+  the same for the waterfall Y axis.
+- **Waterfall time axis** — `CellView::rows_visible` (backed in the
+  shader via `WaterfallCellMeta::rows_visible`) lets `Ctrl+Scroll`
+  shrink the visible history window; row period is tracked as an EMA
+  of inter-frame delta in `App` so axis labels read seconds from now,
+  not row indices.
+- **JetBrainsMono bundle deferred** — egui's default monospace proved
+  legible enough for the timing overlay; the font bundle did not
+  land. Left in the deferred bucket for Phase 3 if we grow a larger
+  HUD.
+
 ---
 
 ## Workstreams

@@ -142,8 +142,8 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> i64 {
     // Find peak within ±max_lag
     let mut best_lag = 0i64;
     let mut best_val = f64::NEG_INFINITY;
-    for lag in 0..=max_lag {
-        let v = corr[lag].abs();
+    for (lag, &c) in corr.iter().enumerate().take(max_lag + 1) {
+        let v = c.abs();
         if v > best_val {
             best_val = v;
             best_lag = lag as i64;
@@ -213,7 +213,7 @@ pub fn h1_estimate(ref_sig: &[f32], meas: &[f32], sr: u32) -> TransferResult {
     let coherence: Vec<f64> = (0..nfft).map(|k| {
         let denom = gxx[k] * gyy[k];
         let coh   = if denom > 0.0 { gxy[k].norm_sqr() / denom } else { 0.0 };
-        coh.min(1.0).max(0.0)
+        coh.clamp(0.0, 1.0)
     }).collect();
 
     TransferResult { freqs, magnitude_db, phase_deg, coherence, delay_samples, delay_ms }

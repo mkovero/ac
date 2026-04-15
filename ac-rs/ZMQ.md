@@ -107,6 +107,8 @@ Emitted continuously by `monitor_spectrum`.
 {
   "type":             "spectrum",
   "cmd":              "monitor_spectrum",
+  "channel":          <int>,          // input channel index this frame describes
+  "n_channels":       <int>,          // total channels being monitored (frame count per cycle)
   "freq_hz":          <float>,        // auto-detected dominant frequency
   "sr":               <int>,          // sample rate (Hz)
   "freqs":            [<float>, ...], // downsampled, DC removed
@@ -119,6 +121,12 @@ Emitted continuously by `monitor_spectrum`.
   "xruns":            <int>
 }
 ```
+
+`channel` and `n_channels` were added alongside the optional `channels`
+request parameter on `monitor_spectrum` (see below). Subscribers that only
+track a single channel should filter by `channel == <their-channel>` — old
+servers that do not emit either field should be treated as
+`channel = 0, n_channels = 1`.
 
 ---
 
@@ -454,15 +462,29 @@ spectrum frames until stopped.
 ```json
 {
   "cmd":        "monitor_spectrum",
-  "freq_hz":    <float>,   // hint for initial fundamental; auto-detected thereafter
-  "level_dbfs": <float>,   // unused by server (kept for client compat)
-  "interval":   <float>    // capture + analysis interval (seconds), default 0.2
+  "freq_hz":    <float>,     // hint for initial fundamental; auto-detected thereafter
+  "level_dbfs": <float>,     // unused by server (kept for client compat)
+  "interval":   <float>,     // capture + analysis interval (seconds), default 0.2
+  "channels":   [<int>, ...] // optional; input channel indices to monitor
+                              // defaults to [config.input_channel]
 }
 ```
 
+When `channels` contains more than one index, the worker cycles through the
+ports via `reconnect_input` (each channel gets `interval / N` seconds of
+capture per cycle). Every published `spectrum` frame carries distinct
+`channel` and `n_channels` fields so subscribers can route frames
+independently. Backends whose `reconnect_input` is a no-op (fake,
+CPAL) will emit N frames per cycle but all drawn from the same live port.
+
 **Reply**
 ```json
-{ "ok": true, "in_port": "<port>" }
+{
+  "ok":       true,
+  "in_port":  "<primary-port>",   // first channel — kept for backward compat
+  "in_ports": ["<port>", ...],    // resolved port per entry in `channels`
+  "channels": [<int>, ...]        // echoed channel indices (defaulted if absent)
+}
 ```
 
 **DATA** — repeated until stopped (spectrum frame, see Shared types).

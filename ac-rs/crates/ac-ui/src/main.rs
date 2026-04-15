@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use app::{App, AppInit, SourceKind};
 use data::store::ChannelStore;
+use data::types::ViewMode;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -18,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let n_channels = if args.synthetic { args.channels.max(1) } else { 1 };
+    let n_channels = args.channels.max(1);
     let (inputs, store) = ChannelStore::new(n_channels);
 
     let source_kind = if args.synthetic {
@@ -34,12 +35,17 @@ fn main() -> anyhow::Result<()> {
         output_dir: args.output_dir.clone(),
         endpoint: args.connect.clone(),
         synthetic_params: Some((args.channels.max(1), args.bins.max(16), args.rate.max(0.5))),
+        benchmark_secs: args.benchmark,
+        initial_view: args.view,
     };
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = App::new(init);
     event_loop.run_app(&mut app)?;
+    if let Some(report) = app.benchmark_report() {
+        println!("{report}");
+    }
     Ok(())
 }
 
@@ -51,6 +57,8 @@ struct Args {
     bins: usize,
     rate: f32,
     output_dir: PathBuf,
+    benchmark: Option<f64>,
+    view: ViewMode,
 }
 
 impl Args {
@@ -63,6 +71,8 @@ impl Args {
             bins: 1000,
             rate: 10.0,
             output_dir: default_output_dir(),
+            benchmark: None,
+            view: ViewMode::Spectrum,
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -98,6 +108,23 @@ impl Args {
                             .ok_or_else(|| anyhow::anyhow!("--output-dir requires value"))?,
                     );
                 }
+                "--benchmark" => {
+                    out.benchmark = Some(
+                        it.next()
+                            .ok_or_else(|| anyhow::anyhow!("--benchmark requires value"))?
+                            .parse()?,
+                    );
+                }
+                "--view" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--view requires value"))?;
+                    out.view = match v.as_str() {
+                        "spectrum" => ViewMode::Spectrum,
+                        "waterfall" => ViewMode::Waterfall,
+                        other => anyhow::bail!("--view: expected spectrum|waterfall, got {other}"),
+                    };
+                }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
         }
@@ -120,26 +147,35 @@ Usage: ac-ui [OPTIONS]\n\n\
 Options:\n  \
   --connect <addr>     ZMQ DATA endpoint [default: tcp://127.0.0.1:5557]\n  \
   --synthetic          Fake data instead of daemon\n  \
-  --channels <n>       Synthetic channel count [default: 1]\n  \
+  --channels <n>       Channel slot count; daemon must emit matching `channel` field [default: 1]\n  \
   --bins <n>           Synthetic bins per channel [default: 1000]\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
+  --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
+  --view <mode>        Initial view: spectrum|waterfall [default: spectrum]\n  \
   -h, --help           Show this help\n\n\
 Keys:\n  \
   Esc/q            quit\n  \
   Enter            toggle freeze\n  \
-  Space            toggle peak hold\n  \
+  p                toggle peak hold\n  \
+  Space            select channel (for compare layout)\n  \
   s                save screenshot + CSV\n  \
-  +/-              adjust dB range\n  \
-  l                cycle layout (grid/overlay/single)\n  \
+  d                toggle GPU/CPU timing overlay\n  \
+  w                cycle view (spectrum/waterfall)\n  \
+  l                cycle layout (grid/overlay/single/compare)\n  \
   f                toggle fullscreen\n  \
-  Ctrl+Tab         next channel (single mode)\n  \
-  Ctrl+Shift+Tab   prev channel\n\n\
+  h                toggle help overlay\n  \
+  +/-              adjust dB range\n  \
+  [/]              shift waterfall colormap floor\n  \
+  Ctrl+R           reset all views and grid sizing\n  \
+  Tab              next page (grid) / next channel\n  \
+  Shift+Tab        prev page (grid) / prev channel\n\n\
 Mouse:\n  \
-  Scroll           zoom both axes around cursor\n  \
-  Shift+Scroll     zoom dB axis only\n  \
-  Ctrl+Scroll      zoom frequency axis only\n  \
+  Scroll (cell)    zoom freq (waterfall) / both axes (spectrum)\n  \
+  Scroll (bg)      resize grid cells (grid layout only)\n  \
+  Shift+Scroll     zoom dB / gain\n  \
+  Ctrl+Scroll      zoom freq (spectrum) / zoom time (waterfall)\n  \
   Left-drag        pan view\n  \
-  Right-click      reset view\n"
+  Right-click      reset hovered cell\n"
     );
 }

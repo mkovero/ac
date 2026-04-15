@@ -584,6 +584,7 @@ Commands:
   plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
   transfer        [<freqStart freqStop>] [level]                H1 transfer function (requires reference)
   monitor         [<freqStart freqStop>] [interval] [show]      live spectrum
+  ui              [--synthetic] [--channels N] [--view <mode>]   GPU spectrum/waterfall UI (ac-ui)
   stop                                                          stop active generator/measurement
   test software                                                  validate analysis pipeline (no hardware)
   test hardware   [dmm]                                          hardware validation (requires 2 loopbacks)

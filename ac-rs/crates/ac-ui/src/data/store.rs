@@ -13,6 +13,7 @@ struct ChannelSlot {
     last_peak_update: Instant,
     last_freqs_len: usize,
     has_data: bool,
+    last_frame_id: u64,
 }
 
 impl ChannelSlot {
@@ -24,6 +25,7 @@ impl ChannelSlot {
             last_peak_update: Instant::now(),
             last_freqs_len: 0,
             has_data: false,
+            last_frame_id: 0,
         }
     }
 
@@ -42,6 +44,11 @@ impl ChannelSlot {
             self.peak_hold = vec![DB_FLOOR; n];
             self.averaged = frame.spectrum.clone();
             self.last_freqs_len = n;
+        }
+
+        let is_fresh = frame.frame_id != 0 && frame.frame_id != self.last_frame_id;
+        if is_fresh {
+            self.last_frame_id = frame.frame_id;
         }
 
         if n > 0 {
@@ -65,6 +72,12 @@ impl ChannelSlot {
             self.has_data = true;
         }
 
+        let new_row = if is_fresh && n > 0 {
+            Some(self.averaged.clone())
+        } else {
+            None
+        };
+
         Some(DisplayFrame {
             spectrum: self.averaged.clone(),
             peak_hold: if config.peak_hold {
@@ -74,6 +87,7 @@ impl ChannelSlot {
             },
             freqs: frame.freqs.clone(),
             meta: FrameMeta::from(frame),
+            new_row,
         })
     }
 }

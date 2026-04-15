@@ -115,7 +115,7 @@ impl Calibration {
         let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
         let all = read_all_entries(&path)?;
         let key = format!("out{}_in{}", output_channel, input_channel);
-        Ok(all.get(&key).map(|e| Calibration::from_entry(e)))
+        Ok(all.get(&key).map(Calibration::from_entry))
     }
 
     /// Load the first calibration matching `output_channel`, any input.
@@ -132,14 +132,14 @@ impl Calibration {
                 format!("out{}_in{}", e.output_channel, e.input_channel)
                     .starts_with(&prefix)
             })
-            .map(|e| Calibration::from_entry(e)))
+            .map(Calibration::from_entry))
     }
 
     /// Load all stored calibration entries.
     pub fn load_all(path: Option<&Path>) -> Result<Vec<Self>> {
         let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
         let all = read_all_entries(&path)?;
-        Ok(all.values().map(|e| Calibration::from_entry(e)).collect())
+        Ok(all.values().map(Calibration::from_entry).collect())
     }
 
     /// Print a human-readable calibration summary to stderr.

@@ -14,14 +14,18 @@ use winit::window::{Window, WindowId};
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
 use crate::data::store::ChannelStore;
 use crate::data::synthetic::SyntheticHandle;
-use crate::data::types::{DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame};
+use crate::data::types::{
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, ViewMode,
+};
 use crate::render::context::RenderContext;
 use crate::render::grid;
 use crate::render::spectrum::{ChannelMeta, ChannelUpload, SpectrumRenderer};
+use crate::render::waterfall::{CellUpload as WaterfallCellUpload, WaterfallRenderer};
 use crate::theme;
 use crate::ui::export::{self, ScreenshotRequest};
-use crate::ui::layout;
-use crate::ui::overlay::{self, OverlayInput};
+use crate::ui::layout::{self, GridParams};
+use crate::ui::overlay::{self, HoverInfo, OverlayInput};
+use crate::ui::stats::{StatsSnapshot, TimingStats};
 
 pub enum DataSource {
     Synthetic(#[allow(dead_code)] SyntheticHandle),
@@ -51,6 +55,8 @@ pub struct AppInit {
     pub output_dir: PathBuf,
     pub endpoint: String,
     pub synthetic_params: Option<(usize, usize, f32)>,
+    pub benchmark_secs: Option<f64>,
+    pub initial_view: ViewMode,
 }
 
 pub enum SourceKind {
@@ -63,8 +69,32 @@ pub struct App {
     source: Option<DataSource>,
     store: Option<ChannelStore>,
     config: DisplayConfig,
+    cell_views: Vec<CellView>,
+    selected: Vec<bool>,
+    show_help: bool,
+    /// Grid layout sizing. `cell_size = None` = auto (sqrt layout, one page);
+    /// scrolling outside cells switches to manual mode. `page` is capped to
+    /// `grid_dims().3 - 1` after every resize/channel change.
+    grid_cell_size: Option<f32>,
+    grid_page: usize,
+    /// Flipped true the first time a waterfall frame lands for each channel
+    /// so we can auto-init dB range from that frame's mean. Cleared on
+    /// `Ctrl+R`, on view-mode changes, and when cell_views is reallocated.
+    waterfall_inited: Vec<bool>,
+    /// Rolling estimate of the producer's frame interval in seconds. Updated
+    /// via EMA on every channel-0 `new_row` arrival so the waterfall Y axis
+    /// can label time as "-{N s}" rather than an abstract "past". Defaults to
+    /// 0.1 s (10 Hz) until we see two frames.
+    waterfall_row_period_s: f32,
+    waterfall_last_row_at: Option<Instant>,
+    /// Highest `freqs.last()` observed across any frame, used as the freq
+    /// clamp ceiling so zoom/pan caps at real Nyquist instead of the 24 kHz
+    /// default (48 kHz sr). Seeded from `DEFAULT_FREQ_MAX`, grows monotonically
+    /// as daemons at higher sample rates come online.
+    data_freq_ceiling: f32,
     render_ctx: Option<RenderContext>,
     spectrum: Option<SpectrumRenderer>,
+    waterfall: Option<WaterfallRenderer>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -76,11 +106,17 @@ pub struct App {
     last_render: Instant,
     cursor_pos: Option<PhysicalPosition<f64>>,
     drag: Option<DragState>,
+    timing_stats: TimingStats,
+    show_timing: bool,
+    benchmark_secs: Option<f64>,
+    benchmark_started: Option<Instant>,
+    benchmark_report: Option<String>,
 }
 
 #[derive(Clone)]
 struct DragState {
     start: PhysicalPosition<f64>,
+    targets: Vec<usize>,
     start_log_min: f32,
     start_log_max: f32,
     start_db_min: f32,
@@ -92,13 +128,29 @@ struct DragState {
 impl App {
     pub fn new(init: AppInit) -> Self {
         let output_dir = init.output_dir.clone();
+        let benchmark_secs = init.benchmark_secs;
+        let show_timing = benchmark_secs.is_some();
+        let config = DisplayConfig {
+            view_mode: init.initial_view,
+            ..DisplayConfig::default()
+        };
         Self {
             init: Some(init),
             source: None,
             store: None,
-            config: DisplayConfig::default(),
+            config,
+            cell_views: Vec::new(),
+            selected: Vec::new(),
+            show_help: false,
+            grid_cell_size: None,
+            grid_page: 0,
+            waterfall_inited: Vec::new(),
+            waterfall_row_period_s: 0.1,
+            waterfall_last_row_at: None,
+            data_freq_ceiling: theme::DEFAULT_FREQ_MAX,
             render_ctx: None,
             spectrum: None,
+            waterfall: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
@@ -110,10 +162,94 @@ impl App {
             last_render: Instant::now(),
             cursor_pos: None,
             drag: None,
+            timing_stats: TimingStats::new(),
+            show_timing,
+            benchmark_secs,
+            benchmark_started: None,
+            benchmark_report: None,
         }
     }
 
-    fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(f32, f32, f32, f32)> {
+    pub fn benchmark_report(&self) -> Option<&str> {
+        self.benchmark_report.as_deref()
+    }
+
+    fn benchmark_tick(&mut self, elwt: &ActiveEventLoop) {
+        let secs = match self.benchmark_secs {
+            Some(s) => s,
+            None => return,
+        };
+        if self.benchmark_started.is_none() {
+            self.benchmark_started = Some(Instant::now());
+            return;
+        }
+        let started = self.benchmark_started.unwrap();
+        if started.elapsed().as_secs_f64() < secs { return; }
+
+        let snap = self.timing_stats.snapshot();
+        let gpu = snap.gpu;
+        let report = format!(
+            "ac-ui benchmark: {:.1} s, {} frames\n  fps mean {:.2}\n  frame ms mean {:.3}  p50 {:.3}  p95 {:.3}  p99 {:.3}\n  cpu ms mean {:.3}\n  gpu ms last  total {:.3}  spectrum {:.3}  egui {:.3}",
+            started.elapsed().as_secs_f64(),
+            snap.samples,
+            snap.fps,
+            snap.frame_mean_ms,
+            snap.frame_p50_ms,
+            snap.frame_p95_ms,
+            snap.frame_p99_ms,
+            snap.cpu_mean_ms,
+            gpu.gpu_ms,
+            gpu.spectrum_ms,
+            gpu.egui_ms,
+        );
+        self.benchmark_report = Some(report);
+        elwt.exit();
+    }
+
+    fn grid_params(&self) -> GridParams {
+        GridParams {
+            cell_size: self.grid_cell_size,
+            page:      self.grid_page,
+        }
+    }
+
+    /// Scroll-to-resize handler, only active in Grid layout when the cursor
+    /// sits outside any cell (the empty band around / between cells). Seeds
+    /// from the current auto layout so the first tick is a continuous step
+    /// from wherever the user currently sees, then pins `grid_page` into the
+    /// new page range so the visible content doesn't jump off-screen.
+    fn adjust_grid_size(&mut self, scroll_y: f32) {
+        let n = self.cell_views.len();
+        if n == 0 {
+            return;
+        }
+        let current = self.grid_cell_size.unwrap_or_else(|| {
+            let cols = (n as f32).sqrt().ceil().max(1.0);
+            1.0 / cols
+        });
+        // Scroll up (positive) = larger cells (fewer per page). Clamped so we
+        // never produce zero-width cells or fewer than 1 col.
+        let factor = 1.15_f32.powf(scroll_y);
+        let new_size = (current * factor).clamp(1.0 / 8.0, 1.0);
+        self.grid_cell_size = Some(new_size);
+        let (cols, rows, _page_size, pages) =
+            layout::grid_dims(n, self.grid_params());
+        self.grid_page = self.grid_page.min(pages.saturating_sub(1));
+        self.notify(&format!(
+            "grid {}×{} · page {}/{}",
+            cols,
+            rows,
+            self.grid_page + 1,
+            pages,
+        ));
+    }
+
+    /// Identify the cell the cursor is in. Returns `(channel, nx, ny, w_px, h_px)`
+    /// where `(nx, ny)` are normalized cell-local coords (y up) and `channel` is
+    /// the cell's primary channel. In Overlay mode every cell shares the same
+    /// rect so this returns the first hit; call [`targets_for_channel`] to
+    /// resolve the full set of cell_views to mutate.
+    fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(usize, f32, f32, f32, f32)> {
         let ctx = self.render_ctx.as_ref()?;
         let w = ctx.config.width as f32;
         let h = ctx.config.height as f32;
@@ -121,7 +257,13 @@ impl App {
         if n == 0 {
             return None;
         }
-        let cells = layout::compute(self.config.layout, n, self.config.active_channel);
+        let cells = layout::compute(
+            self.config.layout,
+            n,
+            self.config.active_channel,
+            &self.selected,
+            self.grid_params(),
+        );
         for c in &cells {
             let r = layout::to_pixel_rect(c, w, h);
             let x = pos.x as f32;
@@ -129,10 +271,33 @@ impl App {
             if x >= r.left() && x <= r.right() && y >= r.top() && y <= r.bottom() {
                 let nx = (x - r.left()) / r.width().max(1.0);
                 let ny = 1.0 - (y - r.top()) / r.height().max(1.0);
-                return Some((nx, ny, r.width(), r.height()));
+                return Some((c.channel, nx, ny, r.width(), r.height()));
             }
         }
         None
+    }
+
+    /// Which `cell_views` indices should a mouse/key interaction under the
+    /// given hovered channel mutate. Grid → just that cell. Overlay → all
+    /// cells (their rects are stacked). Single → whichever channel is active.
+    fn targets_for_channel(&self, hovered: usize) -> Vec<usize> {
+        let n = self.cell_views.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        match self.config.layout {
+            LayoutMode::Grid => vec![hovered.min(n - 1)],
+            LayoutMode::Overlay => (0..n).collect(),
+            LayoutMode::Single => vec![self.config.active_channel.min(n - 1)],
+            // Compare stacks the selected set in one rect, so zoom/pan should
+            // move every selected channel together to keep the overlay coherent.
+            LayoutMode::Compare => self
+                .selected
+                .iter()
+                .enumerate()
+                .filter_map(|(i, sel)| sel.then_some(i))
+                .collect(),
+        }
     }
 
     fn apply_zoom(&mut self, scroll_y: f32) {
@@ -140,33 +305,72 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let (nx, ny, _, _) = match self.cell_at(pos) {
+        let (hovered, nx, ny, _, _) = match self.cell_at(pos) {
             Some(v) => v,
             None => return,
         };
+        let targets = self.targets_for_channel(hovered);
         let factor = 0.85_f32.powf(scroll_y);
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
+        let waterfall = matches!(self.config.view_mode, ViewMode::Waterfall);
 
-        if !shift {
-            let log_min = self.config.freq_min.max(1.0).log10();
-            let log_max = self.config.freq_max.max(log_min.exp().max(10.0)).log10();
-            let anchor = log_min + nx * (log_max - log_min);
-            let new_span = ((log_max - log_min) * factor).clamp(0.15, 4.5);
-            let new_min = (anchor - nx * new_span).clamp(0.0, 4.5);
-            let new_max = (new_min + new_span).min(4.8);
-            self.config.freq_min = 10.0_f32.powf(new_min).max(1.0);
-            self.config.freq_max = 10.0_f32.powf(new_max);
-        }
-        if !ctrl {
-            let db_min = self.config.db_min;
-            let db_max = self.config.db_max;
-            let anchor = db_min + ny * (db_max - db_min);
-            let new_span = ((db_max - db_min) * factor).clamp(10.0, 240.0);
-            let new_min = (anchor - ny * new_span).max(-240.0);
-            let new_max = (new_min + new_span).min(20.0);
-            self.config.db_min = new_min;
-            self.config.db_max = new_max;
+        // Hard floor/ceiling on the visible freq window: the spectrum data
+        // only covers ~20 Hz..Nyquist, so letting the user zoom out past the
+        // data just shows empty space. Ceiling grows to match the largest
+        // `freqs.last()` we've seen from the producer (96 kHz sessions etc.).
+        let data_log_min = theme::DEFAULT_FREQ_MIN.log10();
+        let data_log_max = self.data_freq_ceiling.max(theme::DEFAULT_FREQ_MAX).log10();
+        let data_ceiling = 10_f32.powf(data_log_max);
+        let data_span = (data_log_max - data_log_min).max(0.001);
+        // In waterfall mode: plain scroll = freq, Ctrl+scroll = time (rows
+        // shown), Shift+scroll = gain (colormap dB). Spectrum mode keeps the
+        // "plain scroll zooms both axes at once" feel.
+        let (zoom_freq, zoom_db, zoom_time) = if waterfall {
+            (!shift && !ctrl, shift, ctrl)
+        } else {
+            (!shift, !ctrl, false)
+        };
+
+        for idx in targets {
+            let view = match self.cell_views.get_mut(idx) {
+                Some(v) => v,
+                None => continue,
+            };
+            if zoom_freq {
+                let log_min = view.freq_min.max(1.0).log10();
+                let log_max = view.freq_max.max(log_min.exp().max(10.0)).log10();
+                let anchor = log_min + nx * (log_max - log_min);
+                let new_span = ((log_max - log_min) * factor).clamp(0.15, data_span);
+                let mut new_min = anchor - nx * new_span;
+                let mut new_max = new_min + new_span;
+                if new_min < data_log_min {
+                    new_min = data_log_min;
+                    new_max = (new_min + new_span).min(data_log_max);
+                }
+                if new_max > data_log_max {
+                    new_max = data_log_max;
+                    new_min = (new_max - new_span).max(data_log_min);
+                }
+                view.freq_min = 10.0_f32.powf(new_min).max(theme::DEFAULT_FREQ_MIN);
+                view.freq_max = 10.0_f32.powf(new_max).min(data_ceiling);
+            }
+            if zoom_db {
+                let db_min = view.db_min;
+                let db_max = view.db_max;
+                let anchor = db_min + ny * (db_max - db_min);
+                let new_span = ((db_max - db_min) * factor).clamp(10.0, 240.0);
+                let new_min = (anchor - ny * new_span).max(-240.0);
+                let new_max = (new_min + new_span).min(20.0);
+                view.db_min = new_min;
+                view.db_max = new_max;
+            }
+            if zoom_time {
+                let current = view.rows_visible.max(1) as f32;
+                let max_rows = crate::render::waterfall::ROWS_PER_CHANNEL as f32;
+                let new_rows = (current * factor).round().clamp(8.0, max_rows);
+                view.rows_visible = new_rows as u32;
+            }
         }
     }
 
@@ -175,20 +379,28 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let cell = match self.cell_at(pos) {
+        let (hovered, _nx, _ny, cell_w, cell_h) = match self.cell_at(pos) {
             Some(v) => v,
             None => return,
         };
-        let log_min = self.config.freq_min.max(1.0).log10();
-        let log_max = self.config.freq_max.max(10.0).log10();
+        let targets = self.targets_for_channel(hovered);
+        // Capture the seed view from the first target so every cell in the
+        // set pans by the same amount regardless of where they started.
+        let seed = match targets.first().and_then(|&i| self.cell_views.get(i)) {
+            Some(v) => *v,
+            None => return,
+        };
+        let log_min = seed.freq_min.max(1.0).log10();
+        let log_max = seed.freq_max.max(10.0).log10();
         self.drag = Some(DragState {
             start: pos,
+            targets,
             start_log_min: log_min,
             start_log_max: log_max,
-            start_db_min: self.config.db_min,
-            start_db_max: self.config.db_max,
-            cell_w_px: cell.2,
-            cell_h_px: cell.3,
+            start_db_min: seed.db_min,
+            start_db_max: seed.db_max,
+            cell_w_px: cell_w,
+            cell_h_px: cell_h,
         });
     }
 
@@ -197,28 +409,104 @@ impl App {
             Some(d) => d,
             None => return,
         };
+        let waterfall = matches!(self.config.view_mode, ViewMode::Waterfall);
+        let data_log_min = theme::DEFAULT_FREQ_MIN.log10();
+        let data_log_max = self.data_freq_ceiling.max(theme::DEFAULT_FREQ_MAX).log10();
+        let data_ceiling = 10_f32.powf(data_log_max);
         let dx_px = (pos.x - drag.start.x) as f32;
         let dy_px = (pos.y - drag.start.y) as f32;
         let log_span = drag.start_log_max - drag.start_log_min;
         let db_span = drag.start_db_max - drag.start_db_min;
         let d_log = -(dx_px / drag.cell_w_px.max(1.0)) * log_span;
         let d_db = -(dy_px / drag.cell_h_px.max(1.0)) * db_span;
-        let new_log_min = (drag.start_log_min + d_log).clamp(0.0, 4.8 - log_span.min(4.8));
-        let new_log_max = new_log_min + log_span;
+        let new_log_min = (drag.start_log_min + d_log)
+            .clamp(data_log_min, (data_log_max - log_span).max(data_log_min));
+        let new_log_max = (new_log_min + log_span).min(data_log_max);
         let new_db_min = (drag.start_db_min + d_db).max(-240.0);
         let new_db_max = (new_db_min + db_span).min(20.0);
-        self.config.freq_min = 10.0_f32.powf(new_log_min).max(1.0);
-        self.config.freq_max = 10.0_f32.powf(new_log_max);
-        self.config.db_min = new_db_min;
-        self.config.db_max = new_db_max;
+        for &idx in &drag.targets {
+            if let Some(view) = self.cell_views.get_mut(idx) {
+                view.freq_min = 10.0_f32.powf(new_log_min).max(theme::DEFAULT_FREQ_MIN);
+                view.freq_max = 10.0_f32.powf(new_log_max).min(data_ceiling);
+                if !waterfall {
+                    view.db_min = new_db_min;
+                    view.db_max = new_db_max;
+                }
+            }
+        }
     }
 
-    fn reset_view(&mut self) {
-        self.config.freq_min = theme::DEFAULT_FREQ_MIN;
-        self.config.freq_max = theme::DEFAULT_FREQ_MAX;
-        self.config.db_min = theme::DEFAULT_DB_MIN;
-        self.config.db_max = theme::DEFAULT_DB_MAX;
+    fn reset_hovered_view(&mut self) {
+        let pos = match self.cursor_pos {
+            Some(p) => p,
+            None => {
+                self.reset_all_views();
+                return;
+            }
+        };
+        let hovered = match self.cell_at(pos) {
+            Some((ch, _, _, _, _)) => ch,
+            None => {
+                self.reset_all_views();
+                return;
+            }
+        };
+        for idx in self.targets_for_channel(hovered) {
+            if let Some(view) = self.cell_views.get_mut(idx) {
+                *view = CellView::default();
+            }
+        }
         self.notify("view reset");
+    }
+
+    fn reset_all_views(&mut self) {
+        for view in &mut self.cell_views {
+            *view = CellView::default();
+        }
+        for init in &mut self.waterfall_inited {
+            *init = false;
+        }
+        self.grid_cell_size = None;
+        self.grid_page = 0;
+        self.notify("all views reset");
+    }
+
+    /// Which channel does Space act on. Single mode → the active channel (the
+    /// one visible). Any other layout → the hovered cell, or the active
+    /// channel as a fallback when the cursor sits outside the plot area.
+    fn selection_target(&self) -> Option<usize> {
+        let n = self.selected.len();
+        if n == 0 {
+            return None;
+        }
+        let idx = match self.config.layout {
+            LayoutMode::Single => self.config.active_channel,
+            _ => self
+                .cursor_pos
+                .and_then(|p| self.cell_at(p))
+                .map(|(ch, _, _, _, _)| ch)
+                .unwrap_or(self.config.active_channel),
+        };
+        Some(idx.min(n - 1))
+    }
+
+    fn toggle_selection(&mut self) {
+        let target = match self.selection_target() {
+            Some(t) => t,
+            None => return,
+        };
+        let now_selected = {
+            let slot = &mut self.selected[target];
+            *slot = !*slot;
+            *slot
+        };
+        let count = self.selected.iter().filter(|s| **s).count();
+        self.notify(&format!(
+            "CH{} {} ({} selected)",
+            target,
+            if now_selected { "selected" } else { "unselected" },
+            count,
+        ));
     }
 
     fn start_data_source(&mut self) {
@@ -226,6 +514,9 @@ impl App {
             Some(i) => i,
             None => return,
         };
+        self.cell_views = vec![CellView::default(); init.store.len()];
+        self.selected = vec![false; init.store.len()];
+        self.waterfall_inited = vec![false; init.store.len()];
         self.store = Some(init.store);
         match init.source_kind {
             SourceKind::Synthetic => {
@@ -239,9 +530,7 @@ impl App {
                 self.source = Some(DataSource::Synthetic(handle));
             }
             SourceKind::Daemon => {
-                let mut inputs = init.inputs;
-                let input = inputs.remove(0);
-                let handle = crate::data::receiver::spawn(init.endpoint, input);
+                let handle = crate::data::receiver::spawn(init.endpoint, init.inputs);
                 self.source = Some(DataSource::Receiver(handle));
             }
         }
@@ -251,6 +540,7 @@ impl App {
         let ctx = pollster::block_on(RenderContext::new(window.clone())).expect("wgpu init");
         let format = ctx.surface_format();
         let spectrum = SpectrumRenderer::new(&ctx.device, format);
+        let waterfall = WaterfallRenderer::new(&ctx.device, &ctx.queue, format);
         let egui_renderer = egui_wgpu::Renderer::new(&ctx.device, format, None, 1, false);
         self.egui_ctx.set_visuals(dark_visuals());
         let viewport_id = self.egui_ctx.viewport_id();
@@ -258,6 +548,7 @@ impl App {
             egui_winit::State::new(self.egui_ctx.clone(), viewport_id, &window, None, None, None);
         self.render_ctx = Some(ctx);
         self.spectrum = Some(spectrum);
+        self.waterfall = Some(waterfall);
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
     }
@@ -270,12 +561,18 @@ impl App {
                 self.notify(if self.config.frozen { "FROZEN" } else { "live" });
             }
             KeyCode::Space => {
+                self.toggle_selection();
+            }
+            KeyCode::KeyP => {
                 self.config.peak_hold = !self.config.peak_hold;
                 self.notify(if self.config.peak_hold {
                     "peak hold on"
                 } else {
                     "peak hold off"
                 });
+            }
+            KeyCode::KeyH => {
+                self.show_help = !self.show_help;
             }
             KeyCode::KeyS => {
                 self.pending_screenshot = true;
@@ -286,6 +583,7 @@ impl App {
                     LayoutMode::Grid => "layout: grid",
                     LayoutMode::Overlay => "layout: overlay",
                     LayoutMode::Single => "layout: single",
+                    LayoutMode::Compare => "layout: compare",
                 });
             }
             KeyCode::KeyF => {
@@ -299,23 +597,92 @@ impl App {
                 }
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                let span = (self.config.db_max - self.config.db_min).max(20.0) - 20.0;
-                self.config.db_min = self.config.db_max - span.max(20.0);
+                self.adjust_hovered_db_span(-20.0);
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                let span = (self.config.db_max - self.config.db_min) + 20.0;
-                self.config.db_min = (self.config.db_max - span).max(-240.0);
+                self.adjust_hovered_db_span(20.0);
+            }
+            KeyCode::KeyD => {
+                self.show_timing = !self.show_timing;
+                self.notify(if self.show_timing { "timing on" } else { "timing off" });
+            }
+            KeyCode::KeyW => {
+                self.config.view_mode = self.config.view_mode.next();
+                // Re-arm waterfall auto-init on every switch into waterfall,
+                // so a fresh dB window gets picked from the current signal.
+                if matches!(self.config.view_mode, ViewMode::Waterfall) {
+                    for init in &mut self.waterfall_inited {
+                        *init = false;
+                    }
+                }
+                self.notify(match self.config.view_mode {
+                    ViewMode::Spectrum => "view: spectrum",
+                    ViewMode::Waterfall => "view: waterfall",
+                });
+            }
+            KeyCode::BracketLeft => {
+                self.shift_hovered_db_floor(-5.0);
+            }
+            KeyCode::BracketRight => {
+                self.shift_hovered_db_floor(5.0);
+            }
+            KeyCode::KeyR if self.modifiers.control_key() => {
+                self.reset_all_views();
             }
             KeyCode::Tab => {
                 let n = self.store.as_ref().map(|s| s.len()).unwrap_or(1).max(1);
-                if self.modifiers.control_key() {
-                    let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
-                    self.config.active_channel = (self.config.active_channel + delta) % n;
-                    self.notify(&format!("CH{}", self.config.active_channel));
+                // In Grid layout Tab pages through the grid (when more than
+                // one page exists). Other layouts still cycle the active
+                // channel for Single / overlay channel-of-interest.
+                if matches!(self.config.layout, LayoutMode::Grid) {
+                    let (_, _, _, pages) = layout::grid_dims(n, self.grid_params());
+                    if pages > 1 {
+                        let delta = if self.modifiers.shift_key() {
+                            pages - 1
+                        } else {
+                            1
+                        };
+                        self.grid_page = (self.grid_page + delta) % pages;
+                        self.notify(&format!("page {}/{}", self.grid_page + 1, pages));
+                        return;
+                    }
                 }
+                let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
+                self.config.active_channel = (self.config.active_channel + delta) % n;
+                self.notify(&format!("CH{}", self.config.active_channel));
             }
             _ => {}
         }
+    }
+
+    /// Resolve the set of cell_views a non-mouse key interaction targets:
+    /// hovered cell when the cursor is over one, otherwise every cell so the
+    /// keybind still does *something* useful when the mouse is outside.
+    fn key_targets(&self) -> Vec<usize> {
+        match self.cursor_pos.and_then(|p| self.cell_at(p)) {
+            Some((ch, _, _, _, _)) => self.targets_for_channel(ch),
+            None => (0..self.cell_views.len()).collect(),
+        }
+    }
+
+    fn adjust_hovered_db_span(&mut self, delta: f32) {
+        for idx in self.key_targets() {
+            if let Some(view) = self.cell_views.get_mut(idx) {
+                let span = (view.db_max - view.db_min + delta).clamp(20.0, 240.0);
+                view.db_min = (view.db_max - span).max(-240.0);
+            }
+        }
+    }
+
+    fn shift_hovered_db_floor(&mut self, delta: f32) {
+        let mut last = 0.0_f32;
+        for idx in self.key_targets() {
+            if let Some(view) = self.cell_views.get_mut(idx) {
+                view.db_min = (view.db_min + delta).clamp(-240.0, view.db_max - 10.0);
+                last = view.db_min;
+            }
+        }
+        self.notify(&format!("db min {}", last));
     }
 
     fn notify(&mut self, msg: &str) {
@@ -323,11 +690,14 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let frame_start = Instant::now();
+        let grid_params_snap = self.grid_params();
         let ctx = match self.render_ctx.as_mut() {
             Some(c) => c,
             None => return,
         };
         let spectrum = self.spectrum.as_mut().unwrap();
+        let waterfall = self.waterfall.as_mut().unwrap();
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
         let egui_state = self.egui_state.as_mut().unwrap();
 
@@ -344,37 +714,147 @@ impl App {
         };
 
         let n_channels = frames.len();
-        let cells = layout::compute(self.config.layout, n_channels, self.config.active_channel);
-
-        let mut uploads: Vec<ChannelUpload<'_>> = Vec::with_capacity(cells.len());
+        let cells = layout::compute(
+            self.config.layout,
+            n_channels,
+            self.config.active_channel,
+            &self.selected,
+            grid_params_snap,
+        );
         let cells_vec: Vec<_> = cells.clone();
+
+        // Track producer cadence from channel-0 new_row arrivals. EMA so a
+        // single hiccup doesn't bounce the time axis; guarded to a sane band
+        // (1 ms..5 s) to reject clock jumps and first-frame deltas.
+        if let Some(Some(f0)) = frames.first() {
+            if f0.new_row.is_some() {
+                let now = Instant::now();
+                if let Some(prev) = self.waterfall_last_row_at {
+                    let dt = now.duration_since(prev).as_secs_f32();
+                    if dt > 0.001 && dt < 5.0 {
+                        self.waterfall_row_period_s =
+                            0.85 * self.waterfall_row_period_s + 0.15 * dt;
+                    }
+                }
+                self.waterfall_last_row_at = Some(now);
+            }
+        }
+        // Stretch the freq clamp to whatever Nyquist the producer is running
+        // at: fake-audio daemon is typically 48 kHz → 24 kHz, but a 96 kHz
+        // session will hand us freqs up to ~48 kHz and the clamp must follow.
+        for slot in frames.iter().flatten() {
+            if let Some(&last) = slot.freqs.last() {
+                if last.is_finite() && last > self.data_freq_ceiling {
+                    self.data_freq_ceiling = last;
+                }
+            }
+        }
+
+        let view_mode = self.config.view_mode;
+        // First waterfall frame per channel picks a fixed [-60, 0] dB
+        // window. Anything below -60 bottoms out at the colormap floor,
+        // anything above 0 saturates — gives strong contrast for typical
+        // audio (bulk content between ~-40 and -10 dBFS).
+        if matches!(view_mode, ViewMode::Waterfall) {
+            for (i, slot) in frames.iter().enumerate() {
+                let Some(frame) = slot.as_ref() else { continue };
+                if frame.spectrum.is_empty() {
+                    continue;
+                }
+                let already = self.waterfall_inited.get(i).copied().unwrap_or(true);
+                if already {
+                    continue;
+                }
+                if let Some(view) = self.cell_views.get_mut(i) {
+                    view.db_min = -60.0;
+                    view.db_max = 0.0;
+                }
+                if let Some(flag) = self.waterfall_inited.get_mut(i) {
+                    *flag = true;
+                }
+            }
+        }
+        let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
+        let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
+        match view_mode {
+            ViewMode::Spectrum => spectrum_uploads.reserve(cells_vec.len()),
+            ViewMode::Waterfall => waterfall_uploads.reserve(cells_vec.len()),
+        }
+
         for cell in &cells_vec {
             let frame = match frames.get(cell.channel).and_then(|f| f.as_ref()) {
                 Some(f) if !f.spectrum.is_empty() => f,
                 _ => continue,
             };
-            let freq_log_min = self.config.freq_min.max(1.0).log10();
-            let freq_log_max = self.config.freq_max.max(20.0).log10();
-            let meta = ChannelMeta {
-                color: theme::channel_color(cell.channel),
-                viewport: [cell.x, cell.y, cell.w, cell.h],
-                db_min: self.config.db_min,
-                db_max: self.config.db_max,
-                freq_log_min,
-                freq_log_max,
-                n_bins: frame.spectrum.len() as u32,
-                offset: 0,
-                _pad0: 0,
-                _pad1: 0,
-            };
-            uploads.push(ChannelUpload {
-                spectrum: &frame.spectrum,
-                freqs: &frame.freqs,
-                meta,
-            });
+            let view = self
+                .cell_views
+                .get(cell.channel)
+                .copied()
+                .unwrap_or_default();
+            let freq_log_min = view.freq_min.max(1.0).log10();
+            let freq_log_max = view.freq_max.max(20.0).log10();
+            match view_mode {
+                ViewMode::Spectrum => {
+                    let meta = ChannelMeta {
+                        color: theme::channel_color(cell.channel),
+                        viewport: [cell.x, cell.y, cell.w, cell.h],
+                        db_min: view.db_min,
+                        db_max: view.db_max,
+                        freq_log_min,
+                        freq_log_max,
+                        n_bins: frame.spectrum.len() as u32,
+                        offset: 0,
+                        _pad0: 0,
+                        _pad1: 0,
+                    };
+                    spectrum_uploads.push(ChannelUpload {
+                        spectrum: &frame.spectrum,
+                        freqs: &frame.freqs,
+                        meta,
+                    });
+                }
+                ViewMode::Waterfall => {
+                    // Detect log vs linear bin spacing from step growth at
+                    // the two ends of freqs. Synthetic log-spaced grows by
+                    // ~×1.01 per bin at the top vs bottom; real FFT linear
+                    // bins have constant step.
+                    let n = frame.freqs.len();
+                    let (freq_first, freq_last, log_spaced) = if n >= 4 {
+                        let lo_step = frame.freqs[1] - frame.freqs[0];
+                        let hi_step = frame.freqs[n - 1] - frame.freqs[n - 2];
+                        let is_log = hi_step > lo_step * 3.0;
+                        (frame.freqs[0], frame.freqs[n - 1], is_log)
+                    } else {
+                        (
+                            frame.freqs.first().copied().unwrap_or(1.0),
+                            frame.freqs.last().copied().unwrap_or(24000.0),
+                            false,
+                        )
+                    };
+                    waterfall_uploads.push(WaterfallCellUpload {
+                        channel: cell.channel,
+                        viewport: [cell.x, cell.y, cell.w, cell.h],
+                        db_min: view.db_min,
+                        db_max: view.db_max,
+                        freq_log_min,
+                        freq_log_max,
+                        n_bins: frame.spectrum.len() as u32,
+                        freq_first,
+                        freq_last,
+                        log_spaced,
+                        rows_visible: view.rows_visible,
+                        new_row: frame.new_row.as_deref(),
+                    });
+                }
+            }
         }
 
-        spectrum.upload(&ctx.device, &ctx.queue, &uploads);
+        match view_mode {
+            ViewMode::Spectrum => spectrum.upload(&ctx.device, &ctx.queue, &spectrum_uploads),
+            ViewMode::Waterfall => {
+                waterfall.upload(&ctx.device, &ctx.queue, n_channels, &waterfall_uploads);
+            }
+        }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
         let show_labels = self.config.layout != LayoutMode::Grid || n_channels <= 8;
@@ -384,6 +864,9 @@ impl App {
             .map(|s| s.connected())
             .unwrap_or(false);
         let config_snap = self.config.clone();
+        let cell_views_snap = self.cell_views.clone();
+        let selected_snap = self.selected.clone();
+        let show_help_snap = self.show_help;
         let width_px = ctx.config.width as f32;
         let height_px = ctx.config.height as f32;
         let notification = self
@@ -391,23 +874,102 @@ impl App {
             .as_ref()
             .filter(|(_, t)| t.elapsed() < Duration::from_millis(1200))
             .map(|(s, _)| s.clone());
+        let timing_for_overlay: Option<StatsSnapshot> =
+            self.show_timing.then(|| self.timing_stats.snapshot());
+        let gpu_supported = ctx.timing.is_some();
 
+        // Resolve the hovered cell inline off local snapshots so we don't
+        // borrow `self` across the egui-closure lifetime.
+        let hover_info = self.cursor_pos.and_then(|pos| {
+            let cx = pos.x as f32;
+            let cy = pos.y as f32;
+            let mut hit: Option<(usize, egui::Rect, f32, f32)> = None;
+            for c in &cells_vec {
+                let r = layout::to_pixel_rect(c, width_px, height_px);
+                if cx >= r.left() && cx <= r.right() && cy >= r.top() && cy <= r.bottom() {
+                    let nx = (cx - r.left()) / r.width().max(1.0);
+                    let ny = 1.0 - (cy - r.top()) / r.height().max(1.0);
+                    hit = Some((c.channel, r, nx, ny));
+                    break;
+                }
+            }
+            let (channel, rect, nx, ny) = hit?;
+            let view = cell_views_snap
+                .get(channel)
+                .copied()
+                .unwrap_or_default();
+            let log_min = view.freq_min.max(1.0).log10();
+            let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
+            let freq_hz = 10_f32.powf(log_min + nx * (log_max - log_min));
+            let db = view.db_min + ny * (view.db_max - view.db_min);
+            Some(HoverInfo {
+                channel,
+                rect,
+                cursor: egui::pos2(cx, cy),
+                freq_hz,
+                db,
+            })
+        });
+
+        let row_period_s = self.waterfall_row_period_s;
         let full_output = self.egui_ctx.run(raw_input, |ui_ctx| {
             let painter = ui_ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Background,
                 egui::Id::new("ac-ui-grid"),
             ));
+            let sel_border = egui::Color32::from_rgb(
+                theme::SELECT_BORDER[0],
+                theme::SELECT_BORDER[1],
+                theme::SELECT_BORDER[2],
+            );
             for cell in &cells_vec {
                 let rect = layout::to_pixel_rect(cell, width_px, height_px);
-                grid::draw_grid(&painter, rect, &config_snap, show_labels);
+                let view = cell_views_snap
+                    .get(cell.channel)
+                    .copied()
+                    .unwrap_or_default();
+                let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall)
+                    .then(|| grid::WaterfallTimeAxis {
+                        row_period_s,
+                        rows_visible: view.rows_visible,
+                    });
+                grid::draw_grid(
+                    &painter,
+                    rect,
+                    &view,
+                    config_snap.view_mode,
+                    show_labels,
+                    time_axis,
+                );
+                let is_selected = selected_snap
+                    .get(cell.channel)
+                    .copied()
+                    .unwrap_or(false);
+                // Highlight selected cells in the non-Compare layouts. In
+                // Compare the cells are already filtered to the selection set,
+                // so a per-cell border just adds noise on top of the legend.
+                if is_selected && !matches!(config_snap.layout, LayoutMode::Compare) {
+                    painter.rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(1.5, sel_border),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
             overlay::draw(
                 ui_ctx,
                 OverlayInput {
                     config: &config_snap,
                     frames: &frames,
+                    cell_views: &cell_views_snap,
+                    selected: &selected_snap,
                     connected,
                     notification: notification.as_deref(),
+                    timing: timing_for_overlay,
+                    gpu_supported,
+                    hover: hover_info.clone(),
+                    show_help: show_help_snap,
                 },
             );
         });
@@ -425,6 +987,7 @@ impl App {
             egui_renderer.update_texture(&ctx.device, &ctx.queue, *id, delta);
         }
 
+        let acquire_start = Instant::now();
         let surface_tex = match ctx.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
@@ -436,6 +999,7 @@ impl App {
                 return;
             }
         };
+        let acquire_wait = acquire_start.elapsed();
         let view = surface_tex
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -451,6 +1015,9 @@ impl App {
             &paint_jobs,
             &screen_desc,
         );
+
+        let spectrum_writes = ctx.timing.as_ref().map(|t| t.spectrum_writes());
+        let egui_writes     = ctx.timing.as_ref().map(|t| t.egui_writes());
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -469,10 +1036,13 @@ impl App {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: spectrum_writes,
                 occlusion_query_set: None,
             });
-            spectrum.draw(&mut pass);
+            match view_mode {
+                ViewMode::Spectrum => spectrum.draw(&mut pass),
+                ViewMode::Waterfall => waterfall.draw(&mut pass),
+            }
         }
 
         {
@@ -487,11 +1057,15 @@ impl App {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: egui_writes,
                 occlusion_query_set: None,
             });
             let mut pass = pass.forget_lifetime();
             egui_renderer.render(&mut pass, &paint_jobs, &screen_desc);
+        }
+
+        if let Some(timing) = ctx.timing.as_mut() {
+            timing.resolve(&mut encoder);
         }
 
         let capture = if self.pending_screenshot {
@@ -504,6 +1078,15 @@ impl App {
         ctx.queue.submit(Some(encoder.finish()));
         surface_tex.present();
 
+        let gpu_pass = if let Some(timing) = ctx.timing.as_mut() {
+            timing.after_submit();
+            let _ = ctx.device.poll(wgpu::Maintain::Poll);
+            timing.poll();
+            timing.last()
+        } else {
+            crate::render::timing::PassTimings::default()
+        };
+
         for id in &full_output.textures_delta.free {
             egui_renderer.free_texture(id);
         }
@@ -513,7 +1096,18 @@ impl App {
             self.notify("saved");
         }
 
-        self.last_render = Instant::now();
+        let now = Instant::now();
+        let frame_dt = now.saturating_duration_since(self.last_render);
+        // Subtract the surface-acquire wait so the cpu metric reflects actual
+        // CPU work, not vsync block time. With Fifo present mode the acquire
+        // call sleeps until the next vblank; counting that as cpu time would
+        // pin the metric to the frame budget regardless of how light the
+        // workload is.
+        let cpu_dt = now
+            .saturating_duration_since(frame_start)
+            .saturating_sub(acquire_wait);
+        self.timing_stats.push(cpu_dt, frame_dt, gpu_pass);
+        self.last_render = now;
     }
 }
 
@@ -628,6 +1222,22 @@ impl ApplicationHandler for App {
         _id: WindowId,
         event: WindowEvent,
     ) {
+        // Tab / Shift+Tab are our channel-cycle keys; egui's default focus
+        // handler would otherwise swallow them. We have no text inputs, so
+        // short-circuit the egui forward and dispatch straight to handle_key.
+        if let WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::Tab),
+                    state: ElementState::Pressed,
+                    ..
+                },
+            ..
+        } = &event
+        {
+            self.handle_key(elwt, KeyCode::Tab);
+            return;
+        }
         if let Some(state) = self.egui_state.as_mut() {
             if let Some(ctx) = self.render_ctx.as_ref() {
                 let resp = state.on_window_event(&ctx.window, &event);
@@ -671,7 +1281,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                self.reset_view();
+                self.reset_hovered_view();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
@@ -679,7 +1289,17 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => (p.y / 50.0) as f32,
                 };
                 if scroll != 0.0 {
-                    self.apply_zoom(scroll);
+                    // Scrolling inside a cell zooms that cell. Scrolling on
+                    // the bare background in Grid layout resizes the cells.
+                    let over_cell = self
+                        .cursor_pos
+                        .and_then(|p| self.cell_at(p))
+                        .is_some();
+                    if over_cell {
+                        self.apply_zoom(scroll);
+                    } else if matches!(self.config.layout, LayoutMode::Grid) {
+                        self.adjust_grid_size(scroll);
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -700,7 +1320,8 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _elwt: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
+        self.benchmark_tick(elwt);
         if let Some(ctx) = self.render_ctx.as_ref() {
             ctx.window.request_redraw();
         }

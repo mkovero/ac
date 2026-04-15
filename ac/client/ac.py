@@ -938,6 +938,13 @@ def cmd_monitor(cmd, cfg, client):
                 continue
             if frame.get("type") != "spectrum":
                 continue
+            # Phase 2: daemon may emit frames for multiple channels. The legacy
+            # TUI renders one channel at a time — filter to the configured one
+            # (or slot 0 when the frame predates the channel field).
+            primary_ch = cfg.get("input_channel", 0)
+            frame_ch = frame.get("channel")
+            if frame_ch is not None and frame_ch != primary_ch:
+                continue
 
             sr             = frame.get("sr", 48000)
             detected_hz    = frame.get("freq_hz", start_freq)
@@ -1703,6 +1710,23 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
         print(USAGE)
         return
+
+    # `ac ui ...` → exec the Rust GPU UI, bypassing the ZMQ client entirely.
+    # Mirrors the resolver in `ac/__main__.py` so both entry points agree.
+    if sys.argv[1] == "ui":
+        import os
+        import shutil
+        ui = shutil.which("ac-ui")
+        if not ui:
+            here = os.path.dirname(os.path.abspath(__file__))
+            dev = os.path.join(here, "..", "..", "ac-rs", "target", "debug", "ac-ui")
+            if os.path.isfile(dev) and os.access(dev, os.X_OK):
+                ui = os.path.abspath(dev)
+        if ui:
+            os.execvp(ui, [ui, *sys.argv[2:]])
+        print("  error: ac-ui not found — build it with: cd ac-rs && cargo build -p ac-ui",
+              file=sys.stderr)
+        sys.exit(1)
 
     try:
         cmd = parse(sys.argv[1:])

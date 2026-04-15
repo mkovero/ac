@@ -36,12 +36,18 @@ impl Drop for ReceiverHandle {
     }
 }
 
-pub fn spawn(endpoint: String, mut input: Input<SpectrumFrame>) -> ReceiverHandle {
+pub fn spawn(endpoint: String, inputs: Vec<Input<SpectrumFrame>>) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(ReceiverStatus::new());
     let stop_c = stop.clone();
     let status_c = status.clone();
     let join = thread::spawn(move || {
+        let mut inputs = inputs;
+        let n_slots = inputs.len();
+        let mut channel_map: Vec<Option<u32>> = vec![None; n_slots];
+        let mut slot_seq: Vec<u64> = vec![0; n_slots];
+        let mut warned_overflow = false;
+
         let ctx = zmq::Context::new();
         let sub = match ctx.socket(zmq::SUB) {
             Ok(s) => s,
@@ -72,17 +78,38 @@ pub fn spawn(endpoint: String, mut input: Input<SpectrumFrame>) -> ReceiverHandl
                         Some(("data", body)) => body,
                         _ => continue,
                     };
-                    let frame: SpectrumFrame = match serde_json::from_str(body) {
+                    let mut frame: SpectrumFrame = match serde_json::from_str(body) {
                         Ok(f) => f,
                         Err(_) => continue,
                     };
                     if frame.spectrum.is_empty() {
                         continue;
                     }
+                    // Daemon publishes a linear amplitude spectrum (|FFT|/N/wc
+                    // in [0, ~1]). The UI pipeline — auto-init dB window,
+                    // colormap mapping, hover readout — all assume dBFS. Match
+                    // `ac/ui/spectrum.py:131` which does the same conversion.
+                    for v in frame.spectrum.iter_mut() {
+                        *v = 20.0 * v.max(1e-12).log10();
+                    }
+                    let slot = route_slot(frame.channel, &mut channel_map);
+                    let Some(slot) = slot else {
+                        if !warned_overflow {
+                            log::warn!(
+                                "receiver: frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                frame.channel,
+                                n_slots
+                            );
+                            warned_overflow = true;
+                        }
+                        continue;
+                    };
                     status_c.connected.store(true, Ordering::Relaxed);
                     let ns = start.elapsed().as_nanos() as u64;
                     status_c.last_frame_ns.store(ns, Ordering::Relaxed);
-                    input.write(frame);
+                    slot_seq[slot] += 1;
+                    frame.frame_id = slot_seq[slot];
+                    inputs[slot].write(frame);
                 }
                 Ok(Err(_)) => continue,
                 Err(zmq::Error::EAGAIN) => {
@@ -101,6 +128,30 @@ pub fn spawn(endpoint: String, mut input: Input<SpectrumFrame>) -> ReceiverHandl
         join: Some(join),
         status,
     }
+}
+
+/// Map an incoming `channel` id onto a preallocated slot index.
+///
+/// First-come-first-served: the first unseen `channel` value claims the first
+/// free slot, subsequent frames for the same channel reuse it. Frames with no
+/// channel field always map to slot 0. Returns `None` when all slots are
+/// already claimed and the channel hasn't been seen — the caller drops the
+/// frame.
+fn route_slot(channel: Option<u32>, map: &mut [Option<u32>]) -> Option<usize> {
+    if map.is_empty() {
+        return None;
+    }
+    let Some(ch) = channel else {
+        return Some(0);
+    };
+    if let Some(idx) = map.iter().position(|slot| *slot == Some(ch)) {
+        return Some(idx);
+    }
+    if let Some(idx) = map.iter().position(Option::is_none) {
+        map[idx] = Some(ch);
+        return Some(idx);
+    }
+    None
 }
 
 fn mark_stale(status: &ReceiverStatus, start: &Instant) {

@@ -1,14 +1,60 @@
-use egui::{Align2, Color32, Context, FontId, Pos2};
+use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind};
 
-use crate::data::types::{DisplayConfig, DisplayFrame, LayoutMode};
+use crate::data::types::{CellView, DisplayConfig, DisplayFrame, LayoutMode, ViewMode};
+use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
+use crate::ui::stats::StatsSnapshot;
+
+#[derive(Clone)]
+pub struct HoverInfo {
+    pub channel: usize,
+    pub rect:    Rect,
+    pub cursor:  Pos2,
+    pub freq_hz: f32,
+    pub db:      f32,
+}
 
 pub struct OverlayInput<'a> {
     pub config: &'a DisplayConfig,
     pub frames: &'a [Option<DisplayFrame>],
+    pub cell_views: &'a [CellView],
+    pub selected: &'a [bool],
     pub connected: bool,
     pub notification: Option<&'a str>,
+    pub timing: Option<StatsSnapshot>,
+    pub gpu_supported: bool,
+    pub hover: Option<HoverInfo>,
+    pub show_help: bool,
 }
+
+const HELP_LINES: &[&str] = &[
+    "Keybindings",
+    "─────────────────────────────",
+    "Esc / Q        quit",
+    "Enter          freeze",
+    "P              peak hold",
+    "S              screenshot + CSV",
+    "W              cycle view (spec/water)",
+    "L              cycle layout",
+    "F              fullscreen",
+    "D              timing overlay",
+    "H              toggle this help",
+    "Space          select channel",
+    "Tab            next page / channel",
+    "Shift+Tab      prev page / channel",
+    "[ / ]          shift dB floor",
+    "+ / -          adjust dB range",
+    "Ctrl+R         reset all views",
+    "",
+    "Mouse",
+    "─────────────────────────────",
+    "Scroll (cell)  zoom both axes",
+    "Scroll (bg)    resize grid cells",
+    "Shift+Scroll   zoom dB (gain)",
+    "Ctrl+Scroll    zoom freq (spec) / time (water)",
+    "Left-drag      pan",
+    "Right-click    reset hovered cell",
+];
 
 pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     let screen = ctx.screen_rect();
@@ -34,6 +80,11 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
 
     if let Some(frame) = primary {
         let sr = frame.meta.sr;
+        let view = input
+            .cell_views
+            .get(display_ch)
+            .copied()
+            .unwrap_or_default();
         let top_right = format!("{} Hz │ CH{}", sr, display_ch);
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0),
@@ -42,6 +93,96 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             FontId::monospace(theme::STATUS_PX),
             text_color,
         );
+        // Gain / zoom indicator: show the active cell's dB and frequency
+        // windows directly below the sample-rate line. In Spectrum mode the
+        // dB range is the Y axis; in Waterfall mode it's the colormap range.
+        let gain_line = match input.config.view_mode {
+            ViewMode::Spectrum => format!(
+                "Y {:.0}..{:.0} dB  │  {}..{}",
+                view.db_min,
+                view.db_max,
+                format_hz(view.freq_min).trim(),
+                format_hz(view.freq_max).trim(),
+            ),
+            ViewMode::Waterfall => format!(
+                "color {:.0}..{:.0} dB  │  {}..{}",
+                view.db_min,
+                view.db_max,
+                format_hz(view.freq_min).trim(),
+                format_hz(view.freq_max).trim(),
+            ),
+        };
+        painter.text(
+            Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),
+            Align2::RIGHT_TOP,
+            gain_line,
+            FontId::monospace(theme::STATUS_PX),
+            text_color,
+        );
+
+        // Waterfall colorbar: vertical gradient sampled from the same
+        // inferno LUT the GPU uses, with dB tick labels every 20 dB. Anchored
+        // under the gain line so the reader sees "color X..Y dB" above and
+        // the actual scale below.
+        if matches!(input.config.view_mode, ViewMode::Waterfall) {
+            let bar_top = screen.top() + 6.0 + 2.0 * (theme::STATUS_PX + 2.0) + 6.0;
+            let bar_h = 120.0_f32;
+            let bar_w = 12.0_f32;
+            let label_col_w = 40.0_f32;
+            let bar_right = screen.right() - 8.0 - label_col_w;
+            let bar_left = bar_right - bar_w;
+            let strips = 48_usize;
+            for i in 0..strips {
+                // Top strip = max dB (hottest) so the bar visually matches
+                // the "loud up, quiet down" mental model.
+                let t = 1.0 - (i as f32 + 0.5) / strips as f32;
+                let lut_idx = ((t * 255.0).round() as usize).min(255);
+                let off = lut_idx * 4;
+                let color = Color32::from_rgb(
+                    COLORMAP_LUT[off],
+                    COLORMAP_LUT[off + 1],
+                    COLORMAP_LUT[off + 2],
+                );
+                let y0 = bar_top + (i as f32) * bar_h / strips as f32;
+                let y1 = bar_top + (i as f32 + 1.0) * bar_h / strips as f32;
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(bar_left, y0),
+                        Pos2::new(bar_right, y1),
+                    ),
+                    CornerRadius::ZERO,
+                    color,
+                );
+            }
+            painter.rect_stroke(
+                Rect::from_min_max(
+                    Pos2::new(bar_left, bar_top),
+                    Pos2::new(bar_right, bar_top + bar_h),
+                ),
+                CornerRadius::ZERO,
+                Stroke::new(1.0, text_color),
+                StrokeKind::Inside,
+            );
+            // Labels: db_max at top, db_min at bottom, ~3 ticks between.
+            let tick_dbs = [
+                view.db_max,
+                view.db_min + (view.db_max - view.db_min) * 0.75,
+                view.db_min + (view.db_max - view.db_min) * 0.50,
+                view.db_min + (view.db_max - view.db_min) * 0.25,
+                view.db_min,
+            ];
+            for (i, db) in tick_dbs.iter().enumerate() {
+                let t = i as f32 / (tick_dbs.len() as f32 - 1.0);
+                let y = bar_top + t * bar_h;
+                painter.text(
+                    Pos2::new(bar_right + 4.0, y),
+                    Align2::LEFT_CENTER,
+                    format!("{:+.0}", db),
+                    FontId::monospace(theme::GRID_LABEL_PX),
+                    text_color,
+                );
+            }
+        }
 
         let dbu = frame
             .meta
@@ -106,5 +247,153 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             FontId::monospace(theme::READOUT_PX),
             text_color,
         );
+    }
+
+    if matches!(input.config.layout, LayoutMode::Compare) {
+        let any_selected = input.selected.iter().any(|s| *s);
+        if !any_selected {
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "compare mode — press Space to select channels",
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        } else {
+            let x0 = screen.left() + 12.0;
+            let mut y = screen.top() + 12.0;
+            let row_h = theme::READOUT_PX + 4.0;
+            for (i, &sel) in input.selected.iter().enumerate() {
+                if !sel {
+                    continue;
+                }
+                let rgba = theme::channel_color(i);
+                let swatch = Color32::from_rgb(
+                    (rgba[0] * 255.0) as u8,
+                    (rgba[1] * 255.0) as u8,
+                    (rgba[2] * 255.0) as u8,
+                );
+                let swatch_rect = Rect::from_min_size(
+                    Pos2::new(x0, y + 2.0),
+                    egui::vec2(12.0, 12.0),
+                );
+                painter.rect_filled(swatch_rect, CornerRadius::ZERO, swatch);
+                painter.text(
+                    Pos2::new(x0 + 18.0, y),
+                    Align2::LEFT_TOP,
+                    format!("CH{i}"),
+                    FontId::monospace(theme::READOUT_PX),
+                    text_color,
+                );
+                y += row_h;
+            }
+        }
+    }
+
+    if let Some(hover) = input.hover.as_ref() {
+        let crosshair = Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, (0.55 * 255.0) as u8),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(hover.rect.left(), hover.cursor.y),
+                Pos2::new(hover.rect.right(), hover.cursor.y),
+            ],
+            crosshair,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(hover.cursor.x, hover.rect.top()),
+                Pos2::new(hover.cursor.x, hover.rect.bottom()),
+            ],
+            crosshair,
+        );
+        let label = format!(
+            "CH{} {} {:+6.1} dB",
+            hover.channel,
+            format_hz(hover.freq_hz),
+            hover.db,
+        );
+        // Pin the readout just above-right of the cursor, clamped so it
+        // stays inside the hovered cell.
+        let anchor = Pos2::new(
+            (hover.cursor.x + 8.0).min(hover.rect.right() - 4.0),
+            (hover.cursor.y - 8.0).max(hover.rect.top() + 4.0),
+        );
+        painter.text(
+            anchor,
+            Align2::LEFT_BOTTOM,
+            label,
+            FontId::monospace(theme::READOUT_PX),
+            text_color,
+        );
+    }
+
+    if let Some(snap) = input.timing {
+        let gpu = snap.gpu;
+        let line1 = format!(
+            "fps {:>5.1}   frame {:>5.2} ms   p95 {:>5.2}   p99 {:>5.2}",
+            snap.fps, snap.frame_mean_ms, snap.frame_p95_ms, snap.frame_p99_ms,
+        );
+        let line2 = if input.gpu_supported {
+            format!(
+                "cpu {:>5.2} ms   gpu {:>5.2}   spec {:>5.2}   egui {:>5.2}",
+                snap.cpu_mean_ms, gpu.gpu_ms, gpu.spectrum_ms, gpu.egui_ms,
+            )
+        } else {
+            format!("cpu {:>5.2} ms   gpu n/a (TIMESTAMP_QUERY unsupported)", snap.cpu_mean_ms)
+        };
+        let x = screen.left() + 8.0;
+        let y0 = screen.top() + 8.0;
+        let dy = theme::READOUT_PX + 2.0;
+        painter.text(Pos2::new(x, y0),        Align2::LEFT_TOP, line1, FontId::monospace(theme::READOUT_PX), text_color);
+        painter.text(Pos2::new(x, y0 + dy),   Align2::LEFT_TOP, line2, FontId::monospace(theme::READOUT_PX), text_color);
+    }
+
+    if input.show_help {
+        let line_h = theme::READOUT_PX + 4.0;
+        let pad = 16.0;
+        let panel_w = 380.0;
+        let panel_h = HELP_LINES.len() as f32 * line_h + pad * 2.0;
+        let panel = Rect::from_center_size(
+            screen.center(),
+            egui::vec2(panel_w, panel_h),
+        );
+        painter.rect_filled(
+            panel,
+            CornerRadius::same(4),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 220),
+        );
+        let border = Color32::from_rgb(
+            theme::SELECT_BORDER[0],
+            theme::SELECT_BORDER[1],
+            theme::SELECT_BORDER[2],
+        );
+        painter.rect_stroke(
+            panel,
+            CornerRadius::same(4),
+            Stroke::new(1.0, border),
+            StrokeKind::Inside,
+        );
+        let mut y = panel.top() + pad;
+        for line in HELP_LINES {
+            painter.text(
+                Pos2::new(panel.left() + pad, y),
+                Align2::LEFT_TOP,
+                *line,
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+            y += line_h;
+        }
+    }
+}
+
+fn format_hz(hz: f32) -> String {
+    if hz >= 1000.0 {
+        format!("{:>6.2} kHz", hz / 1000.0)
+    } else {
+        format!("{:>6.1} Hz ", hz)
     }
 }
