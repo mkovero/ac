@@ -1228,6 +1228,22 @@ impl App {
                 }
             }
         }
+        let is_overlay = matches!(self.config.layout, LayoutMode::Overlay);
+        let overlay_n = if is_overlay { cells_vec.len() } else { 1 };
+        let overlay_skip_fill = is_overlay && overlay_n >= 8;
+        let overlay_fill_alpha = if overlay_skip_fill {
+            0.0
+        } else if is_overlay && overlay_n > 1 {
+            0.15 / overlay_n as f32
+        } else {
+            0.0 // use shader default
+        };
+        let overlay_line_width = if is_overlay && overlay_n > 1 {
+            0.0018 / (overlay_n as f32).sqrt()
+        } else {
+            0.0 // use shader default
+        };
+
         let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
         if !in_transfer_layout {
@@ -1263,8 +1279,8 @@ impl App {
                         freq_log_max,
                         n_bins: frame.spectrum.len() as u32,
                         offset: 0,
-                        _pad0: 0,
-                        _pad1: 0,
+                        fill_alpha: overlay_fill_alpha,
+                        line_width: overlay_line_width,
                     };
                     spectrum_uploads.push(ChannelUpload {
                         spectrum: &frame.spectrum,
@@ -1309,7 +1325,10 @@ impl App {
         }
 
         match view_mode {
-            ViewMode::Spectrum => spectrum.upload(&ctx.device, &ctx.queue, &spectrum_uploads),
+            ViewMode::Spectrum => {
+                spectrum.set_skip_fill(overlay_skip_fill);
+                spectrum.upload(&ctx.device, &ctx.queue, &spectrum_uploads);
+            }
             ViewMode::Waterfall => {
                 waterfall.upload(&ctx.device, &ctx.queue, n_channels, &waterfall_uploads);
             }

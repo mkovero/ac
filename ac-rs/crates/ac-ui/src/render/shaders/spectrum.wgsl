@@ -7,8 +7,8 @@ struct ChannelMeta {
     freq_log_max: f32,
     n_bins: u32,
     offset: u32,
-    _pad0: u32,
-    _pad1: u32,
+    fill_alpha: f32,
+    line_width: f32,
 }
 
 @group(0) @binding(0) var<storage, read> spectrum_data: array<f32>;
@@ -23,8 +23,8 @@ struct VsOut {
 }
 
 const LN10: f32 = 2.302585;
-const LINE_HALF_W: f32 = 0.0018;
-const FILL_ALPHA: f32 = 0.15;
+const DEFAULT_LINE_HALF_W: f32 = 0.0018;
+const DEFAULT_FILL_ALPHA: f32 = 0.15;
 
 fn safe_idx(offset: u32, bin: u32, n_bins: u32) -> u32 {
     let b = min(bin, n_bins - 1u);
@@ -56,7 +56,8 @@ fn vs_line(@builtin(vertex_index) vid: u32, @builtin(instance_index) ch: u32) ->
     let bin = vid / 2u;
     let side = f32(vid % 2u) * 2.0 - 1.0;
     let p = bin_point(m, bin);
-    let y = p.y + side * LINE_HALF_W;
+    let lw = select(DEFAULT_LINE_HALF_W, m.line_width, m.line_width > 0.0);
+    let y = p.y + side * lw;
     var out: VsOut;
     out.pos = to_clip(vec2(p.x, y));
     out.color = m.color;
@@ -86,9 +87,10 @@ fn vs_fill(@builtin(vertex_index) vid: u32, @builtin(instance_index) ch: u32) ->
         y = m.viewport.y;
         frac = 0.0;
     }
+    let fa = select(DEFAULT_FILL_ALPHA, m.fill_alpha, m.fill_alpha > 0.0);
     var out: VsOut;
     out.pos = to_clip(vec2(p.x, y));
-    out.color = m.color;
+    out.color = vec4(m.color.rgb, fa);
     out.edge = 0.0;
     out.top_frac = frac;
     return out;
@@ -96,5 +98,5 @@ fn vs_fill(@builtin(vertex_index) vid: u32, @builtin(instance_index) ch: u32) ->
 
 @fragment
 fn fs_fill(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4(in.color.rgb, FILL_ALPHA * in.top_frac);
+    return vec4(in.color.rgb, in.color.a * in.top_frac);
 }

@@ -11,8 +11,8 @@ pub struct ChannelMeta {
     pub freq_log_max: f32,
     pub n_bins: u32,
     pub offset: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub fill_alpha: f32,
+    pub line_width: f32,
 }
 
 pub struct ChannelUpload<'a> {
@@ -33,6 +33,7 @@ pub struct SpectrumRenderer {
     capacity_channels: usize,
     active_channels: u32,
     max_bins: u32,
+    skip_fill: bool,
 }
 
 impl SpectrumRenderer {
@@ -126,6 +127,7 @@ impl SpectrumRenderer {
             capacity_channels,
             active_channels: 0,
             max_bins: 0,
+            skip_fill: false,
         }
     }
 
@@ -197,14 +199,20 @@ impl SpectrumRenderer {
         self.max_bins = max_bins as u32;
     }
 
+    pub fn set_skip_fill(&mut self, skip: bool) {
+        self.skip_fill = skip;
+    }
+
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         if self.active_channels == 0 || self.max_bins == 0 {
             return;
         }
         let verts = self.max_bins * 2;
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_pipeline(&self.pipeline_fill);
-        pass.draw(0..verts, 0..self.active_channels);
+        if !self.skip_fill {
+            pass.set_pipeline(&self.pipeline_fill);
+            pass.draw(0..verts, 0..self.active_channels);
+        }
         pass.set_pipeline(&self.pipeline_line);
         pass.draw(0..verts, 0..self.active_channels);
     }
