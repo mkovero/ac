@@ -128,6 +128,30 @@ fn serial_write(port: &Arc<Mutex<Box<dyn serialport::SerialPort>>>, bytes: [u8; 
 }
 
 // ---------------------------------------------------------------------------
+// Frame parser (pure, no I/O)
+// ---------------------------------------------------------------------------
+
+/// Parse complete 5-byte MCU→Host frames from `buf`, draining consumed bytes.
+/// Returns `(pin, value)` pairs. Partial frames stay in `buf` for the next call.
+fn parse_frames(buf: &mut Vec<u8>) -> Vec<(u8, u8)> {
+    let mut events = Vec::new();
+    loop {
+        let Some(start) = buf.iter().position(|&b| b == 0xAA) else {
+            buf.clear();
+            break;
+        };
+        if start > 0 { buf.drain(..start); }
+        if buf.len() < 5 { break; }
+
+        let pin   = buf[1];
+        let value = buf[2];
+        buf.drain(..5);
+        events.push((pin, value));
+    }
+    events
+}
+
+// ---------------------------------------------------------------------------
 // Thread: serial reader
 // ---------------------------------------------------------------------------
 
@@ -139,26 +163,13 @@ fn serial_reader(mut port: Box<dyn serialport::SerialPort>, tx: Sender<GpioEvent
     loop {
         match port.read(&mut tmp) {
             Ok(0) | Err(_) => {
-                // timeout (0 bytes) or error — keep trying
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
         }
 
-        // Parse 5-byte frames: [0xAA][pin][val][ts_lo][ts_hi]
-        loop {
-            let Some(start) = buf.iter().position(|&b| b == 0xAA) else {
-                buf.clear();
-                break;
-            };
-            if start > 0 { buf.drain(..start); }
-            if buf.len() < 5 { break; }
-
-            let pin   = buf[1];
-            let value = buf[2];
-            buf.drain(..5);
-
+        for (pin, value) in parse_frames(&mut buf) {
             let _ = tx.try_send(GpioEvent::Button(pin, value));
         }
     }
@@ -373,4 +384,127 @@ fn update_leds(port: &Arc<Mutex<Box<dyn serialport::SerialPort>>>, sine: bool, p
     serial_write(port, [0x55, CMD_SET_OUTPUT, PIN_LED_SINE, sine as u8]);
     serial_write(port, [0x55, CMD_SET_OUTPUT, PIN_LED_PINK, pink as u8]);
     serial_write(port, [0x55, CMD_SET_OUTPUT, PIN_LED_BUSY, busy as u8]);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(pin: u8, value: u8) -> Vec<u8> {
+        vec![0xAA, pin, value, 0x00, 0x00]
+    }
+
+    // ---- Well-formed frames ----
+
+    #[test]
+    fn single_press() {
+        let mut buf = frame(PIN_STOP, 0);
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_STOP, 0)]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn single_release() {
+        let mut buf = frame(PIN_GEN_SINE, 1);
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_GEN_SINE, 1)]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn timestamp_bytes_ignored() {
+        let mut buf = vec![0xAA, PIN_STOP, 0, 0xDE, 0xAD];
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_STOP, 0)]);
+    }
+
+    // ---- Partial frame buffering ----
+
+    #[test]
+    fn partial_frame_retained() {
+        let mut buf = vec![0xAA, PIN_STOP, 0];
+        let evs = parse_frames(&mut buf);
+        assert!(evs.is_empty());
+        assert_eq!(buf, vec![0xAA, PIN_STOP, 0]);
+    }
+
+    #[test]
+    fn partial_then_complete() {
+        let mut buf = vec![0xAA, PIN_STOP, 0];
+        assert!(parse_frames(&mut buf).is_empty());
+
+        buf.extend_from_slice(&[0x00, 0x00]);
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_STOP, 0)]);
+        assert!(buf.is_empty());
+    }
+
+    // ---- Corrupted / garbage ----
+
+    #[test]
+    fn garbage_before_sync_discarded() {
+        let mut buf = vec![0x01, 0x02, 0xFF];
+        buf.extend_from_slice(&frame(PIN_GEN_PINK, 0));
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_GEN_PINK, 0)]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn no_sync_clears_buffer() {
+        let mut buf = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let evs = parse_frames(&mut buf);
+        assert!(evs.is_empty());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn lone_sync_retained() {
+        let mut buf = vec![0xAA];
+        let evs = parse_frames(&mut buf);
+        assert!(evs.is_empty());
+        assert_eq!(buf, vec![0xAA]);
+    }
+
+    // ---- Multi-frame bursts ----
+
+    #[test]
+    fn two_frames_in_one_read() {
+        let mut buf = frame(PIN_STOP, 0);
+        buf.extend_from_slice(&frame(PIN_GEN_SINE, 0));
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(PIN_STOP, 0), (PIN_GEN_SINE, 0)]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn three_frames_with_garbage_between() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&frame(2, 0));
+        buf.extend_from_slice(&[0xFF, 0x00]);
+        buf.extend_from_slice(&frame(3, 0));
+        buf.extend_from_slice(&[0x42]);
+        buf.extend_from_slice(&frame(20, 1));
+        let evs = parse_frames(&mut buf);
+        assert_eq!(evs, vec![(2, 0), (3, 0), (20, 1)]);
+        assert!(buf.is_empty());
+    }
+
+    // ---- All known pins ----
+
+    #[test]
+    fn all_input_pins_parsed() {
+        let mut buf = Vec::new();
+        for &pin in INPUT_PINS {
+            buf.extend_from_slice(&frame(pin, 0));
+        }
+        let evs = parse_frames(&mut buf);
+        let pins: Vec<u8> = evs.iter().map(|&(p, _)| p).collect();
+        assert_eq!(pins, INPUT_PINS);
+    }
 }
