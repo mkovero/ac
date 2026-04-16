@@ -227,3 +227,162 @@ pub fn capture_duration(n_averages: usize, sr: u32) -> f64 {
     let total    = nperseg + step * (n_averages - 1);
     total as f64 / sr as f64
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use rand_distr::{Distribution, Normal};
+
+    const SR: u32 = 48_000;
+    const N: usize = 3 * SR as usize; // 3 s → 5 Welch segments
+
+    fn white_noise(n: usize, amplitude: f64, seed: u64) -> Vec<f32> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let dist = Normal::new(0.0, amplitude).unwrap();
+        (0..n).map(|_| dist.sample(&mut rng) as f32).collect()
+    }
+
+    // ---- capture_duration ----
+
+    #[test]
+    fn capture_duration_arithmetic() {
+        assert_relative_eq!(capture_duration(1, SR), 1.0, epsilon = 1e-12);
+        assert_relative_eq!(capture_duration(5, SR), 3.0, epsilon = 1e-12);
+        assert_relative_eq!(capture_duration(10, SR), 5.5, epsilon = 1e-12);
+    }
+
+    // ---- Unity / delay / filter ----
+
+    #[test]
+    fn unity_loopback() {
+        let sig = white_noise(N, 0.5, 42);
+        let r = h1_estimate(&sig, &sig, SR);
+
+        assert_eq!(r.delay_samples, 0);
+        for k in 20..=20_000 {
+            assert!(
+                r.magnitude_db[k].abs() < 0.1,
+                "bin {k}: mag {:.3} dB", r.magnitude_db[k]
+            );
+            assert!(
+                r.phase_deg[k].abs() < 1.0,
+                "bin {k}: phase {:.3}°", r.phase_deg[k]
+            );
+            assert!(
+                r.coherence[k] > 0.999,
+                "bin {k}: coh {:.4}", r.coherence[k]
+            );
+        }
+    }
+
+    #[test]
+    fn delay_only_path() {
+        let sig = white_noise(N, 0.5, 42);
+        let delay: usize = 100;
+
+        let mut meas = vec![0.0f32; N];
+        meas[delay..].copy_from_slice(&sig[..N - delay]);
+
+        let r = h1_estimate(&sig, &meas, SR);
+
+        assert_eq!(r.delay_samples, delay as i64);
+        let expected_ms = delay as f64 / SR as f64 * 1000.0;
+        assert_relative_eq!(r.delay_ms, expected_ms, epsilon = 0.01);
+
+        for k in 100..=20_000 {
+            assert!(
+                r.magnitude_db[k].abs() < 0.5,
+                "bin {k}: mag {:.3} dB", r.magnitude_db[k]
+            );
+            assert!(
+                r.coherence[k] > 0.95,
+                "bin {k}: coh {:.4}", r.coherence[k]
+            );
+        }
+    }
+
+    #[test]
+    fn single_pole_lowpass() {
+        let ref_sig = white_noise(N, 0.5, 42);
+
+        let fc = 2000.0_f64;
+        let a = 1.0 - (-2.0 * PI * fc / SR as f64).exp();
+
+        // Apply IIR: y[n] = a*x[n] + (1-a)*y[n-1]
+        let mut meas = vec![0.0f32; N];
+        let mut prev = 0.0_f64;
+        for i in 0..N {
+            let y = a * ref_sig[i] as f64 + (1.0 - a) * prev;
+            meas[i] = y as f32;
+            prev = y;
+        }
+
+        let r = h1_estimate(&ref_sig, &meas, SR);
+
+        // Analytical: H(z) = a / (1 - (1-a)*z^{-1})
+        let spot_checks: &[(f64, f64)] = &[
+            (200.0, 0.5),
+            (2000.0, 0.5),
+            (10000.0, 1.0),
+            (20000.0, 1.5),
+        ];
+        for &(freq, tol) in spot_checks {
+            let w = 2.0 * PI * freq / SR as f64;
+            let z_inv = Complex::new(w.cos(), -w.sin());
+            let denom = Complex::new(1.0, 0.0) - z_inv * (1.0 - a);
+            let h = Complex::new(a, 0.0) / denom;
+            let expected_db = 20.0 * h.norm().log10();
+            let k = freq.round() as usize;
+            assert!(
+                (r.magnitude_db[k] - expected_db).abs() < tol,
+                "f={freq}: got {:.2} dB, expected {:.2} dB",
+                r.magnitude_db[k], expected_db
+            );
+        }
+    }
+
+    // ---- Noise & coherence ----
+
+    #[test]
+    fn noise_robustness() {
+        let ref_sig = white_noise(N, 0.5, 42);
+        let noise = white_noise(N, 0.05, 99);
+        let meas: Vec<f32> = ref_sig.iter().zip(&noise).map(|(&s, &n)| s + n).collect();
+
+        let r = h1_estimate(&ref_sig, &meas, SR);
+
+        let range = 50..=20_000;
+        let count = range.clone().count() as f64;
+        let mean_mag_err: f64 =
+            range.clone().map(|k| r.magnitude_db[k].abs()).sum::<f64>() / count;
+        assert!(
+            mean_mag_err < 0.5,
+            "mean |mag error| {:.3} dB", mean_mag_err
+        );
+        let mean_coh: f64 =
+            range.map(|k| r.coherence[k]).sum::<f64>() / count;
+        assert!(mean_coh > 0.95, "mean coherence {:.4}", mean_coh);
+    }
+
+    #[test]
+    fn coherence_uncorrelated() {
+        let a = white_noise(N, 0.5, 42);
+        let b = white_noise(N, 0.5, 99);
+        let r = h1_estimate(&a, &b, SR);
+
+        let mean_coh: f64 =
+            r.coherence[1..].iter().sum::<f64>() / (r.coherence.len() - 1) as f64;
+        assert!(
+            mean_coh < 0.4,
+            "uncorrelated signals should have low coherence, got {:.4}",
+            mean_coh
+        );
+    }
+}
