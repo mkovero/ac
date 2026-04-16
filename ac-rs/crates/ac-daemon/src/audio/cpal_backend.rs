@@ -341,3 +341,158 @@ impl AudioEngine for CpalEngine {
         ports
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state() -> SharedState {
+        SharedState {
+            tone_buf: Mutex::new(vec![1.0, 2.0, 3.0, 4.0]),
+            tone_pos: AtomicUsize::new(0),
+            silence:  AtomicBool::new(false),
+            ring:     Mutex::new(Vec::new()),
+            xruns:    AtomicUsize::new(0),
+        }
+    }
+
+    // ---- Output fill: f32 ----
+
+    #[test]
+    fn fill_f32_copies_tone_with_wraparound() {
+        let state = make_state();
+        let mut out = [0.0f32; 7];
+        fill_output_f32(&mut out, &state);
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fill_f32_silence_zeros() {
+        let state = make_state();
+        state.silence.store(true, Ordering::Relaxed);
+        let mut out = [9.0f32; 4];
+        fill_output_f32(&mut out, &state);
+        assert_eq!(out, [0.0; 4]);
+    }
+
+    // ---- Output fill: i16 ----
+
+    #[test]
+    fn fill_i16_scales_and_clamps() {
+        let state = SharedState {
+            tone_buf: Mutex::new(vec![0.5, -0.5, 1.5]),
+            tone_pos: AtomicUsize::new(0),
+            silence:  AtomicBool::new(false),
+            ring:     Mutex::new(Vec::new()),
+            xruns:    AtomicUsize::new(0),
+        };
+        let mut out = [0i16; 3];
+        fill_output_i16(&mut out, &state);
+        assert_eq!(out[0], (0.5 * i16::MAX as f32) as i16);
+        assert_eq!(out[1], (-0.5 * i16::MAX as f32) as i16);
+        assert_eq!(out[2], i16::MAX); // 1.5 clamped to 1.0
+    }
+
+    // ---- Output fill: i32 ----
+
+    #[test]
+    fn fill_i32_scales_and_clamps() {
+        let state = SharedState {
+            tone_buf: Mutex::new(vec![0.25, -2.0]),
+            tone_pos: AtomicUsize::new(0),
+            silence:  AtomicBool::new(false),
+            ring:     Mutex::new(Vec::new()),
+            xruns:    AtomicUsize::new(0),
+        };
+        let mut out = [0i32; 2];
+        fill_output_i32(&mut out, &state);
+        assert_eq!(out[0], (0.25 * i32::MAX as f32) as i32);
+        assert_eq!(out[1], ((-1.0f32).clamp(-1.0, 1.0) * i32::MAX as f32) as i32);
+    }
+
+    // ---- Input drain: mono and multichannel ----
+
+    #[test]
+    fn drain_f32_mono_passthrough() {
+        let state = make_state();
+        let input = [0.1f32, 0.2, 0.3];
+        drain_input_f32(&input, 1, &state);
+        let ring = state.ring.lock().unwrap();
+        assert_eq!(&ring[..], &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn drain_f32_stereo_takes_channel_0() {
+        let state = make_state();
+        // Interleaved stereo: [L0, R0, L1, R1, L2, R2]
+        let input = [0.1f32, 0.9, 0.2, 0.8, 0.3, 0.7];
+        drain_input_f32(&input, 2, &state);
+        let ring = state.ring.lock().unwrap();
+        assert_eq!(&ring[..], &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn drain_i16_scales_to_float() {
+        let state = make_state();
+        let input = [i16::MAX, i16::MIN, 0i16];
+        drain_input_i16(&input, 1, &state);
+        let ring = state.ring.lock().unwrap();
+        let scale = 1.0 / i16::MAX as f32;
+        assert!((ring[0] - 1.0).abs() < 1e-4);
+        assert!((ring[1] - (i16::MIN as f32 * scale)).abs() < 1e-4);
+        assert!((ring[2]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drain_i32_multichannel_extracts_ch0() {
+        let state = make_state();
+        // 3-channel interleaved
+        let input = [i32::MAX, 0, 0, i32::MIN, 0, 0];
+        drain_input_i32(&input, 3, &state);
+        let ring = state.ring.lock().unwrap();
+        assert_eq!(ring.len(), 2);
+        assert!((ring[0] - 1.0).abs() < 1e-4);
+    }
+
+    // ---- State transitions ----
+
+    #[test]
+    fn set_tone_resets_pos_and_unsilences() {
+        let mut eng = CpalEngine::new();
+        eng.state.tone_pos.store(999, Ordering::Relaxed);
+        eng.state.silence.store(true, Ordering::Relaxed);
+        eng.set_tone(1000.0, 0.5);
+        assert_eq!(eng.state.tone_pos.load(Ordering::Relaxed), 0);
+        assert!(!eng.state.silence.load(Ordering::Relaxed));
+        assert!(!eng.state.tone_buf.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_silence_flag() {
+        let mut eng = CpalEngine::new();
+        eng.state.silence.store(false, Ordering::Relaxed);
+        eng.set_silence();
+        assert!(eng.state.silence.load(Ordering::Relaxed));
+    }
+
+    // ---- Trait properties ----
+
+    #[test]
+    fn does_not_support_routing() {
+        let eng = CpalEngine::new();
+        assert!(!eng.supports_routing());
+        assert_eq!(eng.backend_name(), "cpal");
+    }
+
+    #[test]
+    fn flush_clears_ring() {
+        let mut eng = CpalEngine::new();
+        eng.state.ring.lock().unwrap().extend_from_slice(&[1.0, 2.0, 3.0]);
+        eng.flush_capture();
+        assert!(eng.state.ring.lock().unwrap().is_empty());
+    }
+}
