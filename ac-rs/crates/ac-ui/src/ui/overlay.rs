@@ -52,7 +52,6 @@ const HELP_LINES: &[&str] = &[
     "─────────────────────────────",
     "Esc / Q        quit",
     "Enter          freeze",
-    "P              peak hold",
     "S              screenshot + CSV",
     "W              cycle view (spec/water)",
     "L              cycle layout (grid/sng/cmp*/xfer*)",
@@ -270,79 +269,70 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     }
 
     if matches!(input.config.layout, LayoutMode::Transfer) {
-        // New convention: last selection is REF, everything before it is a
-        // meas channel. One meas is "active" at a time (Tab/Shift+Tab cycles).
-        // We need at least one meas + one ref → len >= 2.
         let n_sel = input.selection_order.len();
-        let refc = if n_sel >= 2 {
-            input.selection_order.last().copied()
-        } else {
-            None
-        };
-        let meas_ch = input.active_meas.filter(|_| refc.is_some());
-        if refc.is_none() {
-            painter.text(
-                screen.center(),
-                Align2::CENTER_CENTER,
-                "Select ≥ 2 channels — last pick is REF (Tab cycles MEAS)",
-                FontId::monospace(theme::READOUT_PX),
-                text_color,
-            );
-        } else if let Some(tf) = input.transfer {
-            // Prominent delay readout — top-center, larger than normal status.
-            let delay_text = format!(
-                "Δt = {:+.2} ms  ({:+} samp)",
-                tf.delay_ms, tf.delay_samples,
-            );
-            painter.text(
-                Pos2::new(screen.center().x, screen.top() + 10.0),
-                Align2::CENTER_TOP,
-                delay_text,
-                FontId::monospace(theme::READOUT_PX * 1.4),
-                text_color,
-            );
-            // MEAS / REF legend (top-left), with channel color swatches. In
-            // multi-meas mode we annotate the active meas with `(n/N)`.
-            let meas_count = n_sel - 1;
-            let active_idx = input.active_meas_idx.min(meas_count.saturating_sub(1));
-            let x0 = screen.left() + 12.0;
-            let mut y = screen.top() + 12.0;
-            let row_h = theme::READOUT_PX + 4.0;
-            let meas_label = if meas_count > 1 {
-                format!("MEAS ({}/{})", active_idx + 1, meas_count)
-            } else {
-                "MEAS".to_string()
-            };
-            let entries: [(String, usize); 2] = [
-                (meas_label, meas_ch.unwrap_or(0)),
-                ("REF".to_string(), refc.unwrap()),
-            ];
-            for (label, ch) in &entries {
-                let rgba = theme::channel_color(*ch);
-                let swatch = Color32::from_rgb(
-                    (rgba[0] * 255.0) as u8,
-                    (rgba[1] * 255.0) as u8,
-                    (rgba[2] * 255.0) as u8,
-                );
-                painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(x0, y + 2.0), egui::vec2(12.0, 12.0)),
-                    CornerRadius::ZERO,
-                    swatch,
+        if let Some(&refc) = input.selection_order.last().filter(|_| n_sel >= 2) {
+            let meas_ch = input.active_meas;
+            if let Some(tf) = input.transfer {
+                let delay_text = format!(
+                    "Δt = {:+.2} ms  ({:+} samp)",
+                    tf.delay_ms, tf.delay_samples,
                 );
                 painter.text(
-                    Pos2::new(x0 + 18.0, y),
-                    Align2::LEFT_TOP,
-                    format!("{label}: CH{ch}"),
+                    Pos2::new(screen.center().x, screen.top() + 10.0),
+                    Align2::CENTER_TOP,
+                    delay_text,
+                    FontId::monospace(theme::READOUT_PX * 1.4),
+                    text_color,
+                );
+                let meas_count = n_sel - 1;
+                let active_idx = input.active_meas_idx.min(meas_count.saturating_sub(1));
+                let x0 = screen.left() + 12.0;
+                let mut y = screen.top() + 12.0;
+                let row_h = theme::READOUT_PX + 4.0;
+                let meas_label = if meas_count > 1 {
+                    format!("MEAS ({}/{})", active_idx + 1, meas_count)
+                } else {
+                    "MEAS".to_string()
+                };
+                let entries: [(String, usize); 2] = [
+                    (meas_label, meas_ch.unwrap_or(0)),
+                    ("REF".to_string(), refc),
+                ];
+                for (label, ch) in &entries {
+                    let rgba = theme::channel_color(*ch);
+                    let swatch = Color32::from_rgb(
+                        (rgba[0] * 255.0) as u8,
+                        (rgba[1] * 255.0) as u8,
+                        (rgba[2] * 255.0) as u8,
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(x0, y + 2.0), egui::vec2(12.0, 12.0)),
+                        CornerRadius::ZERO,
+                        swatch,
+                    );
+                    painter.text(
+                        Pos2::new(x0 + 18.0, y),
+                        Align2::LEFT_TOP,
+                        format!("{label}: CH{ch}"),
+                        FontId::monospace(theme::READOUT_PX),
+                        text_color,
+                    );
+                    y += row_h;
+                }
+            } else {
+                painter.text(
+                    screen.center(),
+                    Align2::CENTER_CENTER,
+                    "waiting for transfer_stream…",
                     FontId::monospace(theme::READOUT_PX),
                     text_color,
                 );
-                y += row_h;
             }
         } else {
             painter.text(
                 screen.center(),
                 Align2::CENTER_CENTER,
-                "waiting for transfer_stream…",
+                "Select ≥ 2 channels — last pick is REF (Tab cycles MEAS)",
                 FontId::monospace(theme::READOUT_PX),
                 text_color,
             );

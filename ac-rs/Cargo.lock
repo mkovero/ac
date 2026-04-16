@@ -58,7 +58,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "chrono",
- "crossbeam-channel",
  "egui",
  "egui-wgpu",
  "egui-winit",

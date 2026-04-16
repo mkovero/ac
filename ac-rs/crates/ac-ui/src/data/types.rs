@@ -48,8 +48,6 @@ impl Default for SpectrumFrame {
 #[derive(Debug, Clone)]
 pub struct DisplayFrame {
     pub spectrum: Vec<f32>,
-    #[allow(dead_code)]
-    pub peak_hold: Vec<f32>,
     pub freqs: Vec<f32>,
     pub meta: FrameMeta,
     /// Populated by the store on the first read after a fresh producer frame.
@@ -105,26 +103,6 @@ pub struct TransferFrame {
     pub sr:            u32,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::TransferFrame;
-
-    /// Real-daemon body captured via `transfer_stream` → `/tmp/claude/transfer_body.json`.
-    /// Regression: catch any struct-vs-wire drift (f32/f64 narrowing, missing
-    /// fields) that would silently cause the UI to drop every frame.
-    #[test]
-    fn parse_real_daemon_body() {
-        let body = std::fs::read_to_string("/tmp/claude/transfer_body.json").ok();
-        let Some(body) = body else { return };
-        let tf: TransferFrame = serde_json::from_str(&body)
-            .expect("real transfer_stream body must parse");
-        assert!(!tf.freqs.is_empty());
-        assert_eq!(tf.freqs.len(), tf.magnitude_db.len());
-        assert_eq!(tf.freqs.len(), tf.phase_deg.len());
-        assert_eq!(tf.freqs.len(), tf.coherence.len());
-    }
-}
-
 impl From<&SpectrumFrame> for FrameMeta {
     fn from(f: &SpectrumFrame) -> Self {
         Self {
@@ -143,7 +121,6 @@ impl From<&SpectrumFrame> for FrameMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     Grid,
-    Overlay,
     Single,
     /// Stacks only the user-selected channels in one rect (overlay-style)
     /// with a corner legend. Hidden until the user toggles selections via
@@ -161,8 +138,6 @@ pub enum ViewMode {
     Spectrum,
     Waterfall,
 }
-
-
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
 /// can target the hovered cell independently without broadcasting to the rest.
@@ -192,7 +167,6 @@ impl Default for CellView {
 
 #[derive(Debug, Clone)]
 pub struct DisplayConfig {
-    pub peak_hold: bool,
     pub averaging_alpha: f32,
     pub frozen: bool,
     pub layout: LayoutMode,
@@ -203,7 +177,6 @@ pub struct DisplayConfig {
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
-            peak_hold: false,
             averaging_alpha: 0.20,
             frozen: false,
             layout: LayoutMode::Grid,

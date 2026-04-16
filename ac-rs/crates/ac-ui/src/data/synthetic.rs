@@ -178,7 +178,7 @@ fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame 
     let f_lp = 15000.0;
 
     let mut rng = XorShift::new(
-        0xA17E ^ (meas as u32) ^ ((refc as u32) << 8) ^ ((t * 10.0) as u32),
+        0xA17E ^ meas ^ (refc << 8) ^ ((t * 10.0) as u32),
     );
 
     for &f in freqs {

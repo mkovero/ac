@@ -1,17 +1,11 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use triple_buffer::{triple_buffer, Input, Output};
 
 use super::types::{DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, TransferFrame};
 
-const PEAK_DECAY_DB_PER_SEC: f32 = 20.0;
-const DB_FLOOR: f32 = -200.0;
-
 struct ChannelSlot {
     buffer: Output<SpectrumFrame>,
-    peak_hold: Vec<f32>,
     averaged: Vec<f32>,
-    last_peak_update: Instant,
     last_freqs_len: usize,
     has_data: bool,
     last_frame_id: u64,
@@ -21,9 +15,7 @@ impl ChannelSlot {
     fn new(buffer: Output<SpectrumFrame>) -> Self {
         Self {
             buffer,
-            peak_hold: Vec::new(),
             averaged: Vec::new(),
-            last_peak_update: Instant::now(),
             last_freqs_len: 0,
             has_data: false,
             last_frame_id: 0,
@@ -42,7 +34,6 @@ impl ChannelSlot {
         }
 
         if n != self.last_freqs_len {
-            self.peak_hold = vec![DB_FLOOR; n];
             self.averaged = frame.spectrum.clone();
             self.last_freqs_len = n;
         }
@@ -61,15 +52,6 @@ impl ChannelSlot {
                     *dst = alpha * *src + (1.0 - alpha) * *dst;
                 }
             }
-
-            let now = Instant::now();
-            let dt = now.duration_since(self.last_peak_update).as_secs_f32();
-            self.last_peak_update = now;
-            let decay = PEAK_DECAY_DB_PER_SEC * dt;
-            for (dst, cur) in self.peak_hold.iter_mut().zip(self.averaged.iter()) {
-                let decayed = *dst - decay;
-                *dst = decayed.max(*cur);
-            }
             self.has_data = true;
         }
 
@@ -81,11 +63,6 @@ impl ChannelSlot {
 
         Some(DisplayFrame {
             spectrum: self.averaged.clone(),
-            peak_hold: if config.peak_hold {
-                self.peak_hold.clone()
-            } else {
-                Vec::new()
-            },
             freqs: frame.freqs.clone(),
             meta: FrameMeta::from(frame),
             new_row,

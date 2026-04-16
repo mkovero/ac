@@ -40,7 +40,6 @@ impl DataSource {
             DataSource::Receiver(h) => h.status.connected.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
-    #[allow(dead_code)]
     fn status(&self) -> Option<&ReceiverStatus> {
         match self {
             DataSource::Receiver(h) => Some(&h.status),
@@ -347,7 +346,6 @@ impl App {
         }
         match self.config.layout {
             LayoutMode::Grid => vec![hovered.min(n - 1)],
-            LayoutMode::Overlay => (0..n).collect(),
             LayoutMode::Single => vec![self.config.active_channel.min(n - 1)],
             // Compare stacks the selected set in one rect, so zoom/pan should
             // move every selected channel together to keep the overlay coherent.
@@ -885,13 +883,9 @@ impl App {
         self.egui_state = Some(egui_state);
     }
 
-    /// Pick the next layout in the cycle given current selection state. The
-    /// raw cycle is Grid → Single → Compare → Transfer → Grid. Overlay is
-    /// skipped entirely (the old 'every channel stacked on one rect' layout
-    /// was judged too gimmicky to be worth a cycle slot). Compare and
-    /// Transfer are only visited when the user has selected enough channels
-    /// for them to be useful (Compare: any; Transfer: ≥ 2). Avoids the
-    /// "I pressed `l` and ended up in an empty view" failure mode.
+    /// Pick the next layout in the cycle given current selection state.
+    /// Compare and Transfer are only visited when the user has selected
+    /// enough channels (Compare: any; Transfer: >= 2).
     fn next_layout(&self, from: LayoutMode) -> LayoutMode {
         let any_selected = self.selected.iter().any(|s| *s);
         let transfer_ready = self.selection_order.len() >= 2;
@@ -901,9 +895,6 @@ impl App {
             LayoutMode::Compare,
             LayoutMode::Transfer,
         ];
-        // Find where we are in the trimmed cycle. `from` might be Overlay
-        // (if a previous version set it) — treat that as "before Grid" so
-        // the next press lands on Grid rather than silently sticking.
         let start = raw_cycle
             .iter()
             .position(|m| *m == from)
@@ -933,14 +924,6 @@ impl App {
             KeyCode::Space => {
                 self.toggle_selection();
             }
-            KeyCode::KeyP => {
-                self.config.peak_hold = !self.config.peak_hold;
-                self.notify(if self.config.peak_hold {
-                    "peak hold on"
-                } else {
-                    "peak hold off"
-                });
-            }
             KeyCode::KeyH => {
                 self.show_help = !self.show_help;
             }
@@ -953,7 +936,6 @@ impl App {
                 self.on_layout_changed(prev, self.config.layout);
                 self.notify(match self.config.layout {
                     LayoutMode::Grid => "layout: grid",
-                    LayoutMode::Overlay => "layout: overlay",
                     LayoutMode::Single => "layout: single",
                     LayoutMode::Compare => "layout: compare",
                     LayoutMode::Transfer => "layout: transfer",
@@ -1174,7 +1156,6 @@ impl App {
             self.active_meas_idx,
             grid_params_snap,
         );
-        let cells_vec: Vec<_> = cells.clone();
         let in_transfer_layout = matches!(self.config.layout, LayoutMode::Transfer);
 
         // Track producer cadence from channel-0 new_row arrivals. EMA so a
@@ -1228,32 +1209,16 @@ impl App {
                 }
             }
         }
-        let is_overlay = matches!(self.config.layout, LayoutMode::Overlay);
-        let overlay_n = if is_overlay { cells_vec.len() } else { 1 };
-        let overlay_skip_fill = is_overlay && overlay_n >= 8;
-        let overlay_fill_alpha = if overlay_skip_fill {
-            0.0
-        } else if is_overlay && overlay_n > 1 {
-            0.15 / overlay_n as f32
-        } else {
-            0.0 // use shader default
-        };
-        let overlay_line_width = if is_overlay && overlay_n > 1 {
-            0.0018 / (overlay_n as f32).sqrt()
-        } else {
-            0.0 // use shader default
-        };
-
         let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
         if !in_transfer_layout {
             match view_mode {
-                ViewMode::Spectrum => spectrum_uploads.reserve(cells_vec.len()),
-                ViewMode::Waterfall => waterfall_uploads.reserve(cells_vec.len()),
+                ViewMode::Spectrum => spectrum_uploads.reserve(cells.len()),
+                ViewMode::Waterfall => waterfall_uploads.reserve(cells.len()),
             }
         }
 
-        for cell in &cells_vec {
+        for cell in &cells {
             if in_transfer_layout {
                 break;
             }
@@ -1279,8 +1244,8 @@ impl App {
                         freq_log_max,
                         n_bins: frame.spectrum.len() as u32,
                         offset: 0,
-                        fill_alpha: overlay_fill_alpha,
-                        line_width: overlay_line_width,
+                        fill_alpha: 0.0,
+                        line_width: 0.0,
                     };
                     spectrum_uploads.push(ChannelUpload {
                         spectrum: &frame.spectrum,
@@ -1326,7 +1291,6 @@ impl App {
 
         match view_mode {
             ViewMode::Spectrum => {
-                spectrum.set_skip_fill(overlay_skip_fill);
                 spectrum.upload(&ctx.device, &ctx.queue, &spectrum_uploads);
             }
             ViewMode::Waterfall => {
@@ -1381,7 +1345,7 @@ impl App {
             let cx = pos.x as f32;
             let cy = pos.y as f32;
             let mut hit: Option<(usize, egui::Rect, f32, f32)> = None;
-            for c in &cells_vec {
+            for c in &cells {
                 let r = layout::to_pixel_rect(c, width_px, height_px);
                 if cx >= r.left() && cx <= r.right() && cy >= r.top() && cy <= r.bottom() {
                     let nx = (cx - r.left()) / r.width().max(1.0);
@@ -1443,7 +1407,7 @@ impl App {
                 theme::SELECT_BORDER[1],
                 theme::SELECT_BORDER[2],
             );
-            for cell in &cells_vec {
+            for cell in &cells {
                 let rect = layout::to_pixel_rect(cell, width_px, height_px);
                 let view = cell_views_snap
                     .get(cell.channel)

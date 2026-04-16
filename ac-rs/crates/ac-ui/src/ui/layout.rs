@@ -106,22 +106,15 @@ pub fn compute(
                 h: plot_h,
             }]
         }
-        LayoutMode::Overlay | LayoutMode::Single => {
-            let target = if mode == LayoutMode::Single {
-                active_channel.min(n_channels - 1)
-            } else {
-                usize::MAX
-            };
-            (0..n_channels)
-                .filter(|i| mode == LayoutMode::Overlay || *i == target)
-                .map(|i| CellRect {
-                    channel: i,
-                    x: plot_x,
-                    y: plot_y,
-                    w: plot_w,
-                    h: plot_h,
-                })
-                .collect()
+        LayoutMode::Single => {
+            let target = active_channel.min(n_channels - 1);
+            vec![CellRect {
+                channel: target,
+                x: plot_x,
+                y: plot_y,
+                w: plot_w,
+                h: plot_h,
+            }]
         }
         LayoutMode::Grid => {
             let (cols, rows, page_size, pages) = grid_dims(n_channels, grid);
