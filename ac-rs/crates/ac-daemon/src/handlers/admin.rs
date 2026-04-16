@@ -189,6 +189,38 @@ pub fn server_disable(state: &ServerState) -> Value {
     json!({"ok": true, "bind_addr": "127.0.0.1", "listen_mode": "local"})
 }
 
+pub fn set_analysis_mode(state: &ServerState, cmd: &Value) -> Value {
+    let mode = match cmd.get("mode").and_then(Value::as_str) {
+        Some(m) => m,
+        None => return json!({"ok": false, "error": "missing 'mode' field"}),
+    };
+    if mode != "fft" && mode != "cwt" {
+        return json!({
+            "ok": false,
+            "error": format!("invalid mode '{mode}': expected 'fft' or 'cwt'"),
+        });
+    }
+    *state.analysis_mode.lock().unwrap() = mode.to_string();
+    if let Some(s) = cmd.get("sigma").and_then(Value::as_f64) {
+        let s = (s as f32).clamp(5.0, 24.0);
+        *state.cwt_sigma.lock().unwrap() = s;
+    }
+    if let Some(n) = cmd.get("n_scales").and_then(Value::as_u64) {
+        let n = (n as usize).clamp(64, 2048);
+        *state.cwt_n_scales.lock().unwrap() = n;
+    }
+    let sigma = *state.cwt_sigma.lock().unwrap();
+    let n_scales = *state.cwt_n_scales.lock().unwrap();
+    json!({"ok": true, "mode": mode, "sigma": sigma, "n_scales": n_scales})
+}
+
+pub fn get_analysis_mode(state: &ServerState) -> Value {
+    let mode = state.analysis_mode.lock().unwrap().clone();
+    let sigma = *state.cwt_sigma.lock().unwrap();
+    let n_scales = *state.cwt_n_scales.lock().unwrap();
+    json!({"ok": true, "mode": mode, "sigma": sigma, "n_scales": n_scales})
+}
+
 pub fn server_connections(state: &ServerState) -> Value {
     let listen_mode = state.listen_mode.lock().unwrap().clone();
     let (ctrl_ep, data_ep) = if listen_mode == "public" {

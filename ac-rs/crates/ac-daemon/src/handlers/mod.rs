@@ -32,8 +32,9 @@ mod test_hw;
 mod transfer;
 
 pub use admin::{
-    devices, dmm_read, get_calibration, list_calibrations, quit,
-    server_connections, server_disable, server_enable, setup, status, stop,
+    devices, dmm_read, get_analysis_mode, get_calibration, list_calibrations,
+    quit, server_connections, server_disable, server_enable,
+    set_analysis_mode, setup, status, stop,
 };
 pub use audio::{
     generate, generate_pink, monitor_spectrum, plot, plot_level,

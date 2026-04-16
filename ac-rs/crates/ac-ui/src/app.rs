@@ -88,6 +88,13 @@ pub struct App {
     /// pause/resume around `transfer_stream` since that's the `Exclusive`
     /// group and would otherwise be busy-blocked by the `Input`-group monitor.
     monitor_spectrum_active: bool,
+    /// Current daemon analysis mode: "fft" (default) or "cwt". Toggled via
+    /// the W waterfall cycle (Spectrum → Waterfall-FFT → Waterfall-CWT). We
+    /// track it locally so the cycle key can decide which mode to request
+    /// without a round-trip to the daemon.
+    analysis_mode: String,
+    cwt_sigma: f32,
+    cwt_n_scales: usize,
     /// Insertion-order view of `selected`. In Transfer layout the convention
     /// is: the **last** entry is REF, every preceding entry is a meas channel
     /// the user would like to H1-compare against that ref. Only one meas
@@ -141,6 +148,13 @@ pub struct App {
     benchmark_secs: Option<f64>,
     benchmark_started: Option<Instant>,
     benchmark_report: Option<String>,
+    /// Last `ReceiverStatus::last_frame_ns` value we saw. Compared in
+    /// `about_to_wait` to decide whether new data arrived since the last
+    /// render — if not, skip the redraw to save CPU.
+    last_seen_frame_ns: u64,
+    /// Set by input handlers so the next `about_to_wait` requests a redraw
+    /// even without new data (e.g. key press changed layout, mouse drag).
+    needs_redraw: bool,
 }
 
 #[derive(Clone)]
@@ -175,6 +189,9 @@ impl App {
             transfer_last: None,
             transfer_stream_active: false,
             monitor_spectrum_active: false,
+            analysis_mode: "fft".to_string(),
+            cwt_sigma: 12.0,
+            cwt_n_scales: 512,
             selection_order: Vec::new(),
             active_meas_idx: 0,
             config,
@@ -206,6 +223,8 @@ impl App {
             benchmark_secs,
             benchmark_started: None,
             benchmark_report: None,
+            last_seen_frame_ns: 0,
+            needs_redraw: true,
         }
     }
 
@@ -420,7 +439,7 @@ impl App {
             if zoom_time {
                 let current = view.rows_visible.max(1) as f32;
                 let max_rows = crate::render::waterfall::ROWS_PER_CHANNEL as f32;
-                let new_rows = (current * factor).round().clamp(8.0, max_rows);
+                let new_rows = (current * factor).round().clamp(2.0, max_rows);
                 view.rows_visible = new_rows as u32;
             }
         }
@@ -692,6 +711,53 @@ impl App {
         self.ctrl.as_ref()
     }
 
+    /// Tell the daemon to switch `monitor_spectrum`'s analysis path between
+    /// FFT and Morlet CWT. No-op on the synthetic backend (no daemon). On
+    /// success the local `analysis_mode` is updated so the W cycle can pick
+    /// the next state; on failure we leave it unchanged and notify.
+    fn send_set_analysis_mode(&mut self, mode: &str) -> bool {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            self.analysis_mode = mode.to_string();
+            return true;
+        }
+        let sigma = self.cwt_sigma;
+        let n_scales = self.cwt_n_scales;
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("analysis_mode: no ctrl");
+            return false;
+        };
+        let cmd = serde_json::json!({
+            "cmd":      "set_analysis_mode",
+            "mode":     mode,
+            "sigma":    sigma,
+            "n_scales": n_scales,
+        });
+        match ctrl.send(&cmd) {
+            Ok(reply) => {
+                if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    self.analysis_mode = mode.to_string();
+                    true
+                } else {
+                    let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
+                    self.notify(&format!("analysis_mode: {err}"));
+                    false
+                }
+            }
+            Err(e) => {
+                log::warn!("set_analysis_mode failed: {e}");
+                self.notify("analysis_mode: ctrl error");
+                false
+            }
+        }
+    }
+
+    fn send_cwt_params(&mut self) {
+        if self.analysis_mode != "cwt" {
+            return;
+        }
+        self.send_set_analysis_mode("cwt");
+    }
+
     fn send_transfer_stream_start(&mut self, meas_ch: usize, ref_ch: usize) {
         // Synthetic mode: no daemon involved — tell the synthetic worker to
         // start writing fake TransferFrames to the shared store. The renderer
@@ -914,18 +980,51 @@ impl App {
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
             KeyCode::KeyW => {
-                self.config.view_mode = self.config.view_mode.next();
-                // Re-arm waterfall auto-init on every switch into waterfall,
-                // so a fresh dB window gets picked from the current signal.
+                // W cycles three states so the waterfall view can toggle
+                // between the linear FFT and Morlet CWT analysis paths
+                // without needing a second hotkey:
+                //   Spectrum(fft) → Waterfall(fft) → Waterfall(cwt) → Spectrum(fft)
+                let (next_view, next_mode, label): (ViewMode, &str, &str) =
+                    match (self.config.view_mode, self.analysis_mode.as_str()) {
+                        (ViewMode::Spectrum, _) => (ViewMode::Waterfall, "fft", "view: waterfall (fft)"),
+                        (ViewMode::Waterfall, "fft") => (ViewMode::Waterfall, "cwt", "view: waterfall (cwt)"),
+                        (ViewMode::Waterfall, _) => (ViewMode::Spectrum, "fft", "view: spectrum"),
+                    };
+                if self.analysis_mode != next_mode && !self.send_set_analysis_mode(next_mode) {
+                    // Mode change refused — don't advance the view so the
+                    // key keeps meaning "next state" on the next press.
+                    return;
+                }
+                self.config.view_mode = next_view;
+                // Re-arm waterfall auto-init on every switch into waterfall
+                // (or between FFT ↔ CWT where the dB distribution shifts) so
+                // a fresh dB window gets picked from the current signal.
                 if matches!(self.config.view_mode, ViewMode::Waterfall) {
                     for init in &mut self.waterfall_inited {
                         *init = false;
                     }
                 }
-                self.notify(match self.config.view_mode {
-                    ViewMode::Spectrum => "view: spectrum",
-                    ViewMode::Waterfall => "view: waterfall",
-                });
+                self.notify(label);
+            }
+            KeyCode::ArrowUp if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
+                self.cwt_sigma = (self.cwt_sigma + 1.0).min(24.0);
+                self.send_cwt_params();
+                self.notify(&format!("cwt sigma: {:.0}", self.cwt_sigma));
+            }
+            KeyCode::ArrowDown if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
+                self.cwt_sigma = (self.cwt_sigma - 1.0).max(5.0);
+                self.send_cwt_params();
+                self.notify(&format!("cwt sigma: {:.0}", self.cwt_sigma));
+            }
+            KeyCode::ArrowRight if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
+                self.cwt_n_scales = (self.cwt_n_scales * 2).min(2048);
+                self.send_cwt_params();
+                self.notify(&format!("cwt scales: {}", self.cwt_n_scales));
+            }
+            KeyCode::ArrowLeft if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
+                self.cwt_n_scales = (self.cwt_n_scales / 2).max(64);
+                self.send_cwt_params();
+                self.notify(&format!("cwt scales: {}", self.cwt_n_scales));
             }
             KeyCode::BracketLeft => {
                 self.shift_hovered_db_floor(-5.0);
@@ -1647,6 +1746,12 @@ impl ApplicationHandler for App {
         _id: WindowId,
         event: WindowEvent,
     ) {
+        // Any user interaction needs a redraw.
+        match &event {
+            WindowEvent::RedrawRequested | WindowEvent::Destroyed => {}
+            _ => { self.needs_redraw = true; }
+        }
+
         // Tab / Shift+Tab are our channel-cycle keys; egui's default focus
         // handler would otherwise swallow them. We have no text inputs, so
         // short-circuit the egui forward and dispatch straight to handle_key.
@@ -1747,8 +1852,37 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
         self.benchmark_tick(elwt);
-        if let Some(ctx) = self.render_ctx.as_ref() {
-            ctx.window.request_redraw();
+
+        // Check if the receiver pushed a new frame since our last render.
+        let current_ns = self.source.as_ref()
+            .and_then(|s| s.status())
+            .map(|st| st.last_frame_ns.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        if current_ns != self.last_seen_frame_ns {
+            self.last_seen_frame_ns = current_ns;
+            self.needs_redraw = true;
+        }
+
+        // Active notification needs redraws until it expires.
+        if self.notification.is_some() {
+            self.needs_redraw = true;
+        }
+
+        // Benchmark mode always redraws.
+        if self.benchmark_secs.is_some() {
+            self.needs_redraw = true;
+        }
+
+        if self.needs_redraw {
+            self.needs_redraw = false;
+            if let Some(ctx) = self.render_ctx.as_ref() {
+                ctx.window.request_redraw();
+            }
+        } else {
+            // No work — sleep until next check. 16 ms ≈ 60 Hz poll ceiling.
+            elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(16),
+            ));
         }
     }
 

@@ -128,6 +128,32 @@ track a single channel should filter by `channel == <their-channel>` — old
 servers that do not emit either field should be treated as
 `channel = 0, n_channels = 1`.
 
+### `cwt` frame
+
+Emitted continuously by `monitor_spectrum` when `analysis_mode` is `"cwt"`
+(see `set_analysis_mode`). Replaces the `spectrum` frame one-for-one —
+while CWT mode is active, no `spectrum` frames are published on the same
+worker. Magnitudes are already in dBFS and frequencies are log-spaced, so
+subscribers that expect a linear spectrum should convert / branch.
+
+```json
+{
+  "type":        "cwt",
+  "cmd":         "monitor_spectrum",
+  "channel":     <int>,            // input channel index this column describes
+  "n_channels":  <int>,            // total channels being monitored
+  "sr":          <int>,            // sample rate (Hz)
+  "magnitudes":  [<float>, ...],   // dBFS per scale, length = frequencies.len()
+  "frequencies": [<float>, ...],   // Hz per scale, log-spaced
+  "timestamp":   <int>,            // UNIX-epoch nanoseconds
+  "xruns":       <int>
+}
+```
+
+Default parameters (see `ac-core::cwt` constants): `σ = 12.0`,
+`n_scales = 512`, frequency axis spans `20 Hz` to `0.9 · sr/2`.
+Both `σ` and `n_scales` are tuneable at runtime via `set_analysis_mode`.
+
 ---
 
 ## Commands
@@ -169,6 +195,51 @@ Requests the server process to exit cleanly after the current reply.
 **Reply**
 ```json
 { "ok": true }
+```
+
+---
+
+### `set_analysis_mode`
+
+Switches the spectrum analysis path used by `monitor_spectrum` between a
+standard windowed FFT (default) and a Morlet continuous wavelet transform.
+The mode is server-global; the next `monitor_spectrum` tick picks it up,
+even if a `monitor_spectrum` worker is already running.
+
+**Request**
+```json
+{ "cmd": "set_analysis_mode", "mode": "fft" }
+{ "cmd": "set_analysis_mode", "mode": "cwt" }
+{ "cmd": "set_analysis_mode", "mode": "cwt", "sigma": 12.0, "n_scales": 512 }
+```
+
+`sigma` (float, optional, clamped 5–24) and `n_scales` (int, optional,
+clamped 64–2048) tune the Morlet wavelet shape and frequency-axis density.
+Higher sigma = sharper frequency resolution, softer time resolution. More
+scales = finer frequency grid. Both persist until changed or daemon restart.
+
+**Reply**
+```json
+{ "ok": true, "mode": "fft" | "cwt", "sigma": <float>, "n_scales": <int> }
+```
+
+Unknown values for `mode` return `{ "ok": false, "error": "..." }` and
+leave the current mode unchanged. Default at startup is `"fft"`.
+
+---
+
+### `get_analysis_mode`
+
+Returns the current analysis mode.
+
+**Request**
+```json
+{ "cmd": "get_analysis_mode" }
+```
+
+**Reply**
+```json
+{ "ok": true, "mode": "fft" | "cwt", "sigma": <float>, "n_scales": <int> }
 ```
 
 ---

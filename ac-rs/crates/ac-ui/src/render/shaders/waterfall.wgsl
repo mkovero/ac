@@ -73,18 +73,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (bin_f < 0.0 || bin_f > f32(m.n_bins - 1u)) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
-    let bin = u32(bin_f + 0.5);
 
     // Newest row sits at the top (uv.y = 1). `rows_visible` caps how deep into
     // the ring we look — the user Ctrl+scrolls to shrink this and "zoom time"
     // into a narrower recent window.
     let rows_shown = max(min(m.rows_visible, m.n_rows), 1u);
     let rows_back_f = (1.0 - clamp(in.uv.y, 0.0, 1.0)) * f32(rows_shown - 1u);
-    let rows_back = u32(rows_back_f + 0.5);
     let newest = (m.write_row + m.n_rows - 1u) % m.n_rows;
-    let actual_row = (newest + m.n_rows - rows_back) % m.n_rows;
 
-    let mag = textureLoad(history, vec2<i32>(i32(bin), i32(actual_row)), i32(m.layer), 0).r;
+    // Bilinear interpolation across both axes so the colormap transitions
+    // smoothly between adjacent bins and rows instead of snapping to the
+    // nearest integer (which causes visible blocks at low bin counts).
+    let bin_lo = u32(floor(bin_f));
+    let bin_hi = min(bin_lo + 1u, m.n_bins - 1u);
+    let bf = fract(bin_f);
+
+    let rb_lo = u32(floor(rows_back_f));
+    let rb_hi = min(rb_lo + 1u, rows_shown - 1u);
+    let rf = fract(rows_back_f);
+
+    let row_a = (newest + m.n_rows - rb_lo) % m.n_rows;
+    let row_b = (newest + m.n_rows - rb_hi) % m.n_rows;
+
+    let m00 = textureLoad(history, vec2<i32>(i32(bin_lo), i32(row_a)), i32(m.layer), 0).r;
+    let m10 = textureLoad(history, vec2<i32>(i32(bin_hi), i32(row_a)), i32(m.layer), 0).r;
+    let m01 = textureLoad(history, vec2<i32>(i32(bin_lo), i32(row_b)), i32(m.layer), 0).r;
+    let m11 = textureLoad(history, vec2<i32>(i32(bin_hi), i32(row_b)), i32(m.layer), 0).r;
+
+    let mag = mix(mix(m00, m10, bf), mix(m01, m11, bf), rf);
     let span = max(m.db_max - m.db_min, 0.0001);
     let t = clamp((mag - m.db_min) / span, 0.0, 1.0);
     let lut_x = i32(t * 255.0 + 0.5);

@@ -106,21 +106,26 @@ Keyboard-first. Mouse supports zoom/pan within the hovered cell.
 |-----|--------|
 | `Esc` / `q` | Quit |
 | `Enter` | Freeze / unfreeze display (data keeps flowing, rendering pauses update) |
-| `s` | Save screenshot (PNG) + spectrum data (CSV) |
-| `Space` | Toggle peak hold |
-| `+` / `-` | Adjust dB range (vertical zoom) |
-| `Ctrl+Tab` | Next channel (single-view mode) |
-| `Ctrl+Shift+Tab` | Previous channel (single-view mode) |
-| `l` | Cycle layout: grid → overlay → single → grid |
-| `f` | Toggle fullscreen |
+| `P` | Save screenshot (PNG) + spectrum data (CSV) |
+| `Space` | Toggle channel selection |
+| `+` / `-` | Adjust dB span |
+| `[` / `]` | Shift dB floor ±5 |
+| `Tab` / `Shift+Tab` | Next/prev channel or grid page |
+| `L` | Cycle layout: grid → overlay → single → compare → transfer |
+| `W` | Cycle view: spectrum → waterfall (FFT) → waterfall (CWT) → spectrum |
+| `F` | Toggle fullscreen |
+| `D` | Toggle timing overlay |
+| `Ctrl+R` | Reset all views |
+| `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
+| `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
 
 | Mouse | Action |
 |-------|--------|
 | Scroll wheel | Zoom both axes around cursor |
 | `Shift` + scroll | Zoom dB axis only |
-| `Ctrl` + scroll | Zoom frequency axis only |
+| `Ctrl` + scroll | Zoom frequency / time axis only |
 | Left click + drag | Pan frequency and dB window |
-| Right click | Reset view (defaults from `theme.rs`) |
+| Right click | Reset hovered cell view |
 
 Zoom and pan mutate the shared `DisplayConfig` (freq_min/max, db_min/max)
 so both the GPU shader and the egui grid labels track the new window
@@ -213,14 +218,18 @@ egui `FontDefinitions` at startup. Three sizes:
 **Grid:** auto-arranged N channels.
 `cols = ceil(sqrt(n))`, `rows = ceil(n / cols)`.
 Each cell is an independent wgpu viewport with its own spectrum draw.
-At high channel counts (>8), per-channel text is suppressed — only
-channel number label. Hover or click to see detail.
+Scrollable grid with Tab for page navigation.
 
-**Overlay:** all channels in one plot, different colors. Practical up to
-~8 channels. Beyond that, switch to grid.
+**Overlay:** all channels in one plot, different colors.
 
-**Single:** one channel fullscreen. Cycle with `Ctrl+Tab` /
-`Ctrl+Shift+Tab`.
+**Single:** one channel fullscreen. Tab cycles active channel.
+
+**Compare:** stacks only user-selected channels (Space to toggle) in one
+rect with a corner legend. Overlay-style but limited to selection.
+
+**Transfer:** live H1 transfer function view. Requires two selected
+channels (meas + ref). Starts a `transfer_stream` worker on the daemon;
+Tab rotates the active meas channel.
 
 ---
 
@@ -459,20 +468,40 @@ total. Single-digit ms on integrated GPU.
 
 ---
 
-## Waterfall Spectrogram (Phase 2)
+## Waterfall Spectrogram
 
-One `wgpu::Texture` per channel:
-- Size: `n_bins × history_depth` (e.g. 1000 × 256)
-- Format: `R32Float`
-- Each new frame: `queue.write_texture` one row, advance ring pointer
+One `R32Float` 2D texture array: `max_bins × 256 rows × n_layers`.
+Each new frame writes one row via `queue.write_texture` at the ring head.
+Fragment shader applies bilinear interpolation across bins and rows, then
+maps through a 256-entry inferno LUT baked at build time.
 
-Fragment shader samples texture with scroll offset and applies colormap
-(viridis computed in shader, or as a 256×1 lookup texture).
+Unfilled rows are initialized to −200 dBFS → black, so channels with no
+data yet don't flash the hottest colormap color.
 
-Memory: 100 channels × 1000 × 256 × 4 bytes = ~100 MB VRAM.
-Acceptable for a dedicated measurement workstation.
+The `W` key cycles: spectrum → waterfall (FFT) → waterfall (CWT) →
+spectrum. In CWT mode the daemon switches `monitor_spectrum` to the
+Morlet CWT path via `set_analysis_mode`.
 
-Split view per channel: spectrum top half, waterfall bottom half.
+### Morlet CWT mode
+
+`ac-core/src/cwt.rs` implements a single-point IFFT Morlet CWT:
+
+1. Forward complex FFT of the signal (once per column).
+2. Per scale: sparse dot product over the ~10–100 frequency bins where
+   the Gaussian kernel is non-negligible (`|arg| < 5.5`).
+3. `|y[N/2]| × 2/N` → dBFS, matching the existing FFT calibration.
+
+The daemon keeps a 0.15 s sliding ring buffer per channel, captures 20 ms
+per tick, and publishes a CWT frame from the full ring. This gives ~50 Hz
+update rate (single channel, release build) while low-frequency wavelets
+(20 Hz, σ = 12) see enough data.
+
+Parameters tuneable at runtime via `set_analysis_mode`:
+
+| Param | Default | Range | Effect |
+|-------|---------|-------|--------|
+| `sigma` | 12.0 | 5–24 | Morlet shape ω₀. Higher = sharper freq, softer time |
+| `n_scales` | 512 | 64–2048 | Frequency-axis density |
 
 ---
 

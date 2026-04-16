@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 
 use super::store::TransferStore;
-use super::types::{SpectrumFrame, TransferFrame};
+use super::types::{CwtFrame, SpectrumFrame, TransferFrame};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
@@ -131,6 +131,51 @@ pub fn spawn(
                         .and_then(|v| v.get("type"))
                         .and_then(|t| t.as_str())
                         .map(|s| s.to_string());
+                    if type_tag.as_deref() == Some("cwt") {
+                        // Morlet CWT column: magnitudes are already dBFS and
+                        // frequencies are log-spaced. Repackage as a
+                        // SpectrumFrame so the existing display pipeline
+                        // (triple-buffer → waterfall) consumes it unchanged.
+                        // The waterfall auto-detects log spacing from the
+                        // freqs step ratio (see app.rs log_spaced detection).
+                        let cf: CwtFrame = match serde_json::from_str(body) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                log::warn!("cwt parse failed: {e}");
+                                continue;
+                            }
+                        };
+                        if cf.magnitudes.is_empty() {
+                            continue;
+                        }
+                        let slot = route_slot(cf.channel, &mut channel_map);
+                        let Some(slot) = slot else {
+                            if !warned_overflow {
+                                log::warn!(
+                                    "receiver: cwt frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                    cf.channel,
+                                    n_slots
+                                );
+                                warned_overflow = true;
+                            }
+                            continue;
+                        };
+                        status_c.connected.store(true, Ordering::Relaxed);
+                        let ns = start.elapsed().as_nanos() as u64;
+                        status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                        slot_seq[slot] += 1;
+                        let frame = SpectrumFrame {
+                            freqs: cf.frequencies,
+                            spectrum: cf.magnitudes,
+                            sr: cf.sr,
+                            channel: cf.channel,
+                            n_channels: cf.n_channels,
+                            frame_id: slot_seq[slot],
+                            ..SpectrumFrame::default()
+                        };
+                        inputs[slot].write(frame);
+                        continue;
+                    }
                     if type_tag.as_deref() == Some("transfer_stream") {
                         match serde_json::from_str::<TransferFrame>(body) {
                             Ok(tf) => {

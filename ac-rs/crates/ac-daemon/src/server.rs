@@ -51,6 +51,12 @@ pub struct ServerState {
     /// refreshed by the `devices` command.
     pub playback_ports_cache: Arc<Mutex<Option<Vec<String>>>>,
     pub capture_ports_cache:  Arc<Mutex<Option<Vec<String>>>>,
+    /// Spectrum analysis mode: `"fft"` (default) or `"cwt"` (Morlet wavelet).
+    /// Read by the `monitor_spectrum` worker on each tick so toggling it via
+    /// `set_analysis_mode` takes effect on the next published frame.
+    pub analysis_mode: Arc<Mutex<String>>,
+    pub cwt_sigma:     Arc<Mutex<f32>>,
+    pub cwt_n_scales:  Arc<Mutex<usize>>,
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -88,6 +94,9 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cal_reply_tx: Arc::new(Mutex::new(None)),
         playback_ports_cache: Arc::new(Mutex::new(None)),
         capture_ports_cache:  Arc::new(Mutex::new(None)),
+        analysis_mode: Arc::new(Mutex::new("fft".to_string())),
+        cwt_sigma:     Arc::new(Mutex::new(ac_core::cwt::DEFAULT_SIGMA)),
+        cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
@@ -198,6 +207,8 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "plot"                => handlers::plot(state, &cmd),
         "plot_level"          => handlers::plot_level(state, &cmd),
         "monitor_spectrum"    => handlers::monitor_spectrum(state, &cmd),
+        "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
+        "get_analysis_mode"   => handlers::get_analysis_mode(state),
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),
         "calibrate"           => handlers::calibrate(state, &cmd),

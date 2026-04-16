@@ -52,3 +52,25 @@ pub struct AnalysisResult {
     /// indicating a capacitively-coupled path rather than real distortion.
     pub ac_coupled: bool,
 }
+
+/// One column of a Morlet CWT waterfall — a set of magnitudes sampled at
+/// the centre of the analysed buffer, one per log-spaced scale.
+///
+/// Published on DATA:5557 in place of spectrum frames when the daemon's
+/// analysis mode is `"cwt"`. Consumers reach into `frequencies` directly as
+/// a log-spaced frequency axis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CwtFrame {
+    /// Magnitude per scale in dBFS, length equals `frequencies.len()`.
+    /// Already `1/sqrt(scale)`-normalised so equal-amplitude sines land at
+    /// the same dB regardless of their centre frequency.
+    pub magnitudes: Vec<f32>,
+
+    /// Hz per scale (log-spaced), one-for-one with `magnitudes`. UI uses
+    /// this as the waterfall's frequency axis with `log_spaced = true`.
+    pub frequencies: Vec<f32>,
+
+    /// Monotonic timestamp in nanoseconds; convention matches the other
+    /// ac-ui frame timestamps.
+    pub timestamp: u64,
+}

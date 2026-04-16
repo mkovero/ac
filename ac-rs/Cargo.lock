@@ -28,6 +28,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_distr",
  "realfft",
+ "rustfft",
  "serde",
  "serde_json",
  "tempfile",

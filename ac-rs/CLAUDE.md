@@ -8,15 +8,17 @@ The Python client (`ac/client/ac.py`) speaks to it unchanged.
 ```bash
 cargo build -p ac-daemon          # debug (auto-discovered by Python client)
 cargo build -p ac-daemon --release
-cargo test -p ac-core             # 29 unit tests, no hardware required
+cargo build -p ac-ui              # wgpu spectrum/waterfall/transfer UI
+cargo test -p ac-core             # 37 unit tests, no hardware required
 ```
 
 ## Crate layout
 
 | Crate | Role |
 |-------|------|
-| `ac-core` | Pure library — analysis, generator, calibration, config, conversions. No sockets, no global state. |
+| `ac-core` | Pure library — analysis, cwt, generator, calibration, config, conversions. No sockets, no global state. |
 | `ac-daemon` | ZMQ REP+PUB server binary. Thin shell over `ac-core`. |
+| `ac-ui` | wgpu live spectrum/waterfall/transfer monitor. Connects to `ac-daemon` via ZMQ SUB + REQ. |
 
 ## ac-daemon binary
 
@@ -71,5 +73,25 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 - `xruns()` counter is always 0 on both JACK and CPAL (issue #24).
 - Capture rings grow unbounded on long output-only commands (issue #25).
 - `handlers.rs` is 1931 LOC; slated for split into per-concern modules (#29).
+
+## ac-ui keybindings
+
+| Key | Action |
+|-----|--------|
+| `L` | Cycle layout: grid → overlay → single → compare → transfer |
+| `W` | Cycle view: spectrum → waterfall (FFT) → waterfall (CWT) → spectrum |
+| `F` | Toggle fullscreen |
+| `D` | Toggle timing overlay |
+| `Tab` / `Shift+Tab` | Next/prev channel or grid page |
+| `Space` | Toggle channel selection |
+| `[` / `]` | Shift dB floor ±5 |
+| `+` / `-` | Adjust dB span |
+| `Ctrl+R` | Reset all views |
+| `P` | Screenshot |
+| `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
+| `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
+| Scroll | Zoom freq/dB/time axis (context-dependent) |
+| Drag | Pan freq/dB axes |
+| Right-click | Reset hovered cell view |
 
 For the full backlog see <https://github.com/mkovero/ac/issues?q=is%3Aopen+label%3Abacklog>.

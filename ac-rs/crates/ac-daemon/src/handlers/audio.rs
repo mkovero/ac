@@ -337,6 +337,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
     let in_ports_worker = in_ports.clone();
+    let analysis_mode = state.analysis_mode.clone();
+    let cwt_sigma_shared = state.cwt_sigma.clone();
+    let cwt_n_scales_shared = state.cwt_n_scales.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
@@ -352,6 +355,27 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
         let mut xruns_total = 0u32;
 
+        // CWT state: recomputed when sigma/n_scales change.
+        let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
+        let mut cwt_n_scales = *cwt_n_scales_shared.lock().unwrap();
+        let (mut cwt_scales, mut cwt_freqs) = ac_core::cwt::log_scales(
+            ac_core::cwt::DEFAULT_F_MIN,
+            ac_core::cwt::default_f_max(sr),
+            cwt_n_scales,
+            sr,
+            cwt_sigma,
+        );
+
+        // Sliding ring buffer for CWT: holds ~0.5 s of audio per channel so
+        // low-frequency wavelets (20 Hz @ sigma=12 ≈ 0.6 s support) see
+        // enough data. Short 50 ms captures feed the ring; the CWT runs on
+        // the full ring each tick giving ~20 Hz update rate.
+        let ring_cap = (sr as f64 * 0.15).ceil() as usize; // 0.15 s — enough for 20 Hz
+        let cwt_tick = 0.02_f64; // 20 ms capture per CWT tick
+        let mut cwt_rings: Vec<std::collections::VecDeque<f32>> =
+            channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(ring_cap)).collect();
+        let mut cwt_log_counter = 0u32;
+
         let per_channel_interval = if channels_worker.len() > 1 {
             interval / channels_worker.len() as f64
         } else {
@@ -359,6 +383,28 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         };
 
         while !stop.load(Ordering::Relaxed) {
+            let mode = analysis_mode.lock().unwrap().clone();
+            let is_cwt = mode == "cwt";
+
+            // Check for live CWT param changes.
+            if is_cwt {
+                let new_sigma = *cwt_sigma_shared.lock().unwrap();
+                let new_n = *cwt_n_scales_shared.lock().unwrap();
+                if (new_sigma - cwt_sigma).abs() > 0.01 || new_n != cwt_n_scales {
+                    cwt_sigma = new_sigma;
+                    cwt_n_scales = new_n;
+                    let (s, f) = ac_core::cwt::log_scales(
+                        ac_core::cwt::DEFAULT_F_MIN,
+                        ac_core::cwt::default_f_max(sr),
+                        cwt_n_scales,
+                        sr,
+                        cwt_sigma,
+                    );
+                    cwt_scales = s;
+                    cwt_freqs = f;
+                }
+            }
+
             for (idx, &channel) in channels_worker.iter().enumerate() {
                 if stop.load(Ordering::Relaxed) { break; }
                 if channels_worker.len() > 1 {
@@ -371,7 +417,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                     eng.flush_capture();
                 }
-                let samples = match eng.capture_block(per_channel_interval) {
+                let cap_dur = if is_cwt { cwt_tick } else { per_channel_interval };
+                let samples = match eng.capture_block(cap_dur) {
                     Ok(s) => s,
                     Err(e) => {
                         send_pub(&pub_tx, "error", &json!({
@@ -383,7 +430,49 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 };
                 xruns_total += eng.xruns();
 
-                if let Ok(r) = ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
+                if is_cwt {
+                    let ring = &mut cwt_rings[idx];
+                    ring.extend(samples.iter());
+                    while ring.len() > ring_cap {
+                        ring.pop_front();
+                    }
+                    if ring.len() < 256 {
+                        continue;
+                    }
+                    let t0 = std::time::Instant::now();
+                    let buf = ring.make_contiguous();
+                    let mags = ac_core::cwt::morlet_cwt(
+                        buf,
+                        sr,
+                        &cwt_scales,
+                        cwt_sigma,
+                    );
+                    cwt_log_counter += 1;
+                    if cwt_log_counter % 50 == 1 {
+                        eprintln!(
+                            "cwt ch{channel}: {:.1}ms, ring={}, scales={}",
+                            t0.elapsed().as_secs_f64() * 1000.0,
+                            buf.len(),
+                            cwt_scales.len(),
+                        );
+                    }
+                    let ts_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let frame = json!({
+                        "type":        "cwt",
+                        "cmd":         "monitor_spectrum",
+                        "channel":     channel,
+                        "n_channels":  n_channels,
+                        "sr":          sr,
+                        "magnitudes":  mags,
+                        "frequencies": cwt_freqs,
+                        "timestamp":   ts_ns,
+                        "xruns":       xruns_total,
+                    });
+                    send_pub(&pub_tx, "data", &frame);
+                } else if let Ok(r) = ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
                     current_freqs[idx] = r.fundamental_hz;
                     let cal = cals[idx].as_ref();
                     let in_dbu = cal

@@ -71,6 +71,23 @@ pub struct FrameMeta {
     pub xruns: u32,
 }
 
+/// Morlet CWT waterfall column published by the daemon on the `data` topic
+/// with `type == "cwt"`. Shape differs from `SpectrumFrame`: magnitudes are
+/// already in dBFS and frequencies are log-spaced, so the receiver converts
+/// this into a `SpectrumFrame` without the usual linear→dB step before
+/// writing to the display triple-buffer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CwtFrame {
+    pub magnitudes:  Vec<f32>,
+    pub frequencies: Vec<f32>,
+    pub sr:          u32,
+    #[serde(default)]
+    pub channel:     Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub n_channels:  Option<u32>,
+}
+
 /// One H1 transfer function estimate from the daemon. Arrives on the `data`
 /// topic with `type == "transfer_stream"` and replaces whatever the UI was
 /// displaying — no averaging in the UI layer, the Welch averaging already
@@ -145,14 +162,7 @@ pub enum ViewMode {
     Waterfall,
 }
 
-impl ViewMode {
-    pub fn next(self) -> Self {
-        match self {
-            ViewMode::Spectrum => ViewMode::Waterfall,
-            ViewMode::Waterfall => ViewMode::Spectrum,
-        }
-    }
-}
+
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
 /// can target the hovered cell independently without broadcasting to the rest.

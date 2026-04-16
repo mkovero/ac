@@ -48,6 +48,7 @@ ac-rs/
       src/
         audio.rs      # JACK + CPAL capture/playback, ringbuffer
         analysis.rs   # FFT, THD, THD+N (mirrors analysis.py)
+        cwt.rs        # Morlet continuous wavelet transform (sparse freq-domain)
         generator.rs  # sine, sweep waveform generation
         calibration.rs# Calibration struct, load/save cal.json
         types.rs      # all shared JSON-serializable structs (serde)

@@ -169,6 +169,7 @@ impl WaterfallRenderer {
         let history_bins = 1024_u32;
         let history_layers = 8_u32;
         let history_tex = create_history_texture(device, history_bins, history_layers);
+        clear_history(queue, &history_tex, history_bins, history_layers);
         let history_view = history_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -221,6 +222,7 @@ impl WaterfallRenderer {
             let new_bins = need_bins.next_power_of_two().max(self.history_bins);
             let new_layers = need_layers.max(self.history_layers);
             self.history_tex = create_history_texture(device, new_bins, new_layers);
+            clear_history(queue, &self.history_tex, new_bins, new_layers);
             self.history_view = self.history_tex.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
                 ..Default::default()
@@ -334,6 +336,32 @@ fn create_cells_buffer(device: &wgpu::Device, count: usize) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+/// Fill every texel with -200.0 dBFS so unfilled rows render black instead of
+/// the wgpu-default 0.0 (which maps to the hottest colormap color).
+fn clear_history(queue: &wgpu::Queue, tex: &wgpu::Texture, bins: u32, layers: u32) {
+    let row: Vec<f32> = vec![-200.0_f32; bins as usize];
+    let row_bytes = bytemuck::cast_slice(&row);
+    for layer in 0..layers {
+        for row_idx in 0..ROWS_PER_CHANNEL {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: row_idx, z: layer },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                row_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bins * 4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d { width: bins, height: 1, depth_or_array_layers: 1 },
+            );
+        }
+    }
 }
 
 fn create_history_texture(device: &wgpu::Device, bins: u32, layers: u32) -> wgpu::Texture {

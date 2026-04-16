@@ -6,6 +6,7 @@ description = "Core audio measurement library — FFT, THD/THD+N, calibration, s
 
 [dependencies]
 realfft    = "3"
+rustfft    = "6"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow     = "1"
