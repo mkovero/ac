@@ -80,33 +80,34 @@ struct Process {
     ring_ref_prod: HeapProd<f32>,
 }
 
+/// Fill `out` from `tone`, wrapping at buffer boundary. Returns updated position.
+fn fill_tone(out: &mut [f32], tone: &[f32], mut pos: usize) -> usize {
+    let n = tone.len();
+    for s in out.iter_mut() {
+        *s = tone[pos];
+        pos += 1;
+        if pos >= n { pos = 0; }
+    }
+    pos
+}
+
 impl jack::ProcessHandler for Process {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
         let out_buf = self.out_port.as_mut_slice(scope);
         let in_buf  = self.in_port.as_slice(scope);
         let ref_buf = self.in_ref_port.as_slice(scope);
 
-        // Output: lock-free load of the active tone buffer.
         if self.state.silence.load(Ordering::Relaxed) {
             out_buf.fill(0.0);
         } else {
             let tone = self.state.tone_buf.load();
-            let n = tone.len();
-            if n > 0 {
-                let mut pos = self.tone_pos;
-                for s in out_buf.iter_mut() {
-                    *s = tone[pos];
-                    pos += 1;
-                    if pos >= n { pos = 0; }
-                }
-                self.tone_pos = pos;
+            if !tone.is_empty() {
+                self.tone_pos = fill_tone(out_buf, &tone, self.tone_pos);
             } else {
                 out_buf.fill(0.0);
             }
         }
 
-        // Capture: lock-free SPSC push. Drops newest if nobody is draining
-        // (bounded memory for output-only commands).
         self.ring_prod.push_slice(in_buf);
         self.ring_ref_prod.push_slice(ref_buf);
 
@@ -335,5 +336,156 @@ impl AudioEngine for JackEngine {
         } else {
             Vec::new()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ringbuf::HeapRb;
+
+    // ---- fill_tone ----
+
+    #[test]
+    fn fill_tone_basic() {
+        let tone = [1.0f32, 2.0, 3.0];
+        let mut out = [0.0f32; 3];
+        let pos = fill_tone(&mut out, &tone, 0);
+        assert_eq!(out, [1.0, 2.0, 3.0]);
+        assert_eq!(pos, 0); // wraps back to 0
+    }
+
+    #[test]
+    fn fill_tone_wraps_at_boundary() {
+        let tone = [1.0f32, 2.0, 3.0];
+        let mut out = [0.0f32; 7];
+        let pos = fill_tone(&mut out, &tone, 0);
+        assert_eq!(out, [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn fill_tone_starts_mid_buffer() {
+        let tone = [10.0f32, 20.0, 30.0, 40.0];
+        let mut out = [0.0f32; 5];
+        let pos = fill_tone(&mut out, &tone, 2);
+        assert_eq!(out, [30.0, 40.0, 10.0, 20.0, 30.0]);
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn fill_tone_single_sample_buffer() {
+        let tone = [42.0f32];
+        let mut out = [0.0f32; 4];
+        let pos = fill_tone(&mut out, &tone, 0);
+        assert_eq!(out, [42.0; 4]);
+        assert_eq!(pos, 0);
+    }
+
+    // ---- Ring buffer drain (SPSC) ----
+
+    #[test]
+    fn ring_drain_fifo_order() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        let data = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        prod.push_slice(&data);
+        assert_eq!(cons.occupied_len(), 5);
+
+        let mut out = [0.0f32; 5];
+        let got = cons.pop_slice(&mut out);
+        assert_eq!(got, 5);
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn ring_drain_partial() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        prod.push_slice(&[1.0, 2.0, 3.0]);
+
+        let mut out = [0.0f32; 5];
+        let got = cons.pop_slice(&mut out);
+        assert_eq!(got, 3);
+        assert_eq!(&out[..3], &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn ring_clear_resets() {
+        let rb = HeapRb::<f32>::new(64);
+        let (mut prod, mut cons) = rb.split();
+        prod.push_slice(&[1.0, 2.0]);
+        cons.clear();
+        assert_eq!(cons.occupied_len(), 0);
+    }
+
+    // ---- Stereo ref-channel padding ----
+
+    #[test]
+    fn stereo_ref_padding() {
+        let n_needed = 100;
+        let rb_meas = HeapRb::<f32>::new(256);
+        let rb_ref  = HeapRb::<f32>::new(256);
+        let (mut mp, mut mc) = rb_meas.split();
+        let (mut rp, mut rc) = rb_ref.split();
+
+        // Push full meas, partial ref
+        let meas_data: Vec<f32> = (0..n_needed).map(|i| i as f32).collect();
+        mp.push_slice(&meas_data);
+        let ref_data: Vec<f32> = (0..40).map(|i| (i as f32) * 10.0).collect();
+        rp.push_slice(&ref_data);
+
+        let mut meas = vec![0.0f32; n_needed];
+        let got_m = mc.pop_slice(&mut meas);
+        meas.truncate(got_m);
+
+        let mut refch = vec![0.0f32; n_needed];
+        let got_r = rc.pop_slice(&mut refch);
+        for s in refch.iter_mut().skip(got_r) { *s = 0.0; }
+
+        assert_eq!(meas.len(), n_needed);
+        assert_eq!(refch.len(), n_needed);
+        assert_eq!(got_r, 40);
+        // First 40 samples are from ref, rest are zero-padded
+        assert_eq!(&refch[..40], &ref_data[..]);
+        assert!(refch[40..].iter().all(|&s| s == 0.0));
+    }
+
+    // ---- SharedState / xruns ----
+
+    #[test]
+    fn xrun_counter_increments() {
+        let state = Arc::new(SharedState {
+            tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
+            silence:  AtomicBool::new(true),
+            xruns:    AtomicUsize::new(0),
+        });
+        assert_eq!(state.xruns.load(Ordering::Relaxed), 0);
+        state.xruns.fetch_add(1, Ordering::Relaxed);
+        state.xruns.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(state.xruns.load(Ordering::Relaxed), 2);
+    }
+
+    // ---- ArcSwap tone buffer swap ----
+
+    #[test]
+    fn tone_buf_swap_is_visible() {
+        let state = SharedState {
+            tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 4])),
+            silence:  AtomicBool::new(false),
+            xruns:    AtomicUsize::new(0),
+        };
+        let mut out = [0.0f32; 2];
+        fill_tone(&mut out, &state.tone_buf.load(), 0);
+        assert_eq!(out, [0.0, 0.0]);
+
+        state.tone_buf.store(Arc::new(vec![5.0f32, 6.0, 7.0]));
+        let mut out2 = [0.0f32; 3];
+        fill_tone(&mut out2, &state.tone_buf.load(), 0);
+        assert_eq!(out2, [5.0, 6.0, 7.0]);
     }
 }
