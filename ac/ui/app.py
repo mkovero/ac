@@ -21,6 +21,8 @@ PURPLE  = "#a29bfe"
 RED     = "#e74c3c"
 AMBER   = "#ffb43c"
 
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 
 def _hz_label(val):
     """Format a frequency in Hz as a human-readable string."""
@@ -199,7 +201,7 @@ class ZmqReceiver:
 def main():
     ap = argparse.ArgumentParser(prog="ac.ui")
     ap.add_argument("--mode",  required=True,
-                    choices=["spectrum", "thd", "sweep_frequency", "sweep_level", "transfer"])
+                    choices=["spectrum", "sweep_frequency", "sweep_level", "transfer"])
     ap.add_argument("--host",  default="localhost")
     ap.add_argument("--port",  type=int, default=5557)
     ap.add_argument("--session-dir", default=None)
