@@ -181,26 +181,32 @@ pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config) {
     let bin = crate::spawn::find_binary("ac-ui");
     let bin = match bin {
         Some(p) => p,
-        None => return,
+        None => {
+            eprintln!("  warning: ac-ui not found, skipping UI launch");
+            return;
+        }
     };
-    let host = cfg.server_host.as_deref().unwrap_or("localhost");
+    let host = cfg.server_host.as_deref().unwrap_or("127.0.0.1");
     let mut args = vec![
-        "--mode".to_string(),
-        mode.to_string(),
-        "--host".to_string(),
-        host.to_string(),
-        "--port".to_string(),
-        "5557".to_string(),
+        "--connect".to_string(),
+        format!("tcp://{host}:5557"),
+        "--ctrl".to_string(),
+        format!("tcp://{host}:5556"),
     ];
+    if mode != "spectrum" {
+        args.push("--mode".to_string());
+        args.push(mode.to_string());
+    }
     if let Some(ref sess) = cfg.session {
         let d = io::session_dir(sess);
-        args.push("--session-dir".to_string());
+        args.push("--output-dir".to_string());
         args.push(d.to_string_lossy().into_owned());
     }
     std::process::Command::new(bin)
         .args(&args)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .ok();
 }

@@ -41,7 +41,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::Plot { .. } => plot::run(&parsed.cmd, cfg, client, show),
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
 
-        CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg, client, show),
+        CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
         CommandKind::Transfer { .. } => transfer::run(&parsed.cmd, cfg, client, show),
 
         CommandKind::Probe => probe::run(client),

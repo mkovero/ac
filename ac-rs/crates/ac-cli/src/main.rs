@@ -59,6 +59,13 @@ fn main() {
     };
 
     spawn::ensure_server(&mut client, host);
+
+    if matches!(parsed.cmd, CommandKind::Monitor { .. }) {
+        drop(client);
+        commands::monitor::run(&parsed.cmd, &cfg);
+        return;
+    }
+
     commands::dispatch(parsed, &cfg, &mut client);
 }
 

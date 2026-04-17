@@ -4,13 +4,19 @@ use serde::Deserialize;
 pub struct SpectrumFrame {
     pub freqs: Vec<f32>,
     pub spectrum: Vec<f32>,
+    #[serde(default)]
     pub freq_hz: f32,
+    #[serde(default)]
     pub fundamental_dbfs: f32,
+    #[serde(default)]
     pub thd_pct: f32,
+    #[serde(default)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
     pub sr: u32,
+    #[serde(default)]
     pub clipping: bool,
+    #[serde(default)]
     pub xruns: u32,
     #[serde(default)]
     pub channel: Option<u32>,

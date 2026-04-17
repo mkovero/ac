@@ -472,29 +472,47 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "xruns":       xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
-                } else if let Ok(r) = ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
-                    current_freqs[idx] = r.fundamental_hz;
-                    let cal = cals[idx].as_ref();
-                    let in_dbu = cal
-                        .and_then(|c| c.in_vrms(r.linear_rms))
-                        .map(ac_core::conversions::vrms_to_dbu);
-                    let (spec, freqs) = downsample(&r.spectrum, &r.freqs, 1000);
-                    let frame = json!({
-                        "type":             "spectrum",
-                        "cmd":              "monitor_spectrum",
-                        "channel":          channel,
-                        "n_channels":       n_channels,
-                        "freq_hz":          r.fundamental_hz,
-                        "sr":               sr,
-                        "freqs":            freqs,
-                        "spectrum":         spec,
-                        "fundamental_dbfs": r.fundamental_dbfs,
-                        "thd_pct":          r.thd_pct,
-                        "thdn_pct":         r.thdn_pct,
-                        "in_dbu":           in_dbu,
-                        "clipping":         r.clipping,
-                        "xruns":            xruns_total,
-                    });
+                } else {
+                    let frame = match ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
+                        Ok(r) => {
+                            current_freqs[idx] = r.fundamental_hz;
+                            let cal = cals[idx].as_ref();
+                            let in_dbu = cal
+                                .and_then(|c| c.in_vrms(r.linear_rms))
+                                .map(ac_core::conversions::vrms_to_dbu);
+                            let (spec, freqs) = downsample(&r.spectrum, &r.freqs, 1000);
+                            json!({
+                                "type":             "spectrum",
+                                "cmd":              "monitor_spectrum",
+                                "channel":          channel,
+                                "n_channels":       n_channels,
+                                "freq_hz":          r.fundamental_hz,
+                                "sr":               sr,
+                                "freqs":            freqs,
+                                "spectrum":         spec,
+                                "fundamental_dbfs": r.fundamental_dbfs,
+                                "thd_pct":          r.thd_pct,
+                                "thdn_pct":         r.thdn_pct,
+                                "in_dbu":           in_dbu,
+                                "clipping":         r.clipping,
+                                "xruns":            xruns_total,
+                            })
+                        }
+                        Err(_) => {
+                            let (spec, freqs) = ac_core::analysis::spectrum_only(&samples, sr);
+                            let (spec, freqs) = downsample(&spec, &freqs, 1000);
+                            json!({
+                                "type":             "spectrum",
+                                "cmd":              "monitor_spectrum",
+                                "channel":          channel,
+                                "n_channels":       n_channels,
+                                "sr":               sr,
+                                "freqs":            freqs,
+                                "spectrum":         spec,
+                                "xruns":            xruns_total,
+                            })
+                        }
+                    };
                     send_pub(&pub_tx, "data", &frame);
                 }
             }

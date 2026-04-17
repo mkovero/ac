@@ -18,12 +18,14 @@ impl AcClient {
         let ctrl = ctx.socket(zmq::REQ).context("creating CTRL socket")?;
         ctrl.set_rcvtimeo(DEFAULT_TIMEOUT_MS)
             .context("setting CTRL timeout")?;
+        ctrl.set_linger(0).context("setting CTRL linger")?;
         let ctrl_addr = format!("tcp://{host}:{ctrl_port}");
         ctrl.connect(&ctrl_addr)
             .with_context(|| format!("connecting CTRL to {ctrl_addr}"))?;
 
         let data = ctx.socket(zmq::SUB).context("creating DATA socket")?;
         data.set_subscribe(b"").context("subscribing to all topics")?;
+        data.set_linger(0).context("setting DATA linger")?;
         let data_addr = format!("tcp://{host}:{data_port}");
         data.connect(&data_addr)
             .with_context(|| format!("connecting DATA to {data_addr}"))?;
@@ -77,6 +79,7 @@ impl AcClient {
             self.ctx.socket(zmq::REQ).unwrap(),
         ));
         self.ctrl.set_rcvtimeo(DEFAULT_TIMEOUT_MS).ok();
+        self.ctrl.set_linger(0).ok();
         self.ctrl.connect(&addr).ok();
     }
 

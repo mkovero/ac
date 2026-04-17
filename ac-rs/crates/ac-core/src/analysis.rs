@@ -228,6 +228,31 @@ pub fn analyze_default(samples: &[f32]) -> Result<AnalysisResult> {
     analyze(samples, SAMPLERATE, FUNDAMENTAL_HZ, NUM_HARMONICS)
 }
 
+/// Compute just the amplitude spectrum (no THD/fundamental analysis).
+/// Always succeeds for any input ≥ 2 samples. Used by `monitor_spectrum`
+/// to publish data even when there is no detectable signal.
+pub fn spectrum_only(samples: &[f32], sr: u32) -> (Vec<f64>, Vec<f64>) {
+    let n = samples.len().max(2);
+    let mono: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
+    let win: Vec<f64> = (0..n)
+        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()))
+        .collect();
+    let wc = (win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
+    let mut windowed: Vec<f64> = mono.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
+    let mut planner = RealFftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(n);
+    let mut out = fft.make_output_vec();
+    if fft.process(&mut windowed, &mut out).is_err() {
+        return (vec![], vec![]);
+    }
+    let norm = (n as f64 / 2.0) * wc;
+    let spec: Vec<f64> = out.iter().map(|c| c.norm() / norm).collect();
+    let freqs: Vec<f64> = (0..out.len())
+        .map(|k| k as f64 * sr as f64 / n as f64)
+        .collect();
+    (spec, freqs)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
