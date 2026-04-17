@@ -303,6 +303,7 @@ pub enum CommandKind {
         interval: f64,
         min_y: Option<LevelSpec>,
         max_y: Option<LevelSpec>,
+        channels: Option<Vec<u32>>,
     },
     Transfer {
         start: Option<f64>,
@@ -552,7 +553,13 @@ fn parse_sweep(args: &mut Vec<String>, show_plot: bool) -> Result<ParsedCommand,
 }
 
 fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCommand, String> {
-    let mut tokens = classify_all(args)?;
+    let mut args = args.to_vec();
+    let channels = if args.first().map_or(false, |a| is_channel_spec(a)) {
+        Some(parse_channels(&args.remove(0))?)
+    } else {
+        None
+    };
+    let mut tokens = classify_all(&args)?;
     let start_freq = pull(&mut tokens, TokenKind::Freq)
         .map(|v| v.as_f64())
         .unwrap_or(20.0);
@@ -572,6 +579,7 @@ fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCommand, Stri
             interval,
             min_y,
             max_y,
+            channels,
         },
         show_plot,
     })
@@ -942,7 +950,7 @@ Commands:
   plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD vs frequency
   plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
   transfer        [<freqStart freqStop>] [level]                H1 transfer function (requires reference)
-  monitor         [<freqStart freqStop>] [interval] [show]      live spectrum
+  monitor         [channels] [<freqStart freqStop>] [interval] [show]  live spectrum
   ui              [--synthetic] [--channels N] [--view <mode>]   GPU spectrum/waterfall UI (ac-ui)
   stop                                                          stop active generator/measurement
   test software                                                  validate analysis pipeline (no hardware)
@@ -1171,6 +1179,28 @@ mod tests {
         let p = parse(&args("m sh")).unwrap();
         assert!(p.show_plot);
         assert!(matches!(p.cmd, CommandKind::Monitor { .. }));
+    }
+
+    #[test]
+    fn test_monitor_channels() {
+        let p = parse(&args("monitor 0-3,5")).unwrap();
+        match p.cmd {
+            CommandKind::Monitor { channels, .. } => {
+                assert_eq!(channels, Some(vec![0, 1, 2, 3, 5]));
+            }
+            other => panic!("expected Monitor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_monitor_no_channels() {
+        let p = parse(&args("monitor")).unwrap();
+        match p.cmd {
+            CommandKind::Monitor { channels, .. } => {
+                assert_eq!(channels, None);
+            }
+            other => panic!("expected Monitor, got {other:?}"),
+        }
     }
 
     #[test]

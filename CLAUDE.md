@@ -10,7 +10,7 @@ This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, fr
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # ac-core (43 tests) + ac-cli (50 tests)
+cargo test                     # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
 ```
 
 ## Install (Python — alternative)
@@ -38,7 +38,8 @@ ac setup output 11 input 0             # save port config
 ac calibrate                           # interactive calibration
 ac sweep level -20dbu 6dbu 1khz       # level sweep
 ac sweep frequency 20hz 20khz 0dbu    # freq sweep
-ac monitor thd 0dbu 1khz              # live THD monitor
+ac monitor                             # live spectrum (default input)
+ac monitor 0-3,5                       # live spectrum on channels 0–3 and 5
 ac generate sine 0dbu 1khz            # play tone
 ac s f 20hz 20khz 0dbu show           # abbreviated + open plot
 ```
@@ -53,8 +54,8 @@ ac-rs/                 (Rust — primary implementation)
   crates/
     ac-core/           (pure library: analysis, generator, calibration, config — 43 tests)
     ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
-    ac-daemon/         (ZMQ REP+PUB server binary)
-    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep)
+    ac-daemon/         (ZMQ REP+PUB server binary — 43 tests)
+    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 54 tests)
 
 ac/                    (Python — alternative client + UI)
   __init__.py          (empty)
@@ -122,8 +123,8 @@ Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to
 
 Run all tests before committing:
 ```bash
-cd ac-rs && cargo test          # Rust: ac-core (43) + ac-cli (50)
-python -m pytest tests/ -q      # Python: 149 integration tests (uses --fake-audio)
+cd ac-rs && cargo test          # Rust: 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+python -m pytest tests/ -q      # Python: 156 tests (uses --fake-audio)
 ```
 
 ## ds — diagnostics session manager

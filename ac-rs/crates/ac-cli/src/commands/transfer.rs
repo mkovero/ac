@@ -30,7 +30,7 @@ pub fn run(
     println!("  Stimulus: pink noise  |  H1 estimator with Welch averaging");
 
     if show_plot {
-        super::plot::launch_ui("transfer", cfg);
+        super::plot::launch_ui("transfer", cfg, None);
     }
 
     let ack = check_ack(

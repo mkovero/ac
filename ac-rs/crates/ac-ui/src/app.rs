@@ -62,6 +62,7 @@ pub struct AppInit {
     pub benchmark_secs: Option<f64>,
     pub initial_view: ViewMode,
     pub initial_sweep_kind: Option<SweepKind>,
+    pub monitor_channels: Option<Vec<u32>>,
 }
 
 pub enum SourceKind {
@@ -94,6 +95,7 @@ pub struct App {
     /// pause/resume around `transfer_stream` since that's the `Exclusive`
     /// group and would otherwise be busy-blocked by the `Input`-group monitor.
     monitor_spectrum_active: bool,
+    monitor_channels: Option<Vec<u32>>,
     /// Current daemon analysis mode: "fft" (default) or "cwt". Toggled via
     /// the W waterfall cycle (Spectrum → Waterfall-FFT → Waterfall-CWT). We
     /// track it locally so the cycle key can decide which mode to request
@@ -182,6 +184,7 @@ impl App {
         let show_timing = benchmark_secs.is_some();
         let ctrl_endpoint = init.ctrl_endpoint.clone();
         let sweep_kind = init.initial_sweep_kind;
+        let monitor_channels = init.monitor_channels.clone();
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else {
@@ -206,6 +209,7 @@ impl App {
             sweep_last: SweepState::default(),
             sweep_selected_idx: None,
             monitor_spectrum_active: false,
+            monitor_channels,
             analysis_mode: "fft".to_string(),
             cwt_sigma: 12.0,
             cwt_n_scales: 512,
@@ -885,7 +889,8 @@ impl App {
         if n == 0 {
             return;
         }
-        let channels: Vec<u32> = (0..n as u32).collect();
+        let channels: Vec<u32> = self.monitor_channels.clone()
+            .unwrap_or_else(|| (0..n as u32).collect());
         let Some(ctrl) = self.ensure_ctrl() else { return };
         let cmd = serde_json::json!({
             "cmd":      "monitor_spectrum",

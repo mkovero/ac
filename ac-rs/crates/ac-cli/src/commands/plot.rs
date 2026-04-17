@@ -38,7 +38,7 @@ pub fn run(
     io::print_freq_header(have_cal);
 
     if show_plot {
-        launch_ui("sweep_frequency", cfg);
+        launch_ui("sweep_frequency", cfg, None);
     }
 
     let ack = check_ack(
@@ -101,7 +101,7 @@ pub fn run_level(
     io::print_freq_header(have_cal);
 
     if show_plot {
-        launch_ui("sweep_level", cfg);
+        launch_ui("sweep_level", cfg, None);
     }
 
     let ack = check_ack(
@@ -177,7 +177,7 @@ fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::confi
     io::save_csv(results, &path);
 }
 
-pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config) {
+pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
     let bin = crate::spawn::find_binary("ac-ui");
     let bin = match bin {
         Some(p) => p,
@@ -196,6 +196,11 @@ pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config) {
     if mode != "spectrum" {
         args.push("--mode".to_string());
         args.push(mode.to_string());
+    }
+    if let Some(chs) = channels {
+        let spec: Vec<String> = chs.iter().map(|c| c.to_string()).collect();
+        args.push("--channels".to_string());
+        args.push(spec.join(","));
     }
     if let Some(ref sess) = cfg.session {
         let d = io::session_dir(sess);

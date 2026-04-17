@@ -4,10 +4,10 @@ pub fn run(
     cmd: &CommandKind,
     cfg: &ac_core::config::Config,
 ) {
-    let _params = match cmd {
-        CommandKind::Monitor { .. } => {}
+    let channels = match cmd {
+        CommandKind::Monitor { channels, .. } => channels.as_deref(),
         _ => unreachable!(),
     };
 
-    super::plot::launch_ui("spectrum", cfg);
+    super::plot::launch_ui("spectrum", cfg, channels);
 }

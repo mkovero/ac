@@ -20,26 +20,19 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // When the user hasn't forced `--channels`, query the daemon's capture
-    // port count so the store has one slot per input — otherwise multi-channel
-    // views (compare, transfer) silently cap at 1 and the user hits a wall
-    // they can't diagnose.
-    let n_channels = if let Some(n) = args.channels {
-        n.max(1)
+    let (monitor_channels, n_channels) = if let Some(ref chs) = args.channels {
+        (Some(chs.clone()), chs.len().max(1))
     } else if args.synthetic {
-        // Default to 2 so the Transfer layout (meas + ref) is usable out of
-        // the box without passing `--channels 2`. Override with `--channels`
-        // for single-channel smoke tests.
-        2
+        (None, 2)
     } else {
         match probe_daemon_channels(&args.ctrl) {
             Some(n) if n >= 1 => {
                 log::info!("discovered {n} capture channels from daemon");
-                n
+                (None, n)
             }
             _ => {
                 log::warn!("daemon probe failed; defaulting to 2 channel slots");
-                2
+                (None, 2)
             }
         }
     };
@@ -66,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         benchmark_secs: args.benchmark,
         initial_view: args.view,
         initial_sweep_kind: args.mode,
+        monitor_channels,
     };
 
     let event_loop = winit::event_loop::EventLoop::new()?;
@@ -83,9 +77,10 @@ struct Args {
     connect: String,
     ctrl: String,
     synthetic: bool,
-    /// `None` = auto-detect from daemon's `devices` (or fall back to 2 slots).
-    /// `Some(n)` = hard override from `--channels N`.
-    channels: Option<usize>,
+    /// Explicit channel indices to monitor, e.g. `--channels 0,2,5` or
+    /// `--channels 0-3`.  A bare number like `--channels 4` is treated as
+    /// a count (channels 0..4) for backward compatibility.
+    channels: Option<Vec<u32>>,
     bins: usize,
     rate: f32,
     output_dir: PathBuf,
@@ -125,11 +120,9 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--ctrl requires value"))?;
                 }
                 "--channels" => {
-                    out.channels = Some(
-                        it.next()
-                            .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?
-                            .parse()?,
-                    );
+                    let val = it.next()
+                        .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?;
+                    out.channels = Some(parse_channel_spec(&val)?);
                 }
                 "--bins" => {
                     out.bins = it
@@ -195,6 +188,27 @@ fn probe_daemon_channels(ctrl_endpoint: &str) -> Option<usize> {
         .map(|arr| arr.len())
 }
 
+fn parse_channel_spec(s: &str) -> anyhow::Result<Vec<u32>> {
+    if !s.contains(',') && !s.contains('-') {
+        let n: usize = s.parse()?;
+        return Ok((0..n as u32).collect());
+    }
+    let mut channels = std::collections::BTreeSet::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some((lo, hi)) = part.split_once('-') {
+            let lo: u32 = lo.parse()?;
+            let hi: u32 = hi.parse()?;
+            for ch in lo..=hi {
+                channels.insert(ch);
+            }
+        } else {
+            channels.insert(part.parse()?);
+        }
+    }
+    Ok(channels.into_iter().collect())
+}
+
 fn default_output_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join("ac-screenshots")
@@ -211,7 +225,7 @@ Options:\n  \
   --connect <addr>     ZMQ DATA endpoint [default: tcp://127.0.0.1:5557]\n  \
   --ctrl <addr>        ZMQ CTRL endpoint (REQ) [default: tcp://127.0.0.1:5556]\n  \
   --synthetic          Fake data instead of daemon\n  \
-  --channels <n>       Channel slot count; daemon must emit matching `channel` field [default: auto from daemon.devices]\n  \
+  --channels <spec>    Channel indices (0,2,5 or 0-3,7) or count (4 = 0..4) [default: auto from daemon.devices]\n  \
   --bins <n>           Synthetic bins per channel [default: 1000]\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
