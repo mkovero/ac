@@ -55,7 +55,7 @@ fn daemon_mtime() -> f64 {
 pub fn ensure_server(client: &mut AcClient, host: &str) {
     let is_local = matches!(host, "localhost" | "127.0.0.1" | "::1");
 
-    let status = client.send_cmd(&serde_json::json!({"cmd": "status"}), Some(500));
+    let status = client.send_cmd(&serde_json::json!({"cmd": "status"}), Some(1500));
 
     if let Some(reply) = &status {
         if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
@@ -97,13 +97,16 @@ fn spawn_daemon() {
         }
     };
     eprintln!("  starting daemon: {}", bin.display());
-    Command::new(&bin)
+    if let Err(e) = Command::new(&bin)
         .arg("--local")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok();
+    {
+        eprintln!("  error: failed to spawn daemon: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn wait_for_server(client: &mut AcClient) {

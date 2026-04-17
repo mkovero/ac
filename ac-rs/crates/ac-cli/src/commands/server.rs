@@ -71,7 +71,10 @@ pub fn set_host(host: &str) {
         Some(host.to_string())
     };
     match ac_core::config::save(&cfg, None) {
-        Ok(_) => println!("  Server host: {host}"),
+        Ok(_) => {
+            println!("  Server host set to: {host}");
+            println!("  All ac commands will now route through tcp://{host}:5556");
+        }
         Err(e) => eprintln!("  error saving config: {e}"),
     }
 }
