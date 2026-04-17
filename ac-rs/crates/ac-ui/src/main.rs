@@ -46,6 +46,12 @@ fn main() -> anyhow::Result<()> {
         SourceKind::Daemon
     };
 
+    // Build with a unit user-event type so background producer threads can
+    // wake the loop via `EventLoopProxy::send_event` when new frames arrive.
+    let event_loop = winit::event_loop::EventLoop::<()>::with_user_event().build()?;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+    let wake = event_loop.create_proxy();
+
     let init = AppInit {
         store,
         inputs,
@@ -60,10 +66,9 @@ fn main() -> anyhow::Result<()> {
         initial_view: args.view,
         initial_sweep_kind: args.mode,
         monitor_channels,
+        wake: Some(wake),
     };
 
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     let mut app = App::new(init);
     event_loop.run_app(&mut app)?;
     if let Some(report) = app.benchmark_report() {

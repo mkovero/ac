@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
+use winit::event_loop::EventLoopProxy;
 
 use super::store::{SweepStore, TransferStore};
 use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame};
@@ -50,6 +51,7 @@ pub fn spawn(
     inputs: Vec<Input<SpectrumFrame>>,
     transfer: TransferStore,
     sweep: SweepStore,
+    wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(ReceiverStatus::new());
@@ -61,6 +63,11 @@ pub fn spawn(
         let mut channel_map: Vec<Option<u32>> = vec![None; n_slots];
         let mut slot_seq: Vec<u64> = vec![0; n_slots];
         let mut warned_overflow = false;
+        let notify = || {
+            if let Some(ref p) = wake {
+                let _ = p.send_event(());
+            }
+        };
 
         let ctx = zmq::Context::new();
         let sub = match ctx.socket(zmq::SUB) {
@@ -133,6 +140,7 @@ pub fn spawn(
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
                                 status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
                             }
                         }
                         continue;
@@ -183,6 +191,7 @@ pub fn spawn(
                         status_c.connected.store(true, Ordering::Relaxed);
                         let ns = start.elapsed().as_nanos() as u64;
                         status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                        notify();
                         slot_seq[slot] += 1;
                         let frame = SpectrumFrame {
                             freqs: cf.frequencies,
@@ -210,6 +219,7 @@ pub fn spawn(
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
                                 status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
                             }
                             Err(e) => {
                                 log::warn!(
@@ -231,6 +241,7 @@ pub fn spawn(
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
                                 status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
                             }
                             Err(e) => {
                                 log::warn!("sweep_point parse failed: {e}");
@@ -267,6 +278,7 @@ pub fn spawn(
                     status_c.connected.store(true, Ordering::Relaxed);
                     let ns = start.elapsed().as_nanos() as u64;
                     status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                    notify();
                     slot_seq[slot] += 1;
                     frame.frame_id = slot_seq[slot];
                     inputs[slot].write(frame);

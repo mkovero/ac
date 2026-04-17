@@ -7,7 +7,7 @@ use triple_buffer::Input;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -63,6 +63,11 @@ pub struct AppInit {
     pub initial_view: ViewMode,
     pub initial_sweep_kind: Option<SweepKind>,
     pub monitor_channels: Option<Vec<u32>>,
+    /// Proxy handed to background producer threads (receiver / synthetic) so
+    /// they can wake the winit event loop the instant a new frame lands.
+    /// Without this the UI sits in `ControlFlow::Wait` and won't repaint
+    /// until the next OS input event, making streamed data look sluggish.
+    pub wake: Option<EventLoopProxy<()>>,
 }
 
 pub enum SourceKind {
@@ -163,6 +168,10 @@ pub struct App {
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
+    /// Proxy handed to producer threads so they can wake the loop on frame
+    /// arrival. Cloned out during `start_data_source`; kept here only so the
+    /// clone is retained if we ever need to re-wire a new source.
+    wake: Option<EventLoopProxy<()>>,
 }
 
 #[derive(Clone)]
@@ -185,6 +194,7 @@ impl App {
         let ctrl_endpoint = init.ctrl_endpoint.clone();
         let sweep_kind = init.initial_sweep_kind;
         let monitor_channels = init.monitor_channels.clone();
+        let wake = init.wake.clone();
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else {
@@ -246,6 +256,7 @@ impl App {
             benchmark_report: None,
             last_seen_frame_ns: 0,
             needs_redraw: true,
+            wake,
         }
     }
 
@@ -734,7 +745,7 @@ impl App {
                     update_hz: rate,
                     transfer: transfer_store,
                 };
-                let handle = src.spawn(init.inputs);
+                let handle = src.spawn(init.inputs, self.wake.clone());
                 self.source = Some(DataSource::Synthetic(handle));
             }
             SourceKind::Daemon => {
@@ -743,6 +754,7 @@ impl App {
                     init.inputs,
                     transfer_store,
                     sweep_store,
+                    self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));
                 if !matches!(self.config.layout, LayoutMode::Sweep) {
@@ -1932,7 +1944,9 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
         self.benchmark_tick(elwt);
 
-        // Check if the receiver pushed a new frame since our last render.
+        // Producer threads (receiver / synthetic) wake us via
+        // `EventLoopProxy::send_event` on every frame, so we don't need to
+        // poll `last_frame_ns` on a timer — just track it for dedupe.
         let current_ns = self.source.as_ref()
             .and_then(|s| s.status())
             .map(|st| st.last_frame_ns.load(std::sync::atomic::Ordering::Relaxed))
@@ -1942,13 +1956,10 @@ impl ApplicationHandler for App {
             self.needs_redraw = true;
         }
 
-        // Active notification needs redraws until it expires.
-        if self.notification.is_some() {
-            self.needs_redraw = true;
-        }
-
-        // Benchmark mode always redraws.
-        if self.benchmark_secs.is_some() {
+        // Notification fade and benchmark mode are time-driven, so while
+        // either is active we cap at ~60 Hz via a short WaitUntil below.
+        let continuous = self.notification.is_some() || self.benchmark_secs.is_some();
+        if continuous {
             self.needs_redraw = true;
         }
 
@@ -1957,12 +1968,25 @@ impl ApplicationHandler for App {
             if let Some(ctx) = self.render_ctx.as_ref() {
                 ctx.window.request_redraw();
             }
+            if continuous {
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    Instant::now() + std::time::Duration::from_millis(16),
+                ));
+            } else {
+                elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            }
         } else {
-            // No work — sleep until next check. 16 ms ≈ 60 Hz poll ceiling.
-            elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                Instant::now() + std::time::Duration::from_millis(16),
-            ));
+            // Idle: block until a real event (OS input, redraw, or proxy
+            // wake-up from a producer thread).
+            elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
         }
+    }
+
+    fn user_event(&mut self, _elwt: &ActiveEventLoop, _event: ()) {
+        // Producer thread signalled a new frame — schedule a redraw on the
+        // next `about_to_wait` cycle. The frame itself is pulled from the
+        // triple buffer at render time.
+        self.needs_redraw = true;
     }
 
     fn exiting(&mut self, _elwt: &ActiveEventLoop) {

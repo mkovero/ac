@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
+use winit::event_loop::EventLoopProxy;
 
 use super::store::TransferStore;
 use super::types::{SpectrumFrame, TransferFrame};
@@ -43,7 +44,11 @@ impl Drop for SyntheticHandle {
 }
 
 impl SyntheticSource {
-    pub fn spawn(self, mut inputs: Vec<Input<SpectrumFrame>>) -> SyntheticHandle {
+    pub fn spawn(
+        self,
+        mut inputs: Vec<Input<SpectrumFrame>>,
+        wake: Option<EventLoopProxy<()>>,
+    ) -> SyntheticHandle {
         assert_eq!(inputs.len(), self.n_channels);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = stop.clone();
@@ -82,6 +87,9 @@ impl SyntheticSource {
                     input.write(frame);
                 }
                 frame_idx += 1;
+                if let Some(ref p) = wake {
+                    let _ = p.send_event(());
+                }
 
                 // Synthetic transfer: only emit while a pair is set (the UI
                 // enters Transfer layout with a valid meas/ref). Rate-limited
