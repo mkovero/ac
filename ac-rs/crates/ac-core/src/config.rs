@@ -59,6 +59,9 @@ pub struct Config {
 
     /// Force audio backend: `"jack"`, `"sounddevice"`, or `None` for auto.
     pub backend: Option<String>,
+
+    /// Remote server host for CLI connections. `None` means localhost.
+    pub server_host: Option<String>,
 }
 
 impl Default for Config {
@@ -79,6 +82,7 @@ impl Default for Config {
             gpio_port: None,
             session: None,
             backend: None,
+            server_host: None,
         }
     }
 }
