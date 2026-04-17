@@ -5,9 +5,10 @@ pub fn run(
     cfg: &ac_core::config::Config,
 ) {
     let channels = match cmd {
-        CommandKind::Monitor { channels, .. } => channels.as_deref(),
+        CommandKind::Monitor { channels, .. } => channels.clone(),
         _ => unreachable!(),
     };
+    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
 
-    super::plot::launch_ui("spectrum", cfg, channels);
+    super::plot::launch_ui("spectrum", cfg, Some(&channels));
 }
