@@ -103,6 +103,56 @@ pub struct TransferFrame {
     pub sr:            u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepKind {
+    Frequency,
+    Level,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SweepPoint {
+    pub n: u32,
+    #[serde(default)]
+    pub cmd: String,
+    pub drive_db: f32,
+    #[serde(default)]
+    pub freq_hz: Option<f32>,
+    pub thd_pct: f32,
+    pub thdn_pct: f32,
+    pub fundamental_hz: f32,
+    pub fundamental_dbfs: f32,
+    pub linear_rms: f32,
+    #[serde(default)]
+    pub harmonic_levels: Vec<[f32; 2]>,
+    pub noise_floor_dbfs: f32,
+    #[serde(default)]
+    pub spectrum: Vec<f32>,
+    #[serde(default)]
+    pub freqs: Vec<f32>,
+    #[serde(default)]
+    pub clipping: bool,
+    #[serde(default)]
+    pub ac_coupled: bool,
+    pub out_vrms: Option<f32>,
+    pub out_dbu: Option<f32>,
+    pub in_vrms: Option<f32>,
+    pub in_dbu: Option<f32>,
+    pub gain_db: Option<f32>,
+    #[serde(default)]
+    pub vrms_at_0dbfs_out: Option<f32>,
+    #[serde(default)]
+    pub vrms_at_0dbfs_in: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SweepDone {
+    pub cmd: String,
+    #[serde(default)]
+    pub n_points: u32,
+    #[serde(default)]
+    pub xruns: u32,
+}
+
 impl From<&SpectrumFrame> for FrameMeta {
     fn from(f: &SpectrumFrame) -> Self {
         Self {
@@ -131,6 +181,10 @@ pub enum LayoutMode {
     /// layout with a valid pair starts a `transfer_stream` worker on the
     /// daemon; leaving it (or swapping the pair) stops/restarts it.
     Transfer,
+    /// Sweep measurement view (THD/THD+N vs freq or level). Passive — the CLI
+    /// manages the daemon command; the UI just accumulates `sweep_point` frames.
+    /// Only entered via `--mode sweep_frequency|sweep_level`, not the L-key cycle.
+    Sweep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

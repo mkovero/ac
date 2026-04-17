@@ -13,10 +13,11 @@ use winit::window::{Window, WindowId};
 
 use crate::data::control::CtrlClient;
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
-use crate::data::store::{ChannelStore, TransferStore};
+use crate::data::store::{ChannelStore, SweepState, SweepStore, TransferStore};
 use crate::data::synthetic::SyntheticHandle;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, TransferFrame, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
+    ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::grid;
@@ -52,6 +53,7 @@ pub struct AppInit {
     pub store: ChannelStore,
     pub inputs: Vec<Input<SpectrumFrame>>,
     pub transfer_store: TransferStore,
+    pub sweep_store: SweepStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -59,6 +61,7 @@ pub struct AppInit {
     pub synthetic_params: Option<(usize, usize, f32)>,
     pub benchmark_secs: Option<f64>,
     pub initial_view: ViewMode,
+    pub initial_sweep_kind: Option<SweepKind>,
 }
 
 pub enum SourceKind {
@@ -81,6 +84,10 @@ pub struct App {
     /// on successful start, cleared on stop / layout exit. Used to avoid
     /// double-starts and to decide whether to send a stop on layout exit.
     transfer_stream_active: bool,
+    sweep_store: Option<SweepStore>,
+    sweep_kind: Option<SweepKind>,
+    sweep_last: SweepState,
+    sweep_selected_idx: Option<usize>,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -174,8 +181,15 @@ impl App {
         let benchmark_secs = init.benchmark_secs;
         let show_timing = benchmark_secs.is_some();
         let ctrl_endpoint = init.ctrl_endpoint.clone();
+        let sweep_kind = init.initial_sweep_kind;
+        let layout = if sweep_kind.is_some() {
+            LayoutMode::Sweep
+        } else {
+            LayoutMode::Grid
+        };
         let config = DisplayConfig {
             view_mode: init.initial_view,
+            layout,
             ..DisplayConfig::default()
         };
         Self {
@@ -187,6 +201,10 @@ impl App {
             ctrl: None,
             transfer_last: None,
             transfer_stream_active: false,
+            sweep_store: None,
+            sweep_kind,
+            sweep_last: SweepState::default(),
+            sweep_selected_idx: None,
             monitor_spectrum_active: false,
             analysis_mode: "fft".to_string(),
             cwt_sigma: 12.0,
@@ -366,6 +384,7 @@ impl App {
                     Vec::new()
                 }
             }
+            LayoutMode::Sweep => vec![0],
         }
     }
 
@@ -448,6 +467,10 @@ impl App {
             Some(p) => p,
             None => return,
         };
+        if matches!(self.config.layout, LayoutMode::Sweep) {
+            self.handle_sweep_click(pos);
+            return;
+        }
         let (hovered, _nx, _ny, cell_w, cell_h) = match self.cell_at(pos) {
             Some(v) => v,
             None => return,
@@ -471,6 +494,32 @@ impl App {
             cell_w_px: cell_w,
             cell_h_px: cell_h,
         });
+    }
+
+    fn handle_sweep_click(&mut self, pos: PhysicalPosition<f64>) {
+        let kind = match self.sweep_kind {
+            Some(k) => k,
+            None => return,
+        };
+        let cells = layout::compute(
+            self.config.layout,
+            1,
+            0,
+            &self.selected,
+            &self.selection_order,
+            self.active_meas_idx,
+            self.grid_params(),
+        );
+        let Some(cell) = cells.first() else { return };
+        let ctx = self.render_ctx.as_ref().unwrap();
+        let w = ctx.config.width as f32;
+        let h = ctx.config.height as f32;
+        let rect = layout::to_pixel_rect(cell, w, h);
+        let cursor = egui::pos2(pos.x as f32, pos.y as f32);
+        if let Some(idx) = crate::render::sweep::nearest_point(rect, kind, &self.sweep_last, cursor) {
+            self.sweep_selected_idx = Some(idx);
+            self.needs_redraw = true;
+        }
     }
 
     fn update_drag(&mut self, pos: PhysicalPosition<f64>) {
@@ -670,6 +719,8 @@ impl App {
         self.store = Some(init.store);
         let transfer_store = init.transfer_store.clone();
         self.transfer_store = Some(transfer_store.clone());
+        let sweep_store = init.sweep_store.clone();
+        self.sweep_store = Some(sweep_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -683,12 +734,16 @@ impl App {
                 self.source = Some(DataSource::Synthetic(handle));
             }
             SourceKind::Daemon => {
-                let handle =
-                    crate::data::receiver::spawn(init.endpoint, init.inputs, transfer_store);
+                let handle = crate::data::receiver::spawn(
+                    init.endpoint,
+                    init.inputs,
+                    transfer_store,
+                    sweep_store,
+                );
                 self.source = Some(DataSource::Receiver(handle));
-                // Kick off daemon-side spectrum publishing — without this the
-                // UI's SUB socket gets nothing and every view stays blank.
-                self.send_monitor_spectrum_start();
+                if !matches!(self.config.layout, LayoutMode::Sweep) {
+                    self.send_monitor_spectrum_start();
+                }
             }
         }
     }
@@ -939,6 +994,7 @@ impl App {
                     LayoutMode::Single => "layout: single",
                     LayoutMode::Compare => "layout: compare",
                     LayoutMode::Transfer => "layout: transfer",
+                    LayoutMode::Sweep => "layout: sweep",
                 });
             }
             KeyCode::KeyF => {
@@ -1157,6 +1213,12 @@ impl App {
             grid_params_snap,
         );
         let in_transfer_layout = matches!(self.config.layout, LayoutMode::Transfer);
+        let in_sweep_layout = matches!(self.config.layout, LayoutMode::Sweep);
+        if let Some(ss) = self.sweep_store.as_ref() {
+            if !self.config.frozen {
+                self.sweep_last = ss.read();
+            }
+        }
 
         // Track producer cadence from channel-0 new_row arrivals. EMA so a
         // single hiccup doesn't bounce the time axis; guarded to a sane band
@@ -1211,7 +1273,7 @@ impl App {
         }
         let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
-        if !in_transfer_layout {
+        if !in_transfer_layout && !in_sweep_layout {
             match view_mode {
                 ViewMode::Spectrum => spectrum_uploads.reserve(cells.len()),
                 ViewMode::Waterfall => waterfall_uploads.reserve(cells.len()),
@@ -1219,7 +1281,7 @@ impl App {
         }
 
         for cell in &cells {
-            if in_transfer_layout {
+            if in_transfer_layout || in_sweep_layout {
                 break;
             }
             let frame = match frames.get(cell.channel).and_then(|f| f.as_ref()) {
@@ -1314,6 +1376,13 @@ impl App {
         } else {
             None
         };
+        let sweep_snap = if in_sweep_layout {
+            Some(self.sweep_last.clone())
+        } else {
+            None
+        };
+        let sweep_kind_snap = self.sweep_kind;
+        let sweep_sel_snap = self.sweep_selected_idx;
         let selection_order_snap = self.selection_order.clone();
         let active_meas_idx_snap = self.active_meas_idx;
         let active_meas_snap = {
@@ -1366,7 +1435,22 @@ impl App {
             // sub-panel the cursor is in — mag shows dB, phase shows degrees,
             // coh shows 0..1. Outside all three panels (the inter-panel gap)
             // we fall back to mag dB so the crosshair label stays populated.
-            let readout = if matches!(config_snap.layout, LayoutMode::Transfer) {
+            let readout = if matches!(config_snap.layout, LayoutMode::Sweep) {
+                let cursor = egui::pos2(cx, cy);
+                let kind = sweep_kind_snap.unwrap_or(SweepKind::Frequency);
+                match crate::render::sweep::hit_test(rect, cursor, kind) {
+                    Some((crate::render::sweep::SweepHitPanel::Thd, v)) => {
+                        HoverReadout::Thd(v)
+                    }
+                    Some((crate::render::sweep::SweepHitPanel::Gain, v)) => {
+                        HoverReadout::Gain(v)
+                    }
+                    Some((crate::render::sweep::SweepHitPanel::SpectrumDetail, v)) => {
+                        HoverReadout::Db(v)
+                    }
+                    None => HoverReadout::Db(0.0),
+                }
+            } else if matches!(config_snap.layout, LayoutMode::Transfer) {
                 let cursor = egui::pos2(cx, cy);
                 match crate::render::transfer::hit_test(rect, cursor) {
                     Some((crate::render::transfer::HitPanel::Phase, v)) => {
@@ -1413,6 +1497,13 @@ impl App {
                     .get(cell.channel)
                     .copied()
                     .unwrap_or_default();
+                if matches!(config_snap.layout, LayoutMode::Sweep) {
+                    if let Some(ref ss) = sweep_snap {
+                        let kind = sweep_kind_snap.unwrap_or(SweepKind::Frequency);
+                        crate::render::sweep::draw(&painter, rect, kind, ss, sweep_sel_snap);
+                    }
+                    continue;
+                }
                 if matches!(config_snap.layout, LayoutMode::Transfer) {
                     let color = theme::channel_color(cell.channel);
                     crate::render::transfer::draw(

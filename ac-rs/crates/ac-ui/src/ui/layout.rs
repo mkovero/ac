@@ -106,6 +106,15 @@ pub fn compute(
                 h: plot_h,
             }]
         }
+        LayoutMode::Sweep => {
+            vec![CellRect {
+                channel: 0,
+                x: plot_x,
+                y: plot_y,
+                w: plot_w,
+                h: plot_h,
+            }]
+        }
         LayoutMode::Single => {
             let target = active_channel.min(n_channels - 1);
             vec![CellRect {

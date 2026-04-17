@@ -22,6 +22,8 @@ pub enum HoverReadout {
     Db(f32),
     Phase(f32),
     Coherence(f32),
+    Thd(f32),
+    Gain(f32),
 }
 
 pub struct OverlayInput<'a> {
@@ -415,6 +417,16 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             HoverReadout::Coherence(v) => format!(
                 "CH{} {} coh {:.3}",
                 hover.channel,
+                format_hz(hover.freq_hz),
+                v,
+            ),
+            HoverReadout::Thd(v) => format!(
+                "{} THD {:.4}%",
+                format_hz(hover.freq_hz),
+                v,
+            ),
+            HoverReadout::Gain(v) => format!(
+                "{} {:+.2} dB",
                 format_hz(hover.freq_hz),
                 v,
             ),

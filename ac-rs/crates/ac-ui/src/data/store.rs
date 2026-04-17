@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use triple_buffer::{triple_buffer, Input, Output};
 
-use super::types::{DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, TransferFrame};
+use super::types::{
+    DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
+};
 
 struct ChannelSlot {
     buffer: Output<SpectrumFrame>,
@@ -120,6 +122,49 @@ impl TransferStore {
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             *g = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SweepState {
+    pub points: Vec<SweepPoint>,
+    pub done: Option<SweepDone>,
+}
+
+#[derive(Clone, Default)]
+pub struct SweepStore {
+    inner: Arc<Mutex<SweepState>>,
+}
+
+impl SweepStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&self, point: SweepPoint) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.points.push(point);
+        }
+    }
+
+    pub fn set_done(&self, done: SweepDone) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.done = Some(done);
+        }
+    }
+
+    pub fn read(&self) -> SweepState {
+        self.inner
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = SweepState::default();
         }
     }
 }

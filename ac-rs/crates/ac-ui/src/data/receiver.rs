@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
 
-use super::store::TransferStore;
-use super::types::{CwtFrame, SpectrumFrame, TransferFrame};
+use super::store::{SweepStore, TransferStore};
+use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
@@ -49,6 +49,7 @@ pub fn spawn(
     endpoint: String,
     inputs: Vec<Input<SpectrumFrame>>,
     transfer: TransferStore,
+    sweep: SweepStore,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(ReceiverStatus::new());
@@ -77,6 +78,10 @@ pub fn spawn(
         // silent-failing workers surface in the UI.
         if let Err(e) = sub.set_subscribe(b"error") {
             log::error!("zmq subscribe error: {e}");
+            return;
+        }
+        if let Err(e) = sub.set_subscribe(b"done") {
+            log::error!("zmq subscribe done: {e}");
             return;
         }
         if let Err(e) = sub.set_rcvtimeo(200) {
@@ -114,6 +119,21 @@ pub fn spawn(
                         log::warn!("daemon error: {text}");
                         if let Ok(mut g) = status_c.last_error.lock() {
                             *g = Some(text);
+                        }
+                        continue;
+                    }
+                    if topic == "done" {
+                        if let Ok(done) = serde_json::from_str::<SweepDone>(body) {
+                            if done.cmd == "plot" || done.cmd == "plot_level" {
+                                log::info!(
+                                    "sweep done: cmd={} n_points={} xruns={}",
+                                    done.cmd, done.n_points, done.xruns,
+                                );
+                                sweep.set_done(done);
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                            }
                         }
                         continue;
                     }
@@ -196,6 +216,24 @@ pub fn spawn(
                                     "transfer_stream parse failed: {e} — body head: {}",
                                     &body[..body.len().min(200)]
                                 );
+                            }
+                        }
+                        continue;
+                    }
+                    if type_tag.as_deref() == Some("sweep_point") {
+                        match serde_json::from_str::<SweepPoint>(body) {
+                            Ok(pt) => {
+                                log::debug!(
+                                    "sweep_point n={} fund_hz={:.1} thd={:.3}%",
+                                    pt.n, pt.fundamental_hz, pt.thd_pct,
+                                );
+                                sweep.push(pt);
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::warn!("sweep_point parse failed: {e}");
                             }
                         }
                         continue;

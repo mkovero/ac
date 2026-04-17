@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use app::{App, AppInit, SourceKind};
 use data::control::CtrlClient;
-use data::store::{ChannelStore, TransferStore};
-use data::types::ViewMode;
+use data::store::{ChannelStore, SweepStore, TransferStore};
+use data::types::{SweepKind, ViewMode};
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -45,6 +45,7 @@ fn main() -> anyhow::Result<()> {
     };
     let (inputs, store) = ChannelStore::new(n_channels);
     let transfer_store = TransferStore::new();
+    let sweep_store = SweepStore::new();
 
     let source_kind = if args.synthetic {
         SourceKind::Synthetic
@@ -56,6 +57,7 @@ fn main() -> anyhow::Result<()> {
         store,
         inputs,
         transfer_store,
+        sweep_store,
         source_kind,
         output_dir: args.output_dir.clone(),
         endpoint: args.connect.clone(),
@@ -63,6 +65,7 @@ fn main() -> anyhow::Result<()> {
         synthetic_params: Some((n_channels, args.bins.max(16), args.rate.max(0.5))),
         benchmark_secs: args.benchmark,
         initial_view: args.view,
+        initial_sweep_kind: args.mode,
     };
 
     let event_loop = winit::event_loop::EventLoop::new()?;
@@ -88,6 +91,7 @@ struct Args {
     output_dir: PathBuf,
     benchmark: Option<f64>,
     view: ViewMode,
+    mode: Option<SweepKind>,
 }
 
 impl Args {
@@ -103,6 +107,7 @@ impl Args {
             output_dir: default_output_dir(),
             benchmark: None,
             view: ViewMode::Spectrum,
+            mode: None,
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -161,6 +166,16 @@ impl Args {
                         other => anyhow::bail!("--view: expected spectrum|waterfall, got {other}"),
                     };
                 }
+                "--mode" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--mode requires value"))?;
+                    out.mode = Some(match v.as_str() {
+                        "sweep_frequency" => SweepKind::Frequency,
+                        "sweep_level" => SweepKind::Level,
+                        other => anyhow::bail!("--mode: expected sweep_frequency|sweep_level, got {other}"),
+                    });
+                }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
         }
@@ -202,6 +217,7 @@ Options:\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
   --view <mode>        Initial view: spectrum|waterfall [default: spectrum]\n  \
+  --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   -h, --help           Show this help\n\n\
 Keys:\n  \
   Esc/q            quit\n  \
