@@ -13,9 +13,9 @@
 
 ## Non-goals (for now)
 
-- Rust CLI client — Python client stays as-is
-- Plotting — stays in Python / pyqtgraph
-- DMM / SCPI — low priority, keep in Python or port later
+- ~~Rust CLI client~~ — **Done.** `ac-cli` crate, 28+ commands, 50 parser tests.
+- ~~Plotting / UI~~ — **Done.** `ac-ui` crate: spectrum, waterfall, CWT, transfer, sweep views.
+- DMM / SCPI — ported to Rust daemon (`dmm_read` handler)
 
 ---
 
@@ -44,9 +44,8 @@ ac-rs/
   PLAN.md             (this file)
 
   crates/
-    ac-core/          # pure library — no sockets, no global state
+    ac-core/          # pure library — no sockets, no global state (43 tests)
       src/
-        audio.rs      # JACK + CPAL capture/playback, ringbuffer
         analysis.rs   # FFT, THD, THD+N (mirrors analysis.py)
         cwt.rs        # Morlet continuous wavelet transform (sparse freq-domain)
         generator.rs  # sine, sweep waveform generation
@@ -56,11 +55,29 @@ ac-rs/
         conversions.rs# vrms_to_dbu, dbfs helpers
         constants.rs  # SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, etc.
 
+    ac-cli/           # CLI client — full port of ac/client/ (50 tests)
+      src/
+        main.rs       # arg dispatch
+        parse.rs      # positional token parser
+        client.rs     # ZMQ REQ/SUB wrapper
+        io.rs         # CSV export, print helpers
+        spawn.rs      # daemon/UI auto-spawn
+        commands/      # one file per command group
+
     ac-daemon/        # ZMQ REP+PUB wrapper around ac-core
       src/
         main.rs       # bind sockets, dispatch commands, spawn workers
-        dispatch.rs   # match command name → ac-core call
-        pub_queue.rs  # channel from worker threads → PUB socket
+        server.rs     # main loop, worker reaping
+        handlers.rs   # command handlers
+        audio/        # jack_backend, cpal_backend, fake
+
+    ac-ui/            # GPU UI — wgpu + egui
+      src/
+        main.rs       # CLI args, window setup
+        app.rs        # event loop, render dispatch
+        data/         # ZMQ receiver, triple-buffer store, types
+        render/       # spectrum (wgpu), waterfall (wgpu), grid/transfer/sweep (egui)
+        ui/           # layout, overlay, export
 ```
 
 ### Why this split
@@ -175,37 +192,30 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 
 ---
 
-## What stays in Python forever
+## What stays in Python
 
-- `ac/client/` — CLI parser, ZMQ REQ client, CSV export, plotting
-- `ac/ui/` — pyqtgraph live views (until ac-ui reaches parity — see below)
+- `ac/client/` — alternative CLI (Rust `ac-cli` is the primary now)
+- `ac/ui/` — pyqtgraph views (alternative to Rust `ac-ui`)
 - `ds/` — diagnostics session manager, AI analysis
 - `scripts/` — babyface/OSM shell scripts
 
 ---
 
-## ac-ui — Rust GPU spectrum monitor (experimental)
+## ac-ui — GPU spectrum/sweep/transfer monitor
 
-`crates/ac-ui` is a standalone wgpu/winit/egui binary that subscribes to the
-same DATA socket and renders `spectrum` frames via a custom wgpu pipeline
-(log-freq x, linear-dB y, instanced line + fill). Goal: investigate whether
-a GPU renderer can scale to 100 simultaneous spectra at 60 fps and provide
-a keyboard-driven daily driver alongside the Python pyqtgraph UI.
+`crates/ac-ui` is a standalone wgpu/winit/egui binary. Views:
 
-See `/rust-ui-design.md` for the full design. v0.1 covers synthetic-source
-benchmarking plus single-channel real-daemon rendering; multi-channel real
-mode, waterfall, and GPU-timing overlay are deferred. Launched manually:
+- **Spectrum** — wgpu log-freq × dB pipeline, scales to 100+ channels at 60 fps
+- **Waterfall** — wgpu scrolling spectrogram (FFT or CWT)
+- **Transfer** — egui H1 magnitude/phase/coherence (3-panel)
+- **Sweep** — egui THD/THD+N/gain/spectrum (3-panel freq, 2-panel level)
+
+Layouts: grid, single, compare, transfer, sweep. Sweep entered via `--mode sweep_frequency|sweep_level`.
 
 ```
-cargo build -p ac-ui
-./target/debug/ac-ui --synthetic --channels 10
-./target/debug/ac-ui                          # requires a running daemon
+ac-ui                               # auto-discovers daemon, starts spectrum view
+ac-ui --mode sweep_frequency        # sweep view (launched by ac plot ... show)
+ac-ui --synthetic --channels 10     # benchmark mode
 ```
 
-Keyboard bindings plus mouse zoom (scroll, with `Shift`/`Ctrl` for single
-axis), left-drag pan, and right-click reset are documented in the design
-doc's Interaction section and in `ac-ui --help`. Phase 2 backlog
-(waterfall, GPU-timing overlay, multi-channel real mode) is tracked in
-`/rust-ui-phase2.md`.
-
-Python auto-spawn (`ac/__main__.py`) is untouched.
+See `ac-rs/CLAUDE.md` for keybindings.

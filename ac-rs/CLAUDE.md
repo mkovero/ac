@@ -1,24 +1,23 @@
-# ac-rs — Rust server
+# ac-rs — Rust audio measurement system
 
-Rust implementation of the `ac` ZMQ server. Drop-in replacement for `ac/server/`.
-The Python client (`ac/client/ac.py`) speaks to it unchanged.
+Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 
 ## Build
 
 ```bash
-cargo build -p ac-daemon          # debug (auto-discovered by Python client)
-cargo build -p ac-daemon --release
-cargo build -p ac-ui              # wgpu spectrum/waterfall/transfer UI
-cargo test -p ac-core             # 37 unit tests, no hardware required
+cargo build                       # all crates
+cargo build --release             # optimized
+cargo test                        # ac-core (43 tests) + ac-cli (50 tests)
 ```
 
 ## Crate layout
 
-| Crate | Role |
-|-------|------|
-| `ac-core` | Pure library — analysis, cwt, generator, calibration, config, conversions. No sockets, no global state. |
-| `ac-daemon` | ZMQ REP+PUB server binary. Thin shell over `ac-core`. |
-| `ac-ui` | wgpu live spectrum/waterfall/transfer monitor. Connects to `ac-daemon` via ZMQ SUB + REQ. |
+| Crate | Binary | Role |
+|-------|--------|------|
+| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 43 unit tests. |
+| `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 50 parser tests. |
+| `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. |
 
 ## ac-daemon binary
 
@@ -78,7 +77,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `L` | Cycle layout: grid → overlay → single → compare → transfer |
+| `L` | Cycle layout: grid → single → compare → transfer (sweep via --mode only) |
 | `W` | Cycle view: spectrum → waterfall (FFT) → waterfall (CWT) → spectrum |
 | `F` | Toggle fullscreen |
 | `D` | Toggle timing overlay |

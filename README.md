@@ -10,19 +10,36 @@ The `ip` of audio — terse, positional, unit-tagged arguments.
 > sounddevice/PortAudio backend exists but is not exercised yet.
 > macOS and Windows are untested.
 
+## Architecture
+
+The entire stack is implemented in Rust:
+
+| Crate | Binary | Role |
+|-------|--------|------|
+| `ac-cli` | `ac` | CLI client — parser, ZMQ client, CSV export, UI launch |
+| `ac-daemon` | `ac-daemon` | ZMQ server — audio I/O, analysis, worker management |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/transfer/sweep views |
+| `ac-core` | (library) | Pure DSP — FFT, THD, generator, calibration, config |
+
+A Python implementation (`ac/client/`, `ac/ui/`) also exists and works against
+the same daemon. Install it for the pyqtgraph UI or if you prefer `pip install`.
+
 ## Install
 
+### Rust (recommended)
+
 ```bash
-pip install audiocli
+cd ac-rs && cargo build --release
+# Binaries: target/release/ac, target/release/ac-daemon, target/release/ac-ui
 ```
 
-Or from source:
+### Python
 
 ```bash
 pip install -e .
 ```
 
-This gives you the `ac` command.
+This gives you the `ac` command (Python client, auto-spawns the Rust daemon).
 
 ## Audio backend
 
@@ -84,7 +101,7 @@ Everything is positional. The suffix tells `ac` what it is:
 | `s` | Duration / interval | `1s` `0.5s` |
 | `ppd` | Points per decade | `10ppd` `20ppd` |
 
-Append `show` to any command to open a pyqtgraph window.
+Append `show` to any command to open a live view (Rust ac-ui or Python pyqtgraph).
 
 ## Abbreviations
 
@@ -137,7 +154,7 @@ ac calibrate                  # uses DMM automatically if configured
 
 ## Server
 
-`ac` is client/server — the server manages audio I/O and runs analysis.
+`ac` is client/server — the daemon manages audio I/O and runs analysis.
 It auto-spawns locally. For remote use:
 
 ```bash
@@ -145,19 +162,21 @@ ac server enable          # bind to all interfaces on a server
 ac server 192.168.1.5     # connect to remote server
 ```
 
-The server is implemented in Rust (`ac-rs/`). The Python client auto-discovers the
-`ac-daemon` binary (in `$PATH` or `ac-rs/target/debug/ac-daemon`) and spawns it
-instead of the Python server. See `ac-rs/PLAN.md` and `ac-rs/ZMQ.md` for details.
+The daemon is `ac-daemon` (Rust). Both the Rust CLI and Python client
+auto-discover it in `$PATH` or `ac-rs/target/debug/ac-daemon`.
+See `ac-rs/ZMQ.md` for the wire protocol.
 
-To build the Rust server:
+## Build
+
 ```bash
-cd ac-rs && cargo build -p ac-daemon
+cd ac-rs
+cargo build                   # all crates (ac, ac-daemon, ac-ui)
+cargo test                    # ac-core (43 tests) + ac-cli (50 tests)
 ```
 
 ## Dependencies
 
-Python: numpy, scipy, matplotlib, sounddevice, pyzmq.
-Optional: `jack-client` (for JACK backend), `pyqtgraph` (for live GUI views).
+Rust: libzmq, libjack, Rust toolchain (≥ 1.75).
 
-Rust daemon: libzmq, libjack, Rust toolchain (≥ 1.75).
-The daemon is built separately — see `ac-rs/`.
+Python (optional): numpy, scipy, matplotlib, sounddevice, pyzmq.
+Optional: `jack-client` (for JACK backend), `pyqtgraph` (for live GUI views).

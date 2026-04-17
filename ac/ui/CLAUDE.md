@@ -1,5 +1,8 @@
 # ui/ — pyqtgraph live measurement views
 
+> **Note:** A Rust GPU replacement exists at `ac-rs/crates/ac-ui/` (wgpu+egui).
+> Supports spectrum, waterfall, CWT, transfer, and sweep views.
+
 ## Architecture
 
 Separate process spawned by `ac.py` via `python -m ac.ui --mode <mode> --host <host> --port <port>`. Subscribes to the ZMQ PUB socket and renders live data.

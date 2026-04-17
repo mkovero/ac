@@ -1,8 +1,9 @@
 [package]
-name    = "ac-ui"
-version = "0.1.0"
-edition = "2021"
-build   = "build.rs"
+name        = "ac-ui"
+version     = "0.1.0"
+edition     = "2021"
+build       = "build.rs"
+description = "GPU audio measurement UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views"
 
 [[bin]]
 name = "ac-ui"

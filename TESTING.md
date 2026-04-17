@@ -2,33 +2,34 @@
 
 Run all tests:
 ```bash
-python -m pytest tests/ -q
+cd ac-rs && cargo test            # Rust: ac-core (43) + ac-cli (50) = 93 tests
+python -m pytest tests/ -q        # Python: 149 integration tests
 ```
 
-No JACK daemon or audio hardware required — tests spawn the Rust `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connect via ZMQ.
+No JACK daemon or audio hardware required — Python tests spawn the Rust `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connect via ZMQ.
 
-## Rust daemon tests
-
-The `ac-core` library has its own unit test suite (29 tests — analysis, generator, calibration, conversions). Run from `ac-rs/`:
+## Rust tests
 
 ```bash
 cd ac-rs
-cargo test -p ac-core
+cargo test -p ac-core             # 43 unit tests — analysis, generator, calibration, config, conversions
+cargo test -p ac-cli              # 50 parser tests — all commands, abbreviations, defaults, error cases
+cargo test                        # all crates
 ```
 
-To build the Rust daemon locally (required for the Python client to auto-spawn it):
+## Build
 
 ```bash
 cd ac-rs
-cargo build -p ac-daemon
-# binary lands at ac-rs/target/debug/ac-daemon
+cargo build                       # all crates: ac (CLI), ac-daemon, ac-ui
+cargo build --release             # optimized
 ```
 
-The Python client auto-discovers the debug build at `ac-rs/target/debug/ac-daemon` when `ac-daemon` is not in `$PATH`. For production installs, place the release binary in `$PATH`:
+Both the Rust CLI and Python client auto-discover the debug build at `ac-rs/target/debug/ac-daemon`. For production installs:
 
 ```bash
-cargo build -p ac-daemon --release
-sudo install -m 755 target/release/ac-daemon /usr/local/bin/
+cargo build --release
+sudo install -m 755 target/release/ac target/release/ac-daemon target/release/ac-ui /usr/local/bin/
 ```
 
 Use `--fake-audio` to run the daemon without JACK (for integration testing):
@@ -62,7 +63,9 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 | `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
 | `test_conversions.py` | 11 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
 
-### Rust unit tests (`ac-core`)
+### Rust unit tests
+
+#### ac-core (43 tests)
 
 | Module | Tests | What it covers |
 |--------|-------|----------------|
@@ -71,6 +74,15 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 | `calibration` | 5 | Save/load roundtrip, missing key, load_all, out_vrms computation |
 | `config` | 2 | JSON round-trip, missing keys use defaults |
 | `conversions` | 2 | dBu↔Vrms, format helpers |
+| `cwt` | 6 | Morlet CWT: log-spaced freqs, magnitude peaks, energy conservation |
+| `transfer` | 4 | H1 estimator: coherence, delay, magnitude/phase from known signals |
+| `gpio` | 4 | Frame parser: button events, LED commands, checksum validation |
+
+#### ac-cli (50 tests)
+
+| Module | Tests | What it covers |
+|--------|-------|----------------|
+| `parse` | 50 | All commands: sweep, plot, monitor, generate, calibrate, setup, devices, transfer, test, probe, session, stop, server, gpio, dmm, config. Abbreviations, defaults, error cases. |
 
 ## What is verified numerically
 
@@ -136,10 +148,6 @@ Without calibration, `gain_db`, `out_dbu`, `in_dbu` are `None` in sweep_point fr
 - The buggy pattern (`.get("gain_db", np.nan)`) produces `object` arrays — confirming why the gain line vanished
 
 ## Known limitations
-
-### Rust daemon calibration flow
-
-`calibrate` in the Rust daemon currently stubs the interactive DMM-prompt loop — it emits a `cal_prompt` frame but does not wait for a real `cal_reply` with a Vrms reading before completing. Manual calibration entry (`ac calibrate`) will be wired properly in a future revision.
 
 ### Spectrum downsampling (display only)
 

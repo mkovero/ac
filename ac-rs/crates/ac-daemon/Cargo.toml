@@ -1,7 +1,8 @@
 [package]
-name    = "ac-daemon"
-version = "0.1.0"
-edition = "2021"
+name        = "ac-daemon"
+version     = "0.1.0"
+edition     = "2021"
+description = "ZMQ audio measurement server — JACK/CPAL audio I/O, FFT analysis, worker management"
 
 [[bin]]
 name = "ac-daemon"

@@ -1,4 +1,7 @@
-# client/ — CLI and ZMQ client
+# client/ — Python CLI and ZMQ client
+
+> **Note:** A Rust replacement exists at `ac-rs/crates/ac-cli/` (50 parser tests).
+> Both implementations speak the same ZMQ protocol to `ac-daemon`.
 
 ## Architecture
 

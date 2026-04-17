@@ -1,7 +1,7 @@
 # Kanban — ac measurement system
 
 > Maintained alongside GitHub Issues. Labels: `software` `hardware` `testing` `blocker` `phase-4`
-> Last updated: 2026-04-15
+> Last updated: 2026-04-17
 
 ---
 
@@ -38,19 +38,6 @@ _nothing yet_
 | Arduino Mega firmware | KiCad digital board |
 | Make measurement cables | — |
 
-### Software (Phase 4 — Rust daemon parity)
-
-| Title | Notes |
-|-------|-------|
-| Implement interactive calibrate / cal_reply loop | currently stubbed in handlers.rs |
-| Implement dmm_read (SCPI over TCP) | ref: ac/dmm.py |
-| Implement transfer command | ac-core/transfer.rs exists, needs wiring |
-| Implement probe command | needs dmm_read first |
-| Implement test_hardware / test_dut commands | see TESTING.md for pass criteria |
-| CPAL/sounddevice fallback audio backend | needed for macOS/Windows |
-| Port GPIO handler to Rust daemon | ref: ac/gpio/gpio.py |
-| Stale server detection for Rust daemon | update or remove _ensure_server() mtime check |
-
 ### Testing
 
 | Title | Notes |
@@ -63,6 +50,9 @@ _nothing yet_
 
 | Title | Area | Landed |
 |-------|------|--------|
+| ac-ui sweep view: THD/THD+N, gain, spectrum panels — freq and level sweeps | `software` | 2026-04-17 |
+| ac-cli: full Rust CLI port — 28+ commands, 50 parser tests | `software` | 2026-04-17 |
+| Phase 4 — Rust daemon parity: calibrate, dmm_read, transfer, probe, test_hardware/dut, CPAL, GPIO | `software` | 2026-04-15 |
 | ac-ui Phase 2: waterfall, GPU timing overlay, benchmark harness, per-cell views, multi-channel real-daemon, `ac ui` dispatch | `software` | 2026-04-15 |
 
 ---
@@ -88,10 +78,12 @@ _nothing yet_
 - GPIO: Arduino Mega2560 (DIN-rail) via USB serial → ZMQ → ac daemon
 
 ### Software architecture quick ref
+- Rust CLI: `ac-rs/crates/ac-cli` — positional parser + ZMQ REQ/SUB, 50 tests
 - Rust daemon: `ac-rs/crates/ac-daemon` — ZMQ REP:5556 / PUB:5557
-- DSP library: `ac-rs/crates/ac-core` — no sockets, 29 unit tests
-- Python client: `ac/client/` — CLI parser + ZMQ REQ/SUB
-- GUI: `ac/ui/` — pyqtgraph, separate process
-- Tests: `pytest tests/ -q` (149 passing, uses --fake-audio)
+- Rust UI: `ac-rs/crates/ac-ui` — wgpu spectrum/waterfall/CWT, egui transfer/sweep
+- DSP library: `ac-rs/crates/ac-core` — no sockets, 43 unit tests
+- Python client: `ac/client/` — alternative CLI parser + ZMQ REQ/SUB
+- Python GUI: `ac/ui/` — pyqtgraph, alternative to ac-ui
+- Tests: `cargo test` (93 Rust) + `pytest tests/ -q` (149 Python integration)
 
-*Updated: 2026-04-15*
+*Updated: 2026-04-17*
