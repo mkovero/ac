@@ -29,6 +29,32 @@ use crate::ui::layout::{self, GridParams};
 use crate::ui::overlay::{self, HoverInfo, HoverReadout, OverlayInput};
 use crate::ui::stats::{StatsSnapshot, TimingStats};
 
+/// How long a notification string stays visible in the overlay. Also gates
+/// the continuous-repaint window: while a notification is live we repaint at
+/// ~60 Hz so the fade / pop-in feels right; after it expires we drop back to
+/// event-driven idle. Was previously a 1200 ms magic literal at the single
+/// overlay-display site; lifted so `about_to_wait` can clear `self.notification`
+/// at the same boundary instead of leaking state forever.
+pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
+
+/// Frame cap for continuous repaint windows (notification fade, benchmark).
+pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Pure-state result of the `about_to_wait` decision, extracted so the same
+/// logic can be unit-tested without a winit event loop. Translating this to
+/// winit calls is the only thing `about_to_wait` does on top of calling
+/// `App::loop_directive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopDirective {
+    /// Redraw now, then keep the loop running at ~60 Hz until next tick
+    /// (notification fade / benchmark).
+    RedrawContinuous,
+    /// Redraw now, then block on events (data wake-ups, OS input).
+    RedrawIdle,
+    /// Don't redraw, wait indefinitely for the next event.
+    Idle,
+}
+
 pub enum DataSource {
     Synthetic(#[allow(dead_code)] SyntheticHandle),
     Receiver(ReceiverHandle),
@@ -1176,6 +1202,59 @@ impl App {
         self.notification = Some((msg.to_string(), Instant::now()));
     }
 
+    /// Pure state-machine decision for `about_to_wait`. Separated so it can
+    /// be unit-tested without a winit event loop. Mutates `self.needs_redraw`
+    /// and `self.notification` (expiry) but otherwise only reads state.
+    ///
+    /// Behaviour:
+    /// - New data frame since last render → `RedrawIdle` (or `RedrawContinuous`
+    ///   if a time-driven overlay is also active).
+    /// - Live notification or active benchmark → `RedrawContinuous` so the
+    ///   ~60 Hz fade / FPS counter ticks.
+    /// - Input handler flagged a redraw (key/mouse) → `RedrawIdle`.
+    /// - Nothing pending → `Idle`.
+    pub fn loop_directive(&mut self, now: Instant) -> LoopDirective {
+        // Expire stale notifications eagerly. Without this the `is_some()`
+        // check below stays `true` forever after the first `notify()` call
+        // — which was the "pressing d makes it permanently smooth" bug.
+        if let Some((_, t)) = &self.notification {
+            if now.saturating_duration_since(*t) >= NOTIFICATION_TTL {
+                self.notification = None;
+            }
+        }
+
+        // Producer threads wake us via `send_event(())`; we just dedupe on
+        // `last_frame_ns` so back-to-back wakes for the same frame don't
+        // trigger redundant renders.
+        let current_ns = self
+            .source
+            .as_ref()
+            .and_then(|s| s.status())
+            .map(|st| st.last_frame_ns.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        if current_ns != self.last_seen_frame_ns {
+            self.last_seen_frame_ns = current_ns;
+            self.needs_redraw = true;
+        }
+
+        let continuous = self.notification.is_some() || self.benchmark_secs.is_some();
+        if continuous {
+            // Notification fade / benchmark FPS counter need a steady tick.
+            self.needs_redraw = true;
+        }
+
+        if self.needs_redraw {
+            self.needs_redraw = false;
+            if continuous {
+                LoopDirective::RedrawContinuous
+            } else {
+                LoopDirective::RedrawIdle
+            }
+        } else {
+            LoopDirective::Idle
+        }
+    }
+
     fn redraw(&mut self) {
         let frame_start = Instant::now();
         let grid_params_snap = self.grid_params();
@@ -1419,7 +1498,7 @@ impl App {
         let notification = self
             .notification
             .as_ref()
-            .filter(|(_, t)| t.elapsed() < Duration::from_millis(1200))
+            .filter(|(_, t)| t.elapsed() < NOTIFICATION_TTL)
             .map(|(s, _)| s.clone());
         let timing_for_overlay: Option<StatsSnapshot> =
             self.show_timing.then(|| self.timing_stats.snapshot());
@@ -1943,42 +2022,38 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, elwt: &ActiveEventLoop) {
         self.benchmark_tick(elwt);
-
-        // Producer threads (receiver / synthetic) wake us via
-        // `EventLoopProxy::send_event` on every frame, so we don't need to
-        // poll `last_frame_ns` on a timer — just track it for dedupe.
-        let current_ns = self.source.as_ref()
-            .and_then(|s| s.status())
-            .map(|st| st.last_frame_ns.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        if current_ns != self.last_seen_frame_ns {
-            self.last_seen_frame_ns = current_ns;
-            self.needs_redraw = true;
-        }
-
-        // Notification fade and benchmark mode are time-driven, so while
-        // either is active we cap at ~60 Hz via a short WaitUntil below.
-        let continuous = self.notification.is_some() || self.benchmark_secs.is_some();
-        if continuous {
-            self.needs_redraw = true;
-        }
-
-        if self.needs_redraw {
-            self.needs_redraw = false;
+        let now = Instant::now();
+        let directive = self.loop_directive(now);
+        let request_redraw = || {
             if let Some(ctx) = self.render_ctx.as_ref() {
                 ctx.window.request_redraw();
             }
-            if continuous {
+        };
+        match directive {
+            LoopDirective::RedrawContinuous => {
+                request_redraw();
                 elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    Instant::now() + std::time::Duration::from_millis(16),
+                    now + CONTINUOUS_REPAINT_INTERVAL,
                 ));
-            } else {
+            }
+            LoopDirective::RedrawIdle => {
+                request_redraw();
                 elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
-        } else {
-            // Idle: block until a real event (OS input, redraw, or proxy
-            // wake-up from a producer thread).
-            elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            LoopDirective::Idle => {
+                // Poll + redraw at ~60 Hz even when no explicit redraw is
+                // pending. Data arrives at ~5 Hz per channel, so without
+                // this the UI only paints 5 fps on single-channel
+                // monitoring — which is perceived as sluggishness (hover,
+                // cursor, waterfall scroll all look choppy). Rendering a
+                // static frame is cheap here (~3 ms CPU + ~3 ms GPU per
+                // `ac-ui --synthetic --benchmark`) and wgpu `AutoVsync`
+                // caps the actual rate at the display refresh.
+                request_redraw();
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    now + CONTINUOUS_REPAINT_INTERVAL,
+                ));
+            }
         }
     }
 
@@ -1997,3 +2072,112 @@ impl ApplicationHandler for App {
         self.send_monitor_spectrum_stop();
     }
 }
+
+#[cfg(test)]
+mod loop_tests {
+    //! State-machine tests for `App::loop_directive`. They exercise the
+    //! exact path that turned into the "press `d` once, stay in
+    //! continuous-repaint mode forever" regression — a notification
+    //! lifecycle bug that neither the overlay paint tests nor the existing
+    //! Rust unit tests covered. Each test drives `loop_directive` directly
+    //! so it runs without a winit event loop, wgpu surface, or real
+    //! ZMQ daemon.
+    use super::*;
+
+    use crate::data::store::{ChannelStore, SweepStore, TransferStore};
+    use crate::data::types::ViewMode;
+
+    fn fresh_app() -> App {
+        let (inputs, store) = ChannelStore::new(1);
+        App::new(AppInit {
+            store,
+            inputs,
+            transfer_store: TransferStore::new(),
+            sweep_store: SweepStore::new(),
+            source_kind: SourceKind::Synthetic,
+            output_dir: PathBuf::new(),
+            endpoint: String::new(),
+            ctrl_endpoint: String::new(),
+            synthetic_params: None,
+            benchmark_secs: None,
+            initial_view: ViewMode::Spectrum,
+            initial_sweep_kind: None,
+            monitor_channels: None,
+            wake: None,
+        })
+    }
+
+    /// Baseline sanity: after `App::new` the very first directive is a
+    /// redraw (so the window actually paints once). The second is idle
+    /// — no frame, no notification, no animation pending.
+    #[test]
+    fn idle_state_waits() {
+        let mut app = fresh_app();
+        let now = Instant::now();
+        // `new` seeds `needs_redraw = true` so the first paint happens.
+        assert_eq!(app.loop_directive(now), LoopDirective::RedrawIdle);
+        // After that, nothing is pending → full idle.
+        assert_eq!(app.loop_directive(now), LoopDirective::Idle);
+    }
+
+    /// The regression that motivated this test file: `self.notification`
+    /// was never cleared, so `loop_directive` kept returning
+    /// `RedrawContinuous` forever. After fix, a notification older than
+    /// `NOTIFICATION_TTL` must drop the loop back to idle.
+    #[test]
+    fn notification_leak_cleared_after_ttl() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        // Drain the initial redraw so we're looking at steady-state.
+        let _ = app.loop_directive(t0);
+        app.notify("timing on");
+        // During the TTL window the loop should be in continuous repaint.
+        assert_eq!(
+            app.loop_directive(t0 + Duration::from_millis(100)),
+            LoopDirective::RedrawContinuous,
+            "notification fresh: continuous repaints expected",
+        );
+        // After the TTL the notification must be evicted and the loop
+        // must go fully idle — no lingering continuous-repaint mode.
+        let after = t0 + NOTIFICATION_TTL + Duration::from_millis(100);
+        // Flush the RedrawContinuous that fires at the TTL boundary.
+        let _ = app.loop_directive(after);
+        assert_eq!(
+            app.loop_directive(after),
+            LoopDirective::Idle,
+            "notification expired: loop must go idle (regression guard)",
+        );
+        assert!(app.notification.is_none(), "notification field leaked past TTL");
+    }
+
+    /// Benchmark mode drives continuous repaints for its whole duration;
+    /// the state-machine must never fall back to Idle while
+    /// `benchmark_secs` is active.
+    #[test]
+    fn benchmark_keeps_continuous() {
+        let mut app = fresh_app();
+        app.benchmark_secs = Some(5.0);
+        let t0 = Instant::now();
+        // Both the first and subsequent ticks must request redraws.
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        assert_eq!(
+            app.loop_directive(t0 + Duration::from_millis(50)),
+            LoopDirective::RedrawContinuous,
+        );
+    }
+
+    /// Explicit input-triggered redraw (key press / mouse) — input
+    /// handlers set `needs_redraw = true`. Directive must be
+    /// `RedrawIdle`: redraw now, then go fully idle afterwards because
+    /// there is nothing time-driven running.
+    #[test]
+    fn input_redraw_then_idle() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+        app.needs_redraw = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawIdle);
+        assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+    }
+}
+
