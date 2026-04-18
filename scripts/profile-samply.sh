@@ -6,6 +6,7 @@
 #
 # Env overrides:
 #   FFT_N=16384 CHANNELS=8 MODE=cwt scripts/profile-samply.sh 30
+#   BACKEND=jack scripts/profile-samply.sh 30        # use real JACK (must be running)
 #
 # Output: /tmp/ac-profile-<timestamp>.json.gz
 # View with: samply load <file>   (opens profiler.firefox.com)
@@ -16,8 +17,21 @@ DURATION="${1:-20}"
 FFT_N="${FFT_N:-16384}"
 CHANNELS="${CHANNELS:-4}"            # 1,2,4,8 — monitor on N channels
 MODE="${MODE:-cwt}"                  # fft | cwt — cwt is heavier
+BACKEND="${BACKEND:-fake}"           # fake | jack — jack needs jackd running
 CTRL_PORT="${CTRL_PORT:-5560}"       # off-default so we don't clash with a running daemon
 DATA_PORT="${DATA_PORT:-5561}"
+
+case "$BACKEND" in
+    fake) backend_flag="--fake-audio" ;;
+    jack)
+        backend_flag=""
+        if ! pgrep -x jackd >/dev/null && ! pgrep -x pipewire >/dev/null; then
+            echo "BACKEND=jack but neither jackd nor pipewire is running" >&2
+            exit 1
+        fi
+        ;;
+    *) echo "BACKEND must be fake|jack (got: $BACKEND)" >&2; exit 1 ;;
+esac
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
@@ -67,7 +81,7 @@ echo ">> launching daemon (will attach samply by PID)..."
 # PERF_RECORD_MMAP events from /proc/<pid>/maps, which preserves library
 # mappings. Launching under `samply record -- <bin>` misses the initial exec
 # mmaps and leaves libs=[] in the profile.
-"$daemon_bin" --local --fake-audio \
+"$daemon_bin" --local $backend_flag \
     --ctrl-port "$CTRL_PORT" --data-port "$DATA_PORT" \
     >/tmp/ac-profile-daemon.log 2>&1 &
 daemon_pid=$!

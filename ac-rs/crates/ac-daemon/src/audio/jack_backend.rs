@@ -9,7 +9,8 @@
 //!   bounded (see issue #25).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -31,6 +32,11 @@ struct SharedState {
     tone_buf: ArcSwap<Vec<f32>>,
     silence:  AtomicBool,
     xruns:    AtomicUsize,
+    // Consumer (wait_ring) parks on its own thread handle; the RT process
+    // callback does a `try_lock().unpark()` after pushing samples so the
+    // waiter wakes within microseconds of data arriving instead of polling
+    // on a 10 ms sleep.
+    waker:    Mutex<Option<Thread>>,
 }
 
 pub struct JackEngine {
@@ -57,6 +63,7 @@ impl JackEngine {
                 tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
                 silence:  AtomicBool::new(true),
                 xruns:    AtomicUsize::new(0),
+                waker:    Mutex::new(None),
             }),
             ring_cons:     None,
             ring_ref_cons: None,
@@ -111,6 +118,14 @@ impl jack::ProcessHandler for Process {
         self.ring_prod.push_slice(in_buf);
         self.ring_ref_prod.push_slice(ref_buf);
 
+        // Wake wait_ring if someone is parked. try_lock keeps this RT-safe:
+        // if the consumer is mid-register/deregister, we skip — the next
+        // period (≤ ~3 ms at 128-frame quanta) will catch it, and park_timeout
+        // bounds worst-case latency anyway.
+        if let Ok(guard) = self.state.waker.try_lock() {
+            if let Some(t) = guard.as_ref() { t.unpark(); }
+        }
+
         Control::Continue
     }
 }
@@ -130,17 +145,31 @@ impl jack::NotificationHandler for Notifications {
 
 impl JackEngine {
     /// Wait until the measurement ring holds at least `n` samples or timeout.
+    ///
+    /// Parks this thread and relies on the JACK process callback to unpark
+    /// us as soon as it pushes new samples. A 10 ms `park_timeout` is still
+    /// used as a safety net so a missed wake (e.g. waker slot cleared
+    /// between unpark attempts) can't deadlock.
     fn wait_ring(&mut self, n: usize, duration: f64) -> Result<()> {
         let timeout = Instant::now() + Duration::from_secs_f64(duration + 2.0);
-        loop {
-            std::thread::sleep(Duration::from_millis(10));
+
+        // Fast path: data may already be present.
+        if let Some(ref c) = self.ring_cons {
+            if c.occupied_len() >= n { return Ok(()); }
+        }
+
+        *self.state.waker.lock().unwrap() = Some(std::thread::current());
+        let result = loop {
             if let Some(ref c) = self.ring_cons {
-                if c.occupied_len() >= n { return Ok(()); }
+                if c.occupied_len() >= n { break Ok(()); }
             }
             if Instant::now() > timeout {
-                anyhow::bail!("capture timeout after {duration:.1}s");
+                break Err(anyhow::anyhow!("capture timeout after {duration:.1}s"));
             }
-        }
+            std::thread::park_timeout(Duration::from_millis(10));
+        };
+        *self.state.waker.lock().unwrap() = None;
+        result
     }
 }
 
@@ -472,6 +501,7 @@ mod tests {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
             silence:  AtomicBool::new(true),
             xruns:    AtomicUsize::new(0),
+            waker:    Mutex::new(None),
         });
         assert_eq!(state.xruns.load(Ordering::Relaxed), 0);
         state.xruns.fetch_add(1, Ordering::Relaxed);
@@ -487,6 +517,7 @@ mod tests {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 4])),
             silence:  AtomicBool::new(false),
             xruns:    AtomicUsize::new(0),
+            waker:    Mutex::new(None),
         };
         let mut out = [0.0f32; 2];
         fill_tone(&mut out, &state.tone_buf.load(), 0);
