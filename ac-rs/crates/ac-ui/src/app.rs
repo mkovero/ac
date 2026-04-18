@@ -1702,6 +1702,10 @@ impl App {
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
         let virtual_pairs_snap = self.virtual_render_pairs.clone();
+        let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
+            .iter()
+            .map(|(_, _, tf)| tf.clone())
+            .collect();
         let n_real_snap = n_real;
         let show_help_snap = self.show_help;
         let monitor_params_snap = (self.analysis_mode == "fft").then_some(MonitorParamsInfo {
@@ -1879,6 +1883,18 @@ impl App {
                         egui::Stroke::new(1.5, sel_border),
                         egui::StrokeKind::Inside,
                     );
+                }
+                // Virtual transfer channels get an extra phase/coherence
+                // overlay painted on top of the GPU-drawn magnitude. Skip
+                // the waterfall view — time-scrolling row images don't play
+                // well with a static polyline on top.
+                if matches!(config_snap.view_mode, ViewMode::Spectrum)
+                    && cell.channel >= n_real_snap
+                {
+                    let vi = cell.channel - n_real_snap;
+                    if let Some(Some(tf)) = virtual_tf_snap.get(vi) {
+                        crate::render::virtual_overlay::draw(&painter, rect, &view, tf);
+                    }
                 }
             }
             overlay::draw(

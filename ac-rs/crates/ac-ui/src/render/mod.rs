@@ -4,4 +4,5 @@ pub mod spectrum;
 pub mod timing;
 pub mod sweep;
 pub mod transfer;
+pub mod virtual_overlay;
 pub mod waterfall;
