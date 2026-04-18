@@ -232,9 +232,16 @@ pub fn morlet_cwt(
         if !cache.matches(n, sigma, scales) {
             cache.rebuild(n, sigma, scales);
         }
+        // Serial — rayon was a loss here. Each kernel is a few dozen MACs
+        // and a full tick totals ~12k MACs (sub-millisecond). Waking the
+        // global rayon pool (num_cpus threads) for that trivial amount of
+        // work cost ~55% of total CPU in sched_yield/futex/epoch-pin before
+        // we switched back. If the workload grows (n_scales ≫ 1024 or
+        // per-kernel width ≫ 500 bins), reintroduce a *dedicated* small
+        // pool — don't use the global one.
         cache
             .kernels
-            .par_iter()
+            .iter()
             .map(|kernel| {
                 let mut acc = Complex::new(0.0, 0.0);
                 let base = kernel.k_lo;
