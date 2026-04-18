@@ -532,9 +532,15 @@ includes `"freq_hz"` and `"drive_db"` fields).
 
 ### `monitor_spectrum`
 
-Continuous input-only spectrum monitor. Captures repeatedly at `interval`
-seconds, auto-detects the dominant frequency, runs `analyze()`, and streams
-spectrum frames until stopped.
+Continuous input-only spectrum monitor. Auto-detects the dominant frequency,
+runs `analyze()`, and streams spectrum frames until stopped. `interval`
+controls the tick cadence (refresh rate); `fft_n` controls the FFT window
+length (frequency resolution). The two are independent: for single-channel
+monitoring the daemon maintains a sliding ring per channel, pulling only
+`interval × sr` new samples per tick and analysing the trailing `fft_n`
+window, so refresh can run faster than `fft_n / sr`. Multi-channel mode
+captures a fresh `fft_n`-sample block per channel per tick (continuity
+across `reconnect_input` can't be preserved).
 
 **Request**
 ```json
@@ -542,18 +548,24 @@ spectrum frames until stopped.
   "cmd":        "monitor_spectrum",
   "freq_hz":    <float>,     // hint for initial fundamental; auto-detected thereafter
   "level_dbfs": <float>,     // unused by server (kept for client compat)
-  "interval":   <float>,     // capture + analysis interval (seconds), default 0.2
+  "interval":   <float>,     // tick cadence (seconds), default 0.2
+  "fft_n":      <int>,       // capture window = FFT N, power of 2 in [256, 131072]
+                              // default: nearest pow2 of sr*interval (preserves legacy)
   "channels":   [<int>, ...] // optional; input channel indices to monitor
                               // defaults to [config.input_channel]
 }
 ```
 
+Both `interval` and `fft_n` are live-reconfigurable — see
+`set_monitor_params` below.
+
 When `channels` contains more than one index, the worker cycles through the
-ports via `reconnect_input` (each channel gets `interval / N` seconds of
-capture per cycle). Every published `spectrum` frame carries distinct
-`channel` and `n_channels` fields so subscribers can route frames
-independently. Backends whose `reconnect_input` is a no-op (fake,
-CPAL) will emit N frames per cycle but all drawn from the same live port.
+ports via `reconnect_input` (each channel gets `interval / N` seconds between
+cycles; capture length per channel is still `fft_n` samples). Every
+published `spectrum` frame carries distinct `channel` and `n_channels` fields
+so subscribers can route frames independently. Backends whose
+`reconnect_input` is a no-op (fake, CPAL) will emit N frames per cycle but
+all drawn from the same live port.
 
 **Reply**
 ```json
@@ -571,6 +583,32 @@ CPAL) will emit N frames per cycle but all drawn from the same live port.
 ```json
 // topic: done
 { "cmd": "monitor_spectrum" }
+```
+
+---
+
+### `set_monitor_params`
+
+Live-tunes the running `monitor_spectrum` worker. Either or both of
+`interval` and `fft_n` may be supplied; unspecified fields are left
+unchanged. Takes effect on the next tick — no frame gap, no worker restart.
+
+Request/reply is synchronous on the REP socket; no frames emitted.
+
+**Request**
+```json
+{
+  "cmd":      "set_monitor_params",
+  "interval": <float>,   // optional; seconds, > 0
+  "fft_n":    <int>      // optional; power of 2 in [256, 131072]
+}
+```
+
+**Reply**
+```json
+{ "ok": true,  "interval": <float>, "fft_n": <int> }
+{ "ok": false, "error": "no active monitor" }
+{ "ok": false, "error": "fft_n must be power of 2 in [256, 131072]" }
 ```
 
 ---

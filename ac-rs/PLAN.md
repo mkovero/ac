@@ -44,7 +44,7 @@ ac-rs/
   PLAN.md             (this file)
 
   crates/
-    ac-core/          # pure library — no sockets, no global state (43 tests)
+    ac-core/          # pure library — no sockets, no global state, 43 tests
       src/
         analysis.rs   # FFT, THD, THD+N (mirrors analysis.py)
         cwt.rs        # Morlet continuous wavelet transform (sparse freq-domain)
@@ -55,7 +55,7 @@ ac-rs/
         conversions.rs# vrms_to_dbu, dbfs helpers
         constants.rs  # SAMPLERATE, FFT_WINDOW, NUM_HARMONICS, etc.
 
-    ac-cli/           # CLI client — full port of ac/client/ (50 tests)
+    ac-cli/           # CLI client — full port of ac/client/, 50 tests
       src/
         main.rs       # arg dispatch
         parse.rs      # positional token parser

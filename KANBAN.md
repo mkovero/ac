@@ -79,11 +79,11 @@ _nothing yet_
 
 ### Software architecture quick ref
 - Rust CLI: `ac-rs/crates/ac-cli` — positional parser + ZMQ REQ/SUB, 50 tests
-- Rust daemon: `ac-rs/crates/ac-daemon` — ZMQ REP:5556 / PUB:5557
-- Rust UI: `ac-rs/crates/ac-ui` — wgpu spectrum/waterfall/CWT, egui transfer/sweep
+- Rust daemon: `ac-rs/crates/ac-daemon` — ZMQ REP:5556 / PUB:5557, 43 tests
+- Rust UI: `ac-rs/crates/ac-ui` — wgpu spectrum/waterfall/CWT, egui transfer/sweep, 54 tests
 - DSP library: `ac-rs/crates/ac-core` — no sockets, 43 unit tests
 - Python client: `ac/client/` — alternative CLI parser + ZMQ REQ/SUB
 - Python GUI: `ac/ui/` — pyqtgraph, alternative to ac-ui
-- Tests: `cargo test` (93 Rust) + `pytest tests/ -q` (149 Python integration)
+- Tests: `cargo test` (190 Rust) + `pytest tests/ -q` (156 Python)
 
 *Updated: 2026-04-17*

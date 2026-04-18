@@ -34,8 +34,8 @@ use crate::types::AnalysisResult;
 ///
 /// # Errors
 ///
-/// Returns an error if no signal is detected at the fundamental
-/// (`f1_amp < 1e-9`).
+/// Returns an error if `samples.len() < 256` or if no signal is detected
+/// at the fundamental (`f1_amp < 1e-9`).
 pub fn analyze(
     samples: &[f32],
     sr: u32,
@@ -43,7 +43,9 @@ pub fn analyze(
     n_harmonics: usize,
 ) -> Result<AnalysisResult> {
     let n = samples.len();
-    assert!(n >= 256, "need at least 256 samples");
+    if n < 256 {
+        bail!("need at least 256 samples, got {n}");
+    }
 
     // Convert to f64 mono.
     let mono: Vec<f64> = samples.iter().map(|&x| x as f64).collect();

@@ -7,7 +7,7 @@ Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # ac-core (43 tests) + ac-cli (50 tests)
+cargo test                        # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
 ```
 
 ## Crate layout
@@ -16,8 +16,8 @@ cargo test                        # ac-core (43 tests) + ac-cli (50 tests)
 |-------|--------|------|
 | `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 43 unit tests. |
 | `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 50 parser tests. |
-| `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. |
+| `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 tests. |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 54 tests. |
 
 ## ac-daemon binary
 
@@ -85,6 +85,8 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Space` | Toggle channel selection |
 | `[` / `]` | Shift dB floor ±5 |
 | `+` / `-` | Adjust dB span |
+| `Left` / `Right` | FFT monitor tick interval ±1 ms (clamped 1–1000 ms, FFT mode only) |
+| `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
 | `P` | Screenshot |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |

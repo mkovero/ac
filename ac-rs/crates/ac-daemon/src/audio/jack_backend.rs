@@ -234,6 +234,15 @@ impl AudioEngine for JackEngine {
         Ok(samples)
     }
 
+    fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
+        let mut samples = vec![0.0f32; max_samples];
+        let got = self.ring_cons.as_mut()
+            .map(|c| c.pop_slice(&mut samples))
+            .unwrap_or(0);
+        samples.truncate(got);
+        Ok(samples)
+    }
+
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
 

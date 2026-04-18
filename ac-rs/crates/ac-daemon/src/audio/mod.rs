@@ -33,6 +33,21 @@ pub trait AudioEngine: Send + 'static {
     /// Capture audio for `duration` seconds and return the samples.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>>;
 
+    /// Non-blocking drain of up to `max_samples` from the capture ring,
+    /// without the pre-clear that `capture_block` performs. Returns whatever
+    /// has accumulated since the last call (possibly empty on backends that
+    /// buffer per-period, possibly full on long gaps). Used by the
+    /// `monitor_spectrum` sliding-ring path so refresh rate can be decoupled
+    /// from FFT window length without losing contiguity across ticks.
+    ///
+    /// Default falls back to `capture_block(max_samples / sr)` — safe but
+    /// clears the ring, so sr-agnostic callers still get data. JACK overrides
+    /// with a true non-clearing drain.
+    fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
+        let sr = self.sample_rate() as f64;
+        self.capture_block(max_samples as f64 / sr.max(1.0))
+    }
+
     /// Capture two channels simultaneously: (measurement, reference).
     ///
     /// Default: both channels are the same mono signal (suitable for loopback testing).

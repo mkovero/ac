@@ -611,21 +611,7 @@ fn draw_readout(
     pt: &crate::data::types::SweepPoint,
     label_color: Color32,
 ) {
-    let mut parts = Vec::new();
-    parts.push(format!("{:.1} Hz", pt.fundamental_hz));
-    parts.push(format!("THD {:.4}%", pt.thd_pct));
-    parts.push(format!("THD+N {:.4}%", pt.thdn_pct));
-    if let Some(g) = pt.gain_db {
-        parts.push(format!("Gain {:+.2} dB", g));
-    }
-    parts.push(format!("Fund {:.1} dBFS", pt.fundamental_dbfs));
-    if let Some(dbu) = pt.in_dbu {
-        parts.push(format!("In {:+.2} dBu", dbu));
-    }
-    if let Some(dbu) = pt.out_dbu {
-        parts.push(format!("Out {:+.2} dBu", dbu));
-    }
-    let text = parts.join("   ");
+    let text = crate::ui::fmt::sweep_readout(pt);
     painter.text(
         Pos2::new(rect.left() + 8.0, rect.bottom() - 4.0),
         Align2::LEFT_BOTTOM,

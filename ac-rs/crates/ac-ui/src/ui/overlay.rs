@@ -3,6 +3,7 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 use crate::data::types::{CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, ViewMode};
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
+use crate::ui::fmt::format_hz;
 use crate::ui::stats::StatsSnapshot;
 
 #[derive(Clone)]
@@ -47,6 +48,17 @@ pub struct OverlayInput<'a> {
     pub gpu_supported: bool,
     pub hover: Option<HoverInfo>,
     pub show_help: bool,
+    /// Live FFT monitor knobs — shown in the Spectrum top-right stack when in
+    /// FFT mode so the reader sees `Left/Right` and `Up/Down` arrow effects
+    /// directly (tick cadence, FFT N, resulting Δf). `None` suppresses the
+    /// line (CWT mode or no spectrum frame yet).
+    pub monitor_params: Option<MonitorParamsInfo>,
+}
+
+#[derive(Clone, Copy)]
+pub struct MonitorParamsInfo {
+    pub interval_ms: u32,
+    pub fft_n: u32,
 }
 
 const HELP_LINES: &[&str] = &[
@@ -65,6 +77,8 @@ const HELP_LINES: &[&str] = &[
     "Shift+Tab      prev page / channel",
     "[ / ]          shift dB floor",
     "+ / -          adjust dB range",
+    "← / →          monitor interval (fft)",
+    "↑ / ↓          fft N (fft)",
     "Ctrl+R         reset all views",
     "",
     "Mouse",
@@ -141,6 +155,29 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             text_color,
         );
 
+        // Live FFT monitor readout (Spectrum + FFT only). Shows the knobs
+        // adjusted by plain Left/Right and Up/Down so the user sees the
+        // effect of each key press directly.
+        if matches!(input.config.view_mode, ViewMode::Spectrum) {
+            if let Some(mp) = input.monitor_params {
+                let df = sr as f32 / mp.fft_n as f32;
+                let mon_line = format!(
+                    "{:>4} ms  │  N {}  │  Δf {:.1} Hz",
+                    mp.interval_ms, mp.fft_n, df,
+                );
+                painter.text(
+                    Pos2::new(
+                        screen.right() - 8.0,
+                        screen.top() + 6.0 + 2.0 * (theme::STATUS_PX + 2.0),
+                    ),
+                    Align2::RIGHT_TOP,
+                    mon_line,
+                    FontId::monospace(theme::STATUS_PX),
+                    text_color,
+                );
+            }
+        }
+
         // Waterfall colorbar: vertical gradient sampled from the same
         // inferno LUT the GPU uses, with dB tick labels every 20 dB. Anchored
         // under the gain line so the reader sees "color X..Y dB" above and
@@ -205,18 +242,12 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        let dbu = frame
-            .meta
-            .in_dbu
-            .map(|v| format!("   {:+.1} dBu", v))
-            .unwrap_or_default();
-        let bottom_left = format!(
-            "{:>7.1} Hz   {:>6.1} dBFS   THD {:.3}%   THD+N {:.3}%{}",
+        let bottom_left = super::fmt::spectrum_readout(
             frame.meta.freq_hz,
             frame.meta.fundamental_dbfs,
             frame.meta.thd_pct,
             frame.meta.thdn_pct,
-            dbu,
+            frame.meta.in_dbu,
         );
         painter.text(
             Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
@@ -275,10 +306,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         if let Some(&refc) = input.selection_order.last().filter(|_| n_sel >= 2) {
             let meas_ch = input.active_meas;
             if let Some(tf) = input.transfer {
-                let delay_text = format!(
-                    "Δt = {:+.2} ms  ({:+} samp)",
-                    tf.delay_ms, tf.delay_samples,
-                );
+                let delay_text = super::fmt::transfer_delay(tf.delay_ms, tf.delay_samples);
                 painter.text(
                     Pos2::new(screen.center().x, screen.top() + 10.0),
                     Align2::CENTER_TOP,
@@ -401,36 +429,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        let label = match hover.readout {
-            HoverReadout::Db(v) => format!(
-                "CH{} {} {:+6.1} dB",
-                hover.channel,
-                format_hz(hover.freq_hz),
-                v,
-            ),
-            HoverReadout::Phase(v) => format!(
-                "CH{} {} {:+6.1} deg",
-                hover.channel,
-                format_hz(hover.freq_hz),
-                v,
-            ),
-            HoverReadout::Coherence(v) => format!(
-                "CH{} {} coh {:.3}",
-                hover.channel,
-                format_hz(hover.freq_hz),
-                v,
-            ),
-            HoverReadout::Thd(v) => format!(
-                "{} THD {:.4}%",
-                format_hz(hover.freq_hz),
-                v,
-            ),
-            HoverReadout::Gain(v) => format!(
-                "{} {:+.2} dB",
-                format_hz(hover.freq_hz),
-                v,
-            ),
-        };
+        let label = super::fmt::hover_label(hover.channel, hover.freq_hz, &hover.readout);
         // Pin the readout just above-right of the cursor, clamped so it
         // stays inside the hovered cell.
         let anchor = Pos2::new(
@@ -506,10 +505,3 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     }
 }
 
-fn format_hz(hz: f32) -> String {
-    if hz >= 1000.0 {
-        format!("{:>6.2} kHz", hz / 1000.0)
-    } else {
-        format!("{:>6.1} Hz ", hz)
-    }
-}

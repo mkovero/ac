@@ -171,7 +171,7 @@ See `ac-rs/ZMQ.md` for the wire protocol.
 ```bash
 cd ac-rs
 cargo build                   # all crates (ac, ac-daemon, ac-ui)
-cargo test                    # ac-core (43 tests) + ac-cli (50 tests)
+cargo test                    # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
 ```
 
 ## Dependencies

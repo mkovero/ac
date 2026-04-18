@@ -26,7 +26,7 @@ use crate::render::waterfall::{CellUpload as WaterfallCellUpload, WaterfallRende
 use crate::theme;
 use crate::ui::export::{self, ScreenshotRequest};
 use crate::ui::layout::{self, GridParams};
-use crate::ui::overlay::{self, HoverInfo, HoverReadout, OverlayInput};
+use crate::ui::overlay::{self, HoverInfo, HoverReadout, MonitorParamsInfo, OverlayInput};
 use crate::ui::stats::{StatsSnapshot, TimingStats};
 
 /// How long a notification string stays visible in the overlay. Also gates
@@ -39,6 +39,29 @@ pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
 
 /// Frame cap for continuous repaint windows (notification fade, benchmark).
 pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Left/Right arrow tunes FFT monitor refresh rate in 1 ms steps (Left =
+/// slower, Right = faster). Clamped to [`MONITOR_INTERVAL_MIN_MS`,
+/// `MONITOR_INTERVAL_MAX_MS`]. Default 200 ms (5 Hz) matches the legacy
+/// hardcoded interval so `ac monitor` opens identical to pre-feature behavior.
+pub const MONITOR_INTERVAL_MIN_MS: u32 = 1;
+pub const MONITOR_INTERVAL_MAX_MS: u32 = 1000;
+
+/// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
+/// N (finer resolution), Down → smaller N (coarser but faster capture).
+/// Protocol rejects anything outside [256, 131072] or non-pow2.
+pub const MONITOR_FFT_N_LADDER: &[u32] = &[1024, 2048, 4096, 8192, 16384, 32768, 65536];
+
+/// Step a ladder: find `current`'s index, move by `delta`, clamp to bounds.
+/// Returns the new value, or `current` if it wasn't on the ladder (keeps the
+/// UI coherent when the daemon default drifts from the UI default).
+pub fn step_ladder(ladder: &[u32], current: u32, delta: i32) -> u32 {
+    let Some(idx) = ladder.iter().position(|&v| v == current) else {
+        return current;
+    };
+    let new_idx = (idx as i32 + delta).clamp(0, ladder.len() as i32 - 1) as usize;
+    ladder[new_idx]
+}
 
 /// Pure-state result of the `about_to_wait` decision, extracted so the same
 /// logic can be unit-tested without a winit event loop. Translating this to
@@ -134,6 +157,11 @@ pub struct App {
     analysis_mode: String,
     cwt_sigma: f32,
     cwt_n_scales: usize,
+    /// Live FFT monitor knobs (interval 1 ms steps in [1, 1000] ms;
+    /// `MONITOR_FFT_N_LADDER` for N). Mutated by plain arrow keys in FFT mode
+    /// and pushed to the daemon via `set_monitor_params`.
+    monitor_interval_ms: u32,
+    monitor_fft_n: u32,
     /// Insertion-order view of `selected`. In Transfer layout the convention
     /// is: the **last** entry is REF, every preceding entry is a meas channel
     /// the user would like to H1-compare against that ref. Only one meas
@@ -249,6 +277,8 @@ impl App {
             analysis_mode: "fft".to_string(),
             cwt_sigma: 12.0,
             cwt_n_scales: 512,
+            monitor_interval_ms: 200,
+            monitor_fft_n: 8192,
             selection_order: Vec::new(),
             active_meas_idx: 0,
             config,
@@ -853,6 +883,28 @@ impl App {
         self.send_set_analysis_mode("cwt");
     }
 
+    /// Push the current `monitor_interval_ms` + `monitor_fft_n` to the daemon
+    /// via `set_monitor_params`. Silent no-op on the synthetic backend.
+    fn send_monitor_params(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        if !self.monitor_spectrum_active {
+            return;
+        }
+        let interval = self.monitor_interval_ms as f64 / 1000.0;
+        let fft_n = self.monitor_fft_n;
+        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let cmd = serde_json::json!({
+            "cmd":      "set_monitor_params",
+            "interval": interval,
+            "fft_n":    fft_n,
+        });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("set_monitor_params failed: {e}");
+        }
+    }
+
     fn send_transfer_stream_start(&mut self, meas_ch: usize, ref_ch: usize) {
         // Synthetic mode: no daemon involved — tell the synthetic worker to
         // start writing fake TransferFrames to the shared store. The renderer
@@ -929,10 +981,13 @@ impl App {
         }
         let channels: Vec<u32> = self.monitor_channels.clone()
             .unwrap_or_else(|| (0..n as u32).collect());
+        let interval = self.monitor_interval_ms as f64 / 1000.0;
+        let fft_n = self.monitor_fft_n;
         let Some(ctrl) = self.ensure_ctrl() else { return };
         let cmd = serde_json::json!({
             "cmd":      "monitor_spectrum",
-            "interval": 0.2,
+            "interval": interval,
+            "fft_n":    fft_n,
             "channels": channels,
         });
         log::info!("monitor_spectrum: sending start channels={channels:?}");
@@ -1106,6 +1161,36 @@ impl App {
                 self.cwt_n_scales = (self.cwt_n_scales / 2).max(64);
                 self.send_cwt_params();
                 self.notify(&format!("cwt scales: {}", self.cwt_n_scales));
+            }
+            KeyCode::ArrowLeft
+                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
+            {
+                self.monitor_interval_ms =
+                    (self.monitor_interval_ms + 1).clamp(MONITOR_INTERVAL_MIN_MS, MONITOR_INTERVAL_MAX_MS);
+                self.send_monitor_params();
+                self.notify(&format!("interval: {} ms", self.monitor_interval_ms));
+            }
+            KeyCode::ArrowRight
+                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
+            {
+                self.monitor_interval_ms =
+                    self.monitor_interval_ms.saturating_sub(1).max(MONITOR_INTERVAL_MIN_MS);
+                self.send_monitor_params();
+                self.notify(&format!("interval: {} ms", self.monitor_interval_ms));
+            }
+            KeyCode::ArrowUp
+                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
+            {
+                self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, 1);
+                self.send_monitor_params();
+                self.notify(&format!("fft N: {}", self.monitor_fft_n));
+            }
+            KeyCode::ArrowDown
+                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
+            {
+                self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, -1);
+                self.send_monitor_params();
+                self.notify(&format!("fft N: {}", self.monitor_fft_n));
             }
             KeyCode::BracketLeft => {
                 self.shift_hovered_db_floor(-5.0);
@@ -1467,6 +1552,10 @@ impl App {
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
         let show_help_snap = self.show_help;
+        let monitor_params_snap = (self.analysis_mode == "fft").then_some(MonitorParamsInfo {
+            interval_ms: self.monitor_interval_ms,
+            fft_n: self.monitor_fft_n,
+        });
         let transfer_snap: Option<TransferFrame> = if in_transfer_layout {
             self.transfer_last.clone()
         } else {
@@ -1657,6 +1746,7 @@ impl App {
                     gpu_supported,
                     hover: hover_info.clone(),
                     show_help: show_help_snap,
+                    monitor_params: monitor_params_snap,
                 },
             );
         });
@@ -2178,6 +2268,37 @@ mod loop_tests {
         app.needs_redraw = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawIdle);
         assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    #[test]
+    fn step_ladder_walks_within_bounds() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, 0), 8192);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, -1), 4096);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, 1), 16384);
+    }
+
+    #[test]
+    fn step_ladder_clamps_at_edges() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 1024, -5), 1024);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 65536, 5), 65536);
+    }
+
+    #[test]
+    fn step_ladder_leaves_off_ladder_value_unchanged() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 12345, 1), 12345);
+    }
+
+    #[test]
+    fn fft_n_ladder_entries_are_pow2_in_protocol_range() {
+        for &n in MONITOR_FFT_N_LADDER {
+            assert!(n.is_power_of_two(), "ladder entry {n} not pow2");
+            assert!((256..=131_072).contains(&n), "ladder entry {n} out of protocol range");
+        }
     }
 }
 

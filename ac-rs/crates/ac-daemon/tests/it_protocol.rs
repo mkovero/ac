@@ -223,6 +223,57 @@ fn sweep_frequency_publishes_done() {
 }
 
 #[test]
+fn set_monitor_params_rejects_when_idle() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"set_monitor_params","interval":0.1,"fft_n":4096}));
+    assert_eq!(r["ok"], json!(false));
+    assert_eq!(r["error"], json!("no active monitor"));
+}
+
+#[test]
+fn set_monitor_params_validates_ranges() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"monitor_spectrum","interval":0.2,"fft_n":8192}));
+    assert_eq!(r["ok"], json!(true));
+
+    let r = c.call(json!({"cmd":"set_monitor_params","fft_n":3000}));
+    assert_eq!(r["ok"], json!(false));
+    assert!(r["error"].as_str().unwrap().contains("power of 2"));
+
+    let r = c.call(json!({"cmd":"set_monitor_params","interval":-1.0}));
+    assert_eq!(r["ok"], json!(false));
+    assert!(r["error"].as_str().unwrap().contains("interval"));
+
+    let _ = c.call(json!({"cmd":"stop"}));
+}
+
+#[test]
+fn set_monitor_params_live_updates_running_worker() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"monitor_spectrum","interval":0.2,"fft_n":8192}));
+    assert_eq!(r["ok"], json!(true));
+
+    let r = c.call(json!({"cmd":"set_monitor_params","interval":0.1,"fft_n":4096}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["interval"], json!(0.1));
+    assert_eq!(r["fft_n"], json!(4096));
+
+    // A partial update leaves the other field unchanged.
+    let r = c.call(json!({"cmd":"set_monitor_params","fft_n":16384}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["interval"], json!(0.1));
+    assert_eq!(r["fft_n"], json!(16384));
+
+    let _ = c.call(json!({"cmd":"stop"}));
+    let done = c.wait_for_topic("done", Duration::from_secs(3))
+        .expect("no done frame after stop");
+    assert_eq!(done["cmd"], json!("monitor_spectrum"));
+}
+
+#[test]
 fn calibrate_prompt_reply_cycle() {
     let d = Daemon::spawn();
     let c = Client::new(&d);

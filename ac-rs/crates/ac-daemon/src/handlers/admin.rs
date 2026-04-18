@@ -221,6 +221,33 @@ pub fn get_analysis_mode(state: &ServerState) -> Value {
     json!({"ok": true, "mode": mode, "sigma": sigma, "n_scales": n_scales})
 }
 
+/// Live-tune `interval` and/or `fft_n` on a running `monitor_spectrum` worker.
+/// Rejects if no monitor is active (the worker owns the Arc; without it the
+/// change has nothing to pick up).
+pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
+    let req_interval = cmd.get("interval").and_then(Value::as_f64);
+    let req_fft_n = cmd.get("fft_n").and_then(Value::as_u64).map(|v| v as u32);
+
+    if let Some(i) = req_interval {
+        if !(i > 0.0 && i <= 60.0) {
+            return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
+        }
+    }
+    if let Some(n) = req_fft_n {
+        if !n.is_power_of_two() || n < 256 || n > 131_072 {
+            return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
+        }
+    }
+
+    let mut mp = state.monitor_params.lock().unwrap();
+    if !mp.active {
+        return json!({"ok": false, "error": "no active monitor"});
+    }
+    if let Some(i) = req_interval { mp.interval = i; }
+    if let Some(n) = req_fft_n    { mp.fft_n = n; }
+    json!({"ok": true, "interval": mp.interval, "fft_n": mp.fft_n})
+}
+
 pub fn server_connections(state: &ServerState) -> Value {
     let listen_mode = state.listen_mode.lock().unwrap().clone();
     let (ctrl_ep, data_ep) = if listen_mode == "public" {

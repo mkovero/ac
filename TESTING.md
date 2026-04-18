@@ -2,8 +2,8 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test            # Rust: ac-core (43) + ac-cli (50) = 93 tests
-python -m pytest tests/ -q        # Python: 149 integration tests
+cd ac-rs && cargo test            # Rust: 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+python -m pytest tests/ -q        # Python: 156 tests
 ```
 
 No JACK daemon or audio hardware required — Python tests spawn the Rust `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connect via ZMQ.
@@ -12,8 +12,10 @@ No JACK daemon or audio hardware required — Python tests spawn the Rust `ac-da
 
 ```bash
 cd ac-rs
-cargo test -p ac-core             # 43 unit tests — analysis, generator, calibration, config, conversions
+cargo test -p ac-core             # 43 unit tests — analysis, generator, calibration, config, conversions, CWT, transfer, GPIO
 cargo test -p ac-cli              # 50 parser tests — all commands, abbreviations, defaults, error cases
+cargo test -p ac-daemon           # 43 tests — 36 unit (audio backends, GPIO) + 7 integration (ZMQ protocol)
+cargo test -p ac-ui               # 54 tests — formatting, grid ticks, egui paint-capture overlay tests
 cargo test                        # all crates
 ```
 
@@ -55,13 +57,16 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 
 ## Test files
 
+### Python (tests/)
+
 | File | Tests | What it covers |
 |------|-------|----------------|
-| `test_analysis.py` | 28 | FFT analysis: THD, THD+N, harmonics, noise floor, fundamental detection, spectrum downsampling |
 | `test_parse.py` | 58 | CLI token parser: all commands incl. test/dut, abbreviations, defaults, error cases |
-| `test_server_client.py` | 21 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
+| `test_server_client.py` | 28 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
+| `test_analysis.py` | 27 | FFT analysis: THD, THD+N, harmonics, noise floor, fundamental detection, spectrum downsampling |
+| `test_transfer.py` | 19 | H1 transfer function: unity loopback, known gains, delay, coherence, capture duration |
 | `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
-| `test_conversions.py` | 11 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
+| `test_conversions.py` | 10 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
 
 ### Rust unit tests
 
@@ -70,19 +75,37 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 | Module | Tests | What it covers |
 |--------|-------|----------------|
 | `analysis` | 16 | FFT analysis port: THD, THD+N, harmonics, fundamental detection, noise floor, clipping, ac_coupled |
-| `generator` | 4 | Sine RMS, phase start, dBFS→amplitude, pink noise length and crest factor |
-| `calibration` | 5 | Save/load roundtrip, missing key, load_all, out_vrms computation |
-| `config` | 2 | JSON round-trip, missing keys use defaults |
-| `conversions` | 2 | dBu↔Vrms, format helpers |
 | `cwt` | 6 | Morlet CWT: log-spaced freqs, magnitude peaks, energy conservation |
+| `calibration` | 5 | Save/load roundtrip, missing key, load_all, out_vrms computation |
+| `generator` | 4 | Sine RMS, phase start, dBFS→amplitude, pink noise length and crest factor |
 | `transfer` | 4 | H1 estimator: coherence, delay, magnitude/phase from known signals |
 | `gpio` | 4 | Frame parser: button events, LED commands, checksum validation |
+| `config` | 2 | JSON round-trip, missing keys use defaults |
+| `conversions` | 2 | dBu↔Vrms, format helpers |
 
 #### ac-cli (50 tests)
 
 | Module | Tests | What it covers |
 |--------|-------|----------------|
 | `parse` | 50 | All commands: sweep, plot, monitor, generate, calibrate, setup, devices, transfer, test, probe, session, stop, server, gpio, dmm, config. Abbreviations, defaults, error cases. |
+
+#### ac-daemon (43 tests)
+
+| Module | Tests | What it covers |
+|--------|-------|----------------|
+| `audio::cpal_backend` | 11 | CPAL I/O: fill/drain buffers, format conversion (i16/i32/f32), silence flag, routing |
+| `audio::jack_backend` | 8 | JACK I/O: tone fill, ring buffer FIFO, stereo padding, xrun counter |
+| `gpio` | 10 | USB2GPIO frame parser: sync, partial frames, button events, garbage handling |
+| `audio::fake` | 3 | Fake engine: channel index parsing, reroute, stereo independence |
+| integration (`it_protocol`) | 7 | ZMQ protocol: status, devices, generate/stop, sweep, calibration cycle, busy guard |
+
+#### ac-ui (54 tests)
+
+| Module | Tests | What it covers |
+|--------|-------|----------------|
+| `ui::fmt` | 31 | Pure formatting functions: spectrum readout (THD, freq, dBFS, dBu), transfer delay, sweep readout, hover labels, format_hz — tests exact numeric output, field alignment, sign formatting, optional field presence/absence |
+| `render::grid` | 12 | Axis ticks: freq_ticks (log decade + sub-decade), format_freq_tick (Hz/kHz), time_ticks, format_time_tick |
+| `ui::paint_tests` | 11 | egui paint-capture: drive overlay::draw() headlessly with synthetic FrameMeta, extract text from rendered shapes, verify spectrum readout, CLIP, FROZEN, connected/disconnected, transfer delay, hover readout, notification, sample rate |
 
 ## What is verified numerically
 
@@ -113,6 +136,24 @@ These tests generate synthetic signals with mathematically known distortion and 
 
 - Injecting broadband noise raises the measured noise floor proportionally
 - Clean sine noise floor is lower than noisy sine noise floor
+
+### UI display formatting (ui::fmt)
+
+- THD 0.003% and 0.030% produce distinct readout strings (catches decimal-place bugs)
+- dBu shown only when calibrated, absent when uncalibrated
+- Field alignment preserved ({:>7.1} Hz, {:>6.1} dBFS)
+- Sweep readout: THD 4 decimal places, gain sign formatting, optional dBu fields
+- Transfer delay: sign on both ms and samples, zero case
+- Hover readout: all 5 variants (dB, phase, coherence, THD, gain) with correct units
+
+### UI overlay rendering (ui::paint_tests)
+
+- Spectrum readout text appears in egui paint output with correct THD/freq/dBFS values
+- CLIP indicator present when clipping=true, absent otherwise
+- FROZEN indicator present when frozen=true
+- Connected/disconnected status text renders correctly
+- Transfer delay readout renders in Transfer layout
+- Hover crosshair label renders with correct channel, frequency, and value
 
 ### Unit conversions (test_conversions.py)
 
@@ -217,3 +258,6 @@ Expected results: gain ≈ 0 dB, flat frequency response (±0 dB), coherence = 1
 - **Analysis tests**: add to `test_analysis.py`. Use `make_recording()` to build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
 - **Integration tests**: add to `test_server_client.py`. Use the session-scoped `server_client` fixture. Must drain to `done`/`error` before returning so the server is idle for the next test.
 - **Calibration/conversion tests**: add to respective files. Pure math, no I/O.
+- **UI formatting tests**: add to `ac-rs/crates/ac-ui/src/ui/fmt.rs`. Pure `fn → String`, no egui/wgpu dependencies.
+- **UI rendering tests**: add to `ac-rs/crates/ac-ui/src/ui/paint_tests.rs`. Construct `OverlayInput` with synthetic data, call `run_overlay()`, assert on extracted text strings.
+- **Grid/axis tests**: add to `ac-rs/crates/ac-ui/src/render/grid.rs`. Pure functions (`freq_ticks`, `format_freq_tick`, `time_ticks`, `format_time_tick`).

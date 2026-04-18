@@ -57,6 +57,31 @@ pub struct ServerState {
     pub analysis_mode: Arc<Mutex<String>>,
     pub cwt_sigma:     Arc<Mutex<f32>>,
     pub cwt_n_scales:  Arc<Mutex<usize>>,
+    /// Live-tunable parameters for the `monitor_spectrum` FFT path. The worker
+    /// re-reads these every tick so `set_monitor_params` takes effect without
+    /// a restart. `active` flips true on worker spawn and false on exit;
+    /// `set_monitor_params` uses it to reject changes when no monitor runs.
+    pub monitor_params: Arc<Mutex<MonitorParams>>,
+}
+
+/// Live-tunable parameters for the FFT spectrum monitor.
+#[derive(Clone, Copy, Debug)]
+pub struct MonitorParams {
+    /// Tick cadence in seconds (refresh rate). Worker sleeps after publishing
+    /// each cycle to reach this cadence; capture never stretches to fill it.
+    pub interval: f64,
+    /// FFT window length in samples. Must be a power of 2 in [256, 131072].
+    pub fft_n: u32,
+    /// `monitor_spectrum` worker is running.
+    pub active: bool,
+}
+
+impl Default for MonitorParams {
+    fn default() -> Self {
+        // 8192 @ 48 kHz ≈ 5.86 Hz bin spacing — close to legacy 0.2 s × 48 k
+        // = 9600 samples (≈ 5 Hz) while being a clean pow2 for the planner.
+        Self { interval: 0.2, fft_n: 8192, active: false }
+    }
 }
 
 pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
@@ -97,6 +122,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         analysis_mode: Arc::new(Mutex::new("fft".to_string())),
         cwt_sigma:     Arc::new(Mutex::new(ac_core::cwt::DEFAULT_SIGMA)),
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
+        monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
@@ -209,6 +235,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "monitor_spectrum"    => handlers::monitor_spectrum(state, &cmd),
         "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
         "get_analysis_mode"   => handlers::get_analysis_mode(state),
+        "set_monitor_params"  => handlers::set_monitor_params(state, &cmd),
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),
         "calibrate"           => handlers::calibrate(state, &cmd),

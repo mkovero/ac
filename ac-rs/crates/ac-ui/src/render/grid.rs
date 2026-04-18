@@ -219,3 +219,97 @@ fn format_time_tick(t_s: f32) -> String {
         format!("-{:.1}s", t_s)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_freq_tick ──────────────────────────────────────────────
+
+    #[test]
+    fn freq_tick_integer_hz() {
+        assert_eq!(format_freq_tick(100.0), "100");
+        assert_eq!(format_freq_tick(200.0), "200");
+        assert_eq!(format_freq_tick(500.0), "500");
+    }
+
+    #[test]
+    fn freq_tick_fractional_hz() {
+        assert_eq!(format_freq_tick(100.5), "100.5");
+    }
+
+    #[test]
+    fn freq_tick_integer_khz() {
+        assert_eq!(format_freq_tick(1000.0), "1k");
+        assert_eq!(format_freq_tick(2000.0), "2k");
+        assert_eq!(format_freq_tick(10000.0), "10k");
+        assert_eq!(format_freq_tick(20000.0), "20k");
+    }
+
+    #[test]
+    fn freq_tick_fractional_khz() {
+        assert_eq!(format_freq_tick(2500.0), "2.5k");
+        assert_eq!(format_freq_tick(1500.0), "1.5k");
+    }
+
+    #[test]
+    fn freq_tick_5khz() {
+        assert_eq!(format_freq_tick(5000.0), "5k");
+    }
+
+    // ── freq_ticks (log mode) ─────────────────────────────────────────
+
+    #[test]
+    fn freq_ticks_log_full_range() {
+        let ticks = freq_ticks(20.0, 20000.0);
+        assert!(ticks.contains(&100.0));
+        assert!(ticks.contains(&1000.0));
+        assert!(ticks.contains(&10000.0));
+    }
+
+    #[test]
+    fn freq_ticks_log_contains_decade_markers() {
+        let ticks = freq_ticks(20.0, 20000.0);
+        for &f in &[20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0] {
+            assert!(ticks.contains(&f), "missing {f}");
+        }
+    }
+
+    #[test]
+    fn freq_ticks_log_narrow_range() {
+        let ticks = freq_ticks(900.0, 2000.0);
+        assert!(ticks.contains(&1000.0));
+        assert!(ticks.contains(&2000.0));
+        assert!(!ticks.contains(&500.0));
+    }
+
+    // ── time_ticks ────────────────────────────────────────────────────
+
+    #[test]
+    fn time_ticks_always_starts_at_zero() {
+        let ticks = time_ticks(10.0);
+        assert_eq!(ticks[0], 0.0);
+    }
+
+    #[test]
+    fn time_ticks_zero_duration() {
+        assert_eq!(time_ticks(0.0), vec![0.0]);
+    }
+
+    // ── format_time_tick ──────────────────────────────────────────────
+
+    #[test]
+    fn format_time_zero() {
+        assert_eq!(format_time_tick(0.0), "0");
+    }
+
+    #[test]
+    fn format_time_small() {
+        assert_eq!(format_time_tick(1.5), "-1.5s");
+    }
+
+    #[test]
+    fn format_time_large() {
+        assert_eq!(format_time_tick(30.0), "-30s");
+    }
+}

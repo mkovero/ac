@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use ac_core::calibration::Calibration;
 
 use crate::audio::make_engine;
-use crate::server::ServerState;
+use crate::server::{MonitorParams, ServerState};
 
 use super::{
     busy_guard, downsample, resolve_input, resolve_output, send_pub, spawn_worker,
@@ -311,9 +311,26 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
-    let freq_hz  = cmd.get("freq_hz") .and_then(Value::as_f64).unwrap_or(1000.0);
-    let interval = cmd.get("interval").and_then(Value::as_f64).unwrap_or(0.2);
-    let cfg      = state.cfg.lock().unwrap().clone();
+    let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
+
+    let defaults = MonitorParams::default();
+    let interval = cmd.get("interval").and_then(Value::as_f64).unwrap_or(defaults.interval);
+    let fft_n = cmd.get("fft_n").and_then(Value::as_u64).unwrap_or(defaults.fft_n as u64) as u32;
+
+    if !(interval > 0.0 && interval <= 60.0) {
+        return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
+    }
+    if !fft_n.is_power_of_two() || fft_n < 256 || fft_n > 131_072 {
+        return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
+    }
+
+    {
+        let mut mp = state.monitor_params.lock().unwrap();
+        *mp = MonitorParams { interval, fft_n, active: true };
+    }
+    let monitor_params_shared = state.monitor_params.clone();
+
+    let cfg = state.cfg.lock().unwrap().clone();
 
     let channels: Vec<u32> = cmd.get("channels")
         .and_then(Value::as_array)
@@ -376,13 +393,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(ring_cap)).collect();
         let mut cwt_log_counter = 0u32;
 
-        let per_channel_interval = if channels_worker.len() > 1 {
-            interval / channels_worker.len() as f64
-        } else {
-            interval
-        };
+        // Sliding ring buffer for single-channel FFT path so refresh cadence
+        // (`cur_interval`) can run faster than capture-window duration
+        // (`cur_fft_n / sr`). Each tick pulls just the new samples that
+        // arrived since the last tick, appends them, trims to the current
+        // FFT-N, and analyses the full ring.
+        let single_channel = channels_worker.len() == 1;
+        let mut fft_rings: Vec<std::collections::VecDeque<f32>> =
+            channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(131_072)).collect();
 
         while !stop.load(Ordering::Relaxed) {
+            let tick_start = std::time::Instant::now();
+            let (cur_interval, cur_fft_n) = {
+                let mp = monitor_params_shared.lock().unwrap();
+                (mp.interval, mp.fft_n)
+            };
             let mode = analysis_mode.lock().unwrap().clone();
             let is_cwt = mode == "cwt";
 
@@ -417,20 +442,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                     eng.flush_capture();
                 }
-                let cap_dur = if is_cwt { cwt_tick } else { per_channel_interval };
-                let samples = match eng.capture_block(cap_dur) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        send_pub(&pub_tx, "error", &json!({
-                            "cmd":     "monitor_spectrum",
-                            "message": format!("capture error on ch{channel}: {e}"),
-                        }));
-                        return;
-                    }
-                };
-                xruns_total += eng.xruns();
-
                 if is_cwt {
+                    let samples = match eng.capture_block(cwt_tick) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            send_pub(&pub_tx, "error", &json!({
+                                "cmd":     "monitor_spectrum",
+                                "message": format!("capture error on ch{channel}: {e}"),
+                            }));
+                            return;
+                        }
+                    };
+                    xruns_total += eng.xruns();
                     let ring = &mut cwt_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > ring_cap {
@@ -472,7 +495,56 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "xruns":       xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
+                    continue;
+                }
+
+                // FFT path. Each channel has its own sliding ring so refresh
+                // cadence (`cur_interval`) is decoupled from FFT window length
+                // (`cur_fft_n`). Per-tick per-channel budget = interval / n_ch,
+                // clamped to a sensible floor so JACK always has something to
+                // hand back. Single-channel uses `capture_available` (non-
+                // clearing drain on JACK, falls back to capture_block
+                // elsewhere); multi-channel must use block capture because
+                // `reconnect_input` clears the ring on every switch.
+                let per_ch_budget = (cur_interval / channels_worker.len() as f64)
+                    .max(0.002);
+                let budget_samples = ((per_ch_budget * sr as f64) as usize)
+                    .clamp(128, cur_fft_n as usize);
+                let new = if single_channel {
+                    match eng.capture_available(budget_samples) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            send_pub(&pub_tx, "error", &json!({
+                                "cmd":     "monitor_spectrum",
+                                "message": format!("capture error on ch{channel}: {e}"),
+                            }));
+                            return;
+                        }
+                    }
                 } else {
+                    match eng.capture_block(budget_samples as f64 / sr as f64) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            send_pub(&pub_tx, "error", &json!({
+                                "cmd":     "monitor_spectrum",
+                                "message": format!("capture error on ch{channel}: {e}"),
+                            }));
+                            return;
+                        }
+                    }
+                };
+                xruns_total += eng.xruns();
+                let ring = &mut fft_rings[idx];
+                ring.extend(new.iter());
+                while ring.len() > cur_fft_n as usize {
+                    ring.pop_front();
+                }
+                if ring.len() < 256 {
+                    continue;
+                }
+                let samples: Vec<f32> = ring.iter().copied().collect();
+
+                {
                     let frame = match ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
                         Ok(r) => {
                             current_freqs[idx] = r.fundamental_hz;
@@ -516,8 +588,22 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                 }
             }
+            // Pace FFT mode to requested interval. CWT has its own cadence
+            // (short tick + sliding ring — see `cwt_tick`) and paces itself.
+            if !is_cwt {
+                let elapsed = tick_start.elapsed().as_secs_f64();
+                if elapsed < cur_interval {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(
+                        cur_interval - elapsed,
+                    ));
+                }
+            }
         }
         eng.stop();
+        {
+            let mut mp = monitor_params_shared.lock().unwrap();
+            mp.active = false;
+        }
         send_pub(&pub_tx, "done", &json!({"cmd":"monitor_spectrum"}));
     });
 
