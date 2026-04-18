@@ -14,6 +14,10 @@ const PHASE_MIN_DEG: f32 = -180.0;
 const PHASE_MAX_DEG: f32 = 180.0;
 const PHASE_TRACE_WIDTH: f32 = 1.8;
 const COH_STRIP_PX: f32 = 6.0;
+/// Bins with coherence below this are hidden from the phase curve — phase
+/// is meaningless where the output isn't linearly related to the reference,
+/// and drawing it just adds a zigzag across the cell.
+const PHASE_COH_GATE: f32 = 0.5;
 
 /// Paint phase + coherence on top of an already-rendered magnitude cell.
 pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFrame) {
@@ -37,6 +41,7 @@ pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFr
         cell_view,
         &tf.freqs,
         &tf.phase_deg,
+        &tf.coherence,
         phase_color,
     );
     draw_coherence_strip(painter, rect, cell_view, &tf.freqs, &tf.coherence);
@@ -79,15 +84,17 @@ fn draw_phase_axis(painter: &Painter, rect: Rect, label_color: Color32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_phase_polyline(
     painter: &Painter,
     rect: Rect,
     cell_view: &CellView,
     freqs: &[f32],
     phase_deg: &[f32],
+    coherence: &[f32],
     color: Color32,
 ) {
-    let n = freqs.len().min(phase_deg.len());
+    let n = freqs.len().min(phase_deg.len()).min(coherence.len());
     if n < 2 {
         return;
     }
@@ -99,12 +106,21 @@ fn draw_phase_polyline(
     let span = (log_max - log_min).max(0.0001);
     let y_span = (PHASE_MAX_DEG - PHASE_MIN_DEG).max(0.0001);
 
-    // Break segments at ±180° wrap boundaries and extend each side to the
-    // nearest axis so wraps read as "line exits the top, re-enters the
-    // bottom" rather than a hard gap.
+    // Break segments at ±180° wrap boundaries (extend to axis so the wrap
+    // reads as "exits top, re-enters bottom") and at coherence gate
+    // crossings (phase is meaningless where the output isn't linearly
+    // related to the reference, so we simply don't draw those bins).
     let mut segments: Vec<Vec<Pos2>> = Vec::new();
     let mut current: Vec<Pos2> = Vec::new();
     let mut last: Option<(f32, f32)> = None; // (x, phase_deg)
+
+    let flush = |current: &mut Vec<Pos2>, segments: &mut Vec<Vec<Pos2>>| {
+        if current.len() >= 2 {
+            segments.push(std::mem::take(current));
+        } else {
+            current.clear();
+        }
+    };
 
     for i in 0..n {
         let f = freqs[i];
@@ -113,6 +129,12 @@ fn draw_phase_polyline(
         }
         let v = phase_deg[i];
         if !v.is_finite() {
+            continue;
+        }
+        let coh = coherence[i];
+        if !coh.is_finite() || coh < PHASE_COH_GATE {
+            flush(&mut current, &mut segments);
+            last = None;
             continue;
         }
         let tx = (f.log10() - log_min) / span;
@@ -125,16 +147,9 @@ fn draw_phase_polyline(
 
         if let Some((prev_x, prev_v)) = last {
             if (v - prev_v).abs() > 180.0 {
-                // Wrap. End the running segment at the axis the previous
-                // sample was drifting toward, then start fresh at the
-                // opposite axis for the current sample.
                 let end_y = if prev_v > 0.0 { rect.top() } else { rect.bottom() };
                 current.push(Pos2::new(prev_x, end_y));
-                if current.len() >= 2 {
-                    segments.push(std::mem::take(&mut current));
-                } else {
-                    current.clear();
-                }
+                flush(&mut current, &mut segments);
                 let start_y = if v > 0.0 { rect.top() } else { rect.bottom() };
                 current.push(Pos2::new(x, start_y));
             }

@@ -279,7 +279,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let step         = nperseg / 2;              // 50% overlap
         let n_averages   = 4;
         let target_total = nperseg + step * (n_averages - 1);
-        let chunk_secs   = 0.25;
+        let chunk_secs   = 0.1;
         let mut rings: Vec<Vec<f32>> = (0..unique_ports.len())
             .map(|_| Vec::with_capacity(target_total + step))
             .collect();
