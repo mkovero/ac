@@ -59,6 +59,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "jack",
+ "rayon",
  "ringbuf",
  "serde",
  "serde_json",

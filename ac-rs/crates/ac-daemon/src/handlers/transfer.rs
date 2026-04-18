@@ -3,6 +3,7 @@
 
 use std::sync::atomic::Ordering;
 
+use rayon::prelude::*;
 use serde_json::{json, Value};
 
 use crate::audio::make_engine;
@@ -313,40 +314,52 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // segment so the first H1 has meaningful coherence.
             if rings.iter().any(|r| r.len() < nperseg) { continue; }
 
-            for (&(meas_ch, ref_ch), &(mi, ri)) in pairs.iter().zip(pair_idx.iter()) {
-                let meas = match rings.get(mi) { Some(b) => b.as_slice(), None => continue };
-                let refb = match rings.get(ri) { Some(b) => b.as_slice(), None => continue };
-                let result = ac_core::transfer::h1_estimate(refb, meas, sr);
+            // Pairs are independent H1 estimates — fan out across the rayon
+            // pool so multi-pair sessions (e.g. 4 mic positions against one
+            // reference) scale linearly with core count. The rings are
+            // read-only inside the per-pair closure; JSON is built on the
+            // worker thread and published back in original pair order.
+            let messages: Vec<Value> = pairs
+                .par_iter()
+                .zip(pair_idx.par_iter())
+                .filter_map(|(&(meas_ch, ref_ch), &(mi, ri))| {
+                    let meas = rings.get(mi)?.as_slice();
+                    let refb = rings.get(ri)?.as_slice();
+                    let result = ac_core::transfer::h1_estimate(refb, meas, sr);
 
-                let n_pts = result.freqs.len();
-                let indices: Vec<usize> = if n_pts > 2000 {
-                    let mut idx: Vec<usize> = (0..2000)
-                        .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
-                        .collect();
-                    idx.dedup();
-                    idx
-                } else {
-                    (0..n_pts).collect()
-                };
+                    let n_pts = result.freqs.len();
+                    let indices: Vec<usize> = if n_pts > 2000 {
+                        let mut idx: Vec<usize> = (0..2000)
+                            .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
+                            .collect();
+                        idx.dedup();
+                        idx
+                    } else {
+                        (0..n_pts).collect()
+                    };
 
-                let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
-                let mag   = indices.iter().map(|&i| result.magnitude_db[i]).collect::<Vec<_>>();
-                let phase = indices.iter().map(|&i| result.phase_deg[i]).collect::<Vec<_>>();
-                let coh   = indices.iter().map(|&i| result.coherence[i]).collect::<Vec<_>>();
+                    let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
+                    let mag   = indices.iter().map(|&i| result.magnitude_db[i]).collect::<Vec<_>>();
+                    let phase = indices.iter().map(|&i| result.phase_deg[i]).collect::<Vec<_>>();
+                    let coh   = indices.iter().map(|&i| result.coherence[i]).collect::<Vec<_>>();
 
-                send_pub(&pub_tx, "data", &json!({
-                    "type":          "transfer_stream",
-                    "cmd":           "transfer_stream",
-                    "freqs":         freqs,
-                    "magnitude_db":  mag,
-                    "phase_deg":     phase,
-                    "coherence":     coh,
-                    "delay_samples": result.delay_samples,
-                    "delay_ms":      result.delay_ms,
-                    "ref_channel":   ref_ch,
-                    "meas_channel":  meas_ch,
-                    "sr":            sr,
-                }));
+                    Some(json!({
+                        "type":          "transfer_stream",
+                        "cmd":           "transfer_stream",
+                        "freqs":         freqs,
+                        "magnitude_db":  mag,
+                        "phase_deg":     phase,
+                        "coherence":     coh,
+                        "delay_samples": result.delay_samples,
+                        "delay_ms":      result.delay_ms,
+                        "ref_channel":   ref_ch,
+                        "meas_channel":  meas_ch,
+                        "sr":            sr,
+                    }))
+                })
+                .collect();
+            for msg in messages {
+                send_pub(&pub_tx, "data", &msg);
             }
         }
 

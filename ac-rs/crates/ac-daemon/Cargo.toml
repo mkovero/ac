@@ -20,6 +20,7 @@ arc-swap    = "1.7"
 jack        = { version = "0.11", optional = true }
 cpal        = { version = "0.15", optional = true }
 serialport = "4.9.0"
+rayon       = "1"
 
 [features]
 default    = ["jack-audio", "cpal-audio"]

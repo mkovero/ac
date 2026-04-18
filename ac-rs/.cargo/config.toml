@@ -1,0 +1,10 @@
+[build]
+# Build for the host CPU by default so rustc autovectorizes hot loops
+# (Welch PSD/CSD, coherence, delay cross-correlation, Morlet CWT) onto
+# AVX2/AVX-512 where available. rustfft already runtime-dispatches to
+# AVX internally; this config just extends the same treatment to the
+# surrounding non-FFT kernels. Downside: the produced binaries are not
+# portable to older CPUs than the build host. If you need portable
+# release artifacts, build with `RUSTFLAGS="-C target-cpu=x86-64"` or
+# override this file in the CI job.
+rustflags = ["-C", "target-cpu=native"]
