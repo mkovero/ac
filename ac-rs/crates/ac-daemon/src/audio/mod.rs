@@ -58,6 +58,18 @@ pub trait AudioEngine: Send + 'static {
         Ok((ch, clone))
     }
 
+    /// Capture N channels simultaneously in the order they were registered
+    /// via `start(..., input_port)` + subsequent `add_ref_input(..)` calls.
+    /// Used by the multi-pair `transfer_stream` worker.
+    ///
+    /// Default falls back to `capture_stereo` and returns 2 buffers — backends
+    /// that can't do >2 (e.g. CPAL) inherit this and the multi-pair handler
+    /// degrades gracefully to one pair.
+    fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        let (meas, refch) = self.capture_stereo(duration)?;
+        Ok(vec![meas, refch])
+    }
+
     /// Reconnect the measurement input port without restarting the engine.
     /// Default no-op (used by fake engine; JACK backend overrides).
     fn reconnect_input(&mut self, _port: &str) -> Result<()> { Ok(()) }

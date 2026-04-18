@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use app::{App, AppInit, SourceKind};
 use data::control::CtrlClient;
-use data::store::{ChannelStore, SweepStore, TransferStore};
+use data::store::{ChannelStore, SweepStore, TransferStore, VirtualChannelStore};
 use data::types::{SweepKind, ViewMode};
 
 fn main() -> anyhow::Result<()> {
@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
     };
     let (inputs, store) = ChannelStore::new(n_channels);
     let transfer_store = TransferStore::new();
+    let virtual_channels = VirtualChannelStore::new();
     let sweep_store = SweepStore::new();
 
     let source_kind = if args.synthetic {
@@ -56,6 +57,7 @@ fn main() -> anyhow::Result<()> {
         store,
         inputs,
         transfer_store,
+        virtual_channels,
         sweep_store,
         source_kind,
         output_dir: args.output_dir.clone(),

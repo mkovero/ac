@@ -32,10 +32,19 @@ impl Drop for WorkerHandle {
 }
 
 /// Concurrency groups for the busy guard (mirrors Python engine.py).
+///
+/// * `Output` — drives the soundcard output (tone/pink/sweep).
+/// * `Input`  — drains capture into a spectrum stream.
+/// * `Transfer` — passive H1 estimator on independent JACK capture clients;
+///   one at a time, but coexists with `Input` and `Output` because each
+///   worker owns its own `AudioEngine` with its own capture ring.
+/// * `Exclusive` — monopolises the engine (calibration, full-sweep plots,
+///   hardware/DUT probes).
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Group {
     Output,
     Input,
+    Transfer,
     Exclusive,
 }
 
@@ -43,7 +52,8 @@ pub fn cmd_group(name: &str) -> Option<Group> {
     match name {
         "sweep_level" | "sweep_frequency" | "generate" | "generate_pink" => Some(Group::Output),
         "monitor_spectrum" => Some(Group::Input),
-        "plot" | "plot_level" | "calibrate" | "transfer" | "transfer_stream"
+        "transfer_stream"  => Some(Group::Transfer),
+        "plot" | "plot_level" | "calibrate" | "transfer"
         | "probe" | "test_hardware" | "test_dut" => Some(Group::Exclusive),
         _ => None,
     }

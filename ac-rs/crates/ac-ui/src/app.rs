@@ -13,11 +13,13 @@ use winit::window::{Window, WindowId};
 
 use crate::data::control::CtrlClient;
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
-use crate::data::store::{ChannelStore, SweepState, SweepStore, TransferStore};
+use crate::data::store::{
+    ChannelStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+};
 use crate::data::synthetic::SyntheticHandle;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
-    ViewMode,
+    CellView, DisplayConfig, DisplayFrame, FrameMeta, LayoutMode, SpectrumFrame, SweepKind,
+    TransferFrame, TransferPair, ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::grid;
@@ -102,6 +104,7 @@ pub struct AppInit {
     pub store: ChannelStore,
     pub inputs: Vec<Input<SpectrumFrame>>,
     pub transfer_store: TransferStore,
+    pub virtual_channels: VirtualChannelStore,
     pub sweep_store: SweepStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
@@ -129,6 +132,10 @@ pub struct App {
     source: Option<DataSource>,
     store: Option<ChannelStore>,
     transfer_store: Option<TransferStore>,
+    /// Registered virtual transfer channels (Space + T). Multi-pair
+    /// `transfer_stream` worker keeps one H1 estimate live per entry, routed
+    /// into the store's per-pair slots by the receiver.
+    virtual_channels: VirtualChannelStore,
     ctrl_endpoint: String,
     ctrl: Option<CtrlClient>,
     /// Cached latest TransferFrame so the renderer can draw a held view during
@@ -203,6 +210,12 @@ pub struct App {
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
     last_frames: Vec<Option<DisplayFrame>>,
+    /// Virtual transfer channels currently rendered as extra grid cells,
+    /// in the order they appear after real channels in `frames`. Refreshed
+    /// from `virtual_channels.pairs()` on every redraw so the mapping
+    /// `virtual_index_in_frames - n_real → TransferPair` always matches
+    /// what the shaders just drew.
+    virtual_render_pairs: Vec<TransferPair>,
     pending_screenshot: bool,
     output_dir: PathBuf,
     notification: Option<(String, Instant)>,
@@ -264,6 +277,7 @@ impl App {
             source: None,
             store: None,
             transfer_store: None,
+            virtual_channels: VirtualChannelStore::new(),
             ctrl_endpoint,
             ctrl: None,
             transfer_last: None,
@@ -298,6 +312,7 @@ impl App {
             egui_state: None,
             egui_renderer: None,
             last_frames: Vec::new(),
+            virtual_render_pairs: Vec::new(),
             pending_screenshot: false,
             output_dir,
             notification: None,
@@ -399,10 +414,13 @@ impl App {
         let ctx = self.render_ctx.as_ref()?;
         let w = ctx.config.width as f32;
         let h = ctx.config.height as f32;
-        let n = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
-        if n == 0 {
+        let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        if n_real == 0 {
             return None;
         }
+        // Include virtual transfer channels so hover / scroll / drag work on
+        // their cells just like real ones.
+        let n = n_real + self.virtual_render_pairs.len();
         let cells = layout::compute(
             self.config.layout,
             n,
@@ -663,9 +681,12 @@ impl App {
     /// Which channel does Space act on. Single mode → the active channel (the
     /// one visible). Any other layout → the hovered cell, or the active
     /// channel as a fallback when the cursor sits outside the plot area.
+    /// Clamps to the real channel count — Space over a virtual transfer
+    /// cell is a no-op, because virtual channels can't themselves be used
+    /// as MEAS/REF for a nested transfer.
     fn selection_target(&self) -> Option<usize> {
-        let n = self.selected.len();
-        if n == 0 {
+        let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        if n_real == 0 {
             return None;
         }
         let idx = match self.config.layout {
@@ -676,7 +697,10 @@ impl App {
                 .map(|(ch, _, _, _, _)| ch)
                 .unwrap_or(self.config.active_channel),
         };
-        Some(idx.min(n - 1))
+        if idx >= n_real {
+            return None;
+        }
+        Some(idx)
     }
 
     fn toggle_selection(&mut self) {
@@ -738,24 +762,26 @@ impl App {
         self.selection_order.last().copied()
     }
 
-    /// Stop any currently running `transfer_stream` worker and, if the
-    /// selection is still a valid meas/ref pair, start a fresh one with the
-    /// current active meas. Used on selection changes, Tab cycling, and
-    /// layout enter.
+    /// Stop any currently running `transfer_stream` worker and restart it
+    /// with the current union of virtual-channel pairs plus (if in L-transfer
+    /// layout) the active meas/ref pair. No-op when the union is empty —
+    /// stopping the worker is enough.
     fn restart_transfer_stream(&mut self) {
         self.send_transfer_stream_stop();
-        let Some(meas) = self.transfer_active_meas() else {
+        let pairs = self.collect_transfer_pairs();
+        if pairs.is_empty() {
             return;
-        };
-        let Some(refc) = self.transfer_ref_channel() else {
-            return;
-        };
-        self.send_transfer_stream_start(meas, refc);
+        }
+        // Args are unused in the new pairs-based implementation; kept for
+        // call-site compatibility in case we ever revert.
+        self.send_transfer_stream_start(0, 0);
     }
 
     /// Called after `config.layout` has been advanced by the `l` key. Starts
     /// the transfer_stream worker when entering Transfer (if the pair is
-    /// ready) and stops it when leaving.
+    /// ready) and stops it when leaving — *unless* virtual channels are
+    /// registered, in which case the worker stays live to keep feeding them
+    /// across layout changes.
     fn on_layout_changed(&mut self, prev: LayoutMode, next: LayoutMode) {
         let entering = !matches!(prev, LayoutMode::Transfer)
             && matches!(next, LayoutMode::Transfer);
@@ -767,11 +793,21 @@ impl App {
             self.active_meas_idx = 0;
             if self.transfer_active_meas().is_some() {
                 self.restart_transfer_stream();
-            } else {
+            } else if self.virtual_channels.is_empty() {
                 self.notify("transfer: pick ≥ 2 channels (last = REF)");
+            } else {
+                // Worker already live serving virtual channels — nothing to
+                // restart, the layout just has no legacy pair to display.
             }
         } else if leaving {
-            self.send_transfer_stream_stop();
+            // Virtual channels keep the worker alive across layout changes;
+            // only fully stop if there's nothing left to stream.
+            if self.virtual_channels.is_empty() {
+                self.send_transfer_stream_stop();
+            } else {
+                // Drop the L-layout pair from the worker's set.
+                self.restart_transfer_stream();
+            }
             // Resume spectrum publishing that was paused when we entered
             // Transfer. No-op if it's already running (e.g. the user never
             // had a valid pair so we never actually stopped it).
@@ -790,6 +826,8 @@ impl App {
         self.store = Some(init.store);
         let transfer_store = init.transfer_store.clone();
         self.transfer_store = Some(transfer_store.clone());
+        self.virtual_channels = init.virtual_channels.clone();
+        let virtual_channels = init.virtual_channels.clone();
         let sweep_store = init.sweep_store.clone();
         self.sweep_store = Some(sweep_store.clone());
         match init.source_kind {
@@ -800,6 +838,7 @@ impl App {
                     n_bins: bins,
                     update_hz: rate,
                     transfer: transfer_store,
+                    virtual_channels,
                 };
                 let handle = src.spawn(init.inputs, self.wake.clone());
                 self.source = Some(DataSource::Synthetic(handle));
@@ -809,6 +848,7 @@ impl App {
                     init.endpoint,
                     init.inputs,
                     transfer_store,
+                    virtual_channels,
                     sweep_store,
                     self.wake.clone(),
                 );
@@ -905,36 +945,59 @@ impl App {
         }
     }
 
-    fn send_transfer_stream_start(&mut self, meas_ch: usize, ref_ch: usize) {
-        // Synthetic mode: no daemon involved — tell the synthetic worker to
-        // start writing fake TransferFrames to the shared store. The renderer
-        // and overlay don't care where the frame came from.
-        if let Some(DataSource::Synthetic(h)) = self.source.as_ref() {
-            h.set_transfer_pair(Some((meas_ch as u32, ref_ch as u32)));
-            self.transfer_stream_active = true;
-            self.notify("transfer_stream: live (synthetic)");
+    /// Union of every pair the worker needs to service: every registered
+    /// virtual channel plus, if the user is currently in the legacy
+    /// L-transfer layout, the (active_meas, ref) pair that view points at —
+    /// dedup'd so the worker doesn't compute the same H1 twice.
+    fn collect_transfer_pairs(&self) -> Vec<TransferPair> {
+        let mut pairs = self.virtual_channels.pairs();
+        if matches!(self.config.layout, LayoutMode::Transfer) {
+            if let (Some(meas), Some(refc)) =
+                (self.transfer_active_meas(), self.transfer_ref_channel())
+            {
+                let layout_pair = TransferPair { meas: meas as u32, ref_ch: refc as u32 };
+                if !pairs.iter().any(|p| *p == layout_pair) {
+                    pairs.push(layout_pair);
+                }
+            }
+        }
+        pairs
+    }
+
+    fn send_transfer_stream_start(&mut self, _meas_ch: usize, _ref_ch: usize) {
+        let pairs = self.collect_transfer_pairs();
+        if pairs.is_empty() {
             return;
         }
-        // transfer_stream is `Exclusive` in the daemon's busy_guard; an
-        // already-running `monitor_spectrum` (`Input` group) would cause the
-        // start to be rejected as busy. Pause monitor first, resume on stop.
-        self.send_monitor_spectrum_stop();
+        // Synthetic mode: no daemon involved — the synthetic worker reads
+        // `virtual_channels.pairs()` directly on each tick, so we just flip
+        // the active flag. The renderer and overlay don't care where the
+        // frame came from.
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            self.transfer_stream_active = true;
+            self.notify(&format!("transfer_stream: {} pair(s) (synthetic)", pairs.len()));
+            return;
+        }
+        // `transfer_stream` is in the `Transfer` group — coexists with the
+        // running `monitor_spectrum` (`Input`) because each worker owns its
+        // own JACK client, so no need to pause monitor here.
         let Some(ctrl) = self.ensure_ctrl() else { return };
         // Passive mode: don't ask the daemon to drive the output. The user
         // wires their own stimulus (pink, sweep, speech, music) into the
         // meas/ref inputs externally and we just compute H1 against it.
+        let pairs_json: Vec<[u32; 2]> =
+            pairs.iter().map(|p| [p.meas, p.ref_ch]).collect();
         let cmd = serde_json::json!({
-            "cmd":          "transfer_stream",
-            "meas_channel": meas_ch as u32,
-            "ref_channel":  ref_ch as u32,
+            "cmd":   "transfer_stream",
+            "pairs": pairs_json,
         });
-        log::info!("transfer_stream: sending start meas={meas_ch} ref={ref_ch}");
+        log::info!("transfer_stream: sending start pairs={pairs_json:?}");
         match ctrl.send(&cmd) {
             Ok(reply) => {
                 log::info!("transfer_stream reply: {reply}");
                 if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
                     self.transfer_stream_active = true;
-                    self.notify("transfer_stream: live");
+                    self.notify(&format!("transfer_stream: {} pair(s) live", pairs.len()));
                 } else {
                     let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
                     self.notify(&format!("transfer_stream: {err}"));
@@ -951,11 +1014,11 @@ impl App {
         if !self.transfer_stream_active {
             return;
         }
-        if let Some(DataSource::Synthetic(h)) = self.source.as_ref() {
-            h.set_transfer_pair(None);
-        } else if let Some(ctrl) = self.ensure_ctrl() {
-            let cmd = serde_json::json!({ "cmd": "stop", "name": "transfer_stream" });
-            let _ = ctrl.send(&cmd);
+        if !matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            if let Some(ctrl) = self.ensure_ctrl() {
+                let cmd = serde_json::json!({ "cmd": "stop", "name": "transfer_stream" });
+                let _ = ctrl.send(&cmd);
+            }
         }
         self.transfer_stream_active = false;
         if let Some(ts) = self.transfer_store.as_ref() {
@@ -1094,6 +1157,26 @@ impl App {
                     LayoutMode::Transfer => "layout: transfer",
                     LayoutMode::Sweep => "layout: sweep",
                 });
+            }
+            KeyCode::KeyT => {
+                if self.selection_order.len() < 2 {
+                    self.notify("T: select ≥ 2 channels first (last = REF)");
+                    return;
+                }
+                let meas = self.selection_order[0] as u32;
+                let ref_ch = *self.selection_order.last().unwrap() as u32;
+                let pair = TransferPair { meas, ref_ch };
+                if self.virtual_channels.remove(pair) {
+                    self.notify(&format!(
+                        "T: removed virtual ch MEAS{meas}←REF{ref_ch}"
+                    ));
+                } else {
+                    self.virtual_channels.add(pair);
+                    self.notify(&format!(
+                        "T: added virtual ch MEAS{meas}←REF{ref_ch}"
+                    ));
+                }
+                self.restart_transfer_stream();
             }
             KeyCode::KeyF => {
                 if let Some(ctx) = self.render_ctx.as_ref() {
@@ -1363,7 +1446,7 @@ impl App {
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
         let egui_state = self.egui_state.as_mut().unwrap();
 
-        let frames = {
+        let mut frames = {
             let store = self.store.as_mut();
             if let Some(store) = store {
                 if !self.config.frozen {
@@ -1385,6 +1468,53 @@ impl App {
                     self.transfer_last = Some(frame);
                 }
             }
+        }
+
+        // Virtual transfer channels get appended as extra cells so the grid /
+        // single / compare layouts render `|H(ω)|` alongside real captures. A
+        // virtual cell with no frame yet shows as empty (same as a real
+        // channel before its first packet). Phase + coherence rendering is
+        // deferred to a follow-up; this commit only wires magnitude-dB through
+        // the spectrum/waterfall renderers.
+        let n_real = frames.len();
+        let virtual_snapshots = self.virtual_channels.read_all();
+        self.virtual_render_pairs = virtual_snapshots.iter().map(|(p, _)| *p).collect();
+        for (_, maybe_tf) in &virtual_snapshots {
+            let frame = maybe_tf.as_ref().map(|tf| DisplayFrame {
+                spectrum: Arc::new(tf.magnitude_db.clone()),
+                freqs:    Arc::new(tf.freqs.clone()),
+                meta: FrameMeta {
+                    freq_hz:          0.0,
+                    fundamental_dbfs: -140.0,
+                    thd_pct:          0.0,
+                    thdn_pct:         0.0,
+                    in_dbu:           None,
+                    sr:               tf.sr,
+                    clipping:         false,
+                    xruns:            0,
+                },
+                // TODO: scroll-per-fresh-frame requires a per-pair freshness
+                // serial on TransferStore. Until that lands, waterfall shows
+                // a static frozen image for virtual channels.
+                new_row: None,
+            });
+            frames.push(frame);
+        }
+
+        // Grow per-channel state arrays so the render path can index by the
+        // virtual channel index the same way it does for real channels.
+        // Shrinking never happens: real channel count is fixed for the
+        // session, and removing a virtual channel leaves harmless empty
+        // trailing slots (they'll be reused the next time the user presses T).
+        let n_total = frames.len();
+        if self.cell_views.len() < n_total {
+            self.cell_views.resize(n_total, CellView::default());
+        }
+        if self.selected.len() < n_total {
+            self.selected.resize(n_total, false);
+        }
+        if self.waterfall_inited.len() < n_total {
+            self.waterfall_inited.resize(n_total, false);
         }
 
         let n_channels = frames.len();
@@ -1555,6 +1685,8 @@ impl App {
         let config_snap = self.config.clone();
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
+        let virtual_pairs_snap = self.virtual_render_pairs.clone();
+        let n_real_snap = n_real;
         let show_help_snap = self.show_help;
         let monitor_params_snap = (self.analysis_mode == "fft").then_some(MonitorParamsInfo {
             interval_ms: self.monitor_interval_ms,
@@ -1751,6 +1883,8 @@ impl App {
                     hover: hover_info.clone(),
                     show_help: show_help_snap,
                     monitor_params: monitor_params_snap,
+                    n_real: n_real_snap,
+                    virtual_pairs: &virtual_pairs_snap,
                 },
             );
         });
@@ -2178,7 +2312,9 @@ mod loop_tests {
     //! ZMQ daemon.
     use super::*;
 
-    use crate::data::store::{ChannelStore, SweepStore, TransferStore};
+    use crate::data::store::{
+        ChannelStore, SweepStore, TransferStore, VirtualChannelStore,
+    };
     use crate::data::types::ViewMode;
 
     fn fresh_app() -> App {
@@ -2187,6 +2323,7 @@ mod loop_tests {
             store,
             inputs,
             transfer_store: TransferStore::new(),
+            virtual_channels: VirtualChannelStore::new(),
             sweep_store: SweepStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),

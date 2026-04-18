@@ -1,6 +1,8 @@
 use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind};
 
-use crate::data::types::{CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, ViewMode};
+use crate::data::types::{
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, TransferPair, ViewMode,
+};
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
 use crate::ui::fmt::format_hz;
@@ -53,6 +55,28 @@ pub struct OverlayInput<'a> {
     /// directly (tick cadence, FFT N, resulting Δf). `None` suppresses the
     /// line (CWT mode or no spectrum frame yet).
     pub monitor_params: Option<MonitorParamsInfo>,
+    /// Number of real capture channels. Channel indices `< n_real` are
+    /// regular captures and label as `CHn`; indices `>= n_real` are virtual
+    /// transfer channels and label via `virtual_pairs`.
+    pub n_real: usize,
+    /// Parallel to cells `n_real..n_real + virtual_pairs.len()`. An entry
+    /// `i` corresponds to the cell at channel index `n_real + i`.
+    pub virtual_pairs: &'a [TransferPair],
+}
+
+/// Label used in overlays / legends for a given cell index. Real channels
+/// stay `CHn`; virtual transfer cells read as `M{m}←R{r}` so the pair is
+/// visible at a glance.
+pub(crate) fn channel_label(idx: usize, n_real: usize, virtual_pairs: &[TransferPair]) -> String {
+    if idx < n_real {
+        format!("CH{idx}")
+    } else {
+        let vi = idx - n_real;
+        match virtual_pairs.get(vi) {
+            Some(p) => format!("M{}←R{}", p.meas, p.ref_ch),
+            None => format!("V{vi}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -120,7 +144,11 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             .get(display_ch)
             .copied()
             .unwrap_or_default();
-        let top_right = format!("{} Hz │ CH{}", sr, display_ch);
+        let top_right = format!(
+            "{} Hz │ {}",
+            sr,
+            channel_label(display_ch, input.n_real, input.virtual_pairs),
+        );
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0),
             Align2::RIGHT_TOP,
@@ -401,7 +429,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 painter.text(
                     Pos2::new(x0 + 18.0, y),
                     Align2::LEFT_TOP,
-                    format!("CH{i}"),
+                    channel_label(i, input.n_real, input.virtual_pairs),
                     FontId::monospace(theme::READOUT_PX),
                     text_color,
                 );

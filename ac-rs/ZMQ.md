@@ -818,8 +818,9 @@ Returns current listen mode and connected client endpoints.
 Streaming H1 transfer function estimator. Captures the selected measurement
 + reference input channels and publishes a new `transfer_stream` frame each
 iteration (every `ac_core::transfer::capture_duration(4, sr)` seconds,
-≈ 2.5 s at 48 kHz) until stopped. Exclusive — mutually exclusive with all
-other audio commands.
+≈ 2.5 s at 48 kHz) until stopped. Runs in the `TRANSFER` concurrency group:
+only one `transfer_stream` at a time, but coexists with `monitor_spectrum`
+(`INPUT`) and any `OUTPUT` worker (each owns its own JACK client).
 
 By default the daemon is **passive** — it does not drive any output. The
 caller is expected to feed stimulus (pink noise, music, sweep, speech, …) into
@@ -832,16 +833,31 @@ the DUT externally and the daemon just observes `ref` → `meas`. Pass
   "cmd":          "transfer_stream",
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
   "level_dbfs":   <float>,   // only meaningful when drive=true, default -10
+
+  // Either the multi-pair form …
+  "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
+
+  // … or the single-pair legacy form (still accepted):
   "meas_channel": <int>,     // capture port index for the measurement signal (DUT output)
   "ref_channel":  <int>      // capture port index for the reference signal (DUT input)
 }
 ```
+
+When `pairs` is present the daemon captures every unique channel referenced
+in the list once per iteration and emits one `transfer_stream` DATA frame
+per pair (each tagged with its own `meas_channel` / `ref_channel`). The
+legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
+`pairs` must be non-empty and every channel index must be within range.
 
 **Reply**
 ```json
 {
   "ok":           true,
   "out_port":     "<playback-port>",
+  "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
+
+  // For backward compatibility with single-pair callers the first pair is
+  // also exposed at the top level:
   "meas_port":    "<capture-port>",
   "ref_port":     "<capture-port>",
   "meas_channel": <int>,
@@ -849,7 +865,7 @@ the DUT externally and the daemon just observes `ref` → `meas`. Pass
 }
 ```
 
-**DATA** — repeated until stopped:
+**DATA** — one frame per pair per iteration, repeated until stopped:
 ```json
 // topic: data
 {
@@ -877,17 +893,20 @@ the DUT externally and the daemon just observes `ref` → `meas`. Pass
 
 ## Busy guard
 
-Audio commands are classified into three concurrency groups:
+Audio commands are classified into four concurrency groups:
 
 | Group | Commands |
 |-------|---------|
-| `OUTPUT` | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
-| `INPUT`  | `monitor_spectrum` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `transfer`, `transfer_stream`, `probe`, `test_hardware`, `test_dut` |
+| `OUTPUT`    | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
+| `INPUT`     | `monitor_spectrum` |
+| `TRANSFER`  | `transfer_stream` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `transfer`, `probe`, `test_hardware`, `test_dut` |
 
 Rules:
 - Only one `OUTPUT` command at a time.
 - Only one `INPUT` command at a time.
+- Only one `TRANSFER` command at a time — but it coexists with `OUTPUT`
+  and `INPUT` because each worker owns an independent JACK client.
 - An `EXCLUSIVE` command cannot start if **anything** is running.
 - Nothing can start while an `EXCLUSIVE` command is running.
 

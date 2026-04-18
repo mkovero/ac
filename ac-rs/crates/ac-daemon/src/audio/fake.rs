@@ -172,6 +172,21 @@ mod tests {
     }
 
     #[test]
+    fn capture_multi_matches_stereo_default() {
+        // Fake backend inherits the default `capture_multi` which calls
+        // `capture_stereo` — covers the CPAL fallback path too.
+        let mut eng = FakeEngine::new();
+        eng.set_tone(1_000.0, 0.5);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_2").unwrap();
+        let bufs = eng.capture_multi(0.02).unwrap();
+        assert_eq!(bufs.len(), 2);
+        assert_eq!(bufs[0].len(), bufs[1].len());
+        let diff: f32 = bufs[0].iter().zip(&bufs[1]).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.0, "multi channels should differ between meas and ref");
+    }
+
+    #[test]
     fn stereo_channels_are_independent() {
         let mut eng = FakeEngine::new();
         eng.set_tone(1_000.0, 0.5);

@@ -90,6 +90,8 @@ fn overlay_shows_spectrum_readout() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -121,6 +123,8 @@ fn overlay_shows_dbu_when_calibrated() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -154,6 +158,8 @@ fn overlay_shows_clip_when_clipping() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -183,6 +189,8 @@ fn overlay_no_clip_when_not_clipping() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -215,6 +223,8 @@ fn overlay_shows_frozen() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -245,6 +255,8 @@ fn overlay_shows_connected() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 0,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -273,6 +285,8 @@ fn overlay_shows_disconnected() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 0,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -316,6 +330,8 @@ fn overlay_shows_transfer_delay() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 2,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -356,6 +372,8 @@ fn overlay_shows_hover_db_readout() {
         hover: Some(hover),
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -387,6 +405,8 @@ fn overlay_shows_notification() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 0,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);
@@ -418,6 +438,8 @@ fn overlay_shows_sample_rate() {
         hover: None,
         show_help: false,
         monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
     };
 
     let texts = run_overlay(input);

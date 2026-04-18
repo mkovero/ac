@@ -26,6 +26,23 @@ use ac_core::generator::{generate_pink_noise, generate_sine_1s};
 /// Fixed at construction so neither thread ever reallocates.
 const RING_CAPACITY: usize = 16 * 192_000;
 
+/// 4 s at 192 kHz — ref inputs are only used by (multi-pair) transfer_stream
+/// whose `capture_duration(4, sr)` ≈ 2.5 s, so this leaves a comfortable
+/// margin without the 16 s footprint of the main ring.
+const REF_RING_CAPACITY: usize = 4 * 192_000;
+
+/// Capacity ceiling for simultaneously-live reference-input ports. Ports are
+/// registered on-demand from `add_ref_input` (not pre-registered at
+/// `start()`), so JACK sees only the ports actually wired up. The ceiling
+/// exists so the RT handler can pre-reserve `Vec` capacity and push new
+/// ports without allocating in the process callback.
+const MAX_REF_INPUTS: usize = 16;
+
+/// Queue capacity for main-thread → RT-handler port hand-off. `MAX_REF_INPUTS`
+/// is plenty: the handler drains the queue every period, so it only needs to
+/// hold pending adds between two periods.
+const REF_ADD_QUEUE_CAPACITY: usize = MAX_REF_INPUTS;
+
 // -----------------------------------------------------------------------
 
 struct SharedState {
@@ -39,15 +56,33 @@ struct SharedState {
     waker:    Mutex<Option<Thread>>,
 }
 
+/// Main-thread → RT-handler hand-off for a freshly-registered ref input.
+/// The port is registered on the main thread via `AsyncClient::as_client()`
+/// and shipped in along with its dedicated SPSC producer, which the RT
+/// handler appends to its capture list on the next period.
+struct RefAdd {
+    port: jack::Port<AudioIn>,
+    prod: HeapProd<f32>,
+}
+
 pub struct JackEngine {
     sample_rate:    u32,
     state:          Arc<SharedState>,
     ring_cons:      Option<HeapCons<f32>>,
-    ring_ref_cons:  Option<HeapCons<f32>>,
+    /// One SPSC consumer per active ref input, in insertion order. Parallel
+    /// to `ref_ports`. Grows as `add_ref_input` is called; the RT handler
+    /// owns the matching producers and drains new ones via `ref_add_prod`.
+    ring_ref_cons:  Vec<HeapCons<f32>>,
     _async_client:  Option<jack::AsyncClient<Notifications, Process>>,
     output_ports:   Vec<String>,
     input_port:     Option<String>,
-    ref_port:       Option<String>,
+    /// Active ref source ports in insertion order; parallel to
+    /// `ring_ref_cons`. Unlike the old slot-based design, there are no
+    /// `None` holes — ports are only appended, never re-slotted.
+    ref_ports:      Vec<String>,
+    /// Main-side producer of the on-demand port hand-off queue. `None`
+    /// between `stop()` and the next `start()`.
+    ref_add_prod:   Option<HeapProd<RefAdd>>,
 }
 
 impl JackEngine {
@@ -66,11 +101,12 @@ impl JackEngine {
                 waker:    Mutex::new(None),
             }),
             ring_cons:     None,
-            ring_ref_cons: None,
+            ring_ref_cons: Vec::new(),
             _async_client: None,
             output_ports:  Vec::new(),
             input_port:    None,
-            ref_port:      None,
+            ref_ports:     Vec::new(),
+            ref_add_prod:  None,
         }
     }
 }
@@ -78,13 +114,18 @@ impl JackEngine {
 // -----------------------------------------------------------------------
 
 struct Process {
-    out_port:      jack::Port<AudioOut>,
-    in_port:       jack::Port<AudioIn>,
-    in_ref_port:   jack::Port<AudioIn>,
-    state:         Arc<SharedState>,
-    tone_pos:      usize,
-    ring_prod:     HeapProd<f32>,
-    ring_ref_prod: HeapProd<f32>,
+    out_port:       jack::Port<AudioOut>,
+    in_port:        jack::Port<AudioIn>,
+    /// Ref capture ports, grown on-demand from the `ref_add_cons` queue.
+    /// Pre-allocated to `MAX_REF_INPUTS` so RT-side `push` never reallocates.
+    in_ref_ports:   Vec<jack::Port<AudioIn>>,
+    state:          Arc<SharedState>,
+    tone_pos:       usize,
+    ring_prod:      HeapProd<f32>,
+    /// Parallel to `in_ref_ports`, same pre-allocated capacity.
+    ring_ref_prods: Vec<HeapProd<f32>>,
+    /// Receives port hand-offs from the main thread; drained each period.
+    ref_add_cons:   HeapCons<RefAdd>,
 }
 
 /// Fill `out` from `tone`, wrapping at buffer boundary. Returns updated position.
@@ -102,7 +143,6 @@ impl jack::ProcessHandler for Process {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
         let out_buf = self.out_port.as_mut_slice(scope);
         let in_buf  = self.in_port.as_slice(scope);
-        let ref_buf = self.in_ref_port.as_slice(scope);
 
         if self.state.silence.load(Ordering::Relaxed) {
             out_buf.fill(0.0);
@@ -115,8 +155,21 @@ impl jack::ProcessHandler for Process {
             }
         }
 
+        // Drain any pending ref-port additions before reading capture data.
+        // Capacity was pre-reserved so `push` does not allocate.
+        while let Some(add) = self.ref_add_cons.try_pop() {
+            if self.in_ref_ports.len() < self.in_ref_ports.capacity() {
+                self.in_ref_ports.push(add.port);
+                self.ring_ref_prods.push(add.prod);
+            }
+            // Silently drop if we somehow exceeded capacity — the main-side
+            // guard prevents this, but dropping is still RT-safe.
+        }
+
         self.ring_prod.push_slice(in_buf);
-        self.ring_ref_prod.push_slice(ref_buf);
+        for (port, prod) in self.in_ref_ports.iter().zip(self.ring_ref_prods.iter_mut()) {
+            prod.push_slice(port.as_slice(scope));
+        }
 
         // Wake wait_ring if someone is parked. try_lock keeps this RT-safe:
         // if the consumer is mid-register/deregister, we skip — the next
@@ -180,28 +233,37 @@ impl AudioEngine for JackEngine {
 
         self.sample_rate = client.sample_rate() as u32;
 
-        let out_port    = client.register_port("out",    AudioOut::default()).context("register out")?;
-        let in_port     = client.register_port("in",     AudioIn::default()) .context("register in")?;
-        let in_ref_port = client.register_port("in_ref", AudioIn::default()) .context("register in_ref")?;
+        let out_port = client.register_port("out", AudioOut::default()).context("register out")?;
+        let in_port  = client.register_port("in",  AudioIn::default()) .context("register in")?;
 
         // Publish an initial silent 1-second tone buffer at the real sample rate.
         self.state.tone_buf.store(Arc::new(vec![0.0f32; self.sample_rate as usize]));
         self.state.silence.store(true, Ordering::Relaxed);
 
         // Split SPSC rings: producer → RT callback, consumer → worker thread.
-        let rb     = HeapRb::<f32>::new(RING_CAPACITY);
-        let rb_ref = HeapRb::<f32>::new(RING_CAPACITY);
-        let (ring_prod,     ring_cons)     = rb.split();
-        let (ring_ref_prod, ring_ref_cons) = rb_ref.split();
-        self.ring_cons     = Some(ring_cons);
-        self.ring_ref_cons = Some(ring_ref_cons);
+        let rb = HeapRb::<f32>::new(RING_CAPACITY);
+        let (ring_prod, ring_cons) = rb.split();
+        self.ring_cons = Some(ring_cons);
+
+        // Pre-allocated slots for on-demand ref inputs. No ports are
+        // registered up front; `add_ref_input` ships a (port, prod) pair
+        // through `ref_add_*` and the RT handler appends to these Vecs.
+        let in_ref_ports:   Vec<jack::Port<AudioIn>> = Vec::with_capacity(MAX_REF_INPUTS);
+        let ring_ref_prods: Vec<HeapProd<f32>>       = Vec::with_capacity(MAX_REF_INPUTS);
+        self.ring_ref_cons = Vec::with_capacity(MAX_REF_INPUTS);
+        self.ref_ports     = Vec::with_capacity(MAX_REF_INPUTS);
+
+        let (ref_add_prod, ref_add_cons) =
+            HeapRb::<RefAdd>::new(REF_ADD_QUEUE_CAPACITY).split();
+        self.ref_add_prod = Some(ref_add_prod);
 
         let process = Process {
-            out_port, in_port, in_ref_port,
+            out_port, in_port, in_ref_ports,
             state: self.state.clone(),
             tone_pos: 0,
             ring_prod,
-            ring_ref_prod,
+            ring_ref_prods,
+            ref_add_cons,
         };
         let async_client = client
             .activate_async(Notifications { state: self.state.clone() }, process)
@@ -227,7 +289,9 @@ impl AudioEngine for JackEngine {
     fn stop(&mut self) {
         self._async_client = None;
         self.ring_cons     = None;
-        self.ring_ref_cons = None;
+        self.ring_ref_cons.clear();
+        self.ref_ports.clear();
+        self.ref_add_prod  = None;
     }
 
     fn sample_rate(&self) -> u32 { self.sample_rate }
@@ -275,8 +339,8 @@ impl AudioEngine for JackEngine {
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
 
-        if let Some(ref mut c) = self.ring_cons     { c.clear(); }
-        if let Some(ref mut c) = self.ring_ref_cons { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons { c.clear(); }
+        if let Some(c) = self.ring_ref_cons.get_mut(0) { c.clear(); }
 
         self.wait_ring(n_needed, duration)?;
 
@@ -287,13 +351,39 @@ impl AudioEngine for JackEngine {
         meas.truncate(got_m);
 
         let mut refch = vec![0.0f32; n_needed];
-        let got_r = self.ring_ref_cons.as_mut()
+        let got_r = self.ring_ref_cons.get_mut(0)
             .map(|c| c.pop_slice(&mut refch))
             .unwrap_or(0);
         // Pad if ref port was disconnected / silent.
         for s in refch.iter_mut().skip(got_r) { *s = 0.0; }
 
         Ok((meas, refch))
+    }
+
+    fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        let n_needed = (self.sample_rate as f64 * duration) as usize;
+
+        if let Some(ref mut c) = self.ring_cons { c.clear(); }
+        for c in self.ring_ref_cons.iter_mut() { c.clear(); }
+
+        self.wait_ring(n_needed, duration)?;
+
+        let mut out = Vec::with_capacity(1 + self.ring_ref_cons.len());
+
+        let mut meas = vec![0.0f32; n_needed];
+        let got = self.ring_cons.as_mut()
+            .map(|c| c.pop_slice(&mut meas))
+            .unwrap_or(0);
+        meas.truncate(got);
+        out.push(meas);
+
+        for c in self.ring_ref_cons.iter_mut() {
+            let mut buf = vec![0.0f32; n_needed];
+            let got = c.pop_slice(&mut buf);
+            for s in buf.iter_mut().skip(got) { *s = 0.0; }
+            out.push(buf);
+        }
+        Ok(out)
     }
 
     fn reconnect_input(&mut self, port: &str) -> Result<()> {
@@ -311,22 +401,58 @@ impl AudioEngine for JackEngine {
     }
 
     fn add_ref_input(&mut self, port: &str) -> Result<()> {
-        if let Some(ref ac) = self._async_client {
-            let ref_name = ac.as_client().name().to_string() + ":in_ref";
-            if let Some(ref old) = self.ref_port {
-                ac.as_client().disconnect_ports_by_name(old, &ref_name).ok();
-            }
-            ac.as_client().connect_ports_by_name(port, &ref_name)
-                .context("add_ref_input")?;
-            if let Some(ref mut c) = self.ring_ref_cons { c.clear(); }
-            self.ref_port = Some(port.to_string());
+        let Some(ref ac) = self._async_client else { return Ok(()); };
+
+        // Idempotent: the transfer handler may register the same source port
+        // twice when two pairs share a REF channel.
+        if self.ref_ports.iter().any(|p| p == port) {
+            return Ok(());
         }
+
+        let idx = self.ref_ports.len();
+        if idx >= MAX_REF_INPUTS {
+            return Err(anyhow::anyhow!(
+                "out of ref input slots (max {MAX_REF_INPUTS})"
+            ));
+        }
+
+        // Register a fresh port on the live JACK client. Post-activation
+        // registration is supported (see jack::AsyncClient docs + upstream
+        // `client_cback_calls_port_registered` test).
+        let port_name = format!("in_ref_{idx}");
+        let new_port = ac.as_client().register_port(&port_name, AudioIn::default())
+            .with_context(|| format!("register {port_name}"))?;
+        let full_name = ac.as_client().name().to_string() + ":" + &port_name;
+
+        // Build the dedicated SPSC ring and hand the (port, producer) pair
+        // to the RT callback via `ref_add_prod`. Capacity of the hand-off
+        // queue = MAX_REF_INPUTS, so `try_push` cannot fail under the
+        // enforced cap.
+        let (prod, cons) = HeapRb::<f32>::new(REF_RING_CAPACITY).split();
+        let add = RefAdd { port: new_port, prod };
+        let Some(ref mut q) = self.ref_add_prod else {
+            return Err(anyhow::anyhow!("add_ref_input before start()"));
+        };
+        if q.try_push(add).is_err() {
+            return Err(anyhow::anyhow!("ref_add queue full"));
+        }
+
+        // Wire the external source into our freshly-registered port. The
+        // RT handler will start draining into this ring on the next period,
+        // so a handful of samples between `connect` and `try_pop` may be
+        // discarded — harmless compared to the pre-register approach that
+        // polluted JACK's port list with 8 always-on phantom inputs.
+        ac.as_client().connect_ports_by_name(port, &full_name)
+            .with_context(|| format!("add_ref_input[{idx}] {port} -> {full_name}"))?;
+
+        self.ring_ref_cons.push(cons);
+        self.ref_ports.push(port.to_string());
         Ok(())
     }
 
     fn flush_capture(&mut self) {
-        if let Some(ref mut c) = self.ring_cons     { c.clear(); }
-        if let Some(ref mut c) = self.ring_ref_cons { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons { c.clear(); }
+        for c in self.ring_ref_cons.iter_mut() { c.clear(); }
     }
 
     fn connect_output(&mut self, port: &str) -> Result<()> {

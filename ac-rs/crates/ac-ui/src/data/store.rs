@@ -3,6 +3,7 @@ use triple_buffer::{triple_buffer, Input, Output};
 
 use super::types::{
     DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
+    TransferPair,
 };
 
 struct ChannelSlot {
@@ -143,6 +144,99 @@ impl TransferStore {
     }
 }
 
+/// Shared list of virtual transfer channels. Each registered pair gets its
+/// own `TransferStore`; the receiver demuxes incoming transfer frames by
+/// `(meas_channel, ref_channel)` into the matching slot. Cheap-clone via
+/// `Arc` so the main thread and the receiver thread share the same list.
+#[derive(Clone, Default)]
+pub struct VirtualChannelStore {
+    inner: Arc<Mutex<Vec<(TransferPair, TransferStore)>>>,
+}
+
+impl VirtualChannelStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Snapshot the currently-registered pairs, in insertion order.
+    pub fn pairs(&self) -> Vec<TransferPair> {
+        self.inner
+            .lock()
+            .ok()
+            .map(|g| g.iter().map(|(p, _)| *p).collect())
+            .unwrap_or_default()
+    }
+
+    /// Register a new virtual channel. Returns `false` if the pair was
+    /// already present (caller can use the return value to toggle).
+    pub fn add(&self, pair: TransferPair) -> bool {
+        if let Ok(mut g) = self.inner.lock() {
+            if g.iter().any(|(p, _)| *p == pair) {
+                return false;
+            }
+            g.push((pair, TransferStore::new()));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Unregister a virtual channel. Returns `true` if a matching pair was
+    /// removed, `false` if it wasn't present.
+    pub fn remove(&self, pair: TransferPair) -> bool {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(i) = g.iter().position(|(p, _)| *p == pair) {
+                g.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+
+    #[allow(dead_code)]
+    pub fn store_for(&self, pair: TransferPair) -> Option<TransferStore> {
+        self.inner.lock().ok().and_then(|g| {
+            g.iter()
+                .find(|(p, _)| *p == pair)
+                .map(|(_, s)| s.clone())
+        })
+    }
+
+    /// Receiver-side dispatch: write `frame` into the slot matching
+    /// `(frame.meas_channel, frame.ref_channel)`. Silently drops frames for
+    /// pairs that were unregistered between daemon dispatch and arrival.
+    pub fn write(&self, pair: TransferPair, frame: TransferFrame) {
+        if let Ok(g) = self.inner.lock() {
+            if let Some((_, s)) = g.iter().find(|(p, _)| *p == pair) {
+                s.write(frame);
+            }
+        }
+    }
+
+    pub fn read_all(&self) -> Vec<(TransferPair, Option<TransferFrame>)> {
+        self.inner
+            .lock()
+            .ok()
+            .map(|g| g.iter().map(|(p, s)| (*p, s.read())).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().ok().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SweepState {
     pub points: Vec<SweepPoint>,
@@ -183,5 +277,71 @@ impl SweepStore {
         if let Ok(mut g) = self.inner.lock() {
             *g = SweepState::default();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(m: u32, r: u32) -> TransferPair {
+        TransferPair { meas: m, ref_ch: r }
+    }
+
+    fn sample_frame(meas: u32, ref_ch: u32) -> TransferFrame {
+        TransferFrame {
+            freqs: vec![100.0, 200.0],
+            magnitude_db: vec![-1.0, -2.0],
+            phase_deg: vec![0.0, 10.0],
+            coherence: vec![0.95, 0.90],
+            delay_samples: 0,
+            delay_ms: 0.0,
+            meas_channel: meas,
+            ref_channel: ref_ch,
+            sr: 48000,
+        }
+    }
+
+    #[test]
+    fn virtual_channel_add_remove_toggle() {
+        let store = VirtualChannelStore::new();
+        assert!(store.is_empty());
+
+        assert!(store.add(pair(0, 3)));
+        assert!(!store.add(pair(0, 3))); // duplicate → false
+        assert_eq!(store.len(), 1);
+
+        assert!(store.add(pair(1, 3)));
+        assert_eq!(store.pairs(), vec![pair(0, 3), pair(1, 3)]);
+
+        assert!(store.remove(pair(0, 3)));
+        assert!(!store.remove(pair(0, 3))); // gone → false
+        assert_eq!(store.pairs(), vec![pair(1, 3)]);
+    }
+
+    #[test]
+    fn virtual_channel_write_dispatches_by_pair() {
+        let store = VirtualChannelStore::new();
+        store.add(pair(0, 3));
+        store.add(pair(1, 3));
+
+        store.write(pair(1, 3), sample_frame(1, 3));
+        let s = store.store_for(pair(1, 3)).unwrap();
+        let f = s.read().unwrap();
+        assert_eq!(f.meas_channel, 1);
+        assert_eq!(f.ref_channel, 3);
+
+        // Unregistered pair → write is silently dropped.
+        store.write(pair(9, 9), sample_frame(9, 9));
+        assert!(store.store_for(pair(9, 9)).is_none());
+    }
+
+    #[test]
+    fn virtual_channel_clear_empties() {
+        let store = VirtualChannelStore::new();
+        store.add(pair(0, 3));
+        store.add(pair(1, 3));
+        store.clear();
+        assert!(store.is_empty());
     }
 }

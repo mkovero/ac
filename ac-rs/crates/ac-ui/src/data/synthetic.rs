@@ -1,37 +1,25 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::TransferStore;
-use super::types::{SpectrumFrame, TransferFrame};
+use super::store::{TransferStore, VirtualChannelStore};
+use super::types::{SpectrumFrame, TransferFrame, TransferPair};
 
 pub struct SyntheticSource {
     pub n_channels: usize,
     pub n_bins: usize,
     pub update_hz: f32,
     pub transfer: TransferStore,
+    pub virtual_channels: VirtualChannelStore,
 }
 
 pub struct SyntheticHandle {
     stop: Arc<AtomicBool>,
-    /// When `Some((meas, ref))`, the synthetic worker publishes a fake
-    /// `TransferFrame` to the shared `TransferStore` at ~0.5 Hz. `None`
-    /// disables publishing. Driven by `App::send_transfer_stream_start/stop`
-    /// so synthetic mode mirrors the daemon transfer_stream lifecycle.
-    transfer_pair: Arc<Mutex<Option<(u32, u32)>>>,
     join: Option<thread::JoinHandle<()>>,
-}
-
-impl SyntheticHandle {
-    pub fn set_transfer_pair(&self, pair: Option<(u32, u32)>) {
-        if let Ok(mut g) = self.transfer_pair.lock() {
-            *g = pair;
-        }
-    }
 }
 
 impl Drop for SyntheticHandle {
@@ -52,9 +40,8 @@ impl SyntheticSource {
         assert_eq!(inputs.len(), self.n_channels);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = stop.clone();
-        let transfer_pair: Arc<Mutex<Option<(u32, u32)>>> = Arc::new(Mutex::new(None));
-        let transfer_pair_c = transfer_pair.clone();
         let transfer_store = self.transfer.clone();
+        let virtual_channels = self.virtual_channels.clone();
         let join = thread::spawn(move || {
             let period = Duration::from_secs_f32(1.0 / self.update_hz.max(0.1));
             let freqs = make_log_freqs(self.n_bins, 20.0, 24000.0);
@@ -91,15 +78,25 @@ impl SyntheticSource {
                     let _ = p.send_event(());
                 }
 
-                // Synthetic transfer: only emit while a pair is set (the UI
-                // enters Transfer layout with a valid meas/ref). Rate-limited
-                // to roughly match the daemon's `capture_duration(4, sr)`
-                // cadence so the overlay delay readout behaves the same way.
+                // Synthetic transfer: emit one frame per registered virtual
+                // channel, plus the latest (first pair) also goes into the
+                // global `TransferStore` so the legacy L-transfer view keeps
+                // working. Rate-limited to roughly match the daemon's
+                // `capture_duration(4, sr)` cadence so the overlay delay
+                // readout behaves the same way.
                 if last_transfer.elapsed() >= transfer_period {
-                    let pair = transfer_pair_c.lock().ok().and_then(|g| *g);
-                    if let Some((meas, refc)) = pair {
-                        let tf = synth_transfer(&transfer_freqs, meas, refc, t);
-                        transfer_store.write(tf);
+                    let pairs = virtual_channels.pairs();
+                    for (i, p) in pairs.iter().enumerate() {
+                        let tf = synth_transfer(&transfer_freqs, p.meas, p.ref_ch, t);
+                        virtual_channels.write(
+                            TransferPair { meas: p.meas, ref_ch: p.ref_ch },
+                            tf.clone(),
+                        );
+                        if i == 0 {
+                            transfer_store.write(tf);
+                        }
+                    }
+                    if !pairs.is_empty() {
                         last_transfer = Instant::now();
                     }
                 }
@@ -109,7 +106,6 @@ impl SyntheticSource {
         });
         SyntheticHandle {
             stop,
-            transfer_pair,
             join: Some(join),
         }
     }

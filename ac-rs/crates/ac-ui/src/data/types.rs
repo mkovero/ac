@@ -111,6 +111,17 @@ pub struct TransferFrame {
     pub sr:            u32,
 }
 
+/// Identifier for a virtual transfer channel: pair of real channel indices
+/// (meas, ref_ch) as they appear in the daemon's capture channel ordering.
+/// Lets the UI address virtual channels independently of their position in
+/// the virtual-channel list and lets the receiver route incoming
+/// `TransferFrame`s to the right slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransferPair {
+    pub meas: u32,
+    pub ref_ch: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepKind {
     Frequency,

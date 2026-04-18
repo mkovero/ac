@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{SweepStore, TransferStore};
-use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame};
+use super::store::{SweepStore, TransferStore, VirtualChannelStore};
+use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
@@ -50,6 +50,7 @@ pub fn spawn(
     endpoint: String,
     inputs: Vec<Input<SpectrumFrame>>,
     transfer: TransferStore,
+    virtual_channels: VirtualChannelStore,
     sweep: SweepStore,
     wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
@@ -215,6 +216,11 @@ pub fn spawn(
                                     tf.meas_channel,
                                     tf.ref_channel,
                                 );
+                                let pair = TransferPair {
+                                    meas: tf.meas_channel,
+                                    ref_ch: tf.ref_channel,
+                                };
+                                virtual_channels.write(pair, tf.clone());
                                 transfer.write(tf);
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
