@@ -12,8 +12,8 @@ fn default_raw_input() -> egui::RawInput {
 
 fn test_frame(freq: f32, dbfs: f32, thd: f32, thdn: f32) -> DisplayFrame {
     DisplayFrame {
-        spectrum: vec![-100.0; 100],
-        freqs: (0..100).map(|i| 20.0 + i as f32 * 200.0).collect(),
+        spectrum: std::sync::Arc::new(vec![-100.0; 100]),
+        freqs: std::sync::Arc::new((0..100).map(|i| 20.0 + i as f32 * 200.0).collect()),
         meta: FrameMeta {
             freq_hz: freq,
             fundamental_dbfs: dbfs,

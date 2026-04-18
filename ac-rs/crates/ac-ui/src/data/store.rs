@@ -7,7 +7,11 @@ use super::types::{
 
 struct ChannelSlot {
     buffer: Output<SpectrumFrame>,
-    averaged: Vec<f32>,
+    /// Shared with any DisplayFrame the app is still holding from the previous
+    /// tick. Mutated via `Arc::make_mut` so that when the app dropped the old
+    /// frame before calling `read_all` the refcount is 1 and mutation is free.
+    averaged: Arc<Vec<f32>>,
+    cached_freqs: Option<Arc<Vec<f32>>>,
     last_freqs_len: usize,
     has_data: bool,
     last_frame_id: u64,
@@ -17,7 +21,8 @@ impl ChannelSlot {
     fn new(buffer: Output<SpectrumFrame>) -> Self {
         Self {
             buffer,
-            averaged: Vec::new(),
+            averaged: Arc::new(Vec::new()),
+            cached_freqs: None,
             last_freqs_len: 0,
             has_data: false,
             last_frame_id: 0,
@@ -36,7 +41,7 @@ impl ChannelSlot {
         }
 
         if n != self.last_freqs_len {
-            self.averaged = frame.spectrum.clone();
+            self.averaged = Arc::new(frame.spectrum.clone());
             self.last_freqs_len = n;
         }
 
@@ -48,14 +53,26 @@ impl ChannelSlot {
         if n > 0 {
             let alpha = config.averaging_alpha.clamp(0.0, 1.0);
             if alpha >= 0.999 || self.averaged.len() != n {
-                self.averaged = frame.spectrum.clone();
+                self.averaged = Arc::new(frame.spectrum.clone());
             } else {
-                for (dst, src) in self.averaged.iter_mut().zip(frame.spectrum.iter()) {
+                let buf = Arc::make_mut(&mut self.averaged);
+                for (dst, src) in buf.iter_mut().zip(frame.spectrum.iter()) {
                     *dst = alpha * *src + (1.0 - alpha) * *dst;
                 }
             }
             self.has_data = true;
         }
+
+        // Daemon produces freqs deterministically from (N, sr), so keying the
+        // cache on length is enough: same length ⇒ same bin grid in practice.
+        let freqs = match self.cached_freqs.as_ref() {
+            Some(a) if a.len() == frame.freqs.len() => a.clone(),
+            _ => {
+                let a = Arc::new(frame.freqs.clone());
+                self.cached_freqs = Some(a.clone());
+                a
+            }
+        };
 
         let new_row = if is_fresh && n > 0 {
             Some(self.averaged.clone())
@@ -65,7 +82,7 @@ impl ChannelSlot {
 
         Some(DisplayFrame {
             spectrum: self.averaged.clone(),
-            freqs: frame.freqs.clone(),
+            freqs,
             meta: FrameMeta::from(frame),
             new_row,
         })

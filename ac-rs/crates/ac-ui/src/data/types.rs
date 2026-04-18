@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,13 +55,13 @@ impl Default for SpectrumFrame {
 
 #[derive(Debug, Clone)]
 pub struct DisplayFrame {
-    pub spectrum: Vec<f32>,
-    pub freqs: Vec<f32>,
+    pub spectrum: Arc<Vec<f32>>,
+    pub freqs: Arc<Vec<f32>>,
     pub meta: FrameMeta,
     /// Populated by the store on the first read after a fresh producer frame.
     /// `None` on re-reads of the same frame so the waterfall renderer scrolls
     /// at the rate of incoming data, not at the rate of redraws.
-    pub new_row: Option<Vec<f32>>,
+    pub new_row: Option<Arc<Vec<f32>>>,
 }
 
 #[derive(Debug, Clone)]

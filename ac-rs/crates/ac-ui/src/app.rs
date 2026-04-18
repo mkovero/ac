@@ -1367,6 +1367,10 @@ impl App {
             let store = self.store.as_mut();
             if let Some(store) = store {
                 if !self.config.frozen {
+                    // Drop the previous tick's DisplayFrames *before* reading so
+                    // ChannelSlot::averaged has refcount 1 and `Arc::make_mut`
+                    // can mutate in place instead of copy-on-write.
+                    self.last_frames.clear();
                     self.last_frames = store.read_all(&self.config);
                 } else {
                     let _ = store.read_all(&self.config);
@@ -1526,7 +1530,7 @@ impl App {
                         freq_last,
                         log_spaced,
                         rows_visible: view.rows_visible,
-                        new_row: frame.new_row.as_deref(),
+                        new_row: frame.new_row.as_deref().map(|v| v.as_slice()),
                     });
                 }
             }
