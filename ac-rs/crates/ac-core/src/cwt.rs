@@ -23,10 +23,29 @@
 //! and the same tone sits at the same dBFS line.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
+
+thread_local! {
+    /// Forward complex FFT plans keyed on N. CWT is called per monitor tick
+    /// and N is fixed at `ring_cap` once warm, so this caches the plan for
+    /// the whole run. Keeps the CWT tick hot path out of the planner.
+    static CWT_FFT_PLANS: RefCell<HashMap<usize, Arc<dyn Fft<f64>>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn cwt_fft_plan(n: usize) -> Arc<dyn Fft<f64>> {
+    CWT_FFT_PLANS.with(|cell| {
+        cell.borrow_mut()
+            .entry(n)
+            .or_insert_with(|| FftPlanner::<f64>::new().plan_fft_forward(n))
+            .clone()
+    })
+}
 
 /// Per-scale Gaussian kernel, keyed on `(n, sigma, scale)` via
 /// [`KernelCache`]. `h[i]` is `exp(-0.5 · (a·ω_k − ω₀)²)` at `k = k_lo + i`.
@@ -191,8 +210,7 @@ pub fn morlet_cwt(
     assert!(!scales.is_empty(), "need at least one scale");
     assert!(sigma > 0.0, "sigma must be positive");
 
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(n);
+    let fft = cwt_fft_plan(n);
 
     let mut spectrum: Vec<Complex<f64>> = samples
         .iter()

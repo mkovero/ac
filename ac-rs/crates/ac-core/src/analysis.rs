@@ -11,13 +11,35 @@
 //! `fundamental_dbfs` and `harmonic_levels` are bit-compatible with the
 //! existing Python server output.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use realfft::RealFftPlanner;
+use realfft::{RealFftPlanner, RealToComplex};
 
 use crate::constants::{FUNDAMENTAL_HZ, NUM_HARMONICS, SAMPLERATE};
 use crate::types::AnalysisResult;
+
+thread_local! {
+    /// Thread-local cache of forward real FFT plans keyed on N. `analyze` is
+    /// called per monitor tick; planner construction is the single biggest
+    /// non-twiddle cost and is wasted when N is stable (which it is once the
+    /// UI settles on an `fft_n`). The UI ladder has 7 entries, so the cache
+    /// is bounded at 7 plans per worker thread.
+    static REAL_FFT_PLANS: RefCell<HashMap<usize, Arc<dyn RealToComplex<f64>>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
+    REAL_FFT_PLANS.with(|cell| {
+        cell.borrow_mut()
+            .entry(n)
+            .or_insert_with(|| RealFftPlanner::<f64>::new().plan_fft_forward(n))
+            .clone()
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -66,8 +88,7 @@ pub fn analyze(
     // Apply window — clone mono first; FFT process() may clobber its input.
     let mut windowed: Vec<f64> = mono.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
 
-    let mut planner = RealFftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(n);
+    let fft = real_fft_plan(n);
 
     let mut win_spectrum = fft.make_output_vec();
     fft.process(&mut windowed, &mut win_spectrum)
@@ -241,8 +262,7 @@ pub fn spectrum_only(samples: &[f32], sr: u32) -> (Vec<f64>, Vec<f64>) {
         .collect();
     let wc = (win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
     let mut windowed: Vec<f64> = mono.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
-    let mut planner = RealFftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(n);
+    let fft = real_fft_plan(n);
     let mut out = fft.make_output_vec();
     if fft.process(&mut windowed, &mut out).is_err() {
         return (vec![], vec![]);
