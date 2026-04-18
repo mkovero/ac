@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/ac-core", "crates/ac-daemon", "crates/ac-ui", "crates/ac-cli"]
 resolver = "2"
+
+# Release build with symbols for samply / perf. Use via:
+#   cargo build --profile profiling -p ac-daemon
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
