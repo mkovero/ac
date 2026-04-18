@@ -30,6 +30,27 @@ thread_local! {
     /// is bounded at 7 plans per worker thread.
     static REAL_FFT_PLANS: RefCell<HashMap<usize, Arc<dyn RealToComplex<f64>>>> =
         RefCell::new(HashMap::new());
+
+    /// Thread-local cache for the Hann window (depends only on N).
+    static HANN_CACHE: RefCell<HannCache> = RefCell::new(HannCache::default());
+
+    /// Thread-local cache for the frequency and time axes (depend on N, sr).
+    static AXES_CACHE: RefCell<AxesCache> = RefCell::new(AxesCache::default());
+}
+
+#[derive(Default)]
+struct HannCache {
+    n: usize,
+    win: Vec<f64>,
+    wc:  f64,
+}
+
+#[derive(Default)]
+struct AxesCache {
+    n:     usize,
+    sr:    u32,
+    freqs: Vec<f64>,
+    t:     Vec<f64>,
 }
 
 fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
@@ -38,6 +59,47 @@ fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
             .entry(n)
             .or_insert_with(|| RealFftPlanner::<f64>::new().plan_fft_forward(n))
             .clone()
+    })
+}
+
+/// Return references to a cached Hann window and its RMS correction for the
+/// current thread. Rebuilds iff `n` changed since the last call on this thread.
+fn with_hann<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) -> R {
+    HANN_CACHE.with(|cell| {
+        let mut c = cell.borrow_mut();
+        if c.n != n {
+            c.win.clear();
+            c.win.reserve(n);
+            for i in 0..n {
+                c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
+            }
+            c.wc = (c.win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
+            c.n = n;
+        }
+        f(&c.win, c.wc)
+    })
+}
+
+/// Return references to cached frequency and time axes for (N, sr).
+fn with_axes<R>(n: usize, sr: u32, f: impl FnOnce(&[f64], &[f64]) -> R) -> R {
+    AXES_CACHE.with(|cell| {
+        let mut c = cell.borrow_mut();
+        if c.n != n || c.sr != sr {
+            let half = n / 2 + 1;
+            c.freqs.clear();
+            c.freqs.reserve(half);
+            for k in 0..half {
+                c.freqs.push(k as f64 * sr as f64 / n as f64);
+            }
+            c.t.clear();
+            c.t.reserve(n);
+            for i in 0..n {
+                c.t.push(i as f64 / sr as f64);
+            }
+            c.n = n;
+            c.sr = sr;
+        }
+        f(&c.freqs, &c.t)
     })
 }
 
@@ -76,33 +138,38 @@ pub fn analyze(
     // Hann window + windowed FFT
     // ------------------------------------------------------------------
 
-    // Symmetric Hann window: w[i] = 0.5 * (1 – cos(2π·i / (N-1)))
-    // Matches scipy.signal.get_window("hann", N).
-    let win: Vec<f64> = (0..n)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()))
-        .collect();
-
-    // Window RMS correction factor.
-    let wc = (win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
-
-    // Apply window — clone mono first; FFT process() may clobber its input.
-    let mut windowed: Vec<f64> = mono.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
-
     let fft = real_fft_plan(n);
-
+    let mut windowed = vec![0.0f64; n];
     let mut win_spectrum = fft.make_output_vec();
+
+    // Apply cached Hann window (keyed on N) into `windowed`, taking `wc` out
+    // for the normalization constant below.
+    let wc = HANN_CACHE.with(|cell| {
+        let mut c = cell.borrow_mut();
+        if c.n != n {
+            c.win.clear();
+            c.win.reserve(n);
+            for i in 0..n {
+                c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
+            }
+            c.wc = (c.win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
+            c.n = n;
+        }
+        for i in 0..n {
+            windowed[i] = mono[i] * c.win[i];
+        }
+        c.wc
+    });
+
     fft.process(&mut windowed, &mut win_spectrum)
         .map_err(|e| anyhow::anyhow!("FFT error: {e:?}"))?;
 
     // Amplitude spectrum: |FFT(windowed)| / (N/2) / wc
-    // This is the one-sided peak-amplitude spectrum used for THD ratios.
     let norm = (n as f64 / 2.0) * wc;
     let spec: Vec<f64> = win_spectrum.iter().map(|c| c.norm() / norm).collect();
 
-    // Frequency axis: freqs[k] = k * sr / N
-    let freqs: Vec<f64> = (0..win_spectrum.len())
-        .map(|k| k as f64 * sr as f64 / n as f64)
-        .collect();
+    // Cached frequency axis (keyed on N, sr).
+    let freqs: Vec<f64> = with_axes(n, sr, |f, _t| f.to_vec());
 
     // ------------------------------------------------------------------
     // Fundamental peak
@@ -145,12 +212,16 @@ pub fn analyze(
     let bin_hz = sr as f64 / n as f64;
     let bw = ((fundamental * 0.1 / bin_hz) as usize).max(1);
 
-    let mut spec_nn = spec.clone();
+    // THD+N: sum of |spec|² over the non-notch range. Summed directly to
+    // skip the spec.clone() + zero-fill from the original implementation
+    // while avoiding the catastrophic cancellation of `(total - notch)`
+    // when almost all energy sits inside the notch.
     let lo = f1_bin.saturating_sub(bw);
-    let hi = (f1_bin + bw).min(spec_nn.len());
-    spec_nn[lo..hi].iter_mut().for_each(|x| *x = 0.0);
-
-    let thdn = spec_nn.iter().map(|x| x * x).sum::<f64>().sqrt() / f1_amp * 100.0;
+    let hi = (f1_bin + bw).min(spec.len());
+    let thdn_sq: f64 =
+        spec[..lo].iter().map(|x| x * x).sum::<f64>() +
+        spec[hi..].iter().map(|x| x * x).sum::<f64>();
+    let thdn = thdn_sq.sqrt() / f1_amp * 100.0;
 
     // ------------------------------------------------------------------
     // Fundamental level (dBFS, windowed spectrum)
@@ -175,31 +246,45 @@ pub fn analyze(
     // ------------------------------------------------------------------
 
     // Unwindowed FFT for phase (compute once, reuse across harmonics).
-    let mut raw_input = mono.clone();
+    // Reuse `windowed` as scratch input — it's about to be dropped anyway.
+    windowed.copy_from_slice(&mono);
     let mut raw_spectrum = fft.make_output_vec();
-    fft.process(&mut raw_input, &mut raw_spectrum)
+    fft.process(&mut windowed, &mut raw_spectrum)
         .map_err(|e| anyhow::anyhow!("FFT (phase) error: {e:?}"))?;
-
-    // Time axis
-    let t: Vec<f64> = (0..n).map(|i| i as f64 / sr as f64).collect();
 
     let mut residual = mono.clone();
 
+    // Subtract each harmonic in the time domain. Uses a cos/sin recurrence
+    // (angle-addition) so the inner loop runs one real multiply instead of
+    // a libm cos() per sample — cos was ~48% of daemon CPU in FFT monitor
+    // mode at fft_n=16384 × 11 harmonics × 4 ch × 20 Hz.
+    //
+    // cos(θ + kΔθ) is obtained from (c_k, s_k) via:
+    //   c_{k+1} = c_k·cos(Δθ) − s_k·sin(Δθ)
+    //   s_{k+1} = s_k·cos(Δθ) + c_k·sin(Δθ)
     for harmonic in 1..=(n_harmonics + 1) {
         let hf = fundamental * harmonic as f64;
         if hf > sr as f64 / 2.0 {
             break;
         }
-        let hb    = find_peak(&spec, &freqs, hf, 20.0);
-        let hf_real = freqs[hb];
-        let phase   = raw_spectrum[hb].arg();     // phase from unwindowed FFT
-        let amp_time = spec[hb];                  // amplitude from windowed FFT
+        let hb       = find_peak(&spec, &freqs, hf, 20.0);
+        let hf_real  = freqs[hb];
+        let phase    = raw_spectrum[hb].arg(); // phase from unwindowed FFT
+        let amp_time = spec[hb];               // amplitude from windowed FFT
 
-        for (i, r) in residual.iter_mut().enumerate() {
-            *r -= amp_time * (2.0 * PI * hf_real * t[i] + phase).cos();
+        let dtheta = 2.0 * PI * hf_real / sr as f64;
+        let cos_d  = dtheta.cos();
+        let sin_d  = dtheta.sin();
+        let mut c  = phase.cos();
+        let mut s  = phase.sin();
+        for r in residual.iter_mut() {
+            *r -= amp_time * c;
+            let c_new = c * cos_d - s * sin_d;
+            let s_new = s * cos_d + c * sin_d;
+            c = c_new;
+            s = s_new;
         }
     }
-
     let res_slice = &residual[trim..n - trim];
     let residual_rms =
         (res_slice.iter().map(|x| x * x).sum::<f64>() / res_slice.len() as f64).sqrt();
@@ -256,22 +341,33 @@ pub fn analyze_default(samples: &[f32]) -> Result<AnalysisResult> {
 /// to publish data even when there is no detectable signal.
 pub fn spectrum_only(samples: &[f32], sr: u32) -> (Vec<f64>, Vec<f64>) {
     let n = samples.len().max(2);
-    let mono: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
-    let win: Vec<f64> = (0..n)
-        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()))
-        .collect();
-    let wc = (win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
-    let mut windowed: Vec<f64> = mono.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
     let fft = real_fft_plan(n);
+    let mut windowed = vec![0.0f64; n];
     let mut out = fft.make_output_vec();
+
+    let wc = HANN_CACHE.with(|cell| {
+        let mut c = cell.borrow_mut();
+        if c.n != n {
+            c.win.clear();
+            c.win.reserve(n);
+            for i in 0..n {
+                c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
+            }
+            c.wc = (c.win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
+            c.n = n;
+        }
+        for (i, &s) in samples.iter().enumerate().take(n) {
+            windowed[i] = s as f64 * c.win[i];
+        }
+        c.wc
+    });
+
     if fft.process(&mut windowed, &mut out).is_err() {
         return (vec![], vec![]);
     }
     let norm = (n as f64 / 2.0) * wc;
     let spec: Vec<f64> = out.iter().map(|c| c.norm() / norm).collect();
-    let freqs: Vec<f64> = (0..out.len())
-        .map(|k| k as f64 * sr as f64 / n as f64)
-        .collect();
+    let freqs: Vec<f64> = with_axes(n, sr, |f, _t| f.to_vec());
     (spec, freqs)
 }
 

@@ -546,10 +546,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 if ring.len() < 256 {
                     continue;
                 }
-                let samples: Vec<f32> = ring.iter().copied().collect();
+                let samples = ring.make_contiguous();
 
                 {
-                    let frame = match ac_core::analysis::analyze(&samples, sr, current_freqs[idx], 10) {
+                    let frame = match ac_core::analysis::analyze(samples, sr, current_freqs[idx], 10) {
                         Ok(r) => {
                             current_freqs[idx] = r.fundamental_hz;
                             let cal = cals[idx].as_ref();
@@ -575,7 +575,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             })
                         }
                         Err(_) => {
-                            let (spec, freqs) = ac_core::analysis::spectrum_only(&samples, sr);
+                            let (spec, freqs) = ac_core::analysis::spectrum_only(samples, sr);
                             let (spec, freqs) = downsample(&spec, &freqs, 1000);
                             json!({
                                 "type":             "spectrum",
