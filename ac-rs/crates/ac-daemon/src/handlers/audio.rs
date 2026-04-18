@@ -392,6 +392,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut cwt_rings: Vec<std::collections::VecDeque<f32>> =
             channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(ring_cap)).collect();
         let mut cwt_log_counter = 0u32;
+        // Reused across every CWT tick so morlet_cwt_into doesn't allocate
+        // a fresh Vec each call (prev ~3.5% of CPU in madvise / allocator).
+        let mut cwt_mags: Vec<f32> = Vec::with_capacity(cwt_n_scales);
 
         // Sliding ring buffer for single-channel FFT path so refresh cadence
         // (`cur_interval`) can run faster than capture-window duration
@@ -464,11 +467,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                     let t0 = std::time::Instant::now();
                     let buf = ring.make_contiguous();
-                    let mags = ac_core::cwt::morlet_cwt(
+                    ac_core::cwt::morlet_cwt_into(
                         buf,
                         sr,
                         &cwt_scales,
                         cwt_sigma,
+                        &mut cwt_mags,
                     );
                     cwt_log_counter += 1;
                     if cwt_log_counter % 50 == 1 {
@@ -489,7 +493,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "channel":     channel,
                         "n_channels":  n_channels,
                         "sr":          sr,
-                        "magnitudes":  mags,
+                        "magnitudes":  &cwt_mags,
                         "frequencies": cwt_freqs,
                         "timestamp":   ts_ns,
                         "xruns":       xruns_total,

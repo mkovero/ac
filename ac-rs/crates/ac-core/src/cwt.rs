@@ -201,10 +201,27 @@ pub fn log_scales(
 /// Panics if `samples.len() < 256` or `scales` is empty.
 pub fn morlet_cwt(
     samples: &[f32],
-    _sample_rate: u32,
+    sample_rate: u32,
     scales: &[f32],
     sigma: f32,
 ) -> Vec<f32> {
+    let mut out = Vec::with_capacity(scales.len());
+    morlet_cwt_into(samples, sample_rate, scales, sigma, &mut out);
+    out
+}
+
+/// In-place variant of [`morlet_cwt`]: writes the dBFS magnitudes into
+/// `out`, resizing it to `scales.len()`. The allocated capacity is retained
+/// across calls — the live monitor worker reuses one `Vec<f32>` across
+/// every tick, which keeps the per-call allocator cost (seen as `madvise`
+/// in profiles) out of the hot path.
+pub fn morlet_cwt_into(
+    samples: &[f32],
+    _sample_rate: u32,
+    scales: &[f32],
+    sigma: f32,
+    out: &mut Vec<f32>,
+) {
     let n = samples.len();
     assert!(n >= 256, "need at least 256 samples, got {n}");
     assert!(!scales.is_empty(), "need at least one scale");
@@ -232,27 +249,24 @@ pub fn morlet_cwt(
         if !cache.matches(n, sigma, scales) {
             cache.rebuild(n, sigma, scales);
         }
-        // Serial — rayon was a loss here. Each kernel is a few dozen MACs
-        // and a full tick totals ~12k MACs (sub-millisecond). Waking the
-        // global rayon pool (num_cpus threads) for that trivial amount of
-        // work cost ~55% of total CPU in sched_yield/futex/epoch-pin before
-        // we switched back. If the workload grows (n_scales ≫ 1024 or
-        // per-kernel width ≫ 500 bins), reintroduce a *dedicated* small
-        // pool — don't use the global one.
-        cache
-            .kernels
-            .iter()
-            .map(|kernel| {
-                let mut acc = Complex::new(0.0, 0.0);
-                let base = kernel.k_lo;
-                for (i, &h) in kernel.h.iter().enumerate() {
-                    acc += spectrum[base + i] * h;
-                }
-                let mag = acc.norm() * inv_n * 2.0;
-                (20.0 * mag.max(1e-12).log10()) as f32
-            })
-            .collect()
-    })
+        out.clear();
+        out.reserve(cache.kernels.len());
+        // Serial — rayon was a loss here (see commit 33ba79b). Each kernel
+        // is a few dozen MACs and a full tick totals ~12k MACs
+        // (sub-millisecond). Waking the global rayon pool for that dwarfs
+        // the math with sched_yield/futex/epoch-pin cost. If the workload
+        // grows (n_scales ≫ 1024 or per-kernel width ≫ 500 bins),
+        // reintroduce a *dedicated* small pool — never the global one.
+        for kernel in &cache.kernels {
+            let mut acc = Complex::new(0.0, 0.0);
+            let base = kernel.k_lo;
+            for (i, &h) in kernel.h.iter().enumerate() {
+                acc += spectrum[base + i] * h;
+            }
+            let mag = acc.norm() * inv_n * 2.0;
+            out.push((20.0 * mag.max(1e-12).log10()) as f32);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
