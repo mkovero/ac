@@ -22,9 +22,69 @@
 //! up with the existing FFT spectrum waterfall — the user can switch modes
 //! and the same tone sits at the same dBFS line.
 
+use std::cell::RefCell;
 use std::f64::consts::PI;
 
+use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
+
+/// Per-scale Gaussian kernel, keyed on `(n, sigma, scale)` via
+/// [`KernelCache`]. `h[i]` is `exp(-0.5 · (a·ω_k − ω₀)²)` at `k = k_lo + i`.
+/// Only bins where the Gaussian is above the cutoff are stored, so high
+/// scales have a handful of bins, low scales have up to ~N/2.
+struct CachedKernel {
+    k_lo: usize,
+    h:    Vec<f64>,
+}
+
+#[derive(Default)]
+struct KernelCache {
+    n:         usize,
+    sigma_bits: u32,
+    scales:    Vec<u32>, // f32::to_bits to dodge Eq on f32
+    kernels:   Vec<CachedKernel>,
+}
+
+impl KernelCache {
+    fn matches(&self, n: usize, sigma: f32, scales: &[f32]) -> bool {
+        self.n == n
+            && self.sigma_bits == sigma.to_bits()
+            && self.scales.len() == scales.len()
+            && self.scales.iter().zip(scales).all(|(a, b)| *a == b.to_bits())
+    }
+
+    fn rebuild(&mut self, n: usize, sigma: f32, scales: &[f32]) {
+        let omega0 = sigma as f64;
+        let two_pi_over_n = 2.0 * PI / n as f64;
+        let half = n / 2;
+        const CUTOFF: f64 = 5.5;
+
+        self.n = n;
+        self.sigma_bits = sigma.to_bits();
+        self.scales = scales.iter().map(|s| s.to_bits()).collect();
+        self.kernels = scales
+            .par_iter()
+            .map(|&scale| {
+                let a = scale as f64;
+                let k_center = omega0 / (a * two_pi_over_n);
+                let k_width  = CUTOFF / (a * two_pi_over_n);
+                let k_lo = ((k_center - k_width).floor() as isize).max(0) as usize;
+                let k_hi = ((k_center + k_width).ceil() as isize).min(half as isize) as usize;
+                let h: Vec<f64> = (k_lo..=k_hi)
+                    .map(|k| {
+                        let arg = a * (two_pi_over_n * k as f64) - omega0;
+                        (-0.5 * arg * arg).exp()
+                    })
+                    .collect();
+                CachedKernel { k_lo, h }
+            })
+            .collect();
+    }
+}
+
+thread_local! {
+    static KERNEL_CACHE: RefCell<KernelCache> = RefCell::new(KernelCache::default());
+}
 
 /// Morlet wavelet shape parameter `ω₀` (sometimes written `σ` in the
 /// literature). Controls the time/frequency resolution trade-off:
@@ -147,41 +207,27 @@ pub fn morlet_cwt(
         }
     }
 
-    let omega0 = sigma as f64;
-    let half = n / 2;
     let inv_n = 1.0 / n as f64;
-    let two_pi_over_n = 2.0 * PI / n as f64;
 
-    // Gaussian cutoff: |arg| > CUTOFF → exp(-0.5 * arg²) < ~1e-7.
-    const CUTOFF: f64 = 5.5;
-
-    let mut out = Vec::with_capacity(scales.len());
-
-    for &scale in scales {
-        let a = scale as f64;
-
-        // Kernel peak is at k_peak = ω₀ · N / (2π · a).
-        // Support: k where |a · ω_k - ω₀| < CUTOFF, i.e.
-        //   k ∈ [ (ω₀ - CUTOFF) · N / (2π · a),  (ω₀ + CUTOFF) · N / (2π · a) ]
-        let k_center = omega0 / (a * two_pi_over_n);
-        let k_width = CUTOFF / (a * two_pi_over_n);
-        let k_lo = ((k_center - k_width).floor() as isize).max(0) as usize;
-        let k_hi = ((k_center + k_width).ceil() as isize).min(half as isize) as usize;
-
-        let mut acc = Complex::new(0.0, 0.0);
-        for k in k_lo..=k_hi {
-            let omega_k = two_pi_over_n * k as f64;
-            let arg = a * omega_k - omega0;
-            let h = (-0.5 * arg * arg).exp();
-            acc += spectrum[k] * h;
+    KERNEL_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if !cache.matches(n, sigma, scales) {
+            cache.rebuild(n, sigma, scales);
         }
-
-        let mag = acc.norm() * inv_n * 2.0;
-        let dbfs = 20.0 * mag.max(1e-12).log10();
-        out.push(dbfs as f32);
-    }
-
-    out
+        cache
+            .kernels
+            .par_iter()
+            .map(|kernel| {
+                let mut acc = Complex::new(0.0, 0.0);
+                let base = kernel.k_lo;
+                for (i, &h) in kernel.h.iter().enumerate() {
+                    acc += spectrum[base + i] * h;
+                }
+                let mag = acc.norm() * inv_n * 2.0;
+                (20.0 * mag.max(1e-12).log10()) as f32
+            })
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
