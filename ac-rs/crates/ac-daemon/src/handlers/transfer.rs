@@ -272,7 +272,17 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
 
         let sr       = eng.sample_rate();
-        let duration = ac_core::transfer::capture_duration(4, sr);
+        // Sliding window: keep the last `target_total` samples per unique
+        // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
+        // h1_estimate's internal Welch settings.
+        let nperseg      = sr as usize;              // 1 Hz bin width
+        let step         = nperseg / 2;              // 50% overlap
+        let n_averages   = 4;
+        let target_total = nperseg + step * (n_averages - 1);
+        let chunk_secs   = 0.25;
+        let mut rings: Vec<Vec<f32>> = (0..unique_ports.len())
+            .map(|_| Vec::with_capacity(target_total + step))
+            .collect();
 
         if drive {
             eng.set_pink(amplitude);
@@ -280,7 +290,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let _ = eng.capture_block(0.2); // warmup flush
 
         while !stop.load(Ordering::Relaxed) {
-            let bufs = match eng.capture_multi(duration) {
+            let bufs = match eng.capture_multi(chunk_secs) {
                 Ok(b)  => b,
                 Err(e) => {
                     send_pub(&pub_tx, "error", &json!({"cmd":"transfer_stream","message":format!("{e}")}));
@@ -289,9 +299,23 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             };
             if stop.load(Ordering::Relaxed) { break; }
 
+            for (i, buf) in bufs.iter().enumerate() {
+                if i >= rings.len() { break; }
+                let r = &mut rings[i];
+                r.extend_from_slice(buf);
+                if r.len() > target_total {
+                    let drop = r.len() - target_total;
+                    r.drain(..drop);
+                }
+            }
+
+            // Warm-up: wait for the rings to fill to at least one Welch
+            // segment so the first H1 has meaningful coherence.
+            if rings.iter().any(|r| r.len() < nperseg) { continue; }
+
             for (&(meas_ch, ref_ch), &(mi, ri)) in pairs.iter().zip(pair_idx.iter()) {
-                let meas = match bufs.get(mi) { Some(b) => b, None => continue };
-                let refb = match bufs.get(ri) { Some(b) => b, None => continue };
+                let meas = match rings.get(mi) { Some(b) => b.as_slice(), None => continue };
+                let refb = match rings.get(ri) { Some(b) => b.as_slice(), None => continue };
                 let result = ac_core::transfer::h1_estimate(refb, meas, sr);
 
                 let n_pts = result.freqs.len();
