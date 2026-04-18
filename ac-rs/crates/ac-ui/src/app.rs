@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -216,6 +217,10 @@ pub struct App {
     /// `virtual_index_in_frames - n_real → TransferPair` always matches
     /// what the shaders just drew.
     virtual_render_pairs: Vec<TransferPair>,
+    /// Per-pair last-seen TransferStore write serial. When the current
+    /// serial exceeds the seen value we treat the frame as a fresh row and
+    /// scroll the waterfall for that virtual channel.
+    virtual_seen_serial: HashMap<TransferPair, u64>,
     pending_screenshot: bool,
     output_dir: PathBuf,
     notification: Option<(String, Instant)>,
@@ -313,6 +318,7 @@ impl App {
             egui_renderer: None,
             last_frames: Vec::new(),
             virtual_render_pairs: Vec::new(),
+            virtual_seen_serial: HashMap::new(),
             pending_screenshot: false,
             output_dir,
             notification: None,
@@ -1477,26 +1483,36 @@ impl App {
         // deferred to a follow-up; this commit only wires magnitude-dB through
         // the spectrum/waterfall renderers.
         let n_real = frames.len();
-        let virtual_snapshots = self.virtual_channels.read_all();
-        self.virtual_render_pairs = virtual_snapshots.iter().map(|(p, _)| *p).collect();
-        for (_, maybe_tf) in &virtual_snapshots {
-            let frame = maybe_tf.as_ref().map(|tf| DisplayFrame {
-                spectrum: Arc::new(tf.magnitude_db.clone()),
-                freqs:    Arc::new(tf.freqs.clone()),
-                meta: FrameMeta {
-                    freq_hz:          0.0,
-                    fundamental_dbfs: -140.0,
-                    thd_pct:          0.0,
-                    thdn_pct:         0.0,
-                    in_dbu:           None,
-                    sr:               tf.sr,
-                    clipping:         false,
-                    xruns:            0,
-                },
-                // TODO: scroll-per-fresh-frame requires a per-pair freshness
-                // serial on TransferStore. Until that lands, waterfall shows
-                // a static frozen image for virtual channels.
-                new_row: None,
+        let virtual_snapshots = self.virtual_channels.read_all_with_serial();
+        self.virtual_render_pairs = virtual_snapshots.iter().map(|(p, _, _)| *p).collect();
+        {
+            let live: std::collections::HashSet<_> =
+                virtual_snapshots.iter().map(|(p, _, _)| *p).collect();
+            self.virtual_seen_serial.retain(|p, _| live.contains(p));
+        }
+        for (pair, serial, maybe_tf) in &virtual_snapshots {
+            let is_fresh = *serial != 0
+                && self.virtual_seen_serial.get(pair).copied().unwrap_or(0) != *serial;
+            if is_fresh {
+                self.virtual_seen_serial.insert(*pair, *serial);
+            }
+            let frame = maybe_tf.as_ref().map(|tf| {
+                let spectrum = Arc::new(tf.magnitude_db.clone());
+                DisplayFrame {
+                    spectrum: spectrum.clone(),
+                    freqs:    Arc::new(tf.freqs.clone()),
+                    meta: FrameMeta {
+                        freq_hz:          0.0,
+                        fundamental_dbfs: -140.0,
+                        thd_pct:          0.0,
+                        thdn_pct:         0.0,
+                        in_dbu:           None,
+                        sr:               tf.sr,
+                        clipping:         false,
+                        xruns:            0,
+                    },
+                    new_row: if is_fresh { Some(spectrum) } else { None },
+                }
             });
             frames.push(frame);
         }

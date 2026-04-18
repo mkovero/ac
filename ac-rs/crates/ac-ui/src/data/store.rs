@@ -116,10 +116,19 @@ impl ChannelStore {
 }
 
 /// Shared latest-H1 slot. Receiver writes, main thread reads. Mutex is fine:
-/// update rate is ~0.4 fps and the payload is small (≤ 2000 points × 4 lanes).
+/// update rate is a few Hz and the payload is small (≤ 2000 points × 4 lanes).
+/// `serial` increments on every write so consumers can detect freshness
+/// without diffing payloads (the virtual-channel waterfall renderer uses
+/// this to decide when to scroll in a new row).
+#[derive(Default)]
+struct TransferInner {
+    frame: Option<TransferFrame>,
+    serial: u64,
+}
+
 #[derive(Clone, Default)]
 pub struct TransferStore {
-    inner: Arc<Mutex<Option<TransferFrame>>>,
+    inner: Arc<Mutex<TransferInner>>,
 }
 
 impl TransferStore {
@@ -129,17 +138,29 @@ impl TransferStore {
 
     pub fn write(&self, frame: TransferFrame) {
         if let Ok(mut g) = self.inner.lock() {
-            *g = Some(frame);
+            g.frame = Some(frame);
+            g.serial = g.serial.wrapping_add(1);
         }
     }
 
     pub fn read(&self) -> Option<TransferFrame> {
-        self.inner.lock().ok().and_then(|g| g.clone())
+        self.inner.lock().ok().and_then(|g| g.frame.clone())
+    }
+
+    /// Current frame paired with its monotonic write serial. Callers that
+    /// render scrolling views keep a last-seen serial and treat any increase
+    /// as a fresh row.
+    pub fn read_with_serial(&self) -> (u64, Option<TransferFrame>) {
+        self.inner
+            .lock()
+            .ok()
+            .map(|g| (g.serial, g.frame.clone()))
+            .unwrap_or((0, None))
     }
 
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
-            *g = None;
+            g.frame = None;
         }
     }
 }
@@ -211,6 +232,26 @@ impl VirtualChannelStore {
                 s.write(frame);
             }
         }
+    }
+
+    /// Snapshot every pair with its current frame and write serial. Consumers
+    /// that scroll waterfalls keep per-pair last-seen serials and emit a new
+    /// row only when the serial increases.
+    pub fn read_all_with_serial(
+        &self,
+    ) -> Vec<(TransferPair, u64, Option<TransferFrame>)> {
+        self.inner
+            .lock()
+            .ok()
+            .map(|g| {
+                g.iter()
+                    .map(|(p, s)| {
+                        let (serial, frame) = s.read_with_serial();
+                        (*p, serial, frame)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn read_all(&self) -> Vec<(TransferPair, Option<TransferFrame>)> {
