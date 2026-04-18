@@ -1174,12 +1174,13 @@ impl App {
                 let pair = TransferPair { meas, ref_ch };
                 if self.virtual_channels.remove(pair) {
                     self.notify(&format!(
-                        "T: removed virtual ch MEAS{meas}←REF{ref_ch}"
+                        "T: removed transfer (CH{meas}←CH{ref_ch})"
                     ));
                 } else {
                     self.virtual_channels.add(pair);
+                    let idx = self.virtual_channels.len().saturating_sub(1);
                     self.notify(&format!(
-                        "T: added virtual ch MEAS{meas}←REF{ref_ch}"
+                        "T: added transfer{idx} (CH{meas}←CH{ref_ch})"
                     ));
                 }
                 self.restart_transfer_stream();
@@ -1291,7 +1292,12 @@ impl App {
                 self.reset_all_views();
             }
             KeyCode::Tab => {
-                let n = self.store.as_ref().map(|s| s.len()).unwrap_or(1).max(1);
+                let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+                let n_virt = self.virtual_channels.len();
+                // Virtual transfer channels participate in Tab cycling so the
+                // user can drop into Single / Compare for any `transfer{n}`
+                // without first having to re-select the pair.
+                let n = (n_real + n_virt).max(1);
                 // In Grid layout Tab pages through the grid (when more than
                 // one page exists). Other layouts still cycle the active
                 // channel for Single / overlay channel-of-interest.
@@ -1336,7 +1342,12 @@ impl App {
                 }
                 let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
                 self.config.active_channel = (self.config.active_channel + delta) % n;
-                self.notify(&format!("CH{}", self.config.active_channel));
+                let label = if self.config.active_channel < n_real {
+                    format!("CH{}", self.config.active_channel)
+                } else {
+                    format!("transfer{}", self.config.active_channel - n_real)
+                };
+                self.notify(&label);
             }
             _ => {}
         }

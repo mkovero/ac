@@ -72,10 +72,11 @@ pub(crate) fn channel_label(idx: usize, n_real: usize, virtual_pairs: &[Transfer
         format!("CH{idx}")
     } else {
         let vi = idx - n_real;
-        match virtual_pairs.get(vi) {
-            Some(p) => format!("M{}←R{}", p.meas, p.ref_ch),
-            None => format!("V{vi}"),
-        }
+        // Use a stable display name (`transfer{n}`) so these read as distinct
+        // from the raw audio channels. The pair mapping is still visible in
+        // the hover readout and the T-press toast.
+        let _ = virtual_pairs.get(vi);
+        format!("transfer{vi}")
     }
 }
 

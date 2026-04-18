@@ -12,7 +12,7 @@ use crate::theme;
 
 const PHASE_MIN_DEG: f32 = -180.0;
 const PHASE_MAX_DEG: f32 = 180.0;
-const PHASE_TRACE_WIDTH: f32 = 1.2;
+const PHASE_TRACE_WIDTH: f32 = 1.8;
 const COH_STRIP_PX: f32 = 6.0;
 
 /// Paint phase + coherence on top of an already-rendered magnitude cell.
@@ -26,7 +26,9 @@ pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFr
         theme::GRID_LABEL[1],
         theme::GRID_LABEL[2],
     );
-    let phase_color = Color32::from_rgb(255, 205, 80);
+    // Cool cyan so the phase line reads distinctly against the warm
+    // viridis-like magnitude colours in the spectrum cell.
+    let phase_color = Color32::from_rgb(110, 225, 240);
 
     draw_phase_axis(painter, rect, label_color);
     draw_phase_polyline(
@@ -41,10 +43,32 @@ pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFr
 }
 
 fn draw_phase_axis(painter: &Painter, rect: Rect, label_color: Color32) {
-    // Three ticks on the right edge: +180°, 0°, -180°. Keep subtle — the
-    // primary axis for the cell is still the magnitude scale on the left.
-    for (deg, t) in [(180.0f32, 0.0f32), (0.0, 0.5), (-180.0, 1.0)] {
+    // Reference lines at 0°, ±90°, ±180° plus a tick label on the right
+    // edge. Subtle greys so they don't fight the magnitude grid underneath,
+    // but strong enough that wraps near ±180° read as "at the axis" rather
+    // than random noise.
+    let zero_stroke = Stroke::new(
+        1.0,
+        Color32::from_rgba_unmultiplied(110, 225, 240, 55),
+    );
+    let tick_stroke = Stroke::new(
+        1.0,
+        Color32::from_rgba_unmultiplied(180, 180, 180, 28),
+    );
+
+    for (deg, t) in [
+        (180.0f32, 0.0f32),
+        (90.0, 0.25),
+        (0.0, 0.5),
+        (-90.0, 0.75),
+        (-180.0, 1.0),
+    ] {
         let y = rect.top() + t * rect.height();
+        let stroke = if deg == 0.0 { zero_stroke } else { tick_stroke };
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            stroke,
+        );
         painter.text(
             Pos2::new(rect.right() - 3.0, y),
             Align2::RIGHT_CENTER,
@@ -75,11 +99,12 @@ fn draw_phase_polyline(
     let span = (log_max - log_min).max(0.0001);
     let y_span = (PHASE_MAX_DEG - PHASE_MIN_DEG).max(0.0001);
 
-    // Break segments at ±180° wrap boundaries to avoid long diagonal jumps
-    // when the unwrapped phase crosses the axis.
+    // Break segments at ±180° wrap boundaries and extend each side to the
+    // nearest axis so wraps read as "line exits the top, re-enters the
+    // bottom" rather than a hard gap.
     let mut segments: Vec<Vec<Pos2>> = Vec::new();
     let mut current: Vec<Pos2> = Vec::new();
-    let mut last_v: Option<f32> = None;
+    let mut last: Option<(f32, f32)> = None; // (x, phase_deg)
 
     for i in 0..n {
         let f = freqs[i];
@@ -94,27 +119,35 @@ fn draw_phase_polyline(
         if !(0.0..=1.0).contains(&tx) {
             continue;
         }
-        if let Some(lv) = last_v {
-            if (v - lv).abs() > 180.0 {
+        let x = rect.left() + tx * rect.width();
+        let ty = ((v.clamp(PHASE_MIN_DEG, PHASE_MAX_DEG) - PHASE_MIN_DEG) / y_span).clamp(0.0, 1.0);
+        let y = rect.bottom() - ty * rect.height();
+
+        if let Some((prev_x, prev_v)) = last {
+            if (v - prev_v).abs() > 180.0 {
+                // Wrap. End the running segment at the axis the previous
+                // sample was drifting toward, then start fresh at the
+                // opposite axis for the current sample.
+                let end_y = if prev_v > 0.0 { rect.top() } else { rect.bottom() };
+                current.push(Pos2::new(prev_x, end_y));
                 if current.len() >= 2 {
                     segments.push(std::mem::take(&mut current));
                 } else {
                     current.clear();
                 }
+                let start_y = if v > 0.0 { rect.top() } else { rect.bottom() };
+                current.push(Pos2::new(x, start_y));
             }
         }
-        last_v = Some(v);
-
-        let ty = ((v.clamp(PHASE_MIN_DEG, PHASE_MAX_DEG) - PHASE_MIN_DEG) / y_span).clamp(0.0, 1.0);
-        let x = rect.left() + tx * rect.width();
-        let y = rect.bottom() - ty * rect.height();
         current.push(Pos2::new(x, y));
+        last = Some((x, v));
     }
     if current.len() >= 2 {
         segments.push(current);
     }
+    let stroke = Stroke::new(PHASE_TRACE_WIDTH, color);
     for seg in segments {
-        painter.add(Shape::line(seg, Stroke::new(PHASE_TRACE_WIDTH, color)));
+        painter.add(Shape::line(seg, stroke));
     }
 }
 
