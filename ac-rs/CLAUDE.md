@@ -88,10 +88,12 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Left` / `Right` | FFT monitor tick interval ±1 ms (clamped 1–1000 ms, FFT mode only) |
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
-| `P` | Screenshot |
+| `S` | Screenshot |
+| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
 | `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |
+| `Alt+Scroll` | Cycle waterfall palette (inferno → viridis → magma → plasma, Waterfall only) |
 | Drag | Pan freq/dB axes |
 | Right-click | Reset hovered cell view |
 

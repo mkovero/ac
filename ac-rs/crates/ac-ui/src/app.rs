@@ -273,6 +273,13 @@ pub struct App {
     /// scroll the waterfall for that virtual channel.
     virtual_seen_serial: HashMap<TransferPair, u64>,
     pending_screenshot: bool,
+    /// Peak-hold state. `enabled` toggles via `P`; when true every fresh
+    /// spectrum frame is bin-wise max'd into `holds[channel]` so the UI can
+    /// overlay a frozen-max trace on top of the live spectrum. `None` means
+    /// the buffer is empty (either peak-hold was just enabled, or a reset
+    /// fired because bin count / analysis mode changed).
+    peak_hold_enabled: bool,
+    peak_holds: Vec<Option<Vec<f32>>>,
     output_dir: PathBuf,
     notification: Option<(String, Instant)>,
     modifiers: ModifiersState,
@@ -375,6 +382,8 @@ impl App {
             virtual_render_pairs: Vec::new(),
             virtual_seen_serial: HashMap::new(),
             pending_screenshot: false,
+            peak_hold_enabled: false,
+            peak_holds: Vec::new(),
             output_dir,
             notification: None,
             modifiers: ModifiersState::empty(),
@@ -539,6 +548,36 @@ impl App {
     }
 
     fn apply_zoom(&mut self, scroll_y: f32) {
+        // Alt+Scroll cycles the waterfall colormap palette (inferno → viridis
+        // → magma → plasma → inferno). Alt is otherwise unused in scroll
+        // handling so this is non-breaking; Shift keeps dB-gain zoom semantics.
+        // Spectrum mode ignores the cycle — palette only affects the LUT.
+        if self.modifiers.alt_key()
+            && matches!(self.config.view_mode, ViewMode::Waterfall)
+            && scroll_y != 0.0
+        {
+            let new_idx = self.waterfall.as_mut().map(|wf| {
+                let n = crate::render::waterfall::N_PALETTES;
+                let cur = wf.active_palette();
+                let next = if scroll_y > 0.0 {
+                    (cur + 1) % n
+                } else {
+                    (cur + n - 1) % n
+                };
+                wf.set_palette(next);
+                next as usize
+            });
+            if let Some(idx) = new_idx {
+                let name = crate::render::waterfall::PALETTE_NAMES
+                    .get(idx)
+                    .copied()
+                    .unwrap_or("?");
+                self.notify(&format!("palette: {name}"));
+                self.needs_redraw = true;
+            }
+            return;
+        }
+
         let pos = match self.cursor_pos {
             Some(p) => p,
             None => return,
@@ -742,7 +781,17 @@ impl App {
         }
         self.grid_cell_size = None;
         self.grid_page = 0;
+        self.reset_peak_holds();
         self.notify("all views reset");
+    }
+
+    /// Clear every channel's peak-hold buffer. Leaves `peak_hold_enabled`
+    /// alone — reset triggers (Enter, Ctrl+R, FFT-N / analysis-mode change)
+    /// just drop the stale accumulator; the next fresh frame re-seeds it.
+    fn reset_peak_holds(&mut self) {
+        for slot in &mut self.peak_holds {
+            *slot = None;
+        }
     }
 
     /// Which channel does Space act on. Single mode → the active channel (the
@@ -1219,7 +1268,17 @@ impl App {
             KeyCode::Escape | KeyCode::KeyQ => elwt.exit(),
             KeyCode::Enter => {
                 self.config.frozen = !self.config.frozen;
+                self.reset_peak_holds();
                 self.notify(if self.config.frozen { "FROZEN" } else { "live" });
+            }
+            KeyCode::KeyP => {
+                self.peak_hold_enabled = !self.peak_hold_enabled;
+                self.reset_peak_holds();
+                self.notify(if self.peak_hold_enabled {
+                    "peak hold: on"
+                } else {
+                    "peak hold: off"
+                });
             }
             KeyCode::Space => {
                 self.toggle_selection();
@@ -1308,6 +1367,11 @@ impl App {
                         *init = false;
                     }
                 }
+                // FFT ↔ CWT changes the bin grid; a stale peak buffer would
+                // mis-align with the new frames. Spectrum ↔ waterfall keeps
+                // the grid but a peak marker is meaningless in waterfall, so
+                // resetting in all W cycles keeps the state simple.
+                self.reset_peak_holds();
                 self.notify(label);
             }
             KeyCode::ArrowUp if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
@@ -1353,6 +1417,7 @@ impl App {
                 self.monitor_interval_ms =
                     auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
                 self.send_monitor_params();
+                self.reset_peak_holds();
                 self.notify(&format!(
                     "fft N: {} @ {} ms",
                     self.monitor_fft_n, self.monitor_interval_ms
@@ -1365,6 +1430,7 @@ impl App {
                 self.monitor_interval_ms =
                     auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
                 self.send_monitor_params();
+                self.reset_peak_holds();
                 self.notify(&format!(
                     "fft N: {} @ {} ms",
                     self.monitor_fft_n, self.monitor_interval_ms
@@ -1628,6 +1694,40 @@ impl App {
         if self.selected.len() < n_total {
             self.selected.resize(n_total, false);
         }
+        if self.peak_holds.len() < n_real {
+            self.peak_holds.resize(n_real, None);
+        }
+
+        // Peak-hold accumulator: fold every fresh spectrum bin-wise against
+        // the held max. Virtual (transfer) channels are skipped — peak-hold
+        // is a spectrum-only concept. A bin-count mismatch (FFT-N change we
+        // missed, or a late first frame at a different N) re-seeds the
+        // buffer instead of panicking or silently clipping.
+        if self.peak_hold_enabled {
+            for (i, slot) in frames.iter().enumerate().take(n_real) {
+                let Some(frame) = slot.as_ref() else { continue };
+                if frame.new_row.is_none() || frame.spectrum.is_empty() {
+                    continue;
+                }
+                let buf = match self.peak_holds.get_mut(i) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                match buf.as_mut() {
+                    Some(existing) if existing.len() == frame.spectrum.len() => {
+                        for (held, fresh) in existing.iter_mut().zip(frame.spectrum.iter()) {
+                            if fresh.is_finite() && *fresh > *held {
+                                *held = *fresh;
+                            }
+                        }
+                    }
+                    _ => {
+                        *buf = Some(frame.spectrum.as_ref().clone());
+                    }
+                }
+            }
+        }
+
         if self.waterfall_inited.len() < n_total {
             self.waterfall_inited.resize(n_total, false);
         }
@@ -1784,6 +1884,34 @@ impl App {
                         freqs: &frame.freqs,
                         meta,
                     });
+                    // Peak-hold trace. Reuses the spectrum pipeline as a second
+                    // upload with the same viewport/axes but a distinct colour,
+                    // no fill, and a thicker line so the frozen max stands out
+                    // above the live trace. Only real channels get a peak;
+                    // virtual transfer cells are excluded (peak of a transfer
+                    // magnitude is not a useful measurement).
+                    if self.peak_hold_enabled && cell.channel < n_real {
+                        if let Some(Some(peak)) = self.peak_holds.get(cell.channel) {
+                            if peak.len() == frame.spectrum.len() {
+                                spectrum_uploads.push(ChannelUpload {
+                                    spectrum: peak.as_slice(),
+                                    freqs: &frame.freqs,
+                                    meta: ChannelMeta {
+                                        color: theme::PEAK_LINE,
+                                        viewport: [cell.x, vp_y, cell.w, vp_h],
+                                        db_min: view.db_min,
+                                        db_max: view.db_max,
+                                        freq_log_min,
+                                        freq_log_max,
+                                        n_bins: peak.len() as u32,
+                                        offset: 0,
+                                        fill_alpha: 0.0,
+                                        line_width: 1.5,
+                                    },
+                                });
+                            }
+                        }
+                    }
                 }
                 ViewMode::Waterfall => {
                     // Detect log vs linear bin spacing from step growth at
@@ -1841,6 +1969,12 @@ impl App {
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
         let virtual_pairs_snap = self.virtual_render_pairs.clone();
+        let peak_hold_enabled_snap = self.peak_hold_enabled;
+        let peak_holds_snap = if self.peak_hold_enabled {
+            self.peak_holds.clone()
+        } else {
+            Vec::new()
+        };
         let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
             .iter()
             .map(|(_, _, tf)| tf.clone())
@@ -2048,6 +2182,29 @@ impl App {
                         egui::Stroke::new(1.5, sel_border),
                         egui::StrokeKind::Inside,
                     );
+                }
+                // Peak-hold overlay: fundamental marker + 2×–5× harmonic
+                // ticks + corner readout. Spectrum view only; virtual
+                // channels excluded (peak-of-transfer magnitude is not a
+                // useful reading). Drawn after the grid so it stacks above
+                // the axes.
+                if peak_hold_enabled_snap
+                    && matches!(config_snap.view_mode, ViewMode::Spectrum)
+                    && cell.channel < n_real_snap
+                {
+                    if let (Some(Some(peak)), Some(Some(frame))) = (
+                        peak_holds_snap.get(cell.channel),
+                        frames.get(cell.channel),
+                    ) {
+                        draw_peak_overlay(
+                            &painter,
+                            grid_rect,
+                            cell.channel,
+                            peak,
+                            &frame.freqs,
+                            &view,
+                        );
+                    }
                 }
                 // Virtual transfer channels get a standalone phase subplot
                 // in Single view (split cell, per issue #49). Grid/Compare
@@ -2510,6 +2667,147 @@ impl ApplicationHandler for App {
         // are fine — the daemon cleans up on its own disconnect timeout.
         self.send_transfer_stream_stop();
         self.send_monitor_spectrum_stop();
+    }
+}
+
+/// Per-cell peak-hold overlay: hottest-peak triangle + label, 2×–5× harmonic
+/// ticks, and a corner "PEAK CHn: f Hz A dB" readout. Called inside the egui
+/// closure (Spectrum view, real channels only). Skips DC/sub-audio bins so
+/// a spurious low-frequency excursion can't lock the marker.
+fn draw_peak_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    channel: usize,
+    peak: &[f32],
+    freqs: &[f32],
+    view: &CellView,
+) {
+    if peak.is_empty() || freqs.len() != peak.len() {
+        return;
+    }
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
+    let log_span = (log_max - log_min).max(0.0001);
+    let db_span = (view.db_max - view.db_min).max(0.0001);
+
+    // Argmax across only the visible freq window, clamped to ≥ 20 Hz so the
+    // marker can't latch onto DC or sub-audio noise.
+    let mut best_idx: Option<usize> = None;
+    let mut best_amp = f32::NEG_INFINITY;
+    for (i, (&f, &amp)) in freqs.iter().zip(peak.iter()).enumerate() {
+        if !f.is_finite() || !amp.is_finite() {
+            continue;
+        }
+        if f < view.freq_min.max(theme::DEFAULT_FREQ_MIN) || f > view.freq_max {
+            continue;
+        }
+        if amp > best_amp {
+            best_amp = amp;
+            best_idx = Some(i);
+        }
+    }
+    let Some(argmax) = best_idx else { return };
+    let f0 = freqs[argmax];
+    let a0 = peak[argmax];
+
+    let marker_color = Color32::from_rgb(
+        theme::PEAK_MARKER[0],
+        theme::PEAK_MARKER[1],
+        theme::PEAK_MARKER[2],
+    );
+    let tick_color = Color32::from_rgba_unmultiplied(
+        theme::PEAK_MARKER[0],
+        theme::PEAK_MARKER[1],
+        theme::PEAK_MARKER[2],
+        128,
+    );
+
+    let freq_amp_to_px = |f: f32, amp: f32| -> egui::Pos2 {
+        let tx = (f.max(1.0).log10() - log_min) / log_span;
+        let ty = (amp - view.db_min) / db_span;
+        let x = rect.left() + tx.clamp(0.0, 1.0) * rect.width();
+        let y = rect.top() + (1.0 - ty.clamp(0.0, 1.0)) * rect.height();
+        egui::pos2(x, y)
+    };
+
+    // Harmonic ticks (2× … 5×). A tick per harmonic inside the visible range;
+    // anything above freq_max is silently skipped. Find the bin closest to
+    // k*f0 instead of an interpolated position so the amplitude on the tick
+    // matches the actual peak-buffer value at that bin.
+    for k in 2..=5 {
+        let f_k = f0 * k as f32;
+        if f_k > view.freq_max {
+            break;
+        }
+        if f_k < view.freq_min {
+            continue;
+        }
+        // Nearest-bin search; freqs are monotonic so a simple partition_point
+        // lands us on the right neighbour. Clamp to the buffer so the amp
+        // lookup never panics.
+        let near = match freqs.partition_point(|&f| f < f_k) {
+            0 => 0,
+            p if p >= freqs.len() => freqs.len() - 1,
+            p => {
+                if (freqs[p] - f_k).abs() < (f_k - freqs[p - 1]).abs() {
+                    p
+                } else {
+                    p - 1
+                }
+            }
+        };
+        let a_k = peak[near];
+        if !a_k.is_finite() {
+            continue;
+        }
+        let p = freq_amp_to_px(f_k, a_k);
+        painter.line_segment(
+            [egui::pos2(p.x, p.y - 5.0), egui::pos2(p.x, p.y + 5.0)],
+            egui::Stroke::new(1.0, tick_color),
+        );
+    }
+
+    // Fundamental marker: downward triangle above the peak point + label.
+    let p0 = freq_amp_to_px(f0, a0);
+    let tri = [
+        egui::pos2(p0.x - 5.0, p0.y - 10.0),
+        egui::pos2(p0.x + 5.0, p0.y - 10.0),
+        egui::pos2(p0.x,       p0.y - 2.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        tri.to_vec(),
+        marker_color,
+        egui::Stroke::new(1.0, marker_color),
+    ));
+    let label = format!("{} {:.1} dB", format_freq_compact(f0), a0);
+    painter.text(
+        egui::pos2(p0.x, p0.y - 12.0),
+        egui::Align2::CENTER_BOTTOM,
+        label,
+        egui::FontId::monospace(theme::GRID_LABEL_PX),
+        marker_color,
+    );
+
+    // Top-right corner readout — visible even when the peak is off-screen
+    // (e.g. user zoomed below the fundamental). Kept inside the cell rect so
+    // Compare layout stacks one readout per selected channel automatically.
+    let corner = format!("PEAK CH{channel}: {} {:.1} dB", format_freq_compact(f0), a0);
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.top() + 2.0),
+        egui::Align2::RIGHT_TOP,
+        corner,
+        egui::FontId::monospace(theme::GRID_LABEL_PX),
+        marker_color,
+    );
+}
+
+fn format_freq_compact(hz: f32) -> String {
+    if hz >= 10_000.0 {
+        format!("{:.2} kHz", hz / 1000.0)
+    } else if hz >= 1_000.0 {
+        format!("{:.3} kHz", hz / 1000.0)
+    } else {
+        format!("{:.1} Hz", hz)
     }
 }
 

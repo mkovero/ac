@@ -17,6 +17,11 @@ use bytemuck::{Pod, Zeroable};
 pub const COLORMAP_LUT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/colormap.bin"));
 pub const ROWS_PER_CHANNEL: u32 = 256;
 
+/// Must match the palette ordering baked by `build.rs`.
+pub const PALETTE_NAMES: &[&str] = &["inferno", "viridis", "magma", "plasma"];
+pub const N_PALETTES: u32 = 4;
+pub const LUT_WIDTH: u32 = 256;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct WaterfallCellMeta {
@@ -43,6 +48,13 @@ pub struct WaterfallCellMeta {
     /// time-axis labels that already track the float). Clamped to
     /// `[1.0, n_rows as f32]` by the renderer.
     pub rows_visible: f32,
+    /// Which row of the stacked LUT to sample (0 = inferno, 1 = viridis, …).
+    /// Names in `PALETTE_NAMES`. Zero-padding keeps WaterfallCellMeta a
+    /// multiple of 16 bytes for WGSL's `@group` storage layout.
+    pub palette_row: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 pub struct CellUpload<'a> {
@@ -79,6 +91,7 @@ pub struct WaterfallRenderer {
     history_layers:    u32,
     write_row:         Vec<u32>,
     active_cells:      u32,
+    active_palette:    u32,
 }
 
 impl WaterfallRenderer {
@@ -201,7 +214,16 @@ impl WaterfallRenderer {
             history_layers,
             write_row: vec![0; history_layers as usize],
             active_cells: 0,
+            active_palette: 0,
         }
+    }
+
+    pub fn set_palette(&mut self, idx: u32) {
+        self.active_palette = idx % N_PALETTES;
+    }
+
+    pub fn active_palette(&self) -> u32 {
+        self.active_palette
     }
 
     pub fn upload(
@@ -316,6 +338,10 @@ impl WaterfallRenderer {
                 rows_visible: u
                     .rows_visible
                     .clamp(1.0, ROWS_PER_CHANNEL as f32),
+                palette_row: self.active_palette,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             });
         }
 
@@ -387,10 +413,14 @@ fn create_history_texture(device: &wgpu::Device, bins: u32, layers: u32) -> wgpu
 }
 
 fn upload_lut(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
-    debug_assert_eq!(COLORMAP_LUT.len(), 256 * 4);
+    debug_assert_eq!(COLORMAP_LUT.len(), (LUT_WIDTH * N_PALETTES * 4) as usize);
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("waterfall_lut"),
-        size: wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: LUT_WIDTH,
+            height: N_PALETTES,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -408,10 +438,14 @@ fn upload_lut(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
         COLORMAP_LUT,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(256 * 4),
-            rows_per_image: Some(1),
+            bytes_per_row: Some(LUT_WIDTH * 4),
+            rows_per_image: Some(N_PALETTES),
         },
-        wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: LUT_WIDTH,
+            height: N_PALETTES,
+            depth_or_array_layers: 1,
+        },
     );
     tex.create_view(&wgpu::TextureViewDescriptor::default())
 }

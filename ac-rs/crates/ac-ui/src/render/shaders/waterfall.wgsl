@@ -12,6 +12,10 @@ struct WaterfallCell {
     freq_last:    f32,
     log_spaced:   u32,
     rows_visible: f32,
+    palette_row:  u32,
+    _pad0:        u32,
+    _pad1:        u32,
+    _pad2:        u32,
 }
 
 const LN10: f32 = 2.302585;
@@ -107,6 +111,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let span = max(m.db_max - m.db_min, 0.0001);
     let t = clamp((mag - m.db_min) / span, 0.0, 1.0);
     let lut_x = i32(t * 255.0 + 0.5);
-    let rgba = textureLoad(lut, vec2<i32>(lut_x, 0), 0);
+    let rgba = textureLoad(lut, vec2<i32>(lut_x, i32(m.palette_row)), 0);
     return vec4(rgba.rgb, 1.0);
 }
