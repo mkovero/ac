@@ -1,20 +1,78 @@
 use crate::data::types::SweepPoint;
 use crate::ui::overlay::HoverReadout;
 
-/// Primary spectrum readout (bottom-left overlay).
-pub fn spectrum_readout(
-    freq_hz: f32,
-    fundamental_dbfs: f32,
-    thd_pct: f32,
-    thdn_pct: f32,
-    in_dbu: Option<f32>,
-) -> String {
+/// Broadband statistics summarising a live spectrum for the monitor
+/// bottom-left readout. Derived directly from the displayed dB-magnitude
+/// array — no assumption that the signal is a single tone, so THD numbers
+/// (which require a known fundamental) are deliberately omitted.
+#[derive(Debug, Clone, Copy)]
+pub struct BroadbandStats {
+    /// Peak bin value in dBFS.
+    pub peak_db:  f32,
+    /// Frequency of the peak bin.
+    pub peak_hz:  f32,
+    /// 10th-percentile of all finite bins — an estimate of the noise floor
+    /// that's robust to a handful of bright peaks.
+    pub floor_db: f32,
+    /// `peak_db - floor_db` — dynamic range of the visible spectrum. A
+    /// clean tone reads 80+ dB; broadband noise reads 20–30 dB.
+    pub span_db:  f32,
+}
+
+/// Compute peak / floor / span from a dB-magnitude spectrum and its frequency
+/// grid. Returns `None` for empty inputs or all-NaN spectra. Operates on the
+/// post-smoothing values so the readout matches what's visually on screen.
+pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats> {
+    let n = spectrum.len().min(freqs.len());
+    if n == 0 {
+        return None;
+    }
+    let mut peak_db = f32::NEG_INFINITY;
+    let mut peak_idx = 0usize;
+    let mut finite: Vec<f32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = spectrum[i];
+        if !v.is_finite() {
+            continue;
+        }
+        if v > peak_db {
+            peak_db = v;
+            peak_idx = i;
+        }
+        finite.push(v);
+    }
+    if finite.is_empty() {
+        return None;
+    }
+    // 10th-percentile floor: a single sort is O(n log n), negligible for the
+    // few-thousand-bin spectra the UI works with. `partial_cmp` can't fail
+    // since NaNs are already filtered.
+    finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let floor_idx = (finite.len() as f32 * 0.10) as usize;
+    let floor_db = finite[floor_idx.min(finite.len() - 1)];
+    Some(BroadbandStats {
+        peak_db,
+        peak_hz: freqs[peak_idx],
+        floor_db,
+        span_db: peak_db - floor_db,
+    })
+}
+
+/// Primary monitor readout (bottom-left overlay). Shows broadband stats
+/// derived from the displayed spectrum rather than THD — THD is only
+/// meaningful when a known pure tone is driving the system (sweep / thd
+/// commands), not in live monitoring.
+pub fn spectrum_readout(stats: &BroadbandStats, in_dbu: Option<f32>) -> String {
     let dbu = in_dbu
         .map(|v| format!("   {:+.1} dBu", v))
         .unwrap_or_default();
     format!(
-        "{:>7.1} Hz   {:>6.1} dBFS   THD {:.3}%   THD+N {:.3}%{}",
-        freq_hz, fundamental_dbfs, thd_pct, thdn_pct, dbu,
+        "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}",
+        stats.peak_db,
+        format_hz(stats.peak_hz).trim(),
+        stats.floor_db,
+        stats.span_db,
+        dbu,
     )
 }
 
@@ -117,77 +175,94 @@ mod tests {
         }
     }
 
-    // ── spectrum_readout ──────────────────────────────────────────────
+    // ── broadband_stats + spectrum_readout ────────────────────────────
 
-    #[test]
-    fn spectrum_readout_basic() {
-        let s = spectrum_readout(1000.0, -3.0, 0.003, 0.005, None);
-        assert_eq!(
-            s,
-            " 1000.0 Hz     -3.0 dBFS   THD 0.003%   THD+N 0.005%"
-        );
+    fn mk_spec(peak_idx: usize, peak: f32, floor: f32, n: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut spec = vec![floor; n];
+        spec[peak_idx] = peak;
+        let freqs: Vec<f32> = (0..n).map(|i| i as f32 * 24_000.0 / (n - 1) as f32).collect();
+        (spec, freqs)
     }
 
     #[test]
-    fn spectrum_readout_thd_distinct_magnitudes() {
-        let a = spectrum_readout(1000.0, -3.0, 0.003, 0.005, None);
-        let b = spectrum_readout(1000.0, -3.0, 0.030, 0.050, None);
-        assert_ne!(a, b);
-        assert!(a.contains("THD 0.003%"));
-        assert!(b.contains("THD 0.030%"));
+    fn broadband_stats_finds_peak() {
+        let (spec, freqs) = mk_spec(100, -3.0, -90.0, 1024);
+        let s = broadband_stats(&spec, &freqs).unwrap();
+        assert!((s.peak_db - -3.0).abs() < 1e-4);
+        assert!((s.peak_hz - freqs[100]).abs() < 1e-4);
+        // With one bright peak in 1024 bins, 10th percentile is the floor.
+        assert!((s.floor_db - -90.0).abs() < 1e-4);
+        assert!((s.span_db - 87.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn broadband_stats_empty_is_none() {
+        assert!(broadband_stats(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn broadband_stats_skips_non_finite() {
+        let spec = vec![f32::NAN, -40.0, -20.0, f32::NEG_INFINITY];
+        let freqs = vec![0.0, 100.0, 200.0, 300.0];
+        let s = broadband_stats(&spec, &freqs).unwrap();
+        assert!((s.peak_db - -20.0).abs() < 1e-4);
+        assert!((s.peak_hz - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn spectrum_readout_contains_peak_floor_span() {
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None);
+        assert!(s.contains("peak"));
+        assert!(s.contains("-3.0 dBFS"));
+        assert!(s.contains("1.00 kHz"));
+        assert!(s.contains("floor"));
+        assert!(s.contains("-96.0 dBFS"));
+        assert!(s.contains("span"));
+        assert!(s.contains("93.0 dB"));
+    }
+
+    #[test]
+    fn spectrum_readout_no_thd_nomencalture() {
+        // THD / THD+N are meaningless on broadband signals, so they must not
+        // appear in the monitor readout.
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None);
+        assert!(!s.contains("THD"));
     }
 
     #[test]
     fn spectrum_readout_with_dbu() {
-        let s = spectrum_readout(1000.0, -3.0, 0.003, 0.005, Some(4.0));
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, Some(4.0));
         assert!(s.contains("+4.0 dBu"));
     }
 
     #[test]
-    fn spectrum_readout_negative_dbu() {
-        let s = spectrum_readout(1000.0, -3.0, 0.003, 0.005, Some(-10.5));
-        assert!(s.contains("-10.5 dBu"));
-    }
-
-    #[test]
     fn spectrum_readout_no_dbu_absent() {
-        let s = spectrum_readout(1000.0, -3.0, 0.003, 0.005, None);
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None);
         assert!(!s.contains("dBu"));
-    }
-
-    #[test]
-    fn spectrum_readout_zero_thd() {
-        let s = spectrum_readout(1000.0, -3.0, 0.0, 0.0, None);
-        assert!(s.contains("THD 0.000%"));
-        assert!(s.contains("THD+N 0.000%"));
-    }
-
-    #[test]
-    fn spectrum_readout_high_thd() {
-        let s = spectrum_readout(1000.0, -3.0, 99.999, 100.0, None);
-        assert!(s.contains("THD 99.999%"));
-    }
-
-    #[test]
-    fn spectrum_readout_wide_frequency() {
-        let s = spectrum_readout(12345.6, -3.0, 0.003, 0.005, None);
-        assert!(s.contains("12345.6 Hz"));
-    }
-
-    #[test]
-    fn spectrum_readout_low_frequency() {
-        let s = spectrum_readout(50.0, -20.0, 0.100, 0.200, None);
-        assert!(s.contains("50.0 Hz"));
-        assert!(s.contains("-20.0 dBFS"));
-    }
-
-    #[test]
-    fn spectrum_readout_field_alignment() {
-        let s = spectrum_readout(50.0, -3.0, 0.003, 0.005, None);
-        // {:>7.1} for freq → 7 chars wide
-        assert!(s.starts_with("   50.0 Hz"));
-        // {:>6.1} for dBFS → 6 chars wide
-        assert!(s.contains("  -3.0 dBFS"));
     }
 
     // ── transfer_delay ────────────────────────────────────────────────

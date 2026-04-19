@@ -11,9 +11,22 @@ fn default_raw_input() -> egui::RawInput {
 }
 
 fn test_frame(freq: f32, dbfs: f32, thd: f32, thdn: f32) -> DisplayFrame {
+    // Build a spectrum with a single bright peak at the requested frequency
+    // so the bottom-left broadband readout has a real "peak @ freq" to show.
+    // Other bins sit at -100 dBFS (the 10th-percentile floor the readout
+    // reports).
+    let freqs: Vec<f32> = (0..100).map(|i| 20.0 + i as f32 * 200.0).collect();
+    let peak_idx = freqs
+        .iter()
+        .enumerate()
+        .min_by(|a, b| (a.1 - freq).abs().partial_cmp(&(b.1 - freq).abs()).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let mut spec = vec![-100.0f32; 100];
+    spec[peak_idx] = dbfs;
     DisplayFrame {
-        spectrum: std::sync::Arc::new(vec![-100.0; 100]),
-        freqs: std::sync::Arc::new((0..100).map(|i| 20.0 + i as f32 * 200.0).collect()),
+        spectrum: std::sync::Arc::new(spec),
+        freqs: std::sync::Arc::new(freqs),
         meta: FrameMeta {
             freq_hz: freq,
             fundamental_dbfs: dbfs,
@@ -97,8 +110,14 @@ fn overlay_shows_spectrum_readout() {
     };
 
     let texts = run_overlay(input);
-    let has_readout = texts.iter().any(|t| t.contains("THD 0.003%") && t.contains("THD+N 0.005%"));
-    assert!(has_readout, "spectrum readout not found in: {texts:?}");
+    let has_readout = texts.iter().any(|t| {
+        t.contains("peak") && t.contains("-3.0 dBFS") && t.contains("floor") && t.contains("span")
+    });
+    assert!(has_readout, "broadband readout not found in: {texts:?}");
+    // THD must NOT appear in the monitor readout — it's meaningless on
+    // broadband signals.
+    let has_thd = texts.iter().any(|t| t.contains("THD"));
+    assert!(!has_thd, "THD must not appear in monitor readout: {texts:?}");
 }
 
 #[test]

@@ -66,9 +66,19 @@ pub struct DisplayFrame {
 
 #[derive(Debug, Clone)]
 pub struct FrameMeta {
+    // The single-tone fields (freq_hz, fundamental_dbfs, thd_pct, thdn_pct)
+    // are populated by the daemon's `analyze()` path and kept here for
+    // future per-frame inspection / export, but the live monitor UI no
+    // longer displays them — THD is meaningless on broadband signals and
+    // the argmax is already visible via the peak-hold marker and the new
+    // broadband readout. See `ui::fmt::broadband_stats`.
+    #[allow(dead_code)]
     pub freq_hz: f32,
+    #[allow(dead_code)]
     pub fundamental_dbfs: f32,
+    #[allow(dead_code)]
     pub thd_pct: f32,
+    #[allow(dead_code)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
     pub sr: u32,

@@ -293,20 +293,19 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        let bottom_left = super::fmt::spectrum_readout(
-            frame.meta.freq_hz,
-            frame.meta.fundamental_dbfs,
-            frame.meta.thd_pct,
-            frame.meta.thdn_pct,
-            frame.meta.in_dbu,
-        );
-        painter.text(
-            Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
-            Align2::LEFT_BOTTOM,
-            bottom_left,
-            FontId::monospace(theme::READOUT_PX),
-            text_color,
-        );
+        // Broadband stats derived from the displayed spectrum — honest for
+        // any input (music, speech, noise, room response). Falls back
+        // gracefully when the frame arrived with an empty spectrum.
+        if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
+            let bottom_left = super::fmt::spectrum_readout(&stats, frame.meta.in_dbu);
+            painter.text(
+                Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                Align2::LEFT_BOTTOM,
+                bottom_left,
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        }
     }
 
     let conn_label = if input.connected {
