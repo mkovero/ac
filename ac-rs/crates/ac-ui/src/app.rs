@@ -72,6 +72,12 @@ pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
 /// means the axis responds to real cadence shifts within ~1.6 s while
 /// single-frame jitter is absorbed by the median.
 pub const WATERFALL_ROW_DT_WINDOW: usize = 16;
+
+/// Peak-hold auto-decay: if no fresh bin surpasses the held value for this
+/// long, the buffer re-seeds from the current spectrum. Gives the user a
+/// rolling "loudest in the last N seconds" view instead of a persistent peg
+/// at whatever the room did minutes ago.
+pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(3);
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.
@@ -280,6 +286,11 @@ pub struct App {
     /// fired because bin count / analysis mode changed).
     peak_hold_enabled: bool,
     peak_holds: Vec<Option<Vec<f32>>>,
+    /// Time of the last bin-wise max update for each channel's peak buffer.
+    /// If no fresh bin has surpassed the held peak within `PEAK_HOLD_DECAY`,
+    /// the buffer re-seeds from the current spectrum so a loud transient
+    /// doesn't pin the trace forever when the room has gone quiet again.
+    peak_last_update: Vec<Option<Instant>>,
     /// Accumulates fractional scroll ticks while Alt+Scroll is cycling the
     /// waterfall palette, so trackpad pixel-deltas don't step the palette on
     /// every frame. One palette step per full unit of scroll.
@@ -388,6 +399,7 @@ impl App {
             pending_screenshot: false,
             peak_hold_enabled: false,
             peak_holds: Vec::new(),
+            peak_last_update: Vec::new(),
             alt_scroll_accum: 0.0,
             output_dir,
             notification: None,
@@ -802,6 +814,9 @@ impl App {
     /// just drop the stale accumulator; the next fresh frame re-seeds it.
     fn reset_peak_holds(&mut self) {
         for slot in &mut self.peak_holds {
+            *slot = None;
+        }
+        for slot in &mut self.peak_last_update {
             *slot = None;
         }
     }
@@ -1709,6 +1724,9 @@ impl App {
         if self.peak_holds.len() < n_real {
             self.peak_holds.resize(n_real, None);
         }
+        if self.peak_last_update.len() < n_real {
+            self.peak_last_update.resize(n_real, None);
+        }
 
         // Peak-hold accumulator: fold every fresh spectrum bin-wise against
         // the held max. Virtual (transfer) channels are skipped — peak-hold
@@ -1716,6 +1734,7 @@ impl App {
         // missed, or a late first frame at a different N) re-seeds the
         // buffer instead of panicking or silently clipping.
         if self.peak_hold_enabled {
+            let now = Instant::now();
             for (i, slot) in frames.iter().enumerate().take(n_real) {
                 let Some(frame) = slot.as_ref() else { continue };
                 if frame.new_row.is_none() || frame.spectrum.is_empty() {
@@ -1725,16 +1744,37 @@ impl App {
                     Some(b) => b,
                     None => continue,
                 };
+                let stamp = self
+                    .peak_last_update
+                    .get_mut(i)
+                    .expect("resized above");
                 match buf.as_mut() {
                     Some(existing) if existing.len() == frame.spectrum.len() => {
+                        let mut any_updated = false;
                         for (held, fresh) in existing.iter_mut().zip(frame.spectrum.iter()) {
                             if fresh.is_finite() && *fresh > *held {
                                 *held = *fresh;
+                                any_updated = true;
                             }
+                        }
+                        if any_updated {
+                            *stamp = Some(now);
+                        } else if let Some(last) = *stamp {
+                            // No new max in the last PEAK_HOLD_DECAY window —
+                            // re-seed from the current frame so the trace
+                            // drops back to live values instead of holding a
+                            // stale transient forever.
+                            if now.duration_since(last) >= PEAK_HOLD_DECAY {
+                                *buf = Some(frame.spectrum.as_ref().clone());
+                                *stamp = Some(now);
+                            }
+                        } else {
+                            *stamp = Some(now);
                         }
                     }
                     _ => {
                         *buf = Some(frame.spectrum.as_ref().clone());
+                        *stamp = Some(now);
                     }
                 }
             }
@@ -1897,19 +1937,31 @@ impl App {
                         meta,
                     });
                     // Peak-hold trace. Reuses the spectrum pipeline as a second
-                    // upload with the same viewport/axes but a distinct colour,
-                    // no fill, and a thicker line so the frozen max stands out
-                    // above the live trace. Only real channels get a peak;
-                    // virtual transfer cells are excluded (peak of a transfer
-                    // magnitude is not a useful measurement).
+                    // upload with the same viewport/axes but a brighter,
+                    // channel-tinted colour and a thicker line so the frozen
+                    // max stands out above the live trace. Using the channel
+                    // hue (brightened) instead of a single cyan means the
+                    // peak line in Compare layout is visually paired with
+                    // its parent trace — with N peaks overlapping in one
+                    // rect, a shared cyan made them indistinguishable. Only
+                    // real channels get a peak; virtual transfer cells are
+                    // excluded (peak of a transfer magnitude is not a useful
+                    // measurement).
                     if self.peak_hold_enabled && cell.channel < n_real {
                         if let Some(Some(peak)) = self.peak_holds.get(cell.channel) {
                             if peak.len() == frame.spectrum.len() {
+                                let mut peak_color = theme::channel_color(cell.channel);
+                                // Brighten so peak sits visibly above the live
+                                // trace in the same hue. Clamp to 1.0 so
+                                // already-bright hues (pale gold) don't wrap.
+                                for c in peak_color.iter_mut().take(3) {
+                                    *c = (*c * 1.35).min(1.0);
+                                }
                                 spectrum_uploads.push(ChannelUpload {
                                     spectrum: peak.as_slice(),
                                     freqs: &frame.freqs,
                                     meta: ChannelMeta {
-                                        color: theme::PEAK_LINE,
+                                        color: peak_color,
                                         viewport: [cell.x, vp_y, cell.w, vp_h],
                                         db_min: view.db_min,
                                         db_max: view.db_max,
