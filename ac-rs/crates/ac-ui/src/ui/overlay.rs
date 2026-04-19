@@ -62,6 +62,10 @@ pub struct OverlayInput<'a> {
     /// Parallel to cells `n_real..n_real + virtual_pairs.len()`. An entry
     /// `i` corresponds to the cell at channel index `n_real + i`.
     pub virtual_pairs: &'a [TransferPair],
+    /// Active waterfall palette row (0 = inferno, 1 = viridis, 2 = magma,
+    /// 3 = plasma). The colorbar in the top-right samples this row of the
+    /// baked LUT so the legend matches what the GPU is actually rendering.
+    pub active_palette: u32,
 }
 
 /// Label used in overlays / legends for a given cell index. Real channels
@@ -219,12 +223,16 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             let bar_right = screen.right() - 8.0 - label_col_w;
             let bar_left = bar_right - bar_w;
             let strips = 48_usize;
+            // COLORMAP_LUT is laid out as `[palette 0 row, palette 1 row, …]`,
+            // each row 256 RGBA8 texels. Offset into the active row so the
+            // legend follows Alt+Scroll palette cycling.
+            let palette_off = (input.active_palette as usize) * 256 * 4;
             for i in 0..strips {
                 // Top strip = max dB (hottest) so the bar visually matches
                 // the "loud up, quiet down" mental model.
                 let t = 1.0 - (i as f32 + 0.5) / strips as f32;
                 let lut_idx = ((t * 255.0).round() as usize).min(255);
-                let off = lut_idx * 4;
+                let off = palette_off + lut_idx * 4;
                 let color = Color32::from_rgb(
                     COLORMAP_LUT[off],
                     COLORMAP_LUT[off + 1],

@@ -280,6 +280,10 @@ pub struct App {
     /// fired because bin count / analysis mode changed).
     peak_hold_enabled: bool,
     peak_holds: Vec<Option<Vec<f32>>>,
+    /// Accumulates fractional scroll ticks while Alt+Scroll is cycling the
+    /// waterfall palette, so trackpad pixel-deltas don't step the palette on
+    /// every frame. One palette step per full unit of scroll.
+    alt_scroll_accum: f32,
     output_dir: PathBuf,
     notification: Option<(String, Instant)>,
     modifiers: ModifiersState,
@@ -384,6 +388,7 @@ impl App {
             pending_screenshot: false,
             peak_hold_enabled: false,
             peak_holds: Vec::new(),
+            alt_scroll_accum: 0.0,
             output_dir,
             notification: None,
             modifiers: ModifiersState::empty(),
@@ -556,26 +561,33 @@ impl App {
             && matches!(self.config.view_mode, ViewMode::Waterfall)
             && scroll_y != 0.0
         {
-            let new_idx = self.waterfall.as_mut().map(|wf| {
-                let n = crate::render::waterfall::N_PALETTES;
-                let cur = wf.active_palette();
-                let next = if scroll_y > 0.0 {
-                    (cur + 1) % n
-                } else {
-                    (cur + n - 1) % n
-                };
-                wf.set_palette(next);
-                next as usize
-            });
-            if let Some(idx) = new_idx {
-                let name = crate::render::waterfall::PALETTE_NAMES
-                    .get(idx)
-                    .copied()
-                    .unwrap_or("?");
-                self.notify(&format!("palette: {name}"));
-                self.needs_redraw = true;
+            self.alt_scroll_accum += scroll_y;
+            let steps = self.alt_scroll_accum.trunc() as i32;
+            if steps != 0 {
+                self.alt_scroll_accum -= steps as f32;
+                let new_idx = self.waterfall.as_mut().map(|wf| {
+                    let n = crate::render::waterfall::N_PALETTES as i32;
+                    let cur = wf.active_palette() as i32;
+                    let next = ((cur + steps).rem_euclid(n)) as u32;
+                    wf.set_palette(next);
+                    next as usize
+                });
+                if let Some(idx) = new_idx {
+                    let name = crate::render::waterfall::PALETTE_NAMES
+                        .get(idx)
+                        .copied()
+                        .unwrap_or("?");
+                    self.notify(&format!("palette: {name}"));
+                    self.needs_redraw = true;
+                }
             }
             return;
+        }
+        // Alt released (or not held) — drop any leftover fractional scroll so
+        // the next Alt+Scroll session starts from zero instead of firing on
+        // the first tick.
+        if !self.modifiers.alt_key() && self.alt_scroll_accum != 0.0 {
+            self.alt_scroll_accum = 0.0;
         }
 
         let pos = match self.cursor_pos {
@@ -1905,8 +1917,18 @@ impl App {
                                         freq_log_max,
                                         n_bins: peak.len() as u32,
                                         offset: 0,
-                                        fill_alpha: 0.0,
-                                        line_width: 1.5,
+                                        // Shader treats fill_alpha == 0.0 as
+                                        // "unset → use 15% default" (spectrum.wgsl
+                                        // line 90). A tiny positive value takes the
+                                        // explicit path so the peak line doesn't
+                                        // ship a filled region with it.
+                                        fill_alpha: 0.0001,
+                                        // line_width is a HALF-WIDTH in 0..1 screen
+                                        // space (spectrum.wgsl line 26 default is
+                                        // 0.0018). ~1.6× default reads as a
+                                        // distinctly thicker trace without wiping
+                                        // the viewport.
+                                        line_width: 0.003,
                                     },
                                 });
                             }
@@ -1970,6 +1992,7 @@ impl App {
         let selected_snap = self.selected.clone();
         let virtual_pairs_snap = self.virtual_render_pairs.clone();
         let peak_hold_enabled_snap = self.peak_hold_enabled;
+        let active_palette_snap = waterfall.active_palette();
         let peak_holds_snap = if self.peak_hold_enabled {
             self.peak_holds.clone()
         } else {
@@ -2254,6 +2277,7 @@ impl App {
                     monitor_params: monitor_params_snap,
                     n_real: n_real_snap,
                     virtual_pairs: &virtual_pairs_snap,
+                    active_palette: active_palette_snap,
                 },
             );
         });
