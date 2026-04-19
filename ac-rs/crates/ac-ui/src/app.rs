@@ -1933,17 +1933,17 @@ impl App {
                         egui::StrokeKind::Inside,
                     );
                 }
-                // Virtual transfer channels get an extra phase/coherence
-                // lane. Skip the waterfall view — time-scrolling row images
-                // don't play well with a static polyline on top. In Single
-                // view the lane is a standalone subplot below the spectrum
-                // (per issue #49); elsewhere it overlays the magnitude.
+                // Virtual transfer channels get a standalone phase subplot
+                // in Single view (split cell, per issue #49). Grid/Compare
+                // show magnitude only — the phase overlay was visually
+                // intrusive at grid cell size. Waterfall view is also a
+                // no-op since the row image can't host a static polyline.
                 if matches!(config_snap.view_mode, ViewMode::Spectrum)
                     && cell.channel >= n_real_snap
                 {
-                    let vi = cell.channel - n_real_snap;
-                    if let Some(Some(tf)) = virtual_tf_snap.get(vi) {
-                        if let Some(bot) = phase_rect {
+                    if let Some(bot) = phase_rect {
+                        let vi = cell.channel - n_real_snap;
+                        if let Some(Some(tf)) = virtual_tf_snap.get(vi) {
                             painter.line_segment(
                                 [
                                     egui::pos2(rect.left(), bot.top()),
@@ -1956,10 +1956,6 @@ impl App {
                             );
                             crate::render::virtual_overlay::draw_phase_subplot(
                                 &painter, bot, &view, tf, show_labels,
-                            );
-                        } else {
-                            crate::render::virtual_overlay::draw(
-                                &painter, rect, &view, tf,
                             );
                         }
                     }

@@ -1,9 +1,9 @@
-//! Virtual transfer channel overlays on top of the regular spectrum cell.
+//! Virtual transfer channel rendering — phase subplot used in Single view.
 //!
 //! The magnitude curve is rendered by the GPU pipeline like any other
-//! channel; this module paints the extra lanes that a virtual channel
-//! needs — phase polyline on a right-side ±180° axis, and a thin
-//! coherence strip along the bottom that fades to grey below 0.5.
+//! channel; this module paints the phase + coherence lane that sits
+//! below it when the user focuses a virtual transfer in Single view.
+//! Grid/Compare layouts don't draw this lane at all (magnitude only).
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke};
 
@@ -12,45 +12,21 @@ use crate::theme;
 
 const PHASE_MIN_DEG: f32 = -180.0;
 const PHASE_MAX_DEG: f32 = 180.0;
-const PHASE_TRACE_WIDTH: f32 = 1.8;
+const PHASE_TRACE_WIDTH: f32 = 1.2;
 const COH_STRIP_PX: f32 = 6.0;
-/// Bins with coherence below this are hidden from the phase curve — phase
-/// is meaningless where the output isn't linearly related to the reference,
-/// and drawing it just adds a zigzag across the cell.
-const PHASE_COH_GATE: f32 = 0.5;
+/// Bins below this coherence are hidden from the phase curve — phase is
+/// meaningless where the output isn't linearly related to the reference.
+/// Segments between the gate and 1.0 are rendered with alpha proportional
+/// to the segment's average coherence, so noisy bands fade out instead of
+/// jaggedly slashing across the subplot.
+const PHASE_COH_GATE: f32 = 0.4;
+const PHASE_ALPHA_MIN: f32 = 55.0;
+const PHASE_ALPHA_MAX: f32 = 215.0;
 
 /// Fraction of the cell height the spectrum takes when a virtual transfer
 /// channel is shown in Single view. The remaining 1 - FRACTION goes to the
 /// standalone phase subplot below it (see `draw_phase_subplot`).
 pub const SPECTRUM_FRACTION_SINGLE: f32 = 0.60;
-
-/// Paint phase + coherence on top of an already-rendered magnitude cell.
-pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFrame) {
-    if tf.freqs.is_empty() {
-        return;
-    }
-
-    let label_color = Color32::from_rgb(
-        theme::GRID_LABEL[0],
-        theme::GRID_LABEL[1],
-        theme::GRID_LABEL[2],
-    );
-    // Cool cyan so the phase line reads distinctly against the warm
-    // viridis-like magnitude colours in the spectrum cell.
-    let phase_color = Color32::from_rgb(110, 225, 240);
-
-    draw_phase_axis(painter, rect, label_color);
-    draw_phase_polyline(
-        painter,
-        rect,
-        cell_view,
-        &tf.freqs,
-        &tf.phase_deg,
-        &tf.coherence,
-        phase_color,
-    );
-    draw_coherence_strip(painter, rect, cell_view, &tf.freqs, &tf.coherence);
-}
 
 /// Standalone phase subplot for the Single-view split layout: own
 /// background, own freq gridlines, phase axis, polyline, and coherence
@@ -75,7 +51,9 @@ pub fn draw_phase_subplot(
         theme::GRID_LABEL[1],
         theme::GRID_LABEL[2],
     );
-    let phase_color = Color32::from_rgb(110, 225, 240);
+    // Muted cyan-grey; the previous near-saturated cyan fought the warm
+    // spectrum palette too hard when coherence was poor.
+    let phase_color = Color32::from_rgb(160, 200, 210);
     let grid_stroke = Stroke::new(
         1.0,
         Color32::from_rgba_unmultiplied(255, 140, 80, (0.05 * 255.0) as u8),
@@ -125,16 +103,14 @@ pub fn draw_phase_subplot(
 
 fn draw_phase_axis(painter: &Painter, rect: Rect, label_color: Color32) {
     // Reference lines at 0°, ±90°, ±180° plus a tick label on the right
-    // edge. Subtle greys so they don't fight the magnitude grid underneath,
-    // but strong enough that wraps near ±180° read as "at the axis" rather
-    // than random noise.
+    // edge. Kept subtle so they don't compete with the trace itself.
     let zero_stroke = Stroke::new(
         1.0,
-        Color32::from_rgba_unmultiplied(110, 225, 240, 55),
+        Color32::from_rgba_unmultiplied(160, 200, 210, 45),
     );
     let tick_stroke = Stroke::new(
         1.0,
-        Color32::from_rgba_unmultiplied(180, 180, 180, 28),
+        Color32::from_rgba_unmultiplied(180, 180, 180, 24),
     );
 
     for (deg, t) in [
@@ -182,20 +158,38 @@ fn draw_phase_polyline(
     let span = (log_max - log_min).max(0.0001);
     let y_span = (PHASE_MAX_DEG - PHASE_MIN_DEG).max(0.0001);
 
-    // Break segments at ±180° wrap boundaries (extend to axis so the wrap
-    // reads as "exits top, re-enters bottom") and at coherence gate
-    // crossings (phase is meaningless where the output isn't linearly
-    // related to the reference, so we simply don't draw those bins).
-    let mut segments: Vec<Vec<Pos2>> = Vec::new();
-    let mut current: Vec<Pos2> = Vec::new();
-    let mut last: Option<(f32, f32)> = None; // (x, phase_deg)
+    // Segments break on: coherence-gate crossings, ±180° wraps, or
+    // off-screen bins. Wraps used to extend to the rect edges so the
+    // jump looked "intentional", but in low-SNR data that just produced
+    // vertical slashes. Break cleanly instead and let the gap speak.
+    // Each segment remembers its mean coherence so we can fade the
+    // stroke — near-gate runs show up as ghostly hints, high-coh runs
+    // are solid.
+    struct Seg {
+        points: Vec<Pos2>,
+        coh_sum: f32,
+        coh_n: u32,
+    }
+    let mut segments: Vec<Seg> = Vec::new();
+    let mut current = Seg {
+        points: Vec::new(),
+        coh_sum: 0.0,
+        coh_n: 0,
+    };
+    let mut last_phase: Option<f32> = None;
 
-    let flush = |current: &mut Vec<Pos2>, segments: &mut Vec<Vec<Pos2>>| {
-        if current.len() >= 2 {
-            segments.push(std::mem::take(current));
+    let flush = |current: &mut Seg, segments: &mut Vec<Seg>| {
+        if current.points.len() >= 2 {
+            segments.push(Seg {
+                points: std::mem::take(&mut current.points),
+                coh_sum: current.coh_sum,
+                coh_n: current.coh_n,
+            });
         } else {
-            current.clear();
+            current.points.clear();
         }
+        current.coh_sum = 0.0;
+        current.coh_n = 0;
     };
 
     for i in 0..n {
@@ -210,35 +204,45 @@ fn draw_phase_polyline(
         let coh = coherence[i];
         if !coh.is_finite() || coh < PHASE_COH_GATE {
             flush(&mut current, &mut segments);
-            last = None;
+            last_phase = None;
             continue;
         }
         let tx = (f.log10() - log_min) / span;
         if !(0.0..=1.0).contains(&tx) {
             continue;
         }
+        if let Some(prev_v) = last_phase {
+            if (v - prev_v).abs() > 180.0 {
+                flush(&mut current, &mut segments);
+            }
+        }
         let x = rect.left() + tx * rect.width();
         let ty = ((v.clamp(PHASE_MIN_DEG, PHASE_MAX_DEG) - PHASE_MIN_DEG) / y_span).clamp(0.0, 1.0);
         let y = rect.bottom() - ty * rect.height();
-
-        if let Some((prev_x, prev_v)) = last {
-            if (v - prev_v).abs() > 180.0 {
-                let end_y = if prev_v > 0.0 { rect.top() } else { rect.bottom() };
-                current.push(Pos2::new(prev_x, end_y));
-                flush(&mut current, &mut segments);
-                let start_y = if v > 0.0 { rect.top() } else { rect.bottom() };
-                current.push(Pos2::new(x, start_y));
-            }
-        }
-        current.push(Pos2::new(x, y));
-        last = Some((x, v));
+        current.points.push(Pos2::new(x, y));
+        current.coh_sum += coh.clamp(0.0, 1.0);
+        current.coh_n += 1;
+        last_phase = Some(v);
     }
-    if current.len() >= 2 {
+    if current.points.len() >= 2 {
         segments.push(current);
     }
-    let stroke = Stroke::new(PHASE_TRACE_WIDTH, color);
+
     for seg in segments {
-        painter.add(Shape::line(seg, stroke));
+        let avg = if seg.coh_n > 0 {
+            seg.coh_sum / seg.coh_n as f32
+        } else {
+            PHASE_COH_GATE
+        };
+        let t = ((avg - PHASE_COH_GATE) / (1.0 - PHASE_COH_GATE)).clamp(0.0, 1.0);
+        // sqrt gives a gentler ramp so mid-coherence segments already
+        // read as present rather than near-invisible.
+        let alpha = (PHASE_ALPHA_MIN + t.sqrt() * (PHASE_ALPHA_MAX - PHASE_ALPHA_MIN)) as u8;
+        let stroke = Stroke::new(
+            PHASE_TRACE_WIDTH,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+        );
+        painter.add(Shape::line(seg.points, stroke));
     }
 }
 
@@ -261,12 +265,10 @@ fn draw_coherence_strip(
     let span = (log_max - log_min).max(0.0001);
 
     let strip_top = rect.bottom() - COH_STRIP_PX;
-    // Background so the strip reads as a distinct band even when the
-    // magnitude curve is painted over the same pixels.
     painter.rect_filled(
         Rect::from_min_max(Pos2::new(rect.left(), strip_top), rect.right_bottom()),
         egui::CornerRadius::same(0),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
     );
 
     let mut prev_x: Option<f32> = None;
@@ -296,19 +298,21 @@ fn draw_coherence_strip(
     }
 }
 
-/// Coherence 0..1 → red → yellow → green. Values below 0.5 fade toward a
-/// desaturated grey so low-coherence bands read as "don't trust this".
+/// Coherence → muted palette: low coh fades to transparent slate, high
+/// coh settles on a calm teal. Previous red→yellow→green scale read as
+/// alarming in the Single view where the strip sits right next to the
+/// phase trace.
 fn coherence_color(c: f32) -> Color32 {
     let c = c.clamp(0.0, 1.0);
-    let (r, g, b) = if c < 0.5 {
-        // grey → red at c=0.5
-        let t = c / 0.5;
-        let base = 90.0 * (1.0 - t);
-        (base + t * 220.0, base + t * 50.0, base + t * 50.0)
-    } else {
-        // red → yellow → green at c=1.0
-        let t = (c - 0.5) / 0.5;
-        (220.0 * (1.0 - t) + 80.0 * t, 50.0 + t * 180.0, 50.0 * (1.0 - t))
-    };
-    Color32::from_rgb(r as u8, g as u8, b as u8)
+    if c < PHASE_COH_GATE {
+        let t = c / PHASE_COH_GATE;
+        let alpha = (40.0 * t) as u8;
+        return Color32::from_rgba_unmultiplied(90, 95, 100, alpha);
+    }
+    let t = ((c - PHASE_COH_GATE) / (1.0 - PHASE_COH_GATE)).clamp(0.0, 1.0);
+    let r = 120.0 * (1.0 - t) + 110.0 * t;
+    let g = 130.0 * (1.0 - t) + 175.0 * t;
+    let b = 135.0 * (1.0 - t) + 165.0 * t;
+    let alpha = (120.0 + 95.0 * t) as u8;
+    Color32::from_rgba_unmultiplied(r as u8, g as u8, b as u8, alpha)
 }
