@@ -1183,7 +1183,12 @@ impl App {
     /// enough channels (Compare: any; Transfer: >= 2).
     fn next_layout(&self, from: LayoutMode) -> LayoutMode {
         let any_selected = self.selected.iter().any(|s| *s);
-        let transfer_ready = self.selection_order.len() >= 2;
+        // Transfer is reachable when either a fresh L-layout meas/ref pair is
+        // available (≥ 2 selected) or virtual channels are already registered
+        // — the layout still has content to render from the virtual pairs
+        // even if the user has since cleared their selection.
+        let transfer_ready =
+            self.selection_order.len() >= 2 || !self.virtual_channels.is_empty();
         let raw_cycle = [
             LayoutMode::Grid,
             LayoutMode::Single,
@@ -1688,10 +1693,11 @@ impl App {
         }
 
         let view_mode = self.config.view_mode;
-        // First waterfall frame per channel picks a fixed [-60, 0] dB
-        // window. Anything below -60 bottoms out at the colormap floor,
-        // anything above 0 saturates — gives strong contrast for typical
-        // audio (bulk content between ~-40 and -10 dBFS).
+        // First waterfall frame per channel picks a dB window derived from
+        // the actual signal: ceiling just above the observed peak (clamped
+        // to [-20, 0]), 80 dB span below. A fixed [-60, 0] window renders
+        // black for line-in mic levels ~-100 dBFS, forcing the user to mash
+        // `+` / `[` to see anything.
         if matches!(view_mode, ViewMode::Waterfall) {
             for (i, slot) in frames.iter().enumerate() {
                 let Some(frame) = slot.as_ref() else { continue };
@@ -1702,9 +1708,21 @@ impl App {
                 if already {
                     continue;
                 }
+                let peak = frame
+                    .spectrum
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let (db_min, db_max) = if peak.is_finite() {
+                    let top = (peak + 5.0).clamp(-20.0, 0.0);
+                    (top - 80.0, top)
+                } else {
+                    (-60.0, 0.0)
+                };
                 if let Some(view) = self.cell_views.get_mut(i) {
-                    view.db_min = -60.0;
-                    view.db_max = 0.0;
+                    view.db_min = db_min;
+                    view.db_max = db_max;
                 }
                 if let Some(flag) = self.waterfall_inited.get_mut(i) {
                     *flag = true;
