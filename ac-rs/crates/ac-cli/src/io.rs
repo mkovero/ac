@@ -44,42 +44,6 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
     println!("  CSV  -> {}", path.display());
 }
 
-pub fn save_transfer_csv(result: &serde_json::Value, path: &Path) {
-    let mut wtr = match csv::Writer::from_path(path) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("  error: cannot write CSV: {e}");
-            return;
-        }
-    };
-
-    wtr.write_record(["freq_hz", "magnitude_db", "phase_deg", "coherence"])
-        .ok();
-
-    let freqs = result.get("freqs").and_then(|v| v.as_array());
-    let mag = result.get("magnitude_db").and_then(|v| v.as_array());
-    let phase = result.get("phase_deg").and_then(|v| v.as_array());
-    let coh = result.get("coherence").and_then(|v| v.as_array());
-
-    if let (Some(fs), Some(ms), Some(ps), Some(cs)) = (freqs, mag, phase, coh) {
-        for i in 0..fs.len() {
-            let f = fs.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let m = ms.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let p = ps.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let c = cs.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
-            wtr.write_record(&[
-                format!("{f}"),
-                format!("{m}"),
-                format!("{p}"),
-                format!("{c}"),
-            ])
-            .ok();
-        }
-    }
-    wtr.flush().ok();
-    println!("  CSV  -> {}", path.display());
-}
-
 pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal: bool) {
     if results.is_empty() {
         return;

@@ -254,14 +254,6 @@ impl VirtualChannelStore {
             .unwrap_or_default()
     }
 
-    pub fn read_all(&self) -> Vec<(TransferPair, Option<TransferFrame>)> {
-        self.inner
-            .lock()
-            .ok()
-            .map(|g| g.iter().map(|(p, s)| (*p, s.read())).collect())
-            .unwrap_or_default()
-    }
-
     pub fn len(&self) -> usize {
         self.inner.lock().ok().map(|g| g.len()).unwrap_or(0)
     }
@@ -312,12 +304,6 @@ impl SweepStore {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_default()
-    }
-
-    pub fn clear(&self) {
-        if let Ok(mut g) = self.inner.lock() {
-            *g = SweepState::default();
-        }
     }
 }
 

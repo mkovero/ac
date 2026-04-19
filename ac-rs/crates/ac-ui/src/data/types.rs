@@ -141,36 +141,22 @@ pub enum SweepKind {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SweepPoint {
     pub n: u32,
-    #[serde(default)]
-    pub cmd: String,
     pub drive_db: f32,
-    #[serde(default)]
-    pub freq_hz: Option<f32>,
     pub thd_pct: f32,
     pub thdn_pct: f32,
     pub fundamental_hz: f32,
     pub fundamental_dbfs: f32,
-    pub linear_rms: f32,
     #[serde(default)]
     pub harmonic_levels: Vec<[f32; 2]>,
-    pub noise_floor_dbfs: f32,
     #[serde(default)]
     pub spectrum: Vec<f32>,
     #[serde(default)]
     pub freqs: Vec<f32>,
     #[serde(default)]
     pub clipping: bool,
-    #[serde(default)]
-    pub ac_coupled: bool,
-    pub out_vrms: Option<f32>,
     pub out_dbu: Option<f32>,
-    pub in_vrms: Option<f32>,
     pub in_dbu: Option<f32>,
     pub gain_db: Option<f32>,
-    #[serde(default)]
-    pub vrms_at_0dbfs_out: Option<f32>,
-    #[serde(default)]
-    pub vrms_at_0dbfs_in: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

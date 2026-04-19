@@ -1,6 +1,6 @@
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
-use super::{check_ack, get_cal, level_to_dbfs};
+use super::{check_ack, level_to_dbfs};
 
 pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
     let (level, freq, ch_spec) = match cmd {

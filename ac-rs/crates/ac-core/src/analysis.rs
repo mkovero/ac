@@ -62,24 +62,6 @@ fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
     })
 }
 
-/// Return references to a cached Hann window and its RMS correction for the
-/// current thread. Rebuilds iff `n` changed since the last call on this thread.
-fn with_hann<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) -> R {
-    HANN_CACHE.with(|cell| {
-        let mut c = cell.borrow_mut();
-        if c.n != n {
-            c.win.clear();
-            c.win.reserve(n);
-            for i in 0..n {
-                c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
-            }
-            c.wc = (c.win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
-            c.n = n;
-        }
-        f(&c.win, c.wc)
-    })
-}
-
 /// Return references to cached frequency and time axes for (N, sr).
 fn with_axes<R>(n: usize, sr: u32, f: impl FnOnce(&[f64], &[f64]) -> R) -> R {
     AXES_CACHE.with(|cell| {

@@ -152,10 +152,6 @@ fn pull(tokens: &mut Vec<Token>, kind: TokenKind) -> Option<TokenValue> {
     Some(tokens.remove(pos).1)
 }
 
-fn pull_required(tokens: &mut Vec<Token>, kind: TokenKind) -> Result<TokenValue, String> {
-    pull(tokens, kind).ok_or_else(|| format!("expected a {kind:?} value"))
-}
-
 fn check_empty(tokens: &[Token]) -> Result<(), String> {
     if tokens.is_empty() {
         Ok(())
@@ -300,8 +296,6 @@ pub enum CommandKind {
         start_freq: f64,
         end_freq: f64,
         interval: f64,
-        min_y: Option<LevelSpec>,
-        max_y: Option<LevelSpec>,
         channels: Option<Vec<u32>>,
     },
     GenerateSine {
@@ -562,16 +556,12 @@ fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCommand, Stri
     let interval = pull(&mut tokens, TokenKind::Time)
         .map(|v| v.as_f64())
         .unwrap_or(0.1);
-    let min_y = pull(&mut tokens, TokenKind::Level).map(|v| v.as_level());
-    let max_y = pull(&mut tokens, TokenKind::Level).map(|v| v.as_level());
     check_empty(&tokens)?;
     Ok(ParsedCommand {
         cmd: CommandKind::Monitor {
             start_freq,
             end_freq,
             interval,
-            min_y,
-            max_y,
             channels,
         },
         show_plot,

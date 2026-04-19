@@ -151,27 +151,18 @@ mod tests {
     fn test_sweep_point(freq: f32, thd: f32, thdn: f32) -> SweepPoint {
         SweepPoint {
             n: 1,
-            cmd: String::new(),
             drive_db: 0.0,
-            freq_hz: Some(freq),
             thd_pct: thd,
             thdn_pct: thdn,
             fundamental_hz: freq,
             fundamental_dbfs: -3.0,
-            linear_rms: 0.707,
             harmonic_levels: vec![],
-            noise_floor_dbfs: -100.0,
             spectrum: vec![],
             freqs: vec![],
             clipping: false,
-            ac_coupled: false,
-            out_vrms: None,
             out_dbu: None,
-            in_vrms: None,
             in_dbu: None,
             gain_db: None,
-            vrms_at_0dbfs_out: None,
-            vrms_at_0dbfs_in: None,
         }
     }
 

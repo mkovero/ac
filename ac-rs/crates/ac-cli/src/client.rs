@@ -8,7 +8,6 @@ pub struct AcClient {
     data: zmq::Socket,
     host: String,
     ctrl_port: u16,
-    data_port: u16,
 }
 
 impl AcClient {
@@ -36,7 +35,6 @@ impl AcClient {
             data,
             host: host.to_string(),
             ctrl_port,
-            data_port,
         })
     }
 
@@ -83,7 +81,4 @@ impl AcClient {
         self.ctrl.connect(&addr).ok();
     }
 
-    pub fn host(&self) -> &str {
-        &self.host
-    }
 }
