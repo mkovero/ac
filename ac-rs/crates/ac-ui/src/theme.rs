@@ -14,7 +14,6 @@ pub const SELECT_BORDER: [u8; 3] = [0xFF, 0xC8, 0x3A];
 /// the live trace. A cool cyan reads bright on the dark background without
 /// colliding with the gold/orange channel hues.
 pub const PEAK_LINE: [f32; 4] = rgb(0x4D, 0xE0, 0xFF);
-pub const PEAK_MARKER: [u8; 3] = [0x7F, 0xFF, 0xF0];
 
 pub const CHANNEL_COLORS: [[f32; 4]; 10] = [
     rgb(0xFF, 0xC8, 0x3A), // bright gold

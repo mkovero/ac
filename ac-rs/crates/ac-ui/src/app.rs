@@ -2128,6 +2128,11 @@ impl App {
                 theme::SELECT_BORDER[1],
                 theme::SELECT_BORDER[2],
             );
+            // Counter for how many peak readouts have been placed in the
+            // top-right corner so far this frame. Only advances in Compare
+            // layout (overlapping cells); other layouts each have their own
+            // rect so every readout can sit at slot 0.
+            let mut peak_corner_slot: usize = 0;
             for cell in &cells {
                 let rect = layout::to_pixel_rect(cell, width_px, height_px);
                 let view = cell_views_snap
@@ -2226,7 +2231,14 @@ impl App {
                             peak,
                             &frame.freqs,
                             &view,
+                            peak_corner_slot,
                         );
+                        // Only Compare stacks readouts in one shared rect;
+                        // Grid/Single cells have their own top-right so reset
+                        // each cell to slot 0.
+                        if matches!(config_snap.layout, LayoutMode::Compare) {
+                            peak_corner_slot += 1;
+                        }
                     }
                 }
                 // Virtual transfer channels get a standalone phase subplot
@@ -2705,6 +2717,11 @@ fn draw_peak_overlay(
     peak: &[f32],
     freqs: &[f32],
     view: &CellView,
+    // Which row in the top-right corner this readout occupies. 0 = topmost.
+    // Compare layout stacks N overlapping cells into the same rect; without a
+    // per-channel slot the readouts would all overdraw the same pixel and
+    // only the last one would survive.
+    corner_slot: usize,
 ) {
     if peak.is_empty() || freqs.len() != peak.len() {
         return;
@@ -2734,16 +2751,22 @@ fn draw_peak_overlay(
     let f0 = freqs[argmax];
     let a0 = peak[argmax];
 
+    // Colour the markers with the channel's own palette entry so Compare
+    // layout — where every selected channel's peak traces stack into the
+    // same rect — lets the eye pair each triangle/label/readout with its
+    // underlying spectrum trace. `PEAK_MARKER` (cyan) was fine for a single
+    // channel but ambiguous once N peaks share one cell.
+    let ch_rgba = theme::channel_color(channel);
     let marker_color = Color32::from_rgb(
-        theme::PEAK_MARKER[0],
-        theme::PEAK_MARKER[1],
-        theme::PEAK_MARKER[2],
+        (ch_rgba[0] * 255.0) as u8,
+        (ch_rgba[1] * 255.0) as u8,
+        (ch_rgba[2] * 255.0) as u8,
     );
     let tick_color = Color32::from_rgba_unmultiplied(
-        theme::PEAK_MARKER[0],
-        theme::PEAK_MARKER[1],
-        theme::PEAK_MARKER[2],
-        128,
+        (ch_rgba[0] * 255.0) as u8,
+        (ch_rgba[1] * 255.0) as u8,
+        (ch_rgba[2] * 255.0) as u8,
+        160,
     );
 
     let freq_amp_to_px = |f: f32, amp: f32| -> egui::Pos2 {
@@ -2813,11 +2836,16 @@ fn draw_peak_overlay(
     );
 
     // Top-right corner readout — visible even when the peak is off-screen
-    // (e.g. user zoomed below the fundamental). Kept inside the cell rect so
-    // Compare layout stacks one readout per selected channel automatically.
+    // (e.g. user zoomed below the fundamental). `corner_slot` stacks one row
+    // per channel so Compare layout's overlapping cells don't overdraw a
+    // single pixel; Grid/Single always pass 0 and render at the top.
+    let row_h = theme::GRID_LABEL_PX + 2.0;
     let corner = format!("PEAK CH{channel}: {} {:.1} dB", format_freq_compact(f0), a0);
     painter.text(
-        egui::pos2(rect.right() - 4.0, rect.top() + 2.0),
+        egui::pos2(
+            rect.right() - 4.0,
+            rect.top() + 2.0 + corner_slot as f32 * row_h,
+        ),
         egui::Align2::RIGHT_TOP,
         corner,
         egui::FontId::monospace(theme::GRID_LABEL_PX),
