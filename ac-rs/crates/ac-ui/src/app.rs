@@ -1796,7 +1796,7 @@ impl App {
                         freq_first,
                         freq_last,
                         log_spaced,
-                        rows_visible: view.rows_visible,
+                        rows_visible: view.rows_visible_f,
                         new_row: frame.new_row.as_deref().map(|v| v.as_slice()),
                     });
                 }

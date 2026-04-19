@@ -37,10 +37,12 @@ pub struct WaterfallCellMeta {
     /// FFT output). Selects the bin-remap function in the shader so scroll
     /// zoom works on both.
     pub log_spaced:   u32,
-    /// Number of newest rows stretched across the cell height. Must be
-    /// `> 0 && <= n_rows`. Ctrl+scroll in waterfall mode shrinks this to zoom
-    /// time; default is `n_rows` (show all history).
-    pub rows_visible: u32,
+    /// Number of newest rows stretched across the cell height. Fractional so
+    /// continuous scroll zoom slides the content smoothly instead of snapping
+    /// in single-row steps (which otherwise decouples the texture from the
+    /// time-axis labels that already track the float). Clamped to
+    /// `[1.0, n_rows as f32]` by the renderer.
+    pub rows_visible: f32,
 }
 
 pub struct CellUpload<'a> {
@@ -55,8 +57,9 @@ pub struct CellUpload<'a> {
     pub freq_last:  f32,
     pub log_spaced: bool,
     /// How many of the newest ring rows to stretch across the cell (time zoom).
-    /// Clamped into `1..=ROWS_PER_CHANNEL` by the renderer.
-    pub rows_visible: u32,
+    /// Fractional so scroll zoom is continuous; clamped into
+    /// `1.0..=ROWS_PER_CHANNEL` by the renderer.
+    pub rows_visible: f32,
     /// Latest row to push into this channel's ring, if a fresh frame arrived
     /// since the previous redraw. `None` means re-use the existing texture
     /// contents (the ring keeps scrolling at the producer's rate, not ours).
@@ -310,7 +313,9 @@ impl WaterfallRenderer {
                 freq_first: u.freq_first,
                 freq_last:  u.freq_last,
                 log_spaced: u.log_spaced as u32,
-                rows_visible: u.rows_visible.clamp(1, ROWS_PER_CHANNEL),
+                rows_visible: u
+                    .rows_visible
+                    .clamp(1.0, ROWS_PER_CHANNEL as f32),
             });
         }
 

@@ -86,6 +86,11 @@ pub fn draw_grid(
             // Y axis is time: newest row is at the top (t = 0), oldest at the
             // bottom (t = rows_visible * row_period). Ctrl+scroll shrinks
             // rows_visible so the label range collapses to the recent past.
+            // Tick positions are chosen in row-space (not second-space) so
+            // small shifts in the row-period estimator only update the
+            // *label text*, never the label *position* — the eye is much
+            // more sensitive to gridlines moving than to "-5.0s" becoming
+            // "-4.9s" at a fixed height.
             if !show_labels {
                 return;
             }
@@ -93,10 +98,7 @@ pub fn draw_grid(
                 row_period_s: 0.1,
                 rows_visible: 256.0,
             });
-            let total_s = axis.rows_visible * axis.row_period_s;
-            let ticks = time_ticks(total_s);
-            for t_s in ticks {
-                let frac = if total_s > 0.0 { t_s / total_s } else { 0.0 };
+            for (frac, t_s) in time_ticks(axis.rows_visible, axis.row_period_s) {
                 let y = rect.top() + frac * rect.height();
                 painter.line_segment(
                     [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
@@ -182,14 +184,23 @@ pub fn format_freq_tick(f: f32) -> String {
     }
 }
 
-/// Pick seconds tick positions for a waterfall Y axis covering `[0, total_s]`.
-/// Always includes 0 ("now") and aims for 3–5 labels spaced by a 1-2-5 step.
-fn time_ticks(total_s: f32) -> Vec<f32> {
-    if total_s <= 0.0 {
-        return vec![0.0];
+/// Pick waterfall Y-axis ticks in row-space so the label positions are a
+/// function of `rows_visible` alone — a jitter in `row_period_s` only
+/// affects the displayed seconds, not where the gridline sits. Returns
+/// `(frac_from_top, seconds_ago)` pairs: `frac = rows_ago / rows_visible`
+/// anchors the line, `seconds_ago = rows_ago * row_period_s` is the label.
+/// The 1-2-5 "nice" step is picked in row counts (not seconds) so the step
+/// choice only flips when the user scrolls time-zoom, not when the cadence
+/// estimator drifts.
+fn time_ticks(rows_visible: f32, row_period_s: f32) -> Vec<(f32, f32)> {
+    if rows_visible <= 0.0 {
+        return vec![(0.0, 0.0)];
     }
     let target = 4.0_f32;
-    let raw = total_s / target;
+    let raw = rows_visible / target;
+    if raw <= 0.0 {
+        return vec![(0.0, 0.0)];
+    }
     let mag = 10_f32.powf(raw.log10().floor());
     let norm = raw / mag;
     let nice = if norm < 1.5 {
@@ -201,12 +212,13 @@ fn time_ticks(total_s: f32) -> Vec<f32> {
     } else {
         10.0
     };
-    let step = (nice * mag).max(1e-6);
-    let mut out = vec![0.0_f32];
-    let mut t = step;
-    while t <= total_s + step * 0.001 {
-        out.push(t);
-        t += step;
+    let step_rows = (nice * mag).max(1.0);
+    let mut out = vec![(0.0_f32, 0.0_f32)];
+    let mut r = step_rows;
+    while r <= rows_visible + step_rows * 0.001 {
+        let frac = (r / rows_visible).clamp(0.0, 1.0);
+        out.push((frac, r * row_period_s));
+        r += step_rows;
     }
     out
 }
@@ -290,13 +302,40 @@ mod tests {
 
     #[test]
     fn time_ticks_always_starts_at_zero() {
-        let ticks = time_ticks(10.0);
-        assert_eq!(ticks[0], 0.0);
+        let ticks = time_ticks(100.0, 0.1);
+        assert_eq!(ticks[0], (0.0, 0.0));
     }
 
     #[test]
-    fn time_ticks_zero_duration() {
-        assert_eq!(time_ticks(0.0), vec![0.0]);
+    fn time_ticks_zero_rows() {
+        assert_eq!(time_ticks(0.0, 0.1), vec![(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn time_ticks_positions_track_rows_not_seconds() {
+        // Primary guarantee: a small drift in row_period_s must not shift
+        // any tick's fractional y position. Only the seconds label moves.
+        let a = time_ticks(100.0, 0.100);
+        let b = time_ticks(100.0, 0.105);
+        assert_eq!(a.len(), b.len());
+        for (i, ((fa, _), (fb, _))) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (fa - fb).abs() < 1e-6,
+                "tick {i} position drifted: {fa} vs {fb}"
+            );
+        }
+    }
+
+    #[test]
+    fn time_ticks_step_stays_picked_across_period_jitter() {
+        // A 5% wobble in row_period must not flip the 1-2-5 step pick.
+        let a = time_ticks(100.0, 0.100);
+        let b = time_ticks(100.0, 0.095);
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "tick count changed with row_period jitter"
+        );
     }
 
     // ── format_time_tick ──────────────────────────────────────────────

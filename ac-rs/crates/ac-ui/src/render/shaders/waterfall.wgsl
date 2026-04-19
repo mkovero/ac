@@ -11,7 +11,7 @@ struct WaterfallCell {
     freq_first:   f32,
     freq_last:    f32,
     log_spaced:   u32,
-    rows_visible: u32,
+    rows_visible: f32,
 }
 
 const LN10: f32 = 2.302585;
@@ -76,9 +76,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Newest row sits at the top (uv.y = 1). `rows_visible` caps how deep into
     // the ring we look — the user Ctrl+scrolls to shrink this and "zoom time"
-    // into a narrower recent window.
-    let rows_shown = max(min(m.rows_visible, m.n_rows), 1u);
-    let rows_back_f = (1.0 - clamp(in.uv.y, 0.0, 1.0)) * f32(rows_shown - 1u);
+    // into a narrower recent window. Fractional so continuous scroll zoom
+    // slides content by a fraction of a row per tick instead of snapping to
+    // integer boundaries (which otherwise causes the labels — which track
+    // the float — to drift away from the texture).
+    let rows_shown = max(min(m.rows_visible, f32(m.n_rows)), 1.0);
+    let rows_back_f = (1.0 - clamp(in.uv.y, 0.0, 1.0)) * (rows_shown - 1.0);
     let newest = (m.write_row + m.n_rows - 1u) % m.n_rows;
 
     // Bilinear interpolation across both axes so the colormap transitions
@@ -89,7 +92,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let bf = fract(bin_f);
 
     let rb_lo = u32(floor(rows_back_f));
-    let rb_hi = min(rb_lo + 1u, rows_shown - 1u);
+    let rb_hi = min(rb_lo + 1u, u32(max(rows_shown - 1.0, 0.0)));
     let rf = fract(rows_back_f);
 
     let row_a = (newest + m.n_rows - rb_lo) % m.n_rows;
