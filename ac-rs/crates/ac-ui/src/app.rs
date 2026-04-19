@@ -74,11 +74,17 @@ pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
 /// single-frame jitter is absorbed by the median.
 pub const WATERFALL_ROW_DT_WINDOW: usize = 16;
 
-/// Peak-hold auto-decay: if no fresh bin surpasses the held value for this
-/// long, the buffer re-seeds from the current spectrum. Gives the user a
-/// rolling "loudest in the last N seconds" view instead of a persistent peg
-/// at whatever the room did minutes ago.
+/// Peak-hold release: how long the held value sits unchanged before it
+/// starts falling toward the live trace. A standard audio-meter "attack-0,
+/// release-after-hold" behaviour — a transient pins the trace for 3 s, then
+/// the line glides back down at a bounded rate instead of snapping.
 pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(3);
+
+/// Fall rate once release kicks in. 20 dB/s matches the perceived cadence of
+/// analogue peak-program meters — fast enough to track genuine level drops,
+/// slow enough that the user can still read the number on the way down. Also
+/// drives min-hold's symmetric rise toward live.
+pub const PEAK_RELEASE_DB_PER_SEC: f32 = 20.0;
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.
@@ -292,11 +298,16 @@ pub struct App {
     /// the buffer re-seeds from the current spectrum so a loud transient
     /// doesn't pin the trace forever when the room has gone quiet again.
     peak_last_update: Vec<Option<Instant>>,
+    /// Last frame-tick timestamp per channel, used by the release-rate logic
+    /// to compute dt and drop the held trace by `PEAK_RELEASE_DB_PER_SEC*dt`
+    /// each frame once the hold window has elapsed.
+    peak_last_tick: Vec<Option<Instant>>,
     /// Min-hold: mirror of peak-hold, per-bin rolling minimum. Shows the
     /// noise floor below intermittent signals. Same decay behaviour.
     min_hold_enabled: bool,
     min_holds: Vec<Option<Vec<f32>>>,
     min_last_update: Vec<Option<Instant>>,
+    min_last_tick: Vec<Option<Instant>>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -415,9 +426,11 @@ impl App {
             peak_hold_enabled: false,
             peak_holds: Vec::new(),
             peak_last_update: Vec::new(),
+            peak_last_tick: Vec::new(),
             min_hold_enabled: false,
             min_holds: Vec::new(),
             min_last_update: Vec::new(),
+            min_last_tick: Vec::new(),
             smoothing_frac: None,
             smoothing_cache: None,
             alt_scroll_accum: 0.0,
@@ -839,10 +852,16 @@ impl App {
         for slot in &mut self.peak_last_update {
             *slot = None;
         }
+        for slot in &mut self.peak_last_tick {
+            *slot = None;
+        }
         for slot in &mut self.min_holds {
             *slot = None;
         }
         for slot in &mut self.min_last_update {
+            *slot = None;
+        }
+        for slot in &mut self.min_last_tick {
             *slot = None;
         }
     }
@@ -1808,11 +1827,17 @@ impl App {
         if self.peak_last_update.len() < n_real {
             self.peak_last_update.resize(n_real, None);
         }
+        if self.peak_last_tick.len() < n_real {
+            self.peak_last_tick.resize(n_real, None);
+        }
         if self.min_holds.len() < n_real {
             self.min_holds.resize(n_real, None);
         }
         if self.min_last_update.len() < n_real {
             self.min_last_update.resize(n_real, None);
+        }
+        if self.min_last_tick.len() < n_real {
+            self.min_last_tick.resize(n_real, None);
         }
 
         // Peak-hold accumulator: fold every fresh spectrum bin-wise against
@@ -1835,6 +1860,19 @@ impl App {
                     .peak_last_update
                     .get_mut(i)
                     .expect("resized above");
+                let tick = self
+                    .peak_last_tick
+                    .get_mut(i)
+                    .expect("resized above");
+                // Seconds since the previous frame we processed for this
+                // channel — used below to scale the release drop. Clamped
+                // into a sane range so a stall (tab hidden, debugger pause)
+                // can't produce a single enormous drop on resume.
+                let dt = tick
+                    .map(|t| now.duration_since(t).as_secs_f32())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 0.25);
+                *tick = Some(now);
                 match buf.as_mut() {
                     Some(existing) if existing.len() == frame.spectrum.len() => {
                         let mut any_updated = false;
@@ -1847,13 +1885,20 @@ impl App {
                         if any_updated {
                             *stamp = Some(now);
                         } else if let Some(last) = *stamp {
-                            // No new max in the last PEAK_HOLD_DECAY window —
-                            // re-seed from the current frame so the trace
-                            // drops back to live values instead of holding a
-                            // stale transient forever.
+                            // Hold window has elapsed — glide down toward the
+                            // live trace at a bounded dB/s so the peak fades
+                            // out instead of blinking away. Clamped to `fresh`
+                            // so a bin that's already below the current
+                            // spectrum stops falling.
                             if now.duration_since(last) >= PEAK_HOLD_DECAY {
-                                *buf = Some(frame.spectrum.as_ref().clone());
-                                *stamp = Some(now);
+                                let drop = PEAK_RELEASE_DB_PER_SEC * dt;
+                                for (held, fresh) in
+                                    existing.iter_mut().zip(frame.spectrum.iter())
+                                {
+                                    if fresh.is_finite() {
+                                        *held = (*held - drop).max(*fresh);
+                                    }
+                                }
                             }
                         } else {
                             *stamp = Some(now);
@@ -1886,6 +1931,15 @@ impl App {
                     .min_last_update
                     .get_mut(i)
                     .expect("resized above");
+                let tick = self
+                    .min_last_tick
+                    .get_mut(i)
+                    .expect("resized above");
+                let dt = tick
+                    .map(|t| now.duration_since(t).as_secs_f32())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 0.25);
+                *tick = Some(now);
                 match buf.as_mut() {
                     Some(existing) if existing.len() == frame.spectrum.len() => {
                         let mut any_updated = false;
@@ -1898,9 +1952,18 @@ impl App {
                         if any_updated {
                             *stamp = Some(now);
                         } else if let Some(last) = *stamp {
+                            // Symmetric release — rise toward live so a quiet
+                            // moment doesn't pin the noise-floor trace at a
+                            // fluke dropout forever.
                             if now.duration_since(last) >= PEAK_HOLD_DECAY {
-                                *buf = Some(frame.spectrum.as_ref().clone());
-                                *stamp = Some(now);
+                                let rise = PEAK_RELEASE_DB_PER_SEC * dt;
+                                for (held, fresh) in
+                                    existing.iter_mut().zip(frame.spectrum.iter())
+                                {
+                                    if fresh.is_finite() {
+                                        *held = (*held + rise).min(*fresh);
+                                    }
+                                }
                             }
                         } else {
                             *stamp = Some(now);
