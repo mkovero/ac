@@ -1,5 +1,6 @@
 use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind};
 
+use crate::data::smoothing;
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, TransferPair, ViewMode,
 };
@@ -66,6 +67,10 @@ pub struct OverlayInput<'a> {
     /// 3 = plasma). The colorbar in the top-right samples this row of the
     /// baked LUT so the legend matches what the GPU is actually rendering.
     pub active_palette: u32,
+    /// Current fractional-octave smoothing denominator. `None` when the user
+    /// has toggled smoothing off. Shown as a small status tag in the top-right
+    /// so the reader knows the trace they're looking at has been averaged.
+    pub smoothing_frac: Option<u32>,
 }
 
 /// Label used in overlays / legends for a given cell index. Real channels
@@ -164,20 +169,29 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // Gain / zoom indicator: show the active cell's dB and frequency
         // windows directly below the sample-rate line. In Spectrum mode the
         // dB range is the Y axis; in Waterfall mode it's the colormap range.
+        // Smoothing state is appended as a compact tag ("│ smooth 1/6 oct")
+        // whenever fractional-octave smoothing is active, so the reader sees
+        // at a glance that the trace isn't raw FFT grass.
+        let smooth_tag = match input.smoothing_frac {
+            Some(_) => format!("  │  smooth {}", smoothing::label(input.smoothing_frac)),
+            None => String::new(),
+        };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
+                smooth_tag,
             ),
             ViewMode::Waterfall => format!(
-                "color {:.0}..{:.0} dB  │  {}..{}",
+                "color {:.0}..{:.0} dB  │  {}..{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
+                smooth_tag,
             ),
         };
         painter.text(

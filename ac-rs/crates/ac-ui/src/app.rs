@@ -431,7 +431,10 @@ impl App {
             min_holds: Vec::new(),
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
-            smoothing_frac: None,
+            // Default to 1/6 octave: gentle enough to preserve resonance
+            // detail, heavy enough to calm the FFT grass. Users can cycle or
+            // disable via `O`.
+            smoothing_frac: Some(6),
             smoothing_cache: None,
             alt_scroll_accum: 0.0,
             output_dir,
@@ -2275,6 +2278,7 @@ impl App {
         let virtual_pairs_snap = self.virtual_render_pairs.clone();
         let peak_hold_enabled_snap = self.peak_hold_enabled;
         let active_palette_snap = waterfall.active_palette();
+        let smoothing_snap = self.smoothing_frac;
         let peak_holds_snap = if self.peak_hold_enabled {
             self.peak_holds.clone()
         } else {
@@ -2290,11 +2294,21 @@ impl App {
             interval_ms: self.monitor_interval_ms,
             fft_n: self.monitor_fft_n,
         });
-        let transfer_snap: Option<TransferFrame> = if in_transfer_layout {
+        let mut transfer_snap: Option<TransferFrame> = if in_transfer_layout {
             self.transfer_last.clone()
         } else {
             None
         };
+        // Apply the same fractional-octave smoothing to the full Transfer-layout
+        // magnitude trace so it matches the grid-view virtual cells. Only
+        // magnitude-dB is smoothed — phase has 2π wraps that would average to
+        // meaningless midpoints, and coherence is already a windowed stat.
+        if let (Some(n_frac), Some(tf)) = (self.smoothing_frac, transfer_snap.as_mut()) {
+            if !tf.freqs.is_empty() && !tf.magnitude_db.is_empty() {
+                let windows = smoothing::OctaveWindows::build(n_frac, &tf.freqs);
+                tf.magnitude_db = smoothing::smooth_db(&tf.magnitude_db, &windows);
+            }
+        }
         let sweep_snap = if in_sweep_layout {
             Some(self.sweep_last.clone())
         } else {
@@ -2572,6 +2586,7 @@ impl App {
                     n_real: n_real_snap,
                     virtual_pairs: &virtual_pairs_snap,
                     active_palette: active_palette_snap,
+                    smoothing_frac: smoothing_snap,
                 },
             );
         });
