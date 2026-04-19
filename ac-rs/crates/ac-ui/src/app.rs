@@ -45,10 +45,26 @@ pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Left/Right arrow tunes FFT monitor refresh rate in 1 ms steps (Left =
 /// slower, Right = faster). Clamped to [`MONITOR_INTERVAL_MIN_MS`,
-/// `MONITOR_INTERVAL_MAX_MS`]. Default 200 ms (5 Hz) matches the legacy
-/// hardcoded interval so `ac monitor` opens identical to pre-feature behavior.
+/// `MONITOR_INTERVAL_MAX_MS`]. The FLOOR/CEIL below bracket what the eye
+/// perceives as "live": below 33 ms (30 Hz) we're wasting CPU past the
+/// display refresh, above 50 ms (20 Hz) the motion starts to step.
 pub const MONITOR_INTERVAL_MIN_MS: u32 = 1;
 pub const MONITOR_INTERVAL_MAX_MS: u32 = 1000;
+pub const MONITOR_INTERVAL_FLOOR_MS: u32 = 33;
+pub const MONITOR_INTERVAL_CEIL_MS: u32 = 50;
+
+/// Pick a smooth monitor tick for a given FFT size + sample rate. Targets
+/// ~window/8 (87.5% overlap) so consecutive frames share most of their
+/// input and motion reads as continuous even when N is large; floored at
+/// 33 ms so tiny N doesn't burn cycles past the display refresh, ceilinged
+/// at 50 ms so huge N still feels alive rather than stepped. Arrow keys
+/// still let the user push outside this band manually.
+pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
+    let sr = sr_hz.max(1) as f32;
+    let window_ms = (fft_n as f32 * 1000.0) / sr;
+    let target = (window_ms / 8.0).round().max(1.0) as u32;
+    target.clamp(MONITOR_INTERVAL_FLOOR_MS, MONITOR_INTERVAL_CEIL_MS)
+}
 
 /// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
 /// N (finer resolution), Down → smaller N (coarser but faster capture).
@@ -296,7 +312,10 @@ impl App {
             analysis_mode: "fft".to_string(),
             cwt_sigma: 12.0,
             cwt_n_scales: 512,
-            monitor_interval_ms: 200,
+            // Auto-scaled on every N change (arrow Up/Down) and at the
+            // first frame (once sr is known). Seeded from the default N
+            // assuming 48 kHz so the very first tick doesn't overshoot.
+            monitor_interval_ms: auto_monitor_interval_ms(8192, 48_000),
             monitor_fft_n: 8192,
             selection_order: Vec::new(),
             active_meas_idx: 0,
@@ -929,6 +948,18 @@ impl App {
         self.send_set_analysis_mode("cwt");
     }
 
+    /// Sample rate of the most recent real-channel frame, or 48 kHz if no
+    /// frame has arrived yet. Used by `auto_monitor_interval_ms` to pick a
+    /// tick that matches the actual capture rate rather than assuming one.
+    fn current_sr(&self) -> u32 {
+        self.last_frames
+            .iter()
+            .flatten()
+            .map(|f| f.meta.sr)
+            .find(|&sr| sr > 0)
+            .unwrap_or(48_000)
+    }
+
     /// Push the current `monitor_interval_ms` + `monitor_fft_n` to the daemon
     /// via `set_monitor_params`. Silent no-op on the synthetic backend.
     fn send_monitor_params(&mut self) {
@@ -1272,15 +1303,25 @@ impl App {
                 if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
             {
                 self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, 1);
+                self.monitor_interval_ms =
+                    auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
                 self.send_monitor_params();
-                self.notify(&format!("fft N: {}", self.monitor_fft_n));
+                self.notify(&format!(
+                    "fft N: {} @ {} ms",
+                    self.monitor_fft_n, self.monitor_interval_ms
+                ));
             }
             KeyCode::ArrowDown
                 if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
             {
                 self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, -1);
+                self.monitor_interval_ms =
+                    auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
                 self.send_monitor_params();
-                self.notify(&format!("fft N: {}", self.monitor_fft_n));
+                self.notify(&format!(
+                    "fft N: {} @ {} ms",
+                    self.monitor_fft_n, self.monitor_interval_ms
+                ));
             }
             KeyCode::BracketLeft => {
                 self.shift_hovered_db_floor(-5.0);
@@ -2535,6 +2576,44 @@ mod ladder_tests {
         for &n in MONITOR_FFT_N_LADDER {
             assert!(n.is_power_of_two(), "ladder entry {n} not pow2");
             assert!((256..=131_072).contains(&n), "ladder entry {n} out of protocol range");
+        }
+    }
+
+    #[test]
+    fn auto_interval_floors_for_small_n() {
+        // Tiny windows never drop below the display-refresh floor — no
+        // reason to tick faster than the eye can track.
+        assert_eq!(auto_monitor_interval_ms(1024, 48_000), MONITOR_INTERVAL_FLOOR_MS);
+        assert_eq!(auto_monitor_interval_ms(4096, 48_000), MONITOR_INTERVAL_FLOOR_MS);
+    }
+
+    #[test]
+    fn auto_interval_ceils_for_huge_n() {
+        // Huge windows cap at the "still feels live" ceiling even though
+        // window/8 would suggest much slower ticks.
+        assert_eq!(auto_monitor_interval_ms(32768, 48_000), MONITOR_INTERVAL_CEIL_MS);
+        assert_eq!(auto_monitor_interval_ms(65536, 48_000), MONITOR_INTERVAL_CEIL_MS);
+    }
+
+    #[test]
+    fn auto_interval_scales_with_sample_rate() {
+        // Double the sample rate halves the window duration → tick shrinks
+        // (until it hits the floor).
+        let at_48k = auto_monitor_interval_ms(16384, 48_000);
+        let at_96k = auto_monitor_interval_ms(16384, 96_000);
+        assert!(at_96k <= at_48k, "{at_96k} ms should be ≤ {at_48k} ms");
+    }
+
+    #[test]
+    fn auto_interval_stays_within_clamp_band() {
+        for &n in MONITOR_FFT_N_LADDER {
+            for &sr in &[44_100u32, 48_000, 88_200, 96_000, 192_000] {
+                let tick = auto_monitor_interval_ms(n, sr);
+                assert!(
+                    (MONITOR_INTERVAL_FLOOR_MS..=MONITOR_INTERVAL_CEIL_MS).contains(&tick),
+                    "tick {tick} outside band for N={n} sr={sr}"
+                );
+            }
         }
     }
 }
