@@ -2777,21 +2777,26 @@ fn draw_peak_overlay(
         egui::pos2(x, y)
     };
 
-    // Harmonic ticks (2× … 5×). A tick per harmonic inside the visible range;
-    // anything above freq_max is silently skipped. Find the bin closest to
-    // k*f0 instead of an interpolated position so the amplitude on the tick
-    // matches the actual peak-buffer value at that bin.
-    for k in 2..=5 {
+    // Collect the 2×..=5× harmonic samples up front so the same data drives
+    // both the on-plot markers and the corner text block. A harmonic is kept
+    // regardless of whether its frequency is inside the current view window —
+    // the corner readout still wants to show its dB — but on-plot drawing
+    // gates on the visible range.
+    struct Harmonic {
+        k: u32,
+        f_hz: f32,
+        amp_db: f32,
+        in_view: bool,
+    }
+    let mut harmonics: Vec<Harmonic> = Vec::with_capacity(4);
+    for k in 2u32..=5 {
         let f_k = f0 * k as f32;
-        if f_k > view.freq_max {
+        if freqs.last().map_or(true, |&f| f_k > f) {
             break;
         }
-        if f_k < view.freq_min {
-            continue;
-        }
         // Nearest-bin search; freqs are monotonic so a simple partition_point
-        // lands us on the right neighbour. Clamp to the buffer so the amp
-        // lookup never panics.
+        // lands on the right neighbour. Clamp to the buffer so the amp lookup
+        // never panics.
         let near = match freqs.partition_point(|&f| f < f_k) {
             0 => 0,
             p if p >= freqs.len() => freqs.len() - 1,
@@ -2807,10 +2812,36 @@ fn draw_peak_overlay(
         if !a_k.is_finite() {
             continue;
         }
-        let p = freq_amp_to_px(f_k, a_k);
-        painter.line_segment(
-            [egui::pos2(p.x, p.y - 5.0), egui::pos2(p.x, p.y + 5.0)],
+        harmonics.push(Harmonic {
+            k,
+            f_hz: f_k,
+            amp_db: a_k,
+            in_view: f_k >= view.freq_min && f_k <= view.freq_max,
+        });
+    }
+
+    // Harmonic markers: small downward triangle + "k×" label at each
+    // in-view harmonic's amplitude. A 5-px vertical tick was too thin to
+    // read against the spectrum trace; the triangle matches the fundamental
+    // glyph at half size so the family resemblance is obvious.
+    for h in harmonics.iter().filter(|h| h.in_view) {
+        let p = freq_amp_to_px(h.f_hz, h.amp_db);
+        let tri = [
+            egui::pos2(p.x - 3.0, p.y - 8.0),
+            egui::pos2(p.x + 3.0, p.y - 8.0),
+            egui::pos2(p.x,       p.y - 2.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            tri.to_vec(),
+            tick_color,
             egui::Stroke::new(1.0, tick_color),
+        ));
+        painter.text(
+            egui::pos2(p.x, p.y - 10.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("{}×", h.k),
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            tick_color,
         );
     }
 
@@ -2836,21 +2867,40 @@ fn draw_peak_overlay(
     );
 
     // Top-right corner readout — visible even when the peak is off-screen
-    // (e.g. user zoomed below the fundamental). `corner_slot` stacks one row
-    // per channel so Compare layout's overlapping cells don't overdraw a
-    // single pixel; Grid/Single always pass 0 and render at the top.
+    // (e.g. user zoomed below the fundamental). The header gives the
+    // fundamental; one indented line per 2×..=5× harmonic follows with its
+    // frequency and dB. `corner_slot` stacks one full block per channel so
+    // Compare layout's overlapping cells don't overdraw a single pixel;
+    // Grid/Single always pass 0 and render at the top.
     let row_h = theme::GRID_LABEL_PX + 2.0;
+    let block_rows = 1 + harmonics.len();
+    let block_top = rect.top() + 2.0 + corner_slot as f32 * block_rows as f32 * row_h;
     let corner = format!("PEAK CH{channel}: {} {:.1} dB", format_freq_compact(f0), a0);
     painter.text(
-        egui::pos2(
-            rect.right() - 4.0,
-            rect.top() + 2.0 + corner_slot as f32 * row_h,
-        ),
+        egui::pos2(rect.right() - 4.0, block_top),
         egui::Align2::RIGHT_TOP,
         corner,
         egui::FontId::monospace(theme::GRID_LABEL_PX),
         marker_color,
     );
+    for (i, h) in harmonics.iter().enumerate() {
+        let line = format!(
+            "  {}× {} {:+.1} dB",
+            h.k,
+            format_freq_compact(h.f_hz),
+            h.amp_db,
+        );
+        painter.text(
+            egui::pos2(
+                rect.right() - 4.0,
+                block_top + (i + 1) as f32 * row_h,
+            ),
+            egui::Align2::RIGHT_TOP,
+            line,
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            tick_color,
+        );
+    }
 }
 
 fn format_freq_compact(hz: f32) -> String {
