@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,6 +64,37 @@ pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
     let window_ms = (fft_n as f32 * 1000.0) / sr;
     let target = (window_ms / 8.0).round().max(1.0) as u32;
     target.clamp(MONITOR_INTERVAL_FLOOR_MS, MONITOR_INTERVAL_CEIL_MS)
+}
+
+/// Rolling window for the waterfall row-period estimator. Median over the
+/// last N row-to-row dt samples; bigger → more stable axis labels, smaller
+/// → faster tracking if the producer cadence genuinely changes. 16 at 10 Hz
+/// means the axis responds to real cadence shifts within ~1.6 s while
+/// single-frame jitter is absorbed by the median.
+pub const WATERFALL_ROW_DT_WINDOW: usize = 16;
+/// Need at least this many dt samples in the window before we trust the
+/// median enough to replace the 0.1 s default. Below this we keep the
+/// default so the first couple of frames don't set a wildly wrong period.
+pub const WATERFALL_ROW_DT_MIN: usize = 5;
+/// Relative-change gate: only repaint the row-period when the new median
+/// differs by more than this fraction from the current value. Kills label
+/// flipping caused by micro-jitter in the median without blocking real
+/// cadence shifts.
+pub const WATERFALL_ROW_DT_HYSTERESIS: f32 = 0.03;
+
+/// Median of an f32 slice, ignoring NaN. Returns `None` if empty.
+pub fn median_f32(samples: &[f32]) -> Option<f32> {
+    let mut v: Vec<f32> = samples.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    })
 }
 
 /// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
@@ -209,12 +240,16 @@ pub struct App {
     /// so we can auto-init dB range from that frame's mean. Cleared on
     /// `Ctrl+R`, on view-mode changes, and when cell_views is reallocated.
     waterfall_inited: Vec<bool>,
-    /// Rolling estimate of the producer's frame interval in seconds. Updated
-    /// via EMA on every channel-0 `new_row` arrival so the waterfall Y axis
-    /// can label time as "-{N s}" rather than an abstract "past". Defaults to
-    /// 0.1 s (10 Hz) until we see two frames.
+    /// Rolling estimate of the producer's frame interval in seconds. Computed
+    /// as the median of the last `WATERFALL_ROW_DT_WINDOW` channel-0 `new_row`
+    /// inter-arrival times, so the waterfall Y axis stays put under jitter and
+    /// a single stall can't drag it. Defaults to 0.1 s (10 Hz) until we have
+    /// enough samples.
     waterfall_row_period_s: f32,
     waterfall_last_row_at: Option<Instant>,
+    /// Ring of recent row-to-row dt samples (seconds) used to derive the
+    /// median above. Bounded at `WATERFALL_ROW_DT_WINDOW` entries.
+    waterfall_row_dts: VecDeque<f32>,
     /// Highest `freqs.last()` observed across any frame, used as the freq
     /// clamp ceiling so zoom/pan caps at real Nyquist instead of the 24 kHz
     /// default (48 kHz sr). Seeded from `DEFAULT_FREQ_MAX`, grows monotonically
@@ -328,6 +363,7 @@ impl App {
             waterfall_inited: Vec::new(),
             waterfall_row_period_s: 0.1,
             waterfall_last_row_at: None,
+            waterfall_row_dts: VecDeque::with_capacity(WATERFALL_ROW_DT_WINDOW),
             data_freq_ceiling: theme::DEFAULT_FREQ_MAX,
             render_ctx: None,
             spectrum: None,
@@ -568,10 +604,16 @@ impl App {
                 view.db_max = new_max;
             }
             if zoom_time {
-                let current = view.rows_visible.max(1) as f32;
+                // Fractional zoom: the f32 is authoritative so consecutive
+                // scroll ticks don't lose precision to integer rounding,
+                // giving a smoothly growing/shrinking time window instead of
+                // stepped jumps. The u32 copy tracks round(f32) for the
+                // shader and label consumers.
+                let current = view.rows_visible_f.max(1.0);
                 let max_rows = crate::render::waterfall::ROWS_PER_CHANNEL as f32;
-                let new_rows = (current * factor).round().clamp(2.0, max_rows);
-                view.rows_visible = new_rows as u32;
+                let new_rows = (current * factor).clamp(2.0, max_rows);
+                view.rows_visible_f = new_rows;
+                view.rows_visible = new_rows.round().clamp(2.0, max_rows) as u32;
             }
         }
     }
@@ -1603,17 +1645,32 @@ impl App {
             }
         }
 
-        // Track producer cadence from channel-0 new_row arrivals. EMA so a
-        // single hiccup doesn't bounce the time axis; guarded to a sane band
-        // (1 ms..5 s) to reject clock jumps and first-frame deltas.
+        // Track producer cadence from channel-0 new_row arrivals. Rolling
+        // median over the last WATERFALL_ROW_DT_WINDOW samples so a single
+        // hiccup or brief stall can't drag the axis; guarded to a sane band
+        // (1 ms..5 s) to reject clock jumps and first-frame deltas. A small
+        // hysteresis gate suppresses label flipping from median micro-churn
+        // while leaving real cadence shifts free to propagate.
         if let Some(Some(f0)) = frames.first() {
             if f0.new_row.is_some() {
                 let now = Instant::now();
                 if let Some(prev) = self.waterfall_last_row_at {
                     let dt = now.duration_since(prev).as_secs_f32();
                     if dt > 0.001 && dt < 5.0 {
-                        self.waterfall_row_period_s =
-                            0.85 * self.waterfall_row_period_s + 0.15 * dt;
+                        if self.waterfall_row_dts.len() == WATERFALL_ROW_DT_WINDOW {
+                            self.waterfall_row_dts.pop_front();
+                        }
+                        self.waterfall_row_dts.push_back(dt);
+                        if self.waterfall_row_dts.len() >= WATERFALL_ROW_DT_MIN {
+                            let slice: Vec<f32> =
+                                self.waterfall_row_dts.iter().copied().collect();
+                            if let Some(med) = median_f32(&slice) {
+                                let cur = self.waterfall_row_period_s.max(1e-6);
+                                if ((med - cur) / cur).abs() > WATERFALL_ROW_DT_HYSTERESIS {
+                                    self.waterfall_row_period_s = med;
+                                }
+                            }
+                        }
                     }
                 }
                 self.waterfall_last_row_at = Some(now);
@@ -1923,7 +1980,7 @@ impl App {
                 let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall)
                     .then(|| grid::WaterfallTimeAxis {
                         row_period_s,
-                        rows_visible: view.rows_visible,
+                        rows_visible: view.rows_visible_f,
                     });
                 // Single view + virtual transfer channel → split cell:
                 // spectrum on top, standalone phase subplot below. In all
@@ -2615,6 +2672,40 @@ mod ladder_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn median_of_odd_slice_picks_middle() {
+        assert_eq!(median_f32(&[0.09, 0.11, 0.10]), Some(0.10));
+    }
+
+    #[test]
+    fn median_of_even_slice_averages_middle_pair() {
+        let m = median_f32(&[0.1, 0.2, 0.3, 0.4]).unwrap();
+        assert!((m - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_rejects_nan_samples() {
+        // A single spurious NaN in the ring shouldn't poison the estimate.
+        let m = median_f32(&[0.10, f32::NAN, 0.11, 0.10]).unwrap();
+        assert!((m - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_empty_returns_none() {
+        assert_eq!(median_f32(&[]), None);
+    }
+
+    #[test]
+    fn median_absorbs_single_stall() {
+        // Producer running at ~10 Hz with one 500 ms stall — the median
+        // should stay near 0.1 s instead of jumping halfway to 0.5 s the way
+        // a 15% EMA would.
+        let mut samples = vec![0.10_f32; 15];
+        samples.push(0.50);
+        let m = median_f32(&samples).unwrap();
+        assert!((m - 0.10).abs() < 0.01, "median {m} pulled too far by stall");
     }
 }
 

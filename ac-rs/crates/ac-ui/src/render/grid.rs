@@ -6,9 +6,11 @@ use crate::theme;
 pub struct WaterfallTimeAxis {
     /// Seconds between successive waterfall rows (producer frame interval).
     pub row_period_s: f32,
-    /// Number of newest rows currently stretched across the cell (from
-    /// `CellView::rows_visible`). One label per ~4 subdivisions of the axis.
-    pub rows_visible: u32,
+    /// Fractional number of newest rows currently stretched across the cell.
+    /// Tracks `CellView::rows_visible_f` directly so the time axis grows
+    /// and shrinks smoothly while the shader-facing `u32` counterpart steps
+    /// at integer boundaries. One label per ~4 subdivisions of the axis.
+    pub rows_visible: f32,
 }
 
 pub fn draw_grid(
@@ -89,9 +91,9 @@ pub fn draw_grid(
             }
             let axis = time_axis.unwrap_or(WaterfallTimeAxis {
                 row_period_s: 0.1,
-                rows_visible: 256,
+                rows_visible: 256.0,
             });
-            let total_s = axis.rows_visible as f32 * axis.row_period_s;
+            let total_s = axis.rows_visible * axis.row_period_s;
             let ticks = time_ticks(total_s);
             for t_s in ticks {
                 let frac = if total_s > 0.0 { t_s / total_s } else { 0.0 };

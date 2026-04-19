@@ -224,6 +224,13 @@ pub struct CellView {
     /// across the cell height. `ROWS_PER_CHANNEL` = show the whole ring (full
     /// time depth); smaller = zoom into the recent past. Ignored in Spectrum.
     pub rows_visible: u32,
+    /// Fractional counterpart of `rows_visible`. Scroll zoom steps this by a
+    /// small ratio (e.g. ×1.1) so the time axis grows/shrinks continuously
+    /// instead of in integer chunks; `rows_visible` is derived via round. Kept
+    /// separately so we don't accumulate rounding error across many scroll
+    /// ticks. Time-axis labels read this value for smooth interpolation
+    /// between tick positions.
+    pub rows_visible_f: f32,
 }
 
 impl Default for CellView {
@@ -234,6 +241,7 @@ impl Default for CellView {
             db_min:   crate::theme::DEFAULT_DB_MIN,
             db_max:   crate::theme::DEFAULT_DB_MAX,
             rows_visible: crate::render::waterfall::ROWS_PER_CHANNEL,
+            rows_visible_f: crate::render::waterfall::ROWS_PER_CHANNEL as f32,
         }
     }
 }
