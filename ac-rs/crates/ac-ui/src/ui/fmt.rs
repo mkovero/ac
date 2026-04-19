@@ -60,11 +60,19 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
 
 /// Primary monitor readout (bottom-left overlay). Shows broadband stats
 /// derived from the displayed spectrum rather than THD — THD is only
-/// meaningful when a known pure tone is driving the system (sweep / thd
-/// commands), not in live monitoring.
+/// meaningful when a known pure tone is driving the system (sweep / thd /
+/// plot commands), not in live monitoring.
+///
+/// When the channel has been calibrated, both dBu and dBV appear alongside
+/// the peak so the user sees the analog-domain level in either convention.
+/// dBV is derived from dBu via the fixed `dBV = dBu + 20·log10(V_ref_dbu)`
+/// relation (see `ac_core::conversions::dbu_to_dbv`).
 pub fn spectrum_readout(stats: &BroadbandStats, in_dbu: Option<f32>) -> String {
-    let dbu = in_dbu
-        .map(|v| format!("   {:+.1} dBu", v))
+    let cal = in_dbu
+        .map(|dbu| {
+            let dbv = ac_core::conversions::dbu_to_dbv(dbu as f64) as f32;
+            format!("   {:+.1} dBu   {:+.1} dBV", dbu, dbv)
+        })
         .unwrap_or_default();
     format!(
         "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}",
@@ -72,8 +80,49 @@ pub fn spectrum_readout(stats: &BroadbandStats, in_dbu: Option<f32>) -> String {
         format_hz(stats.peak_hz).trim(),
         stats.floor_db,
         stats.span_db,
-        dbu,
+        cal,
     )
+}
+
+/// Live-monitor readout for the FFT knobs shown top-right in Spectrum mode.
+/// Pure function so the exact text — including the `Δf = sr / N` math — is
+/// covered by unit tests rather than only by the paint-test harness.
+pub fn monitor_knobs_readout(interval_ms: u32, fft_n: u32, sr: u32) -> String {
+    let df = sr as f32 / fft_n.max(1) as f32;
+    format!("{:>4} ms  │  N {}  │  Δf {:.1} Hz", interval_ms, fft_n, df)
+}
+
+/// Compact label for the top-right top-line ("{sr} Hz │ {channel}").
+pub fn top_right_status(sr: u32, channel_label: &str) -> String {
+    format!("{} Hz │ {}", sr, channel_label)
+}
+
+/// Fundamental-marker corner label used by the peak-hold overlay
+/// ("PEAK CH{n}: {freq} {dB}"). Pulling this out of `app.rs` so the
+/// formatting contract is testable; the overlay just calls this and paints
+/// the returned string.
+pub fn peak_corner_label(channel: usize, f_hz: f32, amp_db: f32) -> String {
+    format!("PEAK CH{channel}: {} {:.1} dB", format_freq_compact(f_hz), amp_db)
+}
+
+/// Harmonic line under the peak corner label — "  2× 2.000 kHz -48.3 dB".
+pub fn peak_harmonic_line(k: u32, f_hz: f32, amp_db: f32) -> String {
+    format!("  {}× {} {:+.1} dB", k, format_freq_compact(f_hz), amp_db)
+}
+
+/// Compact frequency formatter used by the peak overlay. Threshold-picked
+/// so the narrow right-edge corner column never overflows:
+///   - below 1 kHz  → "NNN.N Hz"
+///   - 1–10 kHz     → "N.NNN kHz" (three decimals preserve bin resolution)
+///   - 10 kHz+      → "NN.NN kHz"
+pub fn format_freq_compact(hz: f32) -> String {
+    if hz >= 10_000.0 {
+        format!("{:.2} kHz", hz / 1000.0)
+    } else if hz >= 1_000.0 {
+        format!("{:.3} kHz", hz / 1000.0)
+    } else {
+        format!("{:.1} Hz", hz)
+    }
 }
 
 /// Transfer delay readout (top center).
@@ -254,6 +303,158 @@ mod tests {
         };
         let s = spectrum_readout(&stats, None);
         assert!(!s.contains("dBu"));
+        assert!(!s.contains("dBV"));
+    }
+
+    #[test]
+    fn spectrum_readout_shows_dbv_when_calibrated() {
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        // 0 dBu is exactly V_ref_dbu (sqrt(0.6) V rms by default), which in
+        // dBV is −2.218... dB. The readout must show both in the correct
+        // relation.
+        let s = spectrum_readout(&stats, Some(0.0));
+        assert!(s.contains("+0.0 dBu"), "want dBu in: {s}");
+        assert!(s.contains("-2.2 dBV"), "want dBV at −2.2 in: {s}");
+    }
+
+    #[test]
+    fn spectrum_readout_dbu_dbv_offset_is_consistent() {
+        // For any calibrated dBu, the dBV reading must equal
+        // ac_core::conversions::dbu_to_dbv(dbu), rounded to one decimal.
+        for dbu in [-20.0_f32, -4.0, 0.0, 4.0, 12.5] {
+            let stats = BroadbandStats {
+                peak_db: -3.0,
+                peak_hz: 1000.0,
+                floor_db: -96.0,
+                span_db: 93.0,
+            };
+            let s = spectrum_readout(&stats, Some(dbu));
+            let expected = ac_core::conversions::dbu_to_dbv(dbu as f64) as f32;
+            let needle = format!("{:+.1} dBV", expected);
+            assert!(s.contains(&needle), "want {needle} in: {s}");
+        }
+    }
+
+    // ── broadband_stats math ──────────────────────────────────────────
+
+    #[test]
+    fn broadband_stats_span_matches_peak_minus_floor() {
+        let (spec, freqs) = mk_spec(50, 0.0, -120.0, 2048);
+        let s = broadband_stats(&spec, &freqs).unwrap();
+        assert!((s.span_db - (s.peak_db - s.floor_db)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn broadband_stats_floor_is_tenth_percentile() {
+        // Construct a spectrum with a known distribution: bins 0..=9 at -90,
+        // 10..=99 at -40. 10th percentile index in a sorted ascending list
+        // is 10 — just past the "-90" block → -40. Verify.
+        let n = 100;
+        let mut spec = vec![-40.0f32; n];
+        for v in spec.iter_mut().take(10) {
+            *v = -90.0;
+        }
+        let freqs: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let s = broadband_stats(&spec, &freqs).unwrap();
+        // With 100 finite values, idx = 10 after sort. Sorted[10] = -40.
+        assert!((s.floor_db - -40.0).abs() < 1e-5, "floor = {}", s.floor_db);
+    }
+
+    // ── monitor knobs ─────────────────────────────────────────────────
+
+    #[test]
+    fn monitor_knobs_delta_f_math() {
+        // Δf = sr / N. 48000 / 4096 = 11.71875 → rounds to "11.7 Hz".
+        let s = monitor_knobs_readout(10, 4096, 48_000);
+        assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
+        // 96 kHz, N = 8192 → 11.71875 as well.
+        let s = monitor_knobs_readout(10, 8192, 96_000);
+        assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
+        // 48 kHz, N = 2048 → 23.4375 → "23.4 Hz".
+        let s = monitor_knobs_readout(5, 2048, 48_000);
+        assert!(s.contains("Δf 23.4 Hz"), "got: {s}");
+    }
+
+    #[test]
+    fn monitor_knobs_formats_interval_and_n() {
+        let s = monitor_knobs_readout(7, 16384, 48_000);
+        assert!(s.contains("   7 ms"));
+        assert!(s.contains("N 16384"));
+    }
+
+    #[test]
+    fn monitor_knobs_zero_n_does_not_panic() {
+        // Defensive guard — mp.fft_n.max(1).
+        let _ = monitor_knobs_readout(1, 0, 48_000);
+    }
+
+    // ── top-right status ──────────────────────────────────────────────
+
+    #[test]
+    fn top_right_status_format() {
+        assert_eq!(top_right_status(48_000, "CH0"), "48000 Hz │ CH0");
+        assert_eq!(
+            top_right_status(96_000, "transfer0"),
+            "96000 Hz │ transfer0"
+        );
+    }
+
+    // ── peak-hold corner label ────────────────────────────────────────
+
+    #[test]
+    fn peak_corner_label_below_1k() {
+        let s = peak_corner_label(2, 500.5, -12.3);
+        assert_eq!(s, "PEAK CH2: 500.5 Hz -12.3 dB");
+    }
+
+    #[test]
+    fn peak_corner_label_above_1k() {
+        let s = peak_corner_label(0, 1234.5, -3.1);
+        assert_eq!(s, "PEAK CH0: 1.235 kHz -3.1 dB");
+    }
+
+    #[test]
+    fn peak_corner_label_above_10k() {
+        let s = peak_corner_label(1, 12_345.6, -0.4);
+        assert_eq!(s, "PEAK CH1: 12.35 kHz -0.4 dB");
+    }
+
+    #[test]
+    fn peak_harmonic_line_signed_db() {
+        // Harmonic line uses `{:+.1}` so negative numbers are still signed
+        // and the layout is consistent.
+        assert_eq!(peak_harmonic_line(2, 2000.0, -48.3), "  2× 2.000 kHz -48.3 dB");
+        assert_eq!(peak_harmonic_line(3, 3000.0, -55.0), "  3× 3.000 kHz -55.0 dB");
+        assert_eq!(peak_harmonic_line(5, 5000.0,   6.1), "  5× 5.000 kHz +6.1 dB");
+    }
+
+    // ── format_freq_compact boundaries ────────────────────────────────
+
+    #[test]
+    fn format_freq_compact_below_1k() {
+        assert_eq!(format_freq_compact(50.0), "50.0 Hz");
+        assert_eq!(format_freq_compact(999.9), "999.9 Hz");
+    }
+
+    #[test]
+    fn format_freq_compact_1k_to_10k() {
+        assert_eq!(format_freq_compact(1000.0), "1.000 kHz");
+        assert_eq!(format_freq_compact(2345.0), "2.345 kHz");
+        assert_eq!(format_freq_compact(9999.9), "10.000 kHz");
+        // ^ rounding: 9999.9/1000 = 9.9999 → {:.3} rounds to 10.000.
+        // That's cosmetically fine since 10.00 kHz would mean the same thing.
+    }
+
+    #[test]
+    fn format_freq_compact_above_10k() {
+        assert_eq!(format_freq_compact(10_000.0), "10.00 kHz");
+        assert_eq!(format_freq_compact(12_345.6), "12.35 kHz");
+        assert_eq!(format_freq_compact(48_000.0), "48.00 kHz");
     }
 
     // ── transfer_delay ────────────────────────────────────────────────

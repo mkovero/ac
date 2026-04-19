@@ -3172,7 +3172,7 @@ fn draw_peak_overlay(
     let row_h = theme::GRID_LABEL_PX + 2.0;
     let block_rows = 1 + harmonics.len();
     let block_top = rect.top() + 2.0 + corner_slot as f32 * block_rows as f32 * row_h;
-    let corner = format!("PEAK CH{channel}: {} {:.1} dB", format_freq_compact(f0), a0);
+    let corner = crate::ui::fmt::peak_corner_label(channel, f0, a0);
     painter.text(
         egui::pos2(rect.right() - 4.0, block_top),
         egui::Align2::RIGHT_TOP,
@@ -3181,12 +3181,7 @@ fn draw_peak_overlay(
         marker_color,
     );
     for (i, h) in harmonics.iter().enumerate() {
-        let line = format!(
-            "  {}× {} {:+.1} dB",
-            h.k,
-            format_freq_compact(h.f_hz),
-            h.amp_db,
-        );
+        let line = crate::ui::fmt::peak_harmonic_line(h.k, h.f_hz, h.amp_db);
         painter.text(
             egui::pos2(
                 rect.right() - 4.0,
@@ -3200,15 +3195,10 @@ fn draw_peak_overlay(
     }
 }
 
-fn format_freq_compact(hz: f32) -> String {
-    if hz >= 10_000.0 {
-        format!("{:.2} kHz", hz / 1000.0)
-    } else if hz >= 1_000.0 {
-        format!("{:.3} kHz", hz / 1000.0)
-    } else {
-        format!("{:.1} Hz", hz)
-    }
-}
+// Compact frequency formatter for the peak overlay lives in `ui::fmt`;
+// re-export here so existing call sites in this file don't have to fully
+// qualify the path.
+use crate::ui::fmt::format_freq_compact;
 
 #[cfg(test)]
 mod loop_tests {
