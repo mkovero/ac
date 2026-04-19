@@ -19,6 +19,11 @@ const COH_STRIP_PX: f32 = 6.0;
 /// and drawing it just adds a zigzag across the cell.
 const PHASE_COH_GATE: f32 = 0.5;
 
+/// Fraction of the cell height the spectrum takes when a virtual transfer
+/// channel is shown in Single view. The remaining 1 - FRACTION goes to the
+/// standalone phase subplot below it (see `draw_phase_subplot`).
+pub const SPECTRUM_FRACTION_SINGLE: f32 = 0.60;
+
 /// Paint phase + coherence on top of an already-rendered magnitude cell.
 pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFrame) {
     if tf.freqs.is_empty() {
@@ -33,6 +38,77 @@ pub fn draw(painter: &Painter, rect: Rect, cell_view: &CellView, tf: &TransferFr
     // Cool cyan so the phase line reads distinctly against the warm
     // viridis-like magnitude colours in the spectrum cell.
     let phase_color = Color32::from_rgb(110, 225, 240);
+
+    draw_phase_axis(painter, rect, label_color);
+    draw_phase_polyline(
+        painter,
+        rect,
+        cell_view,
+        &tf.freqs,
+        &tf.phase_deg,
+        &tf.coherence,
+        phase_color,
+    );
+    draw_coherence_strip(painter, rect, cell_view, &tf.freqs, &tf.coherence);
+}
+
+/// Standalone phase subplot for the Single-view split layout: own
+/// background, own freq gridlines, phase axis, polyline, and coherence
+/// strip. Caller picks `show_freq_labels` — usually `true` because the
+/// subplot sits at the actual bottom of the cell, so the x-axis labels
+/// belong here rather than on the spectrum above.
+pub fn draw_phase_subplot(
+    painter: &Painter,
+    rect: Rect,
+    cell_view: &CellView,
+    tf: &TransferFrame,
+    show_freq_labels: bool,
+) {
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(0),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 70),
+    );
+
+    let label_color = Color32::from_rgb(
+        theme::GRID_LABEL[0],
+        theme::GRID_LABEL[1],
+        theme::GRID_LABEL[2],
+    );
+    let phase_color = Color32::from_rgb(110, 225, 240);
+    let grid_stroke = Stroke::new(
+        1.0,
+        Color32::from_rgba_unmultiplied(255, 140, 80, (0.05 * 255.0) as u8),
+    );
+
+    let log_min = cell_view.freq_min.max(1.0).log10();
+    let log_max = cell_view.freq_max.max(log_min.exp().max(1.1)).log10();
+    let span = (log_max - log_min).max(0.0001);
+
+    for f in crate::render::grid::freq_ticks(cell_view.freq_min, cell_view.freq_max) {
+        let t = (f.log10() - log_min) / span;
+        if !(0.0..=1.0).contains(&t) {
+            continue;
+        }
+        let x = rect.left() + t * rect.width();
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            grid_stroke,
+        );
+        if show_freq_labels {
+            painter.text(
+                Pos2::new(x, rect.bottom() + 3.0),
+                Align2::CENTER_TOP,
+                crate::render::grid::format_freq_tick(f),
+                FontId::monospace(theme::GRID_LABEL_PX),
+                label_color,
+            );
+        }
+    }
+
+    if tf.freqs.is_empty() {
+        return;
+    }
 
     draw_phase_axis(painter, rect, label_color);
     draw_phase_polyline(

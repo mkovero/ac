@@ -17,6 +17,7 @@ pub fn draw_grid(
     view: &CellView,
     view_mode: ViewMode,
     show_labels: bool,
+    show_freq_labels: bool,
     time_axis: Option<WaterfallTimeAxis>,
 ) {
     let stroke = Stroke::new(
@@ -43,7 +44,7 @@ pub fn draw_grid(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
             stroke,
         );
-        if show_labels {
+        if show_freq_labels {
             painter.text(
                 Pos2::new(x, rect.bottom() + 3.0),
                 egui::Align2::CENTER_TOP,

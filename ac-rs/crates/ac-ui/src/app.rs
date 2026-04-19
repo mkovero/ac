@@ -1639,9 +1639,21 @@ impl App {
             let freq_log_max = view.freq_max.max(20.0).log10();
             match view_mode {
                 ViewMode::Spectrum => {
+                    // Single view + virtual transfer channel splits the
+                    // cell into spectrum (top) + phase subplot (bottom).
+                    // GPU viewport uses y=0 at bottom, so shift origin up
+                    // by (1 - FRACTION) * cell.h and shrink height.
+                    let single_virtual = matches!(self.config.layout, LayoutMode::Single)
+                        && cell.channel >= n_real;
+                    let (vp_y, vp_h) = if single_virtual {
+                        let frac = crate::render::virtual_overlay::SPECTRUM_FRACTION_SINGLE;
+                        (cell.y + cell.h * (1.0 - frac), cell.h * frac)
+                    } else {
+                        (cell.y, cell.h)
+                    };
                     let meta = ChannelMeta {
                         color: theme::channel_color(cell.channel),
-                        viewport: [cell.x, cell.y, cell.w, cell.h],
+                        viewport: [cell.x, vp_y, cell.w, vp_h],
                         db_min: view.db_min,
                         db_max: view.db_max,
                         freq_log_min,
@@ -1872,12 +1884,38 @@ impl App {
                         row_period_s,
                         rows_visible: view.rows_visible,
                     });
+                // Single view + virtual transfer channel → split cell:
+                // spectrum on top, standalone phase subplot below. In all
+                // other cases the grid fills the full cell and the phase
+                // data (if any) overlays the spectrum.
+                let single_virtual = matches!(config_snap.layout, LayoutMode::Single)
+                    && matches!(config_snap.view_mode, ViewMode::Spectrum)
+                    && cell.channel >= n_real_snap;
+                let (grid_rect, phase_rect) = if single_virtual {
+                    let frac = crate::render::virtual_overlay::SPECTRUM_FRACTION_SINGLE;
+                    let split_y = rect.top() + rect.height() * frac;
+                    let top = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.max.x, split_y),
+                    );
+                    let bot = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, split_y),
+                        rect.max,
+                    );
+                    (top, Some(bot))
+                } else {
+                    (rect, None)
+                };
+                // Freq x-axis labels sit at the real cell bottom: the phase
+                // subplot when split, the grid rect otherwise.
+                let grid_freq_labels = show_labels && phase_rect.is_none();
                 grid::draw_grid(
                     &painter,
-                    rect,
+                    grid_rect,
                     &view,
                     config_snap.view_mode,
                     show_labels,
+                    grid_freq_labels,
                     time_axis,
                 );
                 let is_selected = selected_snap
@@ -1896,15 +1934,34 @@ impl App {
                     );
                 }
                 // Virtual transfer channels get an extra phase/coherence
-                // overlay painted on top of the GPU-drawn magnitude. Skip
-                // the waterfall view — time-scrolling row images don't play
-                // well with a static polyline on top.
+                // lane. Skip the waterfall view — time-scrolling row images
+                // don't play well with a static polyline on top. In Single
+                // view the lane is a standalone subplot below the spectrum
+                // (per issue #49); elsewhere it overlays the magnitude.
                 if matches!(config_snap.view_mode, ViewMode::Spectrum)
                     && cell.channel >= n_real_snap
                 {
                     let vi = cell.channel - n_real_snap;
                     if let Some(Some(tf)) = virtual_tf_snap.get(vi) {
-                        crate::render::virtual_overlay::draw(&painter, rect, &view, tf);
+                        if let Some(bot) = phase_rect {
+                            painter.line_segment(
+                                [
+                                    egui::pos2(rect.left(), bot.top()),
+                                    egui::pos2(rect.right(), bot.top()),
+                                ],
+                                egui::Stroke::new(
+                                    1.0,
+                                    egui::Color32::from_rgba_unmultiplied(180, 180, 180, 40),
+                                ),
+                            );
+                            crate::render::virtual_overlay::draw_phase_subplot(
+                                &painter, bot, &view, tf, show_labels,
+                            );
+                        } else {
+                            crate::render::virtual_overlay::draw(
+                                &painter, rect, &view, tf,
+                            );
+                        }
                     }
                 }
             }
