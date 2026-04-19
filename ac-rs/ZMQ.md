@@ -900,7 +900,7 @@ Audio commands are classified into four concurrency groups:
 | `OUTPUT`    | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
 | `INPUT`     | `monitor_spectrum` |
 | `TRANSFER`  | `transfer_stream` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `transfer`, `probe`, `test_hardware`, `test_dut` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `probe`, `test_hardware`, `test_dut` |
 
 Rules:
 - Only one `OUTPUT` command at a time.

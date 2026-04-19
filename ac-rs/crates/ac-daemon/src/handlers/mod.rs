@@ -3,7 +3,7 @@
 //! - `admin`     — status, quit, stop, devices, setup, server_*, calibrations, dmm_read
 //! - `audio`     — generate / sweep / plot / monitor
 //! - `calibrate` — calibrate state machine + cal_reply
-//! - `transfer`  — transfer + probe (port-routing aware)
+//! - `transfer`  — transfer_stream + probe (port-routing aware)
 //! - `test_hw`   — hardware self-tests
 //! - `test_dut`  — DUT qualification suite + dut_reply
 //!
@@ -43,7 +43,7 @@ pub use audio::{
 pub use calibrate::{cal_reply, calibrate};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
-pub use transfer::{probe, transfer, transfer_stream};
+pub use transfer::{probe, transfer_stream};
 
 // ---------------------------------------------------------------------------
 // Busy guard

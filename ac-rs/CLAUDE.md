@@ -7,7 +7,7 @@ Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+cargo test                        # 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
 ```
 
 ## Crate layout
@@ -17,7 +17,7 @@ cargo test                        # 190 tests (ac-core 43, ac-cli 50, ac-daemon 
 | `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 43 unit tests. |
 | `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 50 parser tests. |
 | `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 tests. |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 54 tests. |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 76 tests. |
 
 ## ac-daemon binary
 

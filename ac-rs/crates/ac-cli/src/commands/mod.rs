@@ -12,7 +12,6 @@ pub mod setup;
 pub mod stop;
 pub mod sweep;
 pub mod test;
-pub mod transfer;
 
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec, ParsedCommand};
@@ -42,7 +41,6 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
 
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
-        CommandKind::Transfer { .. } => transfer::run(&parsed.cmd, cfg, client, show),
 
         CommandKind::Probe => probe::run(client),
         CommandKind::TestSoftware => test::run_software(client),

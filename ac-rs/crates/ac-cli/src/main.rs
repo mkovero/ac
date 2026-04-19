@@ -16,10 +16,6 @@ fn main() {
         return;
     }
 
-    if args[0] == "ui" {
-        exec_ui(&args[1..]);
-    }
-
     let parsed = match parse::parse(&args) {
         Ok(cmd) => cmd,
         Err(e) => {
@@ -67,26 +63,4 @@ fn main() {
     }
 
     commands::dispatch(parsed, &cfg, &mut client);
-}
-
-fn exec_ui(args: &[String]) {
-    let bin = spawn::find_binary("ac-ui");
-    match bin {
-        Some(path) => {
-            let status = std::process::Command::new(&path)
-                .args(args)
-                .status();
-            match status {
-                Ok(s) => process::exit(s.code().unwrap_or(1)),
-                Err(e) => {
-                    eprintln!("  error: failed to launch ac-ui: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-        None => {
-            eprintln!("  error: ac-ui not found — build it with: cd ac-rs && cargo build -p ac-ui");
-            process::exit(1);
-        }
-    }
 }

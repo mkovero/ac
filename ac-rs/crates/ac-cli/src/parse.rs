@@ -203,7 +203,6 @@ fn expand(word: &str) -> &str {
         "i" | "in" => "input",
         "r" | "ra" => "range",
         "ref" => "reference",
-        "tf" | "tr" => "transfer",
         _ => {
             // Return the original word — but we need 'static lifetime.
             // We leak here; it's fine for CLI arg parsing (called once).
@@ -305,11 +304,6 @@ pub enum CommandKind {
         max_y: Option<LevelSpec>,
         channels: Option<Vec<u32>>,
     },
-    Transfer {
-        start: Option<f64>,
-        stop: Option<f64>,
-        level: LevelSpec,
-    },
     GenerateSine {
         level: Option<LevelSpec>,
         freq: f64,
@@ -387,7 +381,6 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
         "sweep" => parse_sweep(&mut args, show_plot),
         "monitor" => parse_monitor(&args, show_plot),
         "plot" => parse_plot(&mut args, show_plot),
-        "transfer" => parse_transfer(&args, show_plot),
         "generate" => parse_generate(&mut args, show_plot),
         "calibrate" => parse_calibrate(&args, show_plot),
         "stop" => Ok(ParsedCommand {
@@ -629,24 +622,6 @@ fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<ParsedCommand, 
             stop,
             level,
             ppd,
-        },
-        show_plot,
-    })
-}
-
-fn parse_transfer(args: &[String], show_plot: bool) -> Result<ParsedCommand, String> {
-    let mut tokens = classify_all(args)?;
-    let start = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
-    let stop = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
-    let level = pull(&mut tokens, TokenKind::Level)
-        .map(|v| v.as_level())
-        .unwrap_or(LevelSpec::Dbfs(-20.0));
-    check_empty(&tokens)?;
-    Ok(ParsedCommand {
-        cmd: CommandKind::Transfer {
-            start,
-            stop,
-            level,
         },
         show_plot,
     })
@@ -949,9 +924,7 @@ Commands:
   sweep frequency <freqStart freqStop> [level]                  sweep frequency with fixed level
   plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD vs frequency
   plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
-  transfer        [<freqStart freqStop>] [level]                H1 transfer function (requires reference)
   monitor         [channels] [<freqStart freqStop>] [interval] [show]  live spectrum
-  ui              [--synthetic] [--channels N] [--view <mode>]   GPU spectrum/waterfall UI (ac-ui)
   stop                                                          stop active generator/measurement
   test software                                                  validate analysis pipeline (no hardware)
   test hardware   [dmm]                                          hardware validation (requires 2 loopbacks)
@@ -965,7 +938,7 @@ Commands:
 Units:  20hz 1khz  |  0dbu -12dbfs 775mvrms 1vrms  |  1s  |  10ppd
         append \"show\" to open GPU view window
 
-Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) tf/tr(ansfer) pr(obe) te(st)
+Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) pr(obe) te(st)
               l(evel) f(requency) si(ne) pk(ink) sh(ow) so(ftware) h(ardware)
               se(tup) d(evices) st(op) ref(erence)
 
@@ -1271,25 +1244,6 @@ mod tests {
             }
             other => panic!("expected Calibrate, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_transfer() {
-        let p = parse(&args("transfer 20hz 20khz -10dbfs")).unwrap();
-        match p.cmd {
-            CommandKind::Transfer { start, stop, level } => {
-                assert!((start.unwrap() - 20.0).abs() < 1e-9);
-                assert!((stop.unwrap() - 20000.0).abs() < 1e-9);
-                assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-10.0)).abs() < 1e-9));
-            }
-            other => panic!("expected Transfer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_transfer_abbreviated() {
-        let p = parse(&args("tf")).unwrap();
-        assert!(matches!(p.cmd, CommandKind::Transfer { .. }));
     }
 
     #[test]

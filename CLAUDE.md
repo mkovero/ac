@@ -10,7 +10,7 @@ This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, fr
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+cargo test                     # 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
 ```
 
 ## Install (Python — alternative)
@@ -123,7 +123,7 @@ Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to
 
 Run all tests before committing:
 ```bash
-cd ac-rs && cargo test          # Rust: 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+cd ac-rs && cargo test          # Rust: 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
 python -m pytest tests/ -q      # Python: 156 tests (uses --fake-audio)
 ```
 
