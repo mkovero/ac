@@ -14,6 +14,7 @@ use winit::window::{Window, WindowId};
 
 use crate::data::control::CtrlClient;
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
+use crate::data::smoothing;
 use crate::data::store::{
     ChannelStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
 };
@@ -291,6 +292,20 @@ pub struct App {
     /// the buffer re-seeds from the current spectrum so a loud transient
     /// doesn't pin the trace forever when the room has gone quiet again.
     peak_last_update: Vec<Option<Instant>>,
+    /// Min-hold: mirror of peak-hold, per-bin rolling minimum. Shows the
+    /// noise floor below intermittent signals. Same decay behaviour.
+    min_hold_enabled: bool,
+    min_holds: Vec<Option<Vec<f32>>>,
+    min_last_update: Vec<Option<Instant>>,
+    /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
+    /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
+    /// linearly-spaced FFT output reads as a log-spaced curve. Typical
+    /// audio values: 24, 12, 6, 3. Cycles via `O`.
+    smoothing_frac: Option<u32>,
+    /// Cached window index lists for `smoothing_frac`, keyed by
+    /// (n, n_bins, last-freq-seen). Rebuilt when any of those change; saves
+    /// a per-bin log range recomputation every frame.
+    smoothing_cache: Option<smoothing::OctaveWindows>,
     /// Accumulates fractional scroll ticks while Alt+Scroll is cycling the
     /// waterfall palette, so trackpad pixel-deltas don't step the palette on
     /// every frame. One palette step per full unit of scroll.
@@ -400,6 +415,11 @@ impl App {
             peak_hold_enabled: false,
             peak_holds: Vec::new(),
             peak_last_update: Vec::new(),
+            min_hold_enabled: false,
+            min_holds: Vec::new(),
+            min_last_update: Vec::new(),
+            smoothing_frac: None,
+            smoothing_cache: None,
             alt_scroll_accum: 0.0,
             output_dir,
             notification: None,
@@ -817,6 +837,12 @@ impl App {
             *slot = None;
         }
         for slot in &mut self.peak_last_update {
+            *slot = None;
+        }
+        for slot in &mut self.min_holds {
+            *slot = None;
+        }
+        for slot in &mut self.min_last_update {
             *slot = None;
         }
     }
@@ -1307,6 +1333,30 @@ impl App {
                     "peak hold: off"
                 });
             }
+            KeyCode::KeyM => {
+                self.min_hold_enabled = !self.min_hold_enabled;
+                self.reset_peak_holds();
+                self.notify(if self.min_hold_enabled {
+                    "min hold: on"
+                } else {
+                    "min hold: off"
+                });
+            }
+            KeyCode::KeyO => {
+                self.smoothing_frac = smoothing::next(self.smoothing_frac);
+                // Rebuilds on next frame — drop the cache so the new window
+                // factor takes effect immediately even if n_bins/sr haven't
+                // changed.
+                self.smoothing_cache = None;
+                // Stale peak/min buffers were taken over the old smoothing;
+                // clear them so the user immediately sees traces matching
+                // the new resolution.
+                self.reset_peak_holds();
+                self.notify(&format!(
+                    "smoothing: {}",
+                    smoothing::label(self.smoothing_frac),
+                ));
+            }
             KeyCode::Space => {
                 self.toggle_selection();
             }
@@ -1709,6 +1759,37 @@ impl App {
             frames.push(frame);
         }
 
+        // Fractional-octave smoothing. Runs before peak-hold so the held max
+        // is taken over the smoothed trace the user is actually looking at;
+        // it also keeps the frame-level `spectrum` consistent with what the
+        // overlay reads for hover labels. Window indices are cached per
+        // `(n_frac, n_bins, last_freq)` to avoid a log-range recompute per
+        // frame.
+        if let Some(n_frac) = self.smoothing_frac {
+            for frame in frames.iter_mut().flatten() {
+                if frame.freqs.is_empty() || frame.spectrum.is_empty() {
+                    continue;
+                }
+                let last_f = *frame.freqs.last().unwrap();
+                let needs_rebuild = self
+                    .smoothing_cache
+                    .as_ref()
+                    .map_or(true, |w| !w.matches(n_frac, frame.freqs.len(), last_f));
+                if needs_rebuild {
+                    self.smoothing_cache = Some(smoothing::OctaveWindows::build(
+                        n_frac,
+                        frame.freqs.as_ref(),
+                    ));
+                }
+                let windows = self.smoothing_cache.as_ref().unwrap();
+                let smoothed = smoothing::smooth_db(
+                    frame.spectrum.as_slice(),
+                    windows,
+                );
+                frame.spectrum = Arc::new(smoothed);
+            }
+        }
+
         // Grow per-channel state arrays so the render path can index by the
         // virtual channel index the same way it does for real channels.
         // Shrinking never happens: real channel count is fixed for the
@@ -1726,6 +1807,12 @@ impl App {
         }
         if self.peak_last_update.len() < n_real {
             self.peak_last_update.resize(n_real, None);
+        }
+        if self.min_holds.len() < n_real {
+            self.min_holds.resize(n_real, None);
+        }
+        if self.min_last_update.len() < n_real {
+            self.min_last_update.resize(n_real, None);
         }
 
         // Peak-hold accumulator: fold every fresh spectrum bin-wise against
@@ -1764,6 +1851,53 @@ impl App {
                             // re-seed from the current frame so the trace
                             // drops back to live values instead of holding a
                             // stale transient forever.
+                            if now.duration_since(last) >= PEAK_HOLD_DECAY {
+                                *buf = Some(frame.spectrum.as_ref().clone());
+                                *stamp = Some(now);
+                            }
+                        } else {
+                            *stamp = Some(now);
+                        }
+                    }
+                    _ => {
+                        *buf = Some(frame.spectrum.as_ref().clone());
+                        *stamp = Some(now);
+                    }
+                }
+            }
+        }
+
+        // Min-hold accumulator: mirror of the peak loop with the comparator
+        // flipped. Same decay rule so a brief gap in the signal doesn't pin
+        // the trace down forever at whatever accidental silence the buffer
+        // captured.
+        if self.min_hold_enabled {
+            let now = Instant::now();
+            for (i, slot) in frames.iter().enumerate().take(n_real) {
+                let Some(frame) = slot.as_ref() else { continue };
+                if frame.new_row.is_none() || frame.spectrum.is_empty() {
+                    continue;
+                }
+                let buf = match self.min_holds.get_mut(i) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let stamp = self
+                    .min_last_update
+                    .get_mut(i)
+                    .expect("resized above");
+                match buf.as_mut() {
+                    Some(existing) if existing.len() == frame.spectrum.len() => {
+                        let mut any_updated = false;
+                        for (held, fresh) in existing.iter_mut().zip(frame.spectrum.iter()) {
+                            if fresh.is_finite() && *fresh < *held {
+                                *held = *fresh;
+                                any_updated = true;
+                            }
+                        }
+                        if any_updated {
+                            *stamp = Some(now);
+                        } else if let Some(last) = *stamp {
                             if now.duration_since(last) >= PEAK_HOLD_DECAY {
                                 *buf = Some(frame.spectrum.as_ref().clone());
                                 *stamp = Some(now);
@@ -1981,6 +2115,39 @@ impl App {
                                         // distinctly thicker trace without wiping
                                         // the viewport.
                                         line_width: 0.003,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    // Min-hold trace: darker channel tint, same thickness as
+                    // the live trace. Sits underneath the live line in dB;
+                    // a darker hue keeps it from competing with peak + live
+                    // for the eye.
+                    if self.min_hold_enabled && cell.channel < n_real {
+                        if let Some(Some(min)) = self.min_holds.get(cell.channel) {
+                            if min.len() == frame.spectrum.len() {
+                                let base = theme::channel_color(cell.channel);
+                                let min_color = [
+                                    base[0] * 0.55,
+                                    base[1] * 0.55,
+                                    base[2] * 0.55,
+                                    1.0,
+                                ];
+                                spectrum_uploads.push(ChannelUpload {
+                                    spectrum: min.as_slice(),
+                                    freqs: &frame.freqs,
+                                    meta: ChannelMeta {
+                                        color: min_color,
+                                        viewport: [cell.x, vp_y, cell.w, vp_h],
+                                        db_min: view.db_min,
+                                        db_max: view.db_max,
+                                        freq_log_min,
+                                        freq_log_max,
+                                        n_bins: min.len() as u32,
+                                        offset: 0,
+                                        fill_alpha: 0.0001,
+                                        line_width: 0.0022,
                                     },
                                 });
                             }

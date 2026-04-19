@@ -7,7 +7,7 @@ Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
+cargo test                        # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 81)
 ```
 
 ## Crate layout
@@ -89,7 +89,9 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
 | `S` | Screenshot |
-| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak |
+| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak, auto-decays after 3 s idle |
+| `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
+| `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
 | `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |
