@@ -322,6 +322,77 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     st.floor_db, st.peak_count,
                                 ),
                             }
+
+                            // Re-run the identifier to dump every candidate that
+                            // survived the physicality gates — lets us see why
+                            // the winner won (or lost) vs. the runners-up. Runs
+                            // only when AC_TUNER_DEBUG=1 fires, so the extra
+                            // allocation isn't on the hot path.
+                            let peak_hold = tuner_states[idx].peak_hold();
+                            let range = tuner_states[idx]
+                                .range_lock()
+                                .unwrap_or(tuner_states[idx].config().search_range_hz);
+                            if peak_hold.len() == tuner_freqs.len() && st.floor_db.is_finite() {
+                                let (_, diags) = ac_core::tuner::identify_fundamental_with_candidates(
+                                    peak_hold, &tuner_freqs, st.floor_db, range,
+                                );
+                                let mut sorted = diags;
+                                sorted.sort_by(|a, b| {
+                                    b.score.partial_cmp(&a.score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                for d in &sorted {
+                                    let mut parts = String::new();
+                                    for p in &d.matched {
+                                        use std::fmt::Write;
+                                        let _ = write!(
+                                            parts,
+                                            " ({},{})/{:.1}/{:.0}",
+                                            p.mode.0, p.mode.1,
+                                            p.measured_hz, p.magnitude_db,
+                                        );
+                                    }
+                                    eprintln!(
+                                        "[tuner ch{channel}]   cand f0={:.1} has_peak={} \
+                                         score={:.1} matched={} loudest_ratio={:.3} \
+                                         low_mode_max={:.1} partials={}",
+                                        d.f0,
+                                        if d.has_peak { 1 } else { 0 },
+                                        d.score, d.matched.len(),
+                                        d.loudest_ratio, d.low_mode_max_db,
+                                        parts.trim_start(),
+                                    );
+                                }
+                            }
+
+                            // Top-5 raw FFT bins inside the search range, from
+                            // the pre-peak-hold spectrum. Isolates whether the
+                            // "228 Hz at N>=32k" drift comes from a real bin or
+                            // from the peak-hold / aggregator pipeline.
+                            let (fmin, fmax) = range;
+                            let mut bins: Vec<(f32, f32)> = tuner_freqs
+                                .iter()
+                                .zip(tuner_spec.iter())
+                                .filter(|(f, m)| {
+                                    let fh = **f as f64;
+                                    fh >= fmin && fh <= fmax && m.is_finite()
+                                })
+                                .map(|(f, m)| (*f, *m))
+                                .collect();
+                            bins.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let top: Vec<String> = bins
+                                .iter()
+                                .take(5)
+                                .map(|(f, m)| format!("{:.1}Hz/{:.0}", f, m))
+                                .collect();
+                            if !top.is_empty() {
+                                eprintln!(
+                                    "[tuner ch{channel}]   top5bins: {}",
+                                    top.join(" "),
+                                );
+                            }
                         }
                     }
                     if let ac_core::tuner::Triggered::Fired {

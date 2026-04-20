@@ -56,6 +56,28 @@ pub struct FundamentalCandidate {
     pub partials: Vec<Partial>,
 }
 
+/// Per-candidate scoring trace — survives the physicality gates and is
+/// emitted by [`identify_fundamental_with_candidates`] so callers (daemon
+/// debug log, tests) can see why the identifier picked what it picked
+/// without re-running the scorer. Not written on every frame — only
+/// produced when the caller asks for the diagnostic variant.
+#[derive(Debug, Clone)]
+pub struct CandidateDiag {
+    pub f0: f64,
+    /// Candidate came from a detected local-maximum peak (true) or was
+    /// derived as `peak.freq / ratio` (false).
+    pub has_peak: bool,
+    /// Score used for ranking — sum of `(mag_db - floor_db) * fit` over
+    /// matched partials.
+    pub score: f64,
+    pub matched: Vec<Partial>,
+    /// Ideal ratio of the loudest matched partial.
+    pub loudest_ratio: f64,
+    /// Max magnitude in dBFS across matched partials with `ideal_ratio <= 1.65`.
+    /// `NEG_INFINITY` when no low-mode match exists.
+    pub low_mode_max_db: f64,
+}
+
 /// Tolerance when matching a measured peak against an ideal mode ratio.
 const MATCH_TOL: f64 = 0.05;
 
@@ -134,6 +156,26 @@ fn find_peaks(spectrum_db: &[f32], freqs_hz: &[f32], floor_db: f32, range: (f64,
     out
 }
 
+/// Return `true` when `direct_f0` sits within `MATCH_TOL` of
+/// `derived_f0 * r` for some membrane mode ratio `r >= 1.594`. Used by the
+/// tie-break rule: a direct peak that happens to be an overtone of the
+/// derived candidate is evidence *for* the derived f0, not against it.
+fn is_overtone_of(derived_f0: f64, direct_f0: f64) -> bool {
+    if derived_f0 <= 0.0 || direct_f0 <= 0.0 {
+        return false;
+    }
+    let ratio = direct_f0 / derived_f0;
+    for &(_, _, r) in MEMBRANE_MODES {
+        if r <= 1.001 {
+            continue;
+        }
+        if ((ratio - r) / r).abs() <= MATCH_TOL {
+            return true;
+        }
+    }
+    false
+}
+
 /// Identify the `(0,1)` membrane fundamental in `spectrum_db`.
 ///
 /// `spectrum_db` and `freqs_hz` must have the same length and describe a
@@ -149,9 +191,23 @@ pub fn identify_fundamental(
     floor_db: f32,
     search_range_hz: (f64, f64),
 ) -> Option<FundamentalCandidate> {
+    identify_fundamental_with_candidates(spectrum_db, freqs_hz, floor_db, search_range_hz).0
+}
+
+/// Same as [`identify_fundamental`] but also returns a per-candidate trace
+/// of every candidate that survived the physicality gates. Used by the
+/// daemon's `AC_TUNER_DEBUG` log path and by tests — the diagnostic Vec is
+/// allocated unconditionally, so callers on the hot path should keep using
+/// [`identify_fundamental`] to avoid the tiny extra work.
+pub fn identify_fundamental_with_candidates(
+    spectrum_db: &[f32],
+    freqs_hz: &[f32],
+    floor_db: f32,
+    search_range_hz: (f64, f64),
+) -> (Option<FundamentalCandidate>, Vec<CandidateDiag>) {
     let peaks = find_peaks(spectrum_db, freqs_hz, floor_db, search_range_hz);
     if peaks.is_empty() {
-        return None;
+        return (None, Vec::new());
     }
 
     let total_above_floor: f64 = peaks
@@ -159,7 +215,7 @@ pub fn identify_fundamental(
         .map(|p| (p.magnitude_db - floor_db as f64).max(0.0))
         .sum();
     if total_above_floor <= 0.0 {
-        return None;
+        return (None, Vec::new());
     }
     let loudest_in_range = peaks
         .iter()
@@ -212,7 +268,8 @@ pub fn identify_fundamental(
     // peak within ±5% of f0 * ratio; reward by that peak's dB above floor.
     // A drum with clean overtones lights up many modes; a random lone
     // peak scores only the fundamental slot.
-    let mut best: Option<(f64, FundamentalCandidate, f64)> = None;
+    let mut best: Option<(f64, FundamentalCandidate, f64, bool)> = None;
+    let mut diag: Vec<CandidateDiag> = Vec::new();
     for cand in &dedup {
         let f0 = cand.f0;
         if f0 <= 0.0 {
@@ -312,15 +369,13 @@ pub fn identify_fundamental(
         // evidence is a single high-order overtone (e.g. peak/2.136)
         // farms (0,1) and (1,1) from noise and out-scores the direct
         // candidate on that loud peak.
-        if loudest_ratio > 1.65 {
-            let low_mode_max = matched
-                .iter()
-                .filter(|p| p.ideal_ratio <= 1.65)
-                .map(|p| p.magnitude_db)
-                .fold(f64::NEG_INFINITY, f64::max);
-            if low_mode_max < max_matched - 25.0 {
-                continue;
-            }
+        let low_mode_max = matched
+            .iter()
+            .filter(|p| p.ideal_ratio <= 1.65)
+            .map(|p| p.magnitude_db)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if loudest_ratio > 1.65 && low_mode_max < max_matched - 25.0 {
+            continue;
         }
 
         // Raw energy ratio is 1.0 whenever every peak above the floor happens
@@ -344,33 +399,66 @@ pub fn identify_fundamental(
         let this = FundamentalCandidate {
             freq_hz: f0,
             confidence,
-            partials: matched,
+            partials: matched.clone(),
         };
+        diag.push(CandidateDiag {
+            f0,
+            has_peak: cand.has_peak,
+            score,
+            matched,
+            loudest_ratio,
+            low_mode_max_db: low_mode_max,
+        });
 
-        // Tie-break: higher score wins; on near-tie prefer the candidate
-        // whose own f0 peak is louder. The previous "prefer lower f0"
-        // rule backfired — a sub-harmonic bin whose mode-stack hits the
-        // real fundamental as 2×/(2,1) is exactly the failure mode that
-        // manifests as "tuned one step too low".
+        // Tie-break: higher score wins. On near-tie:
+        //   1. If exactly one candidate is derived (has_peak=false) and the
+        //      direct candidate's f0 sits on one of the derived candidate's
+        //      membrane-mode ratios (within MATCH_TOL), prefer the derived
+        //      one — but ONLY when the derived stack has ≥2 matched partials,
+        //      i.e. independent evidence beyond just the direct peak itself.
+        //      Otherwise every lone peak at f would spawn a derived (1,1)
+        //      candidate at f/1.594 and steal the ID with zero extra support
+        //      (see rejects_quiet_subharmonic_with_dominant_peak).
+        //   2. Otherwise prefer the louder f0 (derived candidates substitute
+        //      the loudest matched partial for a missing f0 peak); on equal
+        //      mag prefer higher f0. Previous "prefer lower f0" rule
+        //      backfired — a sub-harmonic bin whose mode-stack hits the real
+        //      fundamental as 2×/(2,1) lands one octave low.
         let replace = match &best {
             None => true,
-            Some((best_score, best_cand, best_mag)) => {
+            Some((best_score, best_cand, best_mag, best_has_peak)) => {
                 if score > *best_score * 1.001 {
                     true
                 } else if (score - *best_score).abs() <= best_score * 0.001 {
-                    f0_mag > *best_mag
-                        || (f0_mag == *best_mag && f0 > best_cand.freq_hz)
+                    let here_n = this.partials.len();
+                    let best_n = best_cand.partials.len();
+                    match (cand.has_peak, *best_has_peak) {
+                        (false, true)
+                            if here_n >= 2 && is_overtone_of(f0, best_cand.freq_hz) =>
+                        {
+                            true
+                        }
+                        (true, false)
+                            if best_n >= 2 && is_overtone_of(best_cand.freq_hz, f0) =>
+                        {
+                            false
+                        }
+                        _ => {
+                            f0_mag > *best_mag
+                                || (f0_mag == *best_mag && f0 > best_cand.freq_hz)
+                        }
+                    }
                 } else {
                     false
                 }
             }
         };
         if replace {
-            best = Some((score, this, f0_mag));
+            best = Some((score, this, f0_mag, cand.has_peak));
         }
     }
 
-    best.map(|(_, c, _)| c)
+    (best.map(|(_, c, _, _)| c), diag)
 }
 
 /// Parameters for the stateful [`TunerState`] trigger/history pipeline.
@@ -909,6 +997,33 @@ mod tests {
         assert!(
             (c.freq_hz - f0).abs() < 3.0,
             "expected ~{f0} Hz from overtone stack alone, got {}",
+            c.freq_hz
+        );
+    }
+
+    #[test]
+    fn identifies_f0_when_loud_overtone_dominates_observed_peaks() {
+        // Real-drum regression for issue #59. (0,1) is present but 20 dB
+        // below (1,1) — the common case on a tuned drum whose (1,1) is
+        // the loudest partial. Both candidates (direct 319 Hz = (1,1)
+        // and derived 200 Hz = 319/1.594) survive scoring. Without the
+        // overtone-aware tie-break, the old rule picks higher f0 on mag
+        // ties and reports ~319 Hz (one octave-ish high).
+        let f0 = 200.0_f64;
+        let (spec, freqs) = synth(
+            1.0,
+            4096,
+            &[
+                (f0, -40.0),           // (0,1) present but quiet
+                (f0 * 1.594, -20.0),   // (1,1) dominant
+                (f0 * 2.136, -30.0),   // (2,1)
+                (f0 * 2.296, -32.0),   // (0,2)
+            ],
+        );
+        let c = identify_fundamental(&spec, &freqs, -60.0, (40.0, 2000.0)).unwrap();
+        assert!(
+            (c.freq_hz - f0).abs() < 3.0,
+            "expected ~{f0} Hz — loud (1,1) must not steal the fundamental, got {}",
             c.freq_hz
         );
     }
