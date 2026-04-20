@@ -564,40 +564,57 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                 {
                     let analyze_result = ac_core::analysis::analyze(samples, sr, current_freqs[idx], 10);
-                    if let Ok(r) = &analyze_result {
-                        let spec_f32: Vec<f32> = r.spectrum.iter().map(|&v| v as f32).collect();
-                        let freqs_f32: Vec<f32> = r.freqs.iter().map(|&v| v as f32).collect();
-                        tuner_states[idx].set_range_lock(tuner_range_snapshot.get(&channel).copied());
-                        let trig = tuner_states[idx].feed(&spec_f32, &freqs_f32, tuner_dt_s);
-                        if let ac_core::tuner::Triggered::Fired {
-                            candidate: Some(c), confident: true,
-                        } = trig {
-                            let partials_json: Vec<Value> = c.partials.iter().map(|p| json!({
-                                "mode":           [p.mode.0, p.mode.1],
-                                "ideal_ratio":    p.ideal_ratio,
-                                "measured_hz":    p.measured_hz,
-                                "measured_ratio": p.measured_ratio,
-                                "deviation_pct":  p.deviation_pct,
-                                "magnitude_db":   p.magnitude_db,
-                            })).collect();
-                            let ts_ns = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_nanos() as u64)
-                                .unwrap_or(0);
-                            let tframe = json!({
-                                "type":        "tuner",
-                                "cmd":         "monitor_spectrum",
-                                "channel":     channel,
-                                "freq_hz":     c.freq_hz,
-                                "confidence":  c.confidence,
-                                "partials":    partials_json,
-                                "baseline_db": tuner_states[idx].baseline_db(),
-                                "range_lock":  tuner_states[idx].range_lock()
-                                    .map(|(l, h)| json!([l, h])),
-                                "timestamp":   ts_ns,
-                            });
-                            send_pub(&pub_tx, "tuner", &tframe);
+                    // Feed tuner on every frame (both analyze-Ok and -Err paths) so
+                    // baseline tracks silence and the internal peak-hold decays
+                    // idle. Tuner expects dBFS; daemon spectra are linear amplitude,
+                    // so convert here (matches the UI's receiver-side conversion).
+                    let (tuner_spec, tuner_freqs): (Vec<f32>, Vec<f32>) = match &analyze_result {
+                        Ok(r) => (
+                            r.spectrum.iter()
+                                .map(|&v| 20.0 * (v as f32).max(1e-12).log10())
+                                .collect(),
+                            r.freqs.iter().map(|&v| v as f32).collect(),
+                        ),
+                        Err(_) => {
+                            let (s, f) = ac_core::analysis::spectrum_only(samples, sr);
+                            (
+                                s.iter()
+                                    .map(|&v| 20.0 * (v as f32).max(1e-12).log10())
+                                    .collect(),
+                                f.iter().map(|&v| v as f32).collect(),
+                            )
                         }
+                    };
+                    tuner_states[idx].set_range_lock(tuner_range_snapshot.get(&channel).copied());
+                    let trig = tuner_states[idx].feed(&tuner_spec, &tuner_freqs, tuner_dt_s);
+                    if let ac_core::tuner::Triggered::Fired {
+                        candidate: Some(c), confident: true,
+                    } = trig {
+                        let partials_json: Vec<Value> = c.partials.iter().map(|p| json!({
+                            "mode":           [p.mode.0, p.mode.1],
+                            "ideal_ratio":    p.ideal_ratio,
+                            "measured_hz":    p.measured_hz,
+                            "measured_ratio": p.measured_ratio,
+                            "deviation_pct":  p.deviation_pct,
+                            "magnitude_db":   p.magnitude_db,
+                        })).collect();
+                        let ts_ns = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        let tframe = json!({
+                            "type":        "tuner",
+                            "cmd":         "monitor_spectrum",
+                            "channel":     channel,
+                            "freq_hz":     c.freq_hz,
+                            "confidence":  c.confidence,
+                            "partials":    partials_json,
+                            "baseline_db": tuner_states[idx].baseline_db(),
+                            "range_lock":  tuner_states[idx].range_lock()
+                                .map(|(l, h)| json!([l, h])),
+                            "timestamp":   ts_ns,
+                        });
+                        send_pub(&pub_tx, "tuner", &tframe);
                     }
                     let frame = match analyze_result {
                         Ok(r) => {
