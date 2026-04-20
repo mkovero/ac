@@ -357,6 +357,8 @@ pub struct TunerState {
     /// Internal per-bin peak-hold accumulator. Sized to match the last
     /// spectrum fed in; re-seeded on bin-count change.
     peak_hold: Vec<f32>,
+    /// Last [`LevelStatus`] snapshot, refreshed on every `feed`.
+    last_status: LevelStatus,
 }
 
 /// Result of a single [`TunerState::feed`] call.
@@ -374,6 +376,34 @@ pub enum Triggered {
     },
 }
 
+/// Per-frame diagnostic snapshot updated by every [`TunerState::feed`] call.
+/// Read via [`TunerState::status`] — lets callers (daemon, test harness)
+/// log what the trigger/identifier is actually seeing without having to
+/// duplicate the level math. Purely informational; the state machine works
+/// off the internal fields, not this struct.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LevelStatus {
+    /// Loudest live-spectrum bin inside `search_range_hz`, dBFS.
+    pub current_db: f32,
+    /// EMA baseline of `current_db`.
+    pub baseline_db: f32,
+    /// `current_db - baseline_db`. Trigger fires when this clears
+    /// `trigger_delta_db` AND `armed`.
+    pub delta_db: f32,
+    /// Whether the edge detector is armed. Cleared after a fire, re-armed
+    /// when delta falls below `rearm_delta_db`.
+    pub armed: bool,
+    /// Identifier noise floor for this frame (`median(live) + offset`).
+    pub floor_db: f32,
+    /// Peaks the identifier found above floor in the peak-hold buffer.
+    pub peak_count: usize,
+    /// Fundamental of the last candidate the identifier returned — `NaN`
+    /// when none. Written on every trigger attempt, not just confident ones.
+    pub last_candidate_hz: f32,
+    /// Confidence of the last candidate — `NaN` when none.
+    pub last_confidence: f32,
+}
+
 impl TunerState {
     pub fn new(cfg: TunerConfig) -> Self {
         Self {
@@ -384,7 +414,16 @@ impl TunerState {
             history: std::collections::VecDeque::new(),
             range_lock: None,
             peak_hold: Vec::new(),
+            last_status: LevelStatus::default(),
         }
+    }
+
+    /// Diagnostic snapshot of the most recent [`feed`](Self::feed) call:
+    /// level detector state, noise floor, peak count, last candidate freq /
+    /// confidence. Lets callers trace why a trigger did or didn't fire
+    /// without re-implementing the math.
+    pub fn status(&self) -> LevelStatus {
+        self.last_status
     }
 
     /// Read-only view of the internal peak-hold buffer — exposed so
@@ -472,6 +511,16 @@ impl TunerState {
             }
         }
         if !current.is_finite() {
+            self.last_status = LevelStatus {
+                current_db: f32::NAN,
+                baseline_db: self.baseline_db,
+                delta_db: f32::NAN,
+                armed: self.armed,
+                floor_db: f32::NAN,
+                peak_count: 0,
+                last_candidate_hz: f32::NAN,
+                last_confidence: f32::NAN,
+            };
             return Triggered::No;
         }
         if !self.baseline_db.is_finite() {
@@ -487,9 +536,6 @@ impl TunerState {
         if !self.armed && delta < self.cfg.rearm_delta_db {
             self.armed = true;
         }
-        if !(self.armed && delta >= self.cfg.trigger_delta_db) {
-            return Triggered::No;
-        }
         // Noise floor from the LIVE spectrum, not peak-hold. Peak-hold's
         // median is inflated by every transient that has ever hit the bin,
         // which would hide drum partials behind a floor that climbed above
@@ -497,11 +543,29 @@ impl TunerState {
         let floor = median_f32_local(spectrum_db)
             .map(|m| m + self.cfg.floor_over_median_db)
             .unwrap_or(-60.0);
+        if !(self.armed && delta >= self.cfg.trigger_delta_db) {
+            self.last_status = LevelStatus {
+                current_db: current,
+                baseline_db: self.baseline_db,
+                delta_db: delta,
+                armed: self.armed,
+                floor_db: floor,
+                peak_count: 0,
+                last_candidate_hz: f32::NAN,
+                last_confidence: f32::NAN,
+            };
+            return Triggered::No;
+        }
         let range = self.range_lock.unwrap_or(self.cfg.search_range_hz);
+        let peak_count = find_peaks(&self.peak_hold, freqs_hz, floor, range).len();
         let cand = identify_fundamental(&self.peak_hold, freqs_hz, floor, range);
         let confident = cand
             .as_ref()
             .is_some_and(|c| c.confidence >= self.cfg.min_confidence);
+        let (cand_hz, cand_conf) = cand
+            .as_ref()
+            .map(|c| (c.freq_hz as f32, c.confidence as f32))
+            .unwrap_or((f32::NAN, f32::NAN));
         if let Some(c) = &cand {
             if confident {
                 let dup = self.history.back().is_some_and(|&prev| {
@@ -517,6 +581,16 @@ impl TunerState {
         }
         self.last = cand.clone();
         self.armed = false;
+        self.last_status = LevelStatus {
+            current_db: current,
+            baseline_db: self.baseline_db,
+            delta_db: delta,
+            armed: self.armed,
+            floor_db: floor,
+            peak_count,
+            last_candidate_hz: cand_hz,
+            last_confidence: cand_conf,
+        };
         Triggered::Fired { candidate: cand, confident }
     }
 }

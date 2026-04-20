@@ -414,6 +414,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             .map(|_| ac_core::tuner::TunerState::new(ac_core::tuner::TunerConfig::default()))
             .collect();
         let mut tuner_last_tick = std::time::Instant::now();
+        let mut tuner_status_last_log = std::time::Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
@@ -587,6 +588,35 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     };
                     tuner_states[idx].set_range_lock(tuner_range_snapshot.get(&channel).copied());
                     let trig = tuner_states[idx].feed(&tuner_spec, &tuner_freqs, tuner_dt_s);
+                    // Log every trigger attempt (both confident and non-confident)
+                    // so users can see why tracking fails — non-confident fires
+                    // don't get published but are still load-bearing diagnostic
+                    // signal. Throttled level status at 1 Hz separately below.
+                    // Gated by AC_TUNER_DEBUG=1 to keep stderr quiet otherwise.
+                    let tuner_debug = std::env::var_os("AC_TUNER_DEBUG").is_some();
+                    if tuner_debug {
+                        if let ac_core::tuner::Triggered::Fired { candidate, confident } = &trig {
+                            let st = tuner_states[idx].status();
+                            match candidate {
+                                Some(c) => eprintln!(
+                                    "[tuner ch{channel}] FIRE conf={} f0={:.1}Hz confidence={:.2} \
+                                     partials={} current={:.1}dB baseline={:.1}dB delta={:.1}dB \
+                                     floor={:.1}dB peaks={}",
+                                    if *confident { "YES" } else { "no " },
+                                    c.freq_hz, c.confidence, c.partials.len(),
+                                    st.current_db, st.baseline_db, st.delta_db,
+                                    st.floor_db, st.peak_count,
+                                ),
+                                None => eprintln!(
+                                    "[tuner ch{channel}] FIRE no-candidate \
+                                     current={:.1}dB baseline={:.1}dB delta={:.1}dB \
+                                     floor={:.1}dB peaks={}",
+                                    st.current_db, st.baseline_db, st.delta_db,
+                                    st.floor_db, st.peak_count,
+                                ),
+                            }
+                        }
+                    }
                     if let ac_core::tuner::Triggered::Fired {
                         candidate: Some(c), confident: true,
                     } = trig {
@@ -672,6 +702,25 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     };
                     send_pub(&pub_tx, "data", &frame);
                 }
+            }
+            // 1 Hz tuner level status log. Gated by AC_TUNER_DEBUG=1; lets
+            // users see live current/baseline/delta/armed/floor even when no
+            // trigger is firing, to diagnose why tracking fails.
+            if std::env::var_os("AC_TUNER_DEBUG").is_some()
+                && tuner_status_last_log.elapsed().as_secs_f64() >= 1.0
+            {
+                for (idx, &channel) in channels_worker.iter().enumerate() {
+                    let st = tuner_states[idx].status();
+                    eprintln!(
+                        "[tuner ch{channel}] status current={:.1}dB baseline={:.1}dB \
+                         delta={:.1}dB armed={} floor={:.1}dB peaks={} \
+                         last_f0={:.1}Hz last_conf={:.2}",
+                        st.current_db, st.baseline_db, st.delta_db,
+                        st.armed, st.floor_db, st.peak_count,
+                        st.last_candidate_hz, st.last_confidence,
+                    );
+                }
+                tuner_status_last_log = std::time::Instant::now();
             }
             // Pace FFT mode to requested interval. CWT has its own cadence
             // (short tick + sliding ring — see `cwt_tick`) and paces itself.
