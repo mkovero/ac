@@ -318,6 +318,12 @@ pub struct TunerConfig {
     /// then dragged the identifier's noise floor up until drum partials
     /// fell below it. Constant decay sidesteps that.
     pub peak_release_db_per_sec: f32,
+    /// Absolute-level gate: a candidate is rejected unless the peak level
+    /// across the search band is `≥` this dBFS. Kills noise-floor fires
+    /// where `delta` crosses the trigger on ambient wiggle. `None` disables
+    /// the gate — the default. Typical tuning: `Some(-45.0)` for close-mic
+    /// drums, `Some(-60.0)` for distant or quiet mics.
+    pub min_level_dbfs: Option<f32>,
 }
 
 impl Default for TunerConfig {
@@ -336,6 +342,7 @@ impl Default for TunerConfig {
             // window but fast enough that the peak-hold median tracks the
             // actual noise floor within a few seconds of silence.
             peak_release_db_per_sec: 8.0,
+            min_level_dbfs: None,
         }
     }
 }
@@ -454,6 +461,12 @@ impl TunerState {
         self.range_lock = range;
     }
 
+    /// Replace the active config. Leaves level-detector state intact so a
+    /// live sensitivity tweak doesn't disarm or clear the baseline EMA.
+    pub fn set_config(&mut self, cfg: TunerConfig) {
+        self.cfg = cfg;
+    }
+
     /// Clear baseline, disarm flag, last candidate, history, and the
     /// internal peak-hold buffer. Range lock is left alone — the caller
     /// decides whether a reset should also drop the lock.
@@ -543,7 +556,12 @@ impl TunerState {
         let floor = median_f32_local(spectrum_db)
             .map(|m| m + self.cfg.floor_over_median_db)
             .unwrap_or(-60.0);
-        if !(self.armed && delta >= self.cfg.trigger_delta_db) {
+        let level_ok = self
+            .cfg
+            .min_level_dbfs
+            .map(|thr| current >= thr)
+            .unwrap_or(true);
+        if !(self.armed && delta >= self.cfg.trigger_delta_db && level_ok) {
             self.last_status = LevelStatus {
                 current_db: current,
                 baseline_db: self.baseline_db,

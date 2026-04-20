@@ -274,6 +274,46 @@ pub fn tuner_range(state: &ServerState, cmd: &Value) -> Value {
     }
 }
 
+/// Override the tuner detector config. All fields optional — omitted
+/// values keep their current setting. `min_level_dbfs` accepts `null` to
+/// clear the gate. The `monitor_spectrum` worker reads the shared config
+/// every tick and pushes it into each per-channel `TunerState` via
+/// `set_config`, so a change takes effect on the next publish cycle.
+pub fn tuner_config(state: &ServerState, cmd: &Value) -> Value {
+    let mut g = state.tuner_config.lock().unwrap();
+    if let Some(v) = cmd.get("trigger_delta_db").and_then(Value::as_f64) {
+        if !v.is_finite() || v < 0.0 {
+            return json!({"ok": false, "error": "trigger_delta_db must be ≥ 0"});
+        }
+        g.trigger_delta_db = v as f32;
+    }
+    if let Some(v) = cmd.get("min_confidence").and_then(Value::as_f64) {
+        if !(0.0..=1.0).contains(&v) {
+            return json!({"ok": false, "error": "min_confidence must be in [0,1]"});
+        }
+        g.min_confidence = v;
+    }
+    if let Some(v) = cmd.get("min_level_dbfs") {
+        g.min_level_dbfs = match v {
+            Value::Null => None,
+            Value::Number(n) => {
+                let f = n.as_f64().unwrap_or(f64::NAN);
+                if !f.is_finite() {
+                    return json!({"ok": false, "error": "min_level_dbfs must be finite or null"});
+                }
+                Some(f as f32)
+            }
+            _ => return json!({"ok": false, "error": "min_level_dbfs must be number or null"}),
+        };
+    }
+    json!({
+        "ok": true,
+        "trigger_delta_db": g.trigger_delta_db,
+        "min_confidence":   g.min_confidence,
+        "min_level_dbfs":   g.min_level_dbfs,
+    })
+}
+
 pub fn server_connections(state: &ServerState) -> Value {
     let listen_mode = state.listen_mode.lock().unwrap().clone();
     let (ctrl_ep, data_ep) = if listen_mode == "public" {

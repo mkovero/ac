@@ -358,6 +358,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let cwt_sigma_shared = state.cwt_sigma.clone();
     let cwt_n_scales_shared = state.cwt_n_scales.clone();
     let tuner_range_locks_shared = state.tuner_range_locks.clone();
+    let tuner_config_shared = state.tuner_config.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
@@ -422,6 +423,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             tuner_last_tick = tick_start;
             let tuner_range_snapshot: std::collections::HashMap<u32, (f64, f64)> =
                 tuner_range_locks_shared.lock().unwrap().clone();
+            let tuner_cfg_snapshot = *tuner_config_shared.lock().unwrap();
+            for st in tuner_states.iter_mut() {
+                st.set_config(tuner_cfg_snapshot);
+            }
             let (cur_interval, cur_fft_n) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n)

@@ -99,6 +99,51 @@ pub const TUNER_MIN_CONFIDENCE: f64 = 0.25;
 /// around the current fundamental. 0.2 = ±20% covers a couple of
 /// semitones of detune without admitting neighbouring octaves.
 pub const TUNER_RANGE_LOCK_FRAC: f64 = 0.20;
+/// Min-level step (dBFS) applied by `+`/`-` while tuner mode is active.
+pub const TUNER_MIN_LEVEL_STEP_DB: f32 = 1.0;
+pub const TUNER_MIN_LEVEL_FLOOR_DBFS: f32 = -120.0;
+pub const TUNER_MIN_LEVEL_CEIL_DBFS: f32 = -10.0;
+
+/// Detector sensitivity preset cycled by `Shift+U`. Each preset maps to a
+/// `(trigger_delta_db, min_confidence)` pair; the absolute-level gate is
+/// controlled separately by `+`/`-` so the user can dial it independently
+/// of the edge/confidence pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TunerSensitivity {
+    /// Lenient — fires on quieter/closer-spaced overtone stacks. Room
+    /// ambience can false-fire.
+    Low,
+    /// Default balanced preset.
+    #[default]
+    Mid,
+    /// Strict — rejects all but clearly-voiced hits.
+    High,
+}
+
+impl TunerSensitivity {
+    pub fn label(self) -> &'static str {
+        match self {
+            TunerSensitivity::Low => "Low",
+            TunerSensitivity::Mid => "Mid",
+            TunerSensitivity::High => "High",
+        }
+    }
+    /// `(trigger_delta_db, min_confidence)`.
+    pub fn params(self) -> (f32, f64) {
+        match self {
+            TunerSensitivity::Low  => (6.0,  0.25),
+            TunerSensitivity::Mid  => (10.0, 0.35),
+            TunerSensitivity::High => (15.0, 0.45),
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            TunerSensitivity::Low  => TunerSensitivity::Mid,
+            TunerSensitivity::Mid  => TunerSensitivity::High,
+            TunerSensitivity::High => TunerSensitivity::Low,
+        }
+    }
+}
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.
@@ -339,6 +384,15 @@ pub struct App {
     /// REQ when the user presses Space in Live mode. Mirrored locally so
     /// the overlay can label the lock without round-tripping to the daemon.
     tuner_range_lock: Option<(f64, f64)>,
+    /// Detector sensitivity preset cycled by `Shift+U`. Maps to
+    /// `(trigger_delta_db, min_confidence)` pushed to the daemon via
+    /// `tuner_config`.
+    tuner_sensitivity: TunerSensitivity,
+    /// Absolute-level gate in dBFS — fires only when the in-band peak is
+    /// this loud or louder. `None` disables the gate. Stepped by `+`/`-`
+    /// while tuner mode is active; falls through to the default dB-span
+    /// control otherwise.
+    tuner_min_level_dbfs: Option<f32>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -466,6 +520,8 @@ impl App {
             tuner_mode: TunerMode::Off,
             tuner_locks: Vec::new(),
             tuner_range_lock: None,
+            tuner_sensitivity: TunerSensitivity::Mid,
+            tuner_min_level_dbfs: Some(-60.0),
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
             // disable via `O`.
@@ -1171,6 +1227,47 @@ impl App {
         }
     }
 
+    /// Step `tuner_min_level_dbfs` by the given dB delta, clamped to the
+    /// configured floor/ceiling. Crossing the floor clears the gate
+    /// (None); starting from None assumes the floor.
+    fn step_tuner_min_level(&mut self, delta_db: f32) {
+        let cur = self.tuner_min_level_dbfs.unwrap_or(TUNER_MIN_LEVEL_FLOOR_DBFS);
+        let next = cur + delta_db;
+        if next < TUNER_MIN_LEVEL_FLOOR_DBFS {
+            self.tuner_min_level_dbfs = None;
+            self.notify("tuner min level: off");
+        } else {
+            let clamped = next.min(TUNER_MIN_LEVEL_CEIL_DBFS);
+            self.tuner_min_level_dbfs = Some(clamped);
+            self.notify(&format!("tuner min level: {:.0} dBFS", clamped));
+        }
+        self.send_tuner_config();
+        self.needs_redraw = true;
+    }
+
+    /// Push the current sensitivity preset + min-level gate to the daemon
+    /// via the `tuner_config` REQ. Synthetic backend has no daemon; no-op.
+    fn send_tuner_config(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let (trigger_delta_db, min_confidence) = self.tuner_sensitivity.params();
+        let min_level = match self.tuner_min_level_dbfs {
+            Some(v) => serde_json::Value::from(v as f64),
+            None => serde_json::Value::Null,
+        };
+        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let cmd = serde_json::json!({
+            "cmd":              "tuner_config",
+            "trigger_delta_db": trigger_delta_db,
+            "min_confidence":   min_confidence,
+            "min_level_dbfs":   min_level,
+        });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("tuner_config failed: {e}");
+        }
+    }
+
     fn send_cwt_params(&mut self) {
         if self.analysis_mode != "cwt" {
             return;
@@ -1428,6 +1525,22 @@ impl App {
                     "min hold: off"
                 });
             }
+            KeyCode::KeyU if self.modifiers.shift_key() => {
+                // Shift+U cycles detector sensitivity (Low → Mid → High) without
+                // touching mode. The preset pair (trigger_delta_db,
+                // min_confidence) is pushed to the daemon immediately so the
+                // next tick applies it. Works from Off too — pressing now so
+                // the next Live-mode entry starts at the user's preferred
+                // sensitivity.
+                self.tuner_sensitivity = self.tuner_sensitivity.next();
+                let (dd, mc) = self.tuner_sensitivity.params();
+                self.send_tuner_config();
+                self.notify(&format!(
+                    "tuner sensitivity: {} (Δ {:.0} dB, conf ≥ {:.2})",
+                    self.tuner_sensitivity.label(), dd, mc
+                ));
+                self.needs_redraw = true;
+            }
             KeyCode::KeyU => {
                 // Tuner tri-state cycle. The identifier reads from the
                 // peak-hold buffer (a live drum hit decays in <100 ms — no
@@ -1445,6 +1558,10 @@ impl App {
                         } else {
                             self.notify("tuner: on");
                         }
+                        // First enable: push current preset + min-level to the
+                        // daemon so its detector matches what the UI advertises
+                        // before any `+`/`-` or `Shift+U` tweaks.
+                        self.send_tuner_config();
                         TunerMode::Live
                     }
                     TunerMode::Live => {
@@ -1584,10 +1701,18 @@ impl App {
                 }
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.adjust_hovered_db_span(-20.0);
+                if self.tuner_mode != TunerMode::Off {
+                    self.step_tuner_min_level(TUNER_MIN_LEVEL_STEP_DB);
+                } else {
+                    self.adjust_hovered_db_span(-20.0);
+                }
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.adjust_hovered_db_span(20.0);
+                if self.tuner_mode != TunerMode::Off {
+                    self.step_tuner_min_level(-TUNER_MIN_LEVEL_STEP_DB);
+                } else {
+                    self.adjust_hovered_db_span(20.0);
+                }
             }
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;
@@ -2487,6 +2612,8 @@ impl App {
         } else {
             None
         };
+        let tuner_sens_snap = self.tuner_sensitivity;
+        let tuner_min_level_snap = self.tuner_min_level_dbfs;
         let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
             .iter()
             .map(|(_, _, tf)| tf.clone())
@@ -2792,6 +2919,8 @@ impl App {
                             lock,
                             tuner_mode_snap,
                             tuner_range_lock_snap,
+                            tuner_sens_snap,
+                            tuner_min_level_snap,
                         );
                     }
                 }
@@ -3479,6 +3608,8 @@ fn draw_tuner_overlay(
     lock_target_hz: Option<f64>,
     mode: TunerMode,
     range_lock: Option<(f64, f64)>,
+    sensitivity: TunerSensitivity,
+    min_level_dbfs: Option<f32>,
 ) {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
@@ -3551,19 +3682,18 @@ fn draw_tuner_overlay(
 
         // Overtone partial ticks: short verticals in the lower half of the
         // cell so they don't collide with the fundamental label at the top.
+        // Partial ticks only — no per-tick text labels. At 8–11 matched
+        // partials squeezed into a narrow log-scaled Hz band the labels
+        // stack on top of each other and become unreadable; the corner
+        // readout already enumerates the same (m,n)/Δ% data with the
+        // partials sorted by ideal ratio so the user has a clean table to
+        // read instead of a smear on the plot.
         for p in cand.partials.iter().skip(1) {
             if let Some(x) = freq_to_x(p.measured_hz as f32) {
                 let y_top = rect.top() + rect.height() * 0.65;
                 painter.line_segment(
                     [egui::pos2(x, y_top), egui::pos2(x, rect.bottom())],
                     egui::Stroke::new(1.0, partial_color),
-                );
-                painter.text(
-                    egui::pos2(x + 3.0, y_top + 2.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("({},{}) Δ{:+.1}%", p.mode.0, p.mode.1, p.deviation_pct),
-                    egui::FontId::monospace(theme::GRID_LABEL_PX),
-                    partial_color,
                 );
             }
         }
@@ -3668,6 +3798,20 @@ fn draw_tuner_overlay(
             y += row_h;
         }
     }
+    // Sensitivity + min-level readout — always shown while the tuner is
+    // visible so the user can see what detector settings produced the
+    // candidate above (or what's blocking one).
+    let level_str = match min_level_dbfs {
+        Some(v) => format!("{:.0} dBFS", v),
+        None => "off".to_string(),
+    };
+    painter.text(
+        egui::pos2(rect.right() - 4.0, y),
+        egui::Align2::RIGHT_TOP,
+        format!("sens {}  min {}", sensitivity.label(), level_str),
+        egui::FontId::monospace(theme::GRID_LABEL_PX),
+        text_color,
+    );
 }
 
 #[cfg(test)]
