@@ -2036,12 +2036,31 @@ impl App {
         // Stretch the freq clamp to whatever Nyquist the producer is running
         // at: fake-audio daemon is typically 48 kHz → 24 kHz, but a 96 kHz
         // session will hand us freqs up to ~48 kHz and the clamp must follow.
+        // Daemon owns the aggregation and publishes bins spanning f_min..f_max
+        // (20 Hz .. sr/2). The GPU shader maps bin index linearly across the
+        // viewport, so the on-screen axis is correct only if view.freq_min /
+        // freq_max match the data range. Lock both to the data range — pan/zoom
+        // on the freq axis was explicitly traded away for this.
+        let mut data_max_seen = self.data_freq_ceiling;
+        let mut data_min_seen = theme::DEFAULT_FREQ_MIN;
         for slot in frames.iter().flatten() {
             if let Some(&last) = slot.freqs.last() {
-                if last.is_finite() && last > self.data_freq_ceiling {
-                    self.data_freq_ceiling = last;
+                if last.is_finite() && last > data_max_seen {
+                    data_max_seen = last;
                 }
             }
+            if let Some(&first) = slot.freqs.first() {
+                if first.is_finite() && first > 0.0 {
+                    data_min_seen = first;
+                }
+            }
+        }
+        if data_max_seen > self.data_freq_ceiling {
+            self.data_freq_ceiling = data_max_seen;
+        }
+        for cv in self.cell_views.iter_mut() {
+            cv.freq_min = data_min_seen;
+            cv.freq_max = self.data_freq_ceiling;
         }
 
         let view_mode = self.config.view_mode;
