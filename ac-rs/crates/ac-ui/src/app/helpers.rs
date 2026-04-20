@@ -1,0 +1,302 @@
+use std::time::Duration;
+
+use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
+use crate::data::synthetic::SyntheticHandle;
+
+/// How long a notification string stays visible in the overlay. Also gates
+/// the continuous-repaint window: while a notification is live we repaint at
+/// ~60 Hz so the fade / pop-in feels right; after it expires we drop back to
+/// event-driven idle. Was previously a 1200 ms magic literal at the single
+/// overlay-display site; lifted so `about_to_wait` can clear `self.notification`
+/// at the same boundary instead of leaking state forever.
+pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
+
+/// Frame cap for continuous repaint windows (notification fade, benchmark).
+pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Left/Right arrow tunes FFT monitor refresh rate in 1 ms steps (Left =
+/// slower, Right = faster). Clamped to [`MONITOR_INTERVAL_MIN_MS`,
+/// `MONITOR_INTERVAL_MAX_MS`]. The FLOOR/CEIL below bracket what the eye
+/// perceives as "live": below 33 ms (30 Hz) we're wasting CPU past the
+/// display refresh, above 50 ms (20 Hz) the motion starts to step.
+pub const MONITOR_INTERVAL_MIN_MS: u32 = 1;
+pub const MONITOR_INTERVAL_MAX_MS: u32 = 1000;
+pub const MONITOR_INTERVAL_FLOOR_MS: u32 = 33;
+pub const MONITOR_INTERVAL_CEIL_MS: u32 = 50;
+
+/// Pick a smooth monitor tick for a given FFT size + sample rate. Targets
+/// ~window/8 (87.5% overlap) so consecutive frames share most of their
+/// input and motion reads as continuous even when N is large; floored at
+/// 33 ms so tiny N doesn't burn cycles past the display refresh, ceilinged
+/// at 50 ms so huge N still feels alive rather than stepped. Arrow keys
+/// still let the user push outside this band manually.
+pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
+    let sr = sr_hz.max(1) as f32;
+    let window_ms = (fft_n as f32 * 1000.0) / sr;
+    let target = (window_ms / 8.0).round().max(1.0) as u32;
+    target.clamp(MONITOR_INTERVAL_FLOOR_MS, MONITOR_INTERVAL_CEIL_MS)
+}
+
+/// Rolling window for the waterfall row-period estimator. Median over the
+/// last N row-to-row dt samples; bigger → more stable axis labels, smaller
+/// → faster tracking if the producer cadence genuinely changes. 16 at 10 Hz
+/// means the axis responds to real cadence shifts within ~1.6 s while
+/// single-frame jitter is absorbed by the median.
+pub const WATERFALL_ROW_DT_WINDOW: usize = 16;
+
+/// Peak-hold release: how long the held value sits unchanged before it
+/// starts falling toward the live trace. A standard audio-meter "attack-0,
+/// release-after-hold" behaviour — a transient pins the trace for 3 s, then
+/// the line glides back down at a bounded rate instead of snapping.
+pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(1);
+
+/// Fall rate once release kicks in. 20 dB/s matches the perceived cadence of
+/// analogue peak-program meters — fast enough to track genuine level drops,
+/// slow enough that the user can still read the number on the way down. Also
+/// drives min-hold's symmetric rise toward live.
+pub const PEAK_RELEASE_DB_PER_SEC: f32 = 20.0;
+
+/// Drum-tuner search window for the (0,1) fundamental. 40 Hz is below any
+/// reasonable kick resonance; 2 kHz sits above the tightest piccolo snare.
+/// Overtone partials can fall anywhere above this ceiling — only the
+/// fundamental candidate itself is gated.
+pub const TUNER_SEARCH_MIN_HZ: f64 = 40.0;
+pub const TUNER_SEARCH_MAX_HZ: f64 = 2000.0;
+/// Below this confidence score we render nothing — a wrong-but-labelled
+/// peak is worse than no peak at all when the user is chasing cents.
+pub const TUNER_MIN_CONFIDENCE: f64 = 0.25;
+/// Half-width (as fraction of f0) of the Space-to-lock search range
+/// around the current fundamental. 0.2 = ±20% covers a couple of
+/// semitones of detune without admitting neighbouring octaves.
+pub const TUNER_RANGE_LOCK_FRAC: f64 = 0.20;
+/// Min-level step (dBFS) applied by `+`/`-` while tuner mode is active.
+pub const TUNER_MIN_LEVEL_STEP_DB: f32 = 1.0;
+pub const TUNER_MIN_LEVEL_FLOOR_DBFS: f32 = -120.0;
+pub const TUNER_MIN_LEVEL_CEIL_DBFS: f32 = -10.0;
+
+/// Detector sensitivity preset cycled by `Shift+U`. Each preset maps to a
+/// `(trigger_delta_db, min_confidence)` pair; the absolute-level gate is
+/// controlled separately by `+`/`-` so the user can dial it independently
+/// of the edge/confidence pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TunerSensitivity {
+    /// Lenient — fires on quieter/closer-spaced overtone stacks. Room
+    /// ambience can false-fire.
+    Low,
+    /// Default balanced preset.
+    #[default]
+    Mid,
+    /// Strict — rejects all but clearly-voiced hits.
+    High,
+}
+
+impl TunerSensitivity {
+    pub fn label(self) -> &'static str {
+        match self {
+            TunerSensitivity::Low => "Low",
+            TunerSensitivity::Mid => "Mid",
+            TunerSensitivity::High => "High",
+        }
+    }
+    /// `(trigger_delta_db, min_confidence)`.
+    pub fn params(self) -> (f32, f64) {
+        match self {
+            TunerSensitivity::Low  => (6.0,  0.25),
+            TunerSensitivity::Mid  => (10.0, 0.35),
+            TunerSensitivity::High => (15.0, 0.45),
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            TunerSensitivity::Low  => TunerSensitivity::Mid,
+            TunerSensitivity::Mid  => TunerSensitivity::High,
+            TunerSensitivity::High => TunerSensitivity::Low,
+        }
+    }
+}
+
+/// Need at least this many dt samples in the window before we trust the
+/// median enough to replace the 0.1 s default. Below this we keep the
+/// default so the first couple of frames don't set a wildly wrong period.
+pub const WATERFALL_ROW_DT_MIN: usize = 5;
+/// Relative-change gate: only repaint the row-period when the new median
+/// differs by more than this fraction from the current value. Kills label
+/// flipping caused by micro-jitter in the median without blocking real
+/// cadence shifts.
+pub const WATERFALL_ROW_DT_HYSTERESIS: f32 = 0.03;
+
+/// Median of an f32 slice, ignoring NaN. Returns `None` if empty.
+pub fn median_f32(samples: &[f32]) -> Option<f32> {
+    let mut v: Vec<f32> = samples.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    })
+}
+
+/// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
+/// N (finer resolution), Down → smaller N (coarser but faster capture).
+/// Protocol rejects anything outside [256, 131072] or non-pow2.
+pub const MONITOR_FFT_N_LADDER: &[u32] =
+    &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+
+/// Step a ladder: find `current`'s index, move by `delta`, clamp to bounds.
+/// Returns the new value, or `current` if it wasn't on the ladder (keeps the
+/// UI coherent when the daemon default drifts from the UI default).
+pub fn step_ladder(ladder: &[u32], current: u32, delta: i32) -> u32 {
+    let Some(idx) = ladder.iter().position(|&v| v == current) else {
+        return current;
+    };
+    let new_idx = (idx as i32 + delta).clamp(0, ladder.len() as i32 - 1) as usize;
+    ladder[new_idx]
+}
+
+/// Pure-state result of the `about_to_wait` decision, extracted so the same
+/// logic can be unit-tested without a winit event loop. Translating this to
+/// winit calls is the only thing `about_to_wait` does on top of calling
+/// `App::loop_directive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopDirective {
+    /// Redraw now, then keep the loop running at ~60 Hz until next tick
+    /// (notification fade / benchmark).
+    RedrawContinuous,
+    /// Redraw now, then block on events (data wake-ups, OS input).
+    RedrawIdle,
+    /// Don't redraw, wait indefinitely for the next event.
+    Idle,
+}
+
+pub enum DataSource {
+    // Retained: handle owns the synthetic worker thread; dropping it stops the thread.
+    Synthetic(#[allow(dead_code)] SyntheticHandle),
+    Receiver(ReceiverHandle),
+}
+
+impl DataSource {
+    pub(super) fn connected(&self) -> bool {
+        match self {
+            DataSource::Synthetic(_) => true,
+            DataSource::Receiver(h) => h.status.connected.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+    pub(super) fn status(&self) -> Option<&ReceiverStatus> {
+        match self {
+            DataSource::Receiver(h) => Some(&h.status),
+            _ => None,
+        }
+    }
+}
+
+pub enum SourceKind {
+    Synthetic,
+    Daemon,
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    #[test]
+    fn step_ladder_walks_within_bounds() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, 0), 8192);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, -1), 4096);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 8192, 1), 16384);
+    }
+
+    #[test]
+    fn step_ladder_clamps_at_edges() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 1024, -5), 1024);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 131072, 5), 131072);
+    }
+
+    #[test]
+    fn step_ladder_leaves_off_ladder_value_unchanged() {
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 12345, 1), 12345);
+    }
+
+    #[test]
+    fn fft_n_ladder_entries_are_pow2_in_protocol_range() {
+        for &n in MONITOR_FFT_N_LADDER {
+            assert!(n.is_power_of_two(), "ladder entry {n} not pow2");
+            assert!((256..=131_072).contains(&n), "ladder entry {n} out of protocol range");
+        }
+    }
+
+    #[test]
+    fn auto_interval_floors_for_small_n() {
+        // Tiny windows never drop below the display-refresh floor — no
+        // reason to tick faster than the eye can track.
+        assert_eq!(auto_monitor_interval_ms(1024, 48_000), MONITOR_INTERVAL_FLOOR_MS);
+        assert_eq!(auto_monitor_interval_ms(4096, 48_000), MONITOR_INTERVAL_FLOOR_MS);
+    }
+
+    #[test]
+    fn auto_interval_ceils_for_huge_n() {
+        // Huge windows cap at the "still feels live" ceiling even though
+        // window/8 would suggest much slower ticks.
+        assert_eq!(auto_monitor_interval_ms(32768, 48_000), MONITOR_INTERVAL_CEIL_MS);
+        assert_eq!(auto_monitor_interval_ms(65536, 48_000), MONITOR_INTERVAL_CEIL_MS);
+    }
+
+    #[test]
+    fn auto_interval_scales_with_sample_rate() {
+        // Double the sample rate halves the window duration → tick shrinks
+        // (until it hits the floor).
+        let at_48k = auto_monitor_interval_ms(16384, 48_000);
+        let at_96k = auto_monitor_interval_ms(16384, 96_000);
+        assert!(at_96k <= at_48k, "{at_96k} ms should be ≤ {at_48k} ms");
+    }
+
+    #[test]
+    fn auto_interval_stays_within_clamp_band() {
+        for &n in MONITOR_FFT_N_LADDER {
+            for &sr in &[44_100u32, 48_000, 88_200, 96_000, 192_000] {
+                let tick = auto_monitor_interval_ms(n, sr);
+                assert!(
+                    (MONITOR_INTERVAL_FLOOR_MS..=MONITOR_INTERVAL_CEIL_MS).contains(&tick),
+                    "tick {tick} outside band for N={n} sr={sr}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn median_of_odd_slice_picks_middle() {
+        assert_eq!(median_f32(&[0.09, 0.11, 0.10]), Some(0.10));
+    }
+
+    #[test]
+    fn median_of_even_slice_averages_middle_pair() {
+        let m = median_f32(&[0.1, 0.2, 0.3, 0.4]).unwrap();
+        assert!((m - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_rejects_nan_samples() {
+        // A single spurious NaN in the ring shouldn't poison the estimate.
+        let m = median_f32(&[0.10, f32::NAN, 0.11, 0.10]).unwrap();
+        assert!((m - 0.10).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_empty_returns_none() {
+        assert_eq!(median_f32(&[]), None);
+    }
+
+    #[test]
+    fn median_absorbs_single_stall() {
+        // Producer running at ~10 Hz with one 500 ms stall — the median
+        // should stay near 0.1 s instead of jumping halfway to 0.5 s the way
+        // a 15% EMA would.
+        let mut samples = vec![0.10_f32; 15];
+        samples.push(0.50);
+        let m = median_f32(&samples).unwrap();
+        assert!((m - 0.10).abs() < 0.01, "median {m} pulled too far by stall");
+    }
+}
