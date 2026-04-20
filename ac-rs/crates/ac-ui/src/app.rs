@@ -2749,14 +2749,25 @@ impl App {
                     && matches!(config_snap.view_mode, ViewMode::Spectrum)
                     && cell.channel < n_real_snap
                 {
-                    let cand_opt = tuner_last_snap
+                    let raw_cand = tuner_last_snap
                         .get(cell.channel)
-                        .and_then(|o| o.as_ref())
+                        .and_then(|o| o.as_ref());
+                    let cand_opt = raw_cand
                         .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
                     let hist_empty: Vec<f64> = Vec::new();
                     let hist = tuner_history_snap
                         .get(cell.channel)
                         .unwrap_or(&hist_empty);
+                    if std::env::var_os("AC_TUNER_DEBUG").is_some() {
+                        eprintln!(
+                            "[ui draw] ch{} mode={:?} raw={} cand_pass={} hist_len={} freqs_len={}",
+                            cell.channel, tuner_mode_snap,
+                            raw_cand.map(|c| format!("f0={:.1}Hz conf={:.2}", c.freq_hz, c.confidence))
+                                .unwrap_or_else(|| "None".into()),
+                            cand_opt.is_some(), hist.len(),
+                            frames.get(cell.channel).and_then(|f| f.as_ref()).map(|f| f.freqs.len()).unwrap_or(0),
+                        );
+                    }
                     if cand_opt.is_some()
                         || !hist.is_empty()
                         || tuner_range_lock_snap.is_some()

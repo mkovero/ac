@@ -138,13 +138,24 @@ pub fn spawn(
                     if topic == "tuner" {
                         match serde_json::from_str::<TunerFrame>(body) {
                             Ok(tf) => {
+                                if std::env::var_os("AC_TUNER_DEBUG").is_some() {
+                                    eprintln!(
+                                        "[ui recv] tuner ch{} f0={:.1}Hz conf={:.2} partials={}",
+                                        tf.channel, tf.freq_hz, tf.confidence, tf.partials.len()
+                                    );
+                                }
                                 tuner.ingest(tf);
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
                                 status_c.last_frame_ns.store(ns, Ordering::Relaxed);
                                 notify();
                             }
-                            Err(e) => log::warn!("tuner parse failed: {e}"),
+                            Err(e) => {
+                                if std::env::var_os("AC_TUNER_DEBUG").is_some() {
+                                    eprintln!("[ui recv] tuner PARSE FAIL: {e}  body={body}");
+                                }
+                                log::warn!("tuner parse failed: {e}");
+                            }
                         }
                         continue;
                     }
