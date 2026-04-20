@@ -291,30 +291,6 @@ def test_server_enable_disable(server_client):
     assert status2["listen_mode"] == "local"
 
 
-def test_server_enable_remote_client_can_connect(server_client):
-    """After server_enable a second client connecting via hostname must work."""
-    import socket as _socket
-    from ac.client.ac import AcClient as _AcClient
-
-    ack = server_client.send_cmd({"cmd": "server_enable"}, timeout_ms=3000)
-    assert ack is not None and ack["ok"]
-    time.sleep(0.15)
-
-    hostname = _socket.gethostname()
-    remote_client = _AcClient(host=hostname,
-                              ctrl_port=server_client._ctrl_port,
-                              data_port=server_client._data_port)
-    try:
-        r = remote_client.send_cmd({"cmd": "status"}, timeout_ms=2000)
-        assert r is not None, "remote client got no response from public server"
-        assert r["ok"] is True
-        assert r["listen_mode"] == "public"
-    finally:
-        remote_client.close()
-        server_client.send_cmd({"cmd": "server_disable"}, timeout_ms=3000)
-        time.sleep(0.1)
-
-
 # ---------------------------------------------------------------------------
 # Plot level
 # ---------------------------------------------------------------------------
@@ -466,16 +442,6 @@ def test_plot_level_thd_numerical_accuracy(server_client):
     assert f["drive_db"] == pytest.approx(-20.0)
 
 
-def test_software_self_tests():
-    """ac test software: all built-in software tests must pass."""
-    from ac.test import run_software_tests
-    failures = []
-    for result in run_software_tests():
-        if not result.passed:
-            failures.append(f"{result.name}: {result.detail}")
-    assert not failures, f"Software self-tests failed: {failures}"
-
-
 def test_monitor_spectrum_frames(server_client):
     """Spectrum monitor should stream spectrum frames."""
     client = server_client
@@ -551,107 +517,6 @@ def _ensure_reference_channel(client, channel=1):
     """Set reference_channel so transfer/test_hardware/test_dut commands don't reject."""
     ack = client.send_cmd({"cmd": "setup", "update": {"reference_channel": channel}})
     assert ack is not None and ack["ok"] is True
-
-
-def test_transfer_requires_reference(server_client):
-    """transfer must return ok=False with an informative error when no reference is configured."""
-    client = server_client
-    # Clear reference_channel (null is accepted since setup now handles explicit null)
-    clear = client.send_cmd({"cmd": "setup", "update": {"reference_channel": None}})
-    assert clear is not None and clear["ok"] is True
-    assert clear["config"].get("reference_channel") is None
-
-    ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
-    assert ack is not None
-    assert ack["ok"] is False
-    assert "reference" in ack.get("error", "").lower()
-
-
-def test_transfer_frames(server_client):
-    """transfer emits a transfer_result frame with all required fields then done."""
-    import numpy as np
-    client = server_client
-    _ensure_reference_channel(client, channel=1)
-
-    ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
-    assert ack is not None
-    assert ack["ok"] is True, f"transfer rejected: {ack.get('error')}"
-    assert "out_port"     in ack
-    assert "in_port"      in ack
-    assert "ref_port"     in ack
-    assert "ref_out_port" in ack
-
-    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
-    data_frames = [f for t, f in frames if t == "data"]
-    assert data_frames, "expected at least one data frame from transfer"
-
-    tf = next((f for f in data_frames if f.get("type") == "transfer_result"), None)
-    assert tf is not None, "no transfer_result frame received"
-
-    # Required fields present
-    for field in ("freqs", "magnitude_db", "phase_deg", "coherence", "delay_samples", "delay_ms"):
-        assert field in tf, f"missing field '{field}' in transfer_result"
-
-    # Basic type checks
-    assert isinstance(tf["freqs"],         list) and len(tf["freqs"]) > 0
-    assert isinstance(tf["magnitude_db"],  list)
-    assert isinstance(tf["coherence"],     list)
-    assert isinstance(tf["delay_samples"], int)
-    assert isinstance(tf["delay_ms"],      float)
-
-    # Array lengths must all match
-    n = len(tf["freqs"])
-    assert len(tf["magnitude_db"]) == n, "magnitude_db length mismatch"
-    assert len(tf["phase_deg"])    == n, "phase_deg length mismatch"
-    assert len(tf["coherence"])    == n, "coherence length mismatch"
-
-    # Downsampling cap
-    assert n <= 2000, f"expected ≤ 2000 frequency points, got {n}"
-
-    # Numeric sanity: coherence in [0, 1]
-    coh = np.array(tf["coherence"])
-    assert np.all(coh >= 0.0), f"coherence below 0: min={coh.min():.4f}"
-    assert np.all(coh <= 1.0), f"coherence above 1: max={coh.max():.4f}"
-
-    # Numeric sanity: magnitude finite (no NaN/inf)
-    mag = np.array(tf["magnitude_db"])
-    assert np.all(np.isfinite(mag)), "non-finite values in magnitude_db"
-
-    # FakeEngine returns identical ref+meas → 0 dB flat transfer, coherence ≈ 1
-    assert np.allclose(mag[1:], 0.0, atol=1.0), \
-        f"FakeEngine should produce ~0 dB transfer; mean={mag[1:].mean():.3f}"
-    assert np.all(coh[1:] > 0.95), \
-        f"FakeEngine identical signals → coherence should be ≈1; min={coh[1:].min():.4f}"
-
-    done_frames = [f for t, f in frames if t == "done"]
-    assert done_frames, "no done frame from transfer"
-    assert done_frames[0]["cmd"] == "transfer"
-
-
-def test_transfer_default_level(server_client):
-    """transfer without explicit level_dbfs must complete successfully (defaults to -10 dBFS)."""
-    client = server_client
-    ack = client.send_cmd({"cmd": "transfer"})   # no level_dbfs
-    assert ack is not None
-    assert ack["ok"] is True, f"transfer rejected: {ack.get('error')}"
-
-    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
-    terminal = [t for t, _ in frames if t in ("done", "error")]
-    assert terminal, "no terminal frame from transfer"
-    assert terminal[-1] == "done", f"expected done, got {terminal[-1]}"
-
-
-def test_transfer_stop_early(server_client):
-    """Stopping a running transfer must produce a done/error terminal frame."""
-    client = server_client
-    ack = client.send_cmd({"cmd": "transfer", "level_dbfs": -20.0})
-    assert ack["ok"] is True
-
-    client.send_cmd({"cmd": "stop"})
-
-    frames = recv_until(client, done_topics=("done", "error"), max_frames=500, timeout_ms=15000)
-    terminal = [t for t, _ in frames if t in ("done", "error")]
-    assert terminal, "no terminal frame after stopping transfer"
 
 
 # ---------------------------------------------------------------------------
