@@ -153,7 +153,8 @@ pub fn median_f32(samples: &[f32]) -> Option<f32> {
 /// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
 /// N (finer resolution), Down → smaller N (coarser but faster capture).
 /// Protocol rejects anything outside [256, 131072] or non-pow2.
-pub const MONITOR_FFT_N_LADDER: &[u32] = &[1024, 2048, 4096, 8192, 16384, 32768, 65536];
+pub const MONITOR_FFT_N_LADDER: &[u32] =
+    &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
 /// Step a ladder: find `current`'s index, move by `delta`, clamp to bounds.
 /// Returns the new value, or `current` if it wasn't on the ladder (keeps the

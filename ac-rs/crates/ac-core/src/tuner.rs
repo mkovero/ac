@@ -59,21 +59,22 @@ pub struct FundamentalCandidate {
 /// Tolerance when matching a measured peak against an ideal mode ratio.
 const MATCH_TOL: f64 = 0.05;
 
-/// Prominence gate for f0 candidates. Rejects candidates whose loudest
-/// matched partial (including (0,1) itself) is more than this many dB
-/// below the loudest peak in the search range. Stops a quiet bass
-/// artifact from winning by coincidentally matching many faint low-freq
-/// peaks while ignoring the dominant tone. 20 dB gives comfortable room
-/// for real drums where (0,1) is typically ≤14 dB below the (1,1) argmax.
-const MATCHED_PROMINENCE_DB: f64 = 20.0;
+/// Stack-level prominence gate — at least one of the candidate's
+/// matched partials (including (0,1) itself) must be within this many
+/// dB of the loudest peak in range. Loose enough to accept the (0,1)
+/// of a heavily-damped drum; tight enough to reject a bass artefact
+/// whose entire mode stack is composed of floor-noise wiggles.
+const MATCHED_PROMINENCE_DB: f64 = 25.0;
 
 /// Minimum prominence the candidate f0 peak itself must clear, relative
 /// to the loudest peak in the search range. A sub-harmonic that would
 /// otherwise aggregate a high score by hijacking the real peak through
 /// ratio aliasing must still be loud enough to plausibly be the true
-/// fundamental. 20 dB matches the matched-stack gate so real drum f0s
-/// (usually ≤14 dB below the (1,1) argmax) still qualify.
-const F0_PROMINENCE_DB: f64 = 20.0;
+/// fundamental. 30 dB keeps the sub-harmonic reject intact (typical
+/// aliasing artefacts land 30+ dB below the dominant) while leaving
+/// headroom for real drum (0,1)s, which can sit 20–25 dB below the
+/// (1,1) argmax on damped or low-tuned heads.
+const F0_PROMINENCE_DB: f64 = 30.0;
 
 #[derive(Debug, Clone, Copy)]
 struct Peak {
