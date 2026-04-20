@@ -202,6 +202,7 @@ pub enum LoopDirective {
 }
 
 pub enum DataSource {
+    // Retained: handle owns the synthetic worker thread; dropping it stops the thread.
     Synthetic(#[allow(dead_code)] SyntheticHandle),
     Receiver(ReceiverHandle),
 }

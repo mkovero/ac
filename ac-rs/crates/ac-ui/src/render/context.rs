@@ -5,6 +5,7 @@ use super::timing::GpuTiming;
 
 pub struct RenderContext {
     pub window: Arc<Window>,
+    // Retained: wgpu resources held for Drop ordering; surface/device depend on them.
     #[allow(dead_code)]
     pub instance: wgpu::Instance,
     pub surface: wgpu::Surface<'static>,

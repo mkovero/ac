@@ -216,6 +216,7 @@ impl VirtualChannelStore {
         false
     }
 
+    // Retained: exercised by unit tests below; no production caller yet.
     #[allow(dead_code)]
     pub fn store_for(&self, pair: TransferPair) -> Option<TransferStore> {
         self.inner.lock().ok().and_then(|g| {
@@ -264,6 +265,7 @@ impl VirtualChannelStore {
         self.len() == 0
     }
 
+    // Retained: exercised by unit tests below; no production caller yet.
     #[allow(dead_code)]
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {

@@ -22,6 +22,7 @@ pub struct SpectrumFrame {
     pub xruns: u32,
     #[serde(default)]
     pub channel: Option<u32>,
+    // Retained: wire-protocol field populated by receiver; no UI consumer yet.
     #[serde(default)]
     #[allow(dead_code)]
     pub n_channels: Option<u32>,
@@ -71,7 +72,8 @@ pub struct FrameMeta {
     // future per-frame inspection / export, but the live monitor UI no
     // longer displays them — THD is meaningless on broadband signals and
     // the argmax is already visible via the peak-hold marker and the new
-    // broadband readout. See `ui::fmt::broadband_stats`.
+    // broadband readout. See `ui::fmt::broadband_stats`. `xruns` is wire-
+    // protocol only (not yet displayed).
     #[allow(dead_code)]
     pub freq_hz: f32,
     #[allow(dead_code)]
@@ -100,7 +102,6 @@ pub struct CwtFrame {
     #[serde(default)]
     pub channel:     Option<u32>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub n_channels:  Option<u32>,
 }
 
@@ -218,6 +219,7 @@ pub struct TunerFrame {
     pub freq_hz:     f64,
     pub confidence:  f64,
     pub partials:    Vec<ac_core::tuner::Partial>,
+    // Retained: diagnostics fields published by daemon; no UI consumer yet.
     #[serde(default)]
     #[allow(dead_code)]
     pub baseline_db: f32,
