@@ -59,6 +59,22 @@ pub struct FundamentalCandidate {
 /// Tolerance when matching a measured peak against an ideal mode ratio.
 const MATCH_TOL: f64 = 0.05;
 
+/// Prominence gate for f0 candidates. Rejects candidates whose loudest
+/// matched partial (including (0,1) itself) is more than this many dB
+/// below the loudest peak in the search range. Stops a quiet bass
+/// artifact from winning by coincidentally matching many faint low-freq
+/// peaks while ignoring the dominant tone. 20 dB gives comfortable room
+/// for real drums where (0,1) is typically ≤14 dB below the (1,1) argmax.
+const MATCHED_PROMINENCE_DB: f64 = 20.0;
+
+/// Minimum prominence the candidate f0 peak itself must clear, relative
+/// to the loudest peak in the search range. A sub-harmonic that would
+/// otherwise aggregate a high score by hijacking the real peak through
+/// ratio aliasing must still be loud enough to plausibly be the true
+/// fundamental. 20 dB matches the matched-stack gate so real drum f0s
+/// (usually ≤14 dB below the (1,1) argmax) still qualify.
+const F0_PROMINENCE_DB: f64 = 20.0;
+
 #[derive(Debug, Clone, Copy)]
 struct Peak {
     freq_hz: f64,
@@ -144,35 +160,55 @@ pub fn identify_fundamental(
     if total_above_floor <= 0.0 {
         return None;
     }
+    let loudest_in_range = peaks
+        .iter()
+        .map(|p| p.magnitude_db)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     // Score each peak as a candidate (0,1). For every membrane mode ratio,
     // look for a peak within ±5% of f0 * ratio; reward by that peak's dB
     // above floor. A drum with clean overtones lights up many modes; a
     // random lone peak scores only the fundamental slot.
-    let mut best: Option<(f64, FundamentalCandidate)> = None;
+    let mut best: Option<(f64, FundamentalCandidate, f64)> = None;
     for cand in &peaks {
         let f0 = cand.freq_hz;
         if f0 <= 0.0 {
             continue;
         }
+        // f0 itself must be a prominent peak. Without this gate a quiet
+        // sub-harmonic artifact can farm matches against the real loud
+        // peak via 2.136× / 2.296× / 2.918× aliasing and out-score the
+        // true fundamental whose only match is itself.
+        if cand.magnitude_db < loudest_in_range - F0_PROMINENCE_DB {
+            continue;
+        }
         let mut matched: Vec<Partial> = Vec::new();
         let mut score = 0.0_f64;
+        let mut used = vec![false; peaks.len()];
         for &(m, n, ratio) in MEMBRANE_MODES {
             let target = f0 * ratio;
             // Prefer the peak with the smallest relative deviation from
             // target, not the loudest — a loud non-matching peak would
-            // otherwise poison the match for a nearby overtone mode.
-            let mut best_p: Option<(f64, Peak)> = None;
-            for p in &peaks {
+            // otherwise poison the match for a nearby overtone mode. Skip
+            // peaks already consumed by an earlier mode so a lone strong
+            // peak can't get credited to two neighbouring ratios at once
+            // (the classic sub-harmonic amplifier: f0/2 sees the real
+            // peak as both (2,1) and (0,2) and wins on duplicate score).
+            let mut best_p: Option<(f64, usize, Peak)> = None;
+            for (idx, p) in peaks.iter().enumerate() {
+                if used[idx] {
+                    continue;
+                }
                 let dev = (p.freq_hz - target) / target;
                 if dev.abs() <= MATCH_TOL {
                     let d = dev.abs();
-                    if best_p.map(|(x, _)| d < x).unwrap_or(true) {
-                        best_p = Some((d, *p));
+                    if best_p.map(|(x, _, _)| d < x).unwrap_or(true) {
+                        best_p = Some((d, idx, *p));
                     }
                 }
             }
-            if let Some((_, p)) = best_p {
+            if let Some((_, idx, p)) = best_p {
+                used[idx] = true;
                 let dev_pct = (p.freq_hz / target - 1.0) * 100.0;
                 score += (p.magnitude_db - floor_db as f64).max(0.0);
                 matched.push(Partial {
@@ -192,6 +228,19 @@ pub fn identify_fundamental(
             continue;
         }
 
+        // Prominence gate: reject candidates whose entire matched stack
+        // sits far below the dominant peak in range. Otherwise a quiet
+        // sub-harmonic (e.g. PSU hum at 47 Hz) with a handful of random
+        // low-freq noise matches can out-score a clean dominant tone
+        // whose only match is itself.
+        let max_matched = matched
+            .iter()
+            .map(|p| p.magnitude_db)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if max_matched < loudest_in_range - MATCHED_PROMINENCE_DB {
+            continue;
+        }
+
         // Raw energy ratio is 1.0 whenever every peak above the floor happens
         // to fall near a mode ratio — which includes the degenerate case of
         // a single isolated peak. Weight by matched-partial count so a thin
@@ -200,33 +249,37 @@ pub fn identify_fundamental(
         let energy_ratio = (score / total_above_floor).clamp(0.0, 1.0);
         let stack_weight = (matched.len() as f64 / 4.0).min(1.0);
         let confidence = (energy_ratio * stack_weight).clamp(0.0, 1.0);
+        let f0_mag = cand.magnitude_db;
         let this = FundamentalCandidate {
             freq_hz: f0,
             confidence,
             partials: matched,
         };
 
-        // Tie-break: higher score wins; on near-tie prefer the lower f0
-        // so an octave-up candidate (whose ratios are all sub-harmonics)
-        // doesn't pre-empt the real fundamental.
+        // Tie-break: higher score wins; on near-tie prefer the candidate
+        // whose own f0 peak is louder. The previous "prefer lower f0"
+        // rule backfired — a sub-harmonic bin whose mode-stack hits the
+        // real fundamental as 2×/(2,1) is exactly the failure mode that
+        // manifests as "tuned one step too low".
         let replace = match &best {
             None => true,
-            Some((best_score, best_cand)) => {
+            Some((best_score, best_cand, best_mag)) => {
                 if score > *best_score * 1.001 {
                     true
                 } else if (score - *best_score).abs() <= best_score * 0.001 {
-                    f0 < best_cand.freq_hz
+                    f0_mag > *best_mag
+                        || (f0_mag == *best_mag && f0 > best_cand.freq_hz)
                 } else {
                     false
                 }
             }
         };
         if replace {
-            best = Some((score, this));
+            best = Some((score, this, f0_mag));
         }
     }
 
-    best.map(|(_, c)| c)
+    best.map(|(_, c, _)| c)
 }
 
 #[cfg(test)]
@@ -362,6 +415,39 @@ mod tests {
         let c = identify_fundamental(&spec, &freqs, -50.0, (40.0, 2000.0)).unwrap();
         let cents_off = cents(c.freq_hz, true_hz).abs();
         assert!(cents_off < 5.0, "got {} Hz ({} cents off)", c.freq_hz, cents_off);
+    }
+
+    #[test]
+    fn rejects_quiet_subharmonic_with_dominant_peak() {
+        // Real-world failure: a loud drum-ish peak at 221 Hz with a quiet
+        // bass artifact at 47 Hz. Naïve matching gives the subharmonic
+        // multiple matches on random low-freq noise and beats the
+        // dominant 221 Hz candidate. Prominence gate + corrected
+        // tie-break must keep 221 as the identified fundamental.
+        let mut spec = vec![-110.0_f32; 4096];
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        // Triangle peak builder — inline so we can add partials at custom levels.
+        let add = |spec: &mut [f32], f: f64, db: f32| {
+            let i = f.round() as usize;
+            spec[i] = spec[i].max(db);
+            spec[i - 1] = spec[i - 1].max(db - 6.0);
+            spec[i + 1] = spec[i + 1].max(db - 6.0);
+        };
+        // Dominant peak at 221 Hz.
+        add(&mut spec, 221.0, -60.0);
+        // Subharmonic artifact at 47 Hz, 30 dB quieter.
+        add(&mut spec, 47.0, -90.0);
+        // A scatter of low-freq noise peaks that 47 Hz can mode-match
+        // coincidentally: 75.6, 101, 108, 149, 166, 192.
+        for &f in &[75.6, 101.0, 108.0, 149.0, 166.0, 192.0] {
+            add(&mut spec, f, -92.0);
+        }
+        let c = identify_fundamental(&spec, &freqs, -100.0, (40.0, 2000.0)).unwrap();
+        assert!(
+            (c.freq_hz - 221.0).abs() < 2.0,
+            "expected ~221 Hz, got {}",
+            c.freq_hz,
+        );
     }
 
     #[test]

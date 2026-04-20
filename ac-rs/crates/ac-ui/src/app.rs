@@ -120,6 +120,11 @@ pub const TUNER_HISTORY_CAP: usize = 5;
 /// (1.5 % ≈ 26 cents). Prevents the history ring from filling with near-
 /// duplicates when the drum rings at a steady pitch over several frames.
 pub const TUNER_HISTORY_DEDUPE_FRAC: f64 = 0.015;
+
+/// Half-width (as fraction of f0) of the Space-to-lock search range
+/// around the current fundamental. 0.2 = ±20% covers a couple of
+/// semitones of detune without admitting neighbouring octaves.
+pub const TUNER_RANGE_LOCK_FRAC: f64 = 0.20;
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.
@@ -376,6 +381,13 @@ pub struct App {
     /// channels — the baseline EMA runs once per incoming frame batch, and
     /// all channels see the same dt.
     tuner_baseline_last: Option<Instant>,
+    /// Optional narrow search range (Hz) that overrides
+    /// `TUNER_SEARCH_MIN_HZ..TUNER_SEARCH_MAX_HZ` while set. Toggled by
+    /// Space while the tuner is Live: the user hits the drum, the tuner
+    /// resolves e.g. 221 Hz, Space locks the search to ±20% of that so
+    /// subsequent hits can't alias onto a sub-harmonic outside the
+    /// interesting range.
+    tuner_range_lock: Option<(f64, f64)>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -506,6 +518,7 @@ impl App {
             tuner_armed: Vec::new(),
             tuner_history: Vec::new(),
             tuner_baseline_last: None,
+            tuner_range_lock: None,
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
             // disable via `O`.
@@ -1506,7 +1519,41 @@ impl App {
                 ));
             }
             KeyCode::Space => {
-                self.toggle_selection();
+                // In Live tuner mode Space narrows the search range
+                // around the current candidate so repeated hits can't
+                // alias to a sub-harmonic outside the area of interest.
+                // Press again to unlock. Only hijacks Space in Live;
+                // Locked and Off preserve the original selection toggle.
+                if self.tuner_mode == TunerMode::Live {
+                    if self.tuner_range_lock.is_some() {
+                        self.tuner_range_lock = None;
+                        self.notify("tuner: range unlocked");
+                    } else {
+                        let ch = self.config.active_channel;
+                        let f0 = self
+                            .tuner_last
+                            .get(ch)
+                            .and_then(|s| s.as_ref())
+                            .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE)
+                            .map(|c| c.freq_hz);
+                        if let Some(f0) = f0 {
+                            let lo = (f0 * (1.0 - TUNER_RANGE_LOCK_FRAC))
+                                .max(TUNER_SEARCH_MIN_HZ);
+                            let hi = (f0 * (1.0 + TUNER_RANGE_LOCK_FRAC))
+                                .min(TUNER_SEARCH_MAX_HZ);
+                            self.tuner_range_lock = Some((lo, hi));
+                            self.notify(&format!(
+                                "tuner: range locked {:.0}-{:.0} Hz",
+                                lo, hi
+                            ));
+                        } else {
+                            self.notify("tuner: no confident f0 to lock range on");
+                        }
+                    }
+                    self.needs_redraw = true;
+                } else {
+                    self.toggle_selection();
+                }
             }
             KeyCode::KeyH => {
                 self.show_help = !self.show_help;
@@ -2123,11 +2170,14 @@ impl App {
                     let floor = median_f32(peak)
                         .map(|m| m + TUNER_FLOOR_OVER_MEDIAN_DB)
                         .unwrap_or(-60.0);
+                    let range = self
+                        .tuner_range_lock
+                        .unwrap_or((TUNER_SEARCH_MIN_HZ, TUNER_SEARCH_MAX_HZ));
                     let cand = ac_core::tuner::identify_fundamental(
                         peak,
                         &frame.freqs,
                         floor,
-                        (TUNER_SEARCH_MIN_HZ, TUNER_SEARCH_MAX_HZ),
+                        range,
                     );
                     if let Some(c) = &cand {
                         if c.confidence >= TUNER_MIN_CONFIDENCE {
@@ -2161,6 +2211,7 @@ impl App {
                 *slot = true;
             }
             self.tuner_baseline_last = None;
+            self.tuner_range_lock = None;
         }
 
         // Min-hold accumulator: mirror of the peak loop with the comparator
@@ -2567,6 +2618,11 @@ impl App {
         } else {
             Vec::new()
         };
+        let tuner_range_lock_snap = if self.tuner_mode != TunerMode::Off {
+            self.tuner_range_lock
+        } else {
+            None
+        };
         let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
             .iter()
             .map(|(_, _, tf)| tf.clone())
@@ -2837,7 +2893,10 @@ impl App {
                     let hist = tuner_history_snap
                         .get(cell.channel)
                         .unwrap_or(&hist_empty);
-                    if cand_opt.is_some() || !hist.is_empty() {
+                    if cand_opt.is_some()
+                        || !hist.is_empty()
+                        || tuner_range_lock_snap.is_some()
+                    {
                         let lock = tuner_locks_snap
                             .get(cell.channel)
                             .copied()
@@ -2857,6 +2916,7 @@ impl App {
                             &view,
                             lock,
                             tuner_mode_snap,
+                            tuner_range_lock_snap,
                         );
                     }
                 }
@@ -3532,6 +3592,7 @@ use crate::ui::fmt::format_freq_compact;
 /// clamped to `view.freq_min..freq_max`; any marker whose Hz falls outside
 /// the visible window is skipped for the on-plot glyph but still appears
 /// in the corner text so the reader sees it exists.
+#[allow(clippy::too_many_arguments)]
 fn draw_tuner_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -3542,6 +3603,7 @@ fn draw_tuner_overlay(
     view: &CellView,
     lock_target_hz: Option<f64>,
     mode: TunerMode,
+    range_lock: Option<(f64, f64)>,
 ) {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
@@ -3693,6 +3755,19 @@ fn draw_tuner_overlay(
             text_color,
         );
         y += n_lines * row_h;
+    }
+    // Range-lock indicator: one line showing the clamped search window
+    // when active, so the user can tell at a glance why the tuner is
+    // ignoring sub-harmonic candidates outside the band.
+    if let Some((lo, hi)) = range_lock {
+        painter.text(
+            egui::pos2(rect.right() - 4.0, y),
+            egui::Align2::RIGHT_TOP,
+            format!("range-lock {:.0}-{:.0} Hz", lo, hi),
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            text_color,
+        );
+        y += row_h;
     }
     // History block: newest last, so the list reads top-down as oldest →
     // latest. Label prefix lets the user parse it even when no live f0 is
