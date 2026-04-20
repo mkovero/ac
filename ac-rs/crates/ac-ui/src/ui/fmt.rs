@@ -183,6 +183,56 @@ pub fn hover_label(channel: usize, freq_hz: f32, readout: &HoverReadout) -> Stri
     }
 }
 
+/// Interval between two frequencies in cents. Positive if `actual > target`.
+/// Caller is expected to feed strictly positive Hz values; zero or negative
+/// inputs return 0 rather than panic on `log2` of a non-positive number.
+pub fn cents(actual_hz: f64, target_hz: f64) -> f64 {
+    if actual_hz <= 0.0 || target_hz <= 0.0 {
+        return 0.0;
+    }
+    1200.0 * (actual_hz / target_hz).log2()
+}
+
+/// Nearest 12-TET pitch name + deviation in cents from that name. Uses
+/// `A4 = 440 Hz` (the standard); returns `(e.g. "A3", -8.0)` for
+/// slightly-flat A3. Octave numbering is scientific pitch notation
+/// (middle C is C4). `hz ≤ 0` returns `("?", 0.0)`.
+pub fn hz_to_note(hz: f64) -> (String, f64) {
+    if hz <= 0.0 {
+        return ("?".to_string(), 0.0);
+    }
+    let semitones = 12.0 * (hz / 440.0_f64).log2() + 69.0;
+    let midi = semitones.round() as i32;
+    let cents_off = (semitones - midi as f64) * 100.0;
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    let name = NAMES[midi.rem_euclid(12) as usize];
+    let octave = midi.div_euclid(12) - 1;
+    (format!("{name}{octave}"), cents_off)
+}
+
+/// Multi-line corner readout for the drum tuner. Line 1 is the fundamental
+/// Hz + nearest-note + cents + confidence. Subsequent lines list up to the
+/// top-3 overtone partials by ideal-ratio order with their deviation from
+/// the ideal membrane ratio. Locked-mode target lines are appended by the
+/// caller since they depend on per-channel state the formatter doesn't see.
+pub fn tuner_corner_label(cand: &ac_core::tuner::FundamentalCandidate) -> String {
+    let (note, cents_off) = hz_to_note(cand.freq_hz);
+    let mut s = format!(
+        "f0 {:.1} Hz  ({} {:+.0}¢)  conf {:.2}",
+        cand.freq_hz, note, cents_off, cand.confidence,
+    );
+    for p in cand.partials.iter().skip(1).take(3) {
+        s.push('\n');
+        s.push_str(&format!(
+            "  ({},{}) r {:.3}  {:.1} Hz  Δ{:+.2}%",
+            p.mode.0, p.mode.1, p.ideal_ratio, p.measured_hz, p.deviation_pct,
+        ));
+    }
+    s
+}
+
 /// Format a frequency value for display.
 pub fn format_hz(hz: f32) -> String {
     if hz >= 1000.0 {
@@ -611,5 +661,53 @@ mod tests {
     fn format_hz_field_width() {
         // {:>6.2} and {:>6.1} produce 6-char fields
         assert_eq!(format_hz(1000.0).trim().len(), "1.00 kHz".len());
+    }
+
+    // ── tuner helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn cents_zero_when_equal() {
+        assert!(cents(440.0, 440.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cents_octave_is_1200() {
+        assert!((cents(880.0, 440.0) - 1200.0).abs() < 1e-6);
+        assert!((cents(220.0, 440.0) + 1200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cents_semitone_is_100() {
+        // 440 → 466.16376 = exactly one equal-tempered semitone.
+        assert!((cents(466.163_76, 440.0) - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn cents_handles_nonpositive() {
+        assert_eq!(cents(0.0, 440.0), 0.0);
+        assert_eq!(cents(440.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn hz_to_note_a4() {
+        let (name, off) = hz_to_note(440.0);
+        assert_eq!(name, "A4");
+        assert!(off.abs() < 0.01, "off {off}");
+    }
+
+    #[test]
+    fn hz_to_note_c4() {
+        // Middle C in scientific notation is C4 = ~261.6256 Hz.
+        let (name, off) = hz_to_note(261.6256);
+        assert_eq!(name, "C4");
+        assert!(off.abs() < 0.05, "off {off}");
+    }
+
+    #[test]
+    fn hz_to_note_flat_a3_has_negative_cents() {
+        // A3 is 220 Hz; 218 Hz should read as A3 with ~−16 cents.
+        let (name, off) = hz_to_note(218.0);
+        assert_eq!(name, "A3");
+        assert!(off < 0.0 && off > -20.0, "off {off}");
     }
 }

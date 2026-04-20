@@ -7,4 +7,5 @@ pub mod conversions;
 pub mod cwt;
 pub mod generator;
 pub mod transfer;
+pub mod tuner;
 pub mod types;

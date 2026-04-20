@@ -21,7 +21,7 @@ use crate::data::store::{
 use crate::data::synthetic::SyntheticHandle;
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, FrameMeta, LayoutMode, SpectrumFrame, SweepKind,
-    TransferFrame, TransferPair, ViewMode,
+    TransferFrame, TransferPair, TunerMode, ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::grid;
@@ -85,6 +85,41 @@ pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(1);
 /// slow enough that the user can still read the number on the way down. Also
 /// drives min-hold's symmetric rise toward live.
 pub const PEAK_RELEASE_DB_PER_SEC: f32 = 20.0;
+
+/// Drum-tuner search window for the (0,1) fundamental. 40 Hz is below any
+/// reasonable kick resonance; 2 kHz sits above the tightest piccolo snare.
+/// Overtone partials can fall anywhere above this ceiling — only the
+/// fundamental candidate itself is gated.
+pub const TUNER_SEARCH_MIN_HZ: f64 = 40.0;
+pub const TUNER_SEARCH_MAX_HZ: f64 = 2000.0;
+/// Below this confidence score we render nothing — a wrong-but-labelled
+/// peak is worse than no peak at all when the user is chasing cents.
+pub const TUNER_MIN_CONFIDENCE: f64 = 0.25;
+/// Height of the noise floor above the median spectrum, in dB. The tuner
+/// ignores local maxima below this so a flat pink-noise floor stays empty.
+pub const TUNER_FLOOR_OVER_MEDIAN_DB: f32 = 12.0;
+/// Rising-edge level jump (in dB over the rolling baseline) that arms a
+/// fresh tuner analysis. 6 dB is one doubling of amplitude ("delta gain
+/// twice") — quiet enough to catch a brushed snare, loud enough that
+/// baseline noise doesn't retrigger.
+pub const TUNER_TRIGGER_DELTA_DB: f32 = 6.0;
+/// Re-arm hysteresis: the level must drop back below
+/// `baseline + TUNER_REARM_DELTA_DB` before the next trigger fires. Keeps
+/// a sustained tone from re-analysing every frame while the hit rings out.
+pub const TUNER_REARM_DELTA_DB: f32 = 3.0;
+/// EMA time-constant for the trigger baseline, in seconds. Slow enough
+/// that a loud transient doesn't immediately raise the floor out from
+/// under the next hit, fast enough to track a changing ambient level.
+pub const TUNER_BASELINE_TAU_S: f32 = 2.0;
+/// How many past triggered fundamentals to remember per channel for the
+/// "last 5" corner readout. A small number because the purpose is to eye
+/// whether consecutive hits are converging on the same Hz as the user
+/// turns a lug.
+pub const TUNER_HISTORY_CAP: usize = 5;
+/// Two fundamentals closer than this fraction are treated as the same hit
+/// (1.5 % ≈ 26 cents). Prevents the history ring from filling with near-
+/// duplicates when the drum rings at a steady pitch over several frames.
+pub const TUNER_HISTORY_DEDUPE_FRAC: f64 = 0.015;
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.
@@ -308,6 +343,39 @@ pub struct App {
     min_holds: Vec<Option<Vec<f32>>>,
     min_last_update: Vec<Option<Instant>>,
     min_last_tick: Vec<Option<Instant>>,
+    /// Drum tuner tri-state. Off → Live → Locked → Off. Cycled by `U`. In
+    /// Live mode the identifier runs every frame on each channel's peak-hold
+    /// buffer; in Locked mode it keeps running so the readout updates when
+    /// the user retunes a lug, but the target stays pinned to whatever
+    /// `freq_hz` was current at the moment of the 2nd press.
+    tuner_mode: TunerMode,
+    /// Per-channel last identified fundamental. `None` means no candidate
+    /// passed `TUNER_MIN_CONFIDENCE`, or the peak-hold buffer is empty.
+    /// Parallel to `peak_holds`, sized to `n_real`.
+    tuner_last: Vec<Option<ac_core::tuner::FundamentalCandidate>>,
+    /// Per-channel tuning target set on 2nd `U` press. Independent per
+    /// channel so a two-drum setup (kick CH0 + snare CH1) can carry two
+    /// locks at once.
+    tuner_locks: Vec<Option<f64>>,
+    /// Per-channel EMA noise-baseline (dBFS of the loudest bin in the
+    /// tuner search range). Updated every frame with time-constant
+    /// `TUNER_BASELINE_TAU_S` so the trigger tracks slow background-level
+    /// drift without smoothing through an actual drum hit.
+    tuner_baseline_db: Vec<f32>,
+    /// Per-channel rising-edge latch: true = ready to fire the identifier
+    /// when the next level jump crosses the trigger threshold; false =
+    /// already fired on the current transient, wait for the level to fall
+    /// back below the re-arm threshold before firing again.
+    tuner_armed: Vec<bool>,
+    /// Per-channel ring of the last successful fundamentals (newest last,
+    /// capped at `TUNER_HISTORY_CAP`). Drawn as a short list in the corner
+    /// readout so the user can compare consecutive hits without having to
+    /// read the live value on every strike.
+    tuner_history: Vec<std::collections::VecDeque<f64>>,
+    /// Wall-clock timestamp of the previous baseline update. Shared across
+    /// channels — the baseline EMA runs once per incoming frame batch, and
+    /// all channels see the same dt.
+    tuner_baseline_last: Option<Instant>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -431,6 +499,13 @@ impl App {
             min_holds: Vec::new(),
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
+            tuner_mode: TunerMode::Off,
+            tuner_last: Vec::new(),
+            tuner_locks: Vec::new(),
+            tuner_baseline_db: Vec::new(),
+            tuner_armed: Vec::new(),
+            tuner_history: Vec::new(),
+            tuner_baseline_last: None,
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
             // disable via `O`.
@@ -1364,6 +1439,57 @@ impl App {
                     "min hold: off"
                 });
             }
+            KeyCode::KeyU => {
+                // Tuner tri-state cycle. The identifier reads from the
+                // peak-hold buffer (a live drum hit decays in <100 ms — no
+                // hold, no signal to analyse), so the first press also turns
+                // peak hold on if it wasn't already. Locking requires a
+                // currently-valid candidate on the active channel; if there
+                // isn't one the press just turns the tuner off again with a
+                // different toast so the user knows the lock failed.
+                self.tuner_mode = match self.tuner_mode {
+                    TunerMode::Off => {
+                        if !self.peak_hold_enabled {
+                            self.peak_hold_enabled = true;
+                            self.reset_peak_holds();
+                            self.notify("tuner: on (peak hold auto-enabled)");
+                        } else {
+                            self.notify("tuner: on");
+                        }
+                        TunerMode::Live
+                    }
+                    TunerMode::Live => {
+                        let ch = self.config.active_channel;
+                        let cand = self
+                            .tuner_last
+                            .get(ch)
+                            .and_then(|slot| slot.as_ref())
+                            .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
+                        if let Some(cand) = cand {
+                            if self.tuner_locks.len() <= ch {
+                                self.tuner_locks.resize(ch + 1, None);
+                            }
+                            self.tuner_locks[ch] = Some(cand.freq_hz);
+                            self.notify(&format!("tuner: locked {:.1} Hz", cand.freq_hz));
+                            TunerMode::Locked
+                        } else {
+                            self.notify("tuner: off (no confident fundamental)");
+                            for slot in self.tuner_locks.iter_mut() {
+                                *slot = None;
+                            }
+                            TunerMode::Off
+                        }
+                    }
+                    TunerMode::Locked => {
+                        self.notify("tuner: off");
+                        for slot in self.tuner_locks.iter_mut() {
+                            *slot = None;
+                        }
+                        TunerMode::Off
+                    }
+                };
+                self.needs_redraw = true;
+            }
             KeyCode::KeyO => {
                 self.smoothing_frac = smoothing::next(self.smoothing_frac);
                 // Rebuilds on next frame — drop the cache so the new window
@@ -1915,6 +2041,128 @@ impl App {
             }
         }
 
+        // Drum tuner: rescore every channel's peak-hold buffer for membrane
+        // modes. Runs per incoming frame — the identifier is O(peaks² × modes)
+        // but peak counts above the floor are small (tens), so cost is
+        // negligible. Left running in `Locked` mode too so the corner readout
+        // keeps updating against the held target after the user has locked.
+        if self.tuner_mode != TunerMode::Off {
+            if self.tuner_last.len() < n_real {
+                self.tuner_last.resize(n_real, None);
+            }
+            if self.tuner_locks.len() < n_real {
+                self.tuner_locks.resize(n_real, None);
+            }
+            if self.tuner_baseline_db.len() < n_real {
+                self.tuner_baseline_db.resize(n_real, f32::NEG_INFINITY);
+            }
+            if self.tuner_armed.len() < n_real {
+                self.tuner_armed.resize(n_real, true);
+            }
+            if self.tuner_history.len() < n_real {
+                self.tuner_history
+                    .resize(n_real, std::collections::VecDeque::new());
+            }
+            let now = Instant::now();
+            let dt = self
+                .tuner_baseline_last
+                .map(|t| now.saturating_duration_since(t).as_secs_f32())
+                .unwrap_or(1.0 / 60.0)
+                .clamp(1e-4, 0.5);
+            self.tuner_baseline_last = Some(now);
+            let ema_alpha = 1.0 - (-dt / TUNER_BASELINE_TAU_S).exp();
+            for (i, slot) in frames.iter().enumerate().take(n_real) {
+                let Some(frame) = slot.as_ref() else { continue };
+                let Some(Some(peak)) = self.peak_holds.get(i) else {
+                    self.tuner_last[i] = None;
+                    continue;
+                };
+                if peak.len() != frame.freqs.len() || peak.is_empty() {
+                    self.tuner_last[i] = None;
+                    continue;
+                }
+                // Level detector: max dBFS of peak-hold bins inside the
+                // membrane search range. Using peak-hold (not the live
+                // spectrum) so a short drum hit doesn't decay below the
+                // trigger threshold before we get to evaluate it.
+                let mut current = f32::NEG_INFINITY;
+                for (f, &m) in frame.freqs.iter().zip(peak.iter()) {
+                    let fh = *f as f64;
+                    if fh >= TUNER_SEARCH_MIN_HZ
+                        && fh <= TUNER_SEARCH_MAX_HZ
+                        && m.is_finite()
+                        && m > current
+                    {
+                        current = m;
+                    }
+                }
+                if !current.is_finite() {
+                    continue;
+                }
+                // Baseline EMA. Seed with the first observed level so the
+                // first hit doesn't always trigger against -inf.
+                let base = &mut self.tuner_baseline_db[i];
+                if !base.is_finite() {
+                    *base = current;
+                }
+                // Only let the baseline rise slowly and fall freely — that
+                // way a sustained tone lifts the floor (correctly
+                // suppressing it as "background") while a quiet gap lets
+                // the next hit look like a large delta.
+                if current < *base {
+                    *base = current;
+                } else {
+                    *base += ema_alpha * (current - *base);
+                }
+                let delta = current - *base;
+                let armed = self.tuner_armed[i];
+                if !armed && delta < TUNER_REARM_DELTA_DB {
+                    self.tuner_armed[i] = true;
+                }
+                if armed && delta >= TUNER_TRIGGER_DELTA_DB {
+                    let floor = median_f32(peak)
+                        .map(|m| m + TUNER_FLOOR_OVER_MEDIAN_DB)
+                        .unwrap_or(-60.0);
+                    let cand = ac_core::tuner::identify_fundamental(
+                        peak,
+                        &frame.freqs,
+                        floor,
+                        (TUNER_SEARCH_MIN_HZ, TUNER_SEARCH_MAX_HZ),
+                    );
+                    if let Some(c) = &cand {
+                        if c.confidence >= TUNER_MIN_CONFIDENCE {
+                            let hist = &mut self.tuner_history[i];
+                            let dup = hist.back().is_some_and(|&prev| {
+                                (c.freq_hz - prev).abs() / prev.max(1.0)
+                                    < TUNER_HISTORY_DEDUPE_FRAC
+                            });
+                            if !dup {
+                                hist.push_back(c.freq_hz);
+                                while hist.len() > TUNER_HISTORY_CAP {
+                                    hist.pop_front();
+                                }
+                            }
+                        }
+                    }
+                    self.tuner_last[i] = cand;
+                    self.tuner_armed[i] = false;
+                }
+            }
+        } else if !self.tuner_last.is_empty() {
+            // Free the stored candidates so Off mode doesn't keep the last
+            // frozen readout visible if the user re-enters Live later.
+            for slot in self.tuner_last.iter_mut() {
+                *slot = None;
+            }
+            for slot in self.tuner_history.iter_mut() {
+                slot.clear();
+            }
+            for slot in self.tuner_armed.iter_mut() {
+                *slot = true;
+            }
+            self.tuner_baseline_last = None;
+        }
+
         // Min-hold accumulator: mirror of the peak loop with the comparator
         // flipped. Same decay rule so a brief gap in the signal doesn't pin
         // the trace down forever at whatever accidental silence the buffer
@@ -2300,6 +2548,25 @@ impl App {
         } else {
             Vec::new()
         };
+        let tuner_mode_snap = self.tuner_mode;
+        let tuner_last_snap = if self.tuner_mode != TunerMode::Off {
+            self.tuner_last.clone()
+        } else {
+            Vec::new()
+        };
+        let tuner_locks_snap = if self.tuner_mode == TunerMode::Locked {
+            self.tuner_locks.clone()
+        } else {
+            Vec::new()
+        };
+        let tuner_history_snap: Vec<Vec<f64>> = if self.tuner_mode != TunerMode::Off {
+            self.tuner_history
+                .iter()
+                .map(|d| d.iter().copied().collect())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
             .iter()
             .map(|(_, _, tf)| tf.clone())
@@ -2551,6 +2818,46 @@ impl App {
                         if matches!(config_snap.layout, LayoutMode::Compare) {
                             peak_corner_slot += 1;
                         }
+                    }
+                }
+                // Drum-tuner overlay: f0 marker + membrane-mode partial
+                // markers + corner readout. Spectrum view only, real channels
+                // only. Sits above the peak-hold glyphs so the tuner markers
+                // aren't obscured by them on a loud drum hit where both
+                // features co-exist.
+                if tuner_mode_snap != TunerMode::Off
+                    && matches!(config_snap.view_mode, ViewMode::Spectrum)
+                    && cell.channel < n_real_snap
+                {
+                    let cand_opt = tuner_last_snap
+                        .get(cell.channel)
+                        .and_then(|o| o.as_ref())
+                        .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
+                    let hist_empty: Vec<f64> = Vec::new();
+                    let hist = tuner_history_snap
+                        .get(cell.channel)
+                        .unwrap_or(&hist_empty);
+                    if cand_opt.is_some() || !hist.is_empty() {
+                        let lock = tuner_locks_snap
+                            .get(cell.channel)
+                            .copied()
+                            .flatten();
+                        let freqs: &[f32] = frames
+                            .get(cell.channel)
+                            .and_then(|f| f.as_ref())
+                            .map(|f| f.freqs.as_slice())
+                            .unwrap_or(&[]);
+                        draw_tuner_overlay(
+                            &painter,
+                            grid_rect,
+                            cell.channel,
+                            cand_opt,
+                            freqs,
+                            hist,
+                            &view,
+                            lock,
+                            tuner_mode_snap,
+                        );
                     }
                 }
                 // Virtual transfer channels get a standalone phase subplot
@@ -3215,6 +3522,203 @@ fn draw_peak_overlay(
 // re-export here so existing call sites in this file don't have to fully
 // qualify the path.
 use crate::ui::fmt::format_freq_compact;
+
+/// Per-cell drum-tuner overlay. Draws a full-height vertical line at the
+/// identified (0,1) fundamental, shorter ticks at each matched overtone
+/// partial, and a corner readout stack with Hz/note/cents/confidence and
+/// (when locked) the target + deviation with traffic-light colouring.
+///
+/// Coordinate system matches `draw_peak_overlay`: log-frequency x-axis
+/// clamped to `view.freq_min..freq_max`; any marker whose Hz falls outside
+/// the visible window is skipped for the on-plot glyph but still appears
+/// in the corner text so the reader sees it exists.
+fn draw_tuner_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    channel: usize,
+    cand: Option<&ac_core::tuner::FundamentalCandidate>,
+    freqs: &[f32],
+    history: &[f64],
+    view: &CellView,
+    lock_target_hz: Option<f64>,
+    mode: TunerMode,
+) {
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
+    let log_span = (log_max - log_min).max(0.0001);
+    // Daemon aggregates raw FFT bins into log-spaced display columns, so
+    // the parabolic-interp Hz sitting between two column centers lands off
+    // the visible peak. Snap marker-x to the nearest column center so the
+    // vertical line always sits on a plotted sample.
+    let snap_to_column = |f: f32| -> f32 {
+        if freqs.len() < 2 {
+            return f;
+        }
+        let idx = freqs.partition_point(|&v| v < f);
+        if idx == 0 {
+            freqs[0]
+        } else if idx >= freqs.len() {
+            *freqs.last().unwrap()
+        } else {
+            let lo = freqs[idx - 1];
+            let hi = freqs[idx];
+            if (f - lo).abs() <= (hi - f).abs() {
+                lo
+            } else {
+                hi
+            }
+        }
+    };
+    let freq_to_x = |f: f32| -> Option<f32> {
+        let fs = snap_to_column(f);
+        if !fs.is_finite() || fs < view.freq_min || fs > view.freq_max {
+            return None;
+        }
+        let tx = (fs.max(1.0).log10() - log_min) / log_span;
+        Some(rect.left() + tx.clamp(0.0, 1.0) * rect.width())
+    };
+
+    let ch_rgba = theme::channel_color(channel);
+    let base = Color32::from_rgba_unmultiplied(
+        (ch_rgba[0] * 255.0) as u8,
+        (ch_rgba[1] * 255.0) as u8,
+        (ch_rgba[2] * 255.0) as u8,
+        220,
+    );
+    let partial_color = Color32::from_rgba_unmultiplied(
+        (ch_rgba[0] * 255.0) as u8,
+        (ch_rgba[1] * 255.0) as u8,
+        (ch_rgba[2] * 255.0) as u8,
+        140,
+    );
+    let text_color = Color32::from_rgb(theme::TEXT[0], theme::TEXT[1], theme::TEXT[2]);
+
+    // Fundamental marker: solid vertical line through the whole cell so
+    // it's visible even when the (0,1) peak itself is below the dB floor.
+    if let Some(cand) = cand {
+        if let Some(x) = freq_to_x(cand.freq_hz as f32) {
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(2.0, base),
+            );
+            let (note, cents_off) = crate::ui::fmt::hz_to_note(cand.freq_hz);
+            let label = format!("f0 {:.1} Hz  {} {:+.0}¢", cand.freq_hz, note, cents_off);
+            painter.text(
+                egui::pos2(x + 4.0, rect.top() + 2.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::monospace(theme::GRID_LABEL_PX),
+                base,
+            );
+        }
+
+        // Overtone partial ticks: short verticals in the lower half of the
+        // cell so they don't collide with the fundamental label at the top.
+        for p in cand.partials.iter().skip(1) {
+            if let Some(x) = freq_to_x(p.measured_hz as f32) {
+                let y_top = rect.top() + rect.height() * 0.65;
+                painter.line_segment(
+                    [egui::pos2(x, y_top), egui::pos2(x, rect.bottom())],
+                    egui::Stroke::new(1.0, partial_color),
+                );
+                painter.text(
+                    egui::pos2(x + 3.0, y_top + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("({},{}) Δ{:+.1}%", p.mode.0, p.mode.1, p.deviation_pct),
+                    egui::FontId::monospace(theme::GRID_LABEL_PX),
+                    partial_color,
+                );
+            }
+        }
+    }
+
+    // Lock target: dashed vertical at the remembered target Hz plus a
+    // traffic-light-coloured deviation readout so the tuner reads at a
+    // glance while the user retunes a lug. Green within ±5¢ is the
+    // standard acceptance band for "in tune"; yellow/red escalate from there.
+    if matches!(mode, TunerMode::Locked) {
+        if let (Some(target), Some(cand)) = (lock_target_hz, cand) {
+            let delta_cents = crate::ui::fmt::cents(cand.freq_hz, target);
+            let lock_color = if delta_cents.abs() <= 5.0 {
+                Color32::from_rgb(80, 220, 120)
+            } else if delta_cents.abs() <= 20.0 {
+                Color32::from_rgb(230, 200, 60)
+            } else {
+                Color32::from_rgb(230, 80, 60)
+            };
+            if let Some(x) = freq_to_x(target as f32) {
+                // Dashed line: paint 4 px segments with 4 px gaps so the
+                // lock marker is visually distinct from the solid f0 line.
+                let mut y = rect.top();
+                while y < rect.bottom() {
+                    let y1 = (y + 4.0).min(rect.bottom());
+                    painter.line_segment(
+                        [egui::pos2(x, y), egui::pos2(x, y1)],
+                        egui::Stroke::new(1.0, lock_color),
+                    );
+                    y += 8.0;
+                }
+            }
+            let delta_hz = cand.freq_hz - target;
+            let lock_line = format!(
+                "target {:.1} Hz  Δ {:+.2} Hz  {:+.1}¢",
+                target, delta_hz, delta_cents,
+            );
+            painter.text(
+                egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
+                egui::Align2::RIGHT_BOTTOM,
+                lock_line,
+                egui::FontId::monospace(theme::GRID_LABEL_PX),
+                lock_color,
+            );
+        }
+    }
+
+    // Corner readout (top-right of this cell). Stacks below the peak-hold
+    // corner block when peak hold is also on: the peak block uses slot 0
+    // at `rect.top() + 2.0`, so anchor the tuner block further down. The
+    // height offset is a fixed constant; the two overlays are each short
+    // enough that an exact measurement would be overkill.
+    let row_h = theme::GRID_LABEL_PX + 2.0;
+    let peak_block_rows = 6.0;
+    let mut y = rect.top() + 2.0 + peak_block_rows * row_h;
+    if let Some(cand) = cand {
+        let corner_text = crate::ui::fmt::tuner_corner_label(cand);
+        let n_lines = corner_text.lines().count().max(1) as f32;
+        painter.text(
+            egui::pos2(rect.right() - 4.0, y),
+            egui::Align2::RIGHT_TOP,
+            corner_text,
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            text_color,
+        );
+        y += n_lines * row_h;
+    }
+    // History block: newest last, so the list reads top-down as oldest →
+    // latest. Label prefix lets the user parse it even when no live f0 is
+    // showing (between triggers or after a low-confidence hit).
+    if !history.is_empty() {
+        painter.text(
+            egui::pos2(rect.right() - 4.0, y),
+            egui::Align2::RIGHT_TOP,
+            "last hits:",
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            text_color,
+        );
+        y += row_h;
+        for &hz in history {
+            let (note, cents_off) = crate::ui::fmt::hz_to_note(hz);
+            painter.text(
+                egui::pos2(rect.right() - 4.0, y),
+                egui::Align2::RIGHT_TOP,
+                format!("{:.1} Hz  {} {:+.0}¢", hz, note, cents_off),
+                egui::FontId::monospace(theme::GRID_LABEL_PX),
+                text_color,
+            );
+            y += row_h;
+        }
+    }
+}
 
 #[cfg(test)]
 mod loop_tests {

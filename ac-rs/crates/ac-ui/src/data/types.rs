@@ -208,6 +208,18 @@ pub enum ViewMode {
     Waterfall,
 }
 
+/// Drum-tuner tri-state cycled by the `U` key. `Live` identifies the
+/// membrane fundamental from the peak-hold buffer every frame and draws
+/// markers + corner readout; `Locked` remembers a target and shows Hz /
+/// cents deviation from it; `Off` disables all tuner rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TunerMode {
+    #[default]
+    Off,
+    Live,
+    Locked,
+}
+
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
 /// can target the hovered cell independently without broadcasting to the rest.
 #[derive(Debug, Clone, Copy)]
