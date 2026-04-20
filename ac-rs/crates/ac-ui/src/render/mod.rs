@@ -1,4 +1,3 @@
-pub mod aggregate;
 pub mod context;
 pub mod grid;
 pub mod spectrum;

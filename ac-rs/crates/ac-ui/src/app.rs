@@ -2082,7 +2082,6 @@ impl App {
             }
         }
         let mut spectrum_uploads: Vec<ChannelUpload> = Vec::new();
-        let window_width_px = ctx.config.width as f32;
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
         if !in_transfer_layout && !in_sweep_layout {
             match view_mode {
@@ -2120,19 +2119,9 @@ impl App {
                     } else {
                         (cell.y, cell.h)
                     };
-                    let n_columns = ((cell.w * window_width_px).round() as usize)
-                        .max(1)
-                        .min(2048);
-                    let f_min = view.freq_min.max(1.0);
-                    let f_max = view.freq_max.max(f_min + 1.0);
-                    let sr = frame.meta.sr as f32;
-                    let live_cols = crate::render::aggregate::spectrum_to_columns(
-                        &frame.spectrum,
-                        sr,
-                        f_min,
-                        f_max,
-                        n_columns,
-                    );
+                    // Daemon now publishes a log-aggregated spectrum (see
+                    // ac_core::aggregate::spectrum_to_columns_wire). Upload as-is.
+                    let live_cols: Vec<f32> = frame.spectrum.as_ref().clone();
                     let meta = ChannelMeta {
                         color: theme::channel_color(cell.channel),
                         viewport: [cell.x, vp_y, cell.w, vp_h],
@@ -2170,13 +2159,7 @@ impl App {
                                 for c in peak_color.iter_mut().take(3) {
                                     *c = (*c * 1.35).min(1.0);
                                 }
-                                let peak_cols = crate::render::aggregate::spectrum_to_columns(
-                                    peak.as_slice(),
-                                    sr,
-                                    f_min,
-                                    f_max,
-                                    n_columns,
-                                );
+                                let peak_cols: Vec<f32> = peak.clone();
                                 let n_cols = peak_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
                                     spectrum: peak_cols,
@@ -2213,13 +2196,7 @@ impl App {
                                     base[2] * 0.55,
                                     1.0,
                                 ];
-                                let min_cols = crate::render::aggregate::spectrum_to_columns(
-                                    min.as_slice(),
-                                    sr,
-                                    f_min,
-                                    f_max,
-                                    n_columns,
-                                );
+                                let min_cols: Vec<f32> = min.clone();
                                 let n_cols = min_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
                                     spectrum: min_cols,

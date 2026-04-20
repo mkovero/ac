@@ -11,7 +11,7 @@ use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
 use super::{
-    busy_guard, downsample, resolve_input, resolve_output, send_pub, spawn_worker,
+    busy_guard, resolve_input, resolve_output, send_pub, spawn_worker,
     sweep_point_frame,
 };
 
@@ -556,7 +556,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let in_dbu = cal
                                 .and_then(|c| c.in_vrms(r.linear_rms))
                                 .map(ac_core::conversions::vrms_to_dbu);
-                            let (spec, freqs) = downsample(&r.spectrum, &r.freqs, 1000);
+                            let sr_f = sr as f64;
+                            let (spec, freqs) = ac_core::aggregate::spectrum_to_columns_wire(
+                                &r.spectrum,
+                                sr_f,
+                                20.0,
+                                (sr_f / 2.0).max(21.0),
+                                2048,
+                            );
                             json!({
                                 "type":             "spectrum",
                                 "cmd":              "monitor_spectrum",
@@ -575,8 +582,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             })
                         }
                         Err(_) => {
-                            let (spec, freqs) = ac_core::analysis::spectrum_only(samples, sr);
-                            let (spec, freqs) = downsample(&spec, &freqs, 1000);
+                            let (spec, _) = ac_core::analysis::spectrum_only(samples, sr);
+                            let sr_f = sr as f64;
+                            let (spec, freqs) = ac_core::aggregate::spectrum_to_columns_wire(
+                                &spec,
+                                sr_f,
+                                20.0,
+                                (sr_f / 2.0).max(21.0),
+                                2048,
+                            );
                             json!({
                                 "type":             "spectrum",
                                 "cmd":              "monitor_spectrum",

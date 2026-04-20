@@ -76,6 +76,32 @@ pub fn spectrum_to_columns(
     out
 }
 
+/// Wire-format helper: aggregate an `f64` linear half-spectrum into a log-
+/// frequency representation suitable for ZMQ publish. Returns `(magnitudes,
+/// frequencies)` both as `Vec<f64>`, log-spaced between `f_min` and `f_max`.
+/// Frequencies are per-column centres so axis labels align with the data.
+pub fn spectrum_to_columns_wire(
+    spectrum_db: &[f64],
+    sr: f64,
+    f_min: f64,
+    f_max: f64,
+    n_columns: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let spec32: Vec<f32> = spectrum_db.iter().map(|&v| v as f32).collect();
+    let cols32 = spectrum_to_columns(&spec32, sr as f32, f_min as f32, f_max as f32, n_columns);
+    let cols64: Vec<f64> = cols32.iter().map(|&v| v as f64).collect();
+    let freqs64: Vec<f64> = if n_columns == 0 || !(f_min > 0.0) || !(f_max > f_min) {
+        Vec::new()
+    } else {
+        let log_ratio = (f_max / f_min).ln();
+        let n = n_columns as f64;
+        (0..n_columns)
+            .map(|i| f_min * (log_ratio * (i as f64 + 0.5) / n).exp())
+            .collect()
+    };
+    (cols64, freqs64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
