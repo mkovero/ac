@@ -2,11 +2,11 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test            # Rust: 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
-python -m pytest tests/ -q        # Python: 156 tests
+cd ac-rs && cargo test            # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 81)
+pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
-No JACK daemon or audio hardware required — Python tests spawn the Rust `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connect via ZMQ.
+No JACK daemon or audio hardware required — pytest spawns `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connects via ZMQ.
 
 ## Rust tests
 
@@ -14,8 +14,8 @@ No JACK daemon or audio hardware required — Python tests spawn the Rust `ac-da
 cd ac-rs
 cargo test -p ac-core             # 43 unit tests — analysis, generator, calibration, config, conversions, CWT, transfer, GPIO
 cargo test -p ac-cli              # 50 parser tests — all commands, abbreviations, defaults, error cases
-cargo test -p ac-daemon           # 43 tests — 36 unit (audio backends, GPIO) + 7 integration (ZMQ protocol)
-cargo test -p ac-ui               # 54 tests — formatting, grid ticks, egui paint-capture overlay tests
+cargo test -p ac-daemon           # 53 tests — 43 unit (audio backends, GPIO, handlers) + 10 integration (ZMQ protocol)
+cargo test -p ac-ui               # 81 tests — formatting, grid ticks, egui paint-capture overlay tests
 cargo test                        # all crates
 ```
 
@@ -27,7 +27,7 @@ cargo build                       # all crates: ac (CLI), ac-daemon, ac-ui
 cargo build --release             # optimized
 ```
 
-Both the Rust CLI and Python client auto-discover the debug build at `ac-rs/target/debug/ac-daemon`. For production installs:
+The Rust CLI auto-discovers the debug build at `ac-rs/target/debug/ac-daemon`. For production installs:
 
 ```bash
 cargo build --release
@@ -59,14 +59,10 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 
 ### Python (tests/)
 
-| File | Tests | What it covers |
-|------|-------|----------------|
-| `test_parse.py` | 58 | CLI token parser: all commands incl. test/dut, abbreviations, defaults, error cases |
-| `test_server_client.py` | 28 | ZMQ integration: command dispatch, sweep/plot/monitor/generate workers, busy guard, stop, software self-tests |
-| `test_analysis.py` | 27 | FFT analysis: THD, THD+N, harmonics, noise floor, fundamental detection, spectrum downsampling |
-| `test_transfer.py` | 19 | H1 transfer function: unity loopback, known gains, delay, coherence, capture duration |
-| `test_calibration.py` | 14 | Calibration class: save/load, vrms conversions, uncalibrated None handling |
-| `test_conversions.py` | 10 | Unit conversions: dBu/Vrms/dBFS/Vpp, known audio standards |
+`tests/` contains black-box ZMQ protocol tests that spawn the Rust daemon
+with `--fake-audio` and exercise the full wire protocol end-to-end
+(see `ac-rs/ZMQ.md` for the authoritative spec). The suite has no Python
+runtime dependency — the pyzmq client lives inline in `conftest.py`.
 
 ### Rust unit tests
 
@@ -89,7 +85,7 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 |--------|-------|----------------|
 | `parse` | 50 | All commands: sweep, plot, monitor, generate, calibrate, setup, devices, transfer, test, probe, session, stop, server, gpio, dmm, config. Abbreviations, defaults, error cases. |
 
-#### ac-daemon (43 tests)
+#### ac-daemon (53 tests)
 
 | Module | Tests | What it covers |
 |--------|-------|----------------|
@@ -97,9 +93,11 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 | `audio::jack_backend` | 8 | JACK I/O: tone fill, ring buffer FIFO, stereo padding, xrun counter |
 | `gpio` | 10 | USB2GPIO frame parser: sync, partial frames, button events, garbage handling |
 | `audio::fake` | 3 | Fake engine: channel index parsing, reroute, stereo independence |
-| integration (`it_protocol`) | 7 | ZMQ protocol: status, devices, generate/stop, sweep, calibration cycle, busy guard |
+| `handlers::transfer` | 6 | transfer_stream request parser: pairs, dedup, legacy single-pair, error cases |
+| other handler unit tests | 5 | misc unit coverage inside `ac-daemon` |
+| integration (`it_protocol`) | 10 | ZMQ protocol: status, devices, generate/stop, sweep, calibration cycle, busy guard, monitor-params live updates |
 
-#### ac-ui (54 tests)
+#### ac-ui (81 tests)
 
 | Module | Tests | What it covers |
 |--------|-------|----------------|
@@ -109,7 +107,7 @@ Short forms: `ac te so`, `ac te h`, `ac te h dmm`, `ac te du`, `ac te du comp`
 
 ## What is verified numerically
 
-### THD accuracy (test_analysis.py)
+### THD accuracy (ac-core `analysis` module)
 
 These tests generate synthetic signals with mathematically known distortion and verify the analyzer returns correct values:
 
@@ -155,7 +153,7 @@ These tests generate synthetic signals with mathematically known distortion and 
 - Transfer delay readout renders in Transfer layout
 - Hover crosshair label renders with correct channel, frequency, and value
 
-### Unit conversions (test_conversions.py)
+### Unit conversions (ac-core `conversions` module)
 
 - 0 dBu = 0.77459667 Vrms (standard definition)
 - +4 dBu = 1.228 Vrms (pro audio reference)
@@ -165,7 +163,7 @@ These tests generate synthetic signals with mathematically known distortion and 
 - Full chain: dBFS + calibration ref → Vrms → dBu (verified against manual calculation)
 - Vpp = Vrms × 2√2
 
-### Calibration (test_calibration.py)
+### Calibration (ac-core `calibration` module)
 
 - `out_vrms(-20 dBFS)` with cal 0.245 → 0.0245 Vrms
 - `in_vrms(linear_rms)` = linear_rms × vrms_at_0dbfs_in
@@ -254,10 +252,10 @@ Expected results: gain ≈ 0 dB, flat frequency response (±0 dB), coherence = 1
 
 ## Adding tests
 
-- **Parser tests**: add to `test_parse.py`. No fixtures needed — pure function input/output.
-- **Analysis tests**: add to `test_analysis.py`. Use `make_recording()` to build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
-- **Integration tests**: add to `test_server_client.py`. Use the session-scoped `server_client` fixture. Must drain to `done`/`error` before returning so the server is idle for the next test.
-- **Calibration/conversion tests**: add to respective files. Pure math, no I/O.
+- **Parser tests**: add to `ac-rs/crates/ac-cli/src/parse.rs` (`#[cfg(test)]` module). Pure function input/output.
+- **Analysis tests**: add to `ac-rs/crates/ac-core/src/analysis.rs`. Build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
+- **Black-box protocol tests**: add to `tests/test_server_client.py`. Use the session-scoped `server_client` fixture. Must drain to `done`/`error` before returning so the server is idle for the next test.
+- **Daemon integration tests**: add to `ac-rs/crates/ac-daemon/tests/it_protocol.rs` for scenarios needing fine-grained control over daemon state.
 - **UI formatting tests**: add to `ac-rs/crates/ac-ui/src/ui/fmt.rs`. Pure `fn → String`, no egui/wgpu dependencies.
 - **UI rendering tests**: add to `ac-rs/crates/ac-ui/src/ui/paint_tests.rs`. Construct `OverlayInput` with synthetic data, call `run_overlay()`, assert on extracted text strings.
 - **Grid/axis tests**: add to `ac-rs/crates/ac-ui/src/render/grid.rs`. Pure functions (`freq_ticks`, `format_freq_tick`, `time_ticks`, `format_time_tick`).

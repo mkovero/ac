@@ -21,25 +21,12 @@ The entire stack is implemented in Rust:
 | `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/transfer/sweep views |
 | `ac-core` | (library) | Pure DSP — FFT, THD, generator, calibration, config |
 
-A Python implementation (`ac/client/`, `ac/ui/`) also exists and works against
-the same daemon. Install it for the pyqtgraph UI or if you prefer `pip install`.
-
 ## Install
-
-### Rust (recommended)
 
 ```bash
 cd ac-rs && cargo build --release
 # Binaries: target/release/ac, target/release/ac-daemon, target/release/ac-ui
 ```
-
-### Python
-
-```bash
-pip install -e .
-```
-
-This gives you the `ac` command (Python client, auto-spawns the Rust daemon).
 
 ## Audio backend
 
@@ -70,7 +57,7 @@ ac setup output 11 input 0          # tell ac which channels to use
 ac calibrate                        # interactive level cal (enables dBu)
 ac plot 20hz 20khz 0dbu 20ppd show  # measure THD vs frequency, open plot
 ac s f 20hz 20khz 0dbu              # fast output-only chirp
-ac m sh                             # live spectrum, pyqtgraph window
+ac m sh                             # live spectrum, GPU UI window
 ```
 
 ## Commands
@@ -101,7 +88,7 @@ Everything is positional. The suffix tells `ac` what it is:
 | `s` | Duration / interval | `1s` `0.5s` |
 | `ppd` | Points per decade | `10ppd` `20ppd` |
 
-Append `show` to any command to open a live view (Rust ac-ui or Python pyqtgraph).
+Append `show` to any command to open a live view (`ac-ui`).
 
 ## Abbreviations
 
@@ -162,21 +149,18 @@ ac server enable          # bind to all interfaces on a server
 ac server 192.168.1.5     # connect to remote server
 ```
 
-The daemon is `ac-daemon` (Rust). Both the Rust CLI and Python client
-auto-discover it in `$PATH` or `ac-rs/target/debug/ac-daemon`.
-See `ac-rs/ZMQ.md` for the wire protocol.
+The daemon is `ac-daemon` (Rust). The Rust CLI auto-discovers it in
+`$PATH` or `ac-rs/target/debug/ac-daemon`. See `ac-rs/ZMQ.md` for the wire
+protocol.
 
 ## Build
 
 ```bash
 cd ac-rs
 cargo build                   # all crates (ac, ac-daemon, ac-ui)
-cargo test                    # 190 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 54)
+cargo test                    # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 81)
 ```
 
 ## Dependencies
 
 Rust: libzmq, libjack, Rust toolchain (≥ 1.75).
-
-Python (optional): numpy, scipy, matplotlib, sounddevice, pyzmq.
-Optional: `jack-client` (for JACK backend), `pyqtgraph` (for live GUI views).

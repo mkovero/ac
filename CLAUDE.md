@@ -4,26 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, frequency sweeps, transfer functions). The full stack is implemented in Rust: CLI (`ac-cli`), daemon (`ac-daemon`), and GPU UI (`ac-ui`). A Python implementation also exists and works against the same daemon. Supports JACK and CPAL (PortAudio) audio backends.
+This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, frequency sweeps, transfer functions). The full stack is implemented in Rust: CLI (`ac-cli`), daemon (`ac-daemon`), and GPU UI (`ac-ui`). Supports JACK and CPAL (PortAudio) audio backends.
 
-## Build (Rust — primary)
+## Build
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
+cargo test                     # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 81)
 ```
-
-## Install (Python — alternative)
-
-```bash
-pip install -e .
-```
-
-This installs two entry points:
-- `ac` — the Python CLI (`ac/client/ac.py`) — auto-spawns the Rust daemon
-- `thd` — legacy CLI (`ac/cli.py`, kept for backward compat)
-
-Also runnable as `python -m ac`.
 
 ## Usage (quick reference)
 
@@ -54,36 +42,19 @@ ac-rs/                 (Rust — primary implementation)
   crates/
     ac-core/           (pure library: analysis, generator, calibration, config — 43 tests)
     ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
-    ac-daemon/         (ZMQ REP+PUB server binary — 43 tests)
-    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 54 tests)
+    ac-daemon/         (ZMQ REP+PUB server binary — 43 unit + 10 it tests)
+    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 81 tests)
 
-ac/                    (Python — alternative client + UI)
-  __init__.py          (empty)
-  __main__.py          (dispatches to client.ac, legacy cli, or Rust daemon)
-  constants.py         (shared)
-  conversions.py       (shared)
-  config.py            (shared)
-  analysis.py          (FFT analysis, THD/THD+N — shared with tests)
-  calibration.py       (Calibration class, cal.json load/save)
-  transfer.py          (H1 transfer function estimation)
-  dmm.py               (SCPI DMM client)
-
-  client/              (Python CLI parser, ZMQ client, plotting)
-  ui/                  (pyqtgraph live views)
+tests/                 (black-box pytest harness — spawns Rust daemon over ZMQ)
 ```
 
 See `ac-rs/CLAUDE.md` and `ac-rs/ZMQ.md` for Rust crate docs.
-See `client/CLAUDE.md`, `ui/CLAUDE.md` for Python subpackage docs.
 
 ## Daemon auto-spawn
 
-Both the Rust CLI and Python client auto-spawn `ac-daemon` locally. Resolution order:
+The Rust CLI auto-spawns `ac-daemon` locally. Resolution order:
 1. `ac-daemon` in `$PATH` (production install)
 2. `ac-rs/target/debug/ac-daemon` (local dev build)
-
-## Legacy / old code
-
-`ac/old/` and `ac/old2/` are historical snapshots; ignore them.
 
 ---
 
@@ -123,8 +94,8 @@ Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to
 
 Run all tests before committing:
 ```bash
-cd ac-rs && cargo test          # Rust: 212 tests (ac-core 43, ac-cli 50, ac-daemon 43, ac-ui 76)
-python -m pytest tests/ -q      # Python: 156 tests (uses --fake-audio)
+cd ac-rs && cargo test
+pytest tests/ -q                # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
 ## ds — diagnostics session manager
