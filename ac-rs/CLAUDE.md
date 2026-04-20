@@ -89,7 +89,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
 | `S` | Screenshot |
-| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak, auto-decays after 3 s idle |
+| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak, auto-decays after 1 s idle |
 | `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
 | `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |

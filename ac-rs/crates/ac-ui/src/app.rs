@@ -78,7 +78,7 @@ pub const WATERFALL_ROW_DT_WINDOW: usize = 16;
 /// starts falling toward the live trace. A standard audio-meter "attack-0,
 /// release-after-hold" behaviour — a transient pins the trace for 3 s, then
 /// the line glides back down at a bounded rate instead of snapping.
-pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(3);
+pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(1);
 
 /// Fall rate once release kicks in. 20 dB/s matches the perceived cadence of
 /// analogue peak-program meters — fast enough to track genuine level drops,
