@@ -33,7 +33,7 @@ as an error after the per-command deadline.
 
 e.g. `data {"type":"sweep_point", ...}` or `done {"cmd":"plot", ...}`.
 
-Topics: `data`, `done`, `error`, `cal_prompt`, `cal_done`, `gpio`.
+Topics: `data`, `done`, `error`, `cal_prompt`, `cal_done`, `gpio`, `tuner`, `keepalive`.
 
 ---
 
@@ -153,6 +153,58 @@ subscribers that expect a linear spectrum should convert / branch.
 Default parameters (see `ac-core::cwt` constants): `σ = 12.0`,
 `n_scales = 512`, frequency axis spans `20 Hz` to `0.9 · sr/2`.
 Both `σ` and `n_scales` are tuneable at runtime via `set_analysis_mode`.
+
+### `tuner` frame
+
+Emitted **sparsely** by `monitor_spectrum` (FFT mode only) — one frame per
+channel per confirmed drum-head trigger. The daemon runs a per-channel
+`ac-core::tuner::TunerState`: an EMA-tracked baseline gates the level
+trigger, the trigger fires the Bessel-ratio identifier, and a frame is
+published only when the candidate clears the configured confidence floor
+(default 0.25). Clients receive nothing between hits.
+
+```json
+{
+  "type":        "tuner",
+  "cmd":         "monitor_spectrum",
+  "channel":     <int>,
+  "freq_hz":     <float>,                // identified (0,1) membrane fundamental
+  "confidence":  <float>,                // 0..1 fraction of in-band peak energy explained
+  "partials":    [
+    {
+      "mode":           [<m>, <n>],      // Bessel mode labels, e.g. [1, 1]
+      "ideal_ratio":    <float>,         // reference f(m,n)/f(0,1)
+      "measured_hz":    <float>,
+      "measured_ratio": <float>,
+      "deviation_pct":  <float>,         // 100 * (measured_ratio - ideal_ratio) / ideal_ratio
+      "magnitude_db":   <float>
+    }
+  ],
+  "baseline_db": <float>,                // EMA level baseline at trigger time
+  "range_lock":  [<lo_hz>, <hi_hz>] | null,  // active search-range override, if any
+  "timestamp":   <int>                   // UNIX-epoch nanoseconds
+}
+```
+
+Subscribers may persist the last frame per channel until the next one
+arrives; the daemon does not resend. Search range and confidence gate are
+daemon-side constants (`ac-core::tuner::TunerConfig`). The per-channel
+search range can be narrowed at runtime via `tuner_range`.
+
+### `keepalive` frame
+
+Emitted once per second on the `keepalive` topic regardless of any running
+worker. Clients can treat a stall in `seq` as a stalled daemon and a reset
+to 1 as a daemon restart.
+
+```json
+{
+  "type":      "keepalive",
+  "seq":       <int>,                    // monotonic, resets to 1 on daemon start
+  "timestamp": <int>,                    // UNIX-epoch nanoseconds
+  "busy":      <bool>                    // any worker currently running?
+}
+```
 
 ---
 
@@ -609,6 +661,48 @@ Request/reply is synchronous on the REP socket; no frames emitted.
 { "ok": true,  "interval": <float>, "fft_n": <int> }
 { "ok": false, "error": "no active monitor" }
 { "ok": false, "error": "fft_n must be power of 2 in [256, 131072]" }
+```
+
+---
+
+### `tuner_range`
+
+Sets or clears the per-channel search-range override used by the daemon's
+tuner (see `tuner` frame). Narrowing the range after a confirmed hit
+prevents sub-harmonic aliasing on subsequent hits (e.g. lock 190–270 Hz
+after a 220 Hz read so a louder 110 Hz artefact cannot re-win). The
+`monitor_spectrum` worker picks up the change on its next tick — the
+command is safe to issue while a monitor is running or stopped.
+
+**Request** — set:
+```json
+{
+  "cmd":     "tuner_range",
+  "channel": <int>,
+  "lo_hz":   <float>,        // > 0
+  "hi_hz":   <float>         // > lo_hz
+}
+```
+
+**Request** — clear:
+```json
+{ "cmd": "tuner_range", "channel": <int>, "clear": true }
+```
+
+**Reply — set**
+```json
+{ "ok": true, "channel": <int>, "range_hz": [<lo_hz>, <hi_hz>] }
+```
+
+**Reply — clear**
+```json
+{ "ok": true, "channel": <int>, "range_hz": null }
+```
+
+**Reply — error**
+```json
+{ "ok": false, "error": "missing 'channel'" }
+{ "ok": false, "error": "lo_hz and hi_hz required, with 0 < lo < hi" }
 ```
 
 ---

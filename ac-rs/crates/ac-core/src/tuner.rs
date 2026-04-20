@@ -33,7 +33,7 @@ pub const MEMBRANE_MODES: &[(u8, u8, f64)] = &[
 
 /// A single overtone that was matched against one of the `MEMBRANE_MODES`
 /// ratios for a given candidate fundamental.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Partial {
     pub mode: (u8, u8),
     pub ideal_ratio: f64,
@@ -44,7 +44,7 @@ pub struct Partial {
     pub magnitude_db: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FundamentalCandidate {
     pub freq_hz: f64,
     /// Fraction of in-band peak energy (above floor, linear in dB) that
@@ -283,6 +283,258 @@ pub fn identify_fundamental(
     best.map(|(_, c, _)| c)
 }
 
+/// Parameters for the stateful [`TunerState`] trigger/history pipeline.
+/// Separated from the pure [`identify_fundamental`] fn so the scorer can
+/// be re-used without forcing a state object on callers that just want
+/// a one-shot analysis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TunerConfig {
+    /// Fundamental search range, Hz. Outside this band a candidate is
+    /// rejected even if it scores well — overtones may still fall above.
+    pub search_range_hz: (f64, f64),
+    /// Noise-floor offset above the per-frame median, in dB.
+    pub floor_over_median_db: f32,
+    /// Rising-edge dB delta (current − baseline) that arms a fresh analysis.
+    pub trigger_delta_db: f32,
+    /// Level must fall back within `rearm_delta_db` of baseline before the
+    /// next trigger can fire. Hysteresis keeps a ringing tone from
+    /// retriggering every frame.
+    pub rearm_delta_db: f32,
+    /// EMA time-constant for the trigger baseline, seconds.
+    pub baseline_tau_s: f32,
+    /// Max entries kept in the recent-hits history ring.
+    pub history_cap: usize,
+    /// Hits closer than this fraction to the prior hit are deduped.
+    pub history_dedupe_frac: f64,
+    /// Below this confidence a triggered candidate is dropped instead
+    /// of being stored — a wrong-but-labelled peak is worse than none.
+    pub min_confidence: f64,
+    /// Seconds without any bin rising before the internal peak-hold
+    /// starts decaying. Shorter = more reactive, longer = holds a hit
+    /// steady for post-trigger analysis.
+    pub peak_hold_idle_s: f32,
+    /// dB/s release rate once the idle window has elapsed. Applied
+    /// per-bin, clamped to the live spectrum so a bin never drops
+    /// below the current reading.
+    pub peak_release_db_per_sec: f32,
+}
+
+impl Default for TunerConfig {
+    fn default() -> Self {
+        Self {
+            search_range_hz: (40.0, 2000.0),
+            floor_over_median_db: 12.0,
+            trigger_delta_db: 6.0,
+            rearm_delta_db: 3.0,
+            baseline_tau_s: 2.0,
+            history_cap: 5,
+            history_dedupe_frac: 0.015,
+            min_confidence: 0.25,
+            peak_hold_idle_s: 1.0,
+            peak_release_db_per_sec: 20.0,
+        }
+    }
+}
+
+/// Per-channel tuner state machine. Owns the EMA trigger baseline, the
+/// armed/disarmed flag, the recent-hit history ring, and an optional
+/// range-lock that narrows the search window after a confirmed hit.
+/// A fresh `feed()` of a peak-hold dBFS spectrum either fires a trigger
+/// (running [`identify_fundamental`]) or bumps the baseline and returns
+/// `Triggered::No`.
+#[derive(Debug, Clone)]
+pub struct TunerState {
+    cfg: TunerConfig,
+    baseline_db: f32,
+    armed: bool,
+    last: Option<FundamentalCandidate>,
+    history: std::collections::VecDeque<f64>,
+    range_lock: Option<(f64, f64)>,
+    /// Internal per-bin peak-hold accumulator. Sized to match the last
+    /// spectrum fed in; re-seeded on bin-count change.
+    peak_hold: Vec<f32>,
+    /// Seconds since any bin rose against `peak_hold`. When this passes
+    /// `cfg.peak_hold_idle_s` the held trace starts decaying toward the
+    /// live spectrum at `cfg.peak_release_db_per_sec`.
+    peak_idle_s: f32,
+}
+
+/// Result of a single [`TunerState::feed`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Triggered {
+    /// No trigger this frame — baseline tracked, state otherwise unchanged.
+    No,
+    /// Level crossed the trigger threshold and the identifier ran.
+    /// `candidate` carries the result (possibly `None` if the spectrum is
+    /// degenerate) and `confident` is `true` when the candidate cleared
+    /// `cfg.min_confidence` and was appended to history.
+    Fired {
+        candidate: Option<FundamentalCandidate>,
+        confident: bool,
+    },
+}
+
+impl TunerState {
+    pub fn new(cfg: TunerConfig) -> Self {
+        Self {
+            cfg,
+            baseline_db: f32::NEG_INFINITY,
+            armed: true,
+            last: None,
+            history: std::collections::VecDeque::new(),
+            range_lock: None,
+            peak_hold: Vec::new(),
+            peak_idle_s: 0.0,
+        }
+    }
+
+    /// Read-only view of the internal peak-hold buffer — exposed so
+    /// rendering code can display the same accumulator the tuner sees.
+    pub fn peak_hold(&self) -> &[f32] {
+        &self.peak_hold
+    }
+
+    pub fn config(&self) -> &TunerConfig {
+        &self.cfg
+    }
+    pub fn baseline_db(&self) -> f32 {
+        self.baseline_db
+    }
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+    pub fn last(&self) -> Option<&FundamentalCandidate> {
+        self.last.as_ref()
+    }
+    pub fn history(&self) -> &std::collections::VecDeque<f64> {
+        &self.history
+    }
+    pub fn range_lock(&self) -> Option<(f64, f64)> {
+        self.range_lock
+    }
+    pub fn set_range_lock(&mut self, range: Option<(f64, f64)>) {
+        self.range_lock = range;
+    }
+
+    /// Clear baseline, disarm flag, last candidate, history, and the
+    /// internal peak-hold buffer. Range lock is left alone — the caller
+    /// decides whether a reset should also drop the lock.
+    pub fn reset(&mut self) {
+        self.baseline_db = f32::NEG_INFINITY;
+        self.armed = true;
+        self.last = None;
+        self.history.clear();
+        self.peak_hold.clear();
+        self.peak_idle_s = 0.0;
+    }
+
+    /// Feed a fresh dBFS spectrum (linear-binned or log-aggregated both
+    /// work; `freqs_hz` must agree in length). The internal peak-hold
+    /// accumulator takes a bin-wise max; after `cfg.peak_hold_idle_s`
+    /// without any bin rising, the held trace decays toward the live
+    /// spectrum. Returns whether a trigger fired this frame.
+    pub fn feed(&mut self, spectrum_db: &[f32], freqs_hz: &[f32], dt_s: f32) -> Triggered {
+        if spectrum_db.is_empty() || spectrum_db.len() != freqs_hz.len() {
+            return Triggered::No;
+        }
+        let dt = dt_s.clamp(1e-4, 0.5);
+
+        // --- Peak-hold accumulation ---
+        if self.peak_hold.len() != spectrum_db.len() {
+            self.peak_hold = spectrum_db.to_vec();
+            self.peak_idle_s = 0.0;
+        } else {
+            let mut any_rose = false;
+            for (held, &fresh) in self.peak_hold.iter_mut().zip(spectrum_db.iter()) {
+                if fresh.is_finite() && fresh > *held {
+                    *held = fresh;
+                    any_rose = true;
+                }
+            }
+            if any_rose {
+                self.peak_idle_s = 0.0;
+            } else {
+                self.peak_idle_s += dt;
+                if self.peak_idle_s > self.cfg.peak_hold_idle_s {
+                    let drop = self.cfg.peak_release_db_per_sec * dt;
+                    for (held, &fresh) in self.peak_hold.iter_mut().zip(spectrum_db.iter()) {
+                        if fresh.is_finite() {
+                            *held = (*held - drop).max(fresh);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Level detector on peak-hold ---
+        let (fmin, fmax) = self.cfg.search_range_hz;
+        let mut current = f32::NEG_INFINITY;
+        for (f, &m) in freqs_hz.iter().zip(self.peak_hold.iter()) {
+            let fh = *f as f64;
+            if fh >= fmin && fh <= fmax && m.is_finite() && m > current {
+                current = m;
+            }
+        }
+        if !current.is_finite() {
+            return Triggered::No;
+        }
+        if !self.baseline_db.is_finite() {
+            self.baseline_db = current;
+        }
+        let alpha = 1.0 - (-dt / self.cfg.baseline_tau_s).exp();
+        if current < self.baseline_db {
+            self.baseline_db = current;
+        } else {
+            self.baseline_db += alpha * (current - self.baseline_db);
+        }
+        let delta = current - self.baseline_db;
+        if !self.armed && delta < self.cfg.rearm_delta_db {
+            self.armed = true;
+        }
+        if !(self.armed && delta >= self.cfg.trigger_delta_db) {
+            return Triggered::No;
+        }
+        let floor = median_f32_local(&self.peak_hold)
+            .map(|m| m + self.cfg.floor_over_median_db)
+            .unwrap_or(-60.0);
+        let range = self.range_lock.unwrap_or(self.cfg.search_range_hz);
+        let cand = identify_fundamental(&self.peak_hold, freqs_hz, floor, range);
+        let confident = cand
+            .as_ref()
+            .is_some_and(|c| c.confidence >= self.cfg.min_confidence);
+        if let Some(c) = &cand {
+            if confident {
+                let dup = self.history.back().is_some_and(|&prev| {
+                    (c.freq_hz - prev).abs() / prev.max(1.0) < self.cfg.history_dedupe_frac
+                });
+                if !dup {
+                    self.history.push_back(c.freq_hz);
+                    while self.history.len() > self.cfg.history_cap {
+                        self.history.pop_front();
+                    }
+                }
+            }
+        }
+        self.last = cand.clone();
+        self.armed = false;
+        Triggered::Fired { candidate: cand, confident }
+    }
+}
+
+fn median_f32_local(samples: &[f32]) -> Option<f32> {
+    let mut v: Vec<f32> = samples.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +701,139 @@ mod tests {
             "expected ~221 Hz, got {}",
             c.freq_hz,
         );
+    }
+
+    fn flat_spectrum(level: f32, freqs: &[f32]) -> Vec<f32> {
+        vec![level; freqs.len()]
+    }
+
+    fn drum_spectrum(freqs: &[f32], f0: f64, peak_db: f32, floor_db: f32) -> Vec<f32> {
+        let mut spec = vec![floor_db; freqs.len()];
+        let partials = [(f0, peak_db), (f0 * 1.594, peak_db - 4.0), (f0 * 2.136, peak_db - 8.0)];
+        for (f, db) in partials {
+            let idx = freqs
+                .iter()
+                .position(|&x| x as f64 >= f)
+                .unwrap_or(freqs.len() - 1);
+            if idx > 0 && idx < freqs.len() - 1 {
+                spec[idx] = spec[idx].max(db);
+                spec[idx - 1] = spec[idx - 1].max(db - 6.0);
+                spec[idx + 1] = spec[idx + 1].max(db - 6.0);
+            }
+        }
+        spec
+    }
+
+    #[test]
+    fn tuner_state_does_not_fire_below_threshold() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let spec = flat_spectrum(-70.0, &freqs);
+        for _ in 0..30 {
+            let t = s.feed(&spec, &freqs, 1.0 / 30.0);
+            assert!(matches!(t, Triggered::No));
+        }
+        assert!(s.armed());
+        assert!(s.last().is_none());
+    }
+
+    #[test]
+    fn tuner_state_fires_on_rising_edge() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let quiet = flat_spectrum(-70.0, &freqs);
+        for _ in 0..60 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -70.0);
+        let t = s.feed(&loud, &freqs, 1.0 / 30.0);
+        match t {
+            Triggered::Fired { candidate, confident } => {
+                let c = candidate.expect("should have candidate");
+                assert!((c.freq_hz - 214.0).abs() < 3.0, "f0 {}", c.freq_hz);
+                assert!(confident, "expected confident");
+            }
+            Triggered::No => panic!("expected trigger"),
+        }
+        assert!(!s.armed(), "should disarm after fire");
+        assert_eq!(s.history().len(), 1);
+    }
+
+    #[test]
+    fn tuner_state_rearms_after_signal_drops() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let quiet = flat_spectrum(-70.0, &freqs);
+        for _ in 0..30 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -70.0);
+        s.feed(&loud, &freqs, 1.0 / 30.0);
+        assert!(!s.armed());
+        for _ in 0..120 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        assert!(s.armed(), "should rearm after signal drops back to baseline");
+    }
+
+    #[test]
+    fn tuner_state_dedupes_identical_hits() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let quiet = flat_spectrum(-70.0, &freqs);
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -70.0);
+        for _ in 0..30 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        s.feed(&loud, &freqs, 1.0 / 30.0);
+        for _ in 0..120 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        s.feed(&loud, &freqs, 1.0 / 30.0);
+        assert_eq!(s.history().len(), 1, "duplicate within dedupe tol should not append");
+    }
+
+    #[test]
+    fn tuner_state_range_lock_narrows_search() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let quiet = flat_spectrum(-70.0, &freqs);
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -70.0);
+        s.set_range_lock(Some((300.0, 500.0)));
+        for _ in 0..30 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        let t = s.feed(&loud, &freqs, 1.0 / 30.0);
+        match t {
+            Triggered::Fired { candidate, .. } => {
+                if let Some(c) = candidate {
+                    assert!(
+                        c.freq_hz >= 300.0 && c.freq_hz <= 500.0,
+                        "range-locked candidate must land in [300,500], got {}",
+                        c.freq_hz
+                    );
+                }
+            }
+            Triggered::No => {}
+        }
+    }
+
+    #[test]
+    fn tuner_state_reset_clears_all() {
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let quiet = flat_spectrum(-70.0, &freqs);
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -70.0);
+        for _ in 0..30 {
+            s.feed(&quiet, &freqs, 1.0 / 30.0);
+        }
+        s.feed(&loud, &freqs, 1.0 / 30.0);
+        assert!(s.last().is_some());
+        s.reset();
+        assert!(s.armed());
+        assert!(s.last().is_none());
+        assert!(s.history().is_empty());
+        assert!(!s.baseline_db().is_finite());
     }
 
     #[test]

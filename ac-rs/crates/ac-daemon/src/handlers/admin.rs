@@ -248,6 +248,32 @@ pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true, "interval": mp.interval, "fft_n": mp.fft_n})
 }
 
+/// Set or clear the tuner search-range override for a channel. The
+/// `monitor_spectrum` worker applies the lock to the matching per-channel
+/// `TunerState` on its next tick. `clear: true` drops the override and
+/// restores the default `(40, 2000) Hz` window.
+pub fn tuner_range(state: &ServerState, cmd: &Value) -> Value {
+    let channel = match cmd.get("channel").and_then(Value::as_u64) {
+        Some(v) => v as u32,
+        None => return json!({"ok": false, "error": "missing 'channel'"}),
+    };
+    let clear = cmd.get("clear").and_then(Value::as_bool).unwrap_or(false);
+    let mut map = state.tuner_range_locks.lock().unwrap();
+    if clear {
+        map.remove(&channel);
+        return json!({"ok": true, "channel": channel, "range_hz": serde_json::Value::Null});
+    }
+    let lo = cmd.get("lo_hz").and_then(Value::as_f64);
+    let hi = cmd.get("hi_hz").and_then(Value::as_f64);
+    match (lo, hi) {
+        (Some(lo), Some(hi)) if lo > 0.0 && hi > lo => {
+            map.insert(channel, (lo, hi));
+            json!({"ok": true, "channel": channel, "range_hz": [lo, hi]})
+        }
+        _ => json!({"ok": false, "error": "lo_hz and hi_hz required, with 0 < lo < hi"}),
+    }
+}
+
 pub fn server_connections(state: &ServerState) -> Value {
     let listen_mode = state.listen_mode.lock().unwrap().clone();
     let (ctrl_ep, data_ep) = if listen_mode == "public" {

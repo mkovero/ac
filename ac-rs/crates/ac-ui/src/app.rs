@@ -16,7 +16,7 @@ use crate::data::control::CtrlClient;
 use crate::data::receiver::{ReceiverHandle, ReceiverStatus};
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, SweepState, SweepStore, TransferStore, TunerStore, VirtualChannelStore,
 };
 use crate::data::synthetic::SyntheticHandle;
 use crate::data::types::{
@@ -95,32 +95,6 @@ pub const TUNER_SEARCH_MAX_HZ: f64 = 2000.0;
 /// Below this confidence score we render nothing — a wrong-but-labelled
 /// peak is worse than no peak at all when the user is chasing cents.
 pub const TUNER_MIN_CONFIDENCE: f64 = 0.25;
-/// Height of the noise floor above the median spectrum, in dB. The tuner
-/// ignores local maxima below this so a flat pink-noise floor stays empty.
-pub const TUNER_FLOOR_OVER_MEDIAN_DB: f32 = 12.0;
-/// Rising-edge level jump (in dB over the rolling baseline) that arms a
-/// fresh tuner analysis. 6 dB is one doubling of amplitude ("delta gain
-/// twice") — quiet enough to catch a brushed snare, loud enough that
-/// baseline noise doesn't retrigger.
-pub const TUNER_TRIGGER_DELTA_DB: f32 = 6.0;
-/// Re-arm hysteresis: the level must drop back below
-/// `baseline + TUNER_REARM_DELTA_DB` before the next trigger fires. Keeps
-/// a sustained tone from re-analysing every frame while the hit rings out.
-pub const TUNER_REARM_DELTA_DB: f32 = 3.0;
-/// EMA time-constant for the trigger baseline, in seconds. Slow enough
-/// that a loud transient doesn't immediately raise the floor out from
-/// under the next hit, fast enough to track a changing ambient level.
-pub const TUNER_BASELINE_TAU_S: f32 = 2.0;
-/// How many past triggered fundamentals to remember per channel for the
-/// "last 5" corner readout. A small number because the purpose is to eye
-/// whether consecutive hits are converging on the same Hz as the user
-/// turns a lug.
-pub const TUNER_HISTORY_CAP: usize = 5;
-/// Two fundamentals closer than this fraction are treated as the same hit
-/// (1.5 % ≈ 26 cents). Prevents the history ring from filling with near-
-/// duplicates when the drum rings at a steady pitch over several frames.
-pub const TUNER_HISTORY_DEDUPE_FRAC: f64 = 0.015;
-
 /// Half-width (as fraction of f0) of the Space-to-lock search range
 /// around the current fundamental. 0.2 = ±20% covers a couple of
 /// semitones of detune without admitting neighbouring octaves.
@@ -208,6 +182,7 @@ pub struct AppInit {
     pub transfer_store: TransferStore,
     pub virtual_channels: VirtualChannelStore,
     pub sweep_store: SweepStore,
+    pub tuner_store: TunerStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -249,6 +224,7 @@ pub struct App {
     /// double-starts and to decide whether to send a stop on layout exit.
     transfer_stream_active: bool,
     sweep_store: Option<SweepStore>,
+    tuner_store: Option<TunerStore>,
     sweep_kind: Option<SweepKind>,
     sweep_last: SweepState,
     sweep_selected_idx: Option<usize>,
@@ -355,39 +331,13 @@ pub struct App {
     /// the user retunes a lug, but the target stays pinned to whatever
     /// `freq_hz` was current at the moment of the 2nd press.
     tuner_mode: TunerMode,
-    /// Per-channel last identified fundamental. `None` means no candidate
-    /// passed `TUNER_MIN_CONFIDENCE`, or the peak-hold buffer is empty.
-    /// Parallel to `peak_holds`, sized to `n_real`.
-    tuner_last: Vec<Option<ac_core::tuner::FundamentalCandidate>>,
     /// Per-channel tuning target set on 2nd `U` press. Independent per
     /// channel so a two-drum setup (kick CH0 + snare CH1) can carry two
     /// locks at once.
     tuner_locks: Vec<Option<f64>>,
-    /// Per-channel EMA noise-baseline (dBFS of the loudest bin in the
-    /// tuner search range). Updated every frame with time-constant
-    /// `TUNER_BASELINE_TAU_S` so the trigger tracks slow background-level
-    /// drift without smoothing through an actual drum hit.
-    tuner_baseline_db: Vec<f32>,
-    /// Per-channel rising-edge latch: true = ready to fire the identifier
-    /// when the next level jump crosses the trigger threshold; false =
-    /// already fired on the current transient, wait for the level to fall
-    /// back below the re-arm threshold before firing again.
-    tuner_armed: Vec<bool>,
-    /// Per-channel ring of the last successful fundamentals (newest last,
-    /// capped at `TUNER_HISTORY_CAP`). Drawn as a short list in the corner
-    /// readout so the user can compare consecutive hits without having to
-    /// read the live value on every strike.
-    tuner_history: Vec<std::collections::VecDeque<f64>>,
-    /// Wall-clock timestamp of the previous baseline update. Shared across
-    /// channels — the baseline EMA runs once per incoming frame batch, and
-    /// all channels see the same dt.
-    tuner_baseline_last: Option<Instant>,
-    /// Optional narrow search range (Hz) that overrides
-    /// `TUNER_SEARCH_MIN_HZ..TUNER_SEARCH_MAX_HZ` while set. Toggled by
-    /// Space while the tuner is Live: the user hits the drum, the tuner
-    /// resolves e.g. 221 Hz, Space locks the search to ±20% of that so
-    /// subsequent hits can't alias onto a sub-harmonic outside the
-    /// interesting range.
+    /// Global narrow search range (Hz) sent to the daemon via `tuner_range`
+    /// REQ when the user presses Space in Live mode. Mirrored locally so
+    /// the overlay can label the lock without round-tripping to the daemon.
     tuner_range_lock: Option<(f64, f64)>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
@@ -468,6 +418,7 @@ impl App {
             transfer_last: None,
             transfer_stream_active: false,
             sweep_store: None,
+            tuner_store: None,
             sweep_kind,
             sweep_last: SweepState::default(),
             sweep_selected_idx: None,
@@ -513,12 +464,7 @@ impl App {
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
             tuner_mode: TunerMode::Off,
-            tuner_last: Vec::new(),
             tuner_locks: Vec::new(),
-            tuner_baseline_db: Vec::new(),
-            tuner_armed: Vec::new(),
-            tuner_history: Vec::new(),
-            tuner_baseline_last: None,
             tuner_range_lock: None,
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
@@ -1110,6 +1056,8 @@ impl App {
         let virtual_channels = init.virtual_channels.clone();
         let sweep_store = init.sweep_store.clone();
         self.sweep_store = Some(sweep_store.clone());
+        let tuner_store = init.tuner_store.clone();
+        self.tuner_store = Some(tuner_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -1130,6 +1078,7 @@ impl App {
                     transfer_store,
                     virtual_channels,
                     sweep_store,
+                    tuner_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));
@@ -1193,6 +1142,32 @@ impl App {
                 self.notify("analysis_mode: ctrl error");
                 false
             }
+        }
+    }
+
+    /// Set or clear the daemon-side tuner search-range lock for a channel.
+    /// Synthetic backend has no daemon; silently no-op.
+    fn send_tuner_range(&mut self, channel: u32, range: Option<(f64, f64)>) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let cmd = if let Some((lo, hi)) = range {
+            serde_json::json!({
+                "cmd":     "tuner_range",
+                "channel": channel,
+                "lo_hz":   lo,
+                "hi_hz":   hi,
+            })
+        } else {
+            serde_json::json!({
+                "cmd":     "tuner_range",
+                "channel": channel,
+                "clear":   true,
+            })
+        };
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("tuner_range failed: {e}");
         }
     }
 
@@ -1475,9 +1450,9 @@ impl App {
                     TunerMode::Live => {
                         let ch = self.config.active_channel;
                         let cand = self
-                            .tuner_last
-                            .get(ch)
-                            .and_then(|slot| slot.as_ref())
+                            .tuner_store
+                            .as_ref()
+                            .and_then(|s| s.snapshot(ch + 1).0.into_iter().nth(ch).flatten())
                             .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
                         if let Some(cand) = cand {
                             if self.tuner_locks.len() <= ch {
@@ -1520,21 +1495,23 @@ impl App {
                 ));
             }
             KeyCode::Space => {
-                // In Live tuner mode Space narrows the search range
-                // around the current candidate so repeated hits can't
-                // alias to a sub-harmonic outside the area of interest.
-                // Press again to unlock. Only hijacks Space in Live;
-                // Locked and Off preserve the original selection toggle.
+                // In Live tuner mode Space narrows the search range on the
+                // active channel so repeated hits can't alias to a sub-
+                // harmonic outside the area of interest. Range lock lives
+                // on the daemon (per-channel); the UI sends `tuner_range`
+                // REQ and mirrors the value locally for the overlay label.
                 if self.tuner_mode == TunerMode::Live {
+                    let ch = self.config.active_channel as u32;
                     if self.tuner_range_lock.is_some() {
                         self.tuner_range_lock = None;
+                        self.send_tuner_range(ch, None);
                         self.notify("tuner: range unlocked");
                     } else {
-                        let ch = self.config.active_channel;
+                        let ch_usize = self.config.active_channel;
                         let f0 = self
-                            .tuner_last
-                            .get(ch)
-                            .and_then(|s| s.as_ref())
+                            .tuner_store
+                            .as_ref()
+                            .and_then(|s| s.snapshot(ch_usize + 1).0.into_iter().nth(ch_usize).flatten())
                             .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE)
                             .map(|c| c.freq_hz);
                         if let Some(f0) = f0 {
@@ -1543,6 +1520,7 @@ impl App {
                             let hi = (f0 * (1.0 + TUNER_RANGE_LOCK_FRAC))
                                 .min(TUNER_SEARCH_MAX_HZ);
                             self.tuner_range_lock = Some((lo, hi));
+                            self.send_tuner_range(ch, Some((lo, hi)));
                             self.notify(&format!(
                                 "tuner: range locked {:.0}-{:.0} Hz",
                                 lo, hi
@@ -2089,130 +2067,17 @@ impl App {
             }
         }
 
-        // Drum tuner: rescore every channel's peak-hold buffer for membrane
-        // modes. Runs per incoming frame — the identifier is O(peaks² × modes)
-        // but peak counts above the floor are small (tens), so cost is
-        // negligible. Left running in `Locked` mode too so the corner readout
-        // keeps updating against the held target after the user has locked.
-        if self.tuner_mode != TunerMode::Off {
-            if self.tuner_last.len() < n_real {
-                self.tuner_last.resize(n_real, None);
+        // Drum tuner candidates are pushed by the daemon on the `tuner`
+        // PUB topic and cached in `tuner_store`. Off mode drops the cache so
+        // a stale pre-Off readout doesn't reappear on re-enter.
+        if self.tuner_mode == TunerMode::Off {
+            if let Some(s) = self.tuner_store.as_ref() {
+                s.clear();
             }
-            if self.tuner_locks.len() < n_real {
-                self.tuner_locks.resize(n_real, None);
-            }
-            if self.tuner_baseline_db.len() < n_real {
-                self.tuner_baseline_db.resize(n_real, f32::NEG_INFINITY);
-            }
-            if self.tuner_armed.len() < n_real {
-                self.tuner_armed.resize(n_real, true);
-            }
-            if self.tuner_history.len() < n_real {
-                self.tuner_history
-                    .resize(n_real, std::collections::VecDeque::new());
-            }
-            let now = Instant::now();
-            let dt = self
-                .tuner_baseline_last
-                .map(|t| now.saturating_duration_since(t).as_secs_f32())
-                .unwrap_or(1.0 / 60.0)
-                .clamp(1e-4, 0.5);
-            self.tuner_baseline_last = Some(now);
-            let ema_alpha = 1.0 - (-dt / TUNER_BASELINE_TAU_S).exp();
-            for (i, slot) in frames.iter().enumerate().take(n_real) {
-                let Some(frame) = slot.as_ref() else { continue };
-                let Some(Some(peak)) = self.peak_holds.get(i) else {
-                    self.tuner_last[i] = None;
-                    continue;
-                };
-                if peak.len() != frame.freqs.len() || peak.is_empty() {
-                    self.tuner_last[i] = None;
-                    continue;
-                }
-                // Level detector: max dBFS of peak-hold bins inside the
-                // membrane search range. Using peak-hold (not the live
-                // spectrum) so a short drum hit doesn't decay below the
-                // trigger threshold before we get to evaluate it.
-                let mut current = f32::NEG_INFINITY;
-                for (f, &m) in frame.freqs.iter().zip(peak.iter()) {
-                    let fh = *f as f64;
-                    if fh >= TUNER_SEARCH_MIN_HZ
-                        && fh <= TUNER_SEARCH_MAX_HZ
-                        && m.is_finite()
-                        && m > current
-                    {
-                        current = m;
-                    }
-                }
-                if !current.is_finite() {
-                    continue;
-                }
-                // Baseline EMA. Seed with the first observed level so the
-                // first hit doesn't always trigger against -inf.
-                let base = &mut self.tuner_baseline_db[i];
-                if !base.is_finite() {
-                    *base = current;
-                }
-                // Only let the baseline rise slowly and fall freely — that
-                // way a sustained tone lifts the floor (correctly
-                // suppressing it as "background") while a quiet gap lets
-                // the next hit look like a large delta.
-                if current < *base {
-                    *base = current;
-                } else {
-                    *base += ema_alpha * (current - *base);
-                }
-                let delta = current - *base;
-                let armed = self.tuner_armed[i];
-                if !armed && delta < TUNER_REARM_DELTA_DB {
-                    self.tuner_armed[i] = true;
-                }
-                if armed && delta >= TUNER_TRIGGER_DELTA_DB {
-                    let floor = median_f32(peak)
-                        .map(|m| m + TUNER_FLOOR_OVER_MEDIAN_DB)
-                        .unwrap_or(-60.0);
-                    let range = self
-                        .tuner_range_lock
-                        .unwrap_or((TUNER_SEARCH_MIN_HZ, TUNER_SEARCH_MAX_HZ));
-                    let cand = ac_core::tuner::identify_fundamental(
-                        peak,
-                        &frame.freqs,
-                        floor,
-                        range,
-                    );
-                    if let Some(c) = &cand {
-                        if c.confidence >= TUNER_MIN_CONFIDENCE {
-                            let hist = &mut self.tuner_history[i];
-                            let dup = hist.back().is_some_and(|&prev| {
-                                (c.freq_hz - prev).abs() / prev.max(1.0)
-                                    < TUNER_HISTORY_DEDUPE_FRAC
-                            });
-                            if !dup {
-                                hist.push_back(c.freq_hz);
-                                while hist.len() > TUNER_HISTORY_CAP {
-                                    hist.pop_front();
-                                }
-                            }
-                        }
-                    }
-                    self.tuner_last[i] = cand;
-                    self.tuner_armed[i] = false;
-                }
-            }
-        } else if !self.tuner_last.is_empty() {
-            // Free the stored candidates so Off mode doesn't keep the last
-            // frozen readout visible if the user re-enters Live later.
-            for slot in self.tuner_last.iter_mut() {
-                *slot = None;
-            }
-            for slot in self.tuner_history.iter_mut() {
-                slot.clear();
-            }
-            for slot in self.tuner_armed.iter_mut() {
-                *slot = true;
-            }
-            self.tuner_baseline_last = None;
             self.tuner_range_lock = None;
+        }
+        if self.tuner_locks.len() < n_real {
+            self.tuner_locks.resize(n_real, None);
         }
 
         // Min-hold accumulator: mirror of the peak loop with the comparator
@@ -2601,21 +2466,19 @@ impl App {
             Vec::new()
         };
         let tuner_mode_snap = self.tuner_mode;
-        let tuner_last_snap = if self.tuner_mode != TunerMode::Off {
-            self.tuner_last.clone()
+        let (tuner_last_snap, tuner_history_snap): (
+            Vec<Option<ac_core::tuner::FundamentalCandidate>>,
+            Vec<Vec<f64>>,
+        ) = if self.tuner_mode != TunerMode::Off {
+            self.tuner_store
+                .as_ref()
+                .map(|s| s.snapshot(n_real))
+                .unwrap_or_else(|| (Vec::new(), Vec::new()))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let tuner_locks_snap = if self.tuner_mode == TunerMode::Locked {
             self.tuner_locks.clone()
-        } else {
-            Vec::new()
-        };
-        let tuner_history_snap: Vec<Vec<f64>> = if self.tuner_mode != TunerMode::Off {
-            self.tuner_history
-                .iter()
-                .map(|d| d.iter().copied().collect())
-                .collect()
         } else {
             Vec::new()
         };
@@ -3808,7 +3671,7 @@ mod loop_tests {
     use super::*;
 
     use crate::data::store::{
-        ChannelStore, SweepStore, TransferStore, VirtualChannelStore,
+        ChannelStore, SweepStore, TransferStore, TunerStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -3820,6 +3683,7 @@ mod loop_tests {
             transfer_store: TransferStore::new(),
             virtual_channels: VirtualChannelStore::new(),
             sweep_store: SweepStore::new(),
+            tuner_store: TunerStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

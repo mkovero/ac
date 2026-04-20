@@ -62,6 +62,11 @@ pub struct ServerState {
     /// a restart. `active` flips true on worker spawn and false on exit;
     /// `set_monitor_params` uses it to reject changes when no monitor runs.
     pub monitor_params: Arc<Mutex<MonitorParams>>,
+    /// Per-channel tuner search-range override. Empty by default; a
+    /// `tuner_range` REQ writes `Some((lo_hz, hi_hz))` for a channel.
+    /// The `monitor_spectrum` worker reads this map every tick and
+    /// applies the lock to each channel's `TunerState`.
+    pub tuner_range_locks: Arc<Mutex<HashMap<u32, (f64, f64)>>>,
 }
 
 /// Live-tunable parameters for the FFT spectrum monitor.
@@ -123,10 +128,17 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cwt_sigma:     Arc::new(Mutex::new(ac_core::cwt::DEFAULT_SIGMA)),
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
+        tuner_range_locks: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
     let mut backlog_warned = false;
+    // Keepalive cadence — clients use the monotonically-increasing `seq`
+    // to detect a stalled or restarted daemon. 1 Hz is plenty and costs
+    // one tiny PUB frame per second.
+    let keepalive_interval = std::time::Duration::from_secs(1);
+    let mut last_keepalive = std::time::Instant::now();
+    let mut keepalive_seq: u64 = 0;
 
     loop {
         // Drain any pending DATA frames first
@@ -152,6 +164,25 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
                     None    => false,
                 }
             });
+        }
+
+        if last_keepalive.elapsed() >= keepalive_interval {
+            last_keepalive = std::time::Instant::now();
+            keepalive_seq = keepalive_seq.wrapping_add(1);
+            let ts_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let busy = !state.workers.lock().unwrap().is_empty();
+            let payload = serde_json::to_string(&json!({
+                "type":      "keepalive",
+                "seq":       keepalive_seq,
+                "timestamp": ts_ns,
+                "busy":      busy,
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+            let frame = format!("keepalive {payload}").into_bytes();
+            data.send(frame, 0).ok();
         }
 
         zmq::poll(&mut items, 10).ok(); // 10 ms timeout
@@ -245,6 +276,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "server_disable"      => handlers::server_disable(state),
         "server_connections"  => handlers::server_connections(state),
         "transfer_stream"     => handlers::transfer_stream(state, &cmd),
+        "tuner_range"         => handlers::tuner_range(state, &cmd),
         "probe"               => handlers::probe(state, &cmd),
         "test_hardware"       => handlers::test_hardware(state, &cmd),
         "test_dut"            => handlers::test_dut(state, &cmd),
