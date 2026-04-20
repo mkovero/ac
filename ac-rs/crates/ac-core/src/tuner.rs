@@ -309,13 +309,14 @@ pub struct TunerConfig {
     /// Below this confidence a triggered candidate is dropped instead
     /// of being stored — a wrong-but-labelled peak is worse than none.
     pub min_confidence: f64,
-    /// Seconds without any bin rising before the internal peak-hold
-    /// starts decaying. Shorter = more reactive, longer = holds a hit
-    /// steady for post-trigger analysis.
-    pub peak_hold_idle_s: f32,
-    /// dB/s release rate once the idle window has elapsed. Applied
-    /// per-bin, clamped to the live spectrum so a bin never drops
-    /// below the current reading.
+    /// dB/s per-bin release rate for the internal peak-hold. Applied every
+    /// frame, clamped so a bin never drops below the current live reading
+    /// (so rising bins still track the live spectrum up). The old design
+    /// only decayed after an "idle" window with zero rising bins, but in
+    /// real audio ambient noise keeps at least one bin rising every frame,
+    /// so the peak-hold would saturate upward indefinitely — its median
+    /// then dragged the identifier's noise floor up until drum partials
+    /// fell below it. Constant decay sidesteps that.
     pub peak_release_db_per_sec: f32,
 }
 
@@ -330,8 +331,11 @@ impl Default for TunerConfig {
             history_cap: 5,
             history_dedupe_frac: 0.015,
             min_confidence: 0.25,
-            peak_hold_idle_s: 1.0,
-            peak_release_db_per_sec: 20.0,
+            // 8 dB/s: a -30 dB peak takes ~3 s to fall below a -50 dB
+            // floor, long enough to hold a drum ring across the analysis
+            // window but fast enough that the peak-hold median tracks the
+            // actual noise floor within a few seconds of silence.
+            peak_release_db_per_sec: 8.0,
         }
     }
 }
@@ -353,10 +357,6 @@ pub struct TunerState {
     /// Internal per-bin peak-hold accumulator. Sized to match the last
     /// spectrum fed in; re-seeded on bin-count change.
     peak_hold: Vec<f32>,
-    /// Seconds since any bin rose against `peak_hold`. When this passes
-    /// `cfg.peak_hold_idle_s` the held trace starts decaying toward the
-    /// live spectrum at `cfg.peak_release_db_per_sec`.
-    peak_idle_s: f32,
 }
 
 /// Result of a single [`TunerState::feed`] call.
@@ -384,7 +384,6 @@ impl TunerState {
             history: std::collections::VecDeque::new(),
             range_lock: None,
             peak_hold: Vec::new(),
-            peak_idle_s: 0.0,
         }
     }
 
@@ -425,7 +424,6 @@ impl TunerState {
         self.last = None;
         self.history.clear();
         self.peak_hold.clear();
-        self.peak_idle_s = 0.0;
     }
 
     /// Feed a fresh dBFS spectrum (linear-binned or log-aggregated both
@@ -439,29 +437,20 @@ impl TunerState {
         }
         let dt = dt_s.clamp(1e-4, 0.5);
 
-        // --- Peak-hold accumulation ---
+        // --- Peak-hold accumulation (leaky) ---
+        // Always decay: `held = max(held - drop, fresh)`. Rising bins follow
+        // the live spectrum up; falling/steady bins bleed off at
+        // `peak_release_db_per_sec`. No idle gate — gating on "any bin rose"
+        // never released in real audio because ambient noise kept at least
+        // one bin rising every frame, and an unbounded peak-hold dragged the
+        // identifier's median-based noise floor up over drum partials.
         if self.peak_hold.len() != spectrum_db.len() {
             self.peak_hold = spectrum_db.to_vec();
-            self.peak_idle_s = 0.0;
         } else {
-            let mut any_rose = false;
+            let drop = self.cfg.peak_release_db_per_sec * dt;
             for (held, &fresh) in self.peak_hold.iter_mut().zip(spectrum_db.iter()) {
-                if fresh.is_finite() && fresh > *held {
-                    *held = fresh;
-                    any_rose = true;
-                }
-            }
-            if any_rose {
-                self.peak_idle_s = 0.0;
-            } else {
-                self.peak_idle_s += dt;
-                if self.peak_idle_s > self.cfg.peak_hold_idle_s {
-                    let drop = self.cfg.peak_release_db_per_sec * dt;
-                    for (held, &fresh) in self.peak_hold.iter_mut().zip(spectrum_db.iter()) {
-                        if fresh.is_finite() {
-                            *held = (*held - drop).max(fresh);
-                        }
-                    }
+                if fresh.is_finite() {
+                    *held = (*held - drop).max(fresh);
                 }
             }
         }
@@ -501,7 +490,11 @@ impl TunerState {
         if !(self.armed && delta >= self.cfg.trigger_delta_db) {
             return Triggered::No;
         }
-        let floor = median_f32_local(&self.peak_hold)
+        // Noise floor from the LIVE spectrum, not peak-hold. Peak-hold's
+        // median is inflated by every transient that has ever hit the bin,
+        // which would hide drum partials behind a floor that climbed above
+        // them.
+        let floor = median_f32_local(spectrum_db)
             .map(|m| m + self.cfg.floor_over_median_db)
             .unwrap_or(-60.0);
         let range = self.range_lock.unwrap_or(self.cfg.search_range_hz);
@@ -931,6 +924,41 @@ mod tests {
                 assert!((c.freq_hz - 214.0).abs() < 5.0, "f0 {}", c.freq_hz);
             }
             other => panic!("expected confident fire, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tuner_state_identifier_survives_accumulated_peak_hold_history() {
+        // Regression: peak-hold saturated upward in real audio because any
+        // bin rising reset the idle counter, so its median climbed over drum
+        // partials and the identifier's floor gate hid them. After a minute
+        // of prior hits + noise, a fresh hit at moderate level must still
+        // be identifiable.
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let dt = 1.0 / 30.0;
+        // Simulate 20 s of mixed drum hits + noise so peak-hold is fully
+        // populated with history.
+        for hit in 0..10 {
+            for k in 0..60 {
+                let n = noisy_silence(&freqs, -95.0, -75.0, (hit * 7919 + k) as u64);
+                s.feed(&n, &freqs, dt);
+            }
+            let loud = drum_spectrum(&freqs, 214.0, -30.0, -80.0);
+            s.feed(&loud, &freqs, dt);
+        }
+        // 10 s of silence so baseline can track down and rearm.
+        for k in 0..300 {
+            let n = noisy_silence(&freqs, -95.0, -75.0, (99999 + k) as u64);
+            s.feed(&n, &freqs, dt);
+        }
+        // Fresh hit — must still fire with a confident candidate.
+        let loud = drum_spectrum(&freqs, 214.0, -30.0, -80.0);
+        match s.feed(&loud, &freqs, dt) {
+            Triggered::Fired { candidate: Some(c), confident: true } => {
+                assert!((c.freq_hz - 214.0).abs() < 3.0, "f0 {}", c.freq_hz);
+            }
+            other => panic!("expected confident fire after history accumulation, got {other:?}"),
         }
     }
 
