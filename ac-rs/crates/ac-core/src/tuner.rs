@@ -166,21 +166,63 @@ pub fn identify_fundamental(
         .map(|p| p.magnitude_db)
         .fold(f64::NEG_INFINITY, f64::max);
 
-    // Score each peak as a candidate (0,1). For every membrane mode ratio,
-    // look for a peak within ±5% of f0 * ratio; reward by that peak's dB
-    // above floor. A drum with clean overtones lights up many modes; a
-    // random lone peak scores only the fundamental slot.
+    // Build the candidate-f0 set. Each detected peak is a candidate, plus
+    // `peak / ratio` for every mode ratio > 1 — the derived half rescues
+    // a real (0,1) that the local-max finder missed because the
+    // fundamental is a broad bump (common at large FFT N) or sits 30+ dB
+    // below the (1,1) argmax on damped heads. Without them the identifier
+    // can only pick an overtone as f0 and reports 100–200 Hz high.
+    let (fmin, fmax) = search_range_hz;
+    #[derive(Clone, Copy)]
+    struct Cand {
+        f0: f64,
+        f0_mag: f64,
+        has_peak: bool,
+    }
+    let mut cand_set: Vec<Cand> = Vec::with_capacity(peaks.len() * (MEMBRANE_MODES.len() + 1));
+    for p in &peaks {
+        cand_set.push(Cand { f0: p.freq_hz, f0_mag: p.magnitude_db, has_peak: true });
+        for &(_, _, ratio) in MEMBRANE_MODES {
+            if ratio <= 1.001 {
+                continue;
+            }
+            let f0 = p.freq_hz / ratio;
+            if f0 < fmin || f0 > fmax {
+                continue;
+            }
+            cand_set.push(Cand { f0, f0_mag: f64::NEG_INFINITY, has_peak: false });
+        }
+    }
+    cand_set.sort_by(|a, b| a.f0.partial_cmp(&b.f0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut dedup: Vec<Cand> = Vec::with_capacity(cand_set.len());
+    for c in cand_set {
+        if let Some(p) = dedup.last().copied() {
+            if (c.f0 - p.f0).abs() / p.f0.max(1e-9) < 0.005 {
+                // Prefer a real detected peak over a derived duplicate.
+                if c.has_peak && !p.has_peak {
+                    *dedup.last_mut().unwrap() = c;
+                }
+                continue;
+            }
+        }
+        dedup.push(c);
+    }
+
+    // Score each candidate f0. For every membrane mode ratio, look for a
+    // peak within ±5% of f0 * ratio; reward by that peak's dB above floor.
+    // A drum with clean overtones lights up many modes; a random lone
+    // peak scores only the fundamental slot.
     let mut best: Option<(f64, FundamentalCandidate, f64)> = None;
-    for cand in &peaks {
-        let f0 = cand.freq_hz;
+    for cand in &dedup {
+        let f0 = cand.f0;
         if f0 <= 0.0 {
             continue;
         }
-        // f0 itself must be a prominent peak. Without this gate a quiet
-        // sub-harmonic artifact can farm matches against the real loud
-        // peak via 2.136× / 2.296× / 2.918× aliasing and out-score the
-        // true fundamental whose only match is itself.
-        if cand.magnitude_db < loudest_in_range - F0_PROMINENCE_DB {
+        // f0 itself must be a prominent peak — but only for candidates
+        // that *are* a detected peak. Derived candidates (peak/ratio) are
+        // precisely the case where (0,1) lacks a prominent peak, so this
+        // gate would defeat the point.
+        if cand.has_peak && cand.f0_mag < loudest_in_range - F0_PROMINENCE_DB {
             continue;
         }
         let mut matched: Vec<Partial> = Vec::new();
@@ -208,10 +250,18 @@ pub fn identify_fundamental(
                     }
                 }
             }
-            if let Some((_, idx, p)) = best_p {
+            if let Some((d_abs, idx, p)) = best_p {
                 used[idx] = true;
                 let dev_pct = (p.freq_hz / target - 1.0) * 100.0;
-                score += (p.magnitude_db - floor_db as f64).max(0.0);
+                // Weight the score contribution by how cleanly the peak
+                // aligns with the ideal ratio. A zero-deviation match
+                // counts in full; a match at the ±5% edge counts half.
+                // This prevents a derived candidate (peak / ratio) from
+                // winning by coincidentally aligning many peaks at the
+                // edge of tolerance when a direct candidate fits the
+                // same peaks at zero deviation.
+                let fit = 1.0 - 0.5 * (d_abs / MATCH_TOL);
+                score += (p.magnitude_db - floor_db as f64).max(0.0) * fit;
                 matched.push(Partial {
                     mode: (m, n),
                     ideal_ratio: ratio,
@@ -242,6 +292,37 @@ pub fn identify_fundamental(
             continue;
         }
 
+        // Physicality gate: the loudest matched partial must be a
+        // low-order mode. Real drums put their energy in (0,1), (1,1),
+        // (2,1), or (0,2) — higher modes are always quieter. A derived
+        // candidate like f0 = peak / 3.501 that farms the dominant peak
+        // as a (3,2) overtone plus random noise matches violates this
+        // and is the pattern we want to reject.
+        let loudest_ratio = matched
+            .iter()
+            .find(|p| (p.magnitude_db - max_matched).abs() < 1e-9)
+            .map(|p| p.ideal_ratio)
+            .unwrap_or(0.0);
+        if loudest_ratio > 2.3 {
+            continue;
+        }
+        // Low-mode energy requirement: if the loudest match is beyond
+        // (1,1), a (0,1) or (1,1) match must still exist within 25 dB
+        // of max_matched. Without this, a candidate whose only real
+        // evidence is a single high-order overtone (e.g. peak/2.136)
+        // farms (0,1) and (1,1) from noise and out-scores the direct
+        // candidate on that loud peak.
+        if loudest_ratio > 1.65 {
+            let low_mode_max = matched
+                .iter()
+                .filter(|p| p.ideal_ratio <= 1.65)
+                .map(|p| p.magnitude_db)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if low_mode_max < max_matched - 25.0 {
+                continue;
+            }
+        }
+
         // Raw energy ratio is 1.0 whenever every peak above the floor happens
         // to fall near a mode ratio — which includes the degenerate case of
         // a single isolated peak. Weight by matched-partial count so a thin
@@ -250,7 +331,16 @@ pub fn identify_fundamental(
         let energy_ratio = (score / total_above_floor).clamp(0.0, 1.0);
         let stack_weight = (matched.len() as f64 / 4.0).min(1.0);
         let confidence = (energy_ratio * stack_weight).clamp(0.0, 1.0);
-        let f0_mag = cand.magnitude_db;
+        // Tie-break mag: for derived candidates the loudest matched
+        // partial stands in for a (missing) f0 peak.
+        let f0_mag = if cand.has_peak {
+            cand.f0_mag
+        } else {
+            matched
+                .iter()
+                .map(|p| p.magnitude_db)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
         let this = FundamentalCandidate {
             freq_hz: f0,
             confidence,
@@ -792,6 +882,34 @@ mod tests {
             (c.freq_hz - 221.0).abs() < 2.0,
             "expected ~221 Hz, got {}",
             c.freq_hz,
+        );
+    }
+
+    #[test]
+    fn identifies_f0_when_fundamental_peak_missing() {
+        // Damped / low-tuned drum: (0,1) is a broad bump the local-max
+        // finder misses, but (1,1) / (2,1) / (0,2) are sharp peaks.
+        // Derived-candidate expansion (peak / ratio) must recover f0
+        // from the overtone stack alone. Without it the identifier
+        // would report the (1,1) peak as f0 — ~100-200 Hz high for
+        // drums in the 200 Hz range.
+        let f0 = 200.0_f64;
+        let (spec, freqs) = synth(
+            1.0,
+            4096,
+            &[
+                // No (0,1) peak.
+                (f0 * 1.594, -6.0),
+                (f0 * 2.136, -12.0),
+                (f0 * 2.296, -14.0),
+                (f0 * 2.653, -18.0),
+            ],
+        );
+        let c = identify_fundamental(&spec, &freqs, -50.0, (40.0, 2000.0)).unwrap();
+        assert!(
+            (c.freq_hz - f0).abs() < 3.0,
+            "expected ~{f0} Hz from overtone stack alone, got {}",
+            c.freq_hz
         );
     }
 
