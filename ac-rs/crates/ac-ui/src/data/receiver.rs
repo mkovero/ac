@@ -138,13 +138,23 @@ pub fn spawn(
                     if topic == "tuner" {
                         match serde_json::from_str::<TunerFrame>(body) {
                             Ok(tf) => {
+                                let slot = route_slot(Some(tf.channel), &mut channel_map);
+                                let Some(slot) = slot else {
+                                    if std::env::var_os("AC_TUNER_DEBUG").is_some() {
+                                        eprintln!(
+                                            "[ui recv] tuner ch{} DROP (no slot, n_slots={})",
+                                            tf.channel, n_slots
+                                        );
+                                    }
+                                    continue;
+                                };
                                 if std::env::var_os("AC_TUNER_DEBUG").is_some() {
                                     eprintln!(
-                                        "[ui recv] tuner ch{} f0={:.1}Hz conf={:.2} partials={}",
-                                        tf.channel, tf.freq_hz, tf.confidence, tf.partials.len()
+                                        "[ui recv] tuner ch{} → slot{} f0={:.1}Hz conf={:.2} partials={}",
+                                        tf.channel, slot, tf.freq_hz, tf.confidence, tf.partials.len()
                                     );
                                 }
-                                tuner.ingest(tf);
+                                tuner.ingest(slot, tf);
                                 status_c.connected.store(true, Ordering::Relaxed);
                                 let ns = start.elapsed().as_nanos() as u64;
                                 status_c.last_frame_ns.store(ns, Ordering::Relaxed);

@@ -295,13 +295,12 @@ impl TunerStore {
         Self::default()
     }
 
-    pub fn ingest(&self, frame: TunerFrame) {
-        let ch = frame.channel as usize;
+    pub fn ingest(&self, slot_idx: usize, frame: TunerFrame) {
         let Ok(mut g) = self.inner.lock() else { return };
-        if g.len() <= ch {
-            g.resize_with(ch + 1, TunerChannel::default);
+        if g.len() <= slot_idx {
+            g.resize_with(slot_idx + 1, TunerChannel::default);
         }
-        let slot = &mut g[ch];
+        let slot = &mut g[slot_idx];
         if let Some(last) = slot.history.back() {
             if (last - frame.freq_hz).abs() / last.abs().max(1.0) >= 0.015
                 && slot.history.len() >= TUNER_HISTORY_CAP
