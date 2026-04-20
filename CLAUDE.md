@@ -15,7 +15,7 @@ cargo test                     # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 
 
 ## Usage (quick reference)
 
-Audio backend is auto-detected: JACK if available, otherwise sounddevice (PortAudio). Force via config `"backend": "jack"` or `"backend": "sounddevice"`. When using JACK, it must be running first:
+Audio backend is auto-detected: JACK if available, otherwise CPAL. When using JACK, it must be running first:
 ```bash
 jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ```
