@@ -7,7 +7,7 @@ THD, THD+N, level 'n frequency sweeps, transfer functions, live spectrum.
 The `ip` of audio — terse, positional, unit-tagged arguments.
 
 > **Alpha** — only tested on Linux with JACK (native and PipeWire).
-> sounddevice/PortAudio backend exists but is not exercised yet.
+> CPAL fallback backend exists but is not exercised yet.
 > macOS and Windows are untested.
 
 ## Architecture
@@ -35,13 +35,7 @@ cd ac-rs && cargo build --release
 | Backend | When used | Platforms |
 |---------|-----------|-----------|
 | **JACK** (`jack-client`) | Preferred when a JACK server is running | Linux (native or PipeWire) |
-| **sounddevice** (PortAudio) | Fallback when JACK is unavailable | Linux, macOS, Windows |
-
-To force a backend, set `"backend"` in `~/.config/ac/config.json`:
-
-```json
-{ "backend": "sounddevice" }
-```
+| **CPAL** (PortAudio/ALSA/WASAPI/CoreAudio) | Fallback when JACK is unavailable | Linux, macOS, Windows |
 
 When using JACK, the server must be running before any measurement:
 

@@ -12,8 +12,7 @@ struct ChannelMeta {
 }
 
 @group(0) @binding(0) var<storage, read> spectrum_data: array<f32>;
-@group(0) @binding(1) var<storage, read> freq_data: array<f32>;
-@group(0) @binding(2) var<storage, read> channels: array<ChannelMeta>;
+@group(0) @binding(1) var<storage, read> channels: array<ChannelMeta>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -22,7 +21,6 @@ struct VsOut {
     @location(2) top_frac: f32,
 }
 
-const LN10: f32 = 2.302585;
 const DEFAULT_LINE_HALF_W: f32 = 0.0018;
 const DEFAULT_FILL_ALPHA: f32 = 0.15;
 
@@ -32,12 +30,12 @@ fn safe_idx(offset: u32, bin: u32, n_bins: u32) -> u32 {
 }
 
 fn bin_point(m: ChannelMeta, bin: u32) -> vec2<f32> {
-    let idx = safe_idx(m.offset, bin, m.n_bins);
-    let freq = max(freq_data[idx], 1.0);
+    let clamped_bin = min(bin, m.n_bins - 1u);
+    let idx = m.offset + clamped_bin;
     let mag = spectrum_data[idx];
-    let freq_span = max(m.freq_log_max - m.freq_log_min, 0.0001);
+    let denom = f32(max(m.n_bins - 1u, 1u));
+    let x_n = f32(clamped_bin) / denom;
     let db_span = max(m.db_max - m.db_min, 0.0001);
-    let x_n = (log(freq) / LN10 - m.freq_log_min) / freq_span;
     let y_n = (mag - m.db_min) / db_span;
     let x_c = clamp(x_n, 0.0, 1.0);
     let y_c = clamp(y_n, 0.0, 1.0);
