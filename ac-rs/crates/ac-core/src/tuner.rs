@@ -466,10 +466,17 @@ impl TunerState {
             }
         }
 
-        // --- Level detector on peak-hold ---
+        // --- Level detector on LIVE spectrum (not peak-hold) ---
+        // Peak-hold is used by the identifier (needs the transient preserved
+        // across the analysis window). Trigger detection on peak-hold would
+        // saturate at the first hit in real-world noise — ambient flicker
+        // keeps `any_rose` true so peak-hold never decays, baseline climbs to
+        // match, and subsequent hits can't beat the previous one. Running the
+        // edge detector on the live spectrum fixes that: the live trace
+        // actually falls between hits.
         let (fmin, fmax) = self.cfg.search_range_hz;
         let mut current = f32::NEG_INFINITY;
-        for (f, &m) in freqs_hz.iter().zip(self.peak_hold.iter()) {
+        for (f, &m) in freqs_hz.iter().zip(spectrum_db.iter()) {
             let fh = *f as f64;
             if fh >= fmin && fh <= fmax && m.is_finite() && m > current {
                 current = m;
@@ -834,6 +841,97 @@ mod tests {
         assert!(s.last().is_none());
         assert!(s.history().is_empty());
         assert!(!s.baseline_db().is_finite());
+    }
+
+    /// Build a noisy silence spectrum — flat floor with small per-bin
+    /// random variation. Deterministic LCG so the test stays reproducible.
+    fn noisy_silence(freqs: &[f32], floor_db: f32, noise_peak_db: f32, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        freqs.iter().map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let u = ((state >> 33) as u32) as f32 / u32::MAX as f32;
+            floor_db + u * (noise_peak_db - floor_db)
+        }).collect()
+    }
+
+    #[test]
+    fn tuner_state_fires_on_repeated_hits_with_noise() {
+        // Regression: with the level detector running on peak-hold, ambient
+        // noise keeps `any_rose` true every frame → peak-hold never decays →
+        // baseline climbs to match the first hit → subsequent hits can't beat
+        // it. The trigger must fire on each of three separated hits even
+        // with a non-flat noise floor between them.
+        let mut s = TunerState::new(TunerConfig::default());
+        let freqs: Vec<f32> = (0..4096).map(|i| i as f32).collect();
+        let dt = 1.0 / 30.0;
+        let mut fires = 0;
+        for hit in 0..3 {
+            for k in 0..120 {
+                // Fresh noisy silence each frame.
+                let n = noisy_silence(&freqs, -95.0, -80.0, (hit * 1000 + k) as u64);
+                s.feed(&n, &freqs, dt);
+            }
+            let loud = drum_spectrum(&freqs, 214.0, -30.0, -80.0);
+            if let Triggered::Fired { candidate: Some(_), confident: true } =
+                s.feed(&loud, &freqs, dt)
+            {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 3, "expected 3 triggers across 3 separated hits");
+    }
+
+    #[test]
+    fn tuner_state_triggers_on_analyze_output() {
+        // End-to-end pipeline check: synthetic drum audio → analysis::analyze
+        // → dBFS conversion → TunerState::feed. Catches the dB/linear unit
+        // mismatch the daemon was previously shipping.
+        use std::f64::consts::PI;
+        let sr: u32 = 48_000;
+        let n = 16384;
+        let make_samples = |amp: f32| -> Vec<f32> {
+            // Drum-like: f0 + 1.594·f0 + 2.136·f0, each a partial, small noise.
+            let f0 = 214.0_f64;
+            let mut s = Vec::with_capacity(n);
+            let mut rng = 0x1234_5678u64;
+            for i in 0..n {
+                let t = i as f64 / sr as f64;
+                let mut v = 0.0;
+                v += (2.0 * PI * f0 * t).sin() * amp as f64;
+                v += (2.0 * PI * f0 * 1.594 * t).sin() * amp as f64 * 0.6;
+                v += (2.0 * PI * f0 * 2.136 * t).sin() * amp as f64 * 0.4;
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let u = ((rng >> 33) as u32) as f64 / u32::MAX as f64;
+                v += (u - 0.5) * 1e-4;
+                s.push(v as f32);
+            }
+            s
+        };
+        let to_db = |spec: &[f64]| -> Vec<f32> {
+            spec.iter().map(|&v| 20.0 * (v as f32).max(1e-12).log10()).collect()
+        };
+        let mut state = TunerState::new(TunerConfig::default());
+        let dt = 1.0 / 30.0;
+        // Quiet preamble: noise only.
+        for _ in 0..60 {
+            let quiet = make_samples(1e-4);
+            let (spec, f) = crate::analysis::spectrum_only(&quiet, sr);
+            let spec_db = to_db(&spec);
+            let freqs_f32: Vec<f32> = f.iter().map(|&v| v as f32).collect();
+            state.feed(&spec_db, &freqs_f32, dt);
+        }
+        // Loud drum hit.
+        let loud = make_samples(0.3);
+        let r = crate::analysis::analyze(&loud, sr, 214.0, 10)
+            .expect("analyze should succeed on clean synthetic drum");
+        let spec_db = to_db(&r.spectrum);
+        let freqs_f32: Vec<f32> = r.freqs.iter().map(|&v| v as f32).collect();
+        match state.feed(&spec_db, &freqs_f32, dt) {
+            Triggered::Fired { candidate: Some(c), confident: true } => {
+                assert!((c.freq_hz - 214.0).abs() < 5.0, "f0 {}", c.freq_hz);
+            }
+            other => panic!("expected confident fire, got {other:?}"),
+        }
     }
 
     #[test]
