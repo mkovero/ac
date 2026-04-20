@@ -2081,7 +2081,8 @@ impl App {
                 }
             }
         }
-        let mut spectrum_uploads: Vec<ChannelUpload<'_>> = Vec::new();
+        let mut spectrum_uploads: Vec<ChannelUpload> = Vec::new();
+        let window_width_px = ctx.config.width as f32;
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
         if !in_transfer_layout && !in_sweep_layout {
             match view_mode {
@@ -2119,6 +2120,19 @@ impl App {
                     } else {
                         (cell.y, cell.h)
                     };
+                    let n_columns = ((cell.w * window_width_px).round() as usize)
+                        .max(1)
+                        .min(2048);
+                    let f_min = view.freq_min.max(1.0);
+                    let f_max = view.freq_max.max(f_min + 1.0);
+                    let sr = frame.meta.sr as f32;
+                    let live_cols = crate::render::aggregate::spectrum_to_columns(
+                        &frame.spectrum,
+                        sr,
+                        f_min,
+                        f_max,
+                        n_columns,
+                    );
                     let meta = ChannelMeta {
                         color: theme::channel_color(cell.channel),
                         viewport: [cell.x, vp_y, cell.w, vp_h],
@@ -2126,14 +2140,13 @@ impl App {
                         db_max: view.db_max,
                         freq_log_min,
                         freq_log_max,
-                        n_bins: frame.spectrum.len() as u32,
+                        n_bins: live_cols.len() as u32,
                         offset: 0,
                         fill_alpha: 0.0,
                         line_width: 0.0,
                     };
                     spectrum_uploads.push(ChannelUpload {
-                        spectrum: &frame.spectrum,
-                        freqs: &frame.freqs,
+                        spectrum: live_cols,
                         meta,
                     });
                     // Peak-hold trace. Reuses the spectrum pipeline as a second
@@ -2157,9 +2170,16 @@ impl App {
                                 for c in peak_color.iter_mut().take(3) {
                                     *c = (*c * 1.35).min(1.0);
                                 }
+                                let peak_cols = crate::render::aggregate::spectrum_to_columns(
+                                    peak.as_slice(),
+                                    sr,
+                                    f_min,
+                                    f_max,
+                                    n_columns,
+                                );
+                                let n_cols = peak_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
-                                    spectrum: peak.as_slice(),
-                                    freqs: &frame.freqs,
+                                    spectrum: peak_cols,
                                     meta: ChannelMeta {
                                         color: peak_color,
                                         viewport: [cell.x, vp_y, cell.w, vp_h],
@@ -2167,19 +2187,12 @@ impl App {
                                         db_max: view.db_max,
                                         freq_log_min,
                                         freq_log_max,
-                                        n_bins: peak.len() as u32,
+                                        n_bins: n_cols,
                                         offset: 0,
-                                        // Shader treats fill_alpha == 0.0 as
-                                        // "unset → use 15% default" (spectrum.wgsl
-                                        // line 90). A tiny positive value takes the
-                                        // explicit path so the peak line doesn't
-                                        // ship a filled region with it.
                                         fill_alpha: 0.0001,
                                         // line_width is a HALF-WIDTH in 0..1 screen
-                                        // space (spectrum.wgsl line 26 default is
-                                        // 0.0018). ~1.6× default reads as a
-                                        // distinctly thicker trace without wiping
-                                        // the viewport.
+                                        // space; ~1.6× default reads as a
+                                        // distinctly thicker trace.
                                         line_width: 0.003,
                                     },
                                 });
@@ -2200,9 +2213,16 @@ impl App {
                                     base[2] * 0.55,
                                     1.0,
                                 ];
+                                let min_cols = crate::render::aggregate::spectrum_to_columns(
+                                    min.as_slice(),
+                                    sr,
+                                    f_min,
+                                    f_max,
+                                    n_columns,
+                                );
+                                let n_cols = min_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
-                                    spectrum: min.as_slice(),
-                                    freqs: &frame.freqs,
+                                    spectrum: min_cols,
                                     meta: ChannelMeta {
                                         color: min_color,
                                         viewport: [cell.x, vp_y, cell.w, vp_h],
@@ -2210,7 +2230,7 @@ impl App {
                                         db_max: view.db_max,
                                         freq_log_min,
                                         freq_log_max,
-                                        n_bins: min.len() as u32,
+                                        n_bins: n_cols,
                                         offset: 0,
                                         fill_alpha: 0.0001,
                                         line_width: 0.0022,

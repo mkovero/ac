@@ -15,9 +15,8 @@ pub struct ChannelMeta {
     pub line_width: f32,
 }
 
-pub struct ChannelUpload<'a> {
-    pub spectrum: &'a [f32],
-    pub freqs: &'a [f32],
+pub struct ChannelUpload {
+    pub spectrum: Vec<f32>,
     pub meta: ChannelMeta,
 }
 
@@ -26,7 +25,6 @@ pub struct SpectrumRenderer {
     pipeline_line: wgpu::RenderPipeline,
     pipeline_fill: wgpu::RenderPipeline,
     spectrum_buf: wgpu::Buffer,
-    freq_buf: wgpu::Buffer,
     channel_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     capacity_floats: usize,
@@ -45,11 +43,7 @@ impl SpectrumRenderer {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("spectrum bgl"),
-                entries: &[
-                    storage_entry(0),
-                    storage_entry(1),
-                    storage_entry(2),
-                ],
+                entries: &[storage_entry(0), storage_entry(1)],
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -104,13 +98,11 @@ impl SpectrumRenderer {
         let capacity_channels = 8_usize;
 
         let spectrum_buf = create_storage::<f32>(device, "spectrum_data", capacity_floats);
-        let freq_buf = create_storage::<f32>(device, "freq_data", capacity_floats);
         let channel_buf = create_channel_buf(device, capacity_channels);
         let bind_group = make_bind_group(
             device,
             &bind_group_layout,
             &spectrum_buf,
-            &freq_buf,
             &channel_buf,
         );
 
@@ -119,7 +111,6 @@ impl SpectrumRenderer {
             pipeline_line,
             pipeline_fill,
             spectrum_buf,
-            freq_buf,
             channel_buf,
             bind_group,
             capacity_floats,
@@ -133,7 +124,7 @@ impl SpectrumRenderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        uploads: &[ChannelUpload<'_>],
+        uploads: &[ChannelUpload],
     ) {
         if uploads.is_empty() {
             self.active_channels = 0;
@@ -147,7 +138,6 @@ impl SpectrumRenderer {
         if total_floats > self.capacity_floats {
             let new_cap = total_floats.next_power_of_two().max(4096);
             self.spectrum_buf = create_storage::<f32>(device, "spectrum_data", new_cap);
-            self.freq_buf = create_storage::<f32>(device, "freq_data", new_cap);
             self.capacity_floats = new_cap;
             reallocated = true;
         }
@@ -162,35 +152,29 @@ impl SpectrumRenderer {
                 device,
                 &self.bind_group_layout,
                 &self.spectrum_buf,
-                &self.freq_buf,
                 &self.channel_buf,
             );
         }
 
         let mut spectrum_packed = vec![0.0_f32; total_floats];
-        let mut freq_packed = vec![1.0_f32; total_floats];
         let mut metas: Vec<ChannelMeta> = Vec::with_capacity(uploads.len());
         for (idx, u) in uploads.iter().enumerate() {
             let off = idx * max_bins;
             let n = u.spectrum.len();
-            spectrum_packed[off..off + n].copy_from_slice(u.spectrum);
-            freq_packed[off..off + n].copy_from_slice(u.freqs);
+            spectrum_packed[off..off + n].copy_from_slice(&u.spectrum);
             if n < max_bins {
-                let last_f = *u.freqs.last().unwrap_or(&1.0);
                 let last_s = *u.spectrum.last().unwrap_or(&-140.0);
                 for j in n..max_bins {
                     spectrum_packed[off + j] = last_s;
-                    freq_packed[off + j] = last_f;
                 }
             }
             let mut meta = u.meta;
             meta.offset = off as u32;
-            meta.n_bins = max_bins as u32;
+            meta.n_bins = n as u32;
             metas.push(meta);
         }
 
         queue.write_buffer(&self.spectrum_buf, 0, bytemuck::cast_slice(&spectrum_packed));
-        queue.write_buffer(&self.freq_buf, 0, bytemuck::cast_slice(&freq_packed));
         queue.write_buffer(&self.channel_buf, 0, bytemuck::cast_slice(&metas));
 
         self.active_channels = uploads.len() as u32;
@@ -251,7 +235,6 @@ fn make_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     spectrum: &wgpu::Buffer,
-    freqs: &wgpu::Buffer,
     channels: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -264,10 +247,6 @@ fn make_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: freqs.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
                 resource: channels.as_entire_binding(),
             },
         ],
