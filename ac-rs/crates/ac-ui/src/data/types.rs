@@ -66,9 +66,19 @@ pub struct DisplayFrame {
 
 #[derive(Debug, Clone)]
 pub struct FrameMeta {
+    // The single-tone fields (freq_hz, fundamental_dbfs, thd_pct, thdn_pct)
+    // are populated by the daemon's `analyze()` path and kept here for
+    // future per-frame inspection / export, but the live monitor UI no
+    // longer displays them — THD is meaningless on broadband signals and
+    // the argmax is already visible via the peak-hold marker and the new
+    // broadband readout. See `ui::fmt::broadband_stats`.
+    #[allow(dead_code)]
     pub freq_hz: f32,
+    #[allow(dead_code)]
     pub fundamental_dbfs: f32,
+    #[allow(dead_code)]
     pub thd_pct: f32,
+    #[allow(dead_code)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
     pub sr: u32,
@@ -131,36 +141,22 @@ pub enum SweepKind {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SweepPoint {
     pub n: u32,
-    #[serde(default)]
-    pub cmd: String,
     pub drive_db: f32,
-    #[serde(default)]
-    pub freq_hz: Option<f32>,
     pub thd_pct: f32,
     pub thdn_pct: f32,
     pub fundamental_hz: f32,
     pub fundamental_dbfs: f32,
-    pub linear_rms: f32,
     #[serde(default)]
     pub harmonic_levels: Vec<[f32; 2]>,
-    pub noise_floor_dbfs: f32,
     #[serde(default)]
     pub spectrum: Vec<f32>,
     #[serde(default)]
     pub freqs: Vec<f32>,
     #[serde(default)]
     pub clipping: bool,
-    #[serde(default)]
-    pub ac_coupled: bool,
-    pub out_vrms: Option<f32>,
     pub out_dbu: Option<f32>,
-    pub in_vrms: Option<f32>,
     pub in_dbu: Option<f32>,
     pub gain_db: Option<f32>,
-    #[serde(default)]
-    pub vrms_at_0dbfs_out: Option<f32>,
-    #[serde(default)]
-    pub vrms_at_0dbfs_in: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -154,10 +154,9 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             .get(display_ch)
             .copied()
             .unwrap_or_default();
-        let top_right = format!(
-            "{} Hz │ {}",
+        let top_right = super::fmt::top_right_status(
             sr,
-            channel_label(display_ch, input.n_real, input.virtual_pairs),
+            &channel_label(display_ch, input.n_real, input.virtual_pairs),
         );
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0),
@@ -207,11 +206,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // effect of each key press directly.
         if matches!(input.config.view_mode, ViewMode::Spectrum) {
             if let Some(mp) = input.monitor_params {
-                let df = sr as f32 / mp.fft_n as f32;
-                let mon_line = format!(
-                    "{:>4} ms  │  N {}  │  Δf {:.1} Hz",
-                    mp.interval_ms, mp.fft_n, df,
-                );
+                let mon_line = super::fmt::monitor_knobs_readout(mp.interval_ms, mp.fft_n, sr);
                 painter.text(
                     Pos2::new(
                         screen.right() - 8.0,
@@ -293,20 +288,19 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        let bottom_left = super::fmt::spectrum_readout(
-            frame.meta.freq_hz,
-            frame.meta.fundamental_dbfs,
-            frame.meta.thd_pct,
-            frame.meta.thdn_pct,
-            frame.meta.in_dbu,
-        );
-        painter.text(
-            Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
-            Align2::LEFT_BOTTOM,
-            bottom_left,
-            FontId::monospace(theme::READOUT_PX),
-            text_color,
-        );
+        // Broadband stats derived from the displayed spectrum — honest for
+        // any input (music, speech, noise, room response). Falls back
+        // gracefully when the frame arrived with an empty spectrum.
+        if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
+            let bottom_left = super::fmt::spectrum_readout(&stats, frame.meta.in_dbu);
+            painter.text(
+                Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                Align2::LEFT_BOTTOM,
+                bottom_left,
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        }
     }
 
     let conn_label = if input.connected {
