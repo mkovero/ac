@@ -1,3 +1,11 @@
+/// Default number of log-spaced display columns the daemon ships over
+/// the `spectrum` wire message. 4096 columns across 20-24000 Hz is ~3
+/// cents per column — fine enough that tuner peak-finding isn't bottle-
+/// necked by aggregation below 2 kHz. The original 2048 was picked to
+/// roughly match 4K screen width; the tuner now uses these columns as
+/// an analysis input so we want more resolution than rendering needs.
+pub const DEFAULT_WIRE_COLUMNS: usize = 4096;
+
 /// Aggregate a linear-binned half-spectrum onto a log-frequency display.
 ///
 /// `spectrum_db` holds `N/2 + 1` magnitudes in dBFS with DC at index 0;

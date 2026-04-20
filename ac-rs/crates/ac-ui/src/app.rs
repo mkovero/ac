@@ -3921,7 +3921,7 @@ mod ladder_tests {
     #[test]
     fn step_ladder_clamps_at_edges() {
         assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 1024, -5), 1024);
-        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 65536, 5), 65536);
+        assert_eq!(step_ladder(MONITOR_FFT_N_LADDER, 131072, 5), 131072);
     }
 
     #[test]

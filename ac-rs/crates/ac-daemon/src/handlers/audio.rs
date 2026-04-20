@@ -562,7 +562,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
-                                2048,
+                                ac_core::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
                                 "type":             "spectrum",
@@ -589,7 +589,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
-                                2048,
+                                ac_core::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
                                 "type":             "spectrum",
