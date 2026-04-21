@@ -41,6 +41,10 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
 
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
+        CommandKind::MonitorCwt { .. } => monitor::run_cwt(&parsed.cmd, cfg, client),
+        CommandKind::MonitorNotImplemented { technique } => {
+            monitor::run_not_implemented(technique)
+        }
 
         CommandKind::Probe => probe::run(client),
         CommandKind::TestSoftware => test::run_software(client),
