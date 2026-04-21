@@ -290,10 +290,11 @@ steps — nothing is broken en route.
       and `ac monitor cwt` as subcommands; default is spectrum.
 - [ ] Add tiered `type` prefixes to wire frames, emitting both old and
       new types during transition. Note a deprecation date in `ZMQ.md`.
-- [ ] Build `measurement/filterbank.rs` (IEC 61260-1). See the separate
-      prompt for this work.
+- [x] Build `measurement/filterbank.rs` (IEC 61260-1). Class 1 via
+      6th-order Butterworth BP SOS, bpo ∈ {1, 3, 6, 12, 24}; emits
+      per-band dBFS suitable for `MeasurementData::SpectrumBands`.
 - [ ] Integrate the filterbank into `ac plot` as an optional
-      per-band-summary output.
+      per-band-summary output. Tracked in issue #74.
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 

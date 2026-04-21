@@ -125,6 +125,16 @@ see an unknown version must refuse to decode. Example payload:
 }
 ```
 
+`data.kind` values currently defined:
+
+| `kind`                 | Producer                                           | Payload shape                                                                     |
+|------------------------|----------------------------------------------------|-----------------------------------------------------------------------------------|
+| `frequency_response`   | `plot` (stepped-sine)                              | `{ "points": [FrequencyResponsePoint, ...] }`                                     |
+| `spectrum_bands`       | IEC 61260-1 filterbank (`ac-core::measurement::filterbank`) | `{ "bpo": <int>, "class": "Class 1", "centres_hz": [...], "levels_dbfs": [...] }` |
+
+The `spectrum_bands` variant is serializable today but not yet emitted
+from any CLI command — wiring is tracked in issue #74.
+
 ### `measurement/frequency_response/complete` frame
 
 Terminal summary for a `plot` run, emitted just before the

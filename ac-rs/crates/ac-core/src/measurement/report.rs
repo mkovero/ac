@@ -86,7 +86,17 @@ pub struct CalibrationSnapshot {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeasurementData {
-    FrequencyResponse { points: Vec<FrequencyResponsePoint> },
+    FrequencyResponse {
+        points: Vec<FrequencyResponsePoint>,
+    },
+    /// IEC 61260-1 fractional-octave band levels — output of the Tier 1
+    /// filterbank in `measurement/filterbank.rs`.
+    SpectrumBands {
+        bpo: u32,
+        class: String,
+        centres_hz: Vec<f64>,
+        levels_dbfs: Vec<f64>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -108,28 +118,43 @@ impl MeasurementReport {
         serde_json::to_string_pretty(self).context("encode MeasurementReport as JSON")
     }
 
-    /// Flat CSV of the frequency-response data points. Non-FR reports
-    /// return an empty string — callers should branch on `method`.
+    /// Flat CSV of the report's data payload. The header and column set
+    /// depend on the `MeasurementData` variant — callers that need a
+    /// specific schema should branch on `method` / `data` themselves.
     pub fn to_csv(&self) -> Result<String> {
-        let MeasurementData::FrequencyResponse { points } = &self.data;
         let mut s = String::new();
-        writeln!(
-            s,
-            "freq_hz,fundamental_dbfs,thd_pct,thdn_pct,noise_floor_dbfs,linear_rms,clipping,ac_coupled"
-        )?;
-        for p in points {
-            writeln!(
-                s,
-                "{:.6},{:.6},{:.6},{:.6},{:.6},{:.9},{},{}",
-                p.freq_hz,
-                p.fundamental_dbfs,
-                p.thd_pct,
-                p.thdn_pct,
-                p.noise_floor_dbfs,
-                p.linear_rms,
-                p.clipping,
-                p.ac_coupled,
-            )?;
+        match &self.data {
+            MeasurementData::FrequencyResponse { points } => {
+                writeln!(
+                    s,
+                    "freq_hz,fundamental_dbfs,thd_pct,thdn_pct,noise_floor_dbfs,linear_rms,clipping,ac_coupled"
+                )?;
+                for p in points {
+                    writeln!(
+                        s,
+                        "{:.6},{:.6},{:.6},{:.6},{:.6},{:.9},{},{}",
+                        p.freq_hz,
+                        p.fundamental_dbfs,
+                        p.thd_pct,
+                        p.thdn_pct,
+                        p.noise_floor_dbfs,
+                        p.linear_rms,
+                        p.clipping,
+                        p.ac_coupled,
+                    )?;
+                }
+            }
+            MeasurementData::SpectrumBands {
+                bpo,
+                class,
+                centres_hz,
+                levels_dbfs,
+            } => {
+                writeln!(s, "centre_hz,level_dbfs,bpo,class")?;
+                for (c, l) in centres_hz.iter().zip(levels_dbfs.iter()) {
+                    writeln!(s, "{:.6},{:.6},{},{}", c, l, bpo, class)?;
+                }
+            }
         }
         Ok(s)
     }
@@ -251,6 +276,57 @@ mod tests {
             "data": {"points":[]}
         }"#;
         assert!(serde_json::from_str::<MeasurementReport>(malformed).is_err());
+    }
+
+    fn sample_spectrum_bands_report() -> MeasurementReport {
+        MeasurementReport {
+            schema_version: SCHEMA_VERSION,
+            ac_version: "0.1.0".into(),
+            timestamp_utc: "2026-04-22T12:00:00Z".into(),
+            method: MeasurementMethod::SteppedSine {
+                n_points: 0,
+                standard: Some(StandardsCitation {
+                    standard: "IEC 61260-1:2014".into(),
+                    clause: "§5 Class 1".into(),
+                    verified: false,
+                }),
+            },
+            stimulus: StimulusParams {
+                sample_rate_hz: 48_000,
+                f_start_hz: 100.0,
+                f_stop_hz: 1000.0,
+                level_dbfs: -20.0,
+                n_points: 0,
+            },
+            integration: IntegrationParams {
+                duration_s: 1.0,
+                window: "none".into(),
+            },
+            calibration: None,
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0, 125.893, 158.489],
+                levels_dbfs: vec![-30.0, -20.0, -40.0],
+            },
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn spectrum_bands_round_trip() {
+        let r = sample_spectrum_bands_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn spectrum_bands_csv_shape() {
+        let r = sample_spectrum_bands_report();
+        let csv = r.to_csv().unwrap();
+        assert!(csv.starts_with("centre_hz,level_dbfs,bpo,class"));
+        assert_eq!(csv.lines().count(), 4);
     }
 
     #[test]

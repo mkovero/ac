@@ -12,7 +12,7 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 264 tests (ac-core 61, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
+cargo test                     # 291 tests (ac-core 81, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
 ```
 
 ## Usage (quick reference)
