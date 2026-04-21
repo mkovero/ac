@@ -1,13 +1,13 @@
 //! Fractional-octave aggregation of a CWT column.
 //!
 //! Builds a 1/N-octave display from the CWT magnitude column produced by
-//! [`crate::cwt::morlet_cwt`]. Bands are anchored at 1 kHz (acoustics
+//! [`crate::visualize::cwt::morlet_cwt`]. Bands are anchored at 1 kHz (acoustics
 //! convention) and use base-2 octaves (`G = 2`). Common `bpo`: 1, 3, 6,
 //! 12, 24.
 //!
 //! ## Why not the FFT path?
 //!
-//! [`crate::aggregate::spectrum_to_columns`] uses log-interpolation between
+//! [`crate::visualize::aggregate::spectrum_to_columns`] uses log-interpolation between
 //! sparse FFT bins at low frequencies to avoid display zigzag. That's fine
 //! for a continuous spectrum but the wrong semantics for fractional-octave
 //! bands, where each band must report integrated energy of all spectral
@@ -92,8 +92,8 @@ pub fn ioct_band_edges(centre: f32, bpo: usize) -> (f32, f32) {
 /// Aggregate a CWT magnitude column into 1/`bpo`-octave bands.
 ///
 /// `cwt_col_db[k]` is the dBFS magnitude at scale whose centre frequency
-/// is `cwt_freqs[k]` (Hz) — i.e. the output of [`crate::cwt::morlet_cwt`]
-/// paired with the frequency vector from [`crate::cwt::log_scales`].
+/// is `cwt_freqs[k]` (Hz) — i.e. the output of [`crate::visualize::cwt::morlet_cwt`]
+/// paired with the frequency vector from [`crate::visualize::cwt::log_scales`].
 ///
 /// Algorithm:
 /// 1. dB → linear power via `10^(db/10)`.
@@ -101,7 +101,7 @@ pub fn ioct_band_edges(centre: f32, bpo: usize) -> (f32, f32) {
 ///    whose centre frequency falls inside.
 /// 3. Empty bands fall back to log-`f` linear interpolation in dB
 ///    between the two nearest scale values — matches the
-///    [`crate::aggregate::spectrum_to_columns`] sparse-bin fallback so
+///    [`crate::visualize::aggregate::spectrum_to_columns`] sparse-bin fallback so
 ///    the low-end stays smooth at low `bpo` combined with sparse scales.
 /// 4. Power → dB via `10·log10`.
 ///
@@ -316,7 +316,7 @@ mod tests {
         // (`end_to_end_band_assignment`) exercises real morlet_cwt to
         // verify the *peak band* is correct even when absolute level is
         // hot.
-        use crate::cwt::{log_scales, DEFAULT_SIGMA};
+        use crate::visualize::cwt::{log_scales, DEFAULT_SIGMA};
         let sr = 48_000;
         let n_scales = 256;
         let (_scales, freqs) = log_scales(20.0, 20_000.0, n_scales, sr, DEFAULT_SIGMA);
@@ -352,7 +352,7 @@ mod tests {
         // True generator → morlet_cwt → fractional-octave path. Absolute
         // level is hot due to kernel overlap (documented), but the band
         // containing the tone must be the band with the maximum reading.
-        use crate::cwt::{log_scales, morlet_cwt, DEFAULT_SIGMA};
+        use crate::visualize::cwt::{log_scales, morlet_cwt, DEFAULT_SIGMA};
         let sr = 48_000;
         let n = 8192;
         let amp = 10f64.powf(-6.0 / 20.0);

@@ -149,8 +149,8 @@ fn print_channel_info(ch: u32, freq: Option<f64>, dbfs: f64, cal: &Option<serde_
 
     let (vrms_s, cal_tag) = if let Some(ref_vrms) = v_out {
         let vrms = ref_vrms * 10.0_f64.powf(dbfs / 20.0);
-        let dbu = ac_core::conversions::vrms_to_dbu(vrms);
-        (ac_core::conversions::fmt_vrms(vrms), format!("{dbu:+.2} dBu"))
+        let dbu = ac_core::shared::conversions::vrms_to_dbu(vrms);
+        (ac_core::shared::conversions::fmt_vrms(vrms), format!("{dbu:+.2} dBu"))
     } else {
         ("  -".to_string(), format!("{dbfs:.1} dBFS (uncal)"))
     };

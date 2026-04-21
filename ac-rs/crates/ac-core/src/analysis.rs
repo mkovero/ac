@@ -19,8 +19,8 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use realfft::{RealFftPlanner, RealToComplex};
 
-use crate::constants::{FUNDAMENTAL_HZ, NUM_HARMONICS, SAMPLERATE};
-use crate::types::AnalysisResult;
+use crate::shared::constants::{FUNDAMENTAL_HZ, NUM_HARMONICS, SAMPLERATE};
+use crate::shared::types::AnalysisResult;
 
 thread_local! {
     /// Thread-local cache of forward real FFT plans keyed on N. `analyze` is
@@ -570,7 +570,7 @@ mod tests {
         let samples = pure_sine(F1, 0.5, SR, SR as usize);
         let r = analyze(&samples, SR, F1, 10).unwrap();
         let json = serde_json::to_string(&r).unwrap();
-        let r2: crate::types::AnalysisResult = serde_json::from_str(&json).unwrap();
+        let r2: crate::shared::types::AnalysisResult = serde_json::from_str(&json).unwrap();
         assert_relative_eq!(r2.thd_pct, r.thd_pct, epsilon = 1e-12);
         assert_relative_eq!(r2.linear_rms, r.linear_rms, epsilon = 1e-12);
     }

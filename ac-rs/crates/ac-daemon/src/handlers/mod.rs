@@ -17,7 +17,7 @@ use std::thread;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 use ac_core::config::Config;
 
 use crate::audio::{make_engine, AudioEngine};
@@ -235,7 +235,7 @@ pub(super) fn downsample(spec: &[f64], freqs: &[f64], max_pts: usize) -> (Vec<f6
 }
 
 pub(super) fn sweep_point_frame(
-    r: &ac_core::types::AnalysisResult,
+    r: &ac_core::shared::types::AnalysisResult,
     cal: Option<&Calibration>,
     n: usize,
     cmd_name: &str,
@@ -244,8 +244,8 @@ pub(super) fn sweep_point_frame(
 ) -> Value {
     let out_vrms = cal.and_then(|c| c.out_vrms(level_dbfs));
     let in_vrms  = cal.and_then(|c| c.in_vrms(r.linear_rms));
-    let in_dbu   = in_vrms .map(ac_core::conversions::vrms_to_dbu);
-    let out_dbu  = out_vrms.map(ac_core::conversions::vrms_to_dbu);
+    let in_dbu   = in_vrms .map(ac_core::shared::conversions::vrms_to_dbu);
+    let out_dbu  = out_vrms.map(ac_core::shared::conversions::vrms_to_dbu);
     let gain_db  = in_dbu.zip(out_dbu).map(|(i, o)| i - o);
 
     let (spec_ds, freqs_ds) = if r.spectrum.len() > 1 {
@@ -367,7 +367,7 @@ pub(super) fn analyze_mono(
     freq: f64,
     duration: f64,
     sr: u32,
-) -> Option<ac_core::types::AnalysisResult> {
+) -> Option<ac_core::shared::types::AnalysisResult> {
     let dur = duration.max(20.0 / freq.max(1.0)); // at least 20 cycles
     let _ = eng.capture_block(0.05); // brief flush
     eng.flush_capture();
@@ -388,7 +388,7 @@ pub(super) fn cal_dbu_str(dbfs: f64, cal: Option<&Calibration>, use_output: bool
     };
     if let Some(ref_vrms) = vrms_ref {
         let vrms = ref_vrms * 10f64.powf(dbfs / 20.0);
-        let dbu  = ac_core::conversions::vrms_to_dbu(vrms);
+        let dbu  = ac_core::shared::conversions::vrms_to_dbu(vrms);
         format!("{dbu:+.1} dBu")
     } else {
         format!("{dbfs:.1} dBFS")

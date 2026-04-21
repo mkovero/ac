@@ -4,7 +4,7 @@
 //! [`set_dbu_ref`].  All other functions are pure.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::constants::DBU_REF_VRMS;
+use crate::shared::constants::DBU_REF_VRMS;
 
 // Store the dBu reference as raw f64 bits so we can use an atomic.
 // Initialised to DBU_REF_VRMS; f64::to_bits is const since Rust 1.58.

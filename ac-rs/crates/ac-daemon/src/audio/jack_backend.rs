@@ -20,7 +20,7 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::AudioEngine;
-use ac_core::generator::{generate_pink_noise, generate_sine_1s};
+use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 
 /// 16 s at 192 kHz — comfortably larger than any single capture request.
 /// Fixed at construction so neither thread ever reallocates.

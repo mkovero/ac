@@ -66,11 +66,11 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
 /// When the channel has been calibrated, both dBu and dBV appear alongside
 /// the peak so the user sees the analog-domain level in either convention.
 /// dBV is derived from dBu via the fixed `dBV = dBu + 20·log10(V_ref_dbu)`
-/// relation (see `ac_core::conversions::dbu_to_dbv`).
+/// relation (see `ac_core::shared::conversions::dbu_to_dbv`).
 pub fn spectrum_readout(stats: &BroadbandStats, in_dbu: Option<f32>) -> String {
     let cal = in_dbu
         .map(|dbu| {
-            let dbv = ac_core::conversions::dbu_to_dbv(dbu as f64) as f32;
+            let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
             format!("   {:+.1} dBu   {:+.1} dBV", dbu, dbv)
         })
         .unwrap_or_default();
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn spectrum_readout_dbu_dbv_offset_is_consistent() {
         // For any calibrated dBu, the dBV reading must equal
-        // ac_core::conversions::dbu_to_dbv(dbu), rounded to one decimal.
+        // ac_core::shared::conversions::dbu_to_dbv(dbu), rounded to one decimal.
         for dbu in [-20.0_f32, -4.0, 0.0, 4.0, 12.5] {
             let stats = BroadbandStats {
                 peak_db: -3.0,
@@ -334,7 +334,7 @@ mod tests {
                 span_db: 93.0,
             };
             let s = spectrum_readout(&stats, Some(dbu));
-            let expected = ac_core::conversions::dbu_to_dbv(dbu as f64) as f32;
+            let expected = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
             let needle = format!("{:+.1} dBV", expected);
             assert!(s.contains(&needle), "want {needle} in: {s}");
         }

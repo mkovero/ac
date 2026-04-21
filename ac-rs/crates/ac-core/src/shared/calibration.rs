@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::conversions::{dbfs_to_vrms, vrms_to_dbu, fmt_vrms, fmt_vpp};
+use crate::shared::conversions::{dbfs_to_vrms, vrms_to_dbu, fmt_vrms, fmt_vpp};
 
 /// Raw JSON representation stored in `cal.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

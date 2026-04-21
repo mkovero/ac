@@ -112,12 +112,12 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
         let lo = results.first().and_then(|r| r.get("out_vrms")).and_then(|v| v.as_f64());
         let hi = results.last().and_then(|r| r.get("out_vrms")).and_then(|v| v.as_f64());
         if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
-            let lo_dbu = ac_core::conversions::vrms_to_dbu(lo_v);
-            let hi_dbu = ac_core::conversions::vrms_to_dbu(hi_v);
+            let lo_dbu = ac_core::shared::conversions::vrms_to_dbu(lo_v);
+            let hi_dbu = ac_core::shared::conversions::vrms_to_dbu(hi_v);
             println!(
                 "\n  Output range:  {} ({lo_dbu:+.1} dBu)  ->  {} ({hi_dbu:+.1} dBu)",
-                ac_core::conversions::fmt_vrms(lo_v),
-                ac_core::conversions::fmt_vrms(hi_v),
+                ac_core::shared::conversions::fmt_vrms(lo_v),
+                ac_core::shared::conversions::fmt_vrms(hi_v),
             );
         }
         let ivs: Vec<f64> = results
@@ -129,10 +129,10 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
             let hi = ivs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             println!(
                 "  DUT out range: {} ({:+.1} dBu)  ->  {} ({:+.1} dBu)",
-                ac_core::conversions::fmt_vrms(lo),
-                ac_core::conversions::vrms_to_dbu(lo),
-                ac_core::conversions::fmt_vrms(hi),
-                ac_core::conversions::vrms_to_dbu(hi),
+                ac_core::shared::conversions::fmt_vrms(lo),
+                ac_core::shared::conversions::vrms_to_dbu(lo),
+                ac_core::shared::conversions::fmt_vrms(hi),
+                ac_core::shared::conversions::vrms_to_dbu(hi),
             );
         }
     }
@@ -206,11 +206,11 @@ pub fn print_freq_row(frame: &serde_json::Value) {
     };
 
     if let Some(out_vrms) = frame.get("out_vrms").and_then(|v| v.as_f64()) {
-        let out_s = ac_core::conversions::fmt_vrms(out_vrms);
+        let out_s = ac_core::shared::conversions::fmt_vrms(out_vrms);
         let in_s = frame
             .get("in_vrms")
             .and_then(|v| v.as_f64())
-            .map(|v| ac_core::conversions::fmt_vrms(v))
+            .map(|v| ac_core::shared::conversions::fmt_vrms(v))
             .unwrap_or_else(|| "  -".into());
         let odbu = frame
             .get("out_dbu")

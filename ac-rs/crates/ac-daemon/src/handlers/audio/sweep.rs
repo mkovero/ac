@@ -32,7 +32,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
             send_pub(&pub_tx, "error", &json!({"cmd":"sweep_level","message":format!("{e}")}));
             return;
         }
-        let start_amp = ac_core::generator::dbfs_to_amplitude(start_dbfs);
+        let start_amp = ac_core::shared::generator::dbfs_to_amplitude(start_dbfs);
         eng.set_tone(freq_hz, start_amp);
         let t0 = std::time::Instant::now();
         while !stop.load(Ordering::Relaxed) {
@@ -40,7 +40,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
             if elapsed >= duration { break; }
             let t = elapsed / duration;
             let db = start_dbfs + (stop_dbfs - start_dbfs) * t;
-            eng.set_tone(freq_hz, ac_core::generator::dbfs_to_amplitude(db));
+            eng.set_tone(freq_hz, ac_core::shared::generator::dbfs_to_amplitude(db));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         eng.set_silence();
@@ -64,7 +64,7 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let cfg        = state.cfg.lock().unwrap().clone();
     let out_port   = resolve_output(&cfg, state);
     let out_port_reply = out_port.clone();
-    let amplitude  = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+    let amplitude  = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;

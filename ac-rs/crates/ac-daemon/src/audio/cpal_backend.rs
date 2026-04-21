@@ -18,7 +18,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
 use super::AudioEngine;
-use ac_core::generator::{generate_pink_noise, generate_sine_1s};
+use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 
 // ---------------------------------------------------------------------------
 // Shared state between engine and stream callbacks

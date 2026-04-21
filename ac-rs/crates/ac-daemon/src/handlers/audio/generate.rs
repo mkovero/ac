@@ -26,7 +26,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
             send_pub(&pub_tx, "error", &json!({"cmd":"generate","message":format!("{e}")}));
             return;
         }
-        let amp = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
         eng.set_tone(freq_hz, amp);
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -61,7 +61,7 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
             send_pub(&pub_tx, "error", &json!({"cmd":"generate_pink","message":format!("{e}")}));
             return;
         }
-        let amp = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
         eng.set_pink(amp);
         while !stop.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(50));

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
 use crate::server::ServerState;
@@ -36,7 +36,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let worker = spawn_worker(state, "plot", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
-        let amplitude = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+        let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
@@ -116,7 +116,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let mut xruns = 0u32;
         for &level_dbfs in &levels {
             if stop.load(Ordering::Relaxed) { break; }
-            let amplitude = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+            let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
             eng.set_tone(freq_hz, amplitude);
             let _ = eng.capture_block(0.1);
             let samples = match eng.capture_block(duration) {

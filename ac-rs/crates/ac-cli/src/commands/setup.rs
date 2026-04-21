@@ -68,7 +68,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     let ref_vrms = srv_cfg
         .get("dbu_ref_vrms")
         .and_then(|v| v.as_f64())
-        .unwrap_or(ac_core::constants::DBU_REF_EXACT);
+        .unwrap_or(ac_core::shared::constants::DBU_REF_EXACT);
 
     println!("\n  -- Hardware config (server) --");
     println!(

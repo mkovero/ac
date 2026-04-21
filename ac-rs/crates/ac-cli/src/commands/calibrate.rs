@@ -101,17 +101,17 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             let key = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
             println!("\n  Calibration saved: [{key}]");
             if let Some(v) = data.get("vrms_at_0dbfs_out").and_then(|v| v.as_f64()) {
-                let dbu = ac_core::conversions::vrms_to_dbu(v);
+                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
                 println!(
                     "  Output: 0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::conversions::fmt_vrms(v)
+                    ac_core::shared::conversions::fmt_vrms(v)
                 );
             }
             if let Some(v) = data.get("vrms_at_0dbfs_in").and_then(|v| v.as_f64()) {
-                let dbu = ac_core::conversions::vrms_to_dbu(v);
+                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
                 println!(
                     "  Input:  0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::conversions::fmt_vrms(v)
+                    ac_core::shared::conversions::fmt_vrms(v)
                 );
             }
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
@@ -141,7 +141,7 @@ pub fn run_show(client: &mut AcClient) {
         .cloned()
         .unwrap_or_default();
 
-    let cal_path = ac_core::calibration::default_cal_path();
+    let cal_path = ac_core::shared::calibration::default_cal_path();
     if cals.is_empty() {
         println!("\n  No calibrations stored  ({})\n", cal_path.display());
         return;
@@ -153,20 +153,20 @@ pub fn run_show(client: &mut AcClient) {
         println!("  [{key}]");
         match c.get("vrms_at_0dbfs_out").and_then(|v| v.as_f64()) {
             Some(v) => {
-                let dbu = ac_core::conversions::vrms_to_dbu(v);
+                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
                 println!(
                     "    Output: 0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::conversions::fmt_vrms(v)
+                    ac_core::shared::conversions::fmt_vrms(v)
                 );
             }
             None => println!("    Output: not calibrated"),
         }
         match c.get("vrms_at_0dbfs_in").and_then(|v| v.as_f64()) {
             Some(v) => {
-                let dbu = ac_core::conversions::vrms_to_dbu(v);
+                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
                 println!(
                     "    Input:  0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::conversions::fmt_vrms(v)
+                    ac_core::shared::conversions::fmt_vrms(v)
                 );
             }
             None => println!("    Input:  not calibrated"),

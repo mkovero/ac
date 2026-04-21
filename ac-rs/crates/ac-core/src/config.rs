@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::DBU_REF_EXACT;
+use crate::shared::constants::DBU_REF_EXACT;
 
 fn default_dbu_ref() -> f64 { DBU_REF_EXACT }
 fn default_range_start() -> f64 { 20.0 }

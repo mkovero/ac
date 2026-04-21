@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
@@ -78,9 +78,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
         let mut cwt_n_scales = *cwt_n_scales_shared.lock().unwrap();
-        let (mut cwt_scales, mut cwt_freqs) = ac_core::cwt::log_scales(
-            ac_core::cwt::DEFAULT_F_MIN,
-            ac_core::cwt::default_f_max(sr),
+        let (mut cwt_scales, mut cwt_freqs) = ac_core::visualize::cwt::log_scales(
+            ac_core::visualize::cwt::DEFAULT_F_MIN,
+            ac_core::visualize::cwt::default_f_max(sr),
             cwt_n_scales,
             sr,
             cwt_sigma,
@@ -124,9 +124,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 if (new_sigma - cwt_sigma).abs() > 0.01 || new_n != cwt_n_scales {
                     cwt_sigma = new_sigma;
                     cwt_n_scales = new_n;
-                    let (s, f) = ac_core::cwt::log_scales(
-                        ac_core::cwt::DEFAULT_F_MIN,
-                        ac_core::cwt::default_f_max(sr),
+                    let (s, f) = ac_core::visualize::cwt::log_scales(
+                        ac_core::visualize::cwt::DEFAULT_F_MIN,
+                        ac_core::visualize::cwt::default_f_max(sr),
                         cwt_n_scales,
                         sr,
                         cwt_sigma,
@@ -170,7 +170,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                     let t0 = std::time::Instant::now();
                     let buf = ring.make_contiguous();
-                    ac_core::cwt::morlet_cwt_into(
+                    ac_core::visualize::cwt::morlet_cwt_into(
                         buf,
                         sr,
                         &cwt_scales,
@@ -207,12 +207,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // extra DSP cost when enabled.
                     if let Some(bpo) = *ioct_bpo_shared.lock().unwrap() {
                         let (band_centres, band_levels) =
-                            ac_core::fractional_octave::cwt_to_fractional_octave(
+                            ac_core::visualize::fractional_octave::cwt_to_fractional_octave(
                                 &cwt_mags,
                                 &cwt_freqs,
                                 bpo as usize,
-                                ac_core::cwt::DEFAULT_F_MIN,
-                                ac_core::cwt::default_f_max(sr),
+                                ac_core::visualize::cwt::DEFAULT_F_MIN,
+                                ac_core::visualize::cwt::default_f_max(sr),
                             );
                         let frac_frame = json!({
                             "type":       "fractional_octave",
@@ -285,14 +285,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let cal = cals[idx].as_ref();
                             let in_dbu = cal
                                 .and_then(|c| c.in_vrms(r.linear_rms))
-                                .map(ac_core::conversions::vrms_to_dbu);
+                                .map(ac_core::shared::conversions::vrms_to_dbu);
                             let sr_f = sr as f64;
-                            let (spec, freqs) = ac_core::aggregate::spectrum_to_columns_wire(
+                            let (spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &r.spectrum,
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
-                                ac_core::aggregate::DEFAULT_WIRE_COLUMNS,
+                                ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
                                 "type":             "spectrum",
@@ -314,12 +314,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         Err(_) => {
                             let (spec, _) = ac_core::analysis::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
-                            let (spec, freqs) = ac_core::aggregate::spectrum_to_columns_wire(
+                            let (spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &spec,
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
-                                ac_core::aggregate::DEFAULT_WIRE_COLUMNS,
+                                ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
                                 "type":             "spectrum",

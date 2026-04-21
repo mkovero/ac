@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
@@ -181,7 +181,7 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
     eng.reconnect_input(in_port).ok();
     let mut measured: Vec<Option<f64>> = Vec::new();
     for &level in &levels {
-        let amp = ac_core::generator::dbfs_to_amplitude(level as f64);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level as f64);
         eng.set_tone(1000.0, amp);
         eng.flush_capture();
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -219,7 +219,7 @@ fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult
     eng.reconnect_input(in_port).ok();
     let mut results: Vec<(f64, f64, f64)> = Vec::new();
     for &level in levels {
-        let amp = ac_core::generator::dbfs_to_amplitude(level);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         if let Some(r) = analyze_mono(eng, 1000.0, 1.0, sr) {
             results.push((level, r.thd_pct, r.thdn_pct));
@@ -237,7 +237,7 @@ fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult
 
 fn hw_freq_response(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
     let freqs: &[f64] = &[50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 20000.0];
-    let amp = ac_core::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
     eng.reconnect_input(in_port).ok();
     let mut results: Vec<(f64, f64)> = Vec::new();
     for &freq in freqs {
@@ -263,7 +263,7 @@ fn hw_freq_response(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
 }
 
 fn hw_channel_match(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) -> TestResult {
-    let amp = ac_core::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
     eng.set_tone(1000.0, amp);
     let mut measurements: Vec<(String, f64, f64)> = Vec::new();
     for (label, port) in [("A", in_a), ("B", in_b)] {
@@ -288,7 +288,7 @@ fn hw_channel_match(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) 
 }
 
 fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let amp = ac_core::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
     eng.set_tone(1000.0, amp);
     eng.reconnect_input(in_port).ok();
     let mut levels: Vec<f64> = Vec::new();
@@ -317,7 +317,7 @@ fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
 // ---- DMM hardware tests ----
 
 fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibration>) -> TestResult {
-    let amp = ac_core::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
     eng.set_tone(1000.0, amp);
     std::thread::sleep(std::time::Duration::from_millis(500));
     let vrms_dmm = match read_dmm_vrms(host, 5) {
@@ -343,7 +343,7 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
     let mut max_err = 0.0f64;
     let mut n_pts = 0usize;
     for &level in levels {
-        let amp = ac_core::generator::dbfs_to_amplitude(level);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(400));
         if let (Some(vrms_dmm), Some(vrms_pred)) = (
@@ -365,7 +365,7 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
 
 fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
     let freqs: &[f64] = &[100.0, 1000.0, 5000.0, 10000.0, 20000.0];
-    let amp = ac_core::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
     let mut readings: Vec<(f64, f64)> = Vec::new();
     for &freq in freqs {
         eng.set_tone(freq, amp);

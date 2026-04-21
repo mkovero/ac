@@ -114,7 +114,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let pairs_r       = pairs.clone();
 
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
-        let amplitude = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+        let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
         // Passive mode (default): open no output ports at all so the daemon
         // doesn't need exclusive access to the playback side — the user is
@@ -314,7 +314,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
         let threshold_rms: f64 = 0.010 / (2.0f64.sqrt()); // 10 mVrms ≈ this linear RMS
 
         let freq      = 1000.0;
-        let amplitude = ac_core::generator::dbfs_to_amplitude(-10.0);
+        let amplitude = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
 
         let mut eng = make_engine(fake);
         if !eng.supports_routing() {

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
@@ -189,7 +189,7 @@ fn dut_noise_floor(eng: &mut dyn AudioEngine, _sr: u32, cal: Option<&Calibration
 }
 
 fn dut_gain(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: Option<&Calibration>) -> TestResult {
-    let amp = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
     eng.set_tone(1000.0, amp);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let (meas, refch) = match eng.capture_stereo(1.0) {
@@ -219,7 +219,7 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
     let levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0];
     let mut results: Vec<(f64, f64, f64, f64)> = Vec::new(); // (level, thd, thdn, gain)
     for &level in levels {
-        let amp = ac_core::generator::dbfs_to_amplitude(level);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok((meas, refch)) = eng.capture_stereo(1.0) {
@@ -248,7 +248,7 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
 }
 
 fn dut_freq_response(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: Option<&Calibration>) -> TestResult {
-    let amp = ac_core::generator::dbfs_to_amplitude(level_dbfs);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
     eng.set_pink(amp);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let (meas, refch) = match eng.capture_stereo(4.0) {
@@ -289,7 +289,7 @@ fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibrati
     let mut clip_level = None::<f64>;
 
     for level in &levels {
-        let amp = ac_core::generator::dbfs_to_amplitude(*level);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(*level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(100));
         let (meas, _) = match eng.capture_stereo(0.5) {

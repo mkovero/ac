@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::server::ServerState;
 

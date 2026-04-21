@@ -13,7 +13,7 @@ pub fn run(client: &mut AcClient) {
         .get("vrms")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
-    let dbu = ac_core::conversions::vrms_to_dbu(vrms);
+    let dbu = ac_core::shared::conversions::vrms_to_dbu(vrms);
     let vpp = vrms * 2.0 * std::f64::consts::SQRT_2;
 
     if vrms >= 1.0 {

@@ -87,7 +87,7 @@ pub fn level_to_dbfs(level: &LevelSpec, cal: Option<&serde_json::Value>) -> f64 
             match vrms_0dbfs {
                 Some(ref_vrms) => {
                     let target_vrms =
-                        ac_core::constants::DBU_REF_EXACT * 10.0_f64.powf(*dbu / 20.0);
+                        ac_core::shared::constants::DBU_REF_EXACT * 10.0_f64.powf(*dbu / 20.0);
                     20.0 * (target_vrms / ref_vrms).log10()
                 }
                 None => {

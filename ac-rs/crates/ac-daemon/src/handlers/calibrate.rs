@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::calibration::Calibration;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
 use crate::server::ServerState;
@@ -35,7 +35,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             send_pub(&pub_tx, "error", &json!({"cmd":"calibrate","message":format!("{e}")}));
             return;
         }
-        let amp = ac_core::generator::dbfs_to_amplitude(ref_dbfs);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
         eng.set_tone(1000.0, amp);
 
         // Step 1 — output voltage

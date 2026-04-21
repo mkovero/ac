@@ -126,8 +126,8 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         playback_ports_cache: Arc::new(Mutex::new(None)),
         capture_ports_cache:  Arc::new(Mutex::new(None)),
         analysis_mode: Arc::new(Mutex::new("fft".to_string())),
-        cwt_sigma:     Arc::new(Mutex::new(ac_core::cwt::DEFAULT_SIGMA)),
-        cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
+        cwt_sigma:     Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
+        cwt_n_scales:  Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
         ioct_bpo:      Arc::new(Mutex::new(None)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
     };
