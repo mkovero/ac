@@ -649,6 +649,12 @@ impl App {
             interval_ms: self.monitor_interval_ms,
             fft_n: self.monitor_fft_n,
         });
+        let tier_badge_snap = Some(crate::ui::fmt::tier_badge(
+            &self.analysis_mode,
+            self.monitor_fft_n,
+            self.cwt_sigma,
+            self.cwt_n_scales,
+        ));
         let mut transfer_snap: Option<TransferFrame> = if in_transfer_layout {
             self.transfer_last.clone()
         } else {
@@ -943,6 +949,7 @@ impl App {
                     active_palette: active_palette_snap,
                     smoothing_frac: smoothing_snap,
                     ioct_bpo: ioct_bpo_snap,
+                    tier_badge: tier_badge_snap.clone(),
                 },
             );
         });

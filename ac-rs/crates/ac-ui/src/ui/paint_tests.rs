@@ -108,6 +108,7 @@ fn overlay_shows_spectrum_readout() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -150,6 +151,7 @@ fn overlay_shows_dbu_when_calibrated() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -188,6 +190,7 @@ fn overlay_shows_clip_when_clipping() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -222,6 +225,7 @@ fn overlay_no_clip_when_not_clipping() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -259,6 +263,7 @@ fn overlay_shows_frozen() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -294,6 +299,7 @@ fn overlay_shows_connected() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -327,6 +333,7 @@ fn overlay_shows_disconnected() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -375,6 +382,7 @@ fn overlay_shows_transfer_delay() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -420,6 +428,7 @@ fn overlay_shows_hover_db_readout() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -456,6 +465,7 @@ fn overlay_shows_notification() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);
@@ -492,6 +502,7 @@ fn overlay_shows_sample_rate() {
         active_palette: 0,
         smoothing_frac: None,
         ioct_bpo: None,
+        tier_badge: None,
     };
 
     let texts = run_overlay(input);

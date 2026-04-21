@@ -76,6 +76,11 @@ pub struct OverlayInput<'a> {
     /// `fractional_octave` aggregation of the CWT column. Shown alongside
     /// `smooth` so the reader can tell raw CWT from per-band aggregation.
     pub ioct_bpo: Option<u32>,
+    /// Tier 2 technique badge — one-line label describing the active
+    /// live-analysis method (e.g. `"FFT · N=16384 · Hann"`). `None`
+    /// suppresses the line; callers set it when the current view
+    /// corresponds to a live-analysis frame. See `ARCHITECTURE.md`.
+    pub tier_badge: Option<String>,
 }
 
 /// Label used in overlays / legends for a given cell index. Real channels
@@ -215,20 +220,34 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // Live FFT monitor readout (Spectrum + FFT only). Shows the knobs
         // adjusted by plain Left/Right and Up/Down so the user sees the
         // effect of each key press directly.
+        let mut stack_row: f32 = 2.0;
         if matches!(input.config.view_mode, ViewMode::Spectrum) {
             if let Some(mp) = input.monitor_params {
                 let mon_line = super::fmt::monitor_knobs_readout(mp.interval_ms, mp.fft_n, sr);
                 painter.text(
                     Pos2::new(
                         screen.right() - 8.0,
-                        screen.top() + 6.0 + 2.0 * (theme::STATUS_PX + 2.0),
+                        screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
                     ),
                     Align2::RIGHT_TOP,
                     mon_line,
                     FontId::monospace(theme::STATUS_PX),
                     text_color,
                 );
+                stack_row += 1.0;
             }
+        }
+        if let Some(badge) = input.tier_badge.as_deref() {
+            painter.text(
+                Pos2::new(
+                    screen.right() - 8.0,
+                    screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
+                ),
+                Align2::RIGHT_TOP,
+                badge,
+                FontId::monospace(theme::STATUS_PX),
+                text_color,
+            );
         }
 
         // Waterfall colorbar: vertical gradient sampled from the same

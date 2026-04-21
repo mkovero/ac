@@ -97,6 +97,23 @@ pub fn top_right_status(sr: u32, channel_label: &str) -> String {
     format!("{} Hz │ {}", sr, channel_label)
 }
 
+/// Tier 2 technique badge shown top-right so the reader knows which
+/// live-analysis technique is producing the view. `analysis_mode` is
+/// the server-global setting (`"fft"` or `"cwt"`); unknown values
+/// are surfaced verbatim so bad state is visible instead of silent.
+pub fn tier_badge(
+    analysis_mode: &str,
+    fft_n: u32,
+    cwt_sigma: f32,
+    cwt_n_scales: usize,
+) -> String {
+    match analysis_mode {
+        "fft" => format!("FFT · N={fft_n} · Hann"),
+        "cwt" => format!("CWT · Morlet · σ={cwt_sigma:.0} · N_scales={cwt_n_scales}"),
+        other => format!("{other}"),
+    }
+}
+
 /// Header line for the peak-hold corner readout — "PEAK CH{n}". Sits above
 /// one or more `peak_rank_line` rows listing ranked local maxima.
 pub fn peak_header(channel: usize) -> String {
@@ -394,6 +411,19 @@ mod tests {
     }
 
     // ── top-right status ──────────────────────────────────────────────
+
+    #[test]
+    fn tier_badge_fft() {
+        assert_eq!(tier_badge("fft", 16384, 12.0, 512), "FFT · N=16384 · Hann");
+    }
+
+    #[test]
+    fn tier_badge_cwt() {
+        assert_eq!(
+            tier_badge("cwt", 16384, 12.0, 512),
+            "CWT · Morlet · σ=12 · N_scales=512",
+        );
+    }
 
     #[test]
     fn top_right_status_format() {
