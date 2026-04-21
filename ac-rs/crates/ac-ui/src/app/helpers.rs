@@ -56,65 +56,6 @@ pub const PEAK_HOLD_DECAY: Duration = Duration::from_secs(1);
 /// drives min-hold's symmetric rise toward live.
 pub const PEAK_RELEASE_DB_PER_SEC: f32 = 20.0;
 
-/// Drum-tuner search window for the (0,1) fundamental. 40 Hz is below any
-/// reasonable kick resonance; 2 kHz sits above the tightest piccolo snare.
-/// Overtone partials can fall anywhere above this ceiling — only the
-/// fundamental candidate itself is gated.
-pub const TUNER_SEARCH_MIN_HZ: f64 = 40.0;
-pub const TUNER_SEARCH_MAX_HZ: f64 = 2000.0;
-/// Below this confidence score we render nothing — a wrong-but-labelled
-/// peak is worse than no peak at all when the user is chasing cents.
-pub const TUNER_MIN_CONFIDENCE: f64 = 0.25;
-/// Half-width (as fraction of f0) of the Space-to-lock search range
-/// around the current fundamental. 0.2 = ±20% covers a couple of
-/// semitones of detune without admitting neighbouring octaves.
-pub const TUNER_RANGE_LOCK_FRAC: f64 = 0.20;
-/// Min-level step (dBFS) applied by `+`/`-` while tuner mode is active.
-pub const TUNER_MIN_LEVEL_STEP_DB: f32 = 1.0;
-pub const TUNER_MIN_LEVEL_FLOOR_DBFS: f32 = -120.0;
-pub const TUNER_MIN_LEVEL_CEIL_DBFS: f32 = -10.0;
-
-/// Detector sensitivity preset cycled by `Shift+U`. Each preset maps to a
-/// `(trigger_delta_db, min_confidence)` pair; the absolute-level gate is
-/// controlled separately by `+`/`-` so the user can dial it independently
-/// of the edge/confidence pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TunerSensitivity {
-    /// Lenient — fires on quieter/closer-spaced overtone stacks. Room
-    /// ambience can false-fire.
-    Low,
-    /// Default balanced preset.
-    #[default]
-    Mid,
-    /// Strict — rejects all but clearly-voiced hits.
-    High,
-}
-
-impl TunerSensitivity {
-    pub fn label(self) -> &'static str {
-        match self {
-            TunerSensitivity::Low => "Low",
-            TunerSensitivity::Mid => "Mid",
-            TunerSensitivity::High => "High",
-        }
-    }
-    /// `(trigger_delta_db, min_confidence)`.
-    pub fn params(self) -> (f32, f64) {
-        match self {
-            TunerSensitivity::Low  => (6.0,  0.25),
-            TunerSensitivity::Mid  => (10.0, 0.35),
-            TunerSensitivity::High => (15.0, 0.45),
-        }
-    }
-    pub fn next(self) -> Self {
-        match self {
-            TunerSensitivity::Low  => TunerSensitivity::Mid,
-            TunerSensitivity::Mid  => TunerSensitivity::High,
-            TunerSensitivity::High => TunerSensitivity::Low,
-        }
-    }
-}
-
 /// Need at least this many dt samples in the window before we trust the
 /// median enough to replace the 0.1 s default. Below this we keep the
 /// default so the first couple of frames don't set a wildly wrong period.

@@ -209,40 +209,6 @@ pub enum ViewMode {
     Waterfall,
 }
 
-/// Drum-tuner frame published by the daemon on the `tuner` PUB topic.
-/// Emitted only on a confirmed trigger — the daemon runs the identifier on
-/// its raw FFT half-spectrum (better resolution than the aggregated wire
-/// spectrum). The UI caches the latest frame per channel.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TunerFrame {
-    pub channel:     u32,
-    pub freq_hz:     f64,
-    pub confidence:  f64,
-    pub partials:    Vec<ac_core::tuner::Partial>,
-    // Retained: diagnostics fields published by daemon; no UI consumer yet.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub baseline_db: f32,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub range_lock:  Option<(f64, f64)>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub timestamp:   u64,
-}
-
-/// Drum-tuner tri-state cycled by the `U` key. `Live` identifies the
-/// membrane fundamental from the peak-hold buffer every frame and draws
-/// markers + corner readout; `Locked` remembers a target and shows Hz /
-/// cents deviation from it; `Off` disables all tuner rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TunerMode {
-    #[default]
-    Off,
-    Live,
-    Locked,
-}
-
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
 /// can target the hovered cell independently without broadcasting to the rest.
 #[derive(Debug, Clone, Copy)]

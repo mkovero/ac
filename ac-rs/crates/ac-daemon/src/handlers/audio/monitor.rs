@@ -1,4 +1,4 @@
-//! `monitor_spectrum` — live per-channel spectrum/CWT + drum-tuner feed.
+//! `monitor_spectrum` — live per-channel spectrum/CWT feed.
 
 use std::sync::atomic::Ordering;
 
@@ -60,8 +60,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let cwt_sigma_shared = state.cwt_sigma.clone();
     let cwt_n_scales_shared = state.cwt_n_scales.clone();
     let ioct_bpo_shared = state.ioct_bpo.clone();
-    let tuner_range_locks_shared = state.tuner_range_locks.clone();
-    let tuner_config_shared = state.tuner_config.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
@@ -110,26 +108,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut fft_rings: Vec<std::collections::VecDeque<f32>> =
             channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(131_072)).collect();
 
-        // Per-channel TunerState — drum-head fundamental identifier. Runs
-        // inside the FFT path on the raw half-spectrum (better resolution
-        // than the log-aggregated wire columns); publishes on `tuner` topic
-        // only when the level-trigger fires (sparse).
-        let mut tuner_states: Vec<ac_core::tuner::TunerState> = channels_worker.iter()
-            .map(|_| ac_core::tuner::TunerState::new(ac_core::tuner::TunerConfig::default()))
-            .collect();
-        let mut tuner_last_tick = std::time::Instant::now();
-        let mut tuner_status_last_log = std::time::Instant::now();
-
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
-            let tuner_dt_s = tick_start.duration_since(tuner_last_tick).as_secs_f32();
-            tuner_last_tick = tick_start;
-            let tuner_range_snapshot: std::collections::HashMap<u32, (f64, f64)> =
-                tuner_range_locks_shared.lock().unwrap().clone();
-            let tuner_cfg_snapshot = *tuner_config_shared.lock().unwrap();
-            for st in tuner_states.iter_mut() {
-                st.set_config(tuner_cfg_snapshot);
-            }
             let (cur_interval, cur_fft_n) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n)
@@ -299,158 +279,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                 {
                     let analyze_result = ac_core::analysis::analyze(samples, sr, current_freqs[idx], 10);
-                    // Feed tuner on every frame (both analyze-Ok and -Err paths) so
-                    // baseline tracks silence and the internal peak-hold decays
-                    // idle. Tuner expects dBFS; daemon spectra are linear amplitude,
-                    // so convert here (matches the UI's receiver-side conversion).
-                    let (tuner_spec, tuner_freqs): (Vec<f32>, Vec<f32>) = match &analyze_result {
-                        Ok(r) => (
-                            r.spectrum.iter()
-                                .map(|&v| 20.0 * (v as f32).max(1e-12).log10())
-                                .collect(),
-                            r.freqs.iter().map(|&v| v as f32).collect(),
-                        ),
-                        Err(_) => {
-                            let (s, f) = ac_core::analysis::spectrum_only(samples, sr);
-                            (
-                                s.iter()
-                                    .map(|&v| 20.0 * (v as f32).max(1e-12).log10())
-                                    .collect(),
-                                f.iter().map(|&v| v as f32).collect(),
-                            )
-                        }
-                    };
-                    tuner_states[idx].set_range_lock(tuner_range_snapshot.get(&channel).copied());
-                    let trig = tuner_states[idx].feed(&tuner_spec, &tuner_freqs, tuner_dt_s);
-                    // Log every trigger attempt (both confident and non-confident)
-                    // so users can see why tracking fails — non-confident fires
-                    // don't get published but are still load-bearing diagnostic
-                    // signal. Throttled level status at 1 Hz separately below.
-                    // Gated by AC_TUNER_DEBUG=1 to keep stderr quiet otherwise.
-                    let tuner_debug = std::env::var_os("AC_TUNER_DEBUG").is_some();
-                    if tuner_debug {
-                        if let ac_core::tuner::Triggered::Fired { candidate, confident } = &trig {
-                            let st = tuner_states[idx].status();
-                            match candidate {
-                                Some(c) => eprintln!(
-                                    "[tuner ch{channel}] FIRE conf={} f0={:.1}Hz confidence={:.2} \
-                                     partials={} current={:.1}dB baseline={:.1}dB delta={:.1}dB \
-                                     floor={:.1}dB peaks={}",
-                                    if *confident { "YES" } else { "no " },
-                                    c.freq_hz, c.confidence, c.partials.len(),
-                                    st.current_db, st.baseline_db, st.delta_db,
-                                    st.floor_db, st.peak_count,
-                                ),
-                                None => eprintln!(
-                                    "[tuner ch{channel}] FIRE no-candidate \
-                                     current={:.1}dB baseline={:.1}dB delta={:.1}dB \
-                                     floor={:.1}dB peaks={}",
-                                    st.current_db, st.baseline_db, st.delta_db,
-                                    st.floor_db, st.peak_count,
-                                ),
-                            }
-
-                            // Re-run the identifier to dump every candidate that
-                            // survived the physicality gates — lets us see why
-                            // the winner won (or lost) vs. the runners-up. Runs
-                            // only when AC_TUNER_DEBUG=1 fires, so the extra
-                            // allocation isn't on the hot path.
-                            let peak_hold = tuner_states[idx].peak_hold();
-                            let range = tuner_states[idx]
-                                .range_lock()
-                                .unwrap_or(tuner_states[idx].config().search_range_hz);
-                            if peak_hold.len() == tuner_freqs.len() && st.floor_db.is_finite() {
-                                let (_, diags) = ac_core::tuner::identify_fundamental_with_candidates(
-                                    peak_hold, &tuner_freqs, st.floor_db, range,
-                                );
-                                let mut sorted = diags;
-                                sorted.sort_by(|a, b| {
-                                    b.score.partial_cmp(&a.score)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                                for d in &sorted {
-                                    let mut parts = String::new();
-                                    for p in &d.matched {
-                                        use std::fmt::Write;
-                                        let _ = write!(
-                                            parts,
-                                            " ({},{})/{:.1}/{:.0}",
-                                            p.mode.0, p.mode.1,
-                                            p.measured_hz, p.magnitude_db,
-                                        );
-                                    }
-                                    eprintln!(
-                                        "[tuner ch{channel}]   cand f0={:.1} has_peak={} \
-                                         score={:.1} matched={} loudest_ratio={:.3} \
-                                         low_mode_max={:.1} partials={}",
-                                        d.f0,
-                                        if d.has_peak { 1 } else { 0 },
-                                        d.score, d.matched.len(),
-                                        d.loudest_ratio, d.low_mode_max_db,
-                                        parts.trim_start(),
-                                    );
-                                }
-                            }
-
-                            // Top-5 raw FFT bins inside the search range, from
-                            // the pre-peak-hold spectrum. Isolates whether the
-                            // "228 Hz at N>=32k" drift comes from a real bin or
-                            // from the peak-hold / aggregator pipeline.
-                            let (fmin, fmax) = range;
-                            let mut bins: Vec<(f32, f32)> = tuner_freqs
-                                .iter()
-                                .zip(tuner_spec.iter())
-                                .filter(|(f, m)| {
-                                    let fh = **f as f64;
-                                    fh >= fmin && fh <= fmax && m.is_finite()
-                                })
-                                .map(|(f, m)| (*f, *m))
-                                .collect();
-                            bins.sort_by(|a, b| {
-                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            let top: Vec<String> = bins
-                                .iter()
-                                .take(5)
-                                .map(|(f, m)| format!("{:.1}Hz/{:.0}", f, m))
-                                .collect();
-                            if !top.is_empty() {
-                                eprintln!(
-                                    "[tuner ch{channel}]   top5bins: {}",
-                                    top.join(" "),
-                                );
-                            }
-                        }
-                    }
-                    if let ac_core::tuner::Triggered::Fired {
-                        candidate: Some(c), confident: true,
-                    } = trig {
-                        let partials_json: Vec<Value> = c.partials.iter().map(|p| json!({
-                            "mode":           [p.mode.0, p.mode.1],
-                            "ideal_ratio":    p.ideal_ratio,
-                            "measured_hz":    p.measured_hz,
-                            "measured_ratio": p.measured_ratio,
-                            "deviation_pct":  p.deviation_pct,
-                            "magnitude_db":   p.magnitude_db,
-                        })).collect();
-                        let ts_ns = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0);
-                        let tframe = json!({
-                            "type":        "tuner",
-                            "cmd":         "monitor_spectrum",
-                            "channel":     channel,
-                            "freq_hz":     c.freq_hz,
-                            "confidence":  c.confidence,
-                            "partials":    partials_json,
-                            "baseline_db": tuner_states[idx].baseline_db(),
-                            "range_lock":  tuner_states[idx].range_lock()
-                                .map(|(l, h)| json!([l, h])),
-                            "timestamp":   ts_ns,
-                        });
-                        send_pub(&pub_tx, "tuner", &tframe);
-                    }
                     let frame = match analyze_result {
                         Ok(r) => {
                             current_freqs[idx] = r.fundamental_hz;
@@ -507,25 +335,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     };
                     send_pub(&pub_tx, "data", &frame);
                 }
-            }
-            // 1 Hz tuner level status log. Gated by AC_TUNER_DEBUG=1; lets
-            // users see live current/baseline/delta/armed/floor even when no
-            // trigger is firing, to diagnose why tracking fails.
-            if std::env::var_os("AC_TUNER_DEBUG").is_some()
-                && tuner_status_last_log.elapsed().as_secs_f64() >= 1.0
-            {
-                for (idx, &channel) in channels_worker.iter().enumerate() {
-                    let st = tuner_states[idx].status();
-                    eprintln!(
-                        "[tuner ch{channel}] status current={:.1}dB baseline={:.1}dB \
-                         delta={:.1}dB armed={} floor={:.1}dB peaks={} \
-                         last_f0={:.1}Hz last_conf={:.2}",
-                        st.current_db, st.baseline_db, st.delta_db,
-                        st.armed, st.floor_db, st.peak_count,
-                        st.last_candidate_hz, st.last_confidence,
-                    );
-                }
-                tuner_status_last_log = std::time::Instant::now();
             }
             // Pace FFT mode to requested interval. CWT has its own cadence
             // (short tick + sliding ring — see `cwt_tick`) and paces itself.

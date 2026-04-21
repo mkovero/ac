@@ -7,14 +7,14 @@ Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 283 tests (ac-core 80, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
+cargo test                        # 264 tests (ac-core 61, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
 ```
 
 ## Crate layout
 
 | Crate | Binary | Role |
 |-------|--------|------|
-| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 80 unit tests. |
+| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 61 unit tests. |
 | `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 50 parser tests. |
 | `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 unit + 10 integration tests. |
 | `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 100 tests. |
@@ -89,10 +89,8 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
 | `S` | Screenshot |
-| `P` | Toggle peak hold (Spectrum view) — fundamental + 2×–5× harmonic markers, auto-tracks the hottest peak, auto-decays after 1 s idle |
+| `P` | Toggle peak hold (Spectrum view) — top-5 local maxima ranked by dB with ≥1/3-octave spacing, auto-decays at 20 dB/s after 1 s idle |
 | `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
-| `U` | Toggle drum tuner (Spectrum + peak hold). 1st press: live mode — identifies membrane (0,1) fundamental from peak-hold buffer, annotates overtone partials with Δ% from ideal Bessel ratios, corner readout shows Hz/note/cents/confidence. 2nd press: lock current f₀ as target; readout shows Hz/cents deviation with traffic-light colouring (green ≤5¢, yellow ≤20¢, red beyond). 3rd press: off. Auto-enables peak hold if not already on |
-| `Space` (Live tuner) | Lock tuner search range to ±20% of current f₀ (e.g. 190-270 Hz after a 220 Hz hit). Prevents sub-harmonic aliasing on subsequent hits. Press again to unlock. Outside Live tuner mode Space still toggles channel selection |
 | `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
 | `Shift+O` | Cycle fractional-octave CWT aggregation (CWT mode only): off → 1/1 → 1/3 → 1/6 → 1/12 → 1/24 → off. Replaces the displayed CWT column with summed-power per band; preserves single-tone dBFS at synthetic isolated scales (kernel-overlap drift on real signals — see `ac-core::fractional_octave`); state shown top-right |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |

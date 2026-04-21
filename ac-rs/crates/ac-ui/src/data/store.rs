@@ -1,11 +1,9 @@
 use std::sync::{Arc, Mutex};
 use triple_buffer::{triple_buffer, Input, Output};
 
-use std::collections::VecDeque;
-
 use super::types::{
     DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
-    TransferPair, TunerFrame,
+    TransferPair,
 };
 
 struct ChannelSlot {
@@ -267,77 +265,6 @@ impl VirtualChannelStore {
 
     // Retained: exercised by unit tests below; no production caller yet.
     #[allow(dead_code)]
-    pub fn clear(&self) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.clear();
-        }
-    }
-}
-
-/// Daemon-published tuner frames, keyed by channel. Receiver writes on each
-/// `tuner` PUB frame; main thread snapshots per frame. Latest candidate is
-/// persisted — the daemon only publishes on trigger, so between hits the
-/// last confident result stays visible. `history` remembers recent
-/// fundamentals (one entry per confident frame received).
-pub const TUNER_HISTORY_CAP: usize = 5;
-
-#[derive(Debug, Clone, Default)]
-struct TunerChannel {
-    last: Option<ac_core::tuner::FundamentalCandidate>,
-    history: VecDeque<f64>,
-}
-
-#[derive(Clone, Default)]
-pub struct TunerStore {
-    inner: Arc<Mutex<Vec<TunerChannel>>>,
-}
-
-impl TunerStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn ingest(&self, slot_idx: usize, frame: TunerFrame) {
-        let Ok(mut g) = self.inner.lock() else { return };
-        if g.len() <= slot_idx {
-            g.resize_with(slot_idx + 1, TunerChannel::default);
-        }
-        let slot = &mut g[slot_idx];
-        if let Some(last) = slot.history.back() {
-            if (last - frame.freq_hz).abs() / last.abs().max(1.0) >= 0.015
-                && slot.history.len() >= TUNER_HISTORY_CAP
-            {
-                slot.history.pop_front();
-            }
-        }
-        if slot.history.len() >= TUNER_HISTORY_CAP {
-            slot.history.pop_front();
-        }
-        slot.history.push_back(frame.freq_hz);
-        slot.last = Some(ac_core::tuner::FundamentalCandidate {
-            freq_hz: frame.freq_hz,
-            confidence: frame.confidence,
-            partials: frame.partials,
-        });
-    }
-
-    pub fn snapshot(&self, n: usize) -> (
-        Vec<Option<ac_core::tuner::FundamentalCandidate>>,
-        Vec<Vec<f64>>,
-    ) {
-        let Ok(g) = self.inner.lock() else {
-            return (vec![None; n], vec![Vec::new(); n]);
-        };
-        let cand = (0..n)
-            .map(|i| g.get(i).and_then(|c| c.last.clone()))
-            .collect();
-        let hist = (0..n)
-            .map(|i| g.get(i).map(|c| c.history.iter().copied().collect())
-                .unwrap_or_default())
-            .collect();
-        (cand, hist)
-    }
-
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.clear();

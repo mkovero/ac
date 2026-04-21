@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{SweepStore, TransferStore, TunerStore, VirtualChannelStore};
-use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair, TunerFrame};
+use super::store::{SweepStore, TransferStore, VirtualChannelStore};
+use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
@@ -52,7 +52,6 @@ pub fn spawn(
     transfer: TransferStore,
     virtual_channels: VirtualChannelStore,
     sweep: SweepStore,
-    tuner: TunerStore,
     wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -93,10 +92,6 @@ pub fn spawn(
             log::error!("zmq subscribe done: {e}");
             return;
         }
-        if let Err(e) = sub.set_subscribe(b"tuner") {
-            log::error!("zmq subscribe tuner: {e}");
-            return;
-        }
         if let Err(e) = sub.set_rcvtimeo(200) {
             log::error!("zmq rcvtimeo: {e}");
             return;
@@ -132,40 +127,6 @@ pub fn spawn(
                         log::warn!("daemon error: {text}");
                         if let Ok(mut g) = status_c.last_error.lock() {
                             *g = Some(text);
-                        }
-                        continue;
-                    }
-                    if topic == "tuner" {
-                        match serde_json::from_str::<TunerFrame>(body) {
-                            Ok(tf) => {
-                                let slot = route_slot(Some(tf.channel), &mut channel_map);
-                                let Some(slot) = slot else {
-                                    if std::env::var_os("AC_TUNER_DEBUG").is_some() {
-                                        eprintln!(
-                                            "[ui recv] tuner ch{} DROP (no slot, n_slots={})",
-                                            tf.channel, n_slots
-                                        );
-                                    }
-                                    continue;
-                                };
-                                if std::env::var_os("AC_TUNER_DEBUG").is_some() {
-                                    eprintln!(
-                                        "[ui recv] tuner ch{} → slot{} f0={:.1}Hz conf={:.2} partials={}",
-                                        tf.channel, slot, tf.freq_hz, tf.confidence, tf.partials.len()
-                                    );
-                                }
-                                tuner.ingest(slot, tf);
-                                status_c.connected.store(true, Ordering::Relaxed);
-                                let ns = start.elapsed().as_nanos() as u64;
-                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
-                                notify();
-                            }
-                            Err(e) => {
-                                if std::env::var_os("AC_TUNER_DEBUG").is_some() {
-                                    eprintln!("[ui recv] tuner PARSE FAIL: {e}  body={body}");
-                                }
-                                log::warn!("tuner parse failed: {e}");
-                            }
                         }
                         continue;
                     }

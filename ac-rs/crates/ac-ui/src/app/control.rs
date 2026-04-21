@@ -6,9 +6,7 @@
 use crate::data::control::CtrlClient;
 use crate::data::types::{CellView, LayoutMode, TransferPair};
 
-use super::helpers::{
-    DataSource, SourceKind, TUNER_MIN_LEVEL_CEIL_DBFS, TUNER_MIN_LEVEL_FLOOR_DBFS,
-};
+use super::helpers::{DataSource, SourceKind};
 use super::App;
 
 impl App {
@@ -100,8 +98,6 @@ impl App {
         let virtual_channels = init.virtual_channels.clone();
         let sweep_store = init.sweep_store.clone();
         self.sweep_store = Some(sweep_store.clone());
-        let tuner_store = init.tuner_store.clone();
-        self.tuner_store = Some(tuner_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -122,7 +118,6 @@ impl App {
                     transfer_store,
                     virtual_channels,
                     sweep_store,
-                    tuner_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));
@@ -186,73 +181,6 @@ impl App {
                 self.notify("analysis_mode: ctrl error");
                 false
             }
-        }
-    }
-
-    /// Set or clear the daemon-side tuner search-range lock for a channel.
-    /// Synthetic backend has no daemon; silently no-op.
-    pub(super) fn send_tuner_range(&mut self, channel: u32, range: Option<(f64, f64)>) {
-        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
-            return;
-        }
-        let Some(ctrl) = self.ensure_ctrl() else { return };
-        let cmd = if let Some((lo, hi)) = range {
-            serde_json::json!({
-                "cmd":     "tuner_range",
-                "channel": channel,
-                "lo_hz":   lo,
-                "hi_hz":   hi,
-            })
-        } else {
-            serde_json::json!({
-                "cmd":     "tuner_range",
-                "channel": channel,
-                "clear":   true,
-            })
-        };
-        if let Err(e) = ctrl.send(&cmd) {
-            log::warn!("tuner_range failed: {e}");
-        }
-    }
-
-    /// Step `tuner_min_level_dbfs` by the given dB delta, clamped to the
-    /// configured floor/ceiling. Crossing the floor clears the gate
-    /// (None); starting from None assumes the floor.
-    pub(super) fn step_tuner_min_level(&mut self, delta_db: f32) {
-        let cur = self.tuner_min_level_dbfs.unwrap_or(TUNER_MIN_LEVEL_FLOOR_DBFS);
-        let next = cur + delta_db;
-        if next < TUNER_MIN_LEVEL_FLOOR_DBFS {
-            self.tuner_min_level_dbfs = None;
-            self.notify("tuner min level: off");
-        } else {
-            let clamped = next.min(TUNER_MIN_LEVEL_CEIL_DBFS);
-            self.tuner_min_level_dbfs = Some(clamped);
-            self.notify(&format!("tuner min level: {:.0} dBFS", clamped));
-        }
-        self.send_tuner_config();
-        self.needs_redraw = true;
-    }
-
-    /// Push the current sensitivity preset + min-level gate to the daemon
-    /// via the `tuner_config` REQ. Synthetic backend has no daemon; no-op.
-    pub(super) fn send_tuner_config(&mut self) {
-        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
-            return;
-        }
-        let (trigger_delta_db, min_confidence) = self.tuner_sensitivity.params();
-        let min_level = match self.tuner_min_level_dbfs {
-            Some(v) => serde_json::Value::from(v as f64),
-            None => serde_json::Value::Null,
-        };
-        let Some(ctrl) = self.ensure_ctrl() else { return };
-        let cmd = serde_json::json!({
-            "cmd":              "tuner_config",
-            "trigger_delta_db": trigger_delta_db,
-            "min_confidence":   min_confidence,
-            "min_level_dbfs":   min_level,
-        });
-        if let Err(e) = ctrl.send(&cmd) {
-            log::warn!("tuner_config failed: {e}");
         }
     }
 

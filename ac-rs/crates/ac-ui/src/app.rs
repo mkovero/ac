@@ -14,11 +14,11 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, SweepState, SweepStore, TransferStore, TunerStore, VirtualChannelStore,
+    ChannelStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
 };
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
-    TransferPair, TunerMode, ViewMode,
+    TransferPair, ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::spectrum::SpectrumRenderer;
@@ -40,7 +40,6 @@ pub struct AppInit {
     pub transfer_store: TransferStore,
     pub virtual_channels: VirtualChannelStore,
     pub sweep_store: SweepStore,
-    pub tuner_store: TunerStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -77,7 +76,6 @@ pub struct App {
     /// double-starts and to decide whether to send a stop on layout exit.
     transfer_stream_active: bool,
     sweep_store: Option<SweepStore>,
-    tuner_store: Option<TunerStore>,
     sweep_kind: Option<SweepKind>,
     sweep_last: SweepState,
     sweep_selected_idx: Option<usize>,
@@ -185,29 +183,6 @@ pub struct App {
     min_holds: Vec<Option<Vec<f32>>>,
     min_last_update: Vec<Option<Instant>>,
     min_last_tick: Vec<Option<Instant>>,
-    /// Drum tuner tri-state. Off → Live → Locked → Off. Cycled by `U`. In
-    /// Live mode the identifier runs every frame on each channel's peak-hold
-    /// buffer; in Locked mode it keeps running so the readout updates when
-    /// the user retunes a lug, but the target stays pinned to whatever
-    /// `freq_hz` was current at the moment of the 2nd press.
-    tuner_mode: TunerMode,
-    /// Per-channel tuning target set on 2nd `U` press. Independent per
-    /// channel so a two-drum setup (kick CH0 + snare CH1) can carry two
-    /// locks at once.
-    tuner_locks: Vec<Option<f64>>,
-    /// Global narrow search range (Hz) sent to the daemon via `tuner_range`
-    /// REQ when the user presses Space in Live mode. Mirrored locally so
-    /// the overlay can label the lock without round-tripping to the daemon.
-    tuner_range_lock: Option<(f64, f64)>,
-    /// Detector sensitivity preset cycled by `Shift+U`. Maps to
-    /// `(trigger_delta_db, min_confidence)` pushed to the daemon via
-    /// `tuner_config`.
-    tuner_sensitivity: TunerSensitivity,
-    /// Absolute-level gate in dBFS — fires only when the in-band peak is
-    /// this loud or louder. `None` disables the gate. Stepped by `+`/`-`
-    /// while tuner mode is active; falls through to the default dB-span
-    /// control otherwise.
-    tuner_min_level_dbfs: Option<f32>,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -275,7 +250,6 @@ impl App {
             transfer_last: None,
             transfer_stream_active: false,
             sweep_store: None,
-            tuner_store: None,
             sweep_kind,
             sweep_last: SweepState::default(),
             sweep_selected_idx: None,
@@ -321,11 +295,6 @@ impl App {
             min_holds: Vec::new(),
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
-            tuner_mode: TunerMode::Off,
-            tuner_locks: Vec::new(),
-            tuner_range_lock: None,
-            tuner_sensitivity: TunerSensitivity::Mid,
-            tuner_min_level_dbfs: Some(-60.0),
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
             // disable via `O`.
@@ -658,7 +627,7 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, SweepStore, TransferStore, TunerStore, VirtualChannelStore,
+        ChannelStore, SweepStore, TransferStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -670,7 +639,6 @@ mod loop_tests {
             transfer_store: TransferStore::new(),
             virtual_channels: VirtualChannelStore::new(),
             sweep_store: SweepStore::new(),
-            tuner_store: TunerStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

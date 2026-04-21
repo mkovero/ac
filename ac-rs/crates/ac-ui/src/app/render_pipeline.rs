@@ -1,8 +1,8 @@
 //! Frame-render pipeline — `App::redraw` and its helpers. Runs every vsync
 //! (when the compositor repaints) or on demand (winit `RedrawRequested`).
 //! Reads from data stores, uploads to GPU, composites egui on top, and
-//! submits the frame. All overlays (peak-hold, tuner, monitor stats) are
-//! painted inside the single egui pass driven from `redraw`.
+//! submits the frame. All overlays (peak-hold, monitor stats) are painted
+//! inside the single egui pass driven from `redraw`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +11,7 @@ use egui::Color32;
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayFrame, FrameMeta, LayoutMode, SweepKind, TransferFrame, TunerMode, ViewMode,
+    CellView, DisplayFrame, FrameMeta, LayoutMode, SweepKind, TransferFrame, ViewMode,
 };
 use crate::render::context::RenderContext;
 use crate::render::grid;
@@ -24,8 +24,8 @@ use crate::ui::overlay::{self, HoverInfo, HoverReadout, MonitorParamsInfo, Overl
 use crate::ui::stats::StatsSnapshot;
 
 use super::helpers::{
-    NOTIFICATION_TTL, PEAK_HOLD_DECAY, PEAK_RELEASE_DB_PER_SEC, TUNER_MIN_CONFIDENCE,
-    TunerSensitivity, WATERFALL_ROW_DT_HYSTERESIS, WATERFALL_ROW_DT_MIN, WATERFALL_ROW_DT_WINDOW,
+    NOTIFICATION_TTL, PEAK_HOLD_DECAY, PEAK_RELEASE_DB_PER_SEC,
+    WATERFALL_ROW_DT_HYSTERESIS, WATERFALL_ROW_DT_MIN, WATERFALL_ROW_DT_WINDOW,
     median_f32,
 };
 use super::App;
@@ -251,19 +251,6 @@ impl App {
                     }
                 }
             }
-        }
-
-        // Drum tuner candidates are pushed by the daemon on the `tuner`
-        // PUB topic and cached in `tuner_store`. Off mode drops the cache so
-        // a stale pre-Off readout doesn't reappear on re-enter.
-        if self.tuner_mode == TunerMode::Off {
-            if let Some(s) = self.tuner_store.as_ref() {
-                s.clear();
-            }
-            self.tuner_range_lock = None;
-        }
-        if self.tuner_locks.len() < n_real {
-            self.tuner_locks.resize(n_real, None);
         }
 
         // Min-hold accumulator: mirror of the peak loop with the comparator
@@ -652,30 +639,6 @@ impl App {
         } else {
             Vec::new()
         };
-        let tuner_mode_snap = self.tuner_mode;
-        let (tuner_last_snap, tuner_history_snap): (
-            Vec<Option<ac_core::tuner::FundamentalCandidate>>,
-            Vec<Vec<f64>>,
-        ) = if self.tuner_mode != TunerMode::Off {
-            self.tuner_store
-                .as_ref()
-                .map(|s| s.snapshot(n_real))
-                .unwrap_or_else(|| (Vec::new(), Vec::new()))
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let tuner_locks_snap = if self.tuner_mode == TunerMode::Locked {
-            self.tuner_locks.clone()
-        } else {
-            Vec::new()
-        };
-        let tuner_range_lock_snap = if self.tuner_mode != TunerMode::Off {
-            self.tuner_range_lock
-        } else {
-            None
-        };
-        let tuner_sens_snap = self.tuner_sensitivity;
-        let tuner_min_level_snap = self.tuner_min_level_dbfs;
         let virtual_tf_snap: Vec<Option<TransferFrame>> = virtual_snapshots
             .iter()
             .map(|(_, _, tf)| tf.clone())
@@ -927,63 +890,6 @@ impl App {
                         if matches!(config_snap.layout, LayoutMode::Compare) {
                             peak_corner_slot += 1;
                         }
-                    }
-                }
-                // Drum-tuner overlay: f0 marker + membrane-mode partial
-                // markers + corner readout. Spectrum view only, real channels
-                // only. Sits above the peak-hold glyphs so the tuner markers
-                // aren't obscured by them on a loud drum hit where both
-                // features co-exist.
-                if tuner_mode_snap != TunerMode::Off
-                    && matches!(config_snap.view_mode, ViewMode::Spectrum)
-                    && cell.channel < n_real_snap
-                {
-                    let raw_cand = tuner_last_snap
-                        .get(cell.channel)
-                        .and_then(|o| o.as_ref());
-                    let cand_opt = raw_cand
-                        .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
-                    let hist_empty: Vec<f64> = Vec::new();
-                    let hist = tuner_history_snap
-                        .get(cell.channel)
-                        .unwrap_or(&hist_empty);
-                    if std::env::var_os("AC_TUNER_DEBUG").is_some() {
-                        eprintln!(
-                            "[ui draw] ch{} mode={:?} raw={} cand_pass={} hist_len={} freqs_len={}",
-                            cell.channel, tuner_mode_snap,
-                            raw_cand.map(|c| format!("f0={:.1}Hz conf={:.2}", c.freq_hz, c.confidence))
-                                .unwrap_or_else(|| "None".into()),
-                            cand_opt.is_some(), hist.len(),
-                            frames.get(cell.channel).and_then(|f| f.as_ref()).map(|f| f.freqs.len()).unwrap_or(0),
-                        );
-                    }
-                    if cand_opt.is_some()
-                        || !hist.is_empty()
-                        || tuner_range_lock_snap.is_some()
-                    {
-                        let lock = tuner_locks_snap
-                            .get(cell.channel)
-                            .copied()
-                            .flatten();
-                        let freqs: &[f32] = frames
-                            .get(cell.channel)
-                            .and_then(|f| f.as_ref())
-                            .map(|f| f.freqs.as_slice())
-                            .unwrap_or(&[]);
-                        draw_tuner_overlay(
-                            &painter,
-                            grid_rect,
-                            cell.channel,
-                            cand_opt,
-                            freqs,
-                            hist,
-                            &view,
-                            lock,
-                            tuner_mode_snap,
-                            tuner_range_lock_snap,
-                            tuner_sens_snap,
-                            tuner_min_level_snap,
-                        );
                     }
                 }
                 // Virtual transfer channels get a standalone phase subplot
@@ -1277,10 +1183,60 @@ fn finalize_capture(
     }
 }
 
-/// Per-cell peak-hold overlay: hottest-peak triangle + label, 2×–5× harmonic
-/// ticks, and a corner "PEAK CHn: f Hz A dB" readout. Called inside the egui
-/// closure (Spectrum view, real channels only). Skips DC/sub-audio bins so
-/// a spurious low-frequency excursion can't lock the marker.
+/// Pick up to `n` ranked local maxima from a peak-hold buffer. Strict local
+/// max (`peak[i] > peak[i-1]` and `> peak[i+1]`), restricted to the current
+/// view window and clamped to ≥ 20 Hz so DC/sub-audio noise can't dominate.
+/// A 1/3-octave greedy exclusion is applied after sorting by amplitude so
+/// neighbouring bins in the same spectral lobe can't monopolise the list.
+/// Returns `(bin_index, f_hz, amp_db)` in rank order (descending dB).
+fn top_peaks(
+    peak: &[f32],
+    freqs: &[f32],
+    view: &CellView,
+    n: usize,
+) -> Vec<(usize, f32, f32)> {
+    if peak.is_empty() || freqs.len() != peak.len() || n == 0 {
+        return Vec::new();
+    }
+    let floor_hz = view.freq_min.max(theme::DEFAULT_FREQ_MIN);
+    let mut candidates: Vec<(usize, f32, f32)> = Vec::new();
+    for i in 1..peak.len().saturating_sub(1) {
+        let f = freqs[i];
+        let amp = peak[i];
+        if !f.is_finite() || !amp.is_finite() {
+            continue;
+        }
+        if f < floor_hz || f > view.freq_max {
+            continue;
+        }
+        if amp > peak[i - 1] && amp > peak[i + 1] {
+            candidates.push((i, f, amp));
+        }
+    }
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+
+    const EXCLUSION_OCTAVES: f32 = 1.0 / 3.0;
+    let mut picked: Vec<(usize, f32, f32)> = Vec::with_capacity(n);
+    for cand in candidates {
+        if picked.len() >= n {
+            break;
+        }
+        let too_close = picked.iter().any(|&(_, f, _)| {
+            (cand.1.max(1e-6) / f.max(1e-6)).log2().abs() < EXCLUSION_OCTAVES
+        });
+        if too_close {
+            continue;
+        }
+        picked.push(cand);
+    }
+    picked
+}
+
+/// Per-cell peak-hold overlay: top-5 local maxima ranked by dB, with
+/// rank-1 drawn as a full-size triangle and ranks 2–5 as half-size
+/// triangles with a small rank number. Corner "PEAK CHn" header + one row
+/// per ranked peak. Called inside the egui closure (Spectrum view, real
+/// channels only).
 fn draw_peak_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1297,43 +1253,27 @@ fn draw_peak_overlay(
     if peak.is_empty() || freqs.len() != peak.len() {
         return;
     }
+    let picked = top_peaks(peak, freqs, view, 5);
+    if picked.is_empty() {
+        return;
+    }
+
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
     let log_span = (log_max - log_min).max(0.0001);
     let db_span = (view.db_max - view.db_min).max(0.0001);
 
-    // Argmax across only the visible freq window, clamped to ≥ 20 Hz so the
-    // marker can't latch onto DC or sub-audio noise.
-    let mut best_idx: Option<usize> = None;
-    let mut best_amp = f32::NEG_INFINITY;
-    for (i, (&f, &amp)) in freqs.iter().zip(peak.iter()).enumerate() {
-        if !f.is_finite() || !amp.is_finite() {
-            continue;
-        }
-        if f < view.freq_min.max(theme::DEFAULT_FREQ_MIN) || f > view.freq_max {
-            continue;
-        }
-        if amp > best_amp {
-            best_amp = amp;
-            best_idx = Some(i);
-        }
-    }
-    let Some(argmax) = best_idx else { return };
-    let f0 = freqs[argmax];
-    let a0 = peak[argmax];
-
     // Colour the markers with the channel's own palette entry so Compare
     // layout — where every selected channel's peak traces stack into the
     // same rect — lets the eye pair each triangle/label/readout with its
-    // underlying spectrum trace. `PEAK_MARKER` (cyan) was fine for a single
-    // channel but ambiguous once N peaks share one cell.
+    // underlying spectrum trace.
     let ch_rgba = theme::channel_color(channel);
     let marker_color = Color32::from_rgb(
         (ch_rgba[0] * 255.0) as u8,
         (ch_rgba[1] * 255.0) as u8,
         (ch_rgba[2] * 255.0) as u8,
     );
-    let tick_color = Color32::from_rgba_unmultiplied(
+    let rank_color = Color32::from_rgba_unmultiplied(
         (ch_rgba[0] * 255.0) as u8,
         (ch_rgba[1] * 255.0) as u8,
         (ch_rgba[2] * 255.0) as u8,
@@ -1348,75 +1288,10 @@ fn draw_peak_overlay(
         egui::pos2(x, y)
     };
 
-    // Collect the 2×..=5× harmonic samples up front so the same data drives
-    // both the on-plot markers and the corner text block. A harmonic is kept
-    // regardless of whether its frequency is inside the current view window —
-    // the corner readout still wants to show its dB — but on-plot drawing
-    // gates on the visible range.
-    struct Harmonic {
-        k: u32,
-        f_hz: f32,
-        amp_db: f32,
-        in_view: bool,
-    }
-    let mut harmonics: Vec<Harmonic> = Vec::with_capacity(4);
-    for k in 2u32..=5 {
-        let f_k = f0 * k as f32;
-        if freqs.last().map_or(true, |&f| f_k > f) {
-            break;
-        }
-        // Nearest-bin search; freqs are monotonic so a simple partition_point
-        // lands on the right neighbour. Clamp to the buffer so the amp lookup
-        // never panics.
-        let near = match freqs.partition_point(|&f| f < f_k) {
-            0 => 0,
-            p if p >= freqs.len() => freqs.len() - 1,
-            p => {
-                if (freqs[p] - f_k).abs() < (f_k - freqs[p - 1]).abs() {
-                    p
-                } else {
-                    p - 1
-                }
-            }
-        };
-        let a_k = peak[near];
-        if !a_k.is_finite() {
-            continue;
-        }
-        harmonics.push(Harmonic {
-            k,
-            f_hz: f_k,
-            amp_db: a_k,
-            in_view: f_k >= view.freq_min && f_k <= view.freq_max,
-        });
-    }
-
-    // Harmonic markers: small downward triangle + "k×" label at each
-    // in-view harmonic's amplitude. A 5-px vertical tick was too thin to
-    // read against the spectrum trace; the triangle matches the fundamental
-    // glyph at half size so the family resemblance is obvious.
-    for h in harmonics.iter().filter(|h| h.in_view) {
-        let p = freq_amp_to_px(h.f_hz, h.amp_db);
-        let tri = [
-            egui::pos2(p.x - 3.0, p.y - 8.0),
-            egui::pos2(p.x + 3.0, p.y - 8.0),
-            egui::pos2(p.x,       p.y - 2.0),
-        ];
-        painter.add(egui::Shape::convex_polygon(
-            tri.to_vec(),
-            tick_color,
-            egui::Stroke::new(1.0, tick_color),
-        ));
-        painter.text(
-            egui::pos2(p.x, p.y - 10.0),
-            egui::Align2::CENTER_BOTTOM,
-            format!("{}×", h.k),
-            egui::FontId::monospace(theme::GRID_LABEL_PX),
-            tick_color,
-        );
-    }
-
-    // Fundamental marker: downward triangle above the peak point + label.
+    // Rank 1: full-size triangle + Hz/dB label above the peak. Matches the
+    // old "fundamental" glyph so users trained on the v1 overlay keep their
+    // mental model.
+    let (_, f0, a0) = picked[0];
     let p0 = freq_amp_to_px(f0, a0);
     let tri = [
         egui::pos2(p0.x - 5.0, p0.y - 10.0),
@@ -1437,34 +1312,53 @@ fn draw_peak_overlay(
         marker_color,
     );
 
-    // Top-right corner readout — visible even when the peak is off-screen
-    // (e.g. user zoomed below the fundamental). The header gives the
-    // fundamental; one indented line per 2×..=5× harmonic follows with its
-    // frequency and dB. `corner_slot` stacks one full block per channel so
+    // Ranks 2..=5: half-size triangle with a small rank-number label.
+    for (rank_i, &(_, f, amp)) in picked.iter().enumerate().skip(1) {
+        let p = freq_amp_to_px(f, amp);
+        let tri = [
+            egui::pos2(p.x - 3.0, p.y - 8.0),
+            egui::pos2(p.x + 3.0, p.y - 8.0),
+            egui::pos2(p.x,       p.y - 2.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            tri.to_vec(),
+            rank_color,
+            egui::Stroke::new(1.0, rank_color),
+        ));
+        painter.text(
+            egui::pos2(p.x, p.y - 10.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("{}", rank_i + 1),
+            egui::FontId::monospace(theme::GRID_LABEL_PX),
+            rank_color,
+        );
+    }
+
+    // Top-right corner readout: "PEAK CHn" header + one ranked row per
+    // picked peak. `corner_slot` stacks one full block per channel so
     // Compare layout's overlapping cells don't overdraw a single pixel;
     // Grid/Single always pass 0 and render at the top.
     let row_h = theme::GRID_LABEL_PX + 2.0;
-    let block_rows = 1 + harmonics.len();
+    let block_rows = 1 + picked.len();
     let block_top = rect.top() + 2.0 + corner_slot as f32 * block_rows as f32 * row_h;
-    let corner = crate::ui::fmt::peak_corner_label(channel, f0, a0);
     painter.text(
         egui::pos2(rect.right() - 4.0, block_top),
         egui::Align2::RIGHT_TOP,
-        corner,
+        crate::ui::fmt::peak_header(channel),
         egui::FontId::monospace(theme::GRID_LABEL_PX),
         marker_color,
     );
-    for (i, h) in harmonics.iter().enumerate() {
-        let line = crate::ui::fmt::peak_harmonic_line(h.k, h.f_hz, h.amp_db);
+    for (i, &(_, f, amp)) in picked.iter().enumerate() {
+        let color = if i == 0 { marker_color } else { rank_color };
         painter.text(
             egui::pos2(
                 rect.right() - 4.0,
                 block_top + (i + 1) as f32 * row_h,
             ),
             egui::Align2::RIGHT_TOP,
-            line,
+            crate::ui::fmt::peak_rank_line(i + 1, f, amp),
             egui::FontId::monospace(theme::GRID_LABEL_PX),
-            tick_color,
+            color,
         );
     }
 }
@@ -1474,229 +1368,119 @@ fn draw_peak_overlay(
 // qualify the path.
 use crate::ui::fmt::format_freq_compact;
 
-/// Per-cell drum-tuner overlay. Draws a full-height vertical line at the
-/// identified (0,1) fundamental, shorter ticks at each matched overtone
-/// partial, and a corner readout stack with Hz/note/cents/confidence and
-/// (when locked) the target + deviation with traffic-light colouring.
-///
-/// Coordinate system matches `draw_peak_overlay`: log-frequency x-axis
-/// clamped to `view.freq_min..freq_max`; any marker whose Hz falls outside
-/// the visible window is skipped for the on-plot glyph but still appears
-/// in the corner text so the reader sees it exists.
-#[allow(clippy::too_many_arguments)]
-fn draw_tuner_overlay(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    channel: usize,
-    cand: Option<&ac_core::tuner::FundamentalCandidate>,
-    freqs: &[f32],
-    history: &[f64],
-    view: &CellView,
-    lock_target_hz: Option<f64>,
-    mode: TunerMode,
-    range_lock: Option<(f64, f64)>,
-    sensitivity: TunerSensitivity,
-    min_level_dbfs: Option<f32>,
-) {
-    let log_min = view.freq_min.max(1.0).log10();
-    let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
-    let log_span = (log_max - log_min).max(0.0001);
-    // Daemon aggregates raw FFT bins into log-spaced display columns, so
-    // the parabolic-interp Hz sitting between two column centers lands off
-    // the visible peak. Snap marker-x to the nearest column center so the
-    // vertical line always sits on a plotted sample.
-    let snap_to_column = |f: f32| -> f32 {
-        if freqs.len() < 2 {
-            return f;
-        }
-        let idx = freqs.partition_point(|&v| v < f);
-        if idx == 0 {
-            freqs[0]
-        } else if idx >= freqs.len() {
-            *freqs.last().unwrap()
-        } else {
-            let lo = freqs[idx - 1];
-            let hi = freqs[idx];
-            if (f - lo).abs() <= (hi - f).abs() {
-                lo
-            } else {
-                hi
-            }
-        }
-    };
-    let freq_to_x = |f: f32| -> Option<f32> {
-        let fs = snap_to_column(f);
-        if !fs.is_finite() || fs < view.freq_min || fs > view.freq_max {
-            return None;
-        }
-        let tx = (fs.max(1.0).log10() - log_min) / log_span;
-        Some(rect.left() + tx.clamp(0.0, 1.0) * rect.width())
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let ch_rgba = theme::channel_color(channel);
-    let base = Color32::from_rgba_unmultiplied(
-        (ch_rgba[0] * 255.0) as u8,
-        (ch_rgba[1] * 255.0) as u8,
-        (ch_rgba[2] * 255.0) as u8,
-        220,
-    );
-    let partial_color = Color32::from_rgba_unmultiplied(
-        (ch_rgba[0] * 255.0) as u8,
-        (ch_rgba[1] * 255.0) as u8,
-        (ch_rgba[2] * 255.0) as u8,
-        140,
-    );
-    let text_color = Color32::from_rgb(theme::TEXT[0], theme::TEXT[1], theme::TEXT[2]);
-
-    // Fundamental marker: solid vertical line through the whole cell so
-    // it's visible even when the (0,1) peak itself is below the dB floor.
-    if let Some(cand) = cand {
-        if let Some(x) = freq_to_x(cand.freq_hz as f32) {
-            painter.line_segment(
-                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                egui::Stroke::new(2.0, base),
-            );
-            let (note, cents_off) = crate::ui::fmt::hz_to_note(cand.freq_hz);
-            let label = format!("f0 {:.1} Hz  {} {:+.0}¢", cand.freq_hz, note, cents_off);
-            painter.text(
-                egui::pos2(x + 4.0, rect.top() + 2.0),
-                egui::Align2::LEFT_TOP,
-                label,
-                egui::FontId::monospace(theme::GRID_LABEL_PX),
-                base,
-            );
-        }
-
-        // Overtone partial ticks: short verticals in the lower half of the
-        // cell so they don't collide with the fundamental label at the top.
-        // Partial ticks only — no per-tick text labels. At 8–11 matched
-        // partials squeezed into a narrow log-scaled Hz band the labels
-        // stack on top of each other and become unreadable; the corner
-        // readout already enumerates the same (m,n)/Δ% data with the
-        // partials sorted by ideal ratio so the user has a clean table to
-        // read instead of a smear on the plot.
-        for p in cand.partials.iter().skip(1) {
-            if let Some(x) = freq_to_x(p.measured_hz as f32) {
-                let y_top = rect.top() + rect.height() * 0.65;
-                painter.line_segment(
-                    [egui::pos2(x, y_top), egui::pos2(x, rect.bottom())],
-                    egui::Stroke::new(1.0, partial_color),
-                );
-            }
+    fn view(freq_min: f32, freq_max: f32) -> CellView {
+        CellView {
+            freq_min,
+            freq_max,
+            ..CellView::default()
         }
     }
 
-    // Lock target: dashed vertical at the remembered target Hz plus a
-    // traffic-light-coloured deviation readout so the tuner reads at a
-    // glance while the user retunes a lug. Green within ±5¢ is the
-    // standard acceptance band for "in tune"; yellow/red escalate from there.
-    if matches!(mode, TunerMode::Locked) {
-        if let (Some(target), Some(cand)) = (lock_target_hz, cand) {
-            let delta_cents = crate::ui::fmt::cents(cand.freq_hz, target);
-            let lock_color = if delta_cents.abs() <= 5.0 {
-                Color32::from_rgb(80, 220, 120)
-            } else if delta_cents.abs() <= 20.0 {
-                Color32::from_rgb(230, 200, 60)
-            } else {
-                Color32::from_rgb(230, 80, 60)
-            };
-            if let Some(x) = freq_to_x(target as f32) {
-                // Dashed line: paint 4 px segments with 4 px gaps so the
-                // lock marker is visually distinct from the solid f0 line.
-                let mut y = rect.top();
-                while y < rect.bottom() {
-                    let y1 = (y + 4.0).min(rect.bottom());
-                    painter.line_segment(
-                        [egui::pos2(x, y), egui::pos2(x, y1)],
-                        egui::Stroke::new(1.0, lock_color),
-                    );
-                    y += 8.0;
-                }
-            }
-            let delta_hz = cand.freq_hz - target;
-            let lock_line = format!(
-                "target {:.1} Hz  Δ {:+.2} Hz  {:+.1}¢",
-                target, delta_hz, delta_cents,
-            );
-            painter.text(
-                egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
-                egui::Align2::RIGHT_BOTTOM,
-                lock_line,
-                egui::FontId::monospace(theme::GRID_LABEL_PX),
-                lock_color,
-            );
-        }
+    #[test]
+    fn top_peaks_single_isolated() {
+        // Single clear peak at bin 5 inside a noise floor.
+        let freqs: Vec<f32> = (0..16).map(|i| 100.0 * (i + 1) as f32).collect();
+        let mut peak = vec![-90.0f32; 16];
+        peak[5] = -10.0;
+        let v = view(20.0, 10_000.0);
+        let got = top_peaks(&peak, &freqs, &v, 5);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 5);
+        assert!((got[0].1 - freqs[5]).abs() < 1e-4);
+        assert!((got[0].2 - -10.0).abs() < 1e-4);
     }
 
-    // Corner readout (top-right of this cell). Stacks below the peak-hold
-    // corner block when peak hold is also on: the peak block uses slot 0
-    // at `rect.top() + 2.0`, so anchor the tuner block further down. The
-    // height offset is a fixed constant; the two overlays are each short
-    // enough that an exact measurement would be overkill.
-    let row_h = theme::GRID_LABEL_PX + 2.0;
-    let peak_block_rows = 6.0;
-    let mut y = rect.top() + 2.0 + peak_block_rows * row_h;
-    if let Some(cand) = cand {
-        let corner_text = crate::ui::fmt::tuner_corner_label(cand);
-        let n_lines = corner_text.lines().count().max(1) as f32;
-        painter.text(
-            egui::pos2(rect.right() - 4.0, y),
-            egui::Align2::RIGHT_TOP,
-            corner_text,
-            egui::FontId::monospace(theme::GRID_LABEL_PX),
-            text_color,
-        );
-        y += n_lines * row_h;
+    #[test]
+    fn top_peaks_orders_by_descending_db() {
+        // Two well-separated peaks (>1/3 octave apart). Softer one at bin 3
+        // (-20 dB, 400 Hz); louder at bin 11 (-5 dB, 1200 Hz).
+        let freqs: Vec<f32> = (0..16).map(|i| 100.0 * (i + 1) as f32).collect();
+        let mut peak = vec![-90.0f32; 16];
+        peak[3] = -20.0;
+        peak[11] = -5.0;
+        let v = view(20.0, 10_000.0);
+        let got = top_peaks(&peak, &freqs, &v, 5);
+        assert_eq!(got.len(), 2);
+        // Loudest first.
+        assert_eq!(got[0].0, 11);
+        assert_eq!(got[1].0, 3);
+        assert!(got[0].2 > got[1].2);
     }
-    // Range-lock indicator: one line showing the clamped search window
-    // when active, so the user can tell at a glance why the tuner is
-    // ignoring sub-harmonic candidates outside the band.
-    if let Some((lo, hi)) = range_lock {
-        painter.text(
-            egui::pos2(rect.right() - 4.0, y),
-            egui::Align2::RIGHT_TOP,
-            format!("range-lock {:.0}-{:.0} Hz", lo, hi),
-            egui::FontId::monospace(theme::GRID_LABEL_PX),
-            text_color,
-        );
-        y += row_h;
+
+    #[test]
+    fn top_peaks_excludes_within_one_third_octave() {
+        // Three local maxima packed inside ~0.2 octaves around 1 kHz. Only
+        // the loudest survives the 1/3-octave exclusion.
+        let freqs = vec![
+            950.0, 960.0, 970.0, 980.0, 1000.0, 1020.0, 1050.0, 1080.0, 1100.0,
+        ];
+        // Create maxima at 960, 1000, 1050. Fill rest low; alternate surrounding
+        // values so each listed index is a strict local max.
+        let peak = vec![
+            -80.0, -20.0, -80.0, -80.0, -10.0, -80.0, -25.0, -80.0, -80.0,
+        ];
+        let v = view(20.0, 10_000.0);
+        let got = top_peaks(&peak, &freqs, &v, 5);
+        assert_eq!(got.len(), 1, "got = {got:?}");
+        assert_eq!(got[0].0, 4); // loudest at 1000 Hz
     }
-    // History block: newest last, so the list reads top-down as oldest →
-    // latest. Label prefix lets the user parse it even when no live f0 is
-    // showing (between triggers or after a low-confidence hit).
-    if !history.is_empty() {
-        painter.text(
-            egui::pos2(rect.right() - 4.0, y),
-            egui::Align2::RIGHT_TOP,
-            "last hits:",
-            egui::FontId::monospace(theme::GRID_LABEL_PX),
-            text_color,
-        );
-        y += row_h;
-        for &hz in history {
-            let (note, cents_off) = crate::ui::fmt::hz_to_note(hz);
-            painter.text(
-                egui::pos2(rect.right() - 4.0, y),
-                egui::Align2::RIGHT_TOP,
-                format!("{:.1} Hz  {} {:+.0}¢", hz, note, cents_off),
-                egui::FontId::monospace(theme::GRID_LABEL_PX),
-                text_color,
-            );
-            y += row_h;
+
+    #[test]
+    fn top_peaks_rejects_out_of_view() {
+        let freqs: Vec<f32> = (0..16).map(|i| 100.0 * (i + 1) as f32).collect();
+        let mut peak = vec![-90.0f32; 16];
+        peak[2] = -5.0; // 300 Hz — outside window
+        peak[10] = -10.0; // 1100 Hz — inside window
+        let v = view(1000.0, 2000.0);
+        let got = top_peaks(&peak, &freqs, &v, 5);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 10);
+    }
+
+    #[test]
+    fn top_peaks_rejects_sub_20hz() {
+        // Bin 0 sits below 20 Hz. Even if it's the loudest strict local max,
+        // the DC floor clamp excludes it.
+        let freqs = vec![5.0, 10.0, 50.0, 200.0, 1000.0];
+        let peak = vec![-100.0, -3.0, -100.0, -30.0, -100.0];
+        let v = view(1.0, 10_000.0);
+        let got = top_peaks(&peak, &freqs, &v, 5);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 3);
+        assert!((got[0].1 - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn top_peaks_empty_inputs() {
+        let v = view(20.0, 10_000.0);
+        assert!(top_peaks(&[], &[], &v, 5).is_empty());
+    }
+
+    #[test]
+    fn top_peaks_len_mismatch_returns_empty() {
+        let v = view(20.0, 10_000.0);
+        let freqs = vec![100.0, 200.0, 300.0];
+        let peak = vec![-10.0, -20.0];
+        assert!(top_peaks(&peak, &freqs, &v, 5).is_empty());
+    }
+
+    #[test]
+    fn top_peaks_respects_n_cap() {
+        // Five well-spaced peaks (>1 octave apart each).
+        let freqs: Vec<f32> = (0..11).map(|i| 50.0 * (2.0_f32).powi(i as i32)).collect();
+        let mut peak = vec![-90.0f32; 11];
+        for (i, amp) in [-10.0, -15.0, -20.0, -25.0, -30.0].iter().enumerate() {
+            peak[1 + 2 * i] = *amp;
         }
+        let v = view(20.0, 100_000.0);
+        let got = top_peaks(&peak, &freqs, &v, 3);
+        assert_eq!(got.len(), 3);
+        // Loudest three kept.
+        assert!(got[0].2 >= got[1].2);
+        assert!(got[1].2 >= got[2].2);
     }
-    // Sensitivity + min-level readout — always shown while the tuner is
-    // visible so the user can see what detector settings produced the
-    // candidate above (or what's blocking one).
-    let level_str = match min_level_dbfs {
-        Some(v) => format!("{:.0} dBFS", v),
-        None => "off".to_string(),
-    };
-    painter.text(
-        egui::pos2(rect.right() - 4.0, y),
-        egui::Align2::RIGHT_TOP,
-        format!("sens {}  min {}", sensitivity.label(), level_str),
-        egui::FontId::monospace(theme::GRID_LABEL_PX),
-        text_color,
-    );
 }

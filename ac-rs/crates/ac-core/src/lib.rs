@@ -8,5 +8,4 @@ pub mod cwt;
 pub mod fractional_octave;
 pub mod generator;
 pub mod transfer;
-pub mod tuner;
 pub mod types;

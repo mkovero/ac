@@ -10,7 +10,7 @@ This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, fr
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 283 tests (ac-core 80, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
+cargo test                     # 264 tests (ac-core 61, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
 ```
 
 ## Usage (quick reference)
@@ -40,7 +40,7 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ac-rs/                 (Rust — primary implementation)
   ZMQ.md               (wire protocol reference — authoritative)
   crates/
-    ac-core/           (pure library: analysis, generator, calibration, config — 43 tests)
+    ac-core/           (pure library: analysis, generator, calibration, config — 61 tests)
     ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
     ac-daemon/         (ZMQ REP+PUB server binary — 43 unit + 10 it tests)
     ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 81 tests)

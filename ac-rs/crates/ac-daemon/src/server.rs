@@ -68,16 +68,6 @@ pub struct ServerState {
     /// a restart. `active` flips true on worker spawn and false on exit;
     /// `set_monitor_params` uses it to reject changes when no monitor runs.
     pub monitor_params: Arc<Mutex<MonitorParams>>,
-    /// Per-channel tuner search-range override. Empty by default; a
-    /// `tuner_range` REQ writes `Some((lo_hz, hi_hz))` for a channel.
-    /// The `monitor_spectrum` worker reads this map every tick and
-    /// applies the lock to each channel's `TunerState`.
-    pub tuner_range_locks: Arc<Mutex<HashMap<u32, (f64, f64)>>>,
-    /// Live-tunable tuner detector config. The worker applies this via
-    /// `TunerState::set_config` every tick so sensitivity changes from the
-    /// UI's `tuner_config` REQ take effect on the next frame. Starts at
-    /// `TunerConfig::default()`.
-    pub tuner_config: Arc<Mutex<ac_core::tuner::TunerConfig>>,
 }
 
 /// Live-tunable parameters for the FFT spectrum monitor.
@@ -140,8 +130,6 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
         ioct_bpo:      Arc::new(Mutex::new(None)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
-        tuner_range_locks: Arc::new(Mutex::new(HashMap::new())),
-        tuner_config: Arc::new(Mutex::new(ac_core::tuner::TunerConfig::default())),
     };
 
     let mut items = [ctrl.as_poll_item(zmq::POLLIN)];
@@ -290,8 +278,6 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "server_disable"      => handlers::server_disable(state),
         "server_connections"  => handlers::server_connections(state),
         "transfer_stream"     => handlers::transfer_stream(state, &cmd),
-        "tuner_range"         => handlers::tuner_range(state, &cmd),
-        "tuner_config"        => handlers::tuner_config(state, &cmd),
         "probe"               => handlers::probe(state, &cmd),
         "test_hardware"       => handlers::test_hardware(state, &cmd),
         "test_dut"            => handlers::test_dut(state, &cmd),

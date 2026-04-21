@@ -7,14 +7,13 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
 
 use crate::data::smoothing;
-use crate::data::types::{CellView, LayoutMode, TransferPair, TunerMode, ViewMode};
+use crate::data::types::{CellView, LayoutMode, TransferPair, ViewMode};
 use crate::theme;
 use crate::ui::layout;
 
 use super::helpers::{
     auto_monitor_interval_ms, step_ladder, MONITOR_FFT_N_LADDER, MONITOR_INTERVAL_MAX_MS,
-    MONITOR_INTERVAL_MIN_MS, TUNER_MIN_CONFIDENCE, TUNER_MIN_LEVEL_STEP_DB,
-    TUNER_RANGE_LOCK_FRAC, TUNER_SEARCH_MAX_HZ, TUNER_SEARCH_MIN_HZ,
+    MONITOR_INTERVAL_MIN_MS,
 };
 use super::App;
 
@@ -529,77 +528,6 @@ impl App {
                     "min hold: off"
                 });
             }
-            KeyCode::KeyU if self.modifiers.shift_key() => {
-                // Shift+U cycles detector sensitivity (Low → Mid → High) without
-                // touching mode. The preset pair (trigger_delta_db,
-                // min_confidence) is pushed to the daemon immediately so the
-                // next tick applies it. Works from Off too — pressing now so
-                // the next Live-mode entry starts at the user's preferred
-                // sensitivity.
-                self.tuner_sensitivity = self.tuner_sensitivity.next();
-                let (dd, mc) = self.tuner_sensitivity.params();
-                self.send_tuner_config();
-                self.notify(&format!(
-                    "tuner sensitivity: {} (Δ {:.0} dB, conf ≥ {:.2})",
-                    self.tuner_sensitivity.label(), dd, mc
-                ));
-                self.needs_redraw = true;
-            }
-            KeyCode::KeyU => {
-                // Tuner tri-state cycle. The identifier reads from the
-                // peak-hold buffer (a live drum hit decays in <100 ms — no
-                // hold, no signal to analyse), so the first press also turns
-                // peak hold on if it wasn't already. Locking requires a
-                // currently-valid candidate on the active channel; if there
-                // isn't one the press just turns the tuner off again with a
-                // different toast so the user knows the lock failed.
-                self.tuner_mode = match self.tuner_mode {
-                    TunerMode::Off => {
-                        if !self.peak_hold_enabled {
-                            self.peak_hold_enabled = true;
-                            self.reset_peak_holds();
-                            self.notify("tuner: on (peak hold auto-enabled)");
-                        } else {
-                            self.notify("tuner: on");
-                        }
-                        // First enable: push current preset + min-level to the
-                        // daemon so its detector matches what the UI advertises
-                        // before any `+`/`-` or `Shift+U` tweaks.
-                        self.send_tuner_config();
-                        TunerMode::Live
-                    }
-                    TunerMode::Live => {
-                        let ch = self.config.active_channel;
-                        let cand = self
-                            .tuner_store
-                            .as_ref()
-                            .and_then(|s| s.snapshot(ch + 1).0.into_iter().nth(ch).flatten())
-                            .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE);
-                        if let Some(cand) = cand {
-                            if self.tuner_locks.len() <= ch {
-                                self.tuner_locks.resize(ch + 1, None);
-                            }
-                            self.tuner_locks[ch] = Some(cand.freq_hz);
-                            self.notify(&format!("tuner: locked {:.1} Hz", cand.freq_hz));
-                            TunerMode::Locked
-                        } else {
-                            self.notify("tuner: off (no confident fundamental)");
-                            for slot in self.tuner_locks.iter_mut() {
-                                *slot = None;
-                            }
-                            TunerMode::Off
-                        }
-                    }
-                    TunerMode::Locked => {
-                        self.notify("tuner: off");
-                        for slot in self.tuner_locks.iter_mut() {
-                            *slot = None;
-                        }
-                        TunerMode::Off
-                    }
-                };
-                self.needs_redraw = true;
-            }
             KeyCode::KeyO if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
                 self.ioct_bpo = match self.ioct_bpo {
                     None => Some(1),
@@ -632,44 +560,7 @@ impl App {
                 ));
             }
             KeyCode::Space => {
-                // In Live tuner mode Space narrows the search range on the
-                // active channel so repeated hits can't alias to a sub-
-                // harmonic outside the area of interest. Range lock lives
-                // on the daemon (per-channel); the UI sends `tuner_range`
-                // REQ and mirrors the value locally for the overlay label.
-                if self.tuner_mode == TunerMode::Live {
-                    let ch = self.config.active_channel as u32;
-                    if self.tuner_range_lock.is_some() {
-                        self.tuner_range_lock = None;
-                        self.send_tuner_range(ch, None);
-                        self.notify("tuner: range unlocked");
-                    } else {
-                        let ch_usize = self.config.active_channel;
-                        let f0 = self
-                            .tuner_store
-                            .as_ref()
-                            .and_then(|s| s.snapshot(ch_usize + 1).0.into_iter().nth(ch_usize).flatten())
-                            .filter(|c| c.confidence >= TUNER_MIN_CONFIDENCE)
-                            .map(|c| c.freq_hz);
-                        if let Some(f0) = f0 {
-                            let lo = (f0 * (1.0 - TUNER_RANGE_LOCK_FRAC))
-                                .max(TUNER_SEARCH_MIN_HZ);
-                            let hi = (f0 * (1.0 + TUNER_RANGE_LOCK_FRAC))
-                                .min(TUNER_SEARCH_MAX_HZ);
-                            self.tuner_range_lock = Some((lo, hi));
-                            self.send_tuner_range(ch, Some((lo, hi)));
-                            self.notify(&format!(
-                                "tuner: range locked {:.0}-{:.0} Hz",
-                                lo, hi
-                            ));
-                        } else {
-                            self.notify("tuner: no confident f0 to lock range on");
-                        }
-                    }
-                    self.needs_redraw = true;
-                } else {
-                    self.toggle_selection();
-                }
+                self.toggle_selection();
             }
             KeyCode::KeyH => {
                 self.show_help = !self.show_help;
@@ -721,18 +612,10 @@ impl App {
                 }
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                if self.tuner_mode != TunerMode::Off {
-                    self.step_tuner_min_level(TUNER_MIN_LEVEL_STEP_DB);
-                } else {
-                    self.adjust_hovered_db_span(-20.0);
-                }
+                self.adjust_hovered_db_span(-20.0);
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                if self.tuner_mode != TunerMode::Off {
-                    self.step_tuner_min_level(-TUNER_MIN_LEVEL_STEP_DB);
-                } else {
-                    self.adjust_hovered_db_span(20.0);
-                }
+                self.adjust_hovered_db_span(20.0);
             }
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;
