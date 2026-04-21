@@ -378,6 +378,21 @@ pub fn identify_fundamental_with_candidates(
             continue;
         }
 
+        // Prominence scaling: candidates whose loudest matched partial IS
+        // the loudest peak in the search range are explaining the drum's
+        // dominant signal. Candidates whose matched stack sits far below
+        // the range's loudest peak are farming tail harmonics of a
+        // different fundamental — at high FFT N they can rack up 10+
+        // upper-bin matches and out-score the correct candidate whose
+        // (0,1) IS the dominant ring. Scale score by the dominance gap
+        // so the existing ranking picks "the peak the ear actually hears"
+        // first.
+        let prominence = {
+            let dominance = (loudest_in_range - max_matched).max(0.0);
+            (1.0 - 0.04 * dominance).clamp(0.50, 1.0)
+        };
+        let score = score * prominence;
+
         // Raw energy ratio is 1.0 whenever every peak above the floor happens
         // to fall near a mode ratio — which includes the degenerate case of
         // a single isolated peak. Weight by matched-partial count so a thin
