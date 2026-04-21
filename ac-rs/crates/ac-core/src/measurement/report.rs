@@ -97,6 +97,18 @@ pub enum MeasurementData {
         centres_hz: Vec<f64>,
         levels_dbfs: Vec<f64>,
     },
+    /// Farina exponential-sweep impulse response — output of
+    /// `measurement/sweep.rs`. The `linear_ir` is the deconvolved linear
+    /// IR with the peak placed at `linear_ir.len() / 2`; each entry of
+    /// `harmonics` is a pre-impulse-gated k-th-order harmonic IR.
+    ImpulseResponse {
+        sample_rate_hz: u32,
+        f1_hz: f64,
+        f2_hz: f64,
+        duration_s: f64,
+        linear_ir: Vec<f64>,
+        harmonics: Vec<crate::measurement::sweep::HarmonicIr>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -153,6 +165,23 @@ impl MeasurementReport {
                 writeln!(s, "centre_hz,level_dbfs,bpo,class")?;
                 for (c, l) in centres_hz.iter().zip(levels_dbfs.iter()) {
                     writeln!(s, "{:.6},{:.6},{},{}", c, l, bpo, class)?;
+                }
+            }
+            MeasurementData::ImpulseResponse {
+                sample_rate_hz,
+                linear_ir,
+                harmonics,
+                ..
+            } => {
+                writeln!(s, "sample_idx,time_s,order,amplitude")?;
+                let fs = *sample_rate_hz as f64;
+                for (i, v) in linear_ir.iter().enumerate() {
+                    writeln!(s, "{},{:.9},1,{:.9}", i, i as f64 / fs, v)?;
+                }
+                for h in harmonics {
+                    for (i, v) in h.samples.iter().enumerate() {
+                        writeln!(s, "{},{:.9},{},{:.9}", i, i as f64 / fs, h.order, v)?;
+                    }
                 }
             }
         }
@@ -327,6 +356,64 @@ mod tests {
         let csv = r.to_csv().unwrap();
         assert!(csv.starts_with("centre_hz,level_dbfs,bpo,class"));
         assert_eq!(csv.lines().count(), 4);
+    }
+
+    fn sample_impulse_response_report() -> MeasurementReport {
+        use crate::measurement::sweep::HarmonicIr;
+        MeasurementReport {
+            schema_version: SCHEMA_VERSION,
+            ac_version: "0.1.0".into(),
+            timestamp_utc: "2026-04-22T12:00:00Z".into(),
+            method: MeasurementMethod::SteppedSine {
+                n_points: 0,
+                standard: Some(StandardsCitation {
+                    standard: "Farina 2000 (AES 108)".into(),
+                    clause: "Swept-sine technique for IR and distortion".into(),
+                    verified: false,
+                }),
+            },
+            stimulus: StimulusParams {
+                sample_rate_hz: 48_000,
+                f_start_hz: 20.0,
+                f_stop_hz: 20_000.0,
+                level_dbfs: -6.0,
+                n_points: 0,
+            },
+            integration: IntegrationParams {
+                duration_s: 1.0,
+                window: "none".into(),
+            },
+            calibration: None,
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 48_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: vec![0.0, 0.5, 1.0, 0.25, 0.0],
+                harmonics: vec![HarmonicIr {
+                    order: 2,
+                    samples: vec![0.0, 0.1, 0.2, 0.05, 0.0],
+                }],
+            },
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn impulse_response_round_trip() {
+        let r = sample_impulse_response_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn impulse_response_csv_shape() {
+        let r = sample_impulse_response_report();
+        let csv = r.to_csv().unwrap();
+        assert!(csv.starts_with("sample_idx,time_s,order,amplitude"));
+        // Header + 5 linear rows + 5 harmonic rows.
+        assert_eq!(csv.lines().count(), 11);
     }
 
     #[test]

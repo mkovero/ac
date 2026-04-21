@@ -295,6 +295,13 @@ steps — nothing is broken en route.
       per-band dBFS suitable for `MeasurementData::SpectrumBands`.
 - [ ] Integrate the filterbank into `ac plot` as an optional
       per-band-summary output. Tracked in issue #74.
+- [x] Build `measurement/sweep.rs` — Farina exponential log-sweep IR
+      measurement. Generator + inverse filter + FFT deconvolution + time-
+      gated harmonic IR extraction. Populates
+      `MeasurementData::ImpulseResponse`.
+- [ ] Wire `ac sweep ir` (or similar verb) to run a Farina measurement
+      end-to-end and emit `measurement/impulse_response` frames. Tracked
+      in issue #75.
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 

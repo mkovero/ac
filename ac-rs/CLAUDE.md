@@ -9,14 +9,14 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 291 tests (ac-core 81, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
+cargo test                        # 301 tests (ac-core 91, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
 ```
 
 ## Crate layout
 
 | Crate | Binary | Role |
 |-------|--------|------|
-| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions, IEC 61260-1 filterbank. No sockets, no global state. 81 unit tests. |
+| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions, IEC 61260-1 filterbank, Farina log-sweep IR. No sockets, no global state. 91 unit tests. |
 | `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 55 parser tests. |
 | `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 unit + 10 integration tests. |
 | `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 102 tests. |
