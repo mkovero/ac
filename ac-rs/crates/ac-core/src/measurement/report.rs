@@ -109,6 +109,17 @@ pub enum MeasurementData {
         linear_ir: Vec<f64>,
         harmonics: Vec<crate::measurement::sweep::HarmonicIr>,
     },
+    /// AES17 idle-channel noise — output of `measurement/noise.rs`.
+    /// `ccir_weighted_dbfs` is reserved for a future CCIR-468 quasi-peak
+    /// implementation; today it is always `None`.
+    NoiseResult {
+        sample_rate_hz: u32,
+        duration_s: f64,
+        unweighted_dbfs: f64,
+        a_weighted_dbfs: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ccir_weighted_dbfs: Option<f64>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -183,6 +194,26 @@ impl MeasurementReport {
                         writeln!(s, "{},{:.9},{},{:.9}", i, i as f64 / fs, h.order, v)?;
                     }
                 }
+            }
+            MeasurementData::NoiseResult {
+                sample_rate_hz,
+                duration_s,
+                unweighted_dbfs,
+                a_weighted_dbfs,
+                ccir_weighted_dbfs,
+            } => {
+                writeln!(
+                    s,
+                    "sample_rate_hz,duration_s,unweighted_dbfs,a_weighted_dbfs,ccir_weighted_dbfs"
+                )?;
+                let ccir = ccir_weighted_dbfs
+                    .map(|v| format!("{v:.6}"))
+                    .unwrap_or_default();
+                writeln!(
+                    s,
+                    "{},{:.6},{:.6},{:.6},{}",
+                    sample_rate_hz, duration_s, unweighted_dbfs, a_weighted_dbfs, ccir,
+                )?;
             }
         }
         Ok(s)
@@ -414,6 +445,58 @@ mod tests {
         assert!(csv.starts_with("sample_idx,time_s,order,amplitude"));
         // Header + 5 linear rows + 5 harmonic rows.
         assert_eq!(csv.lines().count(), 11);
+    }
+
+    fn sample_noise_report() -> MeasurementReport {
+        MeasurementReport {
+            schema_version: SCHEMA_VERSION,
+            ac_version: "0.1.0".into(),
+            timestamp_utc: "2026-04-22T12:00:00Z".into(),
+            method: MeasurementMethod::SteppedSine {
+                n_points: 0,
+                standard: Some(StandardsCitation {
+                    standard: "AES17-2015".into(),
+                    clause: "§6.4 Idle-channel noise".into(),
+                    verified: false,
+                }),
+            },
+            stimulus: StimulusParams {
+                sample_rate_hz: 48_000,
+                f_start_hz: 0.0,
+                f_stop_hz: 0.0,
+                level_dbfs: 0.0,
+                n_points: 0,
+            },
+            integration: IntegrationParams {
+                duration_s: 1.0,
+                window: "none".into(),
+            },
+            calibration: None,
+            data: MeasurementData::NoiseResult {
+                sample_rate_hz: 48_000,
+                duration_s: 0.9,
+                unweighted_dbfs: -98.4,
+                a_weighted_dbfs: -103.1,
+                ccir_weighted_dbfs: None,
+            },
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn noise_result_round_trip() {
+        let r = sample_noise_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn noise_result_csv_shape() {
+        let r = sample_noise_report();
+        let csv = r.to_csv().unwrap();
+        assert!(csv.starts_with("sample_rate_hz,duration_s,unweighted_dbfs,"));
+        assert_eq!(csv.lines().count(), 2);
     }
 
     #[test]

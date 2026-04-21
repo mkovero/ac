@@ -132,10 +132,11 @@ see an unknown version must refuse to decode. Example payload:
 | `frequency_response`   | `plot` (stepped-sine)                              | `{ "points": [FrequencyResponsePoint, ...] }`                                     |
 | `spectrum_bands`       | IEC 61260-1 filterbank (`ac-core::measurement::filterbank`) | `{ "bpo": <int>, "class": "Class 1", "centres_hz": [...], "levels_dbfs": [...] }` |
 | `impulse_response`     | Farina log-sweep (`ac-core::measurement::sweep`)   | `{ "sample_rate_hz": <int>, "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "linear_ir": [...], "harmonics": [{ "order": <int>, "samples": [...] }, ...] }` |
+| `noise_result`         | AES17 idle-channel noise (`ac-core::measurement::noise`) | `{ "sample_rate_hz": <int>, "duration_s": <f>, "unweighted_dbfs": <f>, "a_weighted_dbfs": <f>, "ccir_weighted_dbfs": <f?> }` |
 
-The `spectrum_bands` and `impulse_response` variants are serializable
-today but not yet emitted from any CLI command — wiring is tracked in
-issues #74 and #75.
+The `spectrum_bands`, `impulse_response`, and `noise_result` variants
+are serializable today but not yet emitted from any CLI command —
+wiring is tracked in issues #74, #75, and (for CCIR-468) #76.
 
 ### `measurement/frequency_response/complete` frame
 

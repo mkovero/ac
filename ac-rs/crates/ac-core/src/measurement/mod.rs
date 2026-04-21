@@ -2,6 +2,7 @@
 //! archivable. See `ARCHITECTURE.md`.
 
 pub mod filterbank;
+pub mod noise;
 pub mod report;
 pub mod sweep;
 pub mod thd;

@@ -305,6 +305,10 @@ steps — nothing is broken en route.
 - [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
       frequency weighting. Bilinear-mapped biquad cascade, unity gain at
       1 kHz, Class 1 tolerance verified in tests.
+- [x] Build `measurement/noise.rs` — AES17 §6.4 idle-channel noise.
+      Reports unweighted and A-weighted dBFS over a provided buffer;
+      populates `MeasurementData::NoiseResult`. CCIR-468 quasi-peak is
+      a follow-up (#76).
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 
