@@ -62,6 +62,11 @@ pub struct Config {
 
     /// Remote server host for CLI connections. `None` means localhost.
     pub server_host: Option<String>,
+
+    /// Directory where `MeasurementReport` JSON files are written when
+    /// reproducible measurements complete. `None` disables disk emission.
+    #[serde(default)]
+    pub report_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -83,6 +88,7 @@ impl Default for Config {
             session: None,
             backend: None,
             server_host: None,
+            report_dir: None,
         }
     }
 }
