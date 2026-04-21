@@ -65,6 +65,78 @@ stop consuming frames when it receives either of these:
 
 ---
 
+## Tiered frame types (transition)
+
+`ARCHITECTURE.md` introduces a two-tier model for the analysis stack:
+
+- **Tier 1 — Reference measurement** (`measurement/…`): reproducible,
+  archivable. Emitted by `plot` today; future `sweep`, `noise`, etc.
+- **Tier 2 — Live analysis** (`visualize/…`): responsive,
+  display-first. Emitted by `monitor_spectrum`.
+
+During the transition window every live-analysis and per-point
+measurement frame is published **twice**: once with the legacy `"type"`
+value (e.g. `"sweep_point"`, `"spectrum"`), and once with the
+tier-prefixed equivalent. The payloads are byte-identical apart from
+the `"type"` field. Subscribers should prefer the tier-prefixed name
+and treat the legacy copy as redundant.
+
+| Tier  | Legacy `type`        | Tiered `type`                              |
+|-------|----------------------|--------------------------------------------|
+| 1     | `sweep_point`        | `measurement/frequency_response/point`     |
+| 1     | — (new)              | `measurement/frequency_response/complete`  |
+| 1     | — (new)              | `measurement/report`                       |
+| 2     | `spectrum`           | `visualize/spectrum`                       |
+| 2     | `cwt`                | `visualize/cwt`                            |
+| 2     | `fractional_octave`  | `visualize/fractional_octave`              |
+
+Legacy `type` names are scheduled for removal in `ac` v0.2.0.
+
+### `measurement/report` frame
+
+Emitted once at the end of a `plot` run. Carries the full archival
+`MeasurementReport` JSON — the same shape written to
+`cfg.report_dir/<ISO8601>-plot.json` when that directory is
+configured. Schema is versioned (`schema_version: 1`); readers that
+see an unknown version must refuse to decode. Example payload:
+
+```json
+{
+  "type":   "measurement/report",
+  "cmd":    "plot",
+  "report": {
+    "schema_version": 1,
+    "ac_version":     "0.1.0",
+    "timestamp_utc":  "2026-04-21T20:00:00Z",
+    "method": {
+      "kind":     "stepped_sine",
+      "n_points": 3,
+      "standard": { "standard": "IEC 60268-3:2018", "clause": "§14.12", "verified": false }
+    },
+    "stimulus":    { "sample_rate_hz": 48000, "f_start_hz": 100, "f_stop_hz": 10000, "level_dbfs": -20, "n_points": 3 },
+    "integration": { "duration_s": 1.0, "window": "hann" },
+    "data": {
+      "kind":   "frequency_response",
+      "points": [
+        { "freq_hz": 100, "fundamental_dbfs": -20.1, "thd_pct": 0.005, "thdn_pct": 0.012, "noise_floor_dbfs": -120.0, "linear_rms": 0.0707, "clipping": false, "ac_coupled": false }
+      ]
+    }
+  }
+}
+```
+
+### `measurement/frequency_response/complete` frame
+
+Terminal summary for a `plot` run, emitted just before the
+`measurement/report` frame. Carries only aggregate counters so a thin
+subscriber can flag completion without parsing the full report:
+
+```json
+{ "type": "measurement/frequency_response/complete", "cmd": "plot", "n_points": <int>, "xruns": <int> }
+```
+
+---
+
 ## Shared types
 
 ### `sweep_point` frame

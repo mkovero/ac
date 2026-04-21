@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, frequency sweeps, transfer functions). The full stack is implemented in Rust: CLI (`ac-cli`), daemon (`ac-daemon`), and GPU UI (`ac-ui`). Supports JACK and CPAL (PortAudio) audio backends.
 
+When adding a new analysis feature, **first decide its tier** — Tier 1 (reference measurement, `ac-core/src/measurement/`) vs Tier 2 (live analysis, `ac-core/src/visualize/`). See `ARCHITECTURE.md`.
+
 ## Build
 
 ```bash

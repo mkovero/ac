@@ -2,6 +2,8 @@
 
 Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 
+When adding a new analysis feature, **first decide its tier** — Tier 1 (reference measurement, `ac-core/src/measurement/`) vs Tier 2 (live analysis, `ac-core/src/visualize/`). See `../ARCHITECTURE.md`.
+
 ## Build
 
 ```bash

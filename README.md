@@ -12,6 +12,11 @@ The `ip` of audio — terse, positional, unit-tagged arguments.
 
 ## Architecture
 
+The analysis stack is split into two tiers — **reference measurement**
+(reproducible, standards-aligned, archivable) and **live analysis**
+(responsive, display-first). Full model and placement rules:
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 The entire stack is implemented in Rust:
 
 | Crate | Binary | Role |
