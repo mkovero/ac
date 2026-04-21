@@ -373,7 +373,7 @@ pub(super) fn analyze_mono(
     eng.flush_capture();
     std::thread::sleep(std::time::Duration::from_millis(50));
     let samples = eng.capture_block(dur).ok()?;
-    ac_core::analysis::analyze(&samples, sr, freq, 10).ok()
+    ac_core::measurement::thd::analyze(&samples, sr, freq, 10).ok()
 }
 
 // ---------------------------------------------------------------------------

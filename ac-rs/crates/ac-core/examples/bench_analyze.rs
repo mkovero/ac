@@ -1,4 +1,4 @@
-use ac_core::analysis::analyze;
+use ac_core::measurement::thd::analyze;
 use std::time::Instant;
 
 fn main() {

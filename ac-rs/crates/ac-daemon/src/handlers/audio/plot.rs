@@ -61,7 +61,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             };
             xruns += eng.xruns();
 
-            match ac_core::analysis::analyze(&samples, sr, *freq, 10) {
+            match ac_core::measurement::thd::analyze(&samples, sr, *freq, 10) {
                 Ok(r)  => {
                     let frame = sweep_point_frame(&r, cal.as_ref(), n, "plot", level_dbfs, Some(*freq));
                     send_pub(&pub_tx, "data", &frame);
@@ -128,7 +128,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
             };
             xruns += eng.xruns();
 
-            match ac_core::analysis::analyze(&samples, sr, freq_hz, 10) {
+            match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
                 Ok(r) => {
                     let frame = sweep_point_frame(&r, cal.as_ref(), n, "plot_level",
                                                   level_dbfs, Some(freq_hz));

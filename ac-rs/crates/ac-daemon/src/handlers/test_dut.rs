@@ -196,11 +196,11 @@ fn dut_gain(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: Option<&Ca
         Ok(s)  => s,
         Err(e) => return TestResult::new("Gain", false, format!("capture failed: {e}"), ""),
     };
-    let r_meas = match ac_core::analysis::analyze(&meas, sr, 1000.0, 10) {
+    let r_meas = match ac_core::measurement::thd::analyze(&meas, sr, 1000.0, 10) {
         Ok(r)  => r,
         Err(_) => return TestResult::new("Gain", false, "no signal at measurement input".to_string(), ""),
     };
-    let r_ref = match ac_core::analysis::analyze(&refch, sr, 1000.0, 10) {
+    let r_ref = match ac_core::measurement::thd::analyze(&refch, sr, 1000.0, 10) {
         Ok(r)  => r,
         Err(_) => return TestResult::new("Gain", false, "no signal at reference input".to_string(), ""),
     };
@@ -223,8 +223,8 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok((meas, refch)) = eng.capture_stereo(1.0) {
-            let r_meas = ac_core::analysis::analyze(&meas, sr, 1000.0, 10).ok();
-            let r_ref  = ac_core::analysis::analyze(&refch, sr, 1000.0, 10).ok();
+            let r_meas = ac_core::measurement::thd::analyze(&meas, sr, 1000.0, 10).ok();
+            let r_ref  = ac_core::measurement::thd::analyze(&refch, sr, 1000.0, 10).ok();
             if let (Some(rm), Some(rr)) = (r_meas, r_ref) {
                 let gain = rm.fundamental_dbfs - rr.fundamental_dbfs;
                 results.push((level, rm.thd_pct, rm.thdn_pct, gain));
@@ -296,7 +296,7 @@ fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibrati
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Ok(r) = ac_core::analysis::analyze(&meas, sr, 1000.0, 10) {
+        if let Ok(r) = ac_core::measurement::thd::analyze(&meas, sr, 1000.0, 10) {
             if r.thd_pct > 1.0 || r.clipping {
                 clip_level = Some(*level);
                 break;

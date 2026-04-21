@@ -278,7 +278,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 let samples = ring.make_contiguous();
 
                 {
-                    let analyze_result = ac_core::analysis::analyze(samples, sr, current_freqs[idx], 10);
+                    let analyze_result = ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
                     let frame = match analyze_result {
                         Ok(r) => {
                             current_freqs[idx] = r.fundamental_hz;
@@ -312,7 +312,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             })
                         }
                         Err(_) => {
-                            let (spec, _) = ac_core::analysis::spectrum_only(samples, sr);
+                            let (spec, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
                             let (spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &spec,
