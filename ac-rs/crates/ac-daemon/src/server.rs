@@ -57,6 +57,12 @@ pub struct ServerState {
     pub analysis_mode: Arc<Mutex<String>>,
     pub cwt_sigma:     Arc<Mutex<f32>>,
     pub cwt_n_scales:  Arc<Mutex<usize>>,
+    /// 1/N-octave aggregation of the CWT column. `None` = disabled (no
+    /// extra frame published). `Some(N)` = publish a `type:
+    /// "fractional_octave"` frame after each CWT frame with `bpo = N`.
+    /// Read every tick by the `monitor_spectrum` worker so `set_ioct_bpo`
+    /// takes effect live.
+    pub ioct_bpo:      Arc<Mutex<Option<u32>>>,
     /// Live-tunable parameters for the `monitor_spectrum` FFT path. The worker
     /// re-reads these every tick so `set_monitor_params` takes effect without
     /// a restart. `active` flips true on worker spawn and false on exit;
@@ -132,6 +138,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         analysis_mode: Arc::new(Mutex::new("fft".to_string())),
         cwt_sigma:     Arc::new(Mutex::new(ac_core::cwt::DEFAULT_SIGMA)),
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::cwt::DEFAULT_N_SCALES)),
+        ioct_bpo:      Arc::new(Mutex::new(None)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
         tuner_range_locks: Arc::new(Mutex::new(HashMap::new())),
         tuner_config: Arc::new(Mutex::new(ac_core::tuner::TunerConfig::default())),
@@ -272,6 +279,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "monitor_spectrum"    => handlers::monitor_spectrum(state, &cmd),
         "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
         "get_analysis_mode"   => handlers::get_analysis_mode(state),
+        "set_ioct_bpo"        => handlers::set_ioct_bpo(state, &cmd),
         "set_monitor_params"  => handlers::set_monitor_params(state, &cmd),
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),

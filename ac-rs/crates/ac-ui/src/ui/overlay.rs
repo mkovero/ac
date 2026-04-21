@@ -71,6 +71,11 @@ pub struct OverlayInput<'a> {
     /// has toggled smoothing off. Shown as a small status tag in the top-right
     /// so the reader knows the trace they're looking at has been averaged.
     pub smoothing_frac: Option<u32>,
+    /// Fractional-octave aggregation bins-per-octave for CWT view. `None`
+    /// = disabled. `Some(N)` = the spectrum the user sees is the daemon's
+    /// `fractional_octave` aggregation of the CWT column. Shown alongside
+    /// `smooth` so the reader can tell raw CWT from per-band aggregation.
+    pub ioct_bpo: Option<u32>,
 }
 
 /// Label used in overlays / legends for a given cell index. Real channels
@@ -175,22 +180,28 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             Some(_) => format!("  │  smooth {}", smoothing::label(input.smoothing_frac)),
             None => String::new(),
         };
+        let ioct_tag = match input.ioct_bpo {
+            Some(n) => format!("  │  ioct 1/{n} oct"),
+            None => String::new(),
+        };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
+                ioct_tag,
             ),
             ViewMode::Waterfall => format!(
-                "color {:.0}..{:.0} dB  │  {}..{}{}",
+                "color {:.0}..{:.0} dB  │  {}..{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
+                ioct_tag,
             ),
         };
         painter.text(

@@ -245,6 +245,48 @@ pub fn spawn(
                         inputs[slot].write(frame);
                         continue;
                     }
+                    if type_tag.as_deref() == Some("fractional_octave") {
+                        // 1/N-octave aggregation of the CWT column. Daemon
+                        // emits this in addition to the `cwt` frame each
+                        // tick when `set_ioct_bpo` has enabled it. Schema
+                        // matches SpectrumFrame (`freqs` + `spectrum`), so
+                        // we deserialise straight into one. Writing it to
+                        // the same triple-buffer slot as the preceding
+                        // `cwt` frame means the renderer naturally shows
+                        // the band view whenever ioct is on; the AppState's
+                        // `ioct_bpo` provides the overlay label context so
+                        // the user knows the trace isn't raw CWT.
+                        let mut sf: SpectrumFrame = match serde_json::from_str(body) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                log::warn!("fractional_octave parse failed: {e}");
+                                continue;
+                            }
+                        };
+                        if sf.spectrum.is_empty() {
+                            continue;
+                        }
+                        let slot = route_slot(sf.channel, &mut channel_map);
+                        let Some(slot) = slot else {
+                            if !warned_overflow {
+                                log::warn!(
+                                    "receiver: fractional_octave frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                    sf.channel,
+                                    n_slots
+                                );
+                                warned_overflow = true;
+                            }
+                            continue;
+                        };
+                        status_c.connected.store(true, Ordering::Relaxed);
+                        let ns = start.elapsed().as_nanos() as u64;
+                        status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                        notify();
+                        slot_seq[slot] += 1;
+                        sf.frame_id = slot_seq[slot];
+                        inputs[slot].write(sf);
+                        continue;
+                    }
                     if type_tag.as_deref() == Some("transfer_stream") {
                         match serde_json::from_str::<TransferFrame>(body) {
                             Ok(tf) => {

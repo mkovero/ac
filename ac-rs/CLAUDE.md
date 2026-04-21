@@ -7,14 +7,14 @@ Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 275 tests (ac-core 72, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
+cargo test                        # 283 tests (ac-core 80, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
 ```
 
 ## Crate layout
 
 | Crate | Binary | Role |
 |-------|--------|------|
-| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 72 unit tests. |
+| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions. No sockets, no global state. 80 unit tests. |
 | `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 50 parser tests. |
 | `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 unit + 10 integration tests. |
 | `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 100 tests. |
@@ -94,6 +94,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `U` | Toggle drum tuner (Spectrum + peak hold). 1st press: live mode — identifies membrane (0,1) fundamental from peak-hold buffer, annotates overtone partials with Δ% from ideal Bessel ratios, corner readout shows Hz/note/cents/confidence. 2nd press: lock current f₀ as target; readout shows Hz/cents deviation with traffic-light colouring (green ≤5¢, yellow ≤20¢, red beyond). 3rd press: off. Auto-enables peak hold if not already on |
 | `Space` (Live tuner) | Lock tuner search range to ±20% of current f₀ (e.g. 190-270 Hz after a 220 Hz hit). Prevents sub-harmonic aliasing on subsequent hits. Press again to unlock. Outside Live tuner mode Space still toggles channel selection |
 | `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
+| `Shift+O` | Cycle fractional-octave CWT aggregation (CWT mode only): off → 1/1 → 1/3 → 1/6 → 1/12 → 1/24 → off. Replaces the displayed CWT column with summed-power per band; preserves single-tone dBFS at synthetic isolated scales (kernel-overlap drift on real signals — see `ac-core::fractional_octave`); state shown top-right |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
 | `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |

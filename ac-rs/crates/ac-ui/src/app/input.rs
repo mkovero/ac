@@ -600,6 +600,22 @@ impl App {
                 };
                 self.needs_redraw = true;
             }
+            KeyCode::KeyO if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
+                self.ioct_bpo = match self.ioct_bpo {
+                    None => Some(1),
+                    Some(1) => Some(3),
+                    Some(3) => Some(6),
+                    Some(6) => Some(12),
+                    Some(12) => Some(24),
+                    Some(_) => None,
+                };
+                self.send_ioct_bpo();
+                self.notify(&match self.ioct_bpo {
+                    Some(n) => format!("ioct: 1/{n} oct"),
+                    None => "ioct: off".into(),
+                });
+                self.needs_redraw = true;
+            }
             KeyCode::KeyO => {
                 self.smoothing_frac = smoothing::next(self.smoothing_frac);
                 // Rebuilds on next frame — drop the cache so the new window

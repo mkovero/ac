@@ -221,6 +221,25 @@ pub fn get_analysis_mode(state: &ServerState) -> Value {
     json!({"ok": true, "mode": mode, "sigma": sigma, "n_scales": n_scales})
 }
 
+/// Toggle/set the per-tick `fractional_octave` frame published alongside
+/// `cwt`. `bpo == 0` disables; `1/3/6/12/24` enable. Effect is server-global
+/// and the next `monitor_spectrum` tick picks it up live (no worker
+/// restart). Persists across worker restart, reset on daemon restart.
+pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
+    let bpo = match cmd.get("bpo").and_then(Value::as_u64) {
+        Some(v) => v as u32,
+        None    => return json!({"ok": false, "error": "missing 'bpo' field"}),
+    };
+    let new = match bpo {
+        0 => None,
+        1 | 3 | 6 | 12 | 24 => Some(bpo),
+        _ => return json!({"ok": false,
+            "error": format!("invalid bpo {bpo}: expected 0, 1, 3, 6, 12, or 24")}),
+    };
+    *state.ioct_bpo.lock().unwrap() = new;
+    json!({"ok": true, "bpo": bpo})
+}
+
 /// Live-tune `interval` and/or `fft_n` on a running `monitor_spectrum` worker.
 /// Rejects if no monitor is active (the worker owns the Arc; without it the
 /// change has nothing to pick up).

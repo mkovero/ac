@@ -107,6 +107,7 @@ fn overlay_shows_spectrum_readout() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -148,6 +149,7 @@ fn overlay_shows_dbu_when_calibrated() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -185,6 +187,7 @@ fn overlay_shows_clip_when_clipping() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -218,6 +221,7 @@ fn overlay_no_clip_when_not_clipping() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -254,6 +258,7 @@ fn overlay_shows_frozen() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -288,6 +293,7 @@ fn overlay_shows_connected() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -320,6 +326,7 @@ fn overlay_shows_disconnected() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -367,6 +374,7 @@ fn overlay_shows_transfer_delay() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -411,6 +419,7 @@ fn overlay_shows_hover_db_readout() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -446,6 +455,7 @@ fn overlay_shows_notification() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);
@@ -481,6 +491,7 @@ fn overlay_shows_sample_rate() {
         virtual_pairs: &[],
         active_palette: 0,
         smoothing_frac: None,
+        ioct_bpo: None,
     };
 
     let texts = run_overlay(input);

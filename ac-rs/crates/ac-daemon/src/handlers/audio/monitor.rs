@@ -59,6 +59,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let analysis_mode = state.analysis_mode.clone();
     let cwt_sigma_shared = state.cwt_sigma.clone();
     let cwt_n_scales_shared = state.cwt_n_scales.clone();
+    let ioct_bpo_shared = state.ioct_bpo.clone();
     let tuner_range_locks_shared = state.tuner_range_locks.clone();
     let tuner_config_shared = state.tuner_config.clone();
 
@@ -221,6 +222,32 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "xruns":       xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
+                    // Optional fractional-octave aggregation of the same
+                    // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
+                    // extra DSP cost when enabled.
+                    if let Some(bpo) = *ioct_bpo_shared.lock().unwrap() {
+                        let (band_centres, band_levels) =
+                            ac_core::fractional_octave::cwt_to_fractional_octave(
+                                &cwt_mags,
+                                &cwt_freqs,
+                                bpo as usize,
+                                ac_core::cwt::DEFAULT_F_MIN,
+                                ac_core::cwt::default_f_max(sr),
+                            );
+                        let frac_frame = json!({
+                            "type":       "fractional_octave",
+                            "cmd":        "monitor_spectrum",
+                            "channel":    channel,
+                            "n_channels": n_channels,
+                            "sr":         sr,
+                            "bpo":        bpo,
+                            "freqs":      band_centres,
+                            "spectrum":   band_levels,
+                            "timestamp":  ts_ns,
+                            "xruns":      xruns_total,
+                        });
+                        send_pub(&pub_tx, "data", &frac_frame);
+                    }
                     continue;
                 }
 

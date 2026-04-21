@@ -263,6 +263,25 @@ impl App {
         self.send_set_analysis_mode("cwt");
     }
 
+    /// Push the current `ioct_bpo` to the daemon. `None` → `bpo: 0`
+    /// disables the per-tick fractional-octave publish; `Some(N)` enables
+    /// it. Synthetic backend has no daemon; silent no-op.
+    pub(super) fn send_ioct_bpo(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let bpo = self.ioct_bpo.unwrap_or(0);
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("ioct: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({ "cmd": "set_ioct_bpo", "bpo": bpo });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("set_ioct_bpo failed: {e}");
+            self.notify("ioct: ctrl error");
+        }
+    }
+
     /// Sample rate of the most recent real-channel frame, or 48 kHz if no
     /// frame has arrived yet. Used by `auto_monitor_interval_ms` to pick a
     /// tick that matches the actual capture rate rather than assuming one.

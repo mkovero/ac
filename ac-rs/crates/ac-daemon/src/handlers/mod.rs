@@ -34,8 +34,8 @@ mod transfer;
 pub use admin::{
     devices, dmm_read, get_analysis_mode, get_calibration, list_calibrations,
     quit, server_connections, server_disable, server_enable,
-    set_analysis_mode, set_monitor_params, setup, status, stop, tuner_config,
-    tuner_range,
+    set_analysis_mode, set_ioct_bpo, set_monitor_params, setup, status, stop,
+    tuner_config, tuner_range,
 };
 pub use audio::{
     generate, generate_pink, monitor_spectrum, plot, plot_level,

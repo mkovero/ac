@@ -154,6 +154,40 @@ Default parameters (see `ac-core::cwt` constants): `σ = 12.0`,
 `n_scales = 512`, frequency axis spans `20 Hz` to `0.9 · sr/2`.
 Both `σ` and `n_scales` are tuneable at runtime via `set_analysis_mode`.
 
+### `fractional_octave` frame
+
+Emitted by `monitor_spectrum` **only when** `analysis_mode` is `"cwt"`
+**and** `set_ioct_bpo` has been called with a non-zero bins-per-octave.
+When enabled, one frame is published per channel per tick **in addition
+to** the `cwt` frame: subscribers see two frames per channel back-to-back
+(`cwt`, then `fractional_octave`). The aggregation reuses the same CWT
+column the `cwt` frame carries — there is no second CWT cost.
+
+```json
+{
+  "type":       "fractional_octave",
+  "cmd":        "monitor_spectrum",
+  "channel":    <int>,
+  "n_channels": <int>,
+  "sr":         <int>,
+  "bpo":        <int>,            // bins per octave: 1, 3, 6, 12, or 24
+  "freqs":      [<float>, ...],   // band centres (Hz), anchored at 1 kHz
+  "spectrum":   [<float>, ...],   // dBFS per band
+  "timestamp":  <int>,            // UNIX-epoch nanoseconds
+  "xruns":      <int>
+}
+```
+
+Band edges are half-band on each side of the centre
+(`f_c · 2^(±1/(2·bpo))`). Aggregation sums per-band power across CWT
+scales whose centre falls inside the band; bands that contain no scale
+fall back to log-dB interpolation against the two nearest scales (mirrors
+the FFT log-display fallback). **Not IEC 61260** — band shapes follow the
+Morlet kernel, not standard third-octave filters; this is a visualization
+feature, not a metrology filterbank. See `ac-core::fractional_octave` for
+the algorithm and the documented kernel-overlap level drift on tones at
+default CWT density.
+
 ### `tuner` frame
 
 Emitted **sparsely** by `monitor_spectrum` (FFT mode only) — one frame per
@@ -292,6 +326,32 @@ Returns the current analysis mode.
 **Reply**
 ```json
 { "ok": true, "mode": "fft" | "cwt", "sigma": <float>, "n_scales": <int> }
+```
+
+---
+
+### `set_ioct_bpo`
+
+Toggles the per-tick `fractional_octave` frame published alongside the
+`cwt` frame. Server-global; the next `monitor_spectrum` tick picks it up
+even if a worker is already running. Has no effect in FFT mode (no `cwt`
+column to aggregate). Persists across worker restart, resets to disabled
+on daemon restart.
+
+**Request**
+```json
+{ "cmd": "set_ioct_bpo", "bpo": 0 }    // disable (no extra frame)
+{ "cmd": "set_ioct_bpo", "bpo": 3 }    // 1/3-octave
+{ "cmd": "set_ioct_bpo", "bpo": 24 }   // 1/24-octave
+```
+
+`bpo` must be one of `0` (disable), `1`, `3`, `6`, `12`, `24`. Other
+values reply `{ "ok": false, "error": "..." }` and leave the current
+setting unchanged.
+
+**Reply**
+```json
+{ "ok": true, "bpo": <int> }
 ```
 
 ---

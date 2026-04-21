@@ -95,6 +95,13 @@ pub struct App {
     analysis_mode: String,
     cwt_sigma: f32,
     cwt_n_scales: usize,
+    /// Fractional-octave aggregation bins-per-octave for CWT view.
+    /// `None` = disabled, daemon publishes only the raw CWT frame.
+    /// `Some(N)` = daemon also publishes a `type: "fractional_octave"`
+    /// frame per tick which overwrites the CWT entry in the same triple
+    /// buffer slot. Cycled via `Shift+O` (CWT mode only). Distinct from
+    /// `smoothing_frac`, which only reshapes the FFT display.
+    ioct_bpo: Option<u32>,
     /// Live FFT monitor knobs (interval 1 ms steps in [1, 1000] ms;
     /// `MONITOR_FFT_N_LADDER` for N). Mutated by plain arrow keys in FFT mode
     /// and pushed to the daemon via `set_monitor_params`.
@@ -277,6 +284,7 @@ impl App {
             analysis_mode: "fft".to_string(),
             cwt_sigma: 12.0,
             cwt_n_scales: 512,
+            ioct_bpo: None,
             // Auto-scaled on every N change (arrow Up/Down) and at the
             // first frame (once sr is known). Seeded from the default N
             // assuming 48 kHz so the very first tick doesn't overshoot.

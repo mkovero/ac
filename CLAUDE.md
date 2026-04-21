@@ -10,7 +10,7 @@ This is `ac` — an audio bench measurement system (THD, THD+N, level sweeps, fr
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 275 tests (ac-core 72, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
+cargo test                     # 283 tests (ac-core 80, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 100)
 ```
 
 ## Usage (quick reference)

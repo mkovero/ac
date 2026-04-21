@@ -646,6 +646,7 @@ impl App {
         let peak_hold_enabled_snap = self.peak_hold_enabled;
         let active_palette_snap = waterfall.active_palette();
         let smoothing_snap = self.smoothing_frac;
+        let ioct_bpo_snap = self.ioct_bpo;
         let peak_holds_snap = if self.peak_hold_enabled {
             self.peak_holds.clone()
         } else {
@@ -1035,6 +1036,7 @@ impl App {
                     virtual_pairs: &virtual_pairs_snap,
                     active_palette: active_palette_snap,
                     smoothing_frac: smoothing_snap,
+                    ioct_bpo: ioct_bpo_snap,
                 },
             );
         });
