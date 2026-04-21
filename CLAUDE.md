@@ -12,7 +12,7 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 301 tests (ac-core 91, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
+cargo test                     # 310 tests (ac-core 100, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
 ```
 
 ## Usage (quick reference)
@@ -42,7 +42,7 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ac-rs/                 (Rust — primary implementation)
   ZMQ.md               (wire protocol reference — authoritative)
   crates/
-    ac-core/           (pure library: analysis, generator, calibration, config, IEC 61260-1 filterbank, Farina log-sweep IR — 91 tests)
+    ac-core/           (pure library: analysis, generator, calibration, config, IEC 61260-1 filterbank, Farina log-sweep IR, IEC 61672-1 A/C/Z weighting — 100 tests)
     ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
     ac-daemon/         (ZMQ REP+PUB server binary — 43 unit + 10 it tests)
     ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 81 tests)

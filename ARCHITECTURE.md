@@ -302,6 +302,9 @@ steps — nothing is broken en route.
 - [ ] Wire `ac sweep ir` (or similar verb) to run a Farina measurement
       end-to-end and emit `measurement/impulse_response` frames. Tracked
       in issue #75.
+- [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
+      frequency weighting. Bilinear-mapped biquad cascade, unity gain at
+      1 kHz, Class 1 tolerance verified in tests.
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 

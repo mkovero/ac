@@ -5,3 +5,4 @@ pub mod filterbank;
 pub mod report;
 pub mod sweep;
 pub mod thd;
+pub mod weighting;
