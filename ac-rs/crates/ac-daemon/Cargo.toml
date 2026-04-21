@@ -21,6 +21,7 @@ jack        = { version = "0.11", optional = true }
 cpal        = { version = "0.15", optional = true }
 serialport = "4.9.0"
 rayon       = "1"
+chrono      = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 default    = ["jack-audio", "cpal-audio"]
