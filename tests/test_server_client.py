@@ -27,6 +27,14 @@ def recv_until(client, done_topics=("done", "error"), max_frames=200, timeout_ms
     return frames
 
 
+# Frame `type` values emitted by plot/plot_level per frequency point.
+# Transition-era: daemon emits both the legacy `sweep_point` and the
+# tier-prefixed `measurement/frequency_response/point` for the same
+# payload. Tests assert membership in this set.
+SWEEP_POINT_TYPES = ("sweep_point", "measurement/frequency_response/point")
+SPECTRUM_TYPES    = ("spectrum",    "visualize/spectrum")
+
+
 def _drain(client, max_frames=200, timeout_ms=1000):
     """Drain residual frames without caring about content."""
     recv_until(client, done_topics=("done", "error"), max_frames=max_frames,
@@ -147,13 +155,39 @@ def test_plot_fields(server_client):
     data_frames = [f for t, f in frames if t == "data"]
     assert data_frames, "expected at least one sweep_point from plot"
 
-    for f in data_frames:
-        assert f.get("type") == "sweep_point"
+    sp_frames = [f for f in data_frames if f.get("type") in SWEEP_POINT_TYPES]
+    assert sp_frames, "expected at least one sweep_point frame from plot"
+    for f in sp_frames:
         assert "thd_pct"    in f
         assert "thdn_pct"   in f
         assert "drive_db"   in f
         assert "spectrum"   in f
         assert "freqs"      in f
+
+
+def test_plot_emits_measurement_report(server_client):
+    """plot emits a tier-1 MeasurementReport frame at the end."""
+    client = server_client
+    ack = client.send_cmd({
+        "cmd":        "plot",
+        "start_hz":   20.0,
+        "stop_hz":    200.0,
+        "level_dbfs": -20.0,
+        "ppd":         2,
+    })
+    assert ack["ok"] is True
+
+    frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
+    reports = [f for t, f in frames
+               if t == "data" and f.get("type") == "measurement/report"]
+    assert len(reports) == 1, "expected exactly one measurement/report frame"
+
+    r = reports[0]["report"]
+    assert r["schema_version"] == 1
+    assert "ac_version" in r
+    assert r["method"]["kind"] == "stepped_sine"
+    assert r["data"]["kind"]   == "frequency_response"
+    assert len(r["data"]["points"]) == r["stimulus"]["n_points"]
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +347,9 @@ def test_plot_level_fields(server_client):
     data_frames = [f for t, f in frames if t == "data"]
     assert data_frames, "expected at least one sweep_point from plot_level"
 
-    for f in data_frames:
-        assert f.get("type") == "sweep_point"
+    sp_frames = [f for f in data_frames if f.get("type") in SWEEP_POINT_TYPES]
+    assert sp_frames, "expected at least one sweep_point frame from plot_level"
+    for f in sp_frames:
         assert f.get("cmd")  == "plot_level"
         assert "thd_pct"    in f
         assert "thdn_pct"   in f
@@ -368,7 +403,8 @@ def test_sweep_point_none_fields_are_numeric_safe(server_client):
     assert ack["ok"] is True
 
     frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
-    data_frames = [f for t, f in frames if t == "data"]
+    data_frames = [f for t, f in frames
+                   if t == "data" and f.get("type") in SWEEP_POINT_TYPES]
     assert data_frames
 
     # The test server has no calibration, so these fields should be None
@@ -404,7 +440,8 @@ def test_plot_thd_numerical_accuracy(server_client):
     assert ack["ok"] is True
 
     frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
-    data_frames = [f for t, f in frames if t == "data"]
+    data_frames = [f for t, f in frames
+                   if t == "data" and f.get("type") in SWEEP_POINT_TYPES]
     assert data_frames, "expected at least one sweep_point"
 
     f = data_frames[0]
@@ -460,7 +497,7 @@ def test_monitor_spectrum_frames(server_client):
             topic, frame = client.recv_data(timeout_ms=3000)
         except TimeoutError:
             break
-        if topic == "data" and frame.get("type") == "spectrum":
+        if topic == "data" and frame.get("type") in SPECTRUM_TYPES:
             spec_frames.append(frame)
             if len(spec_frames) >= 2:
                 break
