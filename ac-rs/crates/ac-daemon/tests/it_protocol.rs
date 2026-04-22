@@ -360,3 +360,67 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_ir, "never saw measurement/impulse_response frame");
     assert!(got_report, "never saw measurement/report frame");
 }
+
+#[test]
+fn plot_with_bpo_emits_spectrum_bands() {
+    // Plot with `bpo` set: the daemon runs the concatenated sweep capture
+    // through an IEC 61260-1 1/3-octave filterbank and publishes a
+    // `measurement/spectrum_bands` frame plus a second `measurement/report`
+    // whose `data.kind == spectrum_bands`. Assert the payload is well-formed
+    // and the peak band lies inside the stimulus range.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let start_hz = 200.0;
+    let stop_hz  = 4_000.0;
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   start_hz,
+        "stop_hz":    stop_hz,
+        "level_dbfs": -6.0,
+        "ppd":        3,
+        "duration":   0.2,
+        "bpo":        3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let mut got_frame  = false;
+    let mut got_report = false;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !(got_frame && got_report) {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/spectrum_bands" => {
+                assert_eq!(v["bpo"], json!(3));
+                assert_eq!(v["class"], json!("Class 1"));
+                let centres = v["centres_hz"].as_array().expect("centres_hz array");
+                let levels  = v["levels_dbfs"].as_array().expect("levels_dbfs array");
+                assert_eq!(centres.len(), levels.len());
+                assert!(!centres.is_empty(), "filterbank produced no bands");
+                // Peak band must land near the 1 kHz loopback tone.
+                let (peak_idx, _) = levels.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |acc, (i, x)| {
+                    let v = x.as_f64().unwrap_or(f64::NEG_INFINITY);
+                    if v > acc.1 { (i, v) } else { acc }
+                });
+                let peak_fc = centres[peak_idx].as_f64().unwrap();
+                assert!(
+                    (start_hz / 2.0..=stop_hz * 2.0).contains(&peak_fc),
+                    "peak band {peak_fc} Hz falls outside sweep range \
+                     [{start_hz}, {stop_hz}] (±1 octave)"
+                );
+                got_frame = true;
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                if v["report"]["data"]["kind"] == json!("spectrum_bands") {
+                    assert_eq!(v["report"]["data"]["bpo"], json!(3));
+                    assert_eq!(v["report"]["schema_version"], json!(1));
+                    got_report = true;
+                }
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_frame,  "never saw measurement/spectrum_bands frame");
+    assert!(got_report, "never saw measurement/report with spectrum_bands data");
+}

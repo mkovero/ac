@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
+use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
     MeasurementReport, StimulusParams, SCHEMA_VERSION,
@@ -43,6 +44,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let ppd        = cmd.get("ppd")       .and_then(Value::as_u64).unwrap_or(10) as usize;
     let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
+    let bpo        = cmd.get("bpo")       .and_then(Value::as_u64).map(|v| v as usize);
     let cfg        = state.cfg.lock().unwrap().clone();
 
     let out_port = resolve_output(&cfg, state);
@@ -72,6 +74,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mut n = 0usize;
         let mut xruns = 0u32;
         let mut points: Vec<FrequencyResponsePoint> = Vec::with_capacity(freqs.len());
+        let mut concat_capture: Vec<f32> = Vec::new();
         for freq in &freqs {
             if stop.load(Ordering::Relaxed) { break; }
             let dur = f64::max(duration, 3.0 / freq);
@@ -103,6 +106,9 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     n += 1;
                 }
                 Err(e) => eprintln!("plot: analyze error at {freq}Hz: {e}"),
+            }
+            if bpo.is_some() {
+                concat_capture.extend_from_slice(&samples);
             }
         }
         eng.set_silence();
@@ -151,12 +157,27 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             Err(e) => eprintln!("plot: report serialization error: {e}"),
         }
 
-        if let Some(dir) = report_dir {
+        if let Some(ref dir) = report_dir {
             let filename = format!("{timestamp}-plot.json").replace(':', "-");
             let path = dir.join(filename);
             if let Err(e) = report.write_to(&path) {
                 eprintln!("plot: report write error ({}): {e}", path.display());
             }
+        }
+
+        if let Some(bpo) = bpo {
+            emit_spectrum_bands(
+                &pub_tx,
+                &concat_capture,
+                sr,
+                bpo,
+                start_hz,
+                stop_hz,
+                level_dbfs,
+                duration,
+                &timestamp,
+                report_dir.as_deref(),
+            );
         }
 
         send_pub(&pub_tx, "done", &json!({"cmd":"plot","n_points":n,"xruns":xruns}));
@@ -235,4 +256,91 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("plot_level".to_string(), worker);
     }
     json!({"ok": true, "out_port": out_port_reply, "in_port": in_port_reply})
+}
+
+/// Run the concatenated sweep capture through an IEC 61260-1 Class 1
+/// filterbank at the requested BPO, publish a `measurement/spectrum_bands`
+/// frame and a second `measurement/report` whose data payload is the
+/// `SpectrumBands` variant. Errors and non-fatal rejections (e.g. the
+/// band grid would clash with Nyquist) are logged and swallowed — the
+/// primary frequency-response report has already been emitted.
+#[allow(clippy::too_many_arguments)]
+fn emit_spectrum_bands(
+    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    samples: &[f32],
+    sr: u32,
+    bpo: usize,
+    start_hz: f64,
+    stop_hz: f64,
+    level_dbfs: f64,
+    duration: f64,
+    timestamp: &str,
+    report_dir: Option<&std::path::Path>,
+) {
+    let f_max = (sr as f64 * 0.45).min(stop_hz.max(start_hz));
+    let f_min = start_hz.max(1.0);
+    let fb = match Filterbank::new(sr, bpo, f_min, f_max) {
+        Ok(fb) => fb,
+        Err(e) => {
+            eprintln!("plot: filterbank init failed: {e}");
+            return;
+        }
+    };
+    let levels = fb.process(samples);
+    let centres: Vec<f64> = fb.centres_hz().to_vec();
+
+    send_pub(pub_tx, "measurement/spectrum_bands", &json!({
+        "cmd":         "plot",
+        "bpo":         bpo,
+        "class":       fb.class().label(),
+        "centres_hz":  centres.clone(),
+        "levels_dbfs": levels.clone(),
+    }));
+
+    let bands_report = MeasurementReport {
+        schema_version: SCHEMA_VERSION,
+        ac_version:     env!("CARGO_PKG_VERSION").to_string(),
+        timestamp_utc:  timestamp.to_string(),
+        method: MeasurementMethod::SteppedSine {
+            n_points: centres.len(),
+            standard: Some(Filterbank::citation()),
+        },
+        stimulus: StimulusParams {
+            sample_rate_hz: sr,
+            f_start_hz:     start_hz,
+            f_stop_hz:      stop_hz,
+            level_dbfs,
+            n_points:       centres.len(),
+        },
+        integration: IntegrationParams {
+            duration_s: duration,
+            window:     "butterworth-bp".into(),
+        },
+        calibration: None,
+        data: MeasurementData::SpectrumBands {
+            bpo:         bpo as u32,
+            class:       fb.class().label().to_string(),
+            centres_hz:  centres,
+            levels_dbfs: levels,
+        },
+        notes: None,
+    };
+
+    match serde_json::to_value(&bands_report) {
+        Ok(report_json) => {
+            send_pub(pub_tx, "measurement/report", &json!({
+                "cmd":    "plot",
+                "report": report_json,
+            }));
+        }
+        Err(e) => eprintln!("plot: bands report serialization error: {e}"),
+    }
+
+    if let Some(dir) = report_dir {
+        let filename = format!("{timestamp}-plot-bands.json").replace(':', "-");
+        let path = dir.join(filename);
+        if let Err(e) = bands_report.write_to(&path) {
+            eprintln!("plot: bands report write error ({}): {e}", path.display());
+        }
+    }
 }

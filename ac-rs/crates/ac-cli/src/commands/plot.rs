@@ -9,13 +9,14 @@ pub fn run(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, level, ppd) = match cmd {
+    let (start, stop, level, ppd, bpo) = match cmd {
         CommandKind::Plot {
             start,
             stop,
             level,
             ppd,
-        } => (*start, *stop, level, *ppd),
+            bpo,
+        } => (*start, *stop, level, *ppd, *bpo),
         _ => unreachable!(),
     };
 
@@ -41,19 +42,17 @@ pub fn run(
         launch_ui("sweep_frequency", cfg, None);
     }
 
-    let ack = check_ack(
-        client.send_cmd(
-            &serde_json::json!({
-                "cmd": "plot",
-                "start_hz": start_hz,
-                "stop_hz": stop_hz,
-                "level_dbfs": level_db,
-                "ppd": ppd,
-            }),
-            None,
-        ),
-        "plot",
-    );
+    let mut cmd_json = serde_json::json!({
+        "cmd": "plot",
+        "start_hz": start_hz,
+        "stop_hz": stop_hz,
+        "level_dbfs": level_db,
+        "ppd": ppd,
+    });
+    if let Some(b) = bpo {
+        cmd_json["bpo"] = serde_json::json!(b);
+    }
+    let ack = check_ack(client.send_cmd(&cmd_json, None), "plot");
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),

@@ -18,6 +18,7 @@ enum TokenKind {
     Time,
     Level,
     Freq,
+    Bands,
 }
 
 type Token = (TokenKind, TokenValue);
@@ -120,12 +121,28 @@ fn parse_steps(s: &str) -> Result<u32, ()> {
         .ok_or(())
 }
 
+/// Accepts `"bands <N>"` (parsed as the next token) or a single
+/// composite `"<N>bands"` / `"<N>bpo"`. Only the composite form flows
+/// through the token classifier; the `bands <N>` multi-token form is
+/// handled inline by `parse_plot`.
+fn parse_bands(s: &str) -> Result<u32, ()> {
+    let s = s.to_lowercase();
+    s.strip_suffix("bands")
+        .or_else(|| s.strip_suffix("bpo"))
+        .and_then(|rest| rest.parse::<f64>().ok())
+        .map(|v| v as u32)
+        .ok_or(())
+}
+
 fn classify(token: &str) -> Result<Token, String> {
     if let Ok(v) = parse_ppd(token) {
         return Ok((TokenKind::Ppd, TokenValue::Int(v)));
     }
     if let Ok(v) = parse_steps(token) {
         return Ok((TokenKind::Steps, TokenValue::Int(v)));
+    }
+    if let Ok(v) = parse_bands(token) {
+        return Ok((TokenKind::Bands, TokenValue::Int(v)));
     }
     if let Ok(v) = parse_time(token) {
         return Ok((TokenKind::Time, TokenValue::Float(v)));
@@ -291,6 +308,10 @@ pub enum CommandKind {
         stop: Option<f64>,
         level: LevelSpec,
         ppd: u32,
+        /// If set, run the concatenated sweep capture through an
+        /// IEC 61260-1 filterbank at this bands-per-octave resolution
+        /// and emit an additional `SpectrumBands` report.
+        bpo: Option<u32>,
     },
     PlotLevel {
         start: LevelSpec,

@@ -148,6 +148,24 @@ subscriber can flag completion without parsing the full report:
 { "type": "measurement/frequency_response/complete", "cmd": "plot", "n_points": <int>, "xruns": <int> }
 ```
 
+### `measurement/spectrum_bands` frame
+
+Emitted when a `plot` is run with `"bpo": <N>`. After the frequency-response
+sweep finishes, the daemon feeds the concatenated capture through an
+IEC 61260-1 Class 1 fractional-octave filterbank (`Filterbank::new(sr, bpo,
+start_hz, stop_hz)`) and publishes the resulting per-band levels. A second
+`measurement/report` follows with the full `SpectrumBands` payload.
+
+```json
+{
+  "cmd":         "plot",
+  "bpo":         <int>,           // bands per octave (1, 3, 6, 12, 24)
+  "class":       "Class 1",
+  "centres_hz":  [<float>, ...],  // band centre frequencies in Hz
+  "levels_dbfs": [<float>, ...]   // per-band dBFS (AES17-2015 §5 reference)
+}
+```
+
 ---
 
 ## Shared types
