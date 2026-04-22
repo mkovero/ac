@@ -34,6 +34,46 @@ mod render_pipeline;
 
 pub use helpers::*;
 
+/// Per-band time-integration mode toggled by the `T` key and mirrored
+/// to the daemon via `set_time_integration`. Matches the string values
+/// accepted by the daemon command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeIntegrationMode {
+    Off,
+    Fast,
+    Slow,
+    Leq,
+}
+
+impl TimeIntegrationMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off  => Self::Fast,
+            Self::Fast => Self::Slow,
+            Self::Slow => Self::Leq,
+            Self::Leq  => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off  => "off",
+            Self::Fast => "fast",
+            Self::Slow => "slow",
+            Self::Leq  => "leq",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off  => "time: off",
+            Self::Fast => "time: fast (125 ms)",
+            Self::Slow => "time: slow (1 s)",
+            Self::Leq  => "time: Leq",
+        }
+    }
+}
+
 pub struct AppInit {
     pub store: ChannelStore,
     pub inputs: Vec<Input<SpectrumFrame>>,
@@ -100,6 +140,12 @@ pub struct App {
     /// buffer slot. Cycled via `Shift+O` (CWT mode only). Distinct from
     /// `smoothing_frac`, which only reshapes the FFT display.
     ioct_bpo: Option<u32>,
+    /// Per-band time-integration mode mirrored to the daemon via
+    /// `set_time_integration`. Cycled by `T`; the daemon publishes a
+    /// `fractional_octave_leq` sidecar frame whenever this is not
+    /// [`TimeIntegrationMode::Off`]. Consumed for rendering by the
+    /// spectrum view (follow-up); today it is control-surface only.
+    time_integration: TimeIntegrationMode,
     /// Live FFT monitor knobs (interval 1 ms steps in [1, 1000] ms;
     /// `MONITOR_FFT_N_LADDER` for N). Mutated by plain arrow keys in FFT mode
     /// and pushed to the daemon via `set_monitor_params`.
@@ -259,6 +305,7 @@ impl App {
             cwt_sigma: 12.0,
             cwt_n_scales: 512,
             ioct_bpo: None,
+            time_integration: TimeIntegrationMode::Off,
             // Auto-scaled on every N change (arrow Up/Down) and at the
             // first frame (once sr is known). Seeded from the default N
             // assuming 48 kHz so the very first tick doesn't overshoot.

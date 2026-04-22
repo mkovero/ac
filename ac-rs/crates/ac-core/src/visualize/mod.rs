@@ -6,4 +6,5 @@ pub mod aggregate;
 pub mod cwt;
 pub mod fractional_octave;
 pub mod spectrum;
+pub mod time_integration;
 pub mod transfer;

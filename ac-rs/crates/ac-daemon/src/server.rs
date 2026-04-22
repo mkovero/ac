@@ -63,6 +63,16 @@ pub struct ServerState {
     /// Read every tick by the `monitor_spectrum` worker so `set_ioct_bpo`
     /// takes effect live.
     pub ioct_bpo:      Arc<Mutex<Option<u32>>>,
+    /// Time-integration mode applied to each `fractional_octave` frame. One of
+    /// `"off"`, `"fast"`, `"slow"`, `"leq"`. When non-`off`, the worker
+    /// publishes an additional `fractional_octave_leq` frame per channel
+    /// carrying the integrated levels and the mode label. Toggled via
+    /// `set_time_integration`; Leq can be zeroed live via `reset_leq`.
+    pub time_integration_mode: Arc<Mutex<String>>,
+    /// One-shot flag set by `reset_leq` and consumed by the monitor worker
+    /// on its next tick. Applies to the Leq integrators; fast/slow modes
+    /// ignore it (they'd re-prime from the next input anyway).
+    pub leq_reset_request: Arc<std::sync::atomic::AtomicBool>,
     /// Live-tunable parameters for the `monitor_spectrum` FFT path. The worker
     /// re-reads these every tick so `set_monitor_params` takes effect without
     /// a restart. `active` flips true on worker spawn and false on exit;
@@ -129,6 +139,8 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cwt_sigma:     Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
         ioct_bpo:      Arc::new(Mutex::new(None)),
+        time_integration_mode: Arc::new(Mutex::new("off".to_string())),
+        leq_reset_request:     Arc::new(std::sync::atomic::AtomicBool::new(false)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
     };
 
@@ -269,6 +281,9 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
         "get_analysis_mode"   => handlers::get_analysis_mode(state),
         "set_ioct_bpo"        => handlers::set_ioct_bpo(state, &cmd),
+        "set_time_integration" => handlers::set_time_integration(state, &cmd),
+        "get_time_integration" => handlers::get_time_integration(state),
+        "reset_leq"           => handlers::reset_leq(state),
         "set_monitor_params"  => handlers::set_monitor_params(state, &cmd),
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),

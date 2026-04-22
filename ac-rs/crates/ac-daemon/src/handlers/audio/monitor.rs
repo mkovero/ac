@@ -5,11 +5,60 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
+use ac_core::visualize::time_integration::{
+    EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S,
+};
 
 use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
 use super::super::{busy_guard, resolve_input, send_pub, spawn_worker};
+
+/// Per-channel time-integrator state for the `fractional_octave_leq`
+/// sidecar frame. Re-initialised when the mode changes or when the band
+/// count changes (ioct_bpo toggle).
+enum Integrator {
+    Ema(EmaIntegrator),
+    Leq(LeqIntegrator),
+}
+
+impl Integrator {
+    fn for_mode(mode: &str, n_bands: usize) -> Option<Self> {
+        match mode {
+            "fast" => Some(Self::Ema(EmaIntegrator::new(TAU_FAST_S, n_bands))),
+            "slow" => Some(Self::Ema(EmaIntegrator::new(TAU_SLOW_S, n_bands))),
+            "leq"  => Some(Self::Leq(LeqIntegrator::new(n_bands))),
+            _ => None,
+        }
+    }
+
+    fn n_bands(&self) -> usize {
+        match self {
+            Self::Ema(e) => e.state_len(),
+            Self::Leq(l) => l.state_len(),
+        }
+    }
+
+    fn update(&mut self, levels_dbfs: &[f64], dt_s: f64) -> Vec<f64> {
+        match self {
+            Self::Ema(e) => e.update(levels_dbfs, dt_s),
+            Self::Leq(l) => l.update(levels_dbfs, dt_s),
+        }
+    }
+
+    fn duration_s(&self) -> f64 {
+        match self {
+            Self::Ema(_) => f64::NAN,
+            Self::Leq(l) => l.duration_s(),
+        }
+    }
+
+    fn reset_if_leq(&mut self) {
+        if let Self::Leq(l) = self {
+            l.reset();
+        }
+    }
+}
 
 /// Publish a live-analysis frame under both the legacy `type` value
 /// (e.g. `"spectrum"`) and the tiered equivalent (`"visualize/spectrum"`)
@@ -75,6 +124,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let cwt_sigma_shared = state.cwt_sigma.clone();
     let cwt_n_scales_shared = state.cwt_n_scales.clone();
     let ioct_bpo_shared = state.ioct_bpo.clone();
+    let time_integration_shared = state.time_integration_mode.clone();
+    let leq_reset_shared = state.leq_reset_request.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
@@ -123,6 +174,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut fft_rings: Vec<std::collections::VecDeque<f32>> =
             channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(131_072)).collect();
 
+        // Per-channel time-integration state for the `fractional_octave_leq`
+        // sidecar frame. `None` until the first fractional_octave frame at
+        // the current mode + band count arrives. Reset on mode/band-count
+        // change; Leq also reset on the `leq_reset_request` flag.
+        let mut integrators: Vec<Option<Integrator>> =
+            (0..channels_worker.len()).map(|_| None).collect();
+        let mut last_frac_ts: Vec<Option<std::time::Instant>> =
+            vec![None; channels_worker.len()];
+        let mut cur_ti_mode: String =
+            time_integration_shared.lock().unwrap().clone();
+
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
             let (cur_interval, cur_fft_n) = {
@@ -131,6 +193,20 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             };
             let mode = analysis_mode.lock().unwrap().clone();
             let is_cwt = mode == "cwt";
+
+            // Time-integration bookkeeping — run once per tick.
+            let new_ti_mode = time_integration_shared.lock().unwrap().clone();
+            if new_ti_mode != cur_ti_mode {
+                for slot in integrators.iter_mut() { *slot = None; }
+                for slot in last_frac_ts.iter_mut() { *slot = None; }
+                cur_ti_mode = new_ti_mode;
+            }
+            if leq_reset_shared.swap(false, Ordering::Relaxed) {
+                for slot in integrators.iter_mut() {
+                    if let Some(i) = slot { i.reset_if_leq(); }
+                }
+                for slot in last_frac_ts.iter_mut() { *slot = None; }
+            }
 
             // Check for live CWT param changes.
             if is_cwt {
@@ -237,11 +313,59 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             "sr":         sr,
                             "bpo":        bpo,
                             "freqs":      band_centres,
-                            "spectrum":   band_levels,
+                            "spectrum":   band_levels.clone(),
                             "timestamp":  ts_ns,
                             "xruns":      xruns_total,
                         });
                         publish_visualize(&pub_tx, frac_frame, "visualize/fractional_octave");
+
+                        if cur_ti_mode != "off" {
+                            let n_bands = band_levels.len();
+                            let slot = &mut integrators[idx];
+                            // Re-init if the band count changed (e.g. live
+                            // ioct_bpo toggle) or if this channel hasn't
+                            // been primed yet.
+                            if slot.as_ref().map(|i| i.n_bands() != n_bands).unwrap_or(true) {
+                                *slot = Integrator::for_mode(&cur_ti_mode, n_bands);
+                                last_frac_ts[idx] = None;
+                            }
+                            if let Some(integ) = slot.as_mut() {
+                                let now = std::time::Instant::now();
+                                let dt = last_frac_ts[idx]
+                                    .map(|t| now.duration_since(t).as_secs_f64())
+                                    .unwrap_or(cur_interval)
+                                    .max(1e-6);
+                                last_frac_ts[idx] = Some(now);
+                                let levels_f64: Vec<f64> = band_levels.iter().map(|&v| v as f64).collect();
+                                let integrated = integ.update(&levels_f64, dt);
+                                let tau_s: Option<f64> = match cur_ti_mode.as_str() {
+                                    "fast" => Some(TAU_FAST_S),
+                                    "slow" => Some(TAU_SLOW_S),
+                                    _ => None,
+                                };
+                                let dur_s = integ.duration_s();
+                                let leq_frame = json!({
+                                    "type":       "fractional_octave_leq",
+                                    "cmd":        "monitor_spectrum",
+                                    "channel":    channel,
+                                    "n_channels": n_channels,
+                                    "sr":         sr,
+                                    "bpo":        bpo,
+                                    "mode":       cur_ti_mode,
+                                    "tau_s":      tau_s,
+                                    "duration_s": if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
+                                    "freqs":      band_centres,
+                                    "spectrum":   integrated,
+                                    "timestamp":  ts_ns,
+                                    "xruns":      xruns_total,
+                                });
+                                publish_visualize(
+                                    &pub_tx,
+                                    leq_frame,
+                                    "visualize/fractional_octave_leq",
+                                );
+                            }
+                        }
                     }
                     continue;
                 }

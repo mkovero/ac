@@ -559,6 +559,18 @@ impl App {
                     smoothing::label(self.smoothing_frac),
                 ));
             }
+            KeyCode::KeyI if self.modifiers.shift_key() => {
+                // Shift+I — zero Leq accumulators on the daemon. Only
+                // meaningful in Leq mode; in other modes the flag is
+                // latched but the integrator ignores it.
+                self.send_reset_leq();
+                self.notify("Leq: reset");
+            }
+            KeyCode::KeyI => {
+                self.time_integration = self.time_integration.next();
+                self.send_time_integration();
+                self.notify(self.time_integration.label());
+            }
             KeyCode::Space => {
                 self.toggle_selection();
             }

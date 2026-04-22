@@ -291,6 +291,37 @@ feature, not a metrology filterbank. See `ac-core::fractional_octave` for
 the algorithm and the documented kernel-overlap level drift on tones at
 default CWT density.
 
+### `fractional_octave_leq` frame
+
+Sidecar to the `fractional_octave` frame, emitted when the time-integration
+mode is set to `fast` (τ = 125 ms), `slow` (τ = 1 s), or `leq` (unbounded
+equivalent level). Subscribers see three frames per channel per tick:
+`cwt`, then `fractional_octave`, then `fractional_octave_leq`. Toggled
+via `set_time_integration`; Leq can be zeroed live via `reset_leq`.
+
+```json
+{
+  "type":       "fractional_octave_leq",
+  "cmd":        "monitor_spectrum",
+  "channel":    <int>,
+  "n_channels": <int>,
+  "sr":         <int>,
+  "bpo":        <int>,
+  "mode":       "fast" | "slow" | "leq",
+  "tau_s":      <float> | null,  // EMA time constant; null for leq
+  "duration_s": <float> | null,  // Leq-accumulator seconds; null for fast/slow
+  "freqs":      [<float>, ...],  // band centres (Hz)
+  "spectrum":   [<float>, ...],  // integrated dBFS per band
+  "timestamp":  <int>,
+  "xruns":      <int>
+}
+```
+
+Same **not IEC 61672** caveat as the upstream `fractional_octave` frame:
+the time constants and formulas match the standard but the band energies
+come from a Morlet CWT aggregation, not an IEC 61260 filterbank. Display
+use only.
+
 ### `keepalive` frame
 
 Emitted once per second on the `keepalive` topic regardless of any running
@@ -418,6 +449,74 @@ setting unchanged.
 **Reply**
 ```json
 { "ok": true, "bpo": <int> }
+```
+
+---
+
+### `set_time_integration`
+
+Sets the per-band time-integration mode applied to the live
+`fractional_octave` frame. When non-`off`, the monitor worker publishes
+an additional `fractional_octave_leq` frame after each `fractional_octave`
+frame carrying the integrated per-band dBFS values. Server-global;
+picked up by the next monitor tick without a worker restart. Setting
+`leq` clears any existing Leq accumulator on the next tick.
+
+**Request**
+```json
+{ "cmd": "set_time_integration", "mode": "off" | "fast" | "slow" | "leq" }
+```
+
+- `off` — no sidecar frame (default at startup).
+- `fast` — exponentially-weighted average, τ = 125 ms.
+- `slow` — exponentially-weighted average, τ = 1 s.
+- `leq` — unbounded cumulative equivalent level; reset explicitly via `reset_leq`.
+
+Mode is case-insensitive. Unknown values reply `{ "ok": false, ... }` and
+leave the current setting unchanged.
+
+**Reply**
+```json
+{ "ok": true, "mode": "fast" }
+```
+
+Note: the Morlet CWT aggregation upstream of the integrator is not an
+IEC 61260 filterbank — the mode names mirror IEC 61672 time constants but
+the output is display-only and must not be quoted as SPL.
+
+---
+
+### `get_time_integration`
+
+Returns the current time-integration mode.
+
+**Request**
+```json
+{ "cmd": "get_time_integration" }
+```
+
+**Reply**
+```json
+{ "ok": true, "mode": "off" | "fast" | "slow" | "leq" }
+```
+
+---
+
+### `reset_leq`
+
+Zeros the Leq accumulators on the next monitor tick. Safe to call when
+no monitor is active — the flag is latched until a worker consumes it.
+Fast/slow modes ignore the flag (they re-prime from the next input on
+their own).
+
+**Request**
+```json
+{ "cmd": "reset_leq" }
+```
+
+**Reply**
+```json
+{ "ok": true }
 ```
 
 ---

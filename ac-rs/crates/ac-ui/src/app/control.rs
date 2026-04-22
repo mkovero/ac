@@ -210,6 +210,38 @@ impl App {
         }
     }
 
+    /// Push the current `time_integration` mode to the daemon.
+    pub(super) fn send_time_integration(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let mode = self.time_integration.as_str();
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("ti: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({ "cmd": "set_time_integration", "mode": mode });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("set_time_integration failed: {e}");
+            self.notify("ti: ctrl error");
+        }
+    }
+
+    /// Ask the daemon to zero the Leq accumulators.
+    pub(super) fn send_reset_leq(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("ti: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({ "cmd": "reset_leq" });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("reset_leq failed: {e}");
+        }
+    }
+
     /// Sample rate of the most recent real-channel frame, or 48 kHz if no
     /// frame has arrived yet. Used by `auto_monitor_interval_ms` to pick a
     /// tick that matches the actual capture rate rather than assuming one.

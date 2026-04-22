@@ -362,6 +362,63 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
 }
 
 // ---------------------------------------------------------------------------
+// Time-integration — set_time_integration / get_time_integration / reset_leq.
+// See issue #62.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn time_integration_default_is_off() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "get_time_integration"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["mode"], json!("off"));
+}
+
+#[test]
+fn time_integration_accepts_valid_modes() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    for mode in ["off", "fast", "slow", "leq"] {
+        let r = c.call(json!({"cmd": "set_time_integration", "mode": mode}));
+        assert_eq!(r["ok"], json!(true), "set {mode} failed: {r}");
+        assert_eq!(r["mode"], json!(mode));
+        let g = c.call(json!({"cmd": "get_time_integration"}));
+        assert_eq!(g["mode"], json!(mode));
+    }
+}
+
+#[test]
+fn time_integration_rejects_invalid_mode() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_time_integration", "mode": "impulse"}));
+    assert_eq!(r["ok"], json!(false));
+    assert!(r["error"].as_str().unwrap_or("").contains("invalid mode"));
+    // Mode should not have changed.
+    let g = c.call(json!({"cmd": "get_time_integration"}));
+    assert_eq!(g["mode"], json!("off"));
+}
+
+#[test]
+fn time_integration_mode_is_case_insensitive() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_time_integration", "mode": "SLOW"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["mode"], json!("slow"));
+}
+
+#[test]
+fn reset_leq_accepted_when_idle() {
+    // No active monitor — the reset flag is latched for the next worker.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "reset_leq"}));
+    assert_eq!(r["ok"], json!(true));
+}
+
+// ---------------------------------------------------------------------------
 // transfer_stream — ports of the pytest scenarios deleted when the Python
 // runtime was removed. See issue #52.
 // ---------------------------------------------------------------------------

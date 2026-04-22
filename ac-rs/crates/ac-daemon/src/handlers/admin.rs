@@ -240,6 +240,45 @@ pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true, "bpo": bpo})
 }
 
+/// Set the per-band time-integration mode applied to the live
+/// `fractional_octave` frames: `off`, `fast` (τ=125 ms), `slow` (τ=1 s),
+/// or `leq` (unbounded). When non-`off`, the monitor worker publishes a
+/// `fractional_octave_leq` frame after each `fractional_octave` frame
+/// carrying the integrated levels. Server-global; picked up by the next
+/// monitor tick without a worker restart.
+pub fn set_time_integration(state: &ServerState, cmd: &Value) -> Value {
+    let mode = match cmd.get("mode").and_then(Value::as_str) {
+        Some(m) => m.to_ascii_lowercase(),
+        None => return json!({"ok": false, "error": "missing 'mode' field"}),
+    };
+    match mode.as_str() {
+        "off" | "fast" | "slow" | "leq" => {}
+        other => return json!({"ok": false,
+            "error": format!("invalid mode {other:?}: expected off, fast, slow, or leq")}),
+    }
+    *state.time_integration_mode.lock().unwrap() = mode.clone();
+    // Entering leq from any other mode starts a fresh accumulation;
+    // the worker checks the reset flag on its next tick.
+    if mode == "leq" {
+        state.leq_reset_request.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    json!({"ok": true, "mode": mode})
+}
+
+pub fn get_time_integration(state: &ServerState) -> Value {
+    let mode = state.time_integration_mode.lock().unwrap().clone();
+    json!({"ok": true, "mode": mode})
+}
+
+/// Zero the Leq accumulators on the next monitor tick. Fast/slow modes
+/// don't need explicit reset — they re-prime from their next input on
+/// their own. Safe to call when no monitor is active; the flag is held
+/// until a worker consumes it.
+pub fn reset_leq(state: &ServerState) -> Value {
+    state.leq_reset_request.store(true, std::sync::atomic::Ordering::Relaxed);
+    json!({"ok": true})
+}
+
 /// Live-tune `interval` and/or `fft_n` on a running `monitor_spectrum` worker.
 /// Rejects if no monitor is active (the worker owns the Arc; without it the
 /// change has nothing to pick up).
