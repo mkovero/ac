@@ -5,9 +5,8 @@
 //! (RMS = 1/√2, mean-square = 0.5), matching the convention used
 //! throughout the Tier 1 measurement stack.
 //!
-//! CCIR-468 (ITU-R BS.468) quasi-peak measurement is intentionally out
-//! of scope here — the quasi-peak detector is a separate nontrivial
-//! module and is tracked as a follow-up issue.
+//! CCIR-468 (ITU-R BS.468-4) weighted quasi-peak measurement is delegated
+//! to [`crate::measurement::ccir468`].
 //!
 //! The duration of the input signal must be long enough for the
 //! weighting filter's transient to settle; callers can use
@@ -17,6 +16,7 @@
 
 use anyhow::{bail, Result};
 
+use crate::measurement::ccir468;
 use crate::measurement::report::StandardsCitation;
 use crate::measurement::weighting::{Weighting, WeightingFilter};
 
@@ -32,6 +32,10 @@ pub struct NoiseMetrics {
     /// IEC 61672-1 A-weighting filter, and the same settling skip is
     /// applied.
     pub a_weighted_dbfs: f64,
+    /// CCIR-468 (ITU-R BS.468-4) weighted quasi-peak level in dBFS —
+    /// filter per §1, two-stage QP detector per §2. Referenced to a
+    /// full-scale 1 kHz sine (0 dBFS).
+    pub ccir_weighted_dbfs: f64,
 }
 
 const SETTLE_SECS: f64 = 0.1;
@@ -65,12 +69,16 @@ pub fn measure_noise(samples: &[f32], sample_rate: u32) -> Result<NoiseMetrics> 
     let a_weighted = aw.apply(samples);
     let a_weighted_dbfs = rms_dbfs(&a_weighted[skip_n..]);
 
+    let ccir_weighted_dbfs = ccir468::weighted_quasi_peak_dbfs(&samples[skip_n..], sample_rate)
+        .unwrap_or(MIN_DBFS);
+
     let n_integrated = samples.len() - skip_n;
     Ok(NoiseMetrics {
         sample_rate_hz: sample_rate,
         duration_s: n_integrated as f64 / fs,
         unweighted_dbfs,
         a_weighted_dbfs,
+        ccir_weighted_dbfs,
     })
 }
 
@@ -139,6 +147,7 @@ mod tests {
         let m = measure_noise(&buf, FS).unwrap();
         assert_eq!(m.unweighted_dbfs, MIN_DBFS);
         assert_eq!(m.a_weighted_dbfs, MIN_DBFS);
+        assert_eq!(m.ccir_weighted_dbfs, MIN_DBFS);
     }
 
     #[test]
@@ -150,6 +159,20 @@ mod tests {
             m.unweighted_dbfs.abs() < 0.1,
             "full-scale 1 kHz sine should read 0 dBFS, got {:.3}",
             m.unweighted_dbfs
+        );
+    }
+
+    #[test]
+    fn ccir_weighting_is_transparent_at_1khz() {
+        // 1 kHz is the CCIR-468 calibration point — full-scale 1 kHz
+        // sine reads 0 dBFS after weighting + QP.
+        let n = FS as usize * 2;
+        let buf = sine(1000.0, 1.0, n);
+        let m = measure_noise(&buf, FS).unwrap();
+        assert!(
+            m.ccir_weighted_dbfs.abs() < 0.2,
+            "CCIR-weighted full-scale 1 kHz should read 0 dBFS, got {:.3}",
+            m.ccir_weighted_dbfs,
         );
     }
 

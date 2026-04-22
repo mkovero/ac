@@ -1,6 +1,7 @@
 //! Tier 1 — Reference measurement. Reproducible, standards-aligned,
 //! archivable. See `ARCHITECTURE.md`.
 
+pub mod ccir468;
 pub mod filterbank;
 pub mod noise;
 pub mod report;

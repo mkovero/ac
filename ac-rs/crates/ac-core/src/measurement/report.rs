@@ -120,8 +120,10 @@ pub enum MeasurementData {
         harmonics: Vec<crate::measurement::sweep::HarmonicIr>,
     },
     /// AES17 idle-channel noise — output of `measurement/noise.rs`.
-    /// `ccir_weighted_dbfs` is reserved for a future CCIR-468 quasi-peak
-    /// implementation; today it is always `None`.
+    /// `ccir_weighted_dbfs` is the ITU-R BS.468-4 weighted quasi-peak
+    /// level (see `measurement/ccir468.rs`); the field is kept `Option`
+    /// for backward compatibility with reports produced before the CCIR
+    /// detector landed.
     NoiseResult {
         sample_rate_hz: u32,
         duration_s: f64,
