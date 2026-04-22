@@ -9,7 +9,7 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 329 tests (ac-core 119, ac-cli 55, ac-daemon 43 + 10 it, ac-ui 102)
+cargo test                        # 330 tests (ac-core 119, ac-cli 55, ac-daemon 43 + 11 it, ac-ui 102)
 ```
 
 ## Crate layout

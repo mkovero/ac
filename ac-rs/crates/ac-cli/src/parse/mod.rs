@@ -280,6 +280,12 @@ pub enum CommandKind {
         level: LevelSpec,
         duration: f64,
     },
+    SweepIr {
+        f1: f64,
+        f2: f64,
+        duration: f64,
+        level: LevelSpec,
+    },
     Plot {
         start: Option<f64>,
         stop: Option<f64>,
@@ -535,6 +541,7 @@ Commands:
   generate        <sine|pink> [ch] [level] [freq]               output sine/pink
   sweep level     <start> <stop> [freq]                         sweep level with fixed frequency
   sweep frequency <freqStart freqStop> [level]                  sweep frequency with fixed level
+  sweep ir        [freqStart freqStop] [duration] [level]       Farina log-sweep impulse response
   plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD vs frequency
   plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
   monitor         [channels] [<freqStart freqStop>] [interval] [show]  live spectrum

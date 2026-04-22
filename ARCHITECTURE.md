@@ -315,9 +315,10 @@ steps — nothing is broken en route.
       measurement. Generator + inverse filter + FFT deconvolution + time-
       gated harmonic IR extraction. Populates
       `MeasurementData::ImpulseResponse`.
-- [ ] Wire `ac sweep ir` (or similar verb) to run a Farina measurement
-      end-to-end and emit `measurement/impulse_response` frames. Tracked
-      in issue #75.
+- [x] Wire `ac sweep ir` to run a Farina measurement end-to-end and emit
+      `measurement/impulse_response` + `measurement/report` frames. Fake
+      backend supported end-to-end (including integration test); real
+      JACK/CPAL `play_and_capture` is follow-up #78.
 - [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
       frequency weighting. Bilinear-mapped biquad cascade, unity gain at
       1 kHz, Class 1 tolerance verified in tests.

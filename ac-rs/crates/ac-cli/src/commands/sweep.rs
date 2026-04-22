@@ -42,6 +42,39 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
     super::generate::wait_for_stop(client, "sweep_level");
 }
 
+pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
+    let (f1, f2, duration, level) = match cmd {
+        CommandKind::SweepIr { f1, f2, duration, level } => (*f1, *f2, *duration, level),
+        _ => unreachable!(),
+    };
+    let cal = get_cal(client);
+    let level_db = level_to_dbfs(level, cal.as_ref());
+
+    println!(
+        "\n  IR sweep: {f1:.0} \u{2192} {f2:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s"
+    );
+
+    let ack = check_ack(
+        client.send_cmd(
+            &serde_json::json!({
+                "cmd": "sweep_ir",
+                "f1_hz": f1,
+                "f2_hz": f2,
+                "duration": duration,
+                "level_dbfs": level_db,
+            }),
+            None,
+        ),
+        "sweep_ir",
+    );
+    if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
+        println!("  Output: {p}");
+    }
+    println!("  Running IR measurement...\n");
+
+    super::generate::wait_for_stop(client, "sweep_ir");
+}
+
 pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let (start, stop, level, duration) = match cmd {
         CommandKind::SweepFrequency {

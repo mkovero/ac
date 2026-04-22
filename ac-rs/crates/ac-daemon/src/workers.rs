@@ -51,6 +51,7 @@ pub enum Group {
 pub fn cmd_group(name: &str) -> Option<Group> {
     match name {
         "sweep_level" | "sweep_frequency" | "generate" | "generate_pink" => Some(Group::Output),
+        "sweep_ir" => Some(Group::Exclusive),
         "monitor_spectrum" => Some(Group::Input),
         "transfer_stream"  => Some(Group::Transfer),
         "plot" | "plot_level" | "calibrate"

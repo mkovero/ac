@@ -622,6 +622,50 @@ seconds at fixed level. No capture.
 
 ---
 
+### `sweep_ir`
+
+Farina exponential log-sweep impulse-response measurement. Generates an
+ESS, plays it out the configured output, synchronously captures
+`duration + tail_s` of the measurement input, and deconvolves via the
+normalized inverse filter (`ac-core::measurement::sweep`). Emits a
+`measurement/impulse_response` frame and a full `measurement/report`.
+
+Today only the fake backend implements the required `play_and_capture`
+engine path; real JACK / CPAL buffer-playback is a follow-up.
+
+**Request**
+```json
+{
+  "cmd":          "sweep_ir",
+  "f1_hz":        <float>,   // default 20
+  "f2_hz":        <float>,   // default 20000 (must be < sr/2)
+  "duration":     <float>,   // seconds, default 1.0
+  "level_dbfs":   <float>,   // default -6
+  "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
+  "n_harmonics":  <int>,     // default 5
+  "window_len":   <int>      // IR gate length in samples, default 4096
+}
+```
+
+**Reply**
+```json
+{ "ok": true, "out_port": "<resolved-output-port>" }
+```
+
+**DATA**
+```json
+// topic: measurement/impulse_response
+{ "cmd": "sweep_ir", "data": { "kind": "impulse_response", ... } }
+
+// topic: measurement/report
+{ "cmd": "sweep_ir", "report": { "schema_version": 1, ... } }
+
+// topic: done
+{ "cmd": "sweep_ir" }
+```
+
+---
+
 ### `plot`
 
 Blocking point-by-point frequency sweep: plays a tone at each frequency and
@@ -1060,7 +1104,7 @@ Audio commands are classified into four concurrency groups:
 | `OUTPUT`    | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
 | `INPUT`     | `monitor_spectrum` |
 | `TRANSFER`  | `transfer_stream` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `probe`, `test_hardware`, `test_dut` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `probe`, `test_hardware`, `test_dut`, `sweep_ir` |
 
 Rules:
 - Only one `OUTPUT` command at a time.

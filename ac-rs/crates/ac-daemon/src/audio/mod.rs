@@ -33,6 +33,21 @@ pub trait AudioEngine: Send + 'static {
     /// Capture audio for `duration` seconds and return the samples.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>>;
 
+    /// Play `samples` out the configured output and synchronously capture
+    /// `samples.len() + tail` samples from the measurement input. Used by
+    /// Farina swept-sine IR measurement (`sweep_ir`). The returned buffer
+    /// length is `samples.len() + round(tail_s · sample_rate)`.
+    ///
+    /// Default returns an error — only the fake backend (used in tests and
+    /// `--fake-audio` mode) implements this today; real backends need a
+    /// buffer-playback path, tracked as a follow-up (see issue #75 + #78).
+    fn play_and_capture(&mut self, _samples: &[f32], _tail_s: f64) -> Result<Vec<f32>> {
+        anyhow::bail!(
+            "play_and_capture is not implemented for the {} backend",
+            self.backend_name()
+        )
+    }
+
     /// Non-blocking drain of up to `max_samples` from the capture ring,
     /// without the pre-clear that `capture_block` performs. Returns whatever
     /// has accumulated since the last call (possibly empty on backends that

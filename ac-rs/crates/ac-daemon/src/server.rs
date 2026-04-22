@@ -262,6 +262,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "list_calibrations"   => handlers::list_calibrations(state),
         "sweep_level"         => handlers::sweep_level(state, &cmd),
         "sweep_frequency"     => handlers::sweep_frequency(state, &cmd),
+        "sweep_ir"            => handlers::sweep_ir(state, &cmd),
         "plot"                => handlers::plot(state, &cmd),
         "plot_level"          => handlers::plot_level(state, &cmd),
         "monitor_spectrum"    => handlers::monitor_spectrum(state, &cmd),

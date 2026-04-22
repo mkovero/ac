@@ -102,6 +102,25 @@ impl AudioEngine for FakeEngine {
         Ok(self.make_samples_at(freq, duration))
     }
 
+    /// Fake loopback: returns `samples` delayed by a fixed number of
+    /// samples (`FAKE_LOOPBACK_DELAY_SAMPLES`), padded with trailing
+    /// zeros to `samples.len() + tail` total length. Used by the
+    /// `sweep_ir` integration test to verify the deconvolved linear IR
+    /// peaks at the expected offset.
+    fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
+        const FAKE_LOOPBACK_DELAY_SAMPLES: usize = 32;
+        let tail = (tail_s * self.sample_rate as f64).round() as usize;
+        let total = samples.len() + tail;
+        let mut out = vec![0.0f32; total];
+        for (i, &s) in samples.iter().enumerate() {
+            let j = i + FAKE_LOOPBACK_DELAY_SAMPLES;
+            if j < total {
+                out[j] = s;
+            }
+        }
+        Ok(out)
+    }
+
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         std::thread::sleep(Duration::from_secs_f64(duration));
         let meas_freq = self.effective_freq(self.input_port.as_deref());

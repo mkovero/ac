@@ -300,3 +300,63 @@ fn calibrate_prompt_reply_cycle() {
     }
     assert!(saw_done, "calibrate cycle never completed");
 }
+
+#[test]
+fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
+    // Fake backend implements `play_and_capture` as a delayed loopback
+    // (see audio/fake.rs). Running a Farina sweep through it and
+    // deconvolving should produce a linear IR with its peak at the
+    // window centre (the gate re-centres the peak on linear_ir.len()/2).
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"sweep_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let mut got_ir = false;
+    let mut got_report = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(got_ir && got_report) {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                let ir = v["data"]["linear_ir"].as_array().expect("linear_ir array");
+                assert_eq!(ir.len(), 1024, "window_len respected");
+                // Find the max-absolute sample index.
+                let (peak_idx, peak_val) = ir.iter().enumerate().fold((0usize, 0.0f64), |acc, (i, x)| {
+                    let mag = x.as_f64().unwrap_or(0.0).abs();
+                    if mag > acc.1 { (i, mag) } else { acc }
+                });
+                let centre = ir.len() / 2;
+                // Fake backend delays by 32 samples; the linear-IR gate is
+                // centred on the sweep endpoint, which after normalisation
+                // places the peak near the window centre. Allow ±64 sample
+                // tolerance for the finite-window deconvolution.
+                assert!(
+                    (peak_idx as i64 - centre as i64).abs() < 64,
+                    "peak at {peak_idx}, expected near centre {centre}"
+                );
+                assert!(peak_val > 0.3, "peak magnitude too small: {peak_val}");
+                got_ir = true;
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                assert_eq!(v["report"]["data"]["kind"], json!("impulse_response"));
+                assert_eq!(v["report"]["schema_version"], json!(1));
+                got_report = true;
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_ir, "never saw measurement/impulse_response frame");
+    assert!(got_report, "never saw measurement/report frame");
+}

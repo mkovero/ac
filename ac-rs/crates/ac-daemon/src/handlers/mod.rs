@@ -38,7 +38,7 @@ pub use admin::{
 };
 pub use audio::{
     generate, generate_pink, monitor_spectrum, plot, plot_level,
-    sweep_frequency, sweep_level,
+    sweep_frequency, sweep_ir, sweep_level,
 };
 pub use calibrate::{cal_reply, calibrate};
 pub use test_dut::{dut_reply, test_dut};

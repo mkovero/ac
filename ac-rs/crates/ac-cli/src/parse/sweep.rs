@@ -54,8 +54,21 @@ pub(super) fn parse_sweep(args: &mut Vec<String>, show_plot: bool) -> Result<Par
                 show_plot,
             })
         }
+        "ir" => {
+            let f1 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64()).unwrap_or(20.0);
+            let f2 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64()).unwrap_or(20_000.0);
+            let duration = pull(&mut tokens, TokenKind::Time).map(|v| v.as_f64()).unwrap_or(1.0);
+            let level = pull(&mut tokens, TokenKind::Level)
+                .map(|v| v.as_level())
+                .unwrap_or(LevelSpec::Dbfs(-6.0));
+            check_empty(&tokens)?;
+            Ok(ParsedCommand {
+                cmd: CommandKind::SweepIr { f1, f2, duration, level },
+                show_plot,
+            })
+        }
         other => Err(format!(
-            "unknown sweep noun: {other:?}  (level | frequency)"
+            "unknown sweep noun: {other:?}  (level | frequency | ir)"
         )),
     }
 }
