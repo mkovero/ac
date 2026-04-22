@@ -248,6 +248,78 @@ pub fn spawn(
                         inputs[slot].write(sf);
                         continue;
                     }
+                    if type_tag.as_deref() == Some("fractional_octave_leq") {
+                        // Time-integrated sidecar to `fractional_octave` (see
+                        // ZMQ.md § time-integration). Publishers emit this
+                        // immediately after the corresponding `fractional_octave`
+                        // frame; overwriting the same triple-buffer slot means
+                        // consumers paint the integrated trace rather than the
+                        // raw one whenever integration is active. Mode label is
+                        // surfaced by the overlay via `leq_duration_s` — `NaN`
+                        // for fast/slow (duration is irrelevant), real seconds
+                        // for Leq.
+                        #[derive(serde::Deserialize)]
+                        struct LeqFrame {
+                            freqs: Vec<f32>,
+                            spectrum: Vec<f32>,
+                            sr: u32,
+                            #[serde(default)]
+                            channel: Option<u32>,
+                            #[serde(default)]
+                            n_channels: Option<u32>,
+                            #[serde(default)]
+                            mode: Option<String>,
+                            #[serde(default)]
+                            duration_s: Option<f64>,
+                            #[serde(default)]
+                            xruns: u32,
+                        }
+                        let lf: LeqFrame = match serde_json::from_str(body) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                log::warn!("fractional_octave_leq parse failed: {e}");
+                                continue;
+                            }
+                        };
+                        if lf.spectrum.is_empty() {
+                            continue;
+                        }
+                        let slot = route_slot(lf.channel, &mut channel_map);
+                        let Some(slot) = slot else {
+                            if !warned_overflow {
+                                log::warn!(
+                                    "receiver: fractional_octave_leq frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                    lf.channel,
+                                    n_slots
+                                );
+                                warned_overflow = true;
+                            }
+                            continue;
+                        };
+                        status_c.connected.store(true, Ordering::Relaxed);
+                        let ns = start.elapsed().as_nanos() as u64;
+                        status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                        notify();
+                        slot_seq[slot] += 1;
+                        let leq_duration_s = match lf.mode.as_deref() {
+                            Some("leq") => lf.duration_s.or(Some(0.0)),
+                            Some("fast") | Some("slow") => Some(f64::NAN),
+                            _ => lf.duration_s,
+                        };
+                        let sf = SpectrumFrame {
+                            freqs: lf.freqs,
+                            spectrum: lf.spectrum,
+                            sr: lf.sr,
+                            channel: lf.channel,
+                            n_channels: lf.n_channels,
+                            xruns: lf.xruns,
+                            frame_id: slot_seq[slot],
+                            leq_duration_s,
+                            ..SpectrumFrame::default()
+                        };
+                        inputs[slot].write(sf);
+                        continue;
+                    }
                     if type_tag.as_deref() == Some("transfer_stream") {
                         match serde_json::from_str::<TransferFrame>(body) {
                             Ok(tf) => {

@@ -70,6 +70,7 @@ impl SyntheticSource {
                         channel: Some(ch as u32),
                         n_channels: Some(self.n_channels as u32),
                         frame_id: frame_idx + 1,
+                        leq_duration_s: None,
                     };
                     input.write(frame);
                 }

@@ -36,6 +36,7 @@ fn test_frame(freq: f32, dbfs: f32, thd: f32, thdn: f32) -> DisplayFrame {
             sr: 48000,
             clipping: false,
             xruns: 0,
+            leq_duration_s: None,
         },
         new_row: None,
     }
@@ -109,6 +110,7 @@ fn overlay_shows_spectrum_readout() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -152,6 +154,7 @@ fn overlay_shows_dbu_when_calibrated() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -191,6 +194,7 @@ fn overlay_shows_clip_when_clipping() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -226,6 +230,7 @@ fn overlay_no_clip_when_not_clipping() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -264,6 +269,7 @@ fn overlay_shows_frozen() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -300,6 +306,7 @@ fn overlay_shows_connected() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -334,6 +341,7 @@ fn overlay_shows_disconnected() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -383,6 +391,7 @@ fn overlay_shows_transfer_delay() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -429,6 +438,7 @@ fn overlay_shows_hover_db_readout() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -466,6 +476,7 @@ fn overlay_shows_notification() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
@@ -503,8 +514,93 @@ fn overlay_shows_sample_rate() {
         smoothing_frac: None,
         ioct_bpo: None,
         tier_badge: None,
+        time_integration: None,
     };
 
     let texts = run_overlay(input);
     assert!(texts.iter().any(|t| t.contains("48000 Hz")), "sample rate not found in: {texts:?}");
+}
+
+// ── Time-integration overlay tag ──────────────────────────────────
+
+#[test]
+fn overlay_shows_time_fast_tag() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        selection_order: &[],
+        transfer: None,
+        active_meas: None,
+        active_meas_idx: 0,
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: Some(crate::ui::overlay::TimeIntegrationOverlay {
+            mode: "fast",
+            tau_s: Some(0.125),
+            duration_s: None,
+        }),
+    };
+
+    let texts = run_overlay(input);
+    let has_tag = texts.iter().any(|t| t.contains("time fast") && t.contains("125 ms"));
+    assert!(has_tag, "time fast tag not found in: {texts:?}");
+}
+
+#[test]
+fn overlay_shows_leq_duration() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        selection_order: &[],
+        transfer: None,
+        active_meas: None,
+        active_meas_idx: 0,
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: Some(crate::ui::overlay::TimeIntegrationOverlay {
+            mode: "Leq",
+            tau_s: None,
+            duration_s: Some(12.5),
+        }),
+    };
+
+    let texts = run_overlay(input);
+    let has_tag = texts.iter().any(|t| t.contains("Leq") && t.contains("12.5 s"));
+    assert!(has_tag, "Leq duration tag not found in: {texts:?}");
 }

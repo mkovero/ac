@@ -20,8 +20,38 @@ use crate::render::waterfall::CellUpload as WaterfallCellUpload;
 use crate::theme;
 use crate::ui::export::{self, ScreenshotRequest};
 use crate::ui::layout;
-use crate::ui::overlay::{self, HoverInfo, HoverReadout, MonitorParamsInfo, OverlayInput};
+use crate::ui::overlay::{
+    self, HoverInfo, HoverReadout, MonitorParamsInfo, OverlayInput,
+    TimeIntegrationOverlay,
+};
 use crate::ui::stats::StatsSnapshot;
+use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
+
+use super::TimeIntegrationMode;
+
+/// Build the overlay payload describing the active time-integration
+/// state. Returns `None` when the mode is off so the overlay renders
+/// nothing; otherwise carries the mode label and its τ (for fast/slow)
+/// or running Leq duration (for Leq). Duration is read from the most
+/// recent frame's `FrameMeta::leq_duration_s` — `NaN` means the frame
+/// carries integrated data but mode doesn't have a meaningful duration.
+fn build_time_integration_overlay(
+    mode: TimeIntegrationMode,
+    frames: &[Option<crate::data::types::DisplayFrame>],
+) -> Option<TimeIntegrationOverlay> {
+    let (label, tau_s) = match mode {
+        TimeIntegrationMode::Off  => return None,
+        TimeIntegrationMode::Fast => ("fast", Some(TAU_FAST_S)),
+        TimeIntegrationMode::Slow => ("slow", Some(TAU_SLOW_S)),
+        TimeIntegrationMode::Leq  => ("Leq",  None),
+    };
+    let duration_s = frames
+        .iter()
+        .flatten()
+        .find_map(|f| f.meta.leq_duration_s)
+        .filter(|d: &f64| d.is_finite());
+    Some(TimeIntegrationOverlay { mode: label, tau_s, duration_s })
+}
 
 use super::helpers::{
     NOTIFICATION_TTL, PEAK_HOLD_DECAY, PEAK_RELEASE_DB_PER_SEC,
@@ -112,6 +142,7 @@ impl App {
                         sr:               tf.sr,
                         clipping:         false,
                         xruns:            0,
+                        leq_duration_s:   None,
                     },
                     new_row: if is_fresh { Some(spectrum) } else { None },
                 }
@@ -634,6 +665,10 @@ impl App {
         let active_palette_snap = waterfall.active_palette();
         let smoothing_snap = self.smoothing_frac;
         let ioct_bpo_snap = self.ioct_bpo;
+        let time_integration_snap = build_time_integration_overlay(
+            self.time_integration,
+            &frames,
+        );
         let peak_holds_snap = if self.peak_hold_enabled {
             self.peak_holds.clone()
         } else {
@@ -950,6 +985,7 @@ impl App {
                     smoothing_frac: smoothing_snap,
                     ioct_bpo: ioct_bpo_snap,
                     tier_badge: tier_badge_snap.clone(),
+                    time_integration: time_integration_snap.clone(),
                 },
             );
         });

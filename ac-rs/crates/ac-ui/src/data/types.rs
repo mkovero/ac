@@ -32,6 +32,15 @@ pub struct SpectrumFrame {
     /// means "no frame yet"; producers always emit ≥ 1.
     #[serde(default, skip)]
     pub frame_id: u64,
+    /// Populated by the receiver when the frame is a `fractional_octave_leq`
+    /// sidecar (see ZMQ.md § time-integration). `spectrum` then carries the
+    /// integrated per-band dBFS instead of the raw aggregation. `None` for
+    /// every other frame type. The value is the Leq accumulator duration
+    /// in seconds; `NaN` (not `None`) signals the frame is integrated but
+    /// the mode is fast/slow (duration is irrelevant). Overlay reads this
+    /// so the user knows the trace is integrated and for how long.
+    #[serde(default, skip)]
+    pub leq_duration_s: Option<f64>,
 }
 
 impl Default for SpectrumFrame {
@@ -50,6 +59,7 @@ impl Default for SpectrumFrame {
             channel: None,
             n_channels: None,
             frame_id: 0,
+            leq_duration_s: None,
         }
     }
 }
@@ -87,6 +97,11 @@ pub struct FrameMeta {
     pub clipping: bool,
     #[allow(dead_code)]
     pub xruns: u32,
+    /// Non-`None` on frames where the receiver replaced `spectrum` with
+    /// the `fractional_octave_leq` sidecar's integrated bands. `NaN` when
+    /// the mode is fast/slow (no unbounded duration); a real value when
+    /// the mode is Leq. Overlay uses this to flag the trace as integrated.
+    pub leq_duration_s: Option<f64>,
 }
 
 /// Morlet CWT waterfall column published by the daemon on the `data` topic
@@ -180,6 +195,7 @@ impl From<&SpectrumFrame> for FrameMeta {
             sr: f.sr,
             clipping: f.clipping,
             xruns: f.xruns,
+            leq_duration_s: f.leq_duration_s,
         }
     }
 }

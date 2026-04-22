@@ -81,6 +81,23 @@ pub struct OverlayInput<'a> {
     /// suppresses the line; callers set it when the current view
     /// corresponds to a live-analysis frame. See `ARCHITECTURE.md`.
     pub tier_badge: Option<String>,
+    /// Per-band time-integration status. `None` = off. When a mode is
+    /// active, rendered alongside `smooth` / `ioct` as a `time` tag so
+    /// the reader knows the trace has been integrated (EMA fast/slow)
+    /// or accumulated (Leq) rather than shown instantaneously.
+    pub time_integration: Option<TimeIntegrationOverlay>,
+}
+
+/// Overlay payload for the per-band time-integration status.
+#[derive(Debug, Clone)]
+pub struct TimeIntegrationOverlay {
+    /// Short label for the keyed mode (`"fast"`, `"slow"`, `"Leq"`).
+    pub mode: &'static str,
+    /// EMA time constant in seconds. `None` for Leq.
+    pub tau_s: Option<f64>,
+    /// Leq-accumulator wall-clock duration in seconds, if the mode is
+    /// Leq and the daemon reported it on the most recent frame.
+    pub duration_s: Option<f64>,
 }
 
 /// Label used in overlays / legends for a given cell index. Real channels
@@ -189,24 +206,39 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             Some(n) => format!("  │  ioct 1/{n} oct"),
             None => String::new(),
         };
+        let time_tag = match input.time_integration.as_ref() {
+            None => String::new(),
+            Some(t) => match (t.mode, t.tau_s, t.duration_s) {
+                (mode, Some(tau), _) => format!(
+                    "  │  time {mode} τ={:.0} ms",
+                    tau * 1000.0,
+                ),
+                (mode, None, Some(d)) if d.is_finite() => {
+                    format!("  │  {mode} {:.1} s", d)
+                }
+                (mode, _, _) => format!("  │  {mode}"),
+            },
+        };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}{}{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
                 ioct_tag,
+                time_tag,
             ),
             ViewMode::Waterfall => format!(
-                "color {:.0}..{:.0} dB  │  {}..{}{}{}",
+                "color {:.0}..{:.0} dB  │  {}..{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
                 ioct_tag,
+                time_tag,
             ),
         };
         painter.text(
