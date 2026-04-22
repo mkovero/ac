@@ -361,6 +361,140 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
+// ---------------------------------------------------------------------------
+// transfer_stream — ports of the pytest scenarios deleted when the Python
+// runtime was removed. See issue #52.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transfer_stream_missing_reference_errors() {
+    // Neither `ref_channel` nor a `pairs` array — the handler's pair
+    // parser rejects this before any worker spawns.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+    }));
+    assert_eq!(r["ok"], json!(false));
+    let err = r["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("ref_channel") || err.contains("pairs"),
+        "unexpected error message: {err:?}"
+    );
+}
+
+#[test]
+fn transfer_stream_emits_data_and_done() {
+    // `drive=true` makes the daemon play pink noise on its own output
+    // while capturing from two channels of the fake backend. Channel
+    // pair (0, 1) should produce at least one `transfer_stream` data
+    // frame carrying the expected fields.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+        "drive":        true,
+        "level_dbfs":   -12.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "unexpected REP: {r:?}");
+
+    let mut got_frame = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data"
+                && v["type"].as_str() == Some("transfer_stream") => {
+                for key in ["freqs", "magnitude_db", "phase_deg", "coherence",
+                            "delay_samples", "delay_ms"] {
+                    assert!(v.get(key).is_some(), "frame missing {key}: {v}");
+                }
+                got_frame = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_frame, "never saw a transfer_stream data frame");
+
+    let _ = c.call(json!({"cmd": "stop"}));
+    let done = c.wait_for_topic("done", Duration::from_secs(5))
+        .expect("no done frame after stop");
+    assert_eq!(done["cmd"], json!("transfer_stream"));
+}
+
+#[test]
+fn transfer_stream_default_level_ok() {
+    // `level_dbfs` omitted — the handler's documented default (−10 dBFS
+    // when `drive=true`) must be used without a REP error.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+        "drive":        true,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP rejected default level: {r:?}");
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+// ---------------------------------------------------------------------------
+// server_enable / server_disable — toggle listen_mode between local and
+// public and check the reported bind_addr. #52.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn server_enable_reports_public_mode() {
+    // server_enable reply lands before the main loop rebinds the
+    // sockets (see ZMQ.md §server_enable), but the rebind closes the
+    // connection underneath the existing REQ. Reconnect after the
+    // command to verify the new mode is reflected in `status`.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let s0 = c.call(json!({"cmd": "status"}));
+    assert_eq!(s0["listen_mode"], json!("local"));
+
+    let r = c.call(json!({"cmd": "server_enable"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["listen_mode"], json!("public"));
+    assert_eq!(r["bind_addr"], json!("*"));
+    drop(c);
+
+    // Give the daemon a moment to release and rebind.
+    thread::sleep(Duration::from_millis(500));
+    let c2 = Client::new(&d);
+    let s1 = c2.call(json!({"cmd": "status"}));
+    assert_eq!(s1["listen_mode"], json!("public"));
+}
+
+#[test]
+fn server_disable_restores_local_mode() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    c.call(json!({"cmd": "server_enable"}));
+    drop(c);
+    thread::sleep(Duration::from_millis(500));
+
+    let c2 = Client::new(&d);
+    let r = c2.call(json!({"cmd": "server_disable"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["listen_mode"], json!("local"));
+    assert_eq!(r["bind_addr"], json!("127.0.0.1"));
+    drop(c2);
+
+    thread::sleep(Duration::from_millis(500));
+    let c3 = Client::new(&d);
+    let s = c3.call(json!({"cmd": "status"}));
+    assert_eq!(s["listen_mode"], json!("local"));
+}
+
 #[test]
 fn plot_with_bpo_emits_spectrum_bands() {
     // Plot with `bpo` set: the daemon runs the concatenated sweep capture
