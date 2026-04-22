@@ -84,6 +84,7 @@ ac-core/src/
     sweep.rs               # Farina log-sweep IR deconvolution (future)
     noise.rs               # AES17 noise measurement (future)
     report.rs              # MeasurementReport type, serialization
+    report_html.rs         # self-contained HTML renderer (inline CSS + SVG)
 
   visualize/               # Tier 2
     mod.rs
@@ -324,6 +325,10 @@ steps — nothing is broken en route.
       Reports unweighted and A-weighted dBFS over a provided buffer;
       populates `MeasurementData::NoiseResult`. CCIR-468 quasi-peak is
       a follow-up (#76).
+- [x] Build `measurement/report_html.rs` — self-contained HTML renderer
+      for `MeasurementReport` (inline CSS + inline SVG plot, no external
+      assets). Wired to CLI as `ac report <path.json>`; writes sibling
+      `.html`. PDF output is a follow-up (#77).
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 

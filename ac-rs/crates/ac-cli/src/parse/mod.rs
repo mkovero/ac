@@ -355,6 +355,9 @@ pub enum CommandKind {
     Gpio {
         log: bool,
     },
+    Report {
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -478,10 +481,21 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
                 show_plot: false,
             })
         }
+        "report" => {
+            if args.len() != 1 {
+                return Err("report: requires a JSON report path".into());
+            }
+            Ok(ParsedCommand {
+                cmd: CommandKind::Report {
+                    path: args[0].clone(),
+                },
+                show_plot: false,
+            })
+        }
         other => Err(format!(
             "unknown command: {other:?}  \
              (sweep | monitor | plot | transfer | generate | calibrate | \
-             setup | devices | server | new | sessions | use | rm | diff | probe | gpio)"
+             setup | devices | server | new | sessions | use | rm | diff | probe | gpio | report)"
         )),
     }
 }
@@ -530,6 +544,7 @@ Commands:
   test dut        [compare] [level]                              DUT characterization (requires 2 loopbacks)
   probe                                                         auto-detect analog ports and loopback pairs
   dmm                                                           read AC Vrms from configured DMM over SCPI
+  report          <path>                                        render MeasurementReport JSON to HTML (sibling .html)
   setup           [output <N>] [input <N>] [reference <N>]
                   [range <freqStart freqStop>]
                   [dmm <ipaddr>] [gpio <serialDevice>]

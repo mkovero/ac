@@ -6,6 +6,7 @@ pub mod gpio;
 pub mod monitor;
 pub mod plot;
 pub mod probe;
+pub mod report;
 pub mod server;
 pub mod session;
 pub mod setup;
@@ -57,7 +58,8 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         | CommandKind::SessionList
         | CommandKind::SessionUse { .. }
         | CommandKind::SessionRm { .. }
-        | CommandKind::SessionDiff { .. } => unreachable!(),
+        | CommandKind::SessionDiff { .. }
+        | CommandKind::Report { .. } => unreachable!(),
     }
 }
 
