@@ -6,4 +6,5 @@ pub mod constants;
 pub mod conversions;
 pub(crate) mod fft_cache;
 pub mod generator;
+pub mod reference_levels;
 pub mod types;

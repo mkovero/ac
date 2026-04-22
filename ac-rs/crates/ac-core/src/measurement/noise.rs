@@ -19,6 +19,7 @@ use anyhow::{bail, Result};
 use crate::measurement::ccir468;
 use crate::measurement::report::StandardsCitation;
 use crate::measurement::weighting::{Weighting, WeightingFilter};
+use crate::shared::reference_levels::{mean_sq_to_dbfs, MIN_DBFS};
 
 /// Result of an AES17 idle-channel noise measurement.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,9 +40,6 @@ pub struct NoiseMetrics {
 }
 
 const SETTLE_SECS: f64 = 0.1;
-/// Floor in dBFS below which results are clipped. Protects callers
-/// from `-inf` on digital silence.
-const MIN_DBFS: f64 = -200.0;
 
 /// Measure idle-channel noise on `samples` at `sample_rate`. The
 /// returned `NoiseMetrics` reports both the unweighted and A-weighted
@@ -82,8 +80,8 @@ pub fn measure_noise(samples: &[f32], sample_rate: u32) -> Result<NoiseMetrics> 
     })
 }
 
-/// RMS of `samples`, expressed in dBFS where 0 dBFS ↔ a full-scale
-/// sine (mean-square = 0.5). Clipped at [`MIN_DBFS`].
+/// RMS of `samples`, expressed in dBFS via
+/// [`mean_sq_to_dbfs`]. Empty input → [`MIN_DBFS`].
 fn rms_dbfs(samples: &[f32]) -> f64 {
     if samples.is_empty() {
         return MIN_DBFS;
@@ -93,11 +91,7 @@ fn rms_dbfs(samples: &[f32]) -> f64 {
         .map(|&v| (v as f64).powi(2))
         .sum::<f64>()
         / samples.len() as f64;
-    if mean_sq <= 0.0 {
-        return MIN_DBFS;
-    }
-    let db = 10.0 * (mean_sq / 0.5).log10();
-    db.max(MIN_DBFS)
+    mean_sq_to_dbfs(mean_sq)
 }
 
 pub fn citation() -> StandardsCitation {

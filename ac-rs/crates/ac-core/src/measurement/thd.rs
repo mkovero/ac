@@ -18,6 +18,7 @@ use anyhow::{bail, Result};
 use crate::measurement::report::StandardsCitation;
 use crate::shared::constants::{FUNDAMENTAL_HZ, NUM_HARMONICS, SAMPLERATE};
 use crate::shared::fft_cache::{freq_axis, real_fft_plan, with_hann_window};
+use crate::shared::reference_levels::amplitude_to_dbfs;
 use crate::shared::types::AnalysisResult;
 
 /// Citation for a `MeasurementReport` populated from [`analyze`] output.
@@ -111,7 +112,7 @@ pub fn analyze(
         spec[hi..].iter().map(|x| x * x).sum::<f64>();
     let thdn = thdn_sq.sqrt() / f1_amp * 100.0;
 
-    let fundamental_dbfs = 20.0 * f1_amp.max(1e-12).log10();
+    let fundamental_dbfs = amplitude_to_dbfs(f1_amp);
 
     let trim = ((n as f64 * 0.05) as usize).max(1);
     let rms_slice = &mono[trim..n - trim];
@@ -155,7 +156,7 @@ pub fn analyze(
     let res_slice = &residual[trim..n - trim];
     let residual_rms =
         (res_slice.iter().map(|x| x * x).sum::<f64>() / res_slice.len() as f64).sqrt();
-    let noise_floor_dbfs = 20.0 * residual_rms.max(1e-12).log10();
+    let noise_floor_dbfs = amplitude_to_dbfs(residual_rms);
 
     let clipping = mono[trim..n - trim].iter().any(|&x| x.abs() >= 0.9999);
 

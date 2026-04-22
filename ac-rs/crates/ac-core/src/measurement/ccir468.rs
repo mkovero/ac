@@ -28,6 +28,7 @@ use realfft::num_complex::Complex;
 use realfft::RealFftPlanner;
 
 use crate::measurement::report::StandardsCitation;
+use crate::shared::reference_levels::MIN_DBFS;
 
 // ---------------------------------------------------------------------------
 // LC weighting network — BS.468-4 §1, Figure 1a.
@@ -225,8 +226,6 @@ pub fn quasi_peak(samples: &[f32], sample_rate: u32) -> f64 {
 // ---------------------------------------------------------------------------
 // High-level: CCIR-weighted QP level in dBFS.
 // ---------------------------------------------------------------------------
-
-const MIN_DBFS: f64 = -200.0;
 
 /// CCIR-468 weighted quasi-peak level in dBFS, referenced to a full-
 /// scale 1 kHz sine (peak = 1.0 → 0 dBFS). Applies the weighting filter
