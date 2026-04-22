@@ -86,6 +86,11 @@ pub struct OverlayInput<'a> {
     /// the reader knows the trace has been integrated (EMA fast/slow)
     /// or accumulated (Leq) rather than shown instantaneously.
     pub time_integration: Option<TimeIntegrationOverlay>,
+    /// Per-band frequency weighting — `"A"`, `"C"`, or `"Z"`. `None`
+    /// when the user hasn't picked a curve (`Off` in the app state).
+    /// Rendered as a `wt A` tag alongside the other per-band tags so
+    /// the reader can distinguish a weighted trace at a glance.
+    pub band_weighting: Option<&'static str>,
 }
 
 /// Overlay payload for the per-band time-integration status.
@@ -206,6 +211,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             Some(n) => format!("  │  ioct 1/{n} oct"),
             None => String::new(),
         };
+        let wt_tag = match input.band_weighting {
+            Some(t) => format!("  │  wt {t}"),
+            None => String::new(),
+        };
         let time_tag = match input.time_integration.as_ref() {
             None => String::new(),
             Some(t) => match (t.mode, t.tau_s, t.duration_s) {
@@ -221,23 +230,25 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
                 ioct_tag,
+                wt_tag,
                 time_tag,
             ),
             ViewMode::Waterfall => format!(
-                "color {:.0}..{:.0} dB  │  {}..{}{}{}{}",
+                "color {:.0}..{:.0} dB  │  {}..{}{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
                 format_hz(view.freq_max).trim(),
                 smooth_tag,
                 ioct_tag,
+                wt_tag,
                 time_tag,
             ),
         };

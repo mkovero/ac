@@ -8,6 +8,7 @@ use ac_core::shared::calibration::Calibration;
 use ac_core::visualize::time_integration::{
     EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S,
 };
+use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
@@ -126,6 +127,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let ioct_bpo_shared = state.ioct_bpo.clone();
     let time_integration_shared = state.time_integration_mode.clone();
     let leq_reset_shared = state.leq_reset_request.clone();
+    let band_weighting_shared = state.band_weighting.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
@@ -297,7 +299,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
                     // extra DSP cost when enabled.
                     if let Some(bpo) = *ioct_bpo_shared.lock().unwrap() {
-                        let (band_centres, band_levels) =
+                        let (band_centres, mut band_levels) =
                             ac_core::visualize::fractional_octave::cwt_to_fractional_octave(
                                 &cwt_mags,
                                 &cwt_freqs,
@@ -305,6 +307,20 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 ac_core::visualize::cwt::DEFAULT_F_MIN,
                                 ac_core::visualize::cwt::default_f_max(sr),
                             );
+                        // Per-band frequency weighting (off/A/C/Z). Off
+                        // and Z share the identity curve; applying is a
+                        // no-op then, but we still tag the frame so the
+                        // UI can distinguish "weighting explicitly Z"
+                        // from "no weighting picked".
+                        let weighting_tag = band_weighting_shared.lock().unwrap().clone();
+                        let weighting_curve = WeightingCurve::from_tag(&weighting_tag);
+                        if let Some(curve) = weighting_curve {
+                            if !matches!(curve, WeightingCurve::Z) {
+                                for (level, &fc) in band_levels.iter_mut().zip(band_centres.iter()) {
+                                    *level += curve.db_offset(fc as f64) as f32;
+                                }
+                            }
+                        }
                         let frac_frame = json!({
                             "type":       "fractional_octave",
                             "cmd":        "monitor_spectrum",
@@ -312,6 +328,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             "n_channels": n_channels,
                             "sr":         sr,
                             "bpo":        bpo,
+                            "weighting":  weighting_tag,
                             "freqs":      band_centres,
                             "spectrum":   band_levels.clone(),
                             "timestamp":  ts_ns,
@@ -351,6 +368,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     "n_channels": n_channels,
                                     "sr":         sr,
                                     "bpo":        bpo,
+                                    "weighting":  weighting_tag,
                                     "mode":       cur_ti_mode,
                                     "tau_s":      tau_s,
                                     "duration_s": if dur_s.is_finite() { json!(dur_s) } else { Value::Null },

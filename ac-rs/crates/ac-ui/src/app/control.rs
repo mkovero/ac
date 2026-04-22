@@ -210,6 +210,23 @@ impl App {
         }
     }
 
+    /// Push the current `band_weighting` mode to the daemon.
+    pub(super) fn send_band_weighting(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let mode = self.band_weighting.as_str();
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("wt: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({ "cmd": "set_band_weighting", "mode": mode });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("set_band_weighting failed: {e}");
+            self.notify("wt: ctrl error");
+        }
+    }
+
     /// Push the current `time_integration` mode to the daemon.
     pub(super) fn send_time_integration(&mut self) {
         if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {

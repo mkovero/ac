@@ -665,6 +665,7 @@ impl App {
         let active_palette_snap = waterfall.active_palette();
         let smoothing_snap = self.smoothing_frac;
         let ioct_bpo_snap = self.ioct_bpo;
+        let band_weighting_snap = self.band_weighting.overlay_tag();
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -986,6 +987,7 @@ impl App {
                     ioct_bpo: ioct_bpo_snap,
                     tier_badge: tier_badge_snap.clone(),
                     time_integration: time_integration_snap.clone(),
+                    band_weighting: band_weighting_snap,
                 },
             );
         });

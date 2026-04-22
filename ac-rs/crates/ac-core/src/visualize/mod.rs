@@ -8,3 +8,4 @@ pub mod fractional_octave;
 pub mod spectrum;
 pub mod time_integration;
 pub mod transfer;
+pub mod weighting_curves;

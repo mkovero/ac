@@ -95,6 +95,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
 | `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
 | `Shift+O` | Cycle fractional-octave CWT aggregation (CWT mode only): off → 1/1 → 1/3 → 1/6 → 1/12 → 1/24 → off. Replaces the displayed CWT column with summed-power per band; preserves single-tone dBFS at synthetic isolated scales (kernel-overlap drift on real signals — see `ac-core::fractional_octave`); state shown top-right |
+| `A` | Cycle per-band frequency weighting: off → A → C → Z → off. Daemon adds the IEC 61672-1 Annex E dB offset at each band centre before emitting `fractional_octave` / `fractional_octave_leq`. Display-only — same Morlet-CWT caveat. |
 | `I` | Cycle per-band time integration: off → fast (τ=125 ms) → slow (τ=1 s) → Leq → off. Daemon emits a `fractional_octave_leq` sidecar frame when non-off. Display-only — not IEC 61672 SPL (upstream aggregation is Morlet CWT, not IEC 61260 filters). |
 | `Shift+I` | Reset Leq accumulators on the daemon. Fast/slow modes ignore it — they re-prime from their next input. |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |

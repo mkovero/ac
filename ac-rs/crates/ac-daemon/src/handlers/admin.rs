@@ -240,6 +240,33 @@ pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true, "bpo": bpo})
 }
 
+/// Set the frequency-weighting curve applied to every band level in
+/// the live `fractional_octave` / `fractional_octave_leq` frames.
+/// One of `off`, `a`, `c`, `z`. `off` and `z` are functionally the
+/// same (identity curve); both are accepted so the protocol can
+/// distinguish "user hasn't picked one" from "user explicitly picked
+/// Z" in UI affordances. Case-insensitive; the reply echoes the
+/// canonical lowercase form. Server-global; picked up by the next
+/// monitor tick.
+pub fn set_band_weighting(state: &ServerState, cmd: &Value) -> Value {
+    let mode = match cmd.get("mode").and_then(Value::as_str) {
+        Some(m) => m.to_ascii_lowercase(),
+        None => return json!({"ok": false, "error": "missing 'mode' field"}),
+    };
+    match mode.as_str() {
+        "off" | "a" | "c" | "z" => {}
+        other => return json!({"ok": false,
+            "error": format!("invalid mode {other:?}: expected off, a, c, or z")}),
+    }
+    *state.band_weighting.lock().unwrap() = mode.clone();
+    json!({"ok": true, "mode": mode})
+}
+
+pub fn get_band_weighting(state: &ServerState) -> Value {
+    let mode = state.band_weighting.lock().unwrap().clone();
+    json!({"ok": true, "mode": mode})
+}
+
 /// Set the per-band time-integration mode applied to the live
 /// `fractional_octave` frames: `off`, `fast` (τ=125 ms), `slow` (τ=1 s),
 /// or `leq` (unbounded). When non-`off`, the monitor worker publishes a

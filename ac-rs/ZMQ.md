@@ -274,8 +274,9 @@ column the `cwt` frame carries — there is no second CWT cost.
   "n_channels": <int>,
   "sr":         <int>,
   "bpo":        <int>,            // bins per octave: 1, 3, 6, 12, or 24
+  "weighting":  "off" | "a" | "c" | "z",
   "freqs":      [<float>, ...],   // band centres (Hz), anchored at 1 kHz
-  "spectrum":   [<float>, ...],   // dBFS per band
+  "spectrum":   [<float>, ...],   // dBFS per band (post-weighting offset)
   "timestamp":  <int>,            // UNIX-epoch nanoseconds
   "xruns":      <int>
 }
@@ -307,6 +308,7 @@ via `set_time_integration`; Leq can be zeroed live via `reset_leq`.
   "n_channels": <int>,
   "sr":         <int>,
   "bpo":        <int>,
+  "weighting":  "off" | "a" | "c" | "z",
   "mode":       "fast" | "slow" | "leq",
   "tau_s":      <float> | null,  // EMA time constant; null for leq
   "duration_s": <float> | null,  // Leq-accumulator seconds; null for fast/slow
@@ -449,6 +451,53 @@ setting unchanged.
 **Reply**
 ```json
 { "ok": true, "bpo": <int> }
+```
+
+---
+
+### `set_band_weighting`
+
+Sets the frequency-weighting curve applied to every band level before
+the daemon emits the `fractional_octave` / `fractional_octave_leq`
+frames. Adds the IEC 61672-1 Annex E dB offset at each band centre.
+
+**Request**
+```json
+{ "cmd": "set_band_weighting", "mode": "off" | "a" | "c" | "z" }
+```
+
+- `off` — identity (no offset applied; default at startup).
+- `a` — A-weighting per IEC 61672-1 Annex E.
+- `c` — C-weighting per IEC 61672-1 Annex E.
+- `z` — explicitly flat (identity); distinct from `off` only so UI
+  affordances can distinguish "user hasn't picked" from "user picked Z".
+
+Case-insensitive. Unknown values reply `{ "ok": false, ... }` and leave
+the current setting unchanged.
+
+**Reply**
+```json
+{ "ok": true, "mode": "a" }
+```
+
+Note: same caveat as the upstream `fractional_octave` frame — Morlet
+CWT aggregation is not an IEC 61260 filterbank, so the weighted output
+is display-only and must not be quoted as an IEC 61672 SPL reading.
+
+---
+
+### `get_band_weighting`
+
+Returns the current weighting curve.
+
+**Request**
+```json
+{ "cmd": "get_band_weighting" }
+```
+
+**Reply**
+```json
+{ "ok": true, "mode": "off" | "a" | "c" | "z" }
 ```
 
 ---

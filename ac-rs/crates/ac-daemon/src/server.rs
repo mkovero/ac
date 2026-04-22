@@ -63,6 +63,14 @@ pub struct ServerState {
     /// Read every tick by the `monitor_spectrum` worker so `set_ioct_bpo`
     /// takes effect live.
     pub ioct_bpo:      Arc<Mutex<Option<u32>>>,
+    /// Frequency-weighting curve applied to each band level before the
+    /// `fractional_octave` / `fractional_octave_leq` frames are emitted.
+    /// One of `"off"` (identity), `"a"`, `"c"`, `"z"`. `"off"` and
+    /// `"z"` are functionally identical; both are accepted so the
+    /// wire protocol mirrors UI affordances (`off` key state vs `Z`
+    /// mode tag). Toggled via `set_band_weighting` and read every tick
+    /// by the monitor worker — no restart required.
+    pub band_weighting: Arc<Mutex<String>>,
     /// Time-integration mode applied to each `fractional_octave` frame. One of
     /// `"off"`, `"fast"`, `"slow"`, `"leq"`. When non-`off`, the worker
     /// publishes an additional `fractional_octave_leq` frame per channel
@@ -139,6 +147,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cwt_sigma:     Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
         cwt_n_scales:  Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
         ioct_bpo:      Arc::new(Mutex::new(None)),
+        band_weighting: Arc::new(Mutex::new("off".to_string())),
         time_integration_mode: Arc::new(Mutex::new("off".to_string())),
         leq_reset_request:     Arc::new(std::sync::atomic::AtomicBool::new(false)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
@@ -281,6 +290,8 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
         "get_analysis_mode"   => handlers::get_analysis_mode(state),
         "set_ioct_bpo"        => handlers::set_ioct_bpo(state, &cmd),
+        "set_band_weighting"  => handlers::set_band_weighting(state, &cmd),
+        "get_band_weighting"  => handlers::get_band_weighting(state),
         "set_time_integration" => handlers::set_time_integration(state, &cmd),
         "get_time_integration" => handlers::get_time_integration(state),
         "reset_leq"           => handlers::reset_leq(state),

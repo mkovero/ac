@@ -45,6 +45,57 @@ pub enum TimeIntegrationMode {
     Leq,
 }
 
+/// Per-band frequency weighting toggled by the `A` key and mirrored to
+/// the daemon via `set_band_weighting`. `Off` means no curve applied;
+/// `Z` is the identity curve and is functionally identical to `Off`
+/// but distinct in the UI so the user can see "explicitly picked Z"
+/// in the overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandWeighting {
+    Off,
+    A,
+    C,
+    Z,
+}
+
+impl BandWeighting {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::A,
+            Self::A   => Self::C,
+            Self::C   => Self::Z,
+            Self::Z   => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::A   => "a",
+            Self::C   => "c",
+            Self::Z   => "z",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "weighting: off",
+            Self::A   => "weighting: A",
+            Self::C   => "weighting: C",
+            Self::Z   => "weighting: Z",
+        }
+    }
+
+    pub fn overlay_tag(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::A   => Some("A"),
+            Self::C   => Some("C"),
+            Self::Z   => Some("Z"),
+        }
+    }
+}
+
 impl TimeIntegrationMode {
     pub fn next(self) -> Self {
         match self {
@@ -146,6 +197,13 @@ pub struct App {
     /// [`TimeIntegrationMode::Off`]. Consumed for rendering by the
     /// spectrum view (follow-up); today it is control-surface only.
     time_integration: TimeIntegrationMode,
+    /// Per-band frequency-weighting curve mirrored to the daemon via
+    /// `set_band_weighting`. Cycled by `A`; the daemon applies the
+    /// corresponding dB offset to each band level before emitting the
+    /// `fractional_octave` / `fractional_octave_leq` frames. `Off` and
+    /// `Z` send the same wire value for the daemon but differ here so
+    /// the overlay tag distinguishes the two user intents.
+    band_weighting: BandWeighting,
     /// Live FFT monitor knobs (interval 1 ms steps in [1, 1000] ms;
     /// `MONITOR_FFT_N_LADDER` for N). Mutated by plain arrow keys in FFT mode
     /// and pushed to the daemon via `set_monitor_params`.
@@ -306,6 +364,7 @@ impl App {
             cwt_n_scales: 512,
             ioct_bpo: None,
             time_integration: TimeIntegrationMode::Off,
+            band_weighting: BandWeighting::Off,
             // Auto-scaled on every N change (arrow Up/Down) and at the
             // first frame (once sr is known). Seeded from the default N
             // assuming 48 kHz so the very first tick doesn't overshoot.

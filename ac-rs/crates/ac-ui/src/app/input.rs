@@ -559,6 +559,11 @@ impl App {
                     smoothing::label(self.smoothing_frac),
                 ));
             }
+            KeyCode::KeyA => {
+                self.band_weighting = self.band_weighting.next();
+                self.send_band_weighting();
+                self.notify(self.band_weighting.label());
+            }
             KeyCode::KeyI if self.modifiers.shift_key() => {
                 // Shift+I — zero Leq accumulators on the daemon. Only
                 // meaningful in Leq mode; in other modes the flag is

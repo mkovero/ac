@@ -111,6 +111,7 @@ fn overlay_shows_spectrum_readout() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -155,6 +156,7 @@ fn overlay_shows_dbu_when_calibrated() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -195,6 +197,7 @@ fn overlay_shows_clip_when_clipping() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -231,6 +234,7 @@ fn overlay_no_clip_when_not_clipping() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -270,6 +274,7 @@ fn overlay_shows_frozen() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -307,6 +312,7 @@ fn overlay_shows_connected() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -342,6 +348,7 @@ fn overlay_shows_disconnected() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -392,6 +399,7 @@ fn overlay_shows_transfer_delay() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -439,6 +447,7 @@ fn overlay_shows_hover_db_readout() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -477,6 +486,7 @@ fn overlay_shows_notification() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -515,6 +525,7 @@ fn overlay_shows_sample_rate() {
         ioct_bpo: None,
         tier_badge: None,
         time_integration: None,
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
@@ -557,11 +568,50 @@ fn overlay_shows_time_fast_tag() {
             tau_s: Some(0.125),
             duration_s: None,
         }),
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);
     let has_tag = texts.iter().any(|t| t.contains("time fast") && t.contains("125 ms"));
     assert!(has_tag, "time fast tag not found in: {texts:?}");
+}
+
+#[test]
+fn overlay_shows_band_weighting_tag() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        selection_order: &[],
+        transfer: None,
+        active_meas: None,
+        active_meas_idx: 0,
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: Some("A"),
+    };
+
+    let texts = run_overlay(input);
+    let has_tag = texts.iter().any(|t| t.contains("wt A"));
+    assert!(has_tag, "wt A tag not found in: {texts:?}");
 }
 
 #[test]
@@ -598,6 +648,7 @@ fn overlay_shows_leq_duration() {
             tau_s: None,
             duration_s: Some(12.5),
         }),
+        band_weighting: None,
     };
 
     let texts = run_overlay(input);

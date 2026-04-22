@@ -419,6 +419,53 @@ fn reset_leq_accepted_when_idle() {
 }
 
 // ---------------------------------------------------------------------------
+// Band weighting (A/C/Z) — IEC 61672-style curves applied to each
+// fractional-octave band before publish. See issue #61.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn band_weighting_default_is_off() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "get_band_weighting"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["mode"], json!("off"));
+}
+
+#[test]
+fn band_weighting_accepts_valid_modes() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    for mode in ["off", "a", "c", "z"] {
+        let r = c.call(json!({"cmd": "set_band_weighting", "mode": mode}));
+        assert_eq!(r["ok"], json!(true), "set {mode} failed: {r}");
+        assert_eq!(r["mode"], json!(mode));
+        let g = c.call(json!({"cmd": "get_band_weighting"}));
+        assert_eq!(g["mode"], json!(mode));
+    }
+}
+
+#[test]
+fn band_weighting_rejects_invalid_mode() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_band_weighting", "mode": "b"}));
+    assert_eq!(r["ok"], json!(false));
+    assert!(r["error"].as_str().unwrap_or("").contains("invalid mode"));
+    let g = c.call(json!({"cmd": "get_band_weighting"}));
+    assert_eq!(g["mode"], json!("off"));
+}
+
+#[test]
+fn band_weighting_mode_is_case_insensitive() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_band_weighting", "mode": "A"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["mode"], json!("a"));
+}
+
+// ---------------------------------------------------------------------------
 // transfer_stream — ports of the pytest scenarios deleted when the Python
 // runtime was removed. See issue #52.
 // ---------------------------------------------------------------------------
