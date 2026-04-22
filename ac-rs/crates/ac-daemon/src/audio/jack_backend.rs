@@ -54,6 +54,14 @@ struct SharedState {
     // waiter wakes within microseconds of data arriving instead of polling
     // on a 10 ms sleep.
     waker:    Mutex<Option<Thread>>,
+    // One-shot playback for `play_and_capture` (Farina IR stimulus). When
+    // `one_shot_active` is set, the RT callback fills `out_buf` from
+    // `one_shot_buf[one_shot_pos..]` and advances `one_shot_pos`, ignoring
+    // the looping tone. When the buffer is exhausted it clears
+    // `one_shot_active` and falls back to silence.
+    one_shot_buf:    ArcSwap<Vec<f32>>,
+    one_shot_pos:    AtomicUsize,
+    one_shot_active: AtomicBool,
 }
 
 /// Main-thread → RT-handler hand-off for a freshly-registered ref input.
@@ -99,6 +107,9 @@ impl JackEngine {
                 silence:  AtomicBool::new(true),
                 xruns:    AtomicUsize::new(0),
                 waker:    Mutex::new(None),
+                one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
+                one_shot_pos:    AtomicUsize::new(0),
+                one_shot_active: AtomicBool::new(false),
             }),
             ring_cons:     None,
             ring_ref_cons: Vec::new(),
@@ -139,12 +150,35 @@ fn fill_tone(out: &mut [f32], tone: &[f32], mut pos: usize) -> usize {
     pos
 }
 
+/// Fill `out` from `buf` starting at `pos`, without wrapping. Zero-pads
+/// the tail if `buf` runs out mid-fill. Returns `(new_pos, exhausted)`.
+fn fill_one_shot(out: &mut [f32], buf: &[f32], pos: usize) -> (usize, bool) {
+    let remaining = buf.len().saturating_sub(pos);
+    let n = out.len().min(remaining);
+    if n > 0 {
+        out[..n].copy_from_slice(&buf[pos..pos + n]);
+    }
+    for s in &mut out[n..] {
+        *s = 0.0;
+    }
+    let new_pos = pos + n;
+    (new_pos, new_pos >= buf.len())
+}
+
 impl jack::ProcessHandler for Process {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
         let out_buf = self.out_port.as_mut_slice(scope);
         let in_buf  = self.in_port.as_slice(scope);
 
-        if self.state.silence.load(Ordering::Relaxed) {
+        if self.state.one_shot_active.load(Ordering::Acquire) {
+            let buf = self.state.one_shot_buf.load();
+            let pos = self.state.one_shot_pos.load(Ordering::Relaxed);
+            let (new_pos, done) = fill_one_shot(out_buf, &buf, pos);
+            self.state.one_shot_pos.store(new_pos, Ordering::Relaxed);
+            if done {
+                self.state.one_shot_active.store(false, Ordering::Release);
+            }
+        } else if self.state.silence.load(Ordering::Relaxed) {
             out_buf.fill(0.0);
         } else {
             let tone = self.state.tone_buf.load();
@@ -310,6 +344,44 @@ impl AudioEngine for JackEngine {
 
     fn set_silence(&mut self) {
         self.state.silence.store(true, Ordering::Relaxed);
+    }
+
+    fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
+        if samples.is_empty() {
+            anyhow::bail!("play_and_capture: empty stimulus");
+        }
+        let sr = self.sample_rate as f64;
+        let tail_n = (tail_s.max(0.0) * sr) as usize;
+        let n_total = samples.len() + tail_n;
+
+        // Publish buffer and reset position BEFORE enabling — the RT
+        // callback only reads one_shot_buf / one_shot_pos once it sees
+        // one_shot_active=true (Acquire on the flag synchronises with the
+        // Release store below).
+        self.state.one_shot_buf.store(Arc::new(samples.to_vec()));
+        self.state.one_shot_pos.store(0, Ordering::Relaxed);
+        self.state.silence.store(true, Ordering::Relaxed);
+        if let Some(ref mut c) = self.ring_cons {
+            c.clear();
+        }
+        self.state.one_shot_active.store(true, Ordering::Release);
+
+        let duration_s = n_total as f64 / sr;
+        let wait = self.wait_ring(n_total, duration_s + 2.0);
+
+        // Ensure RT stops consuming one-shot even if we bailed early.
+        self.state.one_shot_active.store(false, Ordering::Release);
+
+        wait?;
+
+        let mut out = vec![0.0f32; n_total];
+        let got = self
+            .ring_cons
+            .as_mut()
+            .map(|c| c.pop_slice(&mut out))
+            .unwrap_or(0);
+        out.truncate(got);
+        Ok(out)
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
@@ -512,6 +584,58 @@ mod tests {
     use super::*;
     use ringbuf::HeapRb;
 
+    // ---- fill_one_shot ----
+
+    #[test]
+    fn one_shot_fills_full_buffer() {
+        let buf = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let mut out = [0.0f32; 3];
+        let (pos, done) = fill_one_shot(&mut out, &buf, 0);
+        assert_eq!(out, [1.0, 2.0, 3.0]);
+        assert_eq!(pos, 3);
+        assert!(!done);
+    }
+
+    #[test]
+    fn one_shot_exhausts_and_pads_zero() {
+        let buf = [1.0f32, 2.0, 3.0];
+        let mut out = [9.0f32; 5];
+        let (pos, done) = fill_one_shot(&mut out, &buf, 0);
+        assert_eq!(out, [1.0, 2.0, 3.0, 0.0, 0.0]);
+        assert_eq!(pos, 3);
+        assert!(done);
+    }
+
+    #[test]
+    fn one_shot_resumes_from_mid_position() {
+        let buf = [1.0f32, 2.0, 3.0, 4.0];
+        let mut out = [0.0f32; 2];
+        let (pos, done) = fill_one_shot(&mut out, &buf, 2);
+        assert_eq!(out, [3.0, 4.0]);
+        assert_eq!(pos, 4);
+        assert!(done);
+    }
+
+    #[test]
+    fn one_shot_with_empty_buffer_emits_silence() {
+        let buf: &[f32] = &[];
+        let mut out = [9.0f32; 3];
+        let (pos, done) = fill_one_shot(&mut out, buf, 0);
+        assert_eq!(out, [0.0; 3]);
+        assert_eq!(pos, 0);
+        assert!(done);
+    }
+
+    #[test]
+    fn one_shot_position_past_end_emits_silence() {
+        let buf = [1.0f32, 2.0];
+        let mut out = [9.0f32; 3];
+        let (pos, done) = fill_one_shot(&mut out, &buf, 5);
+        assert_eq!(out, [0.0; 3]);
+        assert_eq!(pos, 5);
+        assert!(done);
+    }
+
     // ---- fill_tone ----
 
     #[test]
@@ -628,6 +752,9 @@ mod tests {
             silence:  AtomicBool::new(true),
             xruns:    AtomicUsize::new(0),
             waker:    Mutex::new(None),
+            one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
+            one_shot_pos:    AtomicUsize::new(0),
+            one_shot_active: AtomicBool::new(false),
         });
         assert_eq!(state.xruns.load(Ordering::Relaxed), 0);
         state.xruns.fetch_add(1, Ordering::Relaxed);
@@ -644,6 +771,9 @@ mod tests {
             silence:  AtomicBool::new(false),
             xruns:    AtomicUsize::new(0),
             waker:    Mutex::new(None),
+            one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
+            one_shot_pos:    AtomicUsize::new(0),
+            one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0.0f32; 2];
         fill_tone(&mut out, &state.tone_buf.load(), 0);

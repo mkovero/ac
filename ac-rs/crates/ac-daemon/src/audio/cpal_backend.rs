@@ -30,6 +30,13 @@ struct SharedState {
     silence:  AtomicBool,
     ring:     Mutex<Vec<f32>>,
     xruns:    AtomicUsize,
+    // One-shot playback for `play_and_capture`. When `one_shot_active`
+    // is set, output callbacks fill from `one_shot_buf[one_shot_pos..]`
+    // instead of the looping tone; when the buffer is exhausted the flag
+    // is cleared and playback falls back to silence.
+    one_shot_buf:    Mutex<Vec<f32>>,
+    one_shot_pos:    AtomicUsize,
+    one_shot_active: AtomicBool,
 }
 
 pub struct CpalEngine {
@@ -55,6 +62,9 @@ impl CpalEngine {
                 silence:  AtomicBool::new(true),
                 ring:     Mutex::new(Vec::new()),
                 xruns:    AtomicUsize::new(0),
+                one_shot_buf:    Mutex::new(Vec::new()),
+                one_shot_pos:    AtomicUsize::new(0),
+                one_shot_active: AtomicBool::new(false),
             }),
             _out_stream: None,
             _in_stream:  None,
@@ -66,7 +76,37 @@ impl CpalEngine {
 // Output callback helpers
 // ---------------------------------------------------------------------------
 
+/// If one-shot playback is active, drain `data.len()` samples from
+/// `one_shot_buf`, zero-padding the tail if the buffer is exhausted
+/// (and clearing `one_shot_active` in that case). Returns `true` when
+/// it handled the fill, `false` when the caller should fall through to
+/// silence / looping tone.
+fn try_fill_one_shot(data: &mut [f32], state: &SharedState) -> bool {
+    if !state.one_shot_active.load(Ordering::Acquire) {
+        return false;
+    }
+    let buf = state.one_shot_buf.lock().unwrap();
+    let pos = state.one_shot_pos.load(Ordering::Relaxed);
+    let remaining = buf.len().saturating_sub(pos);
+    let n = data.len().min(remaining);
+    if n > 0 {
+        data[..n].copy_from_slice(&buf[pos..pos + n]);
+    }
+    for s in &mut data[n..] {
+        *s = 0.0;
+    }
+    let new_pos = pos + n;
+    state.one_shot_pos.store(new_pos, Ordering::Relaxed);
+    if new_pos >= buf.len() {
+        state.one_shot_active.store(false, Ordering::Release);
+    }
+    true
+}
+
 fn fill_output_f32(data: &mut [f32], state: &SharedState) {
+    if try_fill_one_shot(data, state) {
+        return;
+    }
     let tone = state.tone_buf.lock().unwrap();
     let n = tone.len();
     if state.silence.load(Ordering::Relaxed) || n == 0 {
@@ -80,6 +120,14 @@ fn fill_output_f32(data: &mut [f32], state: &SharedState) {
 }
 
 fn fill_output_i16(data: &mut [i16], state: &SharedState) {
+    if state.one_shot_active.load(Ordering::Acquire) {
+        let mut scratch = vec![0.0f32; data.len()];
+        try_fill_one_shot(&mut scratch, state);
+        for (o, &v) in data.iter_mut().zip(scratch.iter()) {
+            *o = (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        }
+        return;
+    }
     let tone = state.tone_buf.lock().unwrap();
     let n = tone.len();
     if state.silence.load(Ordering::Relaxed) || n == 0 {
@@ -93,6 +141,14 @@ fn fill_output_i16(data: &mut [i16], state: &SharedState) {
 }
 
 fn fill_output_i32(data: &mut [i32], state: &SharedState) {
+    if state.one_shot_active.load(Ordering::Acquire) {
+        let mut scratch = vec![0.0f32; data.len()];
+        try_fill_one_shot(&mut scratch, state);
+        for (o, &v) in data.iter_mut().zip(scratch.iter()) {
+            *o = (v.clamp(-1.0, 1.0) * i32::MAX as f32) as i32;
+        }
+        return;
+    }
     let tone = state.tone_buf.lock().unwrap();
     let n = tone.len();
     if state.silence.load(Ordering::Relaxed) || n == 0 {
@@ -279,6 +335,49 @@ impl AudioEngine for CpalEngine {
         self.state.silence.store(true, Ordering::Relaxed);
     }
 
+    fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
+        if samples.is_empty() {
+            anyhow::bail!("play_and_capture: empty stimulus");
+        }
+        let sr = self.sample_rate as f64;
+        let n_total = samples.len() + (tail_s.max(0.0) * sr) as usize;
+
+        // Publish one-shot buffer, reset position, stop the looping tone,
+        // clear capture ring, then enable. The Release on `one_shot_active`
+        // synchronises with the Acquire in the output callback.
+        self.state.silence.store(true, Ordering::Relaxed);
+        *self.state.one_shot_buf.lock().unwrap() = samples.to_vec();
+        self.state.one_shot_pos.store(0, Ordering::Relaxed);
+        self.state.ring.lock().unwrap().clear();
+        self.state.one_shot_active.store(true, Ordering::Release);
+
+        let duration_s = n_total as f64 / sr;
+        let timeout = Instant::now() + Duration::from_secs_f64(duration_s + 2.0);
+        let mut ok = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(10));
+            if self.state.ring.lock().unwrap().len() >= n_total {
+                ok = true;
+                break;
+            }
+            if Instant::now() > timeout {
+                break;
+            }
+        }
+        self.state.one_shot_active.store(false, Ordering::Release);
+        if !ok {
+            anyhow::bail!("cpal play_and_capture timeout after {duration_s:.1}s");
+        }
+        let out: Vec<f32> = self
+            .state
+            .ring
+            .lock()
+            .unwrap()
+            .drain(..n_total)
+            .collect();
+        Ok(out)
+    }
+
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
         self.state.ring.lock().unwrap().clear();
@@ -357,6 +456,9 @@ mod tests {
             silence:  AtomicBool::new(false),
             ring:     Mutex::new(Vec::new()),
             xruns:    AtomicUsize::new(0),
+            one_shot_buf:    Mutex::new(Vec::new()),
+            one_shot_pos:    AtomicUsize::new(0),
+            one_shot_active: AtomicBool::new(false),
         }
     }
 
@@ -389,6 +491,9 @@ mod tests {
             silence:  AtomicBool::new(false),
             ring:     Mutex::new(Vec::new()),
             xruns:    AtomicUsize::new(0),
+            one_shot_buf:    Mutex::new(Vec::new()),
+            one_shot_pos:    AtomicUsize::new(0),
+            one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0i16; 3];
         fill_output_i16(&mut out, &state);
@@ -407,6 +512,9 @@ mod tests {
             silence:  AtomicBool::new(false),
             ring:     Mutex::new(Vec::new()),
             xruns:    AtomicUsize::new(0),
+            one_shot_buf:    Mutex::new(Vec::new()),
+            one_shot_pos:    AtomicUsize::new(0),
+            one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0i32; 2];
         fill_output_i32(&mut out, &state);
@@ -494,5 +602,60 @@ mod tests {
         eng.state.ring.lock().unwrap().extend_from_slice(&[1.0, 2.0, 3.0]);
         eng.flush_capture();
         assert!(eng.state.ring.lock().unwrap().is_empty());
+    }
+
+    // ---- One-shot playback state machine ----
+
+    #[test]
+    fn try_fill_one_shot_returns_false_when_inactive() {
+        let state = make_state();
+        let mut out = [9.0f32; 3];
+        assert!(!try_fill_one_shot(&mut out, &state));
+        assert_eq!(out, [9.0, 9.0, 9.0]); // untouched
+    }
+
+    #[test]
+    fn one_shot_overrides_tone_in_f32() {
+        let state = make_state();
+        *state.one_shot_buf.lock().unwrap() = vec![0.1, 0.2, 0.3, 0.4];
+        state.one_shot_active.store(true, Ordering::Release);
+        let mut out = [0.0f32; 3];
+        fill_output_f32(&mut out, &state);
+        assert_eq!(out, [0.1, 0.2, 0.3]);
+        assert_eq!(state.one_shot_pos.load(Ordering::Relaxed), 3);
+        assert!(state.one_shot_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn one_shot_exhausts_and_clears_active_flag() {
+        let state = make_state();
+        *state.one_shot_buf.lock().unwrap() = vec![0.1, 0.2];
+        state.one_shot_active.store(true, Ordering::Release);
+        let mut out = [9.0f32; 4];
+        fill_output_f32(&mut out, &state);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.0]); // tail zero-padded
+        assert!(!state.one_shot_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn one_shot_preempts_i16_tone() {
+        let state = make_state();
+        *state.one_shot_buf.lock().unwrap() = vec![0.5, -0.5];
+        state.one_shot_active.store(true, Ordering::Release);
+        let mut out = [0i16; 2];
+        fill_output_i16(&mut out, &state);
+        assert_eq!(out[0], (0.5 * i16::MAX as f32) as i16);
+        assert_eq!(out[1], (-0.5 * i16::MAX as f32) as i16);
+    }
+
+    #[test]
+    fn one_shot_preempts_i32_tone() {
+        let state = make_state();
+        *state.one_shot_buf.lock().unwrap() = vec![0.25, 1.5];
+        state.one_shot_active.store(true, Ordering::Release);
+        let mut out = [0i32; 2];
+        fill_output_i32(&mut out, &state);
+        assert_eq!(out[0], (0.25 * i32::MAX as f32) as i32);
+        assert_eq!(out[1], i32::MAX); // clamped
     }
 }
