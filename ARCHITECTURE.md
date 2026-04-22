@@ -101,9 +101,24 @@ ac-core/src/
     types.rs
 
   tuner.rs                 # Tier 2 (stays at root for now, can move later)
-  transfer.rs              # Tier 1 (stays at root pending review)
+  visualize/transfer.rs    # Tier 2 — live H1 estimator, display-first
   config.rs                # orthogonal
 ```
+
+### Transfer — Tier 2 today, Tier 1 TBD
+
+`visualize/transfer.rs` is the live H1 estimator used by `ac transfer`
+and `transfer_stream`. It was classified Tier 2 when the two-tier
+migration finished (#70): the current implementation streams
+magnitude/phase/coherence frames for display and does not produce a
+`MeasurementReport`, so it does not meet Tier 1's archival criterion.
+
+A future Tier 1 variant — dedicated stimulus, integration params,
+`MeasurementData::TransferFunction`, archived JSON — is a separate
+module that would reuse the core H1 math. There is no Tier 1 consumer
+today, so that split is deferred; the file will be moved to
+`measurement/transfer.rs` (or factored into a shared core) when one
+appears.
 
 The directory structure makes the tier of every module legible at the
 file-tree level. A new contributor (or Claude Code) opening the repo

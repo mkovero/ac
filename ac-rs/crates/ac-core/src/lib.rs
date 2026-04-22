@@ -3,7 +3,11 @@ pub mod measurement;
 pub mod visualize;
 
 pub mod config;
-pub mod transfer;
+
+// `transfer` is Tier 2 (live H1 estimator, display-first). A future
+// Tier 1 archival variant would build on top of this — see #70.
+#[deprecated(note = "use ac_core::visualize::transfer")]
+pub use visualize::transfer;
 
 // Legacy flat paths — emit deprecation warnings; slated for removal in
 // v0.2.0 (`ARCHITECTURE.md` transition window).

@@ -256,7 +256,7 @@ fn dut_freq_response(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: O
         Err(e) => return TestResult::new("Frequency response", false, format!("capture failed: {e}"), ""),
     };
     eng.set_silence();
-    let result = ac_core::transfer::h1_estimate(&refch, &meas, sr);
+    let result = ac_core::visualize::transfer::h1_estimate(&refch, &meas, sr);
     let freqs = &result.freqs;
     let mag   = &result.magnitude_db;
     let coh   = &result.coherence;

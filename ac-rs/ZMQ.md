@@ -977,7 +977,7 @@ Returns current listen mode and connected client endpoints.
 
 Streaming H1 transfer function estimator. Captures the selected measurement
 + reference input channels and publishes a new `transfer_stream` frame each
-iteration (every `ac_core::transfer::capture_duration(4, sr)` seconds,
+iteration (every `ac_core::visualize::transfer::capture_duration(4, sr)` seconds,
 ≈ 2.5 s at 48 kHz) until stopped. Runs in the `TRANSFER` concurrency group:
 only one `transfer_stream` at a time, but coexists with `monitor_spectrum`
 (`INPUT`) and any `OUTPUT` worker (each owns its own JACK client).

@@ -193,7 +193,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .filter_map(|(&(meas_ch, ref_ch), &(mi, ri))| {
                     let meas = rings.get(mi)?.as_slice();
                     let refb = rings.get(ri)?.as_slice();
-                    let result = ac_core::transfer::h1_estimate(refb, meas, sr);
+                    let result = ac_core::visualize::transfer::h1_estimate(refb, meas, sr);
 
                     let n_pts = result.freqs.len();
                     let indices: Vec<usize> = if n_pts > 2000 {
