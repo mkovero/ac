@@ -289,10 +289,16 @@ fn gate(buf: &[f64], centre: usize, window_len: usize) -> Vec<f64> {
 }
 
 /// Citation for a `MeasurementReport` emitted from a Farina-sweep run.
+///
+/// The Farina technique is not covered by an IEC or AES standard; the
+/// canonical reference is the AES 108th Convention preprint #5093 by
+/// Angelo Farina, "Simultaneous measurement of impulse response and
+/// distortion with a swept-sine technique" (Paris, 2000). `verified`
+/// stays `false` until the published preprint is re-checked in person.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "Farina 2000 (AES 108)".into(),
-        clause: "Swept-sine technique for IR and distortion".into(),
+        standard: "Farina, AES 108th Convention preprint #5093 (2000)".into(),
+        clause: "Simultaneous measurement of impulse response and distortion with a swept-sine technique".into(),
         verified: false,
     }
 }

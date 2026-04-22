@@ -7,8 +7,9 @@ use serde_json::{json, Value};
 
 use ac_core::measurement::report::{
     FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-    MeasurementReport, StandardsCitation, StimulusParams, SCHEMA_VERSION,
+    MeasurementReport, StimulusParams, SCHEMA_VERSION,
 };
+use ac_core::measurement::thd;
 use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
@@ -114,11 +115,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             timestamp_utc:  timestamp.clone(),
             method: MeasurementMethod::SteppedSine {
                 n_points: n,
-                standard: Some(StandardsCitation {
-                    standard: "IEC 60268-3:2018".into(),
-                    clause:   "§14.12".into(),
-                    verified: false,
-                }),
+                standard: Some(thd::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,

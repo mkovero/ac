@@ -1,7 +1,9 @@
 //! Tier 1 — THD / THD+N / noise-floor analysis of a stepped-sine capture.
 //!
-//! Per IEC 60268-3:2018 §14.12 — TODO: verify clause before emitting a
-//! `StandardsCitation` from callers.
+//! Citation for `MeasurementReport`s produced from this analyser is
+//! provided by [`citation`]. The `verified` flag stays `false` until a
+//! human cross-checks the emitted clause numbers against the published
+//! IEC 60268-3:2018 text.
 //!
 //! The public entry point is [`analyze`]: mono `f32` PCM in, a fully
 //! populated [`AnalysisResult`] out. All intermediate DSP is `f64`. The
@@ -13,9 +15,24 @@ use std::f64::consts::PI;
 
 use anyhow::{bail, Result};
 
+use crate::measurement::report::StandardsCitation;
 use crate::shared::constants::{FUNDAMENTAL_HZ, NUM_HARMONICS, SAMPLERATE};
 use crate::shared::fft_cache::{freq_axis, real_fft_plan, with_hann_window};
 use crate::shared::types::AnalysisResult;
+
+/// Citation for a `MeasurementReport` populated from [`analyze`] output.
+///
+/// The clause number (§14.12) corresponds to the THD definition in
+/// IEC 60268-3:2018 "Sound system equipment — Part 3: Amplifiers" per
+/// widely-cited secondary sources; `verified` stays `false` until the
+/// published PDF is checked in person.
+pub fn citation() -> StandardsCitation {
+    StandardsCitation {
+        standard: "IEC 60268-3:2018".into(),
+        clause: "§14.12 Total harmonic distortion".into(),
+        verified: false,
+    }
+}
 
 /// Analyse a mono audio capture and return THD, THD+N, noise floor, spectrum.
 ///

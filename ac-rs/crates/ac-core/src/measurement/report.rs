@@ -45,9 +45,19 @@ pub enum MeasurementMethod {
     },
 }
 
-/// Pointer to a published standard clause. `verified: false` is the
-/// default: the citation is declarative, not audited, until a human
-/// signs it off against the published text.
+/// Pointer to a published standard clause.
+///
+/// `verified: false` is the default: the citation is declarative, not
+/// audited. Downstream readers that care about provenance (lab reports,
+/// archival tools) should display "unverified" or equivalent unless the
+/// field is `true`.
+///
+/// Flipping `verified: true` requires a human cross-check of both
+/// `standard` and `clause` against the **published text** of the named
+/// standard — not against secondary sources. Once verified against a
+/// specific edition, the clause number and field names are expected to
+/// remain stable for the lifetime of that edition. See issue #72 for the
+/// audit workflow.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct StandardsCitation {
     pub standard: String,

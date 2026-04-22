@@ -243,6 +243,20 @@ old computation stays available behind a version flag so historical
 reports remain reproducible. The default follows the most recent
 revision the implementation has been verified against.
 
+### Citation audit workflow
+
+Every Tier 1 module exposes a `citation()` (or `Type::citation()`) fn
+returning a `StandardsCitation { standard, clause, verified }`. Handler
+code (e.g. `plot.rs`, `sweep_ir`) should always call that fn rather than
+inlining the citation — that keeps the source-of-truth in one place and
+makes audits trivial to roll out.
+
+`verified: false` is the default for every citation today. Flipping a
+citation to `verified: true` requires a cross-check of both `standard`
+and `clause` strings against the **published text of the named
+standard**, not against secondary sources. The audit workflow is tracked
+in issue #72.
+
 ## Testing strategy
 
 ### Tier 1
