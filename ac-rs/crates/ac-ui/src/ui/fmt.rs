@@ -197,6 +197,25 @@ pub fn hover_label(channel: usize, freq_hz: f32, readout: &HoverReadout) -> Stri
             format_hz(freq_hz),
             v,
         ),
+        HoverReadout::TimeAgo(s) => format!(
+            "CH{} {} t-{}",
+            channel,
+            format_hz(freq_hz),
+            format_time_ago(*s),
+        ),
+    }
+}
+
+/// Format a non-negative time-ago in seconds as a short human label: `12ms`,
+/// `340ms`, `1.23s`, `17.5s`. Anchors the waterfall/CWT hover readout.
+pub fn format_time_ago(s: f32) -> String {
+    let s = s.max(0.0);
+    if s < 1.0 {
+        format!("{:.0}ms", s * 1000.0)
+    } else if s < 10.0 {
+        format!("{:.2}s", s)
+    } else {
+        format!("{:.1}s", s)
     }
 }
 

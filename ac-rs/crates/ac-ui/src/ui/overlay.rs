@@ -28,6 +28,9 @@ pub enum HoverReadout {
     Coherence(f32),
     Thd(f32),
     Gain(f32),
+    /// Waterfall/CWT cursor Y-axis is time, not dB. Payload is seconds-ago
+    /// (0 at the top, newest row; grows downward toward older rows).
+    TimeAgo(f32),
 }
 
 pub struct OverlayInput<'a> {
@@ -307,7 +310,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             let strips = 48_usize;
             // COLORMAP_LUT is laid out as `[palette 0 row, palette 1 row, …]`,
             // each row 256 RGBA8 texels. Offset into the active row so the
-            // legend follows Alt+Scroll palette cycling.
+            // legend follows Shift+Scroll palette cycling.
             let palette_off = (input.active_palette as usize) * 256 * 4;
             for i in 0..strips {
                 // Top strip = max dB (hottest) so the bar visually matches

@@ -448,13 +448,25 @@ impl App {
                 if already {
                     continue;
                 }
-                let peak = frame
+                // Use the 98th-percentile bin as the anchor, not the single
+                // max. A lone transient or DC spike in the first frame used
+                // to drag the whole db window with it and stay stuck until
+                // Ctrl+R — P98 ignores those outliers while still tracking
+                // a real signal level.
+                let mut finite: Vec<f32> = frame
                     .spectrum
                     .iter()
                     .copied()
                     .filter(|v| v.is_finite())
-                    .fold(f32::NEG_INFINITY, f32::max);
-                let (db_min, db_max) = if peak.is_finite() {
+                    .collect();
+                let (db_min, db_max) = if finite.len() >= 8 {
+                    finite.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let idx = ((finite.len() as f32 * 0.98) as usize)
+                        .min(finite.len() - 1);
+                    let anchor = finite[idx];
+                    let top = (anchor + 5.0).clamp(-20.0, 0.0);
+                    (top - 80.0, top)
+                } else if let Some(&peak) = finite.last() {
                     let top = (peak + 5.0).clamp(-20.0, 0.0);
                     (top - 80.0, top)
                 } else {
@@ -797,6 +809,14 @@ impl App {
                         HoverReadout::Db(db)
                     }
                 }
+            } else if matches!(config_snap.view_mode, ViewMode::Waterfall) {
+                // Waterfall/CWT Y-axis is time, not dB. Top = newest
+                // (t_ago = 0); bottom = oldest visible row. Mirrors the
+                // shader: rows_back = (1 - ny) * (rows_visible - 1).
+                let rows_visible = view.rows_visible_f.max(1.0);
+                let rows_back = (1.0 - ny) * (rows_visible - 1.0).max(0.0);
+                let t_ago = rows_back * self.waterfall_row_period_s;
+                HoverReadout::TimeAgo(t_ago)
             } else {
                 let db = view.db_min + ny * (view.db_max - view.db_min);
                 HoverReadout::Db(db)

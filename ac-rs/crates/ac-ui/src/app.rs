@@ -296,10 +296,10 @@ pub struct App {
     /// (n, n_bins, last-freq-seen). Rebuilt when any of those change; saves
     /// a per-bin log range recomputation every frame.
     smoothing_cache: Option<smoothing::OctaveWindows>,
-    /// Accumulates fractional scroll ticks while Alt+Scroll is cycling the
+    /// Accumulates fractional scroll ticks while Shift+Scroll is cycling the
     /// waterfall palette, so trackpad pixel-deltas don't step the palette on
     /// every frame. One palette step per full unit of scroll.
-    alt_scroll_accum: f32,
+    palette_scroll_accum: f32,
     output_dir: PathBuf,
     notification: Option<(String, Instant)>,
     modifiers: ModifiersState,
@@ -406,7 +406,7 @@ impl App {
             // disable via `O`.
             smoothing_frac: Some(6),
             smoothing_cache: None,
-            alt_scroll_accum: 0.0,
+            palette_scroll_accum: 0.0,
             output_dir,
             notification: None,
             modifiers: ModifiersState::empty(),

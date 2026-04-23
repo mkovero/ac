@@ -134,18 +134,20 @@ impl App {
     }
 
     pub(super) fn apply_zoom(&mut self, scroll_y: f32) {
-        // Alt+Scroll cycles the waterfall colormap palette (inferno → viridis
-        // → magma → plasma → inferno). Alt is otherwise unused in scroll
-        // handling so this is non-breaking; Shift keeps dB-gain zoom semantics.
+        // Shift+Scroll cycles the waterfall colormap palette (inferno → viridis
+        // → magma → plasma → inferno). Used to live on Alt+Scroll, but Alt is
+        // consumed by the window manager (meta) on common Linux desktops and
+        // fights the UI. Gain zoom lost the Shift+Scroll binding — use
+        // `[`/`]` (shift dB floor) and `+`/`-` (adjust dB span) instead.
         // Spectrum mode ignores the cycle — palette only affects the LUT.
-        if self.modifiers.alt_key()
+        if self.modifiers.shift_key()
             && matches!(self.config.view_mode, ViewMode::Waterfall)
             && scroll_y != 0.0
         {
-            self.alt_scroll_accum += scroll_y;
-            let steps = self.alt_scroll_accum.trunc() as i32;
+            self.palette_scroll_accum += scroll_y;
+            let steps = self.palette_scroll_accum.trunc() as i32;
             if steps != 0 {
-                self.alt_scroll_accum -= steps as f32;
+                self.palette_scroll_accum -= steps as f32;
                 let new_idx = self.waterfall.as_mut().map(|wf| {
                     let n = crate::render::waterfall::N_PALETTES as i32;
                     let cur = wf.active_palette() as i32;
@@ -164,11 +166,11 @@ impl App {
             }
             return;
         }
-        // Alt released (or not held) — drop any leftover fractional scroll so
-        // the next Alt+Scroll session starts from zero instead of firing on
+        // Shift released (or not held) — drop any leftover fractional scroll so
+        // the next Shift+Scroll session starts from zero instead of firing on
         // the first tick.
-        if !self.modifiers.alt_key() && self.alt_scroll_accum != 0.0 {
-            self.alt_scroll_accum = 0.0;
+        if !self.modifiers.shift_key() && self.palette_scroll_accum != 0.0 {
+            self.palette_scroll_accum = 0.0;
         }
 
         let pos = match self.cursor_pos {
@@ -194,10 +196,11 @@ impl App {
         let data_ceiling = 10_f32.powf(data_log_max);
         let data_span = (data_log_max - data_log_min).max(0.001);
         // In waterfall mode: plain scroll = freq, Ctrl+scroll = time (rows
-        // shown), Shift+scroll = gain (colormap dB). Spectrum mode keeps the
-        // "plain scroll zooms both axes at once" feel.
+        // shown). Shift+Scroll is reserved for palette cycling (handled above,
+        // already returned). Gain zoom moved to `[` / `]` / `+` / `-`.
+        // Spectrum mode: plain scroll zooms both axes, Shift = freq only.
         let (zoom_freq, zoom_db, zoom_time) = if waterfall {
-            (!shift && !ctrl, shift, ctrl)
+            (!ctrl, false, ctrl)
         } else {
             (!shift, !ctrl, false)
         };
