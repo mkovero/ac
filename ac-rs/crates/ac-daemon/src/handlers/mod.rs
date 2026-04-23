@@ -260,7 +260,7 @@ pub(super) fn sweep_point_frame(
         .collect();
 
     let mut frame = json!({
-        "type":              "sweep_point",
+        "type":              "measurement/frequency_response/point",
         "cmd":               cmd_name,
         "n":                 n,
         "drive_db":          level_dbfs,

@@ -27,12 +27,8 @@ def recv_until(client, done_topics=("done", "error"), max_frames=200, timeout_ms
     return frames
 
 
-# Frame `type` values emitted by plot/plot_level per frequency point.
-# Transition-era: daemon emits both the legacy `sweep_point` and the
-# tier-prefixed `measurement/frequency_response/point` for the same
-# payload. Tests assert membership in this set.
-SWEEP_POINT_TYPES = ("sweep_point", "measurement/frequency_response/point")
-SPECTRUM_TYPES    = ("spectrum",    "visualize/spectrum")
+SWEEP_POINT_TYPE = "measurement/frequency_response/point"
+SPECTRUM_TYPE    = "visualize/spectrum"
 
 
 def _drain(client, max_frames=200, timeout_ms=1000):
@@ -155,7 +151,7 @@ def test_plot_fields(server_client):
     data_frames = [f for t, f in frames if t == "data"]
     assert data_frames, "expected at least one sweep_point from plot"
 
-    sp_frames = [f for f in data_frames if f.get("type") in SWEEP_POINT_TYPES]
+    sp_frames = [f for f in data_frames if f.get("type") == SWEEP_POINT_TYPE]
     assert sp_frames, "expected at least one sweep_point frame from plot"
     for f in sp_frames:
         assert "thd_pct"    in f
@@ -347,7 +343,7 @@ def test_plot_level_fields(server_client):
     data_frames = [f for t, f in frames if t == "data"]
     assert data_frames, "expected at least one sweep_point from plot_level"
 
-    sp_frames = [f for f in data_frames if f.get("type") in SWEEP_POINT_TYPES]
+    sp_frames = [f for f in data_frames if f.get("type") == SWEEP_POINT_TYPE]
     assert sp_frames, "expected at least one sweep_point frame from plot_level"
     for f in sp_frames:
         assert f.get("cmd")  == "plot_level"
@@ -404,7 +400,7 @@ def test_sweep_point_none_fields_are_numeric_safe(server_client):
 
     frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
     data_frames = [f for t, f in frames
-                   if t == "data" and f.get("type") in SWEEP_POINT_TYPES]
+                   if t == "data" and f.get("type") == SWEEP_POINT_TYPE]
     assert data_frames
 
     # The test server has no calibration, so these fields should be None
@@ -441,7 +437,7 @@ def test_plot_thd_numerical_accuracy(server_client):
 
     frames = recv_until(client, done_topics=("done", "error"), timeout_ms=30000)
     data_frames = [f for t, f in frames
-                   if t == "data" and f.get("type") in SWEEP_POINT_TYPES]
+                   if t == "data" and f.get("type") == SWEEP_POINT_TYPE]
     assert data_frames, "expected at least one sweep_point"
 
     f = data_frames[0]
@@ -497,7 +493,7 @@ def test_monitor_spectrum_frames(server_client):
             topic, frame = client.recv_data(timeout_ms=3000)
         except TimeoutError:
             break
-        if topic == "data" and frame.get("type") in SPECTRUM_TYPES:
+        if topic == "data" and frame.get("type") == SPECTRUM_TYPE:
             spec_frames.append(frame)
             if len(spec_frames) >= 2:
                 break

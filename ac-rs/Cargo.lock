@@ -20,7 +20,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "ac-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ac-core",
  "anyhow",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "ac-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "ac-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ac-core",
  "anyhow",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "ac-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ac-core",
  "anyhow",
