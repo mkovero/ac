@@ -40,8 +40,8 @@ fn main() {
             commands::session::dispatch(&parsed.cmd, &cfg);
             return;
         }
-        CommandKind::Report { path } => {
-            commands::report::run(path);
+        CommandKind::Report { path, format } => {
+            commands::report::run(path, *format);
             return;
         }
         _ => {}

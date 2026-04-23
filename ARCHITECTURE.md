@@ -85,6 +85,7 @@ ac-core/src/
     noise.rs               # AES17 noise measurement (future)
     report.rs              # MeasurementReport type, serialization
     report_html.rs         # self-contained HTML renderer (inline CSS + SVG)
+    report_pdf.rs          # pure-Rust printpdf renderer (single A4 page)
 
   visualize/               # Tier 2
     mod.rs
@@ -343,7 +344,11 @@ steps — nothing is broken en route.
 - [x] Build `measurement/report_html.rs` — self-contained HTML renderer
       for `MeasurementReport` (inline CSS + inline SVG plot, no external
       assets). Wired to CLI as `ac report <path.json>`; writes sibling
-      `.html`. PDF output is a follow-up (#77).
+      `.html`.
+- [x] Build `measurement/report_pdf.rs` — pure-Rust PDF renderer via
+      `printpdf`. Mirrors the HTML layout on a single A4 page; no
+      external binary or Chromium dependency. Wired as
+      `ac report <path.json> pdf`; writes sibling `.pdf`. #77.
 - [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
 - [ ] After one release cycle, drop the legacy `type` names.
 
