@@ -11,14 +11,14 @@ WAVs that become our golden fixtures.
 
 ## Status
 
-| Phase | Subject | State |
-|---|---|---|
-| A | K-weighting filter, 400 ms MS block, per-block LKFS | planned |
-| B | Momentary / short-term / integrated + two-pass gating | planned |
-| C | Loudness range (LRA) | planned |
-| D | True-peak via 4× polyphase FIR | planned |
-| E | Wire into `ac monitor` PUB stream + UI overlay + reset key | planned |
-| F | EBU Tech 3341 / 3342 compliance validation | planned |
+| Phase | Subject | State | Commit |
+|---|---|---|---|
+| A | K-weighting filter, 400 ms MS block, per-block LKFS | ✅ shipped | `182a317` |
+| B | Momentary / short-term / integrated + two-pass gating | ✅ shipped | `7b0369c` |
+| C | Loudness range (LRA) | ✅ shipped | `2a7b2a6` |
+| D | True-peak via 4× polyphase FIR (Annex 2 Table 1 verbatim) | ✅ shipped | `94569e2` |
+| E | Wire into `ac monitor` PUB stream + UI overlay + reset key | planned | — |
+| F | EBU Tech 3341 / 3342 compliance validation | planned | — |
 
 The citation flips to `verified: true` only after Phase F is green.
 
