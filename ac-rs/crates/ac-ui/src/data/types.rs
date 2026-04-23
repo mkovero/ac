@@ -209,9 +209,11 @@ pub enum LayoutMode {
     /// Space — the empty case shows a "press Space to select" hint.
     Compare,
     /// Live H1 transfer function view. Requires exactly two selected channels;
-    /// `selection_order[0]` = meas, `selection_order[1]` = ref. Entering this
-    /// layout with a valid pair starts a `transfer_stream` worker on the
-    /// daemon; leaving it (or swapping the pair) stops/restarts it.
+    /// `selection_order[0]` = meas, `selection_order[1]` = ref. Currently
+    /// unreachable from the UI (the `L` layout-cycle key was dropped in the
+    /// keybinding refactor — see issue #60); pending full removal of the
+    /// dedicated layout.
+    #[allow(dead_code)]
     Transfer,
     /// Sweep measurement view (THD/THD+N vs freq or level). Passive — the CLI
     /// manages the daemon command; the UI just accumulates `sweep_point` frames.

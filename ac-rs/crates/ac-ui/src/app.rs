@@ -619,7 +619,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.drag = None;
+                self.end_drag();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,

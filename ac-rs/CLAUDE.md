@@ -79,8 +79,9 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `L` | Cycle layout: grid → single → compare → transfer (sweep via --mode only) |
-| `W` | Cycle view: spectrum → waterfall (FFT) → waterfall (CWT) → spectrum |
+| `W` | Cycle view: matrix (grid+spectrum) → single → waterfall (FFT) → waterfall (CWT) |
+| `C` | Compare selected channels in one rect (needs ≥ 1 Space-selected channel) |
+| Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |
 | `F` | Toggle fullscreen |
 | `D` | Toggle timing overlay |
 | `Tab` / `Shift+Tab` | Next/prev channel or grid page |

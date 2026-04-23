@@ -17,6 +17,14 @@ use super::helpers::{
 };
 use super::App;
 
+#[derive(Copy, Clone, PartialEq)]
+enum WSlot {
+    Matrix,
+    Single,
+    Waterfall,
+    Cwt,
+}
+
 #[derive(Clone)]
 pub(super) struct DragState {
     pub(super) start: PhysicalPosition<f64>,
@@ -253,6 +261,45 @@ impl App {
         }
     }
 
+    /// Left-button release. If the press+release happened without meaningful
+    /// movement, treat as a click: in Matrix (Grid) layout, this "zooms in"
+    /// — sets the active channel to the one under the cursor and swaps into
+    /// Single layout, preserving the current view_mode (spectrum/waterfall/
+    /// cwt). Everywhere else the click is a no-op beyond clearing drag.
+    pub(super) fn end_drag(&mut self) {
+        let drag = match self.drag.take() {
+            Some(d) => d,
+            None => return,
+        };
+        let pos = match self.cursor_pos {
+            Some(p) => p,
+            None => return,
+        };
+        let dx = pos.x - drag.start.x;
+        let dy = pos.y - drag.start.y;
+        // 5 px dead-zone — a shaky hand / trackpad jitter during a click
+        // shouldn't smuggle in a 1-pixel pan and disable zoom-in.
+        if dx * dx + dy * dy > 25.0 {
+            return;
+        }
+        if !matches!(self.config.layout, LayoutMode::Grid) {
+            return;
+        }
+        let clicked = match self.cell_at(pos) {
+            Some((ch, _, _, _, _)) => ch,
+            None => return,
+        };
+        let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        if clicked >= n_real {
+            return;
+        }
+        self.config.active_channel = clicked;
+        let prev = self.config.layout;
+        self.config.layout = LayoutMode::Single;
+        self.on_layout_changed(prev, LayoutMode::Single);
+        self.notify(&format!("zoom: CH{clicked}"));
+    }
+
     pub(super) fn begin_drag(&mut self) {
         let pos = match self.cursor_pos {
             Some(p) => p,
@@ -469,40 +516,18 @@ impl App {
         }
     }
 
-    /// Pick the next layout in the cycle given current selection state.
-    /// Compare and Transfer are only visited when the user has selected
-    /// enough channels (Compare: any; Transfer: >= 2).
-    fn next_layout(&self, from: LayoutMode) -> LayoutMode {
-        let any_selected = self.selected.iter().any(|s| *s);
-        // Transfer is reachable when either a fresh L-layout meas/ref pair is
-        // available (≥ 2 selected) or virtual channels are already registered
-        // — the layout still has content to render from the virtual pairs
-        // even if the user has since cleared their selection.
-        let transfer_ready =
-            self.selection_order.len() >= 2 || !self.virtual_channels.is_empty();
-        let raw_cycle = [
-            LayoutMode::Grid,
-            LayoutMode::Single,
-            LayoutMode::Compare,
-            LayoutMode::Transfer,
-        ];
-        let start = raw_cycle
-            .iter()
-            .position(|m| *m == from)
-            .map(|i| (i + 1) % raw_cycle.len())
-            .unwrap_or(0);
-        for offset in 0..raw_cycle.len() {
-            let candidate = raw_cycle[(start + offset) % raw_cycle.len()];
-            let allowed = match candidate {
-                LayoutMode::Compare => any_selected,
-                LayoutMode::Transfer => transfer_ready,
-                _ => true,
-            };
-            if allowed {
-                return candidate;
-            }
+    /// Which of the four canonical W-cycle slots we're currently in.
+    /// Returns None when the app is in a non-cycled layout (Compare, Transfer,
+    /// Sweep); pressing W from any of those jumps back to the start of the
+    /// cycle (Matrix).
+    fn current_w_slot(&self) -> Option<WSlot> {
+        match (self.config.layout, self.config.view_mode, self.analysis_mode.as_str()) {
+            (LayoutMode::Grid,   ViewMode::Spectrum,   _)     => Some(WSlot::Matrix),
+            (LayoutMode::Single, ViewMode::Spectrum,   _)     => Some(WSlot::Single),
+            (LayoutMode::Single, ViewMode::Waterfall, "fft") => Some(WSlot::Waterfall),
+            (LayoutMode::Single, ViewMode::Waterfall, "cwt") => Some(WSlot::Cwt),
+            _ => None,
         }
-        LayoutMode::Grid
     }
 
     pub(super) fn handle_key(&mut self, elwt: &ActiveEventLoop, code: KeyCode) {
@@ -588,17 +613,18 @@ impl App {
             KeyCode::KeyS => {
                 self.pending_screenshot = true;
             }
-            KeyCode::KeyL => {
+            KeyCode::KeyC => {
+                // Jump into Compare on selected channels. Nothing selected →
+                // no-op so an accidental press doesn't swap the user out of
+                // their current view into an empty Compare grid.
+                if !self.selected.iter().any(|s| *s) {
+                    self.notify("C: select ≥ 1 channel first (Space over cell)");
+                    return;
+                }
                 let prev = self.config.layout;
-                self.config.layout = self.next_layout(prev);
-                self.on_layout_changed(prev, self.config.layout);
-                self.notify(match self.config.layout {
-                    LayoutMode::Grid => "layout: grid",
-                    LayoutMode::Single => "layout: single",
-                    LayoutMode::Compare => "layout: compare",
-                    LayoutMode::Transfer => "layout: transfer",
-                    LayoutMode::Sweep => "layout: sweep",
-                });
+                self.config.layout = LayoutMode::Compare;
+                self.on_layout_changed(prev, LayoutMode::Compare);
+                self.notify("layout: compare");
             }
             KeyCode::KeyT => {
                 if self.selection_order.len() < 2 {
@@ -642,34 +668,42 @@ impl App {
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
             KeyCode::KeyW => {
-                // W cycles three states so the waterfall view can toggle
-                // between the linear FFT and Morlet CWT analysis paths
-                // without needing a second hotkey:
-                //   Spectrum(fft) → Waterfall(fft) → Waterfall(cwt) → Spectrum(fft)
-                let (next_view, next_mode, label): (ViewMode, &str, &str) =
-                    match (self.config.view_mode, self.analysis_mode.as_str()) {
-                        (ViewMode::Spectrum, _) => (ViewMode::Waterfall, "fft", "view: waterfall (fft)"),
-                        (ViewMode::Waterfall, "fft") => (ViewMode::Waterfall, "cwt", "view: waterfall (cwt)"),
-                        (ViewMode::Waterfall, _) => (ViewMode::Spectrum, "fft", "view: spectrum"),
-                    };
-                if self.analysis_mode != next_mode && !self.send_set_analysis_mode(next_mode) {
-                    // Mode change refused — don't advance the view so the
-                    // key keeps meaning "next state" on the next press.
+                // W cycles the four canonical views:
+                //   Matrix (Grid, spectrum)   → many channels at a glance
+                //   Single (spectrum)         → one channel, FFT
+                //   Waterfall (Single, FFT)   → one channel, time × freq (FFT)
+                //   CWT (Single, Morlet)      → one channel, time × freq (CWT)
+                // Non-cycled layouts (Compare / Transfer / Sweep) jump back to
+                // Matrix so the key always advances deterministically.
+                let next = match self.current_w_slot() {
+                    Some(WSlot::Matrix)    => WSlot::Single,
+                    Some(WSlot::Single)    => WSlot::Waterfall,
+                    Some(WSlot::Waterfall) => WSlot::Cwt,
+                    Some(WSlot::Cwt)       => WSlot::Matrix,
+                    None                   => WSlot::Matrix,
+                };
+                let (layout, view_mode, mode, label) = match next {
+                    WSlot::Matrix    => (LayoutMode::Grid,   ViewMode::Spectrum,  "fft", "view: matrix"),
+                    WSlot::Single    => (LayoutMode::Single, ViewMode::Spectrum,  "fft", "view: single"),
+                    WSlot::Waterfall => (LayoutMode::Single, ViewMode::Waterfall, "fft", "view: waterfall (fft)"),
+                    WSlot::Cwt       => (LayoutMode::Single, ViewMode::Waterfall, "cwt", "view: waterfall (cwt)"),
+                };
+                if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
+                    // Daemon refused the analysis-mode change — stay put so
+                    // the next W press keeps meaning "advance".
                     return;
                 }
-                self.config.view_mode = next_view;
-                // Re-arm waterfall auto-init on every switch into waterfall
-                // (or between FFT ↔ CWT where the dB distribution shifts) so
-                // a fresh dB window gets picked from the current signal.
-                if matches!(self.config.view_mode, ViewMode::Waterfall) {
+                let prev_layout = self.config.layout;
+                self.config.layout = layout;
+                self.config.view_mode = view_mode;
+                if prev_layout != layout {
+                    self.on_layout_changed(prev_layout, layout);
+                }
+                if matches!(view_mode, ViewMode::Waterfall) {
                     for init in &mut self.waterfall_inited {
                         *init = false;
                     }
                 }
-                // FFT ↔ CWT changes the bin grid; a stale peak buffer would
-                // mis-align with the new frames. Spectrum ↔ waterfall keeps
-                // the grid but a peak marker is meaningless in waterfall, so
-                // resetting in all W cycles keeps the state simple.
                 self.reset_peak_holds();
                 self.notify(label);
             }
