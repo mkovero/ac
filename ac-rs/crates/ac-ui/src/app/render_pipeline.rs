@@ -678,6 +678,15 @@ impl App {
         let smoothing_snap = self.smoothing_frac;
         let ioct_bpo_snap = self.ioct_bpo;
         let band_weighting_snap = self.band_weighting.overlay_tag();
+        // Pull the loudness readout for the currently active channel.
+        // Hover-targeted focus is a future refinement — the active
+        // channel is the one the UI is already centred on.
+        let loudness_focus_ch = self.config.active_channel;
+        let loudness_snap: Option<crate::data::types::LoudnessReadout> = self
+            .loudness_store
+            .as_ref()
+            .filter(|_| loudness_focus_ch < n_real)
+            .and_then(|store| store.read(loudness_focus_ch as u32));
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -1008,6 +1017,7 @@ impl App {
                     tier_badge: tier_badge_snap.clone(),
                     time_integration: time_integration_snap.clone(),
                     band_weighting: band_weighting_snap,
+                    loudness: loudness_snap,
                 },
             );
         });

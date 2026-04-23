@@ -81,6 +81,10 @@ pub struct ServerState {
     /// on its next tick. Applies to the Leq integrators; fast/slow modes
     /// ignore it (they'd re-prime from the next input anyway).
     pub leq_reset_request: Arc<std::sync::atomic::AtomicBool>,
+    /// One-shot flag set by `reset_loudness` and consumed by the monitor
+    /// worker on its next tick. Clears per-channel LKFS-I / LRA / dBTP
+    /// accumulators without restarting the monitor.
+    pub loudness_reset_request: Arc<std::sync::atomic::AtomicBool>,
     /// Live-tunable parameters for the `monitor_spectrum` FFT path. The worker
     /// re-reads these every tick so `set_monitor_params` takes effect without
     /// a restart. `active` flips true on worker spawn and false on exit;
@@ -150,6 +154,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         band_weighting: Arc::new(Mutex::new("off".to_string())),
         time_integration_mode: Arc::new(Mutex::new("off".to_string())),
         leq_reset_request:     Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        loudness_reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
     };
 
@@ -340,6 +345,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "set_time_integration" => handlers::set_time_integration(state, &cmd),
         "get_time_integration" => handlers::get_time_integration(state),
         "reset_leq"           => handlers::reset_leq(state),
+        "reset_loudness"      => handlers::reset_loudness(state),
         "set_monitor_params"  => handlers::set_monitor_params(state, &cmd),
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),

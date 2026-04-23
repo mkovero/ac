@@ -313,6 +313,17 @@ pub fn reset_leq(state: &ServerState) -> Value {
     json!({"ok": true})
 }
 
+/// Zero the per-channel BS.1770-5 loudness state (LKFS-I, LRA, dBTP) on
+/// the next monitor tick. Momentary / short-term windows re-prime from
+/// their next input on their own. Safe to call with no monitor active —
+/// the flag is one-shot and held until a worker consumes it.
+pub fn reset_loudness(state: &ServerState) -> Value {
+    state
+        .loudness_reset_request
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    json!({"ok": true})
+}
+
 /// Live-tune `interval` and/or `fft_n` on a running `monitor_spectrum` worker.
 /// Rejects if no monitor is active (the worker owns the Arc; without it the
 /// change has nothing to pick up).

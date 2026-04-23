@@ -219,6 +219,65 @@ pub fn format_time_ago(s: f32) -> String {
     }
 }
 
+/// EBU R128 delivery target (integrated loudness).
+pub const R128_TARGET_LKFS: f64 = -23.0;
+/// EBU R128 pass tolerance (broadcast delivery).
+pub const R128_TOLERANCE_TIGHT_LU: f64 = 0.5;
+/// EBU R128 loose tolerance — live / streaming delivery.
+pub const R128_TOLERANCE_LOOSE_LU: f64 = 2.0;
+
+/// Build the top-right loudness status lines for the current meter
+/// readout. Returns up to three lines: one M/S/I/LRA summary, one
+/// dBTP + gated-duration, and (when integrated is valid) an R128
+/// pass/warn/fail tag. Lines are already formatted; the caller only
+/// paints them.
+pub fn loudness_readout_lines(l: &crate::data::types::LoudnessReadout) -> Vec<crate::ui::overlay::LoudnessLine> {
+    use crate::ui::overlay::{LoudnessLine, LoudnessTint};
+    let fmt_lkfs = |v: Option<f64>| -> String {
+        match v {
+            Some(x) if x.is_finite() => format!("{:+6.1}", x),
+            _ => "  —  ".into(),
+        }
+    };
+    let mut out = Vec::new();
+    let lra = l.lra_lu;
+    let m = fmt_lkfs(l.momentary_lkfs);
+    let s = fmt_lkfs(l.short_term_lkfs);
+    let i = fmt_lkfs(l.integrated_lkfs);
+    out.push(LoudnessLine {
+        text: format!("M{m} S{s} I{i} LRA{lra:4.1}"),
+        tint: LoudnessTint::Default,
+    });
+    let tp = match l.true_peak_dbtp {
+        Some(v) if v.is_finite() => format!("{:+5.1}", v),
+        _ => "  —".into(),
+    };
+    let dur = l.gated_duration_s;
+    out.push(LoudnessLine {
+        text: format!("dBTP {tp}   gated {dur:.1}s"),
+        tint: LoudnessTint::Default,
+    });
+    // R128 pass/warn/fail badge on the integrated value. Only emit once
+    // integrated is defined — pre-gate silence stays quiet.
+    if let Some(i) = l.integrated_lkfs {
+        if i.is_finite() {
+            let delta = i - R128_TARGET_LKFS;
+            let (tint, tag) = if delta.abs() <= R128_TOLERANCE_TIGHT_LU {
+                (LoudnessTint::Good, "PASS")
+            } else if delta.abs() <= R128_TOLERANCE_LOOSE_LU {
+                (LoudnessTint::Warn, "WARN")
+            } else {
+                (LoudnessTint::Bad, "FAIL")
+            };
+            out.push(LoudnessLine {
+                text: format!("R128 {tag}  Δ {delta:+.1} LU"),
+                tint,
+            });
+        }
+    }
+    out
+}
+
 /// Format a frequency value for display.
 pub fn format_hz(hz: f32) -> String {
     if hz >= 1000.0 {

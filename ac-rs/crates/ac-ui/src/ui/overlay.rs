@@ -2,7 +2,8 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, TransferFrame, TransferPair, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, TransferFrame,
+    TransferPair, ViewMode,
 };
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
@@ -31,6 +32,25 @@ pub enum HoverReadout {
     /// Waterfall/CWT cursor Y-axis is time, not dB. Payload is seconds-ago
     /// (0 at the top, newest row; grows downward toward older rows).
     TimeAgo(f32),
+}
+
+/// Colour hint for a single line of the loudness overlay — lets the R128
+/// pass/fail state bleed through without hardcoding colours in the
+/// formatter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoudnessTint {
+    Default,
+    Good,
+    Warn,
+    Bad,
+}
+
+/// One pre-rendered line of the loudness overlay, tagged with the colour
+/// the painter should use. `Default` → regular overlay grey; the R128
+/// variants colour the integrated-LKFS line.
+pub struct LoudnessLine {
+    pub text: String,
+    pub tint: LoudnessTint,
 }
 
 pub struct OverlayInput<'a> {
@@ -94,6 +114,11 @@ pub struct OverlayInput<'a> {
     /// Rendered as a `wt A` tag alongside the other per-band tags so
     /// the reader can distinguish a weighted trace at a glance.
     pub band_weighting: Option<&'static str>,
+    /// Latest BS.1770-5 / R128 meter readout for the active hover / single
+    /// channel. `None` suppresses the loudness status row entirely (either
+    /// no monitor is running, or the channel hasn't received any frames
+    /// yet). Rendered under the live-FFT-monitor line.
+    pub loudness: Option<LoudnessReadout>,
 }
 
 /// Overlay payload for the per-band time-integration status.
@@ -294,6 +319,34 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 FontId::monospace(theme::STATUS_PX),
                 text_color,
             );
+            stack_row += 1.0;
+        }
+
+        // Loudness strip — BS.1770-5 / R128 meter for the active channel.
+        // Colour-codes the integrated value per the R128 delivery target
+        // (-23 LUFS ±0.5 LU green, ±2 LU yellow, outside red, pre-gate
+        // neutral).
+        if let Some(l) = input.loudness {
+            let lines = super::fmt::loudness_readout_lines(&l);
+            for line in lines {
+                let color = match line.tint {
+                    LoudnessTint::Default => text_color,
+                    LoudnessTint::Good => Color32::from_rgb(120, 220, 120),
+                    LoudnessTint::Warn => Color32::from_rgb(230, 200, 90),
+                    LoudnessTint::Bad => Color32::from_rgb(240, 110, 100),
+                };
+                painter.text(
+                    Pos2::new(
+                        screen.right() - 8.0,
+                        screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
+                    ),
+                    Align2::RIGHT_TOP,
+                    line.text,
+                    FontId::monospace(theme::STATUS_PX),
+                    color,
+                );
+                stack_row += 1.0;
+            }
         }
 
         // Waterfall colorbar: vertical gradient sampled from the same

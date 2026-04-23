@@ -626,6 +626,13 @@ impl App {
                 self.on_layout_changed(prev, LayoutMode::Compare);
                 self.notify("layout: compare");
             }
+            KeyCode::KeyL if self.modifiers.shift_key() => {
+                // Shift+L — zero the BS.1770-5 loudness accumulators
+                // (integrated, LRA, true-peak) on the daemon and clear
+                // the local readout so the overlay snaps to '—'.
+                self.send_reset_loudness();
+                self.notify("loudness: reset");
+            }
             KeyCode::KeyT => {
                 if self.selection_order.len() < 2 {
                     self.notify("T: select ≥ 2 channels first (last = REF)");

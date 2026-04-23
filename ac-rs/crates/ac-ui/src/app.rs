@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, LoudnessStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
 };
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
@@ -131,6 +131,7 @@ pub struct AppInit {
     pub transfer_store: TransferStore,
     pub virtual_channels: VirtualChannelStore,
     pub sweep_store: SweepStore,
+    pub loudness_store: LoudnessStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -170,6 +171,9 @@ pub struct App {
     sweep_kind: Option<SweepKind>,
     sweep_last: SweepState,
     sweep_selected_idx: Option<usize>,
+    /// Per-channel BS.1770 / R128 meter — populated by the receiver from
+    /// `measurement/loudness` frames; consumed by the overlay.
+    loudness_store: Option<LoudnessStore>,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -357,6 +361,7 @@ impl App {
             sweep_kind,
             sweep_last: SweepState::default(),
             sweep_selected_idx: None,
+            loudness_store: None,
             monitor_spectrum_active: false,
             monitor_channels,
             analysis_mode: "fft".to_string(),
@@ -733,7 +738,7 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, SweepStore, TransferStore, VirtualChannelStore,
+        ChannelStore, LoudnessStore, SweepStore, TransferStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -745,6 +750,7 @@ mod loop_tests {
             transfer_store: TransferStore::new(),
             virtual_channels: VirtualChannelStore::new(),
             sweep_store: SweepStore::new(),
+            loudness_store: LoudnessStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

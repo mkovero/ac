@@ -112,6 +112,7 @@ fn overlay_shows_spectrum_readout() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -157,6 +158,7 @@ fn overlay_shows_dbu_when_calibrated() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -198,6 +200,7 @@ fn overlay_shows_clip_when_clipping() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -235,6 +238,7 @@ fn overlay_no_clip_when_not_clipping() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -275,6 +279,7 @@ fn overlay_shows_frozen() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -313,6 +318,7 @@ fn overlay_shows_connected() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -349,6 +355,7 @@ fn overlay_shows_disconnected() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -400,6 +407,7 @@ fn overlay_shows_transfer_delay() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -448,6 +456,7 @@ fn overlay_shows_hover_db_readout() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -487,6 +496,7 @@ fn overlay_shows_notification() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -526,6 +536,7 @@ fn overlay_shows_sample_rate() {
         tier_badge: None,
         time_integration: None,
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -569,6 +580,7 @@ fn overlay_shows_time_fast_tag() {
             duration_s: None,
         }),
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);
@@ -607,11 +619,113 @@ fn overlay_shows_band_weighting_tag() {
         tier_badge: None,
         time_integration: None,
         band_weighting: Some("A"),
+        loudness: None,
     };
 
     let texts = run_overlay(input);
     let has_tag = texts.iter().any(|t| t.contains("wt A"));
     assert!(has_tag, "wt A tag not found in: {texts:?}");
+}
+
+#[test]
+fn overlay_shows_loudness_strip_with_r128_pass() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        selection_order: &[],
+        transfer: None,
+        active_meas: None,
+        active_meas_idx: 0,
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: Some(crate::data::types::LoudnessReadout {
+            momentary_lkfs: Some(-22.9),
+            short_term_lkfs: Some(-23.1),
+            integrated_lkfs: Some(-23.0),
+            lra_lu: 5.2,
+            true_peak_dbtp: Some(-1.2),
+            gated_duration_s: 17.3,
+        }),
+    };
+
+    let texts = run_overlay(input);
+    let joined = texts.join(" | ");
+    assert!(joined.contains("M"), "loudness M marker missing: {joined}");
+    assert!(joined.contains("LRA"), "LRA label missing: {joined}");
+    assert!(joined.contains("dBTP"), "dBTP label missing: {joined}");
+    assert!(
+        joined.contains("R128 PASS"),
+        "R128 PASS badge missing (integrated at -23.0): {joined}"
+    );
+}
+
+#[test]
+fn overlay_r128_fail_tag_when_far_off_target() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        selection_order: &[],
+        transfer: None,
+        active_meas: None,
+        active_meas_idx: 0,
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: Some(crate::data::types::LoudnessReadout {
+            momentary_lkfs: Some(-10.0),
+            short_term_lkfs: Some(-9.8),
+            integrated_lkfs: Some(-10.0), // 13 LU too hot → FAIL
+            lra_lu: 1.0,
+            true_peak_dbtp: Some(-0.3),
+            gated_duration_s: 42.0,
+        }),
+    };
+
+    let texts = run_overlay(input);
+    let joined = texts.join(" | ");
+    assert!(
+        joined.contains("R128 FAIL"),
+        "R128 FAIL badge missing (integrated -10 vs -23 target): {joined}"
+    );
 }
 
 #[test]
@@ -649,6 +763,7 @@ fn overlay_shows_leq_duration() {
             duration_s: Some(12.5),
         }),
         band_weighting: None,
+        loudness: None,
     };
 
     let texts = run_overlay(input);

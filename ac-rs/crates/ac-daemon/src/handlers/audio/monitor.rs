@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
+use ac_core::measurement::loudness::LoudnessState;
 use ac_core::shared::calibration::Calibration;
 use ac_core::visualize::time_integration::{
     EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S,
@@ -14,6 +15,43 @@ use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
 use super::super::{busy_guard, resolve_input, send_pub, spawn_worker};
+
+/// Emit a `measurement/loudness` sidecar frame for one channel. Kept
+/// out of the worker body so the two analysis paths (FFT + CWT) can
+/// share it.
+fn emit_loudness_frame(
+    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    channel: u32,
+    n_channels: u32,
+    sr: u32,
+    loudness: &LoudnessState,
+    ts_ns: u64,
+    xruns: u32,
+) {
+    let frame = json!({
+        "type":             "measurement/loudness",
+        "cmd":              "monitor_spectrum",
+        "channel":          channel,
+        "n_channels":       n_channels,
+        "sr":               sr,
+        "momentary_lkfs":   json_finite(loudness.momentary()),
+        "short_term_lkfs":  json_finite(loudness.short_term()),
+        "integrated_lkfs":  json_finite(loudness.integrated()),
+        "lra_lu":           loudness.loudness_range(),
+        "true_peak_dbtp":   json_finite(loudness.true_peak_dbtp()),
+        "gated_duration_s": loudness.gated_duration_s(),
+        "timestamp":        ts_ns,
+        "xruns":            xruns,
+    });
+    send_pub(pub_tx, "data", &frame);
+}
+
+/// Convert a possibly-infinite `f64` to JSON — `null` when not finite,
+/// real number otherwise. Keeps the sidecar frame JSON-parseable; `-inf`
+/// would otherwise fail `serde_json`'s finite-value check.
+fn json_finite(v: f64) -> Value {
+    if v.is_finite() { json!(v) } else { Value::Null }
+}
 
 /// Per-channel time-integrator state for the `fractional_octave_leq`
 /// sidecar frame. Re-initialised when the mode changes or when the band
@@ -112,6 +150,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let ioct_bpo_shared = state.ioct_bpo.clone();
     let time_integration_shared = state.time_integration_mode.clone();
     let leq_reset_shared = state.leq_reset_request.clone();
+    let loudness_reset_shared = state.loudness_reset_request.clone();
     let band_weighting_shared = state.band_weighting.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
@@ -172,6 +211,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut cur_ti_mode: String =
             time_integration_shared.lock().unwrap().clone();
 
+        // Per-channel BS.1770-5 / R128 loudness state — one mono-weighted
+        // LoudnessState per monitored channel. Emits a `measurement/loudness`
+        // sidecar frame each tick. Reset on `loudness_reset_request`.
+        let mut loudness: Vec<LoudnessState> = channels_worker
+            .iter()
+            .map(|_| {
+                LoudnessState::new_mono(sr)
+                    .expect("sample_rate > 0 guaranteed by engine.sample_rate()")
+            })
+            .collect();
+
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
             let (cur_interval, cur_fft_n) = {
@@ -193,6 +243,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     if let Some(i) = slot { i.reset_if_leq(); }
                 }
                 for slot in last_frac_ts.iter_mut() { *slot = None; }
+            }
+            if loudness_reset_shared.swap(false, Ordering::Relaxed) {
+                for l in loudness.iter_mut() {
+                    l.reset();
+                }
             }
 
             // Check for live CWT param changes.
@@ -238,6 +293,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                     };
                     xruns_total += eng.xruns();
+                    // Feed the raw capture into the loudness meter before
+                    // any downstream consumers touch it.
+                    let _ = loudness[idx].push(&[&samples]);
                     let ring = &mut cwt_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > ring_cap {
@@ -280,6 +338,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "xruns":       xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
+                    emit_loudness_frame(
+                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                    );
                     // Optional fractional-octave aggregation of the same
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
                     // extra DSP cost when enabled.
@@ -405,6 +466,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                 };
                 xruns_total += eng.xruns();
+                // Loudness runs on the raw capture, independent of the
+                // FFT-N sliding ring.
+                let _ = loudness[idx].push(&[&new]);
                 let ring = &mut fft_rings[idx];
                 ring.extend(new.iter());
                 while ring.len() > cur_fft_n as usize {
@@ -472,6 +536,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                     };
                     send_pub(&pub_tx, "data", &frame);
+                    let ts_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    emit_loudness_frame(
+                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                    );
                 }
             }
             // Pace FFT mode to requested interval. CWT has its own cadence

@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 use triple_buffer::{triple_buffer, Input, Output};
 
+use std::collections::HashMap;
+
 use super::types::{
-    DisplayConfig, DisplayFrame, FrameMeta, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
-    TransferPair,
+    DisplayConfig, DisplayFrame, FrameMeta, LoudnessReadout, SpectrumFrame, SweepDone, SweepPoint,
+    TransferFrame, TransferPair,
 };
 
 struct ChannelSlot {
@@ -306,6 +308,36 @@ impl SweepStore {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_default()
+    }
+}
+
+/// Latest BS.1770-5 / R128 readout per monitored channel. Written by the
+/// receiver on each `measurement/loudness` frame; read by the overlay
+/// each redraw. Cleared on receiver shutdown / source swap.
+#[derive(Clone, Default)]
+pub struct LoudnessStore {
+    inner: Arc<Mutex<HashMap<u32, LoudnessReadout>>>,
+}
+
+impl LoudnessStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn write(&self, channel: u32, readout: LoudnessReadout) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.insert(channel, readout);
+        }
+    }
+
+    pub fn read(&self, channel: u32) -> Option<LoudnessReadout> {
+        self.inner.lock().ok().and_then(|g| g.get(&channel).copied())
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.clear();
+        }
     }
 }
 

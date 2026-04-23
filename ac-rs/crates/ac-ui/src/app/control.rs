@@ -98,6 +98,8 @@ impl App {
         let virtual_channels = init.virtual_channels.clone();
         let sweep_store = init.sweep_store.clone();
         self.sweep_store = Some(sweep_store.clone());
+        let loudness_store = init.loudness_store.clone();
+        self.loudness_store = Some(loudness_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -118,6 +120,7 @@ impl App {
                     transfer_store,
                     virtual_channels,
                     sweep_store,
+                    loudness_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));
@@ -256,6 +259,27 @@ impl App {
         let cmd = serde_json::json!({ "cmd": "reset_leq" });
         if let Err(e) = ctrl.send(&cmd) {
             log::warn!("reset_leq failed: {e}");
+        }
+    }
+
+    /// Ask the daemon to zero the BS.1770-5 loudness accumulators and
+    /// clear the local store so the overlay snaps to `—` immediately
+    /// (otherwise a stale reading would linger until the next frame
+    /// arrives with `-∞`).
+    pub(super) fn send_reset_loudness(&mut self) {
+        if let Some(store) = self.loudness_store.as_ref() {
+            store.clear();
+        }
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("loudness: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({ "cmd": "reset_loudness" });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("reset_loudness failed: {e}");
         }
     }
 

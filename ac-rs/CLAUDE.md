@@ -99,6 +99,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `A` | Cycle per-band frequency weighting: off → A → C → Z → off. Daemon adds the IEC 61672-1 Annex E dB offset at each band centre before emitting `fractional_octave` / `fractional_octave_leq`. Display-only — same Morlet-CWT caveat. |
 | `I` | Cycle per-band time integration: off → fast (τ=125 ms) → slow (τ=1 s) → Leq → off. Daemon emits a `fractional_octave_leq` sidecar frame when non-off. Display-only — not IEC 61672 SPL (upstream aggregation is Morlet CWT, not IEC 61260 filters). |
 | `Shift+I` | Reset Leq accumulators on the daemon. Fast/slow modes ignore it — they re-prime from their next input. |
+| `Shift+L` | Reset BS.1770-5 loudness accumulators (integrated LKFS, LRA, true-peak) for every monitored channel. |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
 | `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |

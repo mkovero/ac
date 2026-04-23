@@ -33,7 +33,8 @@ mod transfer;
 
 pub use admin::{
     devices, dmm_read, get_analysis_mode, get_band_weighting, get_calibration,
-    get_time_integration, list_calibrations, quit, reset_leq, server_connections,
+    get_time_integration, list_calibrations, quit, reset_leq, reset_loudness,
+    server_connections,
     server_disable, server_enable, set_analysis_mode, set_band_weighting,
     set_ioct_bpo, set_monitor_params, set_time_integration, setup, status, stop,
 };

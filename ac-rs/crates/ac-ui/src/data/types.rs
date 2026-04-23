@@ -184,6 +184,22 @@ pub struct SweepDone {
     pub xruns: u32,
 }
 
+/// Per-channel BS.1770-5 / EBU R128 meter readout, derived from the
+/// daemon's `measurement/loudness` sidecar frame. Optional fields are
+/// `None` before enough audio has been accumulated for a meaningful
+/// value (e.g. `momentary_lkfs` needs ≥ 400 ms, `short_term_lkfs` ≥ 3 s,
+/// `integrated_lkfs` / `true_peak_dbtp` become finite once the first
+/// non-silent audio has passed the gate).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoudnessReadout {
+    pub momentary_lkfs: Option<f64>,
+    pub short_term_lkfs: Option<f64>,
+    pub integrated_lkfs: Option<f64>,
+    pub lra_lu: f64,
+    pub true_peak_dbtp: Option<f64>,
+    pub gated_duration_s: f64,
+}
+
 impl From<&SpectrumFrame> for FrameMeta {
     fn from(f: &SpectrumFrame) -> Self {
         Self {

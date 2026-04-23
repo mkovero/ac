@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{SweepStore, TransferStore, VirtualChannelStore};
-use super::types::{CwtFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair};
+use super::store::{LoudnessStore, SweepStore, TransferStore, VirtualChannelStore};
+use super::types::{
+    CwtFrame, LoudnessReadout, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair,
+};
 
 pub struct ReceiverStatus {
     pub connected: AtomicBool,
@@ -52,6 +54,7 @@ pub fn spawn(
     transfer: TransferStore,
     virtual_channels: VirtualChannelStore,
     sweep: SweepStore,
+    loudness: LoudnessStore,
     wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -318,6 +321,54 @@ pub fn spawn(
                             ..SpectrumFrame::default()
                         };
                         inputs[slot].write(sf);
+                        continue;
+                    }
+                    if type_tag.as_deref() == Some("measurement/loudness") {
+                        // Per-channel BS.1770-5 / R128 meter readout (see
+                        // ZMQ.md § loudness). Writes into a shared
+                        // `LoudnessStore` keyed by channel; the overlay
+                        // reads the latest entry for its hovered channel
+                        // every redraw. Fields that aren't yet meaningful
+                        // (silence, priming window unfilled) arrive as
+                        // `null` and stay `None`.
+                        #[derive(serde::Deserialize)]
+                        struct LoudnessFrame {
+                            channel: u32,
+                            #[serde(default)]
+                            momentary_lkfs: Option<f64>,
+                            #[serde(default)]
+                            short_term_lkfs: Option<f64>,
+                            #[serde(default)]
+                            integrated_lkfs: Option<f64>,
+                            #[serde(default)]
+                            lra_lu: f64,
+                            #[serde(default)]
+                            true_peak_dbtp: Option<f64>,
+                            #[serde(default)]
+                            gated_duration_s: f64,
+                        }
+                        match serde_json::from_str::<LoudnessFrame>(body) {
+                            Ok(lf) => {
+                                loudness.write(
+                                    lf.channel,
+                                    LoudnessReadout {
+                                        momentary_lkfs: lf.momentary_lkfs,
+                                        short_term_lkfs: lf.short_term_lkfs,
+                                        integrated_lkfs: lf.integrated_lkfs,
+                                        lra_lu: lf.lra_lu,
+                                        true_peak_dbtp: lf.true_peak_dbtp,
+                                        gated_duration_s: lf.gated_duration_s,
+                                    },
+                                );
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
+                            }
+                            Err(e) => {
+                                log::warn!("measurement/loudness parse failed: {e}");
+                            }
+                        }
                         continue;
                     }
                     if type_tag.as_deref() == Some("transfer_stream") {

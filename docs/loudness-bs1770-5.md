@@ -17,7 +17,7 @@ WAVs that become our golden fixtures.
 | B | Momentary / short-term / integrated + two-pass gating | ✅ shipped | `7b0369c` |
 | C | Loudness range (LRA) | ✅ shipped | `2a7b2a6` |
 | D | True-peak via 4× polyphase FIR (Annex 2 Table 1 verbatim) | ✅ shipped | `94569e2` |
-| E | Wire into `ac monitor` PUB stream + UI overlay + reset key | planned | — |
+| E | Wire into `ac monitor` PUB stream + UI overlay + reset key | ✅ shipped | this commit |
 | F | EBU Tech 3341 / 3342 compliance validation | planned | — |
 
 The citation flips to `verified: true` only after Phase F is green.
