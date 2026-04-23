@@ -3,11 +3,16 @@
 //! Phase A shipped the K-weighting cascade (§2.1 pre-filter + §2.2 RLB)
 //! and the 400 ms / 100 ms-step gating-block accumulator (§2.3).
 //!
-//! Phase B (this commit) adds the multi-channel [`LoudnessState`]
-//! aggregator: momentary (LKFS-M, 400 ms sliding), short-term (LKFS-S,
-//! 3 s sliding), and integrated (LKFS-I, two-pass gated) per BS.1770-5
-//! §2.3–§2.4, with channel weights for mono and stereo. LRA and true-peak
-//! land in Phases C and D — see `docs/loudness-bs1770-5.md`.
+//! Phase B added the multi-channel [`LoudnessState`] aggregator:
+//! momentary (LKFS-M, 400 ms sliding), short-term (LKFS-S, 3 s sliding),
+//! and integrated (LKFS-I, two-pass gated) per BS.1770-5 §2.3–§2.4, with
+//! channel weights for mono and stereo.
+//!
+//! Phase C (this commit) adds loudness range (LRA) per EBU Tech 3342:
+//! the short-term LKFS values emitted at each 100 ms tile boundary are
+//! retained, two-pass gated (absolute −70 LUFS, relative −20 LU), and the
+//! 95th minus 10th percentile of survivors is reported as LRA in LU.
+//! True-peak lands in Phase D — see `docs/loudness-bs1770-5.md`.
 //!
 //! The K-weighting coefficients are re-derived at runtime from the two
 //! closed-form biquad designs BS.1770 uses — a custom Vh/Vb high-shelf
@@ -222,8 +227,8 @@ pub fn ms_to_lkfs(ms: f64) -> f64 {
 
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "ITU-R BS.1770-5".into(),
-        clause: "§2.1 Pre-filter, §2.2 RLB weighting, §2.3 Gating block, §2.4 Channel weighting".into(),
+        standard: "ITU-R BS.1770-5 / EBU Tech 3342".into(),
+        clause: "BS.1770 §2.1–§2.4, Tech 3342 §2.2 Loudness range".into(),
         verified: false,
     }
 }
@@ -241,6 +246,11 @@ pub const WEIGHT_LFE: f64 = 0.0;
 const ABSOLUTE_GATE_LKFS: f64 = -70.0;
 /// Relative gate delta below ungated loudness, BS.1770-5 §2.4.
 const RELATIVE_GATE_DELTA_LU: f64 = -10.0;
+/// Relative gate delta for loudness range, EBU Tech 3342 §2.2.
+const LRA_RELATIVE_GATE_DELTA_LU: f64 = -20.0;
+/// LRA low / high percentiles, EBU Tech 3342 §2.2.
+const LRA_LOW_PERCENTILE: f64 = 0.10;
+const LRA_HIGH_PERCENTILE: f64 = 0.95;
 
 /// Number of 100 ms tiles in a momentary 400 ms window.
 const MOMENTARY_TILES: usize = 4;
@@ -331,6 +341,10 @@ pub struct LoudnessState {
     /// tile boundary once the state has seen ≥ 4 tiles. Used for the
     /// integrated-loudness two-pass gating.
     block_ms: Vec<f64>,
+    /// Running list of channel-weighted 3 s short-term MS values, one
+    /// per tile boundary once the state has seen ≥ 30 tiles. Used for
+    /// the loudness-range gating and percentile stats.
+    short_term_ms: Vec<f64>,
     /// Count of tiles emitted per channel (all channels stay in lock-step
     /// because they're fed the same number of samples per `push`).
     tiles_emitted: u64,
@@ -360,6 +374,7 @@ impl LoudnessState {
             channels,
             weights: weights.to_vec(),
             block_ms: Vec::new(),
+            short_term_ms: Vec::new(),
             tiles_emitted: 0,
         })
     }
@@ -410,9 +425,15 @@ impl LoudnessState {
             // block completes. Compute its channel-weighted MS and record
             // for the integrated-loudness gating.
             if self.tiles_emitted as usize >= MOMENTARY_TILES {
-                let block = self.channel_weighted_ms(MOMENTARY_TILES);
-                if let Some(ms) = block {
+                if let Some(ms) = self.channel_weighted_ms(MOMENTARY_TILES) {
                     self.block_ms.push(ms);
+                }
+            }
+            // Similarly, once we have ≥ 30 tiles, each boundary completes
+            // a new 3 s short-term window — record it for LRA.
+            if self.tiles_emitted as usize >= SHORT_TERM_TILES {
+                if let Some(ms) = self.channel_weighted_ms(SHORT_TERM_TILES) {
+                    self.short_term_ms.push(ms);
                 }
             }
         }
@@ -501,12 +522,77 @@ impl LoudnessState {
         n as f64 * BLOCK_STEP_S
     }
 
+    /// Loudness range (LRA) per EBU Tech 3342 §2.2, in LU. Two-pass
+    /// gating on the stream of 3 s short-term values (absolute −70 LUFS,
+    /// then relative −20 LU below the ungated mean), then LRA = P95 − P10
+    /// of the survivors. Returns `0.0` before enough data has
+    /// accumulated for a meaningful statistic.
+    ///
+    /// The spec doesn't name a minimum sample count; we return 0 until
+    /// at least 2 short-term values survive the gating so the stat is
+    /// at least defined.
+    pub fn loudness_range(&self) -> f64 {
+        if self.short_term_ms.is_empty() {
+            return 0.0;
+        }
+        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+        let pass1: Vec<f64> = self
+            .short_term_ms
+            .iter()
+            .copied()
+            .filter(|&ms| ms >= abs_gate_ms)
+            .collect();
+        if pass1.is_empty() {
+            return 0.0;
+        }
+        let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
+        let rel_gate_ms = lkfs_to_ms(
+            ms_to_lkfs(ungated_mean_ms) + LRA_RELATIVE_GATE_DELTA_LU,
+        );
+        // Convert survivors to LKFS and sort so we can pull percentiles.
+        let mut lkfs: Vec<f64> = pass1
+            .into_iter()
+            .filter(|&ms| ms >= rel_gate_ms)
+            .map(ms_to_lkfs)
+            .collect();
+        if lkfs.len() < 2 {
+            return 0.0;
+        }
+        lkfs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let lo = percentile(&lkfs, LRA_LOW_PERCENTILE);
+        let hi = percentile(&lkfs, LRA_HIGH_PERCENTILE);
+        (hi - lo).max(0.0)
+    }
+
     pub fn reset(&mut self) {
         for c in self.channels.iter_mut() {
             c.reset();
         }
         self.block_ms.clear();
+        self.short_term_ms.clear();
         self.tiles_emitted = 0;
+    }
+}
+
+/// Linear-interpolated percentile of a pre-sorted ascending slice. `p` is
+/// in `[0, 1]`. Follows Tech 3342's "linear interpolation between adjacent
+/// samples" convention (R-7 / Excel PERCENTILE).
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let p = p.clamp(0.0, 1.0);
+    let pos = p * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let frac = pos - lo as f64;
+        sorted[lo] + frac * (sorted[hi] - sorted[lo])
     }
 }
 
@@ -941,6 +1027,101 @@ mod tests {
         // standard surround support lands.
         let s = LoudnessState::new_with_weights(FS, &[1.0, 1.0, 1.41]).unwrap();
         assert_eq!(s.channel_count(), 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase C — loudness range (LRA).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn lra_zero_before_enough_audio() {
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        let short = sine_samples((FS as usize) * 2, 1000.0, -20.0, FS);
+        s.push(&[&short]).unwrap();
+        // Only 2 s of audio — short-term priming needs 3 s, so nothing in
+        // the short-term history yet.
+        assert_eq!(s.loudness_range(), 0.0);
+    }
+
+    #[test]
+    fn lra_of_constant_tone_is_near_zero() {
+        // A 20 s constant -23 dBFS sine should yield LRA ≈ 0 LU. The
+        // percentile spread across short-term samples of a stationary
+        // signal is essentially zero.
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        let sine = sine_samples((FS as usize) * 20, 1000.0, -23.0, FS);
+        s.push(&[&sine]).unwrap();
+        let lra = s.loudness_range();
+        assert!(
+            lra < 0.5,
+            "constant tone LRA {lra:.3} LU, expected near zero"
+        );
+    }
+
+    #[test]
+    fn lra_step_change_reports_level_delta() {
+        // 15 s at -23 dBFS + 15 s at -13 dBFS (a 10 LU step). Because
+        // both segments are above the relative gate (-20 LU of the
+        // ungated mean), LRA should come out close to the step height
+        // (within the percentile-edge effects of P10 / P95). Tolerate a
+        // generous window — the exact P95/P10 on a step depends on
+        // short-term-window transitions crossing the boundary.
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        let quiet = sine_samples((FS as usize) * 15, 1000.0, -23.0, FS);
+        let loud = sine_samples((FS as usize) * 15, 1000.0, -13.0, FS);
+        s.push(&[&quiet]).unwrap();
+        s.push(&[&loud]).unwrap();
+        let lra = s.loudness_range();
+        assert!(
+            lra > 7.0 && lra < 11.0,
+            "10 LU step → LRA = {lra:.3} LU, expected ~10 ±3"
+        );
+    }
+
+    #[test]
+    fn lra_relative_gate_drops_deep_silences() {
+        // 20 s at -23 dBFS + 20 s at -60 dBFS. The quiet segment sits
+        // well below the -20 LU relative gate, so LRA should reflect
+        // only the loud segment (≈ 0).
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        let loud = sine_samples((FS as usize) * 20, 1000.0, -23.0, FS);
+        let deep_quiet = sine_samples((FS as usize) * 20, 1000.0, -60.0, FS);
+        s.push(&[&loud]).unwrap();
+        s.push(&[&deep_quiet]).unwrap();
+        let lra = s.loudness_range();
+        assert!(
+            lra < 1.5,
+            "relative gate failed to drop -60 dBFS segment: LRA = {lra:.3} LU"
+        );
+    }
+
+    #[test]
+    fn lra_reset_clears_history() {
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        let loud = sine_samples((FS as usize) * 10, 1000.0, -23.0, FS);
+        s.push(&[&loud]).unwrap();
+        let _ = s.loudness_range();
+        s.reset();
+        assert_eq!(s.loudness_range(), 0.0);
+    }
+
+    #[test]
+    fn percentile_handles_edges() {
+        let v = vec![0.0_f64, 1.0, 2.0, 3.0, 4.0];
+        assert!((percentile(&v, 0.0) - 0.0).abs() < 1e-12);
+        assert!((percentile(&v, 1.0) - 4.0).abs() < 1e-12);
+        // Linear interpolation at 0.5 of len-1=4 steps → index 2.0 → 2.0.
+        assert!((percentile(&v, 0.5) - 2.0).abs() < 1e-12);
+        // At 0.25 → index 1.0 → 1.0.
+        assert!((percentile(&v, 0.25) - 1.0).abs() < 1e-12);
+        // At 0.125 → index 0.5 → 0.5.
+        assert!((percentile(&v, 0.125) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn percentile_of_single_and_empty() {
+        assert_eq!(percentile(&[], 0.5), 0.0);
+        assert_eq!(percentile(&[42.0], 0.5), 42.0);
     }
 
     #[test]
