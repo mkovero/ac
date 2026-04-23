@@ -384,7 +384,14 @@ pub enum CommandKind {
     },
     Report {
         path: String,
+        format: ReportFormat,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportFormat {
+    Html,
+    Pdf,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,12 +516,20 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
             })
         }
         "report" => {
-            if args.len() != 1 {
-                return Err("report: requires a JSON report path".into());
+            if args.is_empty() || args.len() > 2 {
+                return Err("report: requires <path.json> [html|pdf]".into());
             }
+            let format = match args.get(1).map(String::as_str) {
+                None | Some("html") => ReportFormat::Html,
+                Some("pdf")         => ReportFormat::Pdf,
+                Some(other) => {
+                    return Err(format!("report: unknown format {other:?} (expected html or pdf)"));
+                }
+            };
             Ok(ParsedCommand {
                 cmd: CommandKind::Report {
                     path: args[0].clone(),
+                    format,
                 },
                 show_plot: false,
             })
@@ -572,7 +587,7 @@ Commands:
   test dut        [compare] [level]                              DUT characterization (requires 2 loopbacks)
   probe                                                         auto-detect analog ports and loopback pairs
   dmm                                                           read AC Vrms from configured DMM over SCPI
-  report          <path>                                        render MeasurementReport JSON to HTML (sibling .html)
+  report          <path.json> [html|pdf]                        render MeasurementReport JSON (default: html; sibling .html/.pdf)
   setup           [output <N>] [input <N>] [reference <N>]
                   [range <freqStart freqStop>]
                   [dmm <ipaddr>] [gpio <serialDevice>]

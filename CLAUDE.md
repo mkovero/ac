@@ -42,7 +42,7 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ac-rs/                 (Rust — primary implementation)
   ZMQ.md               (wire protocol reference — authoritative)
   crates/
-    ac-core/           (pure library: analysis, generator, calibration, config, IEC 61260-1 filterbank, Farina log-sweep IR, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, HTML report renderer — 119 tests)
+    ac-core/           (pure library: analysis, generator, calibration, config, IEC 61260-1 filterbank, Farina log-sweep IR, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, HTML + PDF report renderers — 119 tests)
     ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
     ac-daemon/         (ZMQ REP+PUB server binary — 43 unit + 10 it tests)
     ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 81 tests)
