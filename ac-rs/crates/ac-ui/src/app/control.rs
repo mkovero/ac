@@ -10,77 +10,16 @@ use super::helpers::{DataSource, SourceKind};
 use super::App;
 
 impl App {
-    /// Active meas channel under the current Transfer convention. `None`
-    /// means the selection is too small (< 2) or the resolved index is
-    /// out-of-range; the overlay hint shows up in that case.
-    pub(super) fn transfer_active_meas(&self) -> Option<usize> {
-        let n = self.selection_order.len();
-        if n < 2 {
-            return None;
-        }
-        let meas_count = n - 1;
-        let idx = self.active_meas_idx.min(meas_count - 1);
-        Some(self.selection_order[idx])
-    }
-
-    fn transfer_ref_channel(&self) -> Option<usize> {
-        if self.selection_order.len() < 2 {
-            return None;
-        }
-        self.selection_order.last().copied()
-    }
-
     /// Stop any currently running `transfer_stream` worker and restart it
-    /// with the current union of virtual-channel pairs plus (if in L-transfer
-    /// layout) the active meas/ref pair. No-op when the union is empty —
-    /// stopping the worker is enough.
+    /// against the current virtual-channel set. No-op when no pairs are
+    /// registered — stopping the worker is enough.
     pub(super) fn restart_transfer_stream(&mut self) {
         self.send_transfer_stream_stop();
         let pairs = self.collect_transfer_pairs();
         if pairs.is_empty() {
             return;
         }
-        // Args are unused in the new pairs-based implementation; kept for
-        // call-site compatibility in case we ever revert.
         self.send_transfer_stream_start(0, 0);
-    }
-
-    /// Called after `config.layout` has been advanced by the `l` key. Starts
-    /// the transfer_stream worker when entering Transfer (if the pair is
-    /// ready) and stops it when leaving — *unless* virtual channels are
-    /// registered, in which case the worker stays live to keep feeding them
-    /// across layout changes.
-    pub(super) fn on_layout_changed(&mut self, prev: LayoutMode, next: LayoutMode) {
-        let entering = !matches!(prev, LayoutMode::Transfer)
-            && matches!(next, LayoutMode::Transfer);
-        let leaving = matches!(prev, LayoutMode::Transfer)
-            && !matches!(next, LayoutMode::Transfer);
-        if entering {
-            // Start from the first meas on fresh entry so the user doesn't
-            // inherit stale Tab state from a previous Transfer session.
-            self.active_meas_idx = 0;
-            if self.transfer_active_meas().is_some() {
-                self.restart_transfer_stream();
-            } else if self.virtual_channels.is_empty() {
-                self.notify("transfer: pick ≥ 2 channels (last = REF)");
-            } else {
-                // Worker already live serving virtual channels — nothing to
-                // restart, the layout just has no legacy pair to display.
-            }
-        } else if leaving {
-            // Virtual channels keep the worker alive across layout changes;
-            // only fully stop if there's nothing left to stream.
-            if self.virtual_channels.is_empty() {
-                self.send_transfer_stream_stop();
-            } else {
-                // Drop the L-layout pair from the worker's set.
-                self.restart_transfer_stream();
-            }
-            // Resume spectrum publishing that was paused when we entered
-            // Transfer. No-op if it's already running (e.g. the user never
-            // had a valid pair so we never actually stopped it).
-            self.send_monitor_spectrum_start();
-        }
     }
 
     pub(super) fn start_data_source(&mut self) {
@@ -317,23 +256,11 @@ impl App {
         }
     }
 
-    /// Union of every pair the worker needs to service: every registered
-    /// virtual channel plus, if the user is currently in the legacy
-    /// L-transfer layout, the (active_meas, ref) pair that view points at —
-    /// dedup'd so the worker doesn't compute the same H1 twice.
+    /// Every pair the worker needs to service — one per registered virtual
+    /// channel. Extracted as a helper so `restart_transfer_stream` and the
+    /// worker start path see the same set.
     fn collect_transfer_pairs(&self) -> Vec<TransferPair> {
-        let mut pairs = self.virtual_channels.pairs();
-        if matches!(self.config.layout, LayoutMode::Transfer) {
-            if let (Some(meas), Some(refc)) =
-                (self.transfer_active_meas(), self.transfer_ref_channel())
-            {
-                let layout_pair = TransferPair { meas: meas as u32, ref_ch: refc as u32 };
-                if !pairs.iter().any(|p| *p == layout_pair) {
-                    pairs.push(layout_pair);
-                }
-            }
-        }
-        pairs
+        self.virtual_channels.pairs()
     }
 
     fn send_transfer_stream_start(&mut self, _meas_ch: usize, _ref_ch: usize) {

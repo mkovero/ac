@@ -573,48 +573,63 @@ pub const USAGE: &str = "\
 ac — audio measurement CLI
 
 Commands:
-  devices                                                       list available audio ports
-  calibrate       [output <N> input <N>] [show]                 level calibration
-  generate        <sine|pink> [ch] [level] [freq]               output sine/pink
-  sweep level     <start> <stop> [freq]                         sweep level with fixed frequency
-  sweep frequency <freqStart freqStop> [level]                  sweep frequency with fixed level
-  sweep ir        [freqStart freqStop] [duration] [level]       Farina log-sweep impulse response
-  plot            [<freqStart freqStop>] [level] [ppd] [show]   per point THD vs frequency
-  plot level      <start> <stop> [freq] [steps] [show]         per point THD vs level
-  monitor         [channels] [<freqStart freqStop>] [interval] [show]  live spectrum
-  stop                                                          stop active generator/measurement
-  test software                                                  validate analysis pipeline (no hardware)
-  test hardware   [dmm]                                          hardware validation (requires 2 loopbacks)
-  test dut        [compare] [level]                              DUT characterization (requires 2 loopbacks)
-  probe                                                         auto-detect analog ports and loopback pairs
-  dmm                                                           read AC Vrms from configured DMM over SCPI
-  report          <path.json> [html|pdf]                        render MeasurementReport JSON (default: html; sibling .html/.pdf)
-  setup           [output <N>] [input <N>] [reference <N>]
-                  [range <freqStart freqStop>]
-                  [dmm <ipaddr>] [gpio <serialDevice>]
+  devices                                                             list audio ports
+  probe                                                               auto-detect analog ports and loopback pairs
+  setup           [output <N>] [input <N>] [reference <N>] [device <N>]
+                  [range <freqStart freqStop>] [dburef <vrms>]
+                  [dmm <host>] [gpio <serialDevice>|off]
+                  [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
+  calibrate       [output <N>] [input <N>] [level] [show]             level calibration (default: -10dBFS)
+  generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
+  generate pink   [channels] [level]                                  pink noise
+  sweep level     <start> <stop> [freq] [duration]                    level sweep at fixed frequency
+  sweep frequency [freqStart freqStop] [level] [duration]             frequency sweep at fixed level
+  sweep ir        [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response
+  plot            [freqStart freqStop] [level] [ppd] [<N>bpo] [show]  per-point THD vs freq (+ optional IEC 61260-1 bands)
+  plot level      <start> <stop> [freq] [steps] [show]                per-point THD vs level
+  monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
+                                                                      live spectrum (default FFT; cwt = Morlet)
+  stop                                                                stop active generator/measurement
+  test software                                                       validate analysis pipeline (no hardware)
+  test hardware   [dmm]                                               hardware validation (requires 2 loopbacks)
+  test dut        [compare] [level]                                   DUT characterization (requires 2 loopbacks)
+  dmm                                                                 read AC Vrms from configured DMM over SCPI
+  gpio            [log]                                               USB2GPIO status (log = stream frames)
+  report          <path.json> [html|pdf]                              render MeasurementReport JSON (default html, sibling file)
 
-Units:  20hz 1khz  |  0dbu -12dbfs 775mvrms 1vrms  |  1s  |  10ppd
-        append \"show\" to open GPU view window
+Units:  20hz 1khz              frequency
+        0dbu -12dbfs 775mv     level (also vrms, mvrms, vpp, mvpp; bare number = dBFS)
+        1s                     duration
+        10ppd 26steps          sweep density
+        6bpo 3bands            fractional-octave bins-per-octave
+        show                   also open GPU view window (abbrev: sh)
 
 Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) pr(obe) te(st)
               l(evel) f(requency) si(ne) pk(ink) sh(ow) so(ftware) h(ardware)
-              se(tup) d(evices) st(op) ref(erence)
+              se(tup) d(evices) st(op) ref(erence) ser(ver) n(ew) u(se) df(iff)
+              ses/sess/ls(sessions) o/out(put) i/in(put) r/ra(nge)
 
 Sessions:
-  new|use|ls|rm|diff                                            create, switch, list, remove, compare
+  new <name>                                                          create and switch to a session
+  sessions | ls                                                       list sessions
+  use <name>                                                          switch active session
+  rm <name>                                                           remove a session
+  diff <a> <b>                                                        compare two sessions
 
 Server:
-  server [<enable|disable>] [connections]                       enable/disable server, show connections
-  server <host>                                                 connect to remote host
+  server                                                              connect to localhost daemon
+  server <host>                                                       connect to remote daemon
+  server enable | disable | connections                               manage a persistent local daemon
 
 Examples:
   ac setup output 11 input 0
   ac calibrate
   ac g si 0dbu 1khz
   ac plot 20hz 20khz 0dbu 20ppd show
+  ac plot 20hz 20khz 0dbu 10ppd 6bpo show
   ac plot level -20dbu 6dbu 1khz 26steps show
-  ac m sh
-  ac s f 20hz 20khz 0dbu";
+  ac m cwt 0-3 show
+  ac s f 20hz 20khz 0dbu 2s";
 
 // ---------------------------------------------------------------------------
 // Display impl for LevelSpec

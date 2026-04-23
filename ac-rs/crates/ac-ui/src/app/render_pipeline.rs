@@ -359,11 +359,8 @@ impl App {
             n_channels,
             self.config.active_channel,
             &self.selected,
-            &self.selection_order,
-            self.active_meas_idx,
             grid_params_snap,
         );
-        let in_transfer_layout = matches!(self.config.layout, LayoutMode::Transfer);
         let in_sweep_layout = matches!(self.config.layout, LayoutMode::Sweep);
         if let Some(ss) = self.sweep_store.as_ref() {
             if !self.config.frozen {
@@ -483,7 +480,7 @@ impl App {
         }
         let mut spectrum_uploads: Vec<ChannelUpload> = Vec::new();
         let mut waterfall_uploads: Vec<WaterfallCellUpload<'_>> = Vec::new();
-        if !in_transfer_layout && !in_sweep_layout {
+        if !in_sweep_layout {
             match view_mode {
                 ViewMode::Spectrum => spectrum_uploads.reserve(cells.len()),
                 ViewMode::Waterfall => waterfall_uploads.reserve(cells.len()),
@@ -491,7 +488,7 @@ impl App {
         }
 
         for cell in &cells {
-            if in_transfer_layout || in_sweep_layout {
+            if in_sweep_layout {
                 break;
             }
             let frame = match frames.get(cell.channel).and_then(|f| f.as_ref()) {
@@ -712,21 +709,6 @@ impl App {
             self.cwt_sigma,
             self.cwt_n_scales,
         ));
-        let mut transfer_snap: Option<TransferFrame> = if in_transfer_layout {
-            self.transfer_last.clone()
-        } else {
-            None
-        };
-        // Apply the same fractional-octave smoothing to the full Transfer-layout
-        // magnitude trace so it matches the grid-view virtual cells. Only
-        // magnitude-dB is smoothed — phase has 2π wraps that would average to
-        // meaningless midpoints, and coherence is already a windowed stat.
-        if let (Some(n_frac), Some(tf)) = (self.smoothing_frac, transfer_snap.as_mut()) {
-            if !tf.freqs.is_empty() && !tf.magnitude_db.is_empty() {
-                let windows = smoothing::OctaveWindows::build(n_frac, &tf.freqs);
-                tf.magnitude_db = smoothing::smooth_db(&tf.magnitude_db, &windows);
-            }
-        }
         let sweep_snap = if in_sweep_layout {
             Some(self.sweep_last.clone())
         } else {
@@ -734,20 +716,6 @@ impl App {
         };
         let sweep_kind_snap = self.sweep_kind;
         let sweep_sel_snap = self.sweep_selected_idx;
-        let selection_order_snap = self.selection_order.clone();
-        let active_meas_idx_snap = self.active_meas_idx;
-        let active_meas_snap = {
-            // Inline to dodge an otherwise-mutable borrow of `self` held by
-            // `render_ctx.as_mut()` above.
-            let n = selection_order_snap.len();
-            if n >= 2 {
-                let meas_count = n - 1;
-                let idx = active_meas_idx_snap.min(meas_count - 1);
-                Some(selection_order_snap[idx])
-            } else {
-                None
-            }
-        };
         let width_px = ctx.config.width as f32;
         let height_px = ctx.config.height as f32;
         let notification = self
@@ -782,10 +750,6 @@ impl App {
             let log_min = view.freq_min.max(1.0).log10();
             let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
             let freq_hz = 10_f32.powf(log_min + nx * (log_max - log_min));
-            // In Transfer layout the y-axis meaning depends on which
-            // sub-panel the cursor is in — mag shows dB, phase shows degrees,
-            // coh shows 0..1. Outside all three panels (the inter-panel gap)
-            // we fall back to mag dB so the crosshair label stays populated.
             let readout = if matches!(config_snap.layout, LayoutMode::Sweep) {
                 let cursor = egui::pos2(cx, cy);
                 let kind = sweep_kind_snap.unwrap_or(SweepKind::Frequency);
@@ -800,23 +764,6 @@ impl App {
                         HoverReadout::Db(v)
                     }
                     None => HoverReadout::Db(0.0),
-                }
-            } else if matches!(config_snap.layout, LayoutMode::Transfer) {
-                let cursor = egui::pos2(cx, cy);
-                match crate::render::transfer::hit_test(rect, cursor) {
-                    Some((crate::render::transfer::HitPanel::Phase, v)) => {
-                        HoverReadout::Phase(v)
-                    }
-                    Some((crate::render::transfer::HitPanel::Coherence, v)) => {
-                        HoverReadout::Coherence(v)
-                    }
-                    Some((crate::render::transfer::HitPanel::Magnitude, v)) => {
-                        HoverReadout::Db(v)
-                    }
-                    None => {
-                        let db = view.db_min + ny * (view.db_max - view.db_min);
-                        HoverReadout::Db(db)
-                    }
                 }
             } else if matches!(config_snap.view_mode, ViewMode::Waterfall) {
                 // Waterfall/CWT Y-axis is time, not dB. Top = newest
@@ -866,17 +813,6 @@ impl App {
                         let kind = sweep_kind_snap.unwrap_or(SweepKind::Frequency);
                         crate::render::sweep::draw(&painter, rect, kind, ss, sweep_sel_snap);
                     }
-                    continue;
-                }
-                if matches!(config_snap.layout, LayoutMode::Transfer) {
-                    let color = theme::channel_color(cell.channel);
-                    crate::render::transfer::draw(
-                        &painter,
-                        rect,
-                        &view,
-                        transfer_snap.as_ref(),
-                        color,
-                    );
                     continue;
                 }
                 let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall)
@@ -998,10 +934,6 @@ impl App {
                     frames: &frames,
                     cell_views: &cell_views_snap,
                     selected: &selected_snap,
-                    selection_order: &selection_order_snap,
-                    transfer: transfer_snap.as_ref(),
-                    active_meas: active_meas_snap,
-                    active_meas_idx: active_meas_idx_snap,
                     connected,
                     notification: notification.as_deref(),
                     timing: timing_for_overlay,
@@ -1140,12 +1072,7 @@ impl App {
         }
 
         if let Some(cap) = capture {
-            let transfer_for_capture = if in_transfer_layout {
-                self.transfer_last.clone()
-            } else {
-                None
-            };
-            finalize_capture(ctx, cap, &self.output_dir, &frames, transfer_for_capture);
+            finalize_capture(ctx, cap, &self.output_dir, &frames, None);
             self.notify("saved");
         }
 

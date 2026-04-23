@@ -261,6 +261,7 @@ impl VirtualChannelStore {
         self.inner.lock().ok().map(|g| g.len()).unwrap_or(0)
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

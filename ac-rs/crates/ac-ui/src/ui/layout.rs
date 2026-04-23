@@ -58,8 +58,6 @@ pub fn compute(
     n_channels: usize,
     active_channel: usize,
     selected: &[bool],
-    selection_order: &[usize],
-    active_meas_idx: usize,
     grid: GridParams,
 ) -> Vec<CellRect> {
     if n_channels == 0 {
@@ -81,31 +79,6 @@ pub fn compute(
                 h: plot_h,
             })
             .collect(),
-        LayoutMode::Transfer => {
-            // Convention: last selected = REF, everything before it = meas
-            // list. One meas is "active" (selected via Tab in the app), and
-            // that meas owns the displayed cell. Multiple meas are fine but
-            // only the active one is rendered at a time so the sub-panel
-            // stack stays legible.
-            let n = selection_order.len();
-            if n < 2 {
-                return Vec::new();
-            }
-            let meas_count = n - 1;
-            let idx = active_meas_idx.min(meas_count - 1);
-            let meas = selection_order[idx];
-            let refc = selection_order[n - 1];
-            if meas >= n_channels || refc >= n_channels {
-                return Vec::new();
-            }
-            vec![CellRect {
-                channel: meas,
-                x: plot_x,
-                y: plot_y,
-                w: plot_w,
-                h: plot_h,
-            }]
-        }
         LayoutMode::Sweep => {
             vec![CellRect {
                 channel: 0,

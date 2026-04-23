@@ -142,11 +142,6 @@ pub fn format_freq_compact(hz: f32) -> String {
     }
 }
 
-/// Transfer delay readout (top center).
-pub fn transfer_delay(delay_ms: f32, delay_samples: i64) -> String {
-    format!("Δt = {:+.2} ms  ({:+} samp)", delay_ms, delay_samples)
-}
-
 /// Sweep point readout (bottom bar in sweep layout).
 pub fn sweep_readout(pt: &SweepPoint) -> String {
     let mut parts = Vec::new();
@@ -171,18 +166,6 @@ pub fn hover_label(channel: usize, freq_hz: f32, readout: &HoverReadout) -> Stri
     match readout {
         HoverReadout::Db(v) => format!(
             "CH{} {} {:+6.1} dB",
-            channel,
-            format_hz(freq_hz),
-            v,
-        ),
-        HoverReadout::Phase(v) => format!(
-            "CH{} {} {:+6.1} deg",
-            channel,
-            format_hz(freq_hz),
-            v,
-        ),
-        HoverReadout::Coherence(v) => format!(
-            "CH{} {} coh {:.3}",
             channel,
             format_hz(freq_hz),
             v,
@@ -558,32 +541,6 @@ mod tests {
         assert_eq!(format_freq_compact(48_000.0), "48.00 kHz");
     }
 
-    // ── transfer_delay ────────────────────────────────────────────────
-
-    #[test]
-    fn transfer_delay_positive() {
-        let s = transfer_delay(0.0625, 3);
-        assert_eq!(s, "Δt = +0.06 ms  (+3 samp)");
-    }
-
-    #[test]
-    fn transfer_delay_negative() {
-        let s = transfer_delay(-0.0625, -3);
-        assert_eq!(s, "Δt = -0.06 ms  (-3 samp)");
-    }
-
-    #[test]
-    fn transfer_delay_zero() {
-        let s = transfer_delay(0.0, 0);
-        assert_eq!(s, "Δt = +0.00 ms  (+0 samp)");
-    }
-
-    #[test]
-    fn transfer_delay_large() {
-        let s = transfer_delay(12.34, 592);
-        assert_eq!(s, "Δt = +12.34 ms  (+592 samp)");
-    }
-
     // ── sweep_readout ─────────────────────────────────────────────────
 
     #[test]
@@ -648,20 +605,6 @@ mod tests {
         assert!(s.contains("CH0"));
         assert!(s.contains("kHz"));
         assert!(s.contains("-12.3 dB"));
-    }
-
-    #[test]
-    fn hover_phase() {
-        let s = hover_label(1, 500.0, &HoverReadout::Phase(-90.0));
-        assert!(s.contains("CH1"));
-        assert!(s.contains("500.0 Hz"));
-        assert!(s.contains("-90.0 deg"));
-    }
-
-    #[test]
-    fn hover_coherence() {
-        let s = hover_label(0, 2000.0, &HoverReadout::Coherence(0.987));
-        assert!(s.contains("coh 0.987"));
     }
 
     #[test]

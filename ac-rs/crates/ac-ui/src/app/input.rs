@@ -90,8 +90,6 @@ impl App {
             n,
             self.config.active_channel,
             &self.selected,
-            &self.selection_order,
-            self.active_meas_idx,
             self.grid_params(),
         );
         for c in &cells {
@@ -126,17 +124,6 @@ impl App {
                 .enumerate()
                 .filter_map(|(i, sel)| sel.then_some(i))
                 .collect(),
-            // Transfer cell carries the active meas channel slot; zoom/pan
-            // acts on that meas' CellView (phase/coh sub-panels inherit the
-            // frequency axis from it). Last-selected is REF, everything
-            // before it is a meas — `active_meas_idx` picks the current one.
-            LayoutMode::Transfer => {
-                if let Some(meas) = self.transfer_active_meas() {
-                    vec![meas.min(n - 1)]
-                } else {
-                    Vec::new()
-                }
-            }
             LayoutMode::Sweep => vec![0],
         }
     }
@@ -294,9 +281,7 @@ impl App {
             return;
         }
         self.config.active_channel = clicked;
-        let prev = self.config.layout;
         self.config.layout = LayoutMode::Single;
-        self.on_layout_changed(prev, LayoutMode::Single);
         self.notify(&format!("zoom: CH{clicked}"));
     }
 
@@ -344,8 +329,6 @@ impl App {
             1,
             0,
             &self.selected,
-            &self.selection_order,
-            self.active_meas_idx,
             self.grid_params(),
         );
         let Some(cell) = cells.first() else { return };
@@ -482,7 +465,6 @@ impl App {
             Some(t) => t,
             None => return,
         };
-        let in_transfer = matches!(self.config.layout, LayoutMode::Transfer);
         let now_selected = {
             let slot = &mut self.selected[target];
             *slot = !*slot;
@@ -502,18 +484,6 @@ impl App {
             if now_selected { "selected" } else { "unselected" },
             count,
         ));
-        if in_transfer {
-            // Selection change while live: clamp the active meas into the
-            // (possibly shrunk) meas list, then hot-swap the running
-            // transfer_stream to match the new pair.
-            let meas_count = self.selection_order.len().saturating_sub(1);
-            if meas_count == 0 {
-                self.active_meas_idx = 0;
-            } else if self.active_meas_idx >= meas_count {
-                self.active_meas_idx = meas_count - 1;
-            }
-            self.restart_transfer_stream();
-        }
     }
 
     /// Which of the four canonical W-cycle slots we're currently in.
@@ -621,9 +591,7 @@ impl App {
                     self.notify("C: select ≥ 1 channel first (Space over cell)");
                     return;
                 }
-                let prev = self.config.layout;
                 self.config.layout = LayoutMode::Compare;
-                self.on_layout_changed(prev, LayoutMode::Compare);
                 self.notify("layout: compare");
             }
             KeyCode::KeyL if self.modifiers.shift_key() => {
@@ -700,12 +668,8 @@ impl App {
                     // the next W press keeps meaning "advance".
                     return;
                 }
-                let prev_layout = self.config.layout;
                 self.config.layout = layout;
                 self.config.view_mode = view_mode;
-                if prev_layout != layout {
-                    self.on_layout_changed(prev_layout, layout);
-                }
                 if matches!(view_mode, ViewMode::Waterfall) {
                     for init in &mut self.waterfall_inited {
                         *init = false;
@@ -807,32 +771,6 @@ impl App {
                         self.notify(&format!("page {}/{}", self.grid_page + 1, pages));
                         return;
                     }
-                }
-                // Transfer layout: Tab/Shift+Tab rotates the active meas
-                // channel and hot-swaps the running transfer_stream worker.
-                // With only one meas selected this is a no-op.
-                if matches!(self.config.layout, LayoutMode::Transfer) {
-                    let meas_count = self.selection_order.len().saturating_sub(1);
-                    if meas_count > 1 {
-                        let delta = if self.modifiers.shift_key() {
-                            meas_count - 1
-                        } else {
-                            1
-                        };
-                        self.active_meas_idx =
-                            (self.active_meas_idx + delta) % meas_count;
-                        let meas = self
-                            .transfer_active_meas()
-                            .unwrap_or(self.config.active_channel);
-                        self.notify(&format!(
-                            "MEAS CH{} ({}/{})",
-                            meas,
-                            self.active_meas_idx + 1,
-                            meas_count,
-                        ));
-                        self.restart_transfer_stream();
-                    }
-                    return;
                 }
                 let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
                 self.config.active_channel = (self.config.active_channel + delta) % n;

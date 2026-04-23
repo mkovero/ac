@@ -2,8 +2,7 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, TransferFrame,
-    TransferPair, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, TransferPair, ViewMode,
 };
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
@@ -19,14 +18,12 @@ pub struct HoverInfo {
     pub readout: HoverReadout,
 }
 
-/// The y-axis reading under the hover cursor. Non-transfer layouts always
-/// emit `Db`; Transfer layout classifies which sub-panel the cursor is in and
-/// emits `Phase` (deg) or `Coherence` (0..1) accordingly.
+/// The y-axis reading under the hover cursor. Spectrum/Compare emit `Db`;
+/// Sweep layout classifies the cursor panel (THD vs Gain vs spectrum detail);
+/// Waterfall/CWT emit seconds-ago instead of dB.
 #[derive(Debug, Clone, Copy)]
 pub enum HoverReadout {
     Db(f32),
-    Phase(f32),
-    Coherence(f32),
     Thd(f32),
     Gain(f32),
     /// Waterfall/CWT cursor Y-axis is time, not dB. Payload is seconds-ago
@@ -58,16 +55,6 @@ pub struct OverlayInput<'a> {
     pub frames: &'a [Option<DisplayFrame>],
     pub cell_views: &'a [CellView],
     pub selected: &'a [bool],
-    pub selection_order: &'a [usize],
-    pub transfer: Option<&'a TransferFrame>,
-    /// Currently active meas channel in the Transfer layout (after clamping
-    /// `active_meas_idx` to the meas list). `None` when the layout isn't
-    /// Transfer or the selection has fewer than 2 channels.
-    pub active_meas: Option<usize>,
-    /// Index into the meas list (`selection_order[..len-1]`) that the user
-    /// last cycled to via Tab. Carried through so the overlay can show
-    /// "MEAS (n/N)" when there are multiple meas channels.
-    pub active_meas_idx: usize,
     pub connected: bool,
     pub notification: Option<&'a str>,
     pub timing: Option<StatsSnapshot>,
@@ -159,28 +146,45 @@ const HELP_LINES: &[&str] = &[
     "Keybindings",
     "─────────────────────────────",
     "Esc / Q        quit",
-    "Enter          freeze",
+    "Enter          freeze toggle",
     "S              screenshot + CSV",
-    "W              cycle view (spec/water)",
-    "L              cycle layout (grid/sng/cmp*/xfer*)",
+    "W              cycle view (matrix/single/waterfall-fft/waterfall-cwt)",
+    "C              compare selected channels",
+    "T              add virtual transfer (first sel = MEAS, last = REF)",
     "F              fullscreen",
     "D              timing overlay",
     "H              toggle this help",
-    "Space          select channel",
-    "Tab            next page / channel",
-    "Shift+Tab      prev page / channel",
-    "[ / ]          shift dB floor",
-    "+ / -          adjust dB range",
-    "← / →          monitor interval (fft)",
-    "↑ / ↓          fft N (fft)",
+    "",
+    "Selection",
+    "─────────────────────────────",
+    "Space          toggle channel selection at cursor",
+    "Tab / Sh+Tab   next / prev channel or grid page",
+    "",
+    "Spectrum / waterfall",
+    "─────────────────────────────",
+    "[ / ]          shift dB floor ±5",
+    "+ / -          adjust dB span",
+    "P              peak hold (spectrum)",
+    "M              min hold (spectrum)",
+    "O              cycle 1/N-oct smoothing",
+    "Shift+O        cycle CWT 1/N-oct aggregation (cwt)",
+    "A              cycle weighting: off / A / C / Z",
+    "I              cycle time integration: off / fast / slow / Leq",
+    "Shift+I        reset Leq accumulators",
+    "Shift+L        reset BS.1770 loudness",
+    "← / →          FFT monitor interval ±1 ms (fft)",
+    "↑ / ↓          FFT N ladder step (fft)",
+    "Sh+← / Sh+→    CWT scales ×2 / ÷2 (cwt)",
+    "Sh+↑ / Sh+↓    CWT sigma ±1 (cwt)",
     "Ctrl+R         reset all views",
     "",
     "Mouse",
     "─────────────────────────────",
     "Scroll (cell)  zoom both axes",
     "Scroll (bg)    resize grid cells",
-    "Shift+Scroll   zoom dB (gain)",
+    "Shift+Scroll   cycle waterfall palette (waterfall)",
     "Ctrl+Scroll    zoom freq (spec) / time (water)",
+    "Left-click     zoom in: swap to Single on cell",
     "Left-drag      pan",
     "Right-click    reset hovered cell",
 ];
@@ -475,74 +479,6 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         );
     }
 
-    if matches!(input.config.layout, LayoutMode::Transfer) {
-        let n_sel = input.selection_order.len();
-        if let Some(&refc) = input.selection_order.last().filter(|_| n_sel >= 2) {
-            let meas_ch = input.active_meas;
-            if let Some(tf) = input.transfer {
-                let delay_text = super::fmt::transfer_delay(tf.delay_ms, tf.delay_samples);
-                painter.text(
-                    Pos2::new(screen.center().x, screen.top() + 10.0),
-                    Align2::CENTER_TOP,
-                    delay_text,
-                    FontId::monospace(theme::READOUT_PX * 1.4),
-                    text_color,
-                );
-                let meas_count = n_sel - 1;
-                let active_idx = input.active_meas_idx.min(meas_count.saturating_sub(1));
-                let x0 = screen.left() + 12.0;
-                let mut y = screen.top() + 12.0;
-                let row_h = theme::READOUT_PX + 4.0;
-                let meas_label = if meas_count > 1 {
-                    format!("MEAS ({}/{})", active_idx + 1, meas_count)
-                } else {
-                    "MEAS".to_string()
-                };
-                let entries: [(String, usize); 2] = [
-                    (meas_label, meas_ch.unwrap_or(0)),
-                    ("REF".to_string(), refc),
-                ];
-                for (label, ch) in &entries {
-                    let rgba = theme::channel_color(*ch);
-                    let swatch = Color32::from_rgb(
-                        (rgba[0] * 255.0) as u8,
-                        (rgba[1] * 255.0) as u8,
-                        (rgba[2] * 255.0) as u8,
-                    );
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(x0, y + 2.0), egui::vec2(12.0, 12.0)),
-                        CornerRadius::ZERO,
-                        swatch,
-                    );
-                    painter.text(
-                        Pos2::new(x0 + 18.0, y),
-                        Align2::LEFT_TOP,
-                        format!("{label}: CH{ch}"),
-                        FontId::monospace(theme::READOUT_PX),
-                        text_color,
-                    );
-                    y += row_h;
-                }
-            } else {
-                painter.text(
-                    screen.center(),
-                    Align2::CENTER_CENTER,
-                    "waiting for transfer_stream…",
-                    FontId::monospace(theme::READOUT_PX),
-                    text_color,
-                );
-            }
-        } else {
-            painter.text(
-                screen.center(),
-                Align2::CENTER_CENTER,
-                "Select ≥ 2 channels — last pick is REF (Tab cycles MEAS)",
-                FontId::monospace(theme::READOUT_PX),
-                text_color,
-            );
-        }
-    }
-
     if matches!(input.config.layout, LayoutMode::Compare) {
         let any_selected = input.selected.iter().any(|s| *s);
         if !any_selected {
@@ -643,7 +579,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     if input.show_help {
         let line_h = theme::READOUT_PX + 4.0;
         let pad = 16.0;
-        let panel_w = 380.0;
+        let panel_w = 520.0;
         let panel_h = HELP_LINES.len() as f32 * line_h + pad * 2.0;
         let panel = Rect::from_center_size(
             screen.center(),

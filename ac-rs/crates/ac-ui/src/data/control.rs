@@ -1,7 +1,7 @@
 //! Blocking REQ client for sending commands to `ac-daemon`.
 //!
-//! Used by the Transfer layout to start/stop the daemon's `transfer_stream`
-//! worker. Kept intentionally dumb: one socket, one short RCV timeout, no
+//! Used by the virtual-transfer-channel code to start/stop the daemon's
+//! `transfer_stream` worker. Kept intentionally dumb: one socket, one short RCV timeout, no
 //! reconnect loop — if the daemon is down, commands just fail and the UI
 //! stays on the last frame it received.
 

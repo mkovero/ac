@@ -213,16 +213,10 @@ pub struct App {
     /// and pushed to the daemon via `set_monitor_params`.
     monitor_interval_ms: u32,
     monitor_fft_n: u32,
-    /// Insertion-order view of `selected`. In Transfer layout the convention
-    /// is: the **last** entry is REF, every preceding entry is a meas channel
-    /// the user would like to H1-compare against that ref. Only one meas
-    /// stream runs at a time (daemon worker + display), selected via
-    /// `active_meas_idx`; Tab cycles through the meas list.
+    /// Insertion-order view of `selected`. Compare layout renders cells in
+    /// selection order; the T key reads the first and last entries to form
+    /// a virtual transfer pair (meas = first, ref = last).
     selection_order: Vec<usize>,
-    /// Index into `selection_order[..len-1]` picking which meas channel is
-    /// currently streamed/displayed in Transfer layout. Clamped on every
-    /// consumer read; Tab/Shift+Tab bump it.
-    active_meas_idx: usize,
     config: DisplayConfig,
     cell_views: Vec<CellView>,
     selected: Vec<bool>,
@@ -376,7 +370,6 @@ impl App {
             monitor_interval_ms: auto_monitor_interval_ms(8192, 48_000),
             monitor_fft_n: 8192,
             selection_order: Vec::new(),
-            active_meas_idx: 0,
             config,
             cell_views: Vec::new(),
             selected: Vec::new(),

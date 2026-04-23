@@ -242,30 +242,35 @@ Options:\n  \
   --view <mode>        Initial view: spectrum|waterfall [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   -h, --help           Show this help\n\n\
-Keys:\n  \
+Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
   Enter            toggle freeze\n  \
-  p                toggle peak hold\n  \
-  Space            select channel (for compare / transfer layout)\n  \
   s                save screenshot + CSV\n  \
-  d                toggle GPU/CPU timing overlay\n  \
-  w                cycle view (spectrum/waterfall)\n  \
-  l                cycle layout (grid/single/compare*/transfer*)\n  \
+  w                cycle view (matrix/single/waterfall-fft/waterfall-cwt)\n  \
+  c                compare selected channels\n  \
+  t                add virtual transfer (first selected = MEAS, last = REF)\n  \
+  p / m            toggle peak / min hold (spectrum)\n  \
+  o / Shift+O      1/N-oct smoothing / CWT 1/N-oct aggregation\n  \
+  a / i            cycle weighting (A/C/Z) / time integration (fast/slow/Leq)\n  \
+  Shift+I          reset Leq accumulators\n  \
+  Shift+L          reset BS.1770 loudness\n  \
+  Space            toggle channel selection at cursor\n  \
+  d                toggle timing overlay\n  \
   f                toggle fullscreen\n  \
   h                toggle help overlay\n  \
-  +/-              adjust dB range\n  \
-  [/]              shift waterfall colormap floor\n  \
+  +/-              adjust dB span\n  \
+  [/]              shift dB floor ±5\n  \
+  ← / →            FFT monitor interval / Shift for CWT scales\n  \
+  ↑ / ↓            FFT N ladder / Shift for CWT sigma\n  \
   Ctrl+R           reset all views and grid sizing\n  \
-  Tab              next page (grid) / next channel\n  \
-  Shift+Tab        prev page (grid) / prev channel / prev meas (transfer)\n\n\
-* compare/transfer only cycle-visible when channels are selected; in\n  \
-   transfer the last Space is REF, earlier picks are meas, Tab rotates meas\n\n\
+  Tab / Shift+Tab  next / prev grid page or channel\n\n\
 Mouse:\n  \
-  Scroll (cell)    zoom freq (waterfall) / both axes (spectrum)\n  \
+  Scroll (cell)    zoom both axes\n  \
   Scroll (bg)      resize grid cells (grid layout only)\n  \
-  Shift+Scroll     zoom dB / gain\n  \
+  Shift+Scroll     cycle waterfall palette (waterfall)\n  \
   Ctrl+Scroll      zoom freq (spectrum) / zoom time (waterfall)\n  \
-  Left-drag        pan view\n  \
+  Left-click       zoom in: swap to Single on clicked cell (matrix)\n  \
+  Left-drag        pan\n  \
   Right-click      reset hovered cell\n"
     );
 }
