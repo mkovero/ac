@@ -60,11 +60,15 @@ pub fn amplitude_to_dbfs(amp: f64) -> f64 {
     (20.0 * amp.abs().max(MIN_AMPLITUDE).log10()).max(MIN_DBFS)
 }
 
-/// AES17-2015 §5 — the governing reference for the 0 dBFS convention.
+/// AES17-2015 — the governing reference for the 0 dBFS convention. The
+/// full-scale amplitude is defined in §3 (Terms and definitions); the
+/// exact sub-clause number is not accessible from the iteh.ai preview
+/// under `stddocs/`, so this citation points to §3 at the clause level
+/// and leaves `verified` false pending full-text access.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "AES17-2015".into(),
-        clause: "§5 Digital full-scale amplitude reference".into(),
+        clause: "§3 Terms and definitions (full-scale amplitude)".into(),
         verified: false,
     }
 }
@@ -148,7 +152,7 @@ mod tests {
     fn citation_is_aes17() {
         let c = citation();
         assert!(c.standard.contains("AES17"));
-        assert!(c.clause.contains("§5"));
+        assert!(c.clause.contains("§3"));
         assert!(!c.verified);
     }
 }

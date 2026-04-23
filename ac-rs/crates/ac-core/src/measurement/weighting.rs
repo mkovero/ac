@@ -138,7 +138,7 @@ impl WeightingFilter {
     pub fn citation() -> StandardsCitation {
         StandardsCitation {
             standard: "IEC 61672-1:2013".into(),
-            clause: "§5.4 Frequency weightings, Annex E".into(),
+            clause: "§5.5 Frequency weightings, Annex E".into(),
             verified: false,
         }
     }

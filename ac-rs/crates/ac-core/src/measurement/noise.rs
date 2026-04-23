@@ -97,7 +97,7 @@ fn rms_dbfs(samples: &[f32]) -> f64 {
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "AES17-2015".into(),
-        clause: "§6.4 Idle-channel noise".into(),
+        clause: "§6.4 Noise (idle-channel method)".into(),
         verified: false,
     }
 }

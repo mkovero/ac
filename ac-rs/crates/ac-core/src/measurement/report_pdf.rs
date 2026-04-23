@@ -137,6 +137,16 @@ fn draw_method(
                                     if s.verified { " ✓ verified" } else { "" }));
             }
         }
+        MeasurementMethod::SweptSine { f1_hz, f2_hz, duration_s, standard } => {
+            y = kv_row(layer, font, font_mono, y, "kind",
+                       &format!("swept_sine ({f1_hz:.1}→{f2_hz:.1} Hz, {duration_s:.3} s)"));
+            if let Some(s) = standard {
+                y = kv_row(layer, font, font_mono, y, "standard",
+                           &format!("{} — {}{}",
+                                    s.standard, s.clause,
+                                    if s.verified { " ✓ verified" } else { "" }));
+            }
+        }
     }
     y = kv_row(layer, font, font_mono, y, "integration",
                &format!("{:.3} s, window={}", r.integration.duration_s, r.integration.window));

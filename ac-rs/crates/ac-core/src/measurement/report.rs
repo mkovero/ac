@@ -265,11 +265,7 @@ mod tests {
             timestamp_utc: "2026-04-21T20:00:00Z".into(),
             method: MeasurementMethod::SteppedSine {
                 n_points: 3,
-                standard: Some(StandardsCitation {
-                    standard: "IEC 60268-3:2018".into(),
-                    clause: "§14.12".into(),
-                    verified: false,
-                }),
+                standard: Some(crate::measurement::thd::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
@@ -347,11 +343,7 @@ mod tests {
             f1_hz: 20.0,
             f2_hz: 20_000.0,
             duration_s: 3.0,
-            standard: Some(StandardsCitation {
-                standard: "Farina 2000 (AES 108)".into(),
-                clause: "Swept-sine technique for IR and distortion".into(),
-                verified: false,
-            }),
+            standard: Some(crate::measurement::sweep::citation()),
         };
         let json = r.to_json().unwrap();
         assert!(json.contains("\"kind\": \"swept_sine\""));
@@ -392,11 +384,7 @@ mod tests {
             timestamp_utc: "2026-04-22T12:00:00Z".into(),
             method: MeasurementMethod::SteppedSine {
                 n_points: 0,
-                standard: Some(StandardsCitation {
-                    standard: "IEC 61260-1:2014".into(),
-                    clause: "§5 Class 1".into(),
-                    verified: false,
-                }),
+                standard: Some(crate::measurement::filterbank::Filterbank::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
@@ -446,11 +434,7 @@ mod tests {
                 f1_hz: 20.0,
                 f2_hz: 20_000.0,
                 duration_s: 1.0,
-                standard: Some(StandardsCitation {
-                    standard: "Farina 2000 (AES 108)".into(),
-                    clause: "Swept-sine technique for IR and distortion".into(),
-                    verified: false,
-                }),
+                standard: Some(crate::measurement::sweep::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
@@ -503,11 +487,7 @@ mod tests {
             timestamp_utc: "2026-04-22T12:00:00Z".into(),
             method: MeasurementMethod::SteppedSine {
                 n_points: 0,
-                standard: Some(StandardsCitation {
-                    standard: "AES17-2015".into(),
-                    clause: "§6.4 Idle-channel noise".into(),
-                    verified: false,
-                }),
+                standard: Some(crate::measurement::noise::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
@@ -557,5 +537,39 @@ mod tests {
         let r2: MeasurementReport = serde_json::from_str(&text).unwrap();
         assert_eq!(r, r2);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Every Tier 1 measurement module must emit a populated
+    /// `StandardsCitation` — non-empty `standard` and `clause`. Serialising a
+    /// report built from each `citation()` round-trips cleanly and survives
+    /// with `schema_version == 1`. See #72 for the audit workflow.
+    #[test]
+    fn every_measurement_module_emits_populated_citation() {
+        let citations = [
+            crate::measurement::thd::citation(),
+            crate::measurement::filterbank::Filterbank::citation(),
+            crate::measurement::noise::citation(),
+            crate::measurement::weighting::WeightingFilter::citation(),
+            crate::measurement::sweep::citation(),
+            crate::measurement::ccir468::citation(),
+            crate::shared::reference_levels::citation(),
+        ];
+        for c in &citations {
+            assert!(!c.standard.is_empty(), "empty standard in {c:?}");
+            assert!(!c.clause.is_empty(), "empty clause in {c:?}");
+        }
+
+        // Round-trip each through a full MeasurementReport.
+        for c in citations {
+            let mut r = sample_report();
+            r.method = MeasurementMethod::SteppedSine {
+                n_points: 1,
+                standard: Some(c.clone()),
+            };
+            let json = r.to_json().unwrap();
+            assert!(json.contains("\"schema_version\": 1"));
+            let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+            assert_eq!(r, r2);
+        }
     }
 }

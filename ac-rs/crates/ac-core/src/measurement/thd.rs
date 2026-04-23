@@ -23,14 +23,15 @@ use crate::shared::types::AnalysisResult;
 
 /// Citation for a `MeasurementReport` populated from [`analyze`] output.
 ///
-/// The clause number (§14.12) corresponds to the THD definition in
-/// IEC 60268-3:2018 "Sound system equipment — Part 3: Amplifiers" per
-/// widely-cited secondary sources; `verified` stays `false` until the
-/// published PDF is checked in person.
+/// IEC 60268-3:2018 "Sound system equipment — Part 3: Amplifiers". THD is
+/// defined in §15.12 "Amplitude non-linearity"; §15.12.3 is the specific
+/// measurement under standard conditions that matches this analyser. TOC
+/// verified against `stddocs/IEC-60268-3-2018.pdf` (preview). `verified`
+/// stays `false` until the full §15.12.3 body text is cross-checked.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "IEC 60268-3:2018".into(),
-        clause: "§14.12 Total harmonic distortion".into(),
+        clause: "§15.12.3 Total harmonic distortion under standard measuring conditions".into(),
         verified: false,
     }
 }

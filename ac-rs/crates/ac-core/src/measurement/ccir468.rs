@@ -263,8 +263,8 @@ fn reference_qp_1khz(sample_rate: u32) -> f64 {
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "ITU-R BS.468-4".into(),
-        clause: "§1 Weighting network, §2 Quasi-peak characteristics".into(),
-        verified: false,
+        clause: "§1 Weighting network, §2 Characteristics of the measuring device".into(),
+        verified: true,
     }
 }
 
