@@ -38,8 +38,21 @@ pub struct MeasurementReport {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeasurementMethod {
+    /// Discrete-frequency stepped-sine sweep — one tone per bin, fundamental
+    /// analyzed in isolation (`measurement::thd::analyze`). Used by `plot`.
     SteppedSine {
         n_points: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        standard: Option<StandardsCitation>,
+    },
+    /// Continuous log-swept sine (Farina ESS) — stimulus is a single
+    /// exponential sweep from `f1_hz` to `f2_hz` over `duration_s`; the
+    /// captured response is processed by deconvolution or a fractional-
+    /// octave filterbank. Used by `sweep_ir`.
+    SweptSine {
+        f1_hz: f64,
+        f2_hz: f64,
+        duration_s: f64,
         #[serde(skip_serializing_if = "Option::is_none")]
         standard: Option<StandardsCitation>,
     },
@@ -328,6 +341,28 @@ mod tests {
     }
 
     #[test]
+    fn swept_sine_method_round_trip() {
+        let mut r = sample_report();
+        r.method = MeasurementMethod::SweptSine {
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 3.0,
+            standard: Some(StandardsCitation {
+                standard: "Farina 2000 (AES 108)".into(),
+                clause: "Swept-sine technique for IR and distortion".into(),
+                verified: false,
+            }),
+        };
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"kind\": \"swept_sine\""));
+        assert!(json.contains("\"f1_hz\": 20.0"));
+        assert!(json.contains("\"f2_hz\": 20000.0"));
+        assert!(json.contains("\"duration_s\": 3.0"));
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
@@ -407,8 +442,10 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             ac_version: "0.1.0".into(),
             timestamp_utc: "2026-04-22T12:00:00Z".into(),
-            method: MeasurementMethod::SteppedSine {
-                n_points: 0,
+            method: MeasurementMethod::SweptSine {
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
                 standard: Some(StandardsCitation {
                     standard: "Farina 2000 (AES 108)".into(),
                     clause: "Swept-sine technique for IR and distortion".into(),

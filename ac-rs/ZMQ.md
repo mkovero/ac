@@ -125,6 +125,13 @@ see an unknown version must refuse to decode. Example payload:
 }
 ```
 
+`method.kind` values currently defined:
+
+| `kind`          | Producer      | Extra fields                                                                                  |
+|-----------------|---------------|-----------------------------------------------------------------------------------------------|
+| `stepped_sine`  | `plot`        | `{ "n_points": <int>, "standard": <StandardsCitation?> }`                                     |
+| `swept_sine`    | `sweep_ir`    | `{ "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "standard": <StandardsCitation?> }`         |
+
 `data.kind` values currently defined:
 
 | `kind`                 | Producer                                           | Payload shape                                                                     |
