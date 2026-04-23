@@ -556,6 +556,7 @@ def _ensure_reference_channel(client, channel=1):
 # test_hardware
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_test_hardware_frames(server_client):
     """test_hardware emits test_result frames with required fields then done."""
     client = server_client
@@ -593,6 +594,7 @@ def test_test_hardware_frames(server_client):
 # test_dut
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_test_dut_frames(server_client):
     """test_dut emits test_result frames with required fields then done."""
     client = server_client
