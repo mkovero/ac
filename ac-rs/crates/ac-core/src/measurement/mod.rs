@@ -3,6 +3,7 @@
 
 pub mod ccir468;
 pub mod filterbank;
+pub mod loudness;
 pub mod noise;
 pub mod report;
 pub mod report_html;
