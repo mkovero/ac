@@ -1,8 +1,9 @@
 //! Fractional-octave aggregation of a CWT column.
 //!
 //! Builds a 1/N-octave display from the CWT magnitude column produced by
-//! [`crate::visualize::cwt::morlet_cwt`]. Bands are anchored at 1 kHz (acoustics
-//! convention) and use base-2 octaves (`G = 2`). Common `bpo`: 1, 3, 6,
+//! [`crate::visualize::cwt::morlet_cwt`]. Bands are anchored at 1 kHz
+//! (acoustics convention) and use base-10 octaves
+//! (`G = 10^(3/10)`, IEC 61260-1:2014 §5.2.1). Common `bpo`: 1, 3, 6,
 //! 12, 24.
 //!
 //! ## Why not the FFT path?
@@ -42,12 +43,15 @@
 //! Possible follow-up: per-scale bandwidth normalization, or peak/avg
 //! aggregation. Tracked separately.
 
+use crate::shared::constants::G_OCTAVE;
+
 const ANCHOR_HZ: f64 = 1000.0;
 
-/// Geometric grid of band centres anchored at 1 kHz, base-2.
+/// Geometric grid of band centres anchored at 1 kHz, base-10
+/// (`G = 10^(3/10)`, IEC 61260-1:2014 §5.2.1).
 ///
-/// `c_i = 1000 · 2^(i / bpo)` for integer `i`, clipped to those whose
-/// half-band edges `(c_i / δ, c_i · δ)` with `δ = 2^(1/(2·bpo))` fit
+/// `c_i = 1000 · G^(i / bpo)` for integer `i`, clipped to those whose
+/// half-band edges `(c_i / δ, c_i · δ)` with `δ = G^(1/(2·bpo))` fit
 /// fully within `[f_min, f_max]`.
 ///
 /// Returns an empty Vec on degenerate inputs (`bpo == 0`, non-positive
@@ -57,35 +61,36 @@ pub fn ioct_band_centers(f_min: f32, f_max: f32, bpo: usize) -> Vec<f32> {
         return Vec::new();
     }
     let bpo_f = bpo as f64;
-    let delta = 2_f64.powf(0.5 / bpo_f);
+    let delta = G_OCTAVE.powf(0.5 / bpo_f);
     let f_min = f_min as f64;
     let f_max = f_max as f64;
 
-    // i_min: smallest i with c_i / δ >= f_min  →  i >= bpo · log2(f_min · δ / 1000)
-    // i_max: largest  i with c_i · δ <= f_max  →  i <= bpo · log2(f_max / (1000 · δ))
-    let i_min = (bpo_f * (f_min * delta / ANCHOR_HZ).log2()).ceil() as i64;
-    let i_max = (bpo_f * (f_max / (ANCHOR_HZ * delta)).log2()).floor() as i64;
+    // i_min: smallest i with c_i / δ >= f_min  →  i >= bpo · log_G(f_min · δ / 1000)
+    // i_max: largest  i with c_i · δ <= f_max  →  i <= bpo · log_G(f_max / (1000 · δ))
+    let i_min = (bpo_f * (f_min * delta / ANCHOR_HZ).log(G_OCTAVE)).ceil() as i64;
+    let i_max = (bpo_f * (f_max / (ANCHOR_HZ * delta)).log(G_OCTAVE)).floor() as i64;
     if i_min > i_max {
         return Vec::new();
     }
 
     let mut centres = Vec::with_capacity((i_max - i_min + 1) as usize);
     for i in i_min..=i_max {
-        let c = ANCHOR_HZ * 2_f64.powf(i as f64 / bpo_f);
+        let c = ANCHOR_HZ * G_OCTAVE.powf(i as f64 / bpo_f);
         centres.push(c as f32);
     }
     centres
 }
 
 /// Half-band edges around `centre`: `(centre / δ, centre · δ)` with
-/// `δ = 2^(1/(2·bpo))`. Both edges are returned as `f32`; for adjacent
-/// centres `c_i, c_{i+1}` the relation `f_hi(c_i) == f_lo(c_{i+1})`
-/// holds within float tolerance (covered by `band_edges_tile`).
+/// `δ = G^(1/(2·bpo))`, `G = 10^(3/10)`. Both edges are returned as `f32`;
+/// for adjacent centres `c_i, c_{i+1}` the relation
+/// `f_hi(c_i) == f_lo(c_{i+1})` holds within float tolerance (covered by
+/// `band_edges_tile`).
 pub fn ioct_band_edges(centre: f32, bpo: usize) -> (f32, f32) {
     if bpo == 0 {
         return (centre, centre);
     }
-    let delta = 2_f32.powf(0.5 / bpo as f32);
+    let delta = G_OCTAVE.powf(0.5 / bpo as f64) as f32;
     (centre / delta, centre * delta)
 }
 
@@ -193,6 +198,43 @@ mod tests {
                 "1 kHz not in band-centre grid for bpo={bpo}: {centres:?}"
             );
         }
+    }
+
+    #[test]
+    fn base10_midband_frequencies_iec_61260_1_2014_annex_e() {
+        // IEC 61260-1:2014 §5.2.1: G = 10^(3/10). 1/3-octave centres hit
+        // exact powers of ten at integer decades. Tolerances absorb the
+        // f32 cast in `ioct_band_centers`.
+        let centres = ioct_band_centers(5.0, 20_000.0, 3);
+        let nearest = |target: f64| -> f64 {
+            *centres
+                .iter()
+                .map(|&c| c as f64)
+                .collect::<Vec<_>>()
+                .iter()
+                .min_by(|a, b| {
+                    (**a - target)
+                        .abs()
+                        .partial_cmp(&(**b - target).abs())
+                        .unwrap()
+                })
+                .unwrap()
+        };
+        assert!(
+            (nearest(100.0) - 100.0).abs() < 5e-3,
+            "100 Hz centre = {}",
+            nearest(100.0)
+        );
+        assert!(
+            (nearest(10_000.0) - 10_000.0).abs() < 5e-2,
+            "10 kHz centre = {}",
+            nearest(10_000.0)
+        );
+        assert!(
+            (nearest(2_000.0) - 1995.262_315).abs() < 5e-2,
+            "2 kHz slot centre (should be ≈1995.262, base-2 would read 2000) = {}",
+            nearest(2_000.0)
+        );
     }
 
     #[test]

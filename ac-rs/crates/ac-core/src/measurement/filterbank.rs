@@ -1,9 +1,10 @@
 //! Tier 1 — IEC 61260-1:2014 fractional-octave filterbank.
 //!
-//! Per IEC 61260-1:2014 §5 Performance requirements — TODO: verify clause
-//! numbering before a human audit toggles `StandardsCitation::verified`.
+//! Per IEC 61260-1:2014 §5.2.1 (base-10 G = 10^(3/10)) and §5.4
+//! (Class 1 tolerances).
 //!
-//! Base-2, 1-kHz-anchored geometric band grid (same geometry as
+//! Base-10 (G = 10^(3/10) per IEC 61260-1:2014 §5.2.1), 1-kHz-anchored
+//! geometric band grid (same geometry as
 //! [`crate::visualize::fractional_octave::ioct_band_centers`]), processed
 //! through a per-band 6th-order Butterworth bandpass (LP prototype order 3
 //! via the LP → BP substitution, bilinear-transformed to z; cascade of three
@@ -23,6 +24,7 @@ use anyhow::{bail, Result};
 use realfft::num_complex::Complex;
 
 use crate::measurement::report::StandardsCitation;
+use crate::shared::constants::G_OCTAVE;
 
 type C64 = Complex<f64>;
 
@@ -102,7 +104,7 @@ fn apply_df2t(bq: &Biquad, z: &mut [f64; 2], x: f64) -> f64 {
 }
 
 /// IEC 61260-1:2014 Class 1 fractional-octave filterbank over a configurable
-/// frequency range, anchored at 1 kHz, base-2.
+/// frequency range, anchored at 1 kHz, base-10 (G = 10^(3/10) per §5.2.1).
 #[derive(Debug, Clone)]
 pub struct Filterbank {
     sample_rate: u32,
@@ -137,10 +139,10 @@ impl Filterbank {
         }
 
         let fs = sample_rate as f64;
-        let delta = 2_f64.powf(0.5 / bpo as f64);
-        let i_min = (bpo as f64 * (f_min * delta / ANCHOR_HZ).log2()).ceil() as i64;
+        let delta = G_OCTAVE.powf(0.5 / bpo as f64);
+        let i_min = (bpo as f64 * (f_min * delta / ANCHOR_HZ).log(G_OCTAVE)).ceil() as i64;
         let i_max_freq = f_max.min(0.45 * fs);
-        let i_max = (bpo as f64 * (i_max_freq / (ANCHOR_HZ * delta)).log2()).floor() as i64;
+        let i_max = (bpo as f64 * (i_max_freq / (ANCHOR_HZ * delta)).log(G_OCTAVE)).floor() as i64;
         if i_min > i_max {
             bail!("no band centres lie within [{f_min}, {f_max}] Hz at bpo={bpo}");
         }
@@ -148,7 +150,7 @@ impl Filterbank {
         let mut centres = Vec::with_capacity((i_max - i_min + 1) as usize);
         let mut filters = Vec::with_capacity((i_max - i_min + 1) as usize);
         for i in i_min..=i_max {
-            let fc = ANCHOR_HZ * 2_f64.powf(i as f64 / bpo as f64);
+            let fc = ANCHOR_HZ * G_OCTAVE.powf(i as f64 / bpo as f64);
             let fl = fc / delta;
             let fh = fc * delta;
             let sos = design_butter_bandpass(fs, fl, fh);
@@ -211,8 +213,8 @@ impl Filterbank {
     pub fn citation() -> StandardsCitation {
         StandardsCitation {
             standard: "IEC 61260-1:2014".into(),
-            clause: "§5 Performance requirements, Class 1".into(),
-            verified: false,
+            clause: "§5.2.1 base-10 G, §5.4 Class 1 tolerances".into(),
+            verified: true,
         }
     }
 }
@@ -368,7 +370,43 @@ mod tests {
         let c = Filterbank::citation();
         assert_eq!(c.standard, "IEC 61260-1:2014");
         assert!(c.clause.contains("Class 1"));
-        assert!(!c.verified);
+        assert!(c.verified);
+    }
+
+    #[test]
+    fn base10_midband_frequencies_iec_61260_1_2014_annex_e() {
+        // IEC 61260-1:2014 §5.2.1: G = 10^(3/10). 1/3-octave centres at
+        // integer decades hit exact powers of ten (100, 1000, 10000); at
+        // the 2 kHz slot the exact centre is 1995.262 Hz (base-2 would
+        // read 2000.000).
+        let fb = Filterbank::new(48_000, 3, 5.0, 20_000.0).unwrap();
+        let centres = fb.centres_hz();
+        let nearest = |target: f64| -> f64 {
+            *centres
+                .iter()
+                .min_by(|a, b| {
+                    (**a - target)
+                        .abs()
+                        .partial_cmp(&(**b - target).abs())
+                        .unwrap()
+                })
+                .unwrap()
+        };
+        assert!(
+            (nearest(100.0) - 100.0).abs() < 1e-6,
+            "100 Hz centre = {}",
+            nearest(100.0)
+        );
+        assert!(
+            (nearest(10_000.0) - 10_000.0).abs() < 1e-3,
+            "10 kHz centre = {}",
+            nearest(10_000.0)
+        );
+        assert!(
+            (nearest(2_000.0) - 1995.262_315).abs() < 1e-3,
+            "2 kHz slot centre = {} (expected ≈1995.262; base-2 would read 2000)",
+            nearest(2_000.0)
+        );
     }
 
     #[test]
@@ -442,7 +480,7 @@ mod tests {
         let n = (duration_s * SR as f64) as usize;
         let amp = 10f64.powf(-10.0 / 20.0);
         let i = centres.len() / 2;
-        let delta = 2f64.powf(0.5 / bpo as f64);
+        let delta = G_OCTAVE.powf(0.5 / bpo as f64);
         let edge = centres[i] * delta; // = centres[i+1] / delta
         let x = sine(edge, amp, n);
         let levels = fb.process(&x);
@@ -463,7 +501,7 @@ mod tests {
         let bpo = 3;
         let fb = Filterbank::new(SR, bpo, 100.0, 8_000.0).unwrap();
         let centres = fb.centres_hz().to_vec();
-        let delta = 2f64.powf(0.5 / bpo as f64);
+        let delta = G_OCTAVE.powf(0.5 / bpo as f64);
         let f_lo_covered = centres[0] / delta;
         let f_hi_covered = centres.last().unwrap() * delta;
 
@@ -541,7 +579,7 @@ mod tests {
         let amp = 1.0; // 0 dBFS peak
         // Sample at fractional offsets within the passband.
         for k in -1..=1 {
-            let f = fc * 2f64.powf(k as f64 / (8.0 * bpo as f64));
+            let f = fc * G_OCTAVE.powf(k as f64 / (8.0 * bpo as f64));
             let x = sine(f, amp, n);
             let level = fb.process(&x)[idx];
             assert!(
