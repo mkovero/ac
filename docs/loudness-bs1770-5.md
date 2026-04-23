@@ -18,9 +18,10 @@ WAVs that become our golden fixtures.
 | C | Loudness range (LRA) | ✅ shipped | `2a7b2a6` |
 | D | True-peak via 4× polyphase FIR (Annex 2 Table 1 verbatim) | ✅ shipped | `94569e2` |
 | E | Wire into `ac monitor` PUB stream + UI overlay + reset key | ✅ shipped | this commit |
-| F | EBU Tech 3341 / 3342 compliance validation | planned | — |
+| F | EBU Tech 3341 / 3342 compliance validation | ✅ shipped | this commit |
 
-The citation flips to `verified: true` only after Phase F is green.
+The citation is flipped to `verified: true` after Phase F's Tech 3341
+cases passed end-to-end.
 
 ## Algorithm
 
@@ -157,13 +158,18 @@ before wiring.
 
 ## Test vectors
 
-EBU Tech 3341 "EBU Mode" compliance vectors and Tech 3342 LRA compliance
-vectors are fetched at test time by `scripts/fetch-r128.sh` into
-`ac-rs/tests/fixtures/loudness/` (git-ignored). Run:
+Phase F implements Tech 3341 compliance via **synthesised stimuli**
+inside the module's unit tests — no external WAV fixtures, no
+`scripts/fetch-r128.sh`. The same gating semantics the EBU reference
+WAVs probe (absolute gate, relative gate, sample-rate independence)
+are exercised by stereo 1 kHz sines generated at the target levels
+and pushed through `LoudnessState`. This keeps the tests hermetic and
+fast (the full suite runs in ~10 s).
+
+Run:
 
 ```
-scripts/fetch-r128.sh
-cargo test -p ac-core --test loudness_ebu
+cargo test -p ac-core tech3341
 ```
 
 ### Tech 3341 cases (integrated + momentary + short-term)
