@@ -8,11 +8,15 @@
 //! and integrated (LKFS-I, two-pass gated) per BS.1770-5 §2.3–§2.4, with
 //! channel weights for mono and stereo.
 //!
-//! Phase C (this commit) adds loudness range (LRA) per EBU Tech 3342:
-//! the short-term LKFS values emitted at each 100 ms tile boundary are
-//! retained, two-pass gated (absolute −70 LUFS, relative −20 LU), and the
-//! 95th minus 10th percentile of survivors is reported as LRA in LU.
-//! True-peak lands in Phase D — see `docs/loudness-bs1770-5.md`.
+//! Phase C added loudness range (LRA) per EBU Tech 3342: the short-term
+//! LKFS values at each tile boundary are retained, two-pass gated
+//! (absolute −70 LUFS, relative −20 LU), and the 95th minus 10th
+//! percentile of survivors is reported in LU.
+//!
+//! Phase D (this commit) adds true-peak metering via the 4-phase 48-tap
+//! polyphase FIR interpolator specified in BS.1770-5 Annex 2 Table 1.
+//! Each input sample produces 4 oversampled outputs; the maximum
+//! absolute value across the full stream is reported as dBTP.
 //!
 //! The K-weighting coefficients are re-derived at runtime from the two
 //! closed-form biquad designs BS.1770 uses — a custom Vh/Vb high-shelf
@@ -228,8 +232,165 @@ pub fn ms_to_lkfs(ms: f64) -> f64 {
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "ITU-R BS.1770-5 / EBU Tech 3342".into(),
-        clause: "BS.1770 §2.1–§2.4, Tech 3342 §2.2 Loudness range".into(),
+        clause: "BS.1770 §2.1–§2.4 + Annex 2 true-peak; Tech 3342 §2.2 Loudness range".into(),
         verified: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// True-peak — BS.1770-5 Annex 2 4-phase 48-tap polyphase FIR interpolator.
+// Each input produces 4 oversampled outputs; the maximum |y| across the
+// session is reported in dBTP. The BS.1770 attenuate/compensate trick for
+// fixed-point arithmetic (−12.04 dB in, +12.04 dB out) collapses to a
+// no-op in float and is omitted here.
+// ---------------------------------------------------------------------------
+
+const TP_TAPS: usize = 12;
+const TP_OVERSAMPLE: usize = 4;
+
+/// BS.1770-5 Annex 2 Table 1, column-wise. `TP_PHASE[p][j]` is the j-th tap
+/// (j=0 → newest input) of phase p. Phase 3 is Phase 0 reversed; Phase 2
+/// is Phase 1 reversed — the underlying 48-tap prototype is linear-phase
+/// symmetric.
+const TP_PHASE: [[f64; TP_TAPS]; TP_OVERSAMPLE] = [
+    [
+        0.001_708_984_375_0,
+        0.010_986_328_125_0,
+        -0.019_653_320_312_5,
+        0.033_203_125_000_0,
+        -0.059_448_242_187_5,
+        0.137_329_101_562_5,
+        0.972_167_968_750_0,
+        -0.102_294_921_875_0,
+        0.047_607_421_875_0,
+        -0.026_611_328_125_0,
+        0.014_892_578_125_0,
+        -0.008_300_781_250_0,
+    ],
+    [
+        -0.029_174_804_687_5,
+        0.029_296_875_000_0,
+        -0.051_757_812_500_0,
+        0.089_111_328_125_0,
+        -0.166_503_906_250_0,
+        0.465_087_890_625_0,
+        0.779_785_156_250_0,
+        -0.200_317_382_812_5,
+        0.101_562_500_000_0,
+        -0.058_227_539_062_5,
+        0.033_081_054_687_5,
+        -0.018_920_898_437_5,
+    ],
+    [
+        -0.018_920_898_437_5,
+        0.033_081_054_687_5,
+        -0.058_227_539_062_5,
+        0.101_562_500_000_0,
+        -0.200_317_382_812_5,
+        0.779_785_156_250_0,
+        0.465_087_890_625_0,
+        -0.166_503_906_250_0,
+        0.089_111_328_125_0,
+        -0.051_757_812_500_0,
+        0.029_296_875_000_0,
+        -0.029_174_804_687_5,
+    ],
+    [
+        -0.008_300_781_250_0,
+        0.014_892_578_125_0,
+        -0.026_611_328_125_0,
+        0.047_607_421_875_0,
+        -0.102_294_921_875_0,
+        0.972_167_968_750_0,
+        0.137_329_101_562_5,
+        -0.059_448_242_187_5,
+        0.033_203_125_000_0,
+        -0.019_653_320_312_5,
+        0.010_986_328_125_0,
+        0.001_708_984_375_0,
+    ],
+];
+
+/// Streaming true-peak meter. One instance per loudness-state, tracks the
+/// maximum absolute oversampled value across every channel fed through it
+/// since the last reset.
+pub struct TruePeak {
+    /// Per-channel sample rings. `ring[0]` is the newest sample.
+    rings: Vec<[f64; TP_TAPS]>,
+    /// Largest |y| observed at any oversampled output, any channel.
+    max_abs: f64,
+}
+
+impl TruePeak {
+    pub fn new(channels: usize) -> Self {
+        Self {
+            rings: vec![[0.0; TP_TAPS]; channels],
+            max_abs: 0.0,
+        }
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.rings.len()
+    }
+
+    /// Feed planar audio. `channels.len()` must equal the configured
+    /// channel count; every slice must have the same length.
+    pub fn push(&mut self, channels: &[&[f32]]) -> Result<()> {
+        if channels.len() != self.rings.len() {
+            bail!(
+                "expected {} channels, got {}",
+                self.rings.len(),
+                channels.len()
+            );
+        }
+        if channels.is_empty() {
+            return Ok(());
+        }
+        let len = channels[0].len();
+        for (i, ch) in channels.iter().enumerate().skip(1) {
+            if ch.len() != len {
+                bail!("channel {i} length {} mismatches channel 0 ({len})", ch.len());
+            }
+        }
+        for (ch_idx, x_slice) in channels.iter().enumerate() {
+            let ring = &mut self.rings[ch_idx];
+            for &x in *x_slice {
+                // Shift the 12-sample ring: newest first.
+                for j in (1..TP_TAPS).rev() {
+                    ring[j] = ring[j - 1];
+                }
+                ring[0] = x as f64;
+                // Compute 4 oversampled outputs and track absolute peak.
+                for phase in &TP_PHASE {
+                    let mut y = 0.0;
+                    for j in 0..TP_TAPS {
+                        y += phase[j] * ring[j];
+                    }
+                    let a = y.abs();
+                    if a > self.max_abs {
+                        self.max_abs = a;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Peak level in dBTP (dB relative to 0 dBFS). Returns `-∞` if no
+    /// non-zero sample has been seen.
+    pub fn peak_dbtp(&self) -> f64 {
+        if self.max_abs <= 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * self.max_abs.log10()
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for r in self.rings.iter_mut() {
+            *r = [0.0; TP_TAPS];
+        }
+        self.max_abs = 0.0;
     }
 }
 
@@ -348,6 +509,9 @@ pub struct LoudnessState {
     /// Count of tiles emitted per channel (all channels stay in lock-step
     /// because they're fed the same number of samples per `push`).
     tiles_emitted: u64,
+    /// True-peak meter — runs alongside the K-weighted path on the raw
+    /// input (BS.1770-5 Annex 2, no weighting).
+    true_peak: TruePeak,
 }
 
 impl LoudnessState {
@@ -369,6 +533,7 @@ impl LoudnessState {
         let channels = (0..weights.len())
             .map(|_| ChannelChain::new(sample_rate))
             .collect::<Result<Vec<_>>>()?;
+        let n = weights.len();
         Ok(Self {
             sample_rate,
             channels,
@@ -376,6 +541,7 @@ impl LoudnessState {
             block_ms: Vec::new(),
             short_term_ms: Vec::new(),
             tiles_emitted: 0,
+            true_peak: TruePeak::new(n),
         })
     }
 
@@ -408,6 +574,9 @@ impl LoudnessState {
                 bail!("channel {i} length {} mismatches channel 0 ({len})", ch.len());
             }
         }
+        // Feed the raw signal through the true-peak meter first — it
+        // runs on unweighted audio per BS.1770-5 Annex 2.
+        self.true_peak.push(channels)?;
         // Push each channel in turn. Because they all see the same count
         // of input samples, their tile emissions stay in lock-step.
         let mut tiles_this_push: Option<usize> = None;
@@ -564,6 +733,12 @@ impl LoudnessState {
         (hi - lo).max(0.0)
     }
 
+    /// Peak level across every channel's oversampled signal, in dBTP.
+    /// Returns `-∞` until a non-zero sample has been seen.
+    pub fn true_peak_dbtp(&self) -> f64 {
+        self.true_peak.peak_dbtp()
+    }
+
     pub fn reset(&mut self) {
         for c in self.channels.iter_mut() {
             c.reset();
@@ -571,6 +746,7 @@ impl LoudnessState {
         self.block_ms.clear();
         self.short_term_ms.clear();
         self.tiles_emitted = 0;
+        self.true_peak.reset();
     }
 }
 
@@ -1027,6 +1203,105 @@ mod tests {
         // standard surround support lands.
         let s = LoudnessState::new_with_weights(FS, &[1.0, 1.0, 1.41]).unwrap();
         assert_eq!(s.channel_count(), 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase D — true-peak (BS.1770-5 Annex 2).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn true_peak_silence_is_neg_infinity() {
+        let mut tp = TruePeak::new(1);
+        let zeros = vec![0.0_f32; 4800];
+        tp.push(&[&zeros]).unwrap();
+        assert_eq!(tp.peak_dbtp(), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn true_peak_rejects_mismatched_channels() {
+        let mut tp = TruePeak::new(2);
+        let l = vec![0.0_f32; 100];
+        let r = vec![0.0_f32; 99];
+        assert!(tp.push(&[&l, &r]).is_err());
+    }
+
+    #[test]
+    fn true_peak_phase_filter_dc_gain_near_unity() {
+        // Each Annex 2 polyphase branch should have DC gain ≈ 1.0 so a
+        // DC input reconstructs at (approximately) its original level
+        // across all 4 phases. Published filter has a small droop — stay
+        // within ±0.05 of unity.
+        for (i, phase) in TP_PHASE.iter().enumerate() {
+            let sum: f64 = phase.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 0.05,
+                "phase {i} DC gain {sum:.5} should be ≈ 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn true_peak_of_sample_aligned_0dbfs_sine_is_near_0dbtp() {
+        // A 1 kHz 0 dBFS sine — intersample peak is only marginally
+        // above sample peak. Expect dBTP within a tight neighborhood
+        // of 0.
+        let mut tp = TruePeak::new(1);
+        let samples = sine_samples(FS as usize, 1000.0, 0.0, FS);
+        tp.push(&[&samples]).unwrap();
+        let peak = tp.peak_dbtp();
+        assert!(
+            (peak - 0.0).abs() < 0.5,
+            "1 kHz 0 dBFS true-peak {peak:.3} dBTP, expected ~0"
+        );
+    }
+
+    #[test]
+    fn true_peak_detects_intersample_peak_at_quarter_fs() {
+        // A 0 dBFS sine at fs/4 sampled with 45° phase has sample peaks
+        // of |sin(45°)| = 0.707 (-3.01 dBFS) but its true analog peak
+        // is 1.0 (0 dBTP). The oversampler should recover the peak.
+        let mut tp = TruePeak::new(1);
+        let f = FS as f64 / 4.0;
+        let w = 2.0 * PI * f / FS as f64;
+        let phase = PI / 4.0;
+        let samples: Vec<f32> = (0..FS as usize)
+            .map(|i| (w * i as f64 + phase).sin() as f32)
+            .collect();
+        tp.push(&[&samples]).unwrap();
+        let peak = tp.peak_dbtp();
+        // The sample peaks are ~-3 dBFS but the intersample peak sits
+        // very close to 0 dBTP. A 48-tap filter leaves a small residual
+        // error, so tolerate within 0.5 dB.
+        assert!(
+            peak > -1.0,
+            "expected intersample peak recovery near 0 dBTP, got {peak:.3} dBTP"
+        );
+    }
+
+    #[test]
+    fn true_peak_reset_clears() {
+        let mut tp = TruePeak::new(1);
+        let loud = sine_samples(FS as usize, 1000.0, 0.0, FS);
+        tp.push(&[&loud]).unwrap();
+        assert!(tp.peak_dbtp() > -1.0);
+        tp.reset();
+        assert_eq!(tp.peak_dbtp(), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn loudness_state_exposes_true_peak() {
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        assert_eq!(s.true_peak_dbtp(), f64::NEG_INFINITY);
+        let sine = sine_samples(FS as usize, 1000.0, -6.0, FS);
+        s.push(&[&sine]).unwrap();
+        let peak = s.true_peak_dbtp();
+        // -6 dBFS peak sine → ~-6 dBTP (minor intersample wobble).
+        assert!(
+            (peak - -6.0).abs() < 0.5,
+            "LoudnessState.true_peak_dbtp = {peak:.3}, expected ~-6"
+        );
+        s.reset();
+        assert_eq!(s.true_peak_dbtp(), f64::NEG_INFINITY);
     }
 
     // -----------------------------------------------------------------
