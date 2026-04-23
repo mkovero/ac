@@ -97,8 +97,13 @@ Sets Mic-AN1/AN2 gain to 0, Line-IN3/4 sensitivity to +4 dBu, Line-IN3/4 gain to
 Run all tests before committing:
 ```bash
 cd ac-rs && cargo test
-pytest tests/ -q                # black-box ZMQ protocol tests (spawns Rust daemon)
+pytest tests/ -q                # black-box ZMQ protocol tests — default ~20 s
+pytest tests/ --runslow -q      # + extended (`test_hardware`, `test_dut`) ~3 min
 ```
+
+Two long pytest scenarios (`test_test_hardware_frames`, `test_test_dut_frames`)
+are marked `slow` and skipped by default. Pass `--runslow` to include them, or
+`pytest -m slow --runslow` to run *only* the extended suite.
 
 ## ds — diagnostics session manager
 

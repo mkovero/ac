@@ -17,6 +17,37 @@ import zmq
 
 
 # ---------------------------------------------------------------------------
+# Marker: slow tests (`test_hardware`, `test_dut` drive the full battery
+# against the fake engine and dominate wall-clock — ~2 min each). Skipped
+# by default; opt in with `pytest --runslow` or `pytest -m slow`.
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--runslow", action="store_true", default=False,
+        help="run tests marked `slow` (extended suite: multi-minute)",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: long-running test; skipped unless --runslow or -m slow"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runslow"):
+        return
+    # If the user explicitly selected slow tests via `-m`, respect that.
+    if "slow" in (config.getoption("-m") or ""):
+        return
+    skip_slow = pytest.mark.skip(reason="slow (pass --runslow to include)")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
