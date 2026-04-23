@@ -101,6 +101,22 @@ fn write_method(out: &mut String, r: &MeasurementReport) {
                 );
             }
         }
+        MeasurementMethod::SweptSine { f1_hz, f2_hz, duration_s, standard } => {
+            let _ = writeln!(
+                out,
+                "<dt>kind</dt><dd>swept_sine ({:.1} Hz → {:.1} Hz, {:.3} s)</dd>",
+                f1_hz, f2_hz, duration_s
+            );
+            if let Some(s) = standard {
+                let _ = writeln!(
+                    out,
+                    "<dt>standard</dt><dd>{} — {}{}</dd>",
+                    html_escape(&s.standard),
+                    html_escape(&s.clause),
+                    if s.verified { " ✓ verified" } else { "" }
+                );
+            }
+        }
     }
     let _ = writeln!(
         out,
