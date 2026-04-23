@@ -117,6 +117,13 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if update.get("dmm_host").is_some() {
         cfg.dmm_host = update["dmm_host"].as_str().map(str::to_string);
     }
+    if let Some(v) = update.get("server_idle_timeout_secs") {
+        if v.is_null() {
+            cfg.server_idle_timeout_secs = None;
+        } else if let Some(n) = v.as_u64() {
+            cfg.server_idle_timeout_secs = if n == 0 { None } else { Some(n) };
+        }
+    }
 
     let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
     if let Err(e) = ac_core::config::save(&*cfg, None) {

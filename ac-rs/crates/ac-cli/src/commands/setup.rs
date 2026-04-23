@@ -3,24 +3,31 @@ use crate::parse::CommandKind;
 use super::check_ack;
 
 pub fn run(cmd: &CommandKind, client: &mut AcClient) {
-    let (output, input, reference, device, dbu_ref_vrms, dmm_host, gpio_port, range_start, range_stop) =
-        match cmd {
-            CommandKind::Setup {
-                output,
-                input,
-                reference,
-                device,
-                dbu_ref_vrms,
-                dmm_host,
-                gpio_port,
-                range_start,
-                range_stop,
-            } => (
-                output, input, reference, device, dbu_ref_vrms, dmm_host, gpio_port, range_start,
-                range_stop,
-            ),
-            _ => unreachable!(),
-        };
+    let (
+        output, input, reference, device,
+        dbu_ref_vrms, dmm_host, gpio_port,
+        range_start, range_stop,
+        server_idle_timeout_secs,
+    ) = match cmd {
+        CommandKind::Setup {
+            output,
+            input,
+            reference,
+            device,
+            dbu_ref_vrms,
+            dmm_host,
+            gpio_port,
+            range_start,
+            range_stop,
+            server_idle_timeout_secs,
+        } => (
+            output, input, reference, device,
+            dbu_ref_vrms, dmm_host, gpio_port,
+            range_start, range_stop,
+            server_idle_timeout_secs,
+        ),
+        _ => unreachable!(),
+    };
 
     let mut update = serde_json::Map::new();
     if let Some(v) = output {
@@ -52,6 +59,12 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     }
     if let Some(v) = range_stop {
         update.insert("range_stop_hz".into(), (*v).into());
+    }
+    if let Some(v) = server_idle_timeout_secs {
+        match v {
+            Some(secs) => update.insert("server_idle_timeout_secs".into(), (*secs).into()),
+            None => update.insert("server_idle_timeout_secs".into(), serde_json::Value::Null),
+        };
     }
 
     let has_updates = !update.is_empty();
@@ -129,6 +142,14 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         .and_then(|v| v.as_f64())
         .unwrap_or(20000.0);
     println!("  Range:         {r_start:.0} – {r_stop:.0} Hz");
+
+    let timeout = srv_cfg
+        .get("server_idle_timeout_secs")
+        .and_then(|v| v.as_u64());
+    match timeout {
+        Some(secs) => println!("  Server idle:   {secs}s (auto-disable)"),
+        None => println!("  Server idle:   (no timeout)"),
+    }
 
     if has_updates {
         println!("  Saved.");

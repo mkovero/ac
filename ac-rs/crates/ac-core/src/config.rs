@@ -67,6 +67,12 @@ pub struct Config {
     /// reproducible measurements complete. `None` disables disk emission.
     #[serde(default)]
     pub report_dir: Option<PathBuf>,
+
+    /// Auto-disable `server_enable` (public bind) after this many seconds
+    /// of idle CTRL activity. `None` = never auto-disable. Checked by the
+    /// daemon's keepalive tick; only fires when no workers are running.
+    #[serde(default)]
+    pub server_idle_timeout_secs: Option<u64>,
 }
 
 impl Default for Config {
@@ -89,6 +95,7 @@ impl Default for Config {
             backend: None,
             server_host: None,
             report_dir: None,
+            server_idle_timeout_secs: None,
         }
     }
 }

@@ -161,6 +161,9 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     let keepalive_interval = std::time::Duration::from_secs(1);
     let mut last_keepalive = std::time::Instant::now();
     let mut keepalive_seq: u64 = 0;
+    // Idle-timeout tracking for auto-disable of public bind. Updated on every
+    // CTRL recv; the keepalive tick checks elapsed vs. configured timeout.
+    let mut last_ctrl_activity = std::time::Instant::now();
 
     loop {
         // Drain any pending DATA frames first
@@ -205,12 +208,37 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
             .unwrap_or_else(|_| "{}".to_string());
             let frame = format!("keepalive {payload}").into_bytes();
             data.send(frame, 0).ok();
+
+            // Idle-timeout: while public-bound and not running any worker,
+            // auto-fold back to localhost if we've been silent long enough.
+            // Queues a rebind via the same channel server_disable uses; the
+            // actual socket rebind happens on the next CTRL round.
+            if !busy {
+                let timeout_secs = state
+                    .cfg
+                    .lock()
+                    .unwrap()
+                    .server_idle_timeout_secs;
+                let is_public = state.listen_mode.lock().unwrap().as_str() == "public";
+                if is_public {
+                    if let Some(secs) = timeout_secs {
+                        if last_ctrl_activity.elapsed() >= std::time::Duration::from_secs(secs) {
+                            eprintln!(
+                                "ac-daemon: idle timeout {secs}s reached — auto-disabling public bind"
+                            );
+                            handlers::server_disable(&state);
+                            last_ctrl_activity = std::time::Instant::now();
+                        }
+                    }
+                }
+            }
         }
 
         zmq::poll(&mut items, 10).ok(); // 10 ms timeout
 
         if items[0].is_readable() {
             let msg = ctrl.recv_bytes(0).context("CTRL recv")?;
+            last_ctrl_activity = std::time::Instant::now();
             let reply = dispatch(&msg, &state, &pub_rx, &data);
             let reply_bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{}".to_vec());
 
@@ -229,33 +257,50 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
             }
 
             // Rebind AFTER the reply is sent (per ZMQ.md spec)
-            if let Ok(new_host) = rebind_rx.try_recv() {
-                if new_host != bind_host {
-                    let old_ctrl = format!("tcp://{bind_host}:{ctrl_port}");
-                    let old_data = format!("tcp://{bind_host}:{data_port}");
-                    let new_ctrl = format!("tcp://{new_host}:{ctrl_port}");
-                    let new_data = format!("tcp://{new_host}:{data_port}");
-
-                    ctrl.unbind(&old_ctrl).ok();
-                    data.unbind(&old_data).ok();
-
-                    // Give the OS a moment to release the ports before rebinding.
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-
-                    match (ctrl.bind(&new_ctrl), data.bind(&new_data)) {
-                        (Ok(_), Ok(_)) => {
-                            eprintln!("ac-daemon: rebound → CTRL {new_ctrl}  DATA {new_data}");
-                            bind_host = new_host;
-                        }
-                        (Err(e), _) => eprintln!("ac-daemon: rebind CTRL {new_ctrl}: {e}"),
-                        (_, Err(e)) => eprintln!("ac-daemon: rebind DATA {new_data}: {e}"),
-                    }
-                }
-            }
+            apply_pending_rebind(&rebind_rx, &ctrl, &data, &mut bind_host, ctrl_port, data_port);
         }
+
+        // Also drain rebinds scheduled outside the CTRL round — e.g. when the
+        // keepalive tick auto-disables the public bind on idle timeout. Without
+        // this, the rebind would sit in the channel until the next client
+        // connected and leave the public socket live in the meantime.
+        apply_pending_rebind(&rebind_rx, &ctrl, &data, &mut bind_host, ctrl_port, data_port);
     }
 
     Ok(())
+}
+
+fn apply_pending_rebind(
+    rebind_rx: &Receiver<String>,
+    ctrl: &zmq::Socket,
+    data: &zmq::Socket,
+    bind_host: &mut String,
+    ctrl_port: u16,
+    data_port: u16,
+) {
+    while let Ok(new_host) = rebind_rx.try_recv() {
+        if new_host == *bind_host {
+            continue;
+        }
+        let old_ctrl = format!("tcp://{bind_host}:{ctrl_port}");
+        let old_data = format!("tcp://{bind_host}:{data_port}");
+        let new_ctrl = format!("tcp://{new_host}:{ctrl_port}");
+        let new_data = format!("tcp://{new_host}:{data_port}");
+
+        ctrl.unbind(&old_ctrl).ok();
+        data.unbind(&old_data).ok();
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        match (ctrl.bind(&new_ctrl), data.bind(&new_data)) {
+            (Ok(_), Ok(_)) => {
+                eprintln!("ac-daemon: rebound → CTRL {new_ctrl}  DATA {new_data}");
+                *bind_host = new_host;
+            }
+            (Err(e), _) => eprintln!("ac-daemon: rebind CTRL {new_ctrl}: {e}"),
+            (_, Err(e)) => eprintln!("ac-daemon: rebind DATA {new_data}: {e}"),
+        }
+    }
 }
 
 fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_sock: &zmq::Socket) -> Value {

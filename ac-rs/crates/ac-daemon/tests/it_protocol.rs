@@ -662,3 +662,64 @@ fn plot_with_bpo_emits_spectrum_bands() {
     assert!(got_frame,  "never saw measurement/spectrum_bands frame");
     assert!(got_report, "never saw measurement/report with spectrum_bands data");
 }
+
+// ---------------------------------------------------------------------------
+// server_idle_timeout — daemon folds the public bind back to localhost after
+// the configured idle CTRL-activity window expires. See issue #58.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn server_idle_timeout_auto_disables_public_bind() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // Configure a 1-second idle timeout and go public.
+    let r = c.call(json!({
+        "cmd": "setup",
+        "update": {"server_idle_timeout_secs": 1},
+    }));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["config"]["server_idle_timeout_secs"], json!(1));
+
+    let r = c.call(json!({"cmd": "server_enable"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["listen_mode"], json!("public"));
+    drop(c);
+
+    // Wait past the idle window. The CTRL socket must stay silent, so don't
+    // send anything — the keepalive tick is what trips the auto-disable.
+    thread::sleep(Duration::from_millis(3_500));
+
+    // Reconnect on localhost and verify the daemon reverted to local.
+    let c2 = Client::new(&d);
+    let s = c2.call(json!({"cmd": "status"}));
+    assert_eq!(s["listen_mode"], json!("local"),
+        "idle timeout did not auto-disable public bind: {s}");
+}
+
+#[test]
+fn server_idle_timeout_disabled_keeps_public_bind() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // Explicit null means "no timeout".
+    let r = c.call(json!({
+        "cmd": "setup",
+        "update": {"server_idle_timeout_secs": Value::Null},
+    }));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["config"]["server_idle_timeout_secs"], Value::Null);
+
+    let r = c.call(json!({"cmd": "server_enable"}));
+    assert_eq!(r["ok"], json!(true));
+    drop(c);
+
+    thread::sleep(Duration::from_millis(2_500));
+
+    // Reconnect — still public.
+    thread::sleep(Duration::from_millis(200));
+    let c2 = Client::new(&d);
+    let s = c2.call(json!({"cmd": "status"}));
+    assert_eq!(s["listen_mode"], json!("public"),
+        "disabled timeout still auto-disabled public bind: {s}");
+}

@@ -283,6 +283,7 @@ pub enum CommandKind {
         gpio_port: Option<Option<String>>,
         range_start: Option<f64>,
         range_stop: Option<f64>,
+        server_idle_timeout_secs: Option<Option<u64>>,
     },
     Stop,
     SweepLevel {
