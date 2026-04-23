@@ -61,21 +61,6 @@ impl Integrator {
     }
 }
 
-/// Publish a live-analysis frame under both the legacy `type` value
-/// (e.g. `"spectrum"`) and the tiered equivalent (`"visualize/spectrum"`)
-/// during the transition window. Callers pass the already-built frame
-/// whose `type` is the legacy name; this helper forwards the legacy copy
-/// unchanged and sends a second copy with `type` rewritten to `tiered`.
-fn publish_visualize(
-    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
-    mut frame: Value,
-    tiered: &'static str,
-) {
-    send_pub(pub_tx, "data", &frame);
-    frame["type"] = json!(tiered);
-    send_pub(pub_tx, "data", &frame);
-}
-
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
@@ -284,7 +269,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     let frame = json!({
-                        "type":        "cwt",
+                        "type":        "visualize/cwt",
                         "cmd":         "monitor_spectrum",
                         "channel":     channel,
                         "n_channels":  n_channels,
@@ -294,7 +279,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         "timestamp":   ts_ns,
                         "xruns":       xruns_total,
                     });
-                    publish_visualize(&pub_tx, frame, "visualize/cwt");
+                    send_pub(&pub_tx, "data", &frame);
                     // Optional fractional-octave aggregation of the same
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
                     // extra DSP cost when enabled.
@@ -322,7 +307,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             }
                         }
                         let frac_frame = json!({
-                            "type":       "fractional_octave",
+                            "type":       "visualize/fractional_octave",
                             "cmd":        "monitor_spectrum",
                             "channel":    channel,
                             "n_channels": n_channels,
@@ -334,7 +319,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             "timestamp":  ts_ns,
                             "xruns":      xruns_total,
                         });
-                        publish_visualize(&pub_tx, frac_frame, "visualize/fractional_octave");
+                        send_pub(&pub_tx, "data", &frac_frame);
 
                         if cur_ti_mode != "off" {
                             let n_bands = band_levels.len();
@@ -362,7 +347,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 };
                                 let dur_s = integ.duration_s();
                                 let leq_frame = json!({
-                                    "type":       "fractional_octave_leq",
+                                    "type":       "visualize/fractional_octave_leq",
                                     "cmd":        "monitor_spectrum",
                                     "channel":    channel,
                                     "n_channels": n_channels,
@@ -377,11 +362,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     "timestamp":  ts_ns,
                                     "xruns":      xruns_total,
                                 });
-                                publish_visualize(
-                                    &pub_tx,
-                                    leq_frame,
-                                    "visualize/fractional_octave_leq",
-                                );
+                                send_pub(&pub_tx, "data", &leq_frame);
                             }
                         }
                     }
@@ -452,7 +433,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
-                                "type":             "spectrum",
+                                "type":             "visualize/spectrum",
                                 "cmd":              "monitor_spectrum",
                                 "channel":          channel,
                                 "n_channels":       n_channels,
@@ -479,7 +460,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
                             json!({
-                                "type":             "spectrum",
+                                "type":             "visualize/spectrum",
                                 "cmd":              "monitor_spectrum",
                                 "channel":          channel,
                                 "n_channels":       n_channels,
@@ -490,7 +471,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             })
                         }
                     };
-                    publish_visualize(&pub_tx, frame, "visualize/spectrum");
+                    send_pub(&pub_tx, "data", &frame);
                 }
             }
             // Pace FFT mode to requested interval. CWT has its own cadence

@@ -20,19 +20,6 @@ use super::super::{
     busy_guard, resolve_input, resolve_output, send_pub, spawn_worker, sweep_point_frame,
 };
 
-/// Publish a per-point frame under both the legacy `sweep_point` name
-/// and its tiered equivalent. Callers pass the already-built frame
-/// (whose `type` field is `sweep_point`); this helper forwards the
-/// legacy copy unchanged and sends a second copy with `type` replaced.
-fn publish_sweep_point(
-    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
-    mut frame: Value,
-) {
-    send_pub(pub_tx, "data", &frame);
-    frame["type"] = json!("measurement/frequency_response/point");
-    send_pub(pub_tx, "data", &frame);
-}
-
 fn now_iso8601_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -102,7 +89,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                         ac_coupled:       r.ac_coupled,
                     });
                     let frame = sweep_point_frame(&r, cal.as_ref(), n, "plot", level_dbfs, Some(*freq));
-                    publish_sweep_point(&pub_tx, frame);
+                    send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
                 Err(e) => eprintln!("plot: analyze error at {freq}Hz: {e}"),

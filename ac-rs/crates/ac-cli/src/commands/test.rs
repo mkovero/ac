@@ -50,7 +50,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("sweep_point") {
+            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
                 io::print_freq_row(&data);
             }
         } else if topic == "done" {
@@ -108,7 +108,7 @@ pub fn run_dut(
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("sweep_point") {
+            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
                 io::print_freq_row(&data);
                 results.push(data);
             }

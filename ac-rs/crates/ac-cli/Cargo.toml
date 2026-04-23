@@ -1,6 +1,6 @@
 [package]
 name        = "ac-cli"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2021"
 description = "CLI for audio bench measurements — THD, sweeps, transfer functions, live spectrum"
 

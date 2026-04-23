@@ -160,7 +160,7 @@ pub fn spawn(
                         .and_then(|v| v.get("type"))
                         .and_then(|t| t.as_str())
                         .map(|s| s.to_string());
-                    if type_tag.as_deref() == Some("cwt") {
+                    if type_tag.as_deref() == Some("visualize/cwt") {
                         // Morlet CWT column: magnitudes are already dBFS and
                         // frequencies are log-spaced. Repackage as a
                         // SpectrumFrame so the existing display pipeline
@@ -206,7 +206,7 @@ pub fn spawn(
                         inputs[slot].write(frame);
                         continue;
                     }
-                    if type_tag.as_deref() == Some("fractional_octave") {
+                    if type_tag.as_deref() == Some("visualize/fractional_octave") {
                         // 1/N-octave aggregation of the CWT column. Daemon
                         // emits this in addition to the `cwt` frame each
                         // tick when `set_ioct_bpo` has enabled it. Schema
@@ -248,7 +248,7 @@ pub fn spawn(
                         inputs[slot].write(sf);
                         continue;
                     }
-                    if type_tag.as_deref() == Some("fractional_octave_leq") {
+                    if type_tag.as_deref() == Some("visualize/fractional_octave_leq") {
                         // Time-integrated sidecar to `fractional_octave` (see
                         // ZMQ.md § time-integration). Publishers emit this
                         // immediately after the corresponding `fractional_octave`
@@ -350,7 +350,7 @@ pub fn spawn(
                         }
                         continue;
                     }
-                    if type_tag.as_deref() == Some("sweep_point") {
+                    if type_tag.as_deref() == Some("measurement/frequency_response/point") {
                         match serde_json::from_str::<SweepPoint>(body) {
                             Ok(pt) => {
                                 log::debug!(

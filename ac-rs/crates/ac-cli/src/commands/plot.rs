@@ -145,7 +145,7 @@ fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("sweep_point") {
+            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
                 io::print_freq_row(&data);
                 results.push(data);
             }

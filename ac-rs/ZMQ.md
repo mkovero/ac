@@ -31,7 +31,7 @@ as an error after the per-command deadline.
 <topic> <json-object>\n
 ```
 
-e.g. `data {"type":"sweep_point", ...}` or `done {"cmd":"plot", ...}`.
+e.g. `data {"type":"measurement/frequency_response/point", ...}` or `done {"cmd":"plot", ...}`.
 
 Topics: `data`, `done`, `error`, `cal_prompt`, `cal_done`, `gpio`, `keepalive`.
 
@@ -65,32 +65,30 @@ stop consuming frames when it receives either of these:
 
 ---
 
-## Tiered frame types (transition)
+## Tiered frame types
 
-`ARCHITECTURE.md` introduces a two-tier model for the analysis stack:
+`ARCHITECTURE.md` defines a two-tier model for the analysis stack:
 
 - **Tier 1 — Reference measurement** (`measurement/…`): reproducible,
   archivable. Emitted by `plot` today; future `sweep`, `noise`, etc.
 - **Tier 2 — Live analysis** (`visualize/…`): responsive,
   display-first. Emitted by `monitor_spectrum`.
 
-During the transition window every live-analysis and per-point
-measurement frame is published **twice**: once with the legacy `"type"`
-value (e.g. `"sweep_point"`, `"spectrum"`), and once with the
-tier-prefixed equivalent. The payloads are byte-identical apart from
-the `"type"` field. Subscribers should prefer the tier-prefixed name
-and treat the legacy copy as redundant.
+Every frame carries a tier-prefixed `"type"`:
 
-| Tier  | Legacy `type`        | Tiered `type`                              |
-|-------|----------------------|--------------------------------------------|
-| 1     | `sweep_point`        | `measurement/frequency_response/point`     |
-| 1     | — (new)              | `measurement/frequency_response/complete`  |
-| 1     | — (new)              | `measurement/report`                       |
-| 2     | `spectrum`           | `visualize/spectrum`                       |
-| 2     | `cwt`                | `visualize/cwt`                            |
-| 2     | `fractional_octave`  | `visualize/fractional_octave`              |
+| Tier  | `type`                                      |
+|-------|---------------------------------------------|
+| 1     | `measurement/frequency_response/point`      |
+| 1     | `measurement/frequency_response/complete`   |
+| 1     | `measurement/report`                        |
+| 2     | `visualize/spectrum`                        |
+| 2     | `visualize/cwt`                             |
+| 2     | `visualize/fractional_octave`               |
+| 2     | `visualize/fractional_octave_leq`           |
 
-Legacy `type` names are scheduled for removal in `ac` v0.2.0.
+**v0.2.0 (breaking)** — legacy unprefixed `type` names
+(`sweep_point`, `spectrum`, `cwt`, `fractional_octave`) were removed.
+External SUB subscribers must switch to the tier-prefixed names.
 
 ### `measurement/report` frame
 
@@ -170,13 +168,13 @@ start_hz, stop_hz)`) and publishes the resulting per-band levels. A second
 
 ## Shared types
 
-### `sweep_point` frame
+### `measurement/frequency_response/point` frame
 
 Emitted by `plot` and `plot_level` for each measured frequency or level point.
 
 ```json
 {
-  "type":             "sweep_point",
+  "type":             "measurement/frequency_response/point",
   "cmd":              "plot" | "plot_level",
   "n":                <int>,          // 0-based sequence number
   "drive_db":         <float>,        // stimulus level in dBFS
@@ -835,7 +833,7 @@ engine path; real JACK / CPAL buffer-playback is a follow-up.
 ### `plot`
 
 Blocking point-by-point frequency sweep: plays a tone at each frequency and
-captures + analyses the loopback. Emits one `sweep_point` frame per frequency.
+captures + analyses the loopback. Emits one `measurement/frequency_response/point` frame per frequency.
 
 **Request**
 ```json
@@ -856,7 +854,7 @@ captures + analyses the loopback. Emits one `sweep_point` frame per frequency.
 
 **DATA** — one per frequency:
 ```json
-// topic: data  (sweep_point frame, see Shared types)
+// topic: data  (measurement/frequency_response/point frame, see Shared types)
 ```
 
 **DATA** — terminal:
@@ -870,7 +868,7 @@ captures + analyses the loopback. Emits one `sweep_point` frame per frequency.
 ### `plot_level`
 
 Blocking point-by-point level sweep at a fixed frequency. Plays and captures
-at each level step. Emits one `sweep_point` frame per level.
+at each level step. Emits one `measurement/frequency_response/point` frame per level.
 
 **Request**
 ```json
@@ -889,7 +887,7 @@ at each level step. Emits one `sweep_point` frame per level.
 { "ok": true, "out_port": "<port>", "in_port": "<port>" }
 ```
 
-**DATA** — one per level step (sweep_point frame, `"cmd": "plot_level"`,
+**DATA** — one per level step (measurement/frequency_response/point frame, `"cmd": "plot_level"`,
 includes `"freq_hz"` and `"drive_db"` fields).
 
 **DATA** — terminal:
