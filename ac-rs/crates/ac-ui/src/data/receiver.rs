@@ -325,15 +325,17 @@ pub fn spawn(
                     }
                     if type_tag.as_deref() == Some("measurement/loudness") {
                         // Per-channel BS.1770-5 / R128 meter readout (see
-                        // ZMQ.md § loudness). Writes into a shared
-                        // `LoudnessStore` keyed by channel; the overlay
-                        // reads the latest entry for its hovered channel
-                        // every redraw. Fields that aren't yet meaningful
-                        // (silence, priming window unfilled) arrive as
+                        // ZMQ.md § loudness). The daemon emits `channel` as
+                        // a physical capture index (e.g. 10 for
+                        // `ac monitor 10`), so we route through the same
+                        // `channel_map` spectrum/cwt frames use and key the
+                        // store by UI slot — the overlay reads by
+                        // `active_channel` which is a slot, not a physical
+                        // index. Silence / pre-gate fields arrive as
                         // `null` and stay `None`.
                         #[derive(serde::Deserialize)]
                         struct LoudnessFrame {
-                            channel: u32,
+                            channel: Option<u32>,
                             #[serde(default)]
                             momentary_lkfs: Option<f64>,
                             #[serde(default)]
@@ -349,8 +351,20 @@ pub fn spawn(
                         }
                         match serde_json::from_str::<LoudnessFrame>(body) {
                             Ok(lf) => {
+                                let slot = route_slot(lf.channel, &mut channel_map);
+                                let Some(slot) = slot else {
+                                    if !warned_overflow {
+                                        log::warn!(
+                                            "receiver: loudness frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                            lf.channel,
+                                            n_slots,
+                                        );
+                                        warned_overflow = true;
+                                    }
+                                    continue;
+                                };
                                 loudness.write(
-                                    lf.channel,
+                                    slot as u32,
                                     LoudnessReadout {
                                         momentary_lkfs: lf.momentary_lkfs,
                                         short_term_lkfs: lf.short_term_lkfs,
