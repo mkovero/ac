@@ -143,12 +143,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let sr       = eng.sample_rate();
         // Sliding window: keep the last `target_total` samples per unique
         // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
-        // h1_estimate's internal Welch settings.
+        // h1_estimate's internal Welch settings. chunk_secs matches the
+        // monitor tick default (50 ms → 20 Hz refresh) — now that per-tick
+        // compute is ~5 ms (delay cached), the loop is capture-bound, not
+        // compute-bound, and the view matches the FFT/CWT monitor cadence.
         let nperseg      = sr as usize;              // 1 Hz bin width
         let step         = nperseg / 2;              // 50% overlap
         let n_averages   = 4;
         let target_total = nperseg + step * (n_averages - 1);
-        let chunk_secs   = 0.1;
+        let chunk_secs   = 0.05;
         let mut rings: Vec<Vec<f32>> = (0..unique_ports.len())
             .map(|_| Vec::with_capacity(target_total + step))
             .collect();
@@ -157,6 +160,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             eng.set_pink(amplitude);
         }
         let _ = eng.capture_block(0.2); // warmup flush
+
+        // Delay cache: ref↔meas propagation is constant during a streaming
+        // session (fixed hardware path), so we estimate once per pair on
+        // warmup and reuse the result. Skipping `estimate_delay` per tick
+        // (a 262 k-point FFT+IFFT at 2.5 s ring / 48 kHz) cuts the hot-loop
+        // work from ~17 ms → ~3 ms and takes the refresh rate from choppy
+        // ~8.5 Hz to the capture-interval-limited ~10 Hz.
+        let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
 
         while !stop.load(Ordering::Relaxed) {
             let bufs = match eng.capture_multi(chunk_secs) {
@@ -182,6 +193,24 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // segment so the first H1 has meaningful coherence.
             if rings.iter().any(|r| r.len() < nperseg) { continue; }
 
+            // Estimate any missing per-pair delays once on first entry (after
+            // the rings are full). Subsequent ticks reuse the cached value.
+            for i in 0..pairs.len() {
+                if pair_delays[i].is_some() {
+                    continue;
+                }
+                let (mi, ri) = pair_idx[i];
+                if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
+                    pair_delays[i] = Some(
+                        ac_core::visualize::transfer::estimate_delay_samples(
+                            refb.as_slice(),
+                            meas.as_slice(),
+                            sr,
+                        ),
+                    );
+                }
+            }
+
             // Pairs are independent H1 estimates — fan out across the rayon
             // pool so multi-pair sessions (e.g. 4 mic positions against one
             // reference) scale linearly with core count. The rings are
@@ -190,10 +219,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             let messages: Vec<Value> = pairs
                 .par_iter()
                 .zip(pair_idx.par_iter())
-                .filter_map(|(&(meas_ch, ref_ch), &(mi, ri))| {
+                .zip(pair_delays.par_iter())
+                .filter_map(|((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt)| {
                     let meas = rings.get(mi)?.as_slice();
                     let refb = rings.get(ri)?.as_slice();
-                    let result = ac_core::visualize::transfer::h1_estimate(refb, meas, sr);
+                    let delay = delay_opt.unwrap_or(0);
+                    let result = ac_core::visualize::transfer::h1_estimate_with_delay(
+                        refb, meas, sr, delay,
+                    );
 
                     let n_pts = result.freqs.len();
                     let indices: Vec<usize> = if n_pts > 2000 {

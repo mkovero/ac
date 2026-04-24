@@ -1,4 +1,6 @@
-use ac_core::visualize::transfer::{capture_duration, h1_estimate};
+use ac_core::visualize::transfer::{
+    capture_duration, estimate_delay_samples, h1_estimate, h1_estimate_with_delay,
+};
 use std::time::Instant;
 
 fn main() {
@@ -11,7 +13,6 @@ fn main() {
     for &n_averages in &[1usize, 4, 8, 16] {
         let secs = capture_duration(n_averages, sr);
         let n = (secs * sr as f64) as usize;
-        // Reference: pseudo-white noise from a linear-congruential generator.
         let mut state = 0x1234_5678_u32;
         let r: Vec<f32> = (0..n)
             .map(|_| {
@@ -19,7 +20,6 @@ fn main() {
                 ((state >> 16) as i16) as f32 / 32768.0 * 0.3
             })
             .collect();
-        // Measurement: reference with 2 ms delay + white noise floor.
         let delay_samples = (sr as f64 * 0.002) as usize;
         let m: Vec<f32> = (0..n)
             .map(|i| {
@@ -29,15 +29,26 @@ fn main() {
                 src + noise
             })
             .collect();
+
         let _ = h1_estimate(&r, &m, sr); // warmup
         let t0 = Instant::now();
         for _ in 0..iters {
             let _ = h1_estimate(&r, &m, sr);
         }
         let per_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        // Simulate the transfer_stream hot loop: delay pre-computed once.
+        let d = estimate_delay_samples(&r, &m, sr);
+        let _ = h1_estimate_with_delay(&r, &m, sr, d);
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let _ = h1_estimate_with_delay(&r, &m, sr, d);
+        }
+        let hot_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
         println!(
-            "h1_estimate avgs={:>2} capture={:.2}s n={} avg={:.2} ms/call",
-            n_averages, secs, n, per_ms
+            "avgs={:>2} capture={:.2}s n={:>6}  h1_estimate={:.2}  with_delay(hot)={:.2} ms/call",
+            n_averages, secs, n, per_ms, hot_ms
         );
     }
 }

@@ -173,22 +173,34 @@ drops it to 4.6 ms, a ~5.6× speedup on this i7-1260P.
 
 ## Tier 1 — `visualize::transfer::h1_estimate`
 
-Welch PSD at 1 Hz resolution + H1 + coherence on pseudo-white reference:
+Welch PSD at 1 Hz resolution + H1 + coherence on pseudo-white reference.
+Two variants now: `h1_estimate` (includes delay estimation each call)
+and `h1_estimate_with_delay` (caller-supplied delay — what
+`transfer_stream` uses in its hot loop).
 
-| n_averages | capture | n | avg |
-|---:|---:|---:|------:|
-|  1 | 1.0 s  |  48000 |  9.2 ms |
-|  4 | 2.5 s  | 120000 | 17.1 ms |
-|  8 | 4.5 s  | 216000 | 31.6 ms |
-| 16 | 8.5 s  | 408000 | 36.3 ms |
+| n_averages | capture |      n | h1_estimate | with_delay (hot) |
+|---:|---:|---:|---:|---:|
+|  1 | 1.0 s |  48 000 | 12.7 ms |  4.1 ms |
+|  4 | 2.5 s | 120 000 | 19.3 ms |  4.6 ms |
+|  8 | 4.5 s | 216 000 | 34.8 ms |  4.9 ms |
+| 16 | 8.5 s | 408 000 | 35.9 ms | 10.2 ms |
 
-Previously did three separate Welch passes (`welch_psd(x) + welch_psd(y)
-+ welch_csd(x,y)`), which FFT'd each segment twice (once per side, once
-in the cross term). `welch_all` shares the per-segment FFT pair across
-all three accumulators, halving the FFT count. avgs=16 drops
-48.7 → 36.3 ms (−25%); at avgs=1 the cost is dominated by
-`estimate_delay`'s single 262 k-point FFT+IFFT, which this change does
-not touch.
+Two optimisations landed here:
+
+1. `welch_all` shares each segment's FFT pair across `Gxx`, `Gyy`, `Gxy`
+   instead of doing three separate Welch passes — halves the FFT count
+   (previous avgs=16 was 48.7 ms).
+2. The `transfer_stream` worker caches the delay per pair on warmup and
+   reuses it in `h1_estimate_with_delay`, skipping the 262 k-point
+   cross-correlation FFT+IFFT on every tick. Delay is physically
+   constant during a streaming session, so this is correct as well as
+   cheap. Drops the hot-loop pair cost ~5× at the daemon's avgs=4
+   settings (19.3 → 4.6 ms).
+
+The daemon's `chunk_secs` was also lowered from 100 ms to 50 ms to
+match the FFT/CWT monitor tick cadence — the transfer view now
+refreshes at 20 Hz instead of ~8.5 Hz, which is what the user saw as
+"choppy" relative to the other views.
 
 ## CLI commands — `generate`, `sweep level/frequency`, `plot`, `sweep ir`
 

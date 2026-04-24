@@ -90,7 +90,16 @@ fn welch_all(
     (gxx, gyy, gxy)
 }
 
-/// Delay estimation via FFT-based cross-correlation.
+/// Delay estimation via FFT-based cross-correlation. Exposed so callers that
+/// drive `h1_estimate` in a tight loop (e.g. `transfer_stream`) can estimate
+/// once on warmup and reuse the result via [`h1_estimate_with_delay`] — the
+/// ref↔meas path delay is physically constant during a streaming session.
+pub fn estimate_delay_samples(ref_sig: &[f32], meas: &[f32], sr: u32) -> i64 {
+    let r: Vec<f64> = ref_sig.iter().map(|&x| x as f64).collect();
+    let m: Vec<f64> = meas.iter().map(|&x| x as f64).collect();
+    estimate_delay(&r, &m, sr)
+}
+
 fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> i64 {
     let corr_len = ref_sig.len().min(meas.len()).min(4 * sr as usize);
     let r = &ref_sig[..corr_len];
@@ -155,20 +164,41 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> i64 {
 /// * `meas`    — measurement channel (the output of DUT)
 /// * `sr`      — sample rate in Hz
 pub fn h1_estimate(ref_sig: &[f32], meas: &[f32], sr: u32) -> TransferResult {
-    assert_eq!(ref_sig.len(), meas.len(), "ref and meas must have equal length");
-
     let r: Vec<f64> = ref_sig.iter().map(|&x| x as f64).collect();
     let m: Vec<f64> = meas.iter().map(|&x| x as f64).collect();
+    let delay_samples = estimate_delay(&r, &m, sr);
+    h1_estimate_core(&r, &m, sr, delay_samples)
+}
+
+/// Variant of [`h1_estimate`] that skips the O(N log N) delay estimation and
+/// uses a caller-supplied `delay_samples`. The streaming transfer worker
+/// estimates the delay once on warmup (the ref↔meas path is physically
+/// constant while a session is running) and feeds it in on every tick,
+/// cutting ~12–15 ms of per-frame FFT work at 2.5 s ring length and
+/// 48 kHz — the difference between 8.5 Hz choppy and 20 Hz smooth
+/// transfer-view refresh.
+pub fn h1_estimate_with_delay(
+    ref_sig: &[f32],
+    meas: &[f32],
+    sr: u32,
+    delay_samples: i64,
+) -> TransferResult {
+    let r: Vec<f64> = ref_sig.iter().map(|&x| x as f64).collect();
+    let m: Vec<f64> = meas.iter().map(|&x| x as f64).collect();
+    h1_estimate_core(&r, &m, sr, delay_samples)
+}
+
+fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> TransferResult {
+    assert_eq!(r.len(), m.len(), "ref and meas must have equal length");
 
     let nperseg  = sr as usize; // 1 Hz resolution
     let noverlap = nperseg / 2;
     let window   = hann_window(nperseg);
 
-    let delay_samples = estimate_delay(&r, &m, sr);
-    let delay_ms      = delay_samples as f64 / sr as f64 * 1000.0;
+    let delay_ms = delay_samples as f64 / sr as f64 * 1000.0;
 
     let mut planner = RealFftPlanner::<f64>::new();
-    let (gxx, gyy, gxy) = welch_all(&r, &m, nperseg, noverlap, &window, &mut planner);
+    let (gxx, gyy, gxy) = welch_all(r, m, nperseg, noverlap, &window, &mut planner);
 
     let nfft  = nperseg / 2 + 1;
     let freqs: Vec<f64> = (0..nfft).map(|k| k as f64 * sr as f64 / nperseg as f64).collect();
