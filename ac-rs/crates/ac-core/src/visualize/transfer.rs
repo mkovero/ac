@@ -46,65 +46,48 @@ fn fft_windowed(
     out
 }
 
-/// Welch auto-power spectral density.
-fn welch_psd(
-    sig: &[f64],
-    nperseg: usize,
-    noverlap: usize,
-    window: &[f64],
-    planner: &mut RealFftPlanner<f64>,
-) -> Vec<f64> {
-    let nfft = nperseg / 2 + 1;
-    let step = nperseg - noverlap;
-    let mut psd = vec![0.0f64; nfft];
-    let mut n_seg = 0usize;
-    let mut pos = 0;
-    while pos + nperseg <= sig.len() {
-        let spec = fft_windowed(&sig[pos..pos + nperseg], window, planner);
-        for (k, c) in spec.iter().enumerate() {
-            psd[k] += c.norm_sqr();
-        }
-        n_seg += 1;
-        pos += step;
-    }
-    if n_seg > 0 {
-        for v in psd.iter_mut() {
-            *v /= n_seg as f64;
-        }
-    }
-    psd
-}
-
-/// Welch cross-power spectral density: E[FFT(x)*.FFT(y)].
-fn welch_csd(
+/// Welch joint estimate: returns `(Gxx, Gyy, Gxy)` accumulated from a single
+/// per-segment FFT pair. Computing the three quantities together halves the
+/// FFT count vs calling separate `welch_psd(x) + welch_psd(y) + welch_csd(x,y)`
+/// because each segment's FFTs are reused across all three accumulators.
+fn welch_all(
     x: &[f64],
     y: &[f64],
     nperseg: usize,
     noverlap: usize,
     window: &[f64],
     planner: &mut RealFftPlanner<f64>,
-) -> Vec<Complex<f64>> {
+) -> (Vec<f64>, Vec<f64>, Vec<Complex<f64>>) {
     let nfft = nperseg / 2 + 1;
     let step = nperseg - noverlap;
-    let mut acc = vec![Complex::new(0.0, 0.0); nfft];
+    let mut gxx = vec![0.0_f64; nfft];
+    let mut gyy = vec![0.0_f64; nfft];
+    let mut gxy = vec![Complex::new(0.0, 0.0); nfft];
     let mut n_seg = 0usize;
     let mut pos = 0;
     let len = x.len().min(y.len());
     while pos + nperseg <= len {
         let fx = fft_windowed(&x[pos..pos + nperseg], window, planner);
         let fy = fft_windowed(&y[pos..pos + nperseg], window, planner);
-        for (k, (cx, cy)) in fx.iter().zip(fy.iter()).enumerate() {
-            acc[k] += cx.conj() * cy;
+        for k in 0..nfft {
+            let cx = fx[k];
+            let cy = fy[k];
+            gxx[k] += cx.norm_sqr();
+            gyy[k] += cy.norm_sqr();
+            gxy[k] += cx.conj() * cy;
         }
         n_seg += 1;
         pos += step;
     }
     if n_seg > 0 {
-        for v in acc.iter_mut() {
-            *v /= n_seg as f64;
+        let inv = 1.0 / n_seg as f64;
+        for k in 0..nfft {
+            gxx[k] *= inv;
+            gyy[k] *= inv;
+            gxy[k] *= inv;
         }
     }
-    acc
+    (gxx, gyy, gxy)
 }
 
 /// Delay estimation via FFT-based cross-correlation.
@@ -185,9 +168,7 @@ pub fn h1_estimate(ref_sig: &[f32], meas: &[f32], sr: u32) -> TransferResult {
     let delay_ms      = delay_samples as f64 / sr as f64 * 1000.0;
 
     let mut planner = RealFftPlanner::<f64>::new();
-    let gxx = welch_psd(&r, nperseg, noverlap, &window, &mut planner);
-    let gyy = welch_psd(&m, nperseg, noverlap, &window, &mut planner);
-    let gxy = welch_csd(&r, &m, nperseg, noverlap, &window, &mut planner);
+    let (gxx, gyy, gxy) = welch_all(&r, &m, nperseg, noverlap, &window, &mut planner);
 
     let nfft  = nperseg / 2 + 1;
     let freqs: Vec<f64> = (0..nfft).map(|k| k as f64 * sr as f64 / nperseg as f64).collect();

@@ -126,17 +126,20 @@ Overlay on top of a CWT column (`O`/`A`/`I` hotkeys). 512 log scales input:
 
 | bpo | bands | avg | fraction of CWT tick |
 |-----|------:|------:|----:|
-|  1  |   9   | 0.013 ms |  14% |
-|  3  |  29   | 0.018 ms |  19% |
-|  6  |  60   | 0.025 ms |  26% |
-| 12  | 120   | 0.049 ms |  52% |
-| 24  | 242   | 0.085 ms |  89% |
+|  1  |   9   | 0.012 ms |  13% |
+|  3  |  29   | 0.007 ms |   8% |
+|  6  |  60   | 0.007 ms |   7% |
+| 12  | 120   | 0.008 ms |   9% |
+| 24  | 242   | 0.010 ms |  11% |
 
-Naive O(bands × scales) scan + `powf` per in-band scale. 1/24 oct is
-approaching the cost of the CWT it aggregates; likely worth either
-(a) sorted single-pass merge since scales are monotonic, or
-(b) pre-computing `10^(db/10)` once per tick so the inner loop is an
-add instead of a `powf`.
+Monotone single-pass merge: both `cwt_freqs` and the band grid are
+monotonically increasing and bands are contiguous, so one forward sweep
+places every scale into at most one band — O(scales + bands) instead of
+O(scales × bands). `10^(db/10)` is pre-computed once per tick, pulling
+512 `powf` calls out of the inner loop.
+
+Previous O(N·M) version cost 0.085 ms at 1/24 oct (89% of a CWT tick);
+this drops it to 10% regardless of bpo.
 
 ## Tier 2 — `measurement::loudness` (BS.1770-5)
 
@@ -156,14 +159,17 @@ IEC 61260-1 Class 1 reference filterbank, 1 s of audio at 48 kHz:
 
 | bpo | bands | avg |
 |-----|------:|-----:|
-|  1  |   9   |  2.1 ms |
-|  3  |  29   |  6.1 ms |
-|  6  |  59   | 12.5 ms |
-| 12  | 119   | 25.8 ms |
+|  1  |   9   | 0.55 ms |
+|  3  |  29   | 1.27 ms |
+|  6  |  59   | 2.30 ms |
+| 12  | 119   | 4.56 ms |
 
-Not a per-tick path. Called once per report/measurement. 1/12 at 25.8 ms
-is the heaviest Tier-1 analysis call in the stack today — would need to
-drop by ~5× to fit inside a 20 Hz monitor tick if it ever got promoted.
+Bands are independent IIR chains reading `samples` read-only, so the
+outer iterator runs under `rayon::par_iter`. Per-band work (one
+6th-order Butterworth bandpass + mean-square over ~48 k samples) is
+~ms-scale — well above the threshold where rayon's wake cost is
+amortized. Previous serial version cost 25.8 ms at 1/12 oct; parallel
+drops it to 4.6 ms, a ~5.6× speedup on this i7-1260P.
 
 ## Tier 1 — `visualize::transfer::h1_estimate`
 
@@ -171,13 +177,18 @@ Welch PSD at 1 Hz resolution + H1 + coherence on pseudo-white reference:
 
 | n_averages | capture | n | avg |
 |---:|---:|---:|------:|
-|  1 | 1.0 s  |  48000 |  9.1 ms |
-|  4 | 2.5 s  | 120000 | 20.5 ms |
-|  8 | 4.5 s  | 216000 | 33.1 ms |
-| 16 | 8.5 s  | 408000 | 48.7 ms |
+|  1 | 1.0 s  |  48000 |  9.2 ms |
+|  4 | 2.5 s  | 120000 | 17.1 ms |
+|  8 | 4.5 s  | 216000 | 31.6 ms |
+| 16 | 8.5 s  | 408000 | 36.3 ms |
 
-Cost scales linearly with total samples. Dominated by three FFTs per
-segment (Gxx, Gyy, Gxy). Not a live path; called once per transfer sweep.
+Previously did three separate Welch passes (`welch_psd(x) + welch_psd(y)
++ welch_csd(x,y)`), which FFT'd each segment twice (once per side, once
+in the cross term). `welch_all` shares the per-segment FFT pair across
+all three accumulators, halving the FFT count. avgs=16 drops
+48.7 → 36.3 ms (−25%); at avgs=1 the cost is dominated by
+`estimate_delay`'s single 262 k-point FFT+IFFT, which this change does
+not touch.
 
 ## Big-picture latency budget
 

@@ -21,6 +21,7 @@
 use std::f64::consts::PI;
 
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 use realfft::num_complex::Complex;
 
 use crate::measurement::report::StandardsCitation;
@@ -194,8 +195,13 @@ impl Filterbank {
     /// power. If a band's settling prefix exceeds the input length the
     /// returned level is `f64::NEG_INFINITY` for that band.
     pub fn process(&self, samples: &[f32]) -> Vec<f64> {
+        // Bands are fully independent — each owns its own Biquad state and
+        // reads `samples` read-only. par_iter scales ~linearly with cores
+        // at 1/3 oct and above (per-band IIR over ~48k samples is ~ms of
+        // real work, so rayon's wake cost is well amortized, unlike the
+        // CWT kernel-build case where per-task work is sub-millisecond).
         self.filters
-            .iter()
+            .par_iter()
             .map(|f| {
                 if samples.len() <= f.settle {
                     return f64::NEG_INFINITY;

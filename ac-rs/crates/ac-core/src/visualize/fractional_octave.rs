@@ -130,21 +130,45 @@ pub fn cwt_to_fractional_octave(
         return (centres, Vec::new());
     }
 
-    let mut levels = Vec::with_capacity(centres.len());
-    for &c in &centres {
-        let (lo, hi) = ioct_band_edges(c, bpo);
-        let mut p_sum = 0.0_f64;
-        let mut have_any = false;
-        for (&f, &db) in cwt_freqs.iter().zip(cwt_col_db.iter()) {
-            if f >= lo && f < hi && db.is_finite() {
-                p_sum += 10_f64.powf(db as f64 / 10.0);
-                have_any = true;
-            }
+    // Bands are contiguous by construction (`ioct_band_centers` yields a
+    // geometric grid; adjacent edges are equal since `c_{i+1}/δ = c_i·δ`).
+    // Both `centres` and `cwt_freqs` are monotonically increasing, so one
+    // forward sweep places every scale into at most one band — O(scales +
+    // bands) instead of O(scales · bands). Pre-computing the linear power
+    // per scale also pulls 512 `powf` calls out of the inner loop.
+    let n_bands = centres.len();
+    let delta = G_OCTAVE.powf(0.5 / bpo as f64) as f32;
+    let band_lo: Vec<f32> = centres.iter().map(|&c| c / delta).collect();
+    let band_hi: Vec<f32> = centres.iter().map(|&c| c * delta).collect();
+
+    let powers: Vec<f64> = cwt_col_db
+        .iter()
+        .map(|&db| if db.is_finite() { 10f64.powf(db as f64 / 10.0) } else { 0.0 })
+        .collect();
+
+    let mut band_power = vec![0.0_f64; n_bands];
+    let mut band_hit = vec![false; n_bands];
+    let mut bi = 0usize;
+    for k in 0..cwt_freqs.len() {
+        let f = cwt_freqs[k];
+        while bi < n_bands && f >= band_hi[bi] {
+            bi += 1;
         }
-        let v = if have_any && p_sum > 0.0 {
-            (10.0 * p_sum.log10()) as f32
+        if bi >= n_bands {
+            break;
+        }
+        if f >= band_lo[bi] && cwt_col_db[k].is_finite() {
+            band_power[bi] += powers[k];
+            band_hit[bi] = true;
+        }
+    }
+
+    let mut levels = Vec::with_capacity(n_bands);
+    for i in 0..n_bands {
+        let v = if band_hit[i] && band_power[i] > 0.0 {
+            (10.0 * band_power[i].log10()) as f32
         } else {
-            interp_log_db(c, cwt_freqs, cwt_col_db)
+            interp_log_db(centres[i], cwt_freqs, cwt_col_db)
         };
         levels.push(v);
     }
