@@ -550,12 +550,15 @@ impl App {
                         if let Some(Some(peak)) = self.peak_holds.get(cell.channel) {
                             if peak.len() == frame.spectrum.len() {
                                 let mut peak_color = theme::channel_color(cell.channel);
-                                // Brighten so peak sits visibly above the live
-                                // trace in the same hue. Clamp to 1.0 so
-                                // already-bright hues (pale gold) don't wrap.
+                                // Lightly brighten so peak sits visibly above
+                                // the live trace in the same hue, but keep it
+                                // subdued — alpha drops to 0.55 so the held
+                                // line reads as a ghost of the live trace
+                                // rather than a shinier copy.
                                 for c in peak_color.iter_mut().take(3) {
-                                    *c = (*c * 1.35).min(1.0);
+                                    *c = (*c * 1.12).min(1.0);
                                 }
+                                peak_color[3] = 0.55;
                                 let peak_cols: Vec<f32> = peak.clone();
                                 let n_cols = peak_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
@@ -1336,16 +1339,18 @@ fn draw_peak_overlay(
         );
     }
 
-    // Top-right corner readout: "PEAK CHn" header + one ranked row per
-    // picked peak. `corner_slot` stacks one full block per channel so
-    // Compare layout's overlapping cells don't overdraw a single pixel;
-    // Grid/Single always pass 0 and render at the top.
+    // Top-left corner readout: "PEAK CHn" header + one ranked row per
+    // picked peak. Sits top-left so it never collides with the top-right
+    // status stack (sample rate, gain, tier badge, loudness, colorbar).
+    // `corner_slot` stacks one full block per channel so Compare layout's
+    // overlapping cells don't overdraw a single pixel; Grid/Single always
+    // pass 0 and render at the top.
     let row_h = theme::GRID_LABEL_PX + 2.0;
     let block_rows = 1 + picked.len();
     let block_top = rect.top() + 2.0 + corner_slot as f32 * block_rows as f32 * row_h;
     painter.text(
-        egui::pos2(rect.right() - 4.0, block_top),
-        egui::Align2::RIGHT_TOP,
+        egui::pos2(rect.left() + 4.0, block_top),
+        egui::Align2::LEFT_TOP,
         crate::ui::fmt::peak_header(channel),
         egui::FontId::monospace(theme::GRID_LABEL_PX),
         marker_color,
@@ -1354,10 +1359,10 @@ fn draw_peak_overlay(
         let color = if i == 0 { marker_color } else { rank_color };
         painter.text(
             egui::pos2(
-                rect.right() - 4.0,
+                rect.left() + 4.0,
                 block_top + (i + 1) as f32 * row_h,
             ),
-            egui::Align2::RIGHT_TOP,
+            egui::Align2::LEFT_TOP,
             crate::ui::fmt::peak_rank_line(i + 1, f, amp),
             egui::FontId::monospace(theme::GRID_LABEL_PX),
             color,
