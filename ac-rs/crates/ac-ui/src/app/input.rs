@@ -204,6 +204,34 @@ impl App {
         let ctrl = self.modifiers.control_key();
         let waterfall = matches!(self.config.view_mode, ViewMode::Waterfall);
 
+        // Ctrl+Shift+Scroll — "gain knob": pan the dB window up/down without
+        // changing its span. Scroll up = trace rides higher in the cell
+        // (floor+ceiling both shift down by the same amount). Step is 2 dB
+        // per tick so a fast flick feels like an analog trim, not a jump.
+        // Waterfall shares the behaviour: dB window is the colormap range,
+        // so the same pan reveals quieter detail without re-zooming.
+        if ctrl && shift {
+            const GAIN_DB_PER_TICK: f32 = 2.0;
+            let delta = -scroll_y * GAIN_DB_PER_TICK;
+            let mut last = (0.0_f32, 0.0_f32);
+            for idx in &targets {
+                if let Some(view) = self.cell_views.get_mut(*idx) {
+                    let span = view.db_max - view.db_min;
+                    let mut new_min = (view.db_min + delta).max(-240.0);
+                    let mut new_max = new_min + span;
+                    if new_max > 20.0 {
+                        new_max = 20.0;
+                        new_min = (new_max - span).max(-240.0);
+                    }
+                    view.db_min = new_min;
+                    view.db_max = new_max;
+                    last = (new_min, new_max);
+                }
+            }
+            self.notify(&format!("dB {:.0} … {:.0}", last.0, last.1));
+            return;
+        }
+
         // Hard floor/ceiling on the visible freq window: the spectrum data
         // only covers ~20 Hz..Nyquist, so letting the user zoom out past the
         // data just shows empty space. Ceiling grows to match the largest
@@ -841,7 +869,7 @@ impl App {
                 self.notify(&format!("cwt sigma: {:.0}", self.cwt_sigma));
             }
             KeyCode::ArrowRight if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
-                self.cwt_n_scales = (self.cwt_n_scales * 2).min(2048);
+                self.cwt_n_scales = (self.cwt_n_scales * 2).min(8192);
                 self.send_cwt_params();
                 self.notify(&format!("cwt scales: {}", self.cwt_n_scales));
             }

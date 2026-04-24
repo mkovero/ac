@@ -213,7 +213,7 @@ pub fn set_analysis_mode(state: &ServerState, cmd: &Value) -> Value {
         *state.cwt_sigma.lock().unwrap() = s;
     }
     if let Some(n) = cmd.get("n_scales").and_then(Value::as_u64) {
-        let n = (n as usize).clamp(64, 2048);
+        let n = (n as usize).clamp(64, 8192);
         *state.cwt_n_scales.lock().unwrap() = n;
     }
     let sigma = *state.cwt_sigma.lock().unwrap();

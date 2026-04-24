@@ -184,6 +184,7 @@ const HELP_LINES: &[&str] = &[
     "Scroll (bg)    resize grid cells",
     "Shift+Scroll   cycle waterfall palette (waterfall)",
     "Ctrl+Scroll    zoom freq (spec) / time (water)",
+    "Ctrl+Sh+Scroll pan dB window ±2 dB/tick (gain knob)",
     "Left-click     zoom in: swap to Single on cell",
     "Left-drag      pan",
     "Right-drag     box zoom (rubber-band to freq/dB or freq/time)",

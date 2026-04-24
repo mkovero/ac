@@ -101,9 +101,10 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Shift+I` | Reset Leq accumulators on the daemon. Fast/slow modes ignore it — they re-prime from their next input. |
 | `Shift+L` | Reset BS.1770-5 loudness accumulators (integrated LKFS, LRA, true-peak) for every monitored channel. |
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
-| `Shift+Left/Right` | CWT scales ×2/÷2 (64–2048, only in CWT mode) |
+| `Shift+Left/Right` | CWT scales ×2/÷2 (64–8192, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |
 | `Shift+Scroll` | Cycle waterfall palette (inferno → viridis → magma → plasma, Waterfall only) |
+| `Ctrl+Shift+Scroll` | Pan dB window ±2 dB/tick — analog gain trim (floor and ceiling shift together) |
 | Drag | Pan freq/dB axes |
 | Right-drag | Box zoom — rubber-band a freq/dB (spectrum) or freq/time (waterfall/CWT) region to fill the cell |
 | Right-click | Reset hovered cell view (no drag; drag triggers box zoom) |

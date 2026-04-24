@@ -404,7 +404,7 @@ even if a `monitor_spectrum` worker is already running.
 ```
 
 `sigma` (float, optional, clamped 5–24) and `n_scales` (int, optional,
-clamped 64–2048) tune the Morlet wavelet shape and frequency-axis density.
+clamped 64–8192) tune the Morlet wavelet shape and frequency-axis density.
 Higher sigma = sharper frequency resolution, softer time resolution. More
 scales = finer frequency grid. Both persist until changed or daemon restart.
 
