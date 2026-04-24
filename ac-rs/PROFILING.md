@@ -190,6 +190,47 @@ all three accumulators, halving the FFT count. avgs=16 drops
 `estimate_delay`'s single 262 k-point FFT+IFFT, which this change does
 not touch.
 
+## CLI commands — `generate`, `sweep level/frequency`, `plot`, `sweep ir`
+
+Most CLI commands are **audio-I/O bound**, not CPU bound — the wall-clock
+time is dominated by playing and capturing audio at real-time rate. In
+order of compute relevance:
+
+| command | compute cost | wall-clock dominator |
+|---|---|---|
+| `generate`              | zero (`set_tone` + sleep loop)       | indefinite, user-stopped |
+| `sweep level`           | zero (10 ms loop, linear gain ramp)  | `duration` |
+| `sweep frequency`       | zero (10 ms loop, log freq ramp)     | `duration` |
+| `plot`                  | ~2 ms `analyze` per point            | `n_points · (settle + duration)` |
+| `sweep ir` (Farina ESS) | post-capture DSP (see below)         | capture `duration + tail_s` |
+
+### Farina post-capture DSP (`measurement::sweep`)
+
+Per-call cost after the audio capture finishes:
+
+| dur | n | log_sweep | inverse_sweep | deconvolve_full | extract_irs |
+|---:|---:|---:|---:|---:|---:|
+|  1 s |  48 000 | 0.7 ms |  2.2 ms |  6.1 ms | 0.004 ms |
+|  3 s | 144 000 | 2.2 ms |  6.7 ms | 27.2 ms | 0.004 ms |
+| 10 s | 480 000 | 6.7 ms | 21.6 ms | 64.5 ms | 0.004 ms |
+
+`inverse_sweep` previously ran a **full FFT linear convolution** of `x`
+against the unnormalised `inv` purely to pick the scale factor that
+makes the identity-system IR unity-magnitude. Replaced with a direct
+evaluation of the convolution at the central ±4 lags — Farina's
+construction places the peak exactly at lag `N-1` in continuous math,
+so a small window is all that's needed to pin the discrete-sampled
+maximum. 64 → 22 ms at 10 s (−66%); the existing identity-IR peak test
+(5% tolerance) still passes.
+
+`deconvolve_full` is one forward FFT + one inverse FFT of
+`next_pow_of_2(2N-1)` (131 072 at 1 s). Already realfft-backed — no
+obvious lever short of rayon-parallelised FFT or a different library.
+
+For a 10 s `sweep ir`: post-capture DSP is now ~93 ms (was ~125 ms),
+trivially below the ~10.5 s of wall-clock capture time. At 1 s
+post-capture is ~9 ms. None of these paths is user-visible.
+
 ## Big-picture latency budget
 
 Default live-monitor tick (`ac monitor`, single channel, 50 ms interval

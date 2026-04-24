@@ -139,17 +139,36 @@ pub fn inverse_sweep(p: &SweepParams) -> Result<Vec<f32>> {
         })
         .collect();
 
-    // Normalise so the identity-system IR has peak magnitude 1.
-    // Compute the expected peak by convolving forward with inverse in
-    // closed form at the sweep's centre lag — the integral
-    // ∫ sin²(·) · exp(-a·(T-t)) dt · exp(a·t) ≈ T/2 to leading order —
-    // but a numerically stable approach: forward-FFT both, measure the
-    // cross-spectrum magnitude at DC of their convolution's central lag.
-    // Simpler and exact: run the actual convolution once on the
-    // generator output, measure the peak, and scale `inv` accordingly.
+    // Normalise so the identity-system IR has peak magnitude 1. Farina's
+    // construction places that peak exactly at convolution lag `N-1`
+    // (= length-N forward ⊛ length-N reverse, the centre sample of the
+    // 2N-1 output). Discrete sampling can shift the maximum by ±1 sample,
+    // so evaluate the convolution at a small window of central lags via
+    // direct dot products and take the max. O(k·N) for `k` lags beats
+    // the previous full FFT convolution (one FFT + one IFFT of
+    // next_pow_of_2(2N-1)) by an order of magnitude on long sweeps.
     let x: Vec<f64> = log_sweep(p)?.into_iter().map(|v| v as f64).collect();
-    let full = fft_linear_convolve(&x, &inv);
-    let peak = full.iter().cloned().fold(0.0_f64, |m, v| m.max(v.abs()));
+    const HALF_WIN: i64 = 4;
+    let centre = n as i64 - 1;
+    let full_len = 2 * n - 1;
+    let mut peak = 0.0_f64;
+    for offset in -HALF_WIN..=HALF_WIN {
+        let m = centre + offset;
+        if m < 0 || (m as usize) >= full_len {
+            continue;
+        }
+        let m = m as usize;
+        let k_lo = m.saturating_sub(n - 1);
+        let k_hi = m.min(n - 1);
+        let mut s = 0.0_f64;
+        for k in k_lo..=k_hi {
+            s += x[k] * inv[m - k];
+        }
+        let av = s.abs();
+        if av > peak {
+            peak = av;
+        }
+    }
     if peak > 0.0 && peak.is_finite() {
         let scale = 1.0 / peak;
         for v in &mut inv {
