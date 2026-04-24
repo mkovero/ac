@@ -104,23 +104,101 @@ Per-tick cost at n=7200 samples (≈ 150 ms @ 48 kHz), 512 log-spaced scales,
 3. **Bigger workload amortization** — small-kernel per-scale overhead
    shrinks proportionally as `n_scales` and per-kernel width grow.
 
-## Paths without micro-benches (TODO)
+## Tier 2 — `visualize::spectrum::spectrum_only` (live FFT spectrum)
 
-These show up in `scripts/profile-samply.sh` flame graphs but don't have
-dedicated bench binaries yet. Order by likelihood of being next:
+Hann-windowed realfft magnitude. Same i7-1260P, 48 kHz:
 
-| path | location | rough per-tick cost | bench? |
-|---|---|---|---|
-| `visualize::fractional_octave` | IEC 61260-1 filterbank aggregation | ? | ❌ |
-| `visualize::transfer` | cross-spectrum + coherence per tick | ? | ❌ |
-| `visualize::spectrum` | STFT per monitor tick | ? | ❌ |
-| `measurement::loudness` | BS.1770-5 integrated LKFS / LRA / TP | ? | ❌ |
-| `measurement::filterbank` | Tier-1 IEC 61260-1 reference filterbank | ? | ❌ |
+| N | avg | notes |
+|----:|------:|------|
+| 1024  | 0.010 ms | low-latency monitor |
+| 4096  | 0.022 ms | default `ac monitor` |
+| 8192  | 0.056 ms | |
+| 16384 | 0.113 ms | long-window monitor |
+| 32768 | 0.461 ms | |
+| 65536 | 0.806 ms | |
 
-Add an example under `crates/ac-core/examples/` following the pattern in
-`bench_cwt.rs` (env-driven `AC_BENCH_ITERS`, synthetic input, single
-`println!`). Then run both standalone for a timing number and under
-samply via the `--pid` attach pattern above.
+The N=32768 cliff is cache-driven (complex FFT output stops fitting in
+L2). At monitor defaults this path is never the bottleneck.
+
+## Tier 2 — `visualize::fractional_octave::cwt_to_fractional_octave`
+
+Overlay on top of a CWT column (`O`/`A`/`I` hotkeys). 512 log scales input:
+
+| bpo | bands | avg | fraction of CWT tick |
+|-----|------:|------:|----:|
+|  1  |   9   | 0.013 ms |  14% |
+|  3  |  29   | 0.018 ms |  19% |
+|  6  |  60   | 0.025 ms |  26% |
+| 12  | 120   | 0.049 ms |  52% |
+| 24  | 242   | 0.085 ms |  89% |
+
+Naive O(bands × scales) scan + `powf` per in-band scale. 1/24 oct is
+approaching the cost of the CWT it aggregates; likely worth either
+(a) sorted single-pass merge since scales are monotonic, or
+(b) pre-computing `10^(db/10)` once per tick so the inner loop is an
+add instead of a `powf`.
+
+## Tier 2 — `measurement::loudness` (BS.1770-5)
+
+Per 1 s of audio at 48 kHz, single channel:
+
+| op | avg | realtime factor |
+|---|------:|---:|
+| `KWeighting::apply`   | 0.255 ms | ~3900× |
+| `GatingBlock::push`   | 0.117 ms | ~8500× |
+
+Both are IIR + running-sum, nowhere near the per-tick budget. No action
+needed.
+
+## Tier 1 — `measurement::filterbank::Filterbank::process`
+
+IEC 61260-1 Class 1 reference filterbank, 1 s of audio at 48 kHz:
+
+| bpo | bands | avg |
+|-----|------:|-----:|
+|  1  |   9   |  2.1 ms |
+|  3  |  29   |  6.1 ms |
+|  6  |  59   | 12.5 ms |
+| 12  | 119   | 25.8 ms |
+
+Not a per-tick path. Called once per report/measurement. 1/12 at 25.8 ms
+is the heaviest Tier-1 analysis call in the stack today — would need to
+drop by ~5× to fit inside a 20 Hz monitor tick if it ever got promoted.
+
+## Tier 1 — `visualize::transfer::h1_estimate`
+
+Welch PSD at 1 Hz resolution + H1 + coherence on pseudo-white reference:
+
+| n_averages | capture | n | avg |
+|---:|---:|---:|------:|
+|  1 | 1.0 s  |  48000 |  9.1 ms |
+|  4 | 2.5 s  | 120000 | 20.5 ms |
+|  8 | 4.5 s  | 216000 | 33.1 ms |
+| 16 | 8.5 s  | 408000 | 48.7 ms |
+
+Cost scales linearly with total samples. Dominated by three FFTs per
+segment (Gxx, Gyy, Gxy). Not a live path; called once per transfer sweep.
+
+## Big-picture latency budget
+
+Default live-monitor tick (`ac monitor`, single channel, 50 ms interval
+= 20 Hz):
+
+| stage | cost @ default | cost with everything on |
+|---|------:|------:|
+| spectrum N=16384 *or* CWT 512 scales | 0.11 ms | 0.11 ms |
+| fractional-octave overlay 1/6 | — | 0.03 ms |
+| K-weighting 50 ms block | — | ~0.013 ms |
+| gating 50 ms block | — | ~0.006 ms |
+| **total per tick** | **0.11 ms** | **~0.16 ms** |
+
+At 20 Hz that's ~0.3% of one core per channel. An 8-channel monitor with
+the full overlay stack is still ~2.5% of one core — the live path is
+not CPU-bound anywhere on current hardware.
+
+The expensive calls (`h1_estimate`, `Filterbank::process`, long-window
+`analyze`) are per-sweep, not per-tick, so their budget is human-scale
+(~seconds per measurement).
 
 ## UI (`ac-ui`)
 
