@@ -7,7 +7,10 @@ fn main() {
     let samples: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
     let (scales, _) = log_scales(DEFAULT_F_MIN, default_f_max(sr), 512, sr, DEFAULT_SIGMA);
     let _ = morlet_cwt(&samples, sr, &scales, DEFAULT_SIGMA);
-    let iters = 100;
+    let iters: usize = std::env::var("AC_BENCH_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
     let t0 = Instant::now();
     for _ in 0..iters {
         let _ = morlet_cwt(&samples, sr, &scales, DEFAULT_SIGMA);
