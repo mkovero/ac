@@ -186,7 +186,8 @@ const HELP_LINES: &[&str] = &[
     "Ctrl+Scroll    zoom freq (spec) / time (water)",
     "Left-click     zoom in: swap to Single on cell",
     "Left-drag      pan",
-    "Right-click    reset hovered cell",
+    "Right-drag     box zoom (rubber-band to freq/dB or freq/time)",
+    "Right-click    reset hovered cell (no drag)",
 ];
 
 pub fn draw(ctx: &Context, input: OverlayInput<'_>) {

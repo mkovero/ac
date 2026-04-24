@@ -304,6 +304,7 @@ pub struct App {
     last_render: Instant,
     cursor_pos: Option<PhysicalPosition<f64>>,
     drag: Option<input::DragState>,
+    box_zoom: Option<input::BoxZoomState>,
     timing_stats: TimingStats,
     show_timing: bool,
     benchmark_secs: Option<f64>,
@@ -411,6 +412,7 @@ impl App {
             last_render: Instant::now(),
             cursor_pos: None,
             drag: None,
+            box_zoom: None,
             timing_stats: TimingStats::new(),
             show_timing,
             benchmark_secs,
@@ -604,6 +606,10 @@ impl ApplicationHandler for App {
                 if self.drag.is_some() {
                     self.update_drag(position);
                 }
+                if self.box_zoom.is_some() {
+                    self.update_box_zoom(position);
+                    self.needs_redraw = true;
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -624,7 +630,14 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                self.reset_hovered_view();
+                self.begin_box_zoom();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.end_box_zoom();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {

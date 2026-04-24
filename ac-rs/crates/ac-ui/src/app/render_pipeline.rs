@@ -719,6 +719,12 @@ impl App {
         };
         let sweep_kind_snap = self.sweep_kind;
         let sweep_sel_snap = self.sweep_selected_idx;
+        let box_zoom_snap = self.box_zoom.as_ref().map(|b| {
+            (
+                egui::pos2(b.start.x as f32, b.start.y as f32),
+                egui::pos2(b.current.x as f32, b.current.y as f32),
+            )
+        });
         let width_px = ctx.config.width as f32;
         let height_px = ctx.config.height as f32;
         let notification = self
@@ -929,6 +935,26 @@ impl App {
                         }
                     }
                 }
+            }
+            if let Some((start, current)) = box_zoom_snap {
+                let painter = ui_ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("ac-ui-box-zoom"),
+                ));
+                let rect = egui::Rect::from_two_pos(start, current);
+                // Translucent fill + crisp stroke so the selected region
+                // reads as a highlight rather than a cursor artifact.
+                painter.rect_filled(
+                    rect,
+                    egui::CornerRadius::ZERO,
+                    egui::Color32::from_rgba_unmultiplied(80, 160, 255, 32),
+                );
+                painter.rect_stroke(
+                    rect,
+                    egui::CornerRadius::ZERO,
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(140, 200, 255)),
+                    egui::StrokeKind::Outside,
+                );
             }
             overlay::draw(
                 ui_ctx,
