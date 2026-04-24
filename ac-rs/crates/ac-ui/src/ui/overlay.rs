@@ -358,10 +358,13 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // under the gain line so the reader sees "color X..Y dB" above and
         // the actual scale below.
         if matches!(input.config.view_mode, ViewMode::Waterfall) {
-            let bar_top = screen.top() + 6.0 + 2.0 * (theme::STATUS_PX + 2.0) + 6.0;
-            let bar_h = 120.0_f32;
-            let bar_w = 12.0_f32;
-            let label_col_w = 40.0_f32;
+            // Anchor the colorbar below the entire top-right status stack so
+            // it never overlaps the gain / tier / loudness lines above it.
+            let stack_bottom = screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0);
+            let bar_top = stack_bottom + 10.0;
+            let bar_h = (screen.bottom() - bar_top - 40.0).clamp(140.0, 260.0);
+            let bar_w = 16.0_f32;
+            let label_col_w = 44.0_f32;
             let bar_right = screen.right() - 8.0 - label_col_w;
             let bar_left = bar_right - bar_w;
             let strips = 48_usize;
