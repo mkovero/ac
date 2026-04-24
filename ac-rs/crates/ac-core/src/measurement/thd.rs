@@ -1,9 +1,12 @@
 //! Tier 1 — THD / THD+N / noise-floor analysis of a stepped-sine capture.
 //!
 //! Citation for `MeasurementReport`s produced from this analyser is
-//! provided by [`citation`]. The `verified` flag stays `false` until a
-//! human cross-checks the emitted clause numbers against the published
-//! IEC 60268-3:2018 text.
+//! provided by [`citation`] and tracks IEC 60268-3:2018 §15.12.3
+//! ("Total harmonic distortion under standard measuring conditions"),
+//! verified against the full text at
+//! `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf`.
+//! §15.12.3.2 defines the ratio as `d_tot = (U2'/U2) × 100 %` or
+//! `L_d,tot = 20·lg(U2'/U2)` dB, which matches the analyser output.
 //!
 //! The public entry point is [`analyze`]: mono `f32` PCM in, a fully
 //! populated [`AnalysisResult`] out. All intermediate DSP is `f64`. The
@@ -25,14 +28,15 @@ use crate::shared::types::AnalysisResult;
 ///
 /// IEC 60268-3:2018 "Sound system equipment — Part 3: Amplifiers". THD is
 /// defined in §15.12 "Amplitude non-linearity"; §15.12.3 is the specific
-/// measurement under standard conditions that matches this analyser. TOC
-/// verified against `stddocs/IEC-60268-3-2018.pdf` (preview). `verified`
-/// stays `false` until the full §15.12.3 body text is cross-checked.
+/// measurement under standard conditions that matches this analyser.
+/// Verified against the full text at
+/// `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf`:
+/// §15.12.3.2 gives the ratio and dB formulae implemented here.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "IEC 60268-3:2018".into(),
         clause: "§15.12.3 Total harmonic distortion under standard measuring conditions".into(),
-        verified: false,
+        verified: true,
     }
 }
 

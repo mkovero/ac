@@ -13,14 +13,14 @@ optimizes for when constraints conflict**.
 
 ### Tier 1 — Reference measurement
 
-Commands: `ac plot`, `ac sweep` (future Farina IR-based), `ac noise`
+Commands: `ac plot`, `ac sweep` (Farina IR-based), `ac noise`
 (future), `ac level` (future), `ac impedance`, `ac transfer`.
 
 Optimizes for: **reproducibility, standards alignment, report-grade output.**
 
 Properties:
 - Implements a published standard where one exists. Modules cite the
-  clause (e.g. `// Per IEC 60268-3:2018 §14.12`).
+  clause (e.g. `// Per IEC 60268-3:2018 §15.12.3`).
 - Deterministic given the same input and calibration state.
 - Conservative about uncertainty: if a band cannot be resolved at the
   current settings, the report says so rather than interpolating it away.
@@ -81,8 +81,8 @@ ac-core/src/
     weighting.rs           # A, C, Z weighting filters
     thd.rs                 # IEC 60268-3 THD / THD+N
     stepped_sine.rs        # ac plot primitives
-    sweep.rs               # Farina log-sweep IR deconvolution (future)
-    noise.rs               # AES17 noise measurement (future)
+    sweep.rs               # Farina log-sweep IR deconvolution
+    noise.rs               # AES17 idle-channel noise measurement
     report.rs              # MeasurementReport type, serialization
     report_html.rs         # self-contained HTML renderer (inline CSS + SVG)
     report_pdf.rs          # pure-Rust printpdf renderer (single A4 page)
@@ -138,8 +138,8 @@ Plain, claim-the-ground names. These are the tools a user reaches for
 when they need a number that goes in a report.
 
 - `ac plot` — stepped-sine frequency response
-- `ac sweep` — swept-sine IR measurement (future, Farina method)
-- `ac noise` — noise floor per AES17 (future)
+- `ac sweep` — swept-sine IR measurement (Farina log-sweep)
+- `ac noise` — noise floor per AES17 §6.4.2 (future CLI surface; core landed)
 - `ac level` — single-point level measurement (future)
 - `ac impedance` — impedance measurement
 - `ac transfer` — transfer function
@@ -205,7 +205,7 @@ pub struct MeasurementReport {
 
     // Method
     pub method:     MeasurementMethod, // SteppedSine, SweptSine, Noise, ...
-    pub standards:  Vec<StandardsCitation>, // e.g. IEC 60268-3:2018 §14.12
+    pub standards:  Vec<StandardsCitation>, // e.g. IEC 60268-3:2018 §15.12.3
     pub stimulus:   StimulusParams,    // freqs, levels, durations, sweep params
     pub integration: IntegrationParams, // dwell time, cycles, window type
 
@@ -231,13 +231,19 @@ reports remain readable forever.
 
 ## Standards tracked
 
-Tier 1 modules cite the current editions at time of implementation:
+Tier 1 modules cite the edition each implementation has been verified
+against:
 
-- IEC 60268-3 — Amplifier measurements (THD, frequency response)
-- IEC 60268-21 — Acoustical / output-based measurements
-- IEC 61260-1 — Octave and fractional-octave filters (Class 0/1/2)
-- IEC 61672-1 — Sound level meters (weighting, time constants)
-- AES17 — Digital audio equipment measurement
+| Module | Standard | Clause | Verified against |
+|--------|----------|--------|------------------|
+| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf` |
+| `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | `stddocs/iec-full/Electroacoustics - Octave-band …pdf` |
+| `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | `stddocs/iec-full/Electroacoustics - Sound level meters …pdf` |
+| `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | `stddocs/iec-full/aes17_2020_…pdf` |
+| `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | `stddocs/iec-full/aes17_2020_…pdf` |
+| `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | `stddocs/ITU-R BS.468-4.pdf` |
+| `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | `stddocs/ITU-R BS.1770-5.pdf` + EBU Tech 3341/3342 conformance cases |
+| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical
@@ -252,11 +258,15 @@ code (e.g. `plot.rs`, `sweep_ir`) should always call that fn rather than
 inlining the citation — that keeps the source-of-truth in one place and
 makes audits trivial to roll out.
 
-`verified: false` is the default for every citation today. Flipping a
-citation to `verified: true` requires a cross-check of both `standard`
-and `clause` strings against the **published text of the named
-standard**, not against secondary sources. The audit workflow is tracked
-in issue #72.
+Flipping `verified: true` requires a cross-check of both `standard` and
+`clause` strings against the **published text of the named standard**,
+not against secondary sources. As of the #72 audit pass every Tier 1
+module ships `verified: true`; a regression test
+(`every_measurement_module_emits_populated_citation`) asserts the
+non-empty invariant. When adding a new Tier 1 module, place the full
+text of the cited standard under `stddocs/iec-full/` and land the
+module with `verified: true` from the start — do not reintroduce
+`verified: false` placeholders.
 
 ## Testing strategy
 
@@ -337,10 +347,10 @@ steps — nothing is broken en route.
 - [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
       frequency weighting. Bilinear-mapped biquad cascade, unity gain at
       1 kHz, Class 1 tolerance verified in tests.
-- [x] Build `measurement/noise.rs` — AES17 §6.4 idle-channel noise.
-      Reports unweighted and A-weighted dBFS over a provided buffer;
-      populates `MeasurementData::NoiseResult`. CCIR-468 quasi-peak is
-      a follow-up (#76).
+- [x] Build `measurement/noise.rs` — AES17-2020 §6.4.2 idle-channel
+      noise. Reports unweighted and A-weighted dBFS over a provided
+      buffer; populates `MeasurementData::NoiseResult`. CCIR-468
+      quasi-peak is a follow-up (#76).
 - [x] Build `measurement/report_html.rs` — self-contained HTML renderer
       for `MeasurementReport` (inline CSS + inline SVG plot, no external
       assets). Wired to CLI as `ac report <path.json>`; writes sibling

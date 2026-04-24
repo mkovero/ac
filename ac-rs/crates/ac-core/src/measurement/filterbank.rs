@@ -219,7 +219,7 @@ impl Filterbank {
     pub fn citation() -> StandardsCitation {
         StandardsCitation {
             standard: "IEC 61260-1:2014".into(),
-            clause: "§5.2.1 base-10 G, §5.4 Class 1 tolerances".into(),
+            clause: "§5.2.1 base-10 G, §5.10 Class 1 relative-attenuation limits".into(),
             verified: true,
         }
     }

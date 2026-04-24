@@ -17,6 +17,11 @@ The analysis stack is split into two tiers — **reference measurement**
 (responsive, display-first). Full model and placement rules:
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+Every Tier 1 module carries a `StandardsCitation` audited against the
+published text (IEC 60268-3:2018, IEC 61260-1:2014, IEC 61672-1:2013,
+AES17-2020, ITU-R BS.468-4, ITU-R BS.1770-5, Farina AES 108 #5093) —
+see the audit table in `ARCHITECTURE.md`.
+
 The entire stack is implemented in Rust:
 
 | Crate | Binary | Role |

@@ -1,4 +1,4 @@
-//! Tier 1 — AES17-2015 idle-channel noise measurement.
+//! Tier 1 — AES17-2020 §6.4.2 idle-channel noise measurement.
 //!
 //! Computes unweighted and A-weighted RMS noise levels over the
 //! supplied signal, expressed in dBFS. 0 dBFS ↔ full-scale sine
@@ -96,9 +96,9 @@ fn rms_dbfs(samples: &[f32]) -> f64 {
 
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "AES17-2015".into(),
-        clause: "§6.4 Noise (idle-channel method)".into(),
-        verified: false,
+        standard: "AES17-2020".into(),
+        clause: "§6.4.2 Idle channel noise level".into(),
+        verified: true,
     }
 }
 
@@ -226,6 +226,7 @@ mod tests {
     fn citation_shape() {
         let c = citation();
         assert!(c.standard.contains("AES17"));
-        assert!(!c.verified);
+        assert!(c.clause.contains("§6.4.2"));
+        assert!(c.verified);
     }
 }

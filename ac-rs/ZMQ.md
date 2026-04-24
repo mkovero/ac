@@ -109,7 +109,7 @@ see an unknown version must refuse to decode. Example payload:
     "method": {
       "kind":     "stepped_sine",
       "n_points": 3,
-      "standard": { "standard": "IEC 60268-3:2018", "clause": "§14.12", "verified": false }
+      "standard": { "standard": "IEC 60268-3:2018", "clause": "§15.12.3 Total harmonic distortion under standard measuring conditions", "verified": true }
     },
     "stimulus":    { "sample_rate_hz": 48000, "f_start_hz": 100, "f_stop_hz": 10000, "level_dbfs": -20, "n_points": 3 },
     "integration": { "duration_s": 1.0, "window": "hann" },
@@ -137,7 +137,7 @@ see an unknown version must refuse to decode. Example payload:
 | `frequency_response`   | `plot` (stepped-sine)                              | `{ "points": [FrequencyResponsePoint, ...] }`                                     |
 | `spectrum_bands`       | IEC 61260-1 filterbank (`ac-core::measurement::filterbank`) | `{ "bpo": <int>, "class": "Class 1", "centres_hz": [...], "levels_dbfs": [...] }` |
 | `impulse_response`     | Farina log-sweep (`ac-core::measurement::sweep`)   | `{ "sample_rate_hz": <int>, "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "linear_ir": [...], "harmonics": [{ "order": <int>, "samples": [...] }, ...] }` |
-| `noise_result`         | AES17 idle-channel noise (`ac-core::measurement::noise`) | `{ "sample_rate_hz": <int>, "duration_s": <f>, "unweighted_dbfs": <f>, "a_weighted_dbfs": <f>, "ccir_weighted_dbfs": <f?> }` |
+| `noise_result`         | AES17-2020 §6.4.2 idle-channel noise (`ac-core::measurement::noise`) | `{ "sample_rate_hz": <int>, "duration_s": <f>, "unweighted_dbfs": <f>, "a_weighted_dbfs": <f>, "ccir_weighted_dbfs": <f?> }` |
 
 The `spectrum_bands`, `impulse_response`, and `noise_result` variants
 are serializable today but not yet emitted from any CLI command —
@@ -167,7 +167,7 @@ start_hz, stop_hz)`) and publishes the resulting per-band levels. A second
   "bpo":         <int>,           // bands per octave (1, 3, 6, 12, 24)
   "class":       "Class 1",
   "centres_hz":  [<float>, ...],  // band centre frequencies in Hz
-  "levels_dbfs": [<float>, ...]   // per-band dBFS (AES17-2015 §5 reference)
+  "levels_dbfs": [<float>, ...]   // per-band dBFS (AES17-2020 §3.12.1/§3.12.3 reference)
 }
 ```
 

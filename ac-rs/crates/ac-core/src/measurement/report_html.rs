@@ -484,7 +484,7 @@ mod tests {
                 n_points: 3,
                 standard: Some(StandardsCitation {
                     standard: "IEC 60268-3:2018".into(),
-                    clause: "§14.12".into(),
+                    clause: "§15.12.3".into(),
                     verified: false,
                 }),
             },

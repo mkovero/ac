@@ -1,9 +1,13 @@
 //! Tier 1 — Farina exponential-sweep impulse response measurement.
 //!
 //! Per Farina 2000, *Simultaneous measurement of impulse response and
-//! distortion with a swept-sine technique*, AES 108th convention —
-//! TODO: verify clause/figure numbering before toggling
-//! `StandardsCitation::verified`.
+//! distortion with a swept-sine technique*, AES 108th convention preprint
+//! #5093, §2 "Theoretical basis". Verified against the full preprint at
+//! `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`:
+//! the log-sweep `x(t) = sin[K·(e^(t/L) − 1)]` with `K = T·ω1/ln(ω2/ω1)`
+//! and `L = T/ln(ω2/ω1)`, the `exp(-t/L)` inverse-filter envelope, and
+//! the harmonic offset `Δt_N = T·ln(N)/ln(ω2/ω1)` all match the formulae
+//! implemented below.
 //!
 //! The technique:
 //! 1. Drive the DUT with a logarithmic (exponential) sine sweep `x(t)`
@@ -312,13 +316,13 @@ fn gate(buf: &[f64], centre: usize, window_len: usize) -> Vec<f64> {
 /// The Farina technique is not covered by an IEC or AES standard; the
 /// canonical reference is the AES 108th Convention preprint #5093 by
 /// Angelo Farina, "Simultaneous measurement of impulse response and
-/// distortion with a swept-sine technique" (Paris, 2000). `verified`
-/// stays `false` until the published preprint is re-checked in person.
+/// distortion with a swept-sine technique" (Paris, 2000). Verified
+/// against the full preprint PDF under `stddocs/iec-full/`.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "Farina, AES 108th Convention preprint #5093 (2000)".into(),
-        clause: "Simultaneous measurement of impulse response and distortion with a swept-sine technique".into(),
-        verified: false,
+        clause: "§2 Theoretical basis (log sweep, inverse filter, harmonic offsets)".into(),
+        verified: true,
     }
 }
 
@@ -515,6 +519,7 @@ mod tests {
     fn citation_shape() {
         let c = citation();
         assert!(c.standard.contains("Farina"));
-        assert!(!c.verified);
+        assert!(c.clause.contains("§2"));
+        assert!(c.verified);
     }
 }

@@ -25,11 +25,11 @@ const F_4: f64 = 12_194.217_f64;
 /// Which weighting curve to apply.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Weighting {
-    /// A-weighting — IEC 61672-1 §5.4.11, Annex E.
+    /// A-weighting — IEC 61672-1 §5.5, Annex E eq. (E.6).
     A,
-    /// C-weighting — IEC 61672-1 §5.4.11, Annex E.
+    /// C-weighting — IEC 61672-1 §5.5, Annex E eq. (E.1).
     C,
-    /// Z-weighting — IEC 61672-1 §5.4.6. Flat from 10 Hz to 20 kHz.
+    /// Z-weighting — IEC 61672-1 §5.5, Annex E §E.5. Flat across the passband.
     Z,
 }
 
@@ -138,8 +138,8 @@ impl WeightingFilter {
     pub fn citation() -> StandardsCitation {
         StandardsCitation {
             standard: "IEC 61672-1:2013".into(),
-            clause: "§5.5 Frequency weightings, Annex E".into(),
-            verified: false,
+            clause: "§5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8)".into(),
+            verified: true,
         }
     }
 }
@@ -382,6 +382,8 @@ mod tests {
     fn citation_shape() {
         let c = WeightingFilter::citation();
         assert!(c.standard.contains("IEC 61672-1"));
-        assert!(!c.verified);
+        assert!(c.clause.contains("§5.5"));
+        assert!(c.clause.contains("Annex E"));
+        assert!(c.verified);
     }
 }

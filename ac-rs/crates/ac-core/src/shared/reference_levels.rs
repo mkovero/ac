@@ -1,7 +1,7 @@
 //! Reference levels — the 0 dBFS convention and its analog counterparts.
 //!
-//! AES17-2015 §5 defines the full-scale amplitude reference used
-//! throughout the Tier 1 measurement stack:
+//! AES17-2020 §3.12.1 defines the full-scale level used throughout
+//! the Tier 1 measurement stack:
 //!
 //!   0 dBFS ↔ a full-scale sinusoid (peak = 1.0), whose RMS is
 //!   `1/√2` and whose mean-square is `0.5`.
@@ -24,7 +24,7 @@ pub use crate::shared::conversions::{
 
 /// Mean-square of a full-scale sinusoid (peak = 1.0). This is the
 /// normalisation constant for mean-square → dBFS conversions in the
-/// AES17-2015 §5 convention.
+/// AES17-2020 §3.12.1 / §3.12.3 convention.
 pub const DBFS_FULL_SCALE_SINE_MEAN_SQ: f64 = 0.5;
 
 /// Floor for dBFS results. Values below this are clipped so callers
@@ -36,7 +36,7 @@ pub const MIN_DBFS: f64 = -200.0;
 /// below [`MIN_DBFS`], so the subsequent clamp dominates.
 pub const MIN_AMPLITUDE: f64 = 1e-12;
 
-/// Convert a mean-square power reading to dBFS per AES17-2015 §5:
+/// Convert a mean-square power reading to dBFS per AES17-2020 §3.12.3:
 /// `10·log10(mean_sq / 0.5)`, clipped at [`MIN_DBFS`]. Silence
 /// (`mean_sq <= 0`) returns [`MIN_DBFS`].
 pub fn mean_sq_to_dbfs(mean_sq: f64) -> f64 {
@@ -60,16 +60,16 @@ pub fn amplitude_to_dbfs(amp: f64) -> f64 {
     (20.0 * amp.abs().max(MIN_AMPLITUDE).log10()).max(MIN_DBFS)
 }
 
-/// AES17-2015 — the governing reference for the 0 dBFS convention. The
-/// full-scale amplitude is defined in §3 (Terms and definitions); the
-/// exact sub-clause number is not accessible from the iteh.ai preview
-/// under `stddocs/`, so this citation points to §3 at the clause level
-/// and leaves `verified` false pending full-text access.
+/// AES17-2020 — governing reference for the 0 dBFS convention. Full-scale
+/// level is defined in §3.12.1 (a dc-free 997 Hz sine whose undithered
+/// positive peak equals positive digital full scale); dBFS in §3.12.3
+/// (`"Level in dBFS" = 20 lg("level in FS")`). Verified against the full
+/// text at `stddocs/iec-full/aes17_2020_...pdf`.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "AES17-2015".into(),
-        clause: "§3 Terms and definitions (full-scale amplitude)".into(),
-        verified: false,
+        standard: "AES17-2020".into(),
+        clause: "§3.12.1 Full-scale level; §3.12.3 Decibels full scale".into(),
+        verified: true,
     }
 }
 
@@ -152,7 +152,7 @@ mod tests {
     fn citation_is_aes17() {
         let c = citation();
         assert!(c.standard.contains("AES17"));
-        assert!(c.clause.contains("§3"));
-        assert!(!c.verified);
+        assert!(c.clause.contains("§3.12"));
+        assert!(c.verified);
     }
 }
