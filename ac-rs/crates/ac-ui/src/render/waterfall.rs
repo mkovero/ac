@@ -18,8 +18,8 @@ pub const COLORMAP_LUT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/colorm
 pub const ROWS_PER_CHANNEL: u32 = 256;
 
 /// Must match the palette ordering baked by `build.rs`.
-pub const PALETTE_NAMES: &[&str] = &["inferno", "viridis", "magma", "plasma"];
-pub const N_PALETTES: u32 = 4;
+pub const PALETTE_NAMES: &[&str] = &["inferno", "magma"];
+pub const N_PALETTES: u32 = 2;
 pub const LUT_WIDTH: u32 = 256;
 
 #[repr(C)]
@@ -48,7 +48,7 @@ pub struct WaterfallCellMeta {
     /// time-axis labels that already track the float). Clamped to
     /// `[1.0, n_rows as f32]` by the renderer.
     pub rows_visible: f32,
-    /// Which row of the stacked LUT to sample (0 = inferno, 1 = viridis, …).
+    /// Which row of the stacked LUT to sample (0 = inferno, 1 = magma).
     /// Names in `PALETTE_NAMES`. Zero-padding keeps WaterfallCellMeta a
     /// multiple of 16 bytes for WGSL's `@group` storage layout.
     pub palette_row: u32,

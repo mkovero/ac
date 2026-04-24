@@ -103,7 +103,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
 | `Shift+Left/Right` | CWT scales ×2/÷2 (64–8192, only in CWT mode) |
 | Scroll | Zoom freq/dB/time axis (context-dependent) |
-| `Shift+Scroll` | Cycle waterfall palette (inferno → viridis → magma → plasma, Waterfall only) |
+| `Shift+Scroll` | Cycle waterfall palette (inferno → magma, Waterfall only) |
 | `Ctrl+Shift+Scroll` | Pan dB window ±2 dB/tick — analog gain trim (floor and ceiling shift together) |
 | Drag | Pan freq/dB axes |
 | Right-drag | Box zoom — rubber-band a freq/dB (spectrum) or freq/time (waterfall/CWT) region to fill the cell |

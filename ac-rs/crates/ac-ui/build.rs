@@ -2,18 +2,21 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-// Bakes four 256-entry RGBA8 colormap LUTs (stacked vertically as a
+// Bakes two 256-entry RGBA8 colormap LUTs (stacked vertically as a
 // 256-wide × N_PALETTES-tall texture) for the waterfall renderer into
 // $OUT_DIR/colormap.bin. Coefficients are Iñigo Quilez' polynomial fits of
 // the Matplotlib perceptual palettes (https://www.shadertoy.com/view/WlfXRN).
-// Row 0 = inferno, row 1 = viridis, row 2 = magma, row 3 = plasma.
+// Row 0 = inferno, row 1 = magma. Viridis and plasma are kept in this file
+// but excluded from the cycle — they start at coloured backgrounds, which
+// visually fights a dark-bg UI. Re-add them by extending the slice below
+// and keeping `PALETTE_NAMES` in `render/waterfall.rs` in sync.
 // `PALETTE_NAMES` in `render/waterfall.rs` must agree with this ordering.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let lut_path = out_dir.join("colormap.bin");
 
-    let palettes: &[fn(f32) -> (f32, f32, f32)] = &[inferno, viridis, magma, plasma];
+    let palettes: &[fn(f32) -> (f32, f32, f32)] = &[inferno, magma];
     let mut bytes = Vec::with_capacity(256 * 4 * palettes.len());
     for palette in palettes {
         for i in 0..256u32 {
@@ -46,6 +49,7 @@ fn inferno(t: f32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+#[allow(dead_code)]
 fn viridis(t: f32) -> (f32, f32, f32) {
     let r = poly(t,  0.277_727_38, -0.170_349_75,   2.422_137,  -12.157_051,   24.337_53,  -23.084_894,   8.589_299);
     let g = poly(t,  0.005_408_25,  1.404_613_7,    0.229_481_1, -1.014_227_7,  -0.404_263_3,  2.251_829_7, -1.229_558_6);
@@ -60,6 +64,7 @@ fn magma(t: f32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+#[allow(dead_code)]
 fn plasma(t: f32) -> (f32, f32, f32) {
     let r = poly(t,  0.054_342_46,    2.185_649_8,    0.233_402_98, -8.941_35,     14.197_80,  -9.829_91,    2.691_373);
     let g = poly(t,  0.023_638_08,    0.295_460_1,   -1.907_598,    2.592_914,     0.441_583_2, -1.415_167,   0.540_528);

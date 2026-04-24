@@ -73,8 +73,8 @@ pub struct OverlayInput<'a> {
     /// Parallel to cells `n_real..n_real + virtual_pairs.len()`. An entry
     /// `i` corresponds to the cell at channel index `n_real + i`.
     pub virtual_pairs: &'a [TransferPair],
-    /// Active waterfall palette row (0 = inferno, 1 = viridis, 2 = magma,
-    /// 3 = plasma). The colorbar in the top-right samples this row of the
+    /// Active waterfall palette row (0 = inferno, 1 = magma).
+    /// The colorbar in the top-right samples this row of the
     /// baked LUT so the legend matches what the GPU is actually rendering.
     pub active_palette: u32,
     /// Current fractional-octave smoothing denominator. `None` when the user

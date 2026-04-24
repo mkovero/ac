@@ -151,13 +151,14 @@ impl App {
     }
 
     pub(super) fn apply_zoom(&mut self, scroll_y: f32) {
-        // Shift+Scroll cycles the waterfall colormap palette (inferno → viridis
-        // → magma → plasma → inferno). Used to live on Alt+Scroll, but Alt is
+        // Shift+Scroll cycles the waterfall colormap palette (inferno → magma
+        // → inferno). Used to live on Alt+Scroll, but Alt is
         // consumed by the window manager (meta) on common Linux desktops and
         // fights the UI. Gain zoom lost the Shift+Scroll binding — use
         // `[`/`]` (shift dB floor) and `+`/`-` (adjust dB span) instead.
         // Spectrum mode ignores the cycle — palette only affects the LUT.
         if self.modifiers.shift_key()
+            && !self.modifiers.control_key()
             && matches!(self.config.view_mode, ViewMode::Waterfall)
             && scroll_y != 0.0
         {
