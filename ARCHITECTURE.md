@@ -290,6 +290,30 @@ module with `verified: true` from the start — do not reintroduce
 - Performance tests / benchmarks guard against regressions in the
   per-frame cost, since visual fluidity is the tier's objective.
 
+### Loopback IR runbook
+
+`sweep_ir`'s real-audio path (`JackEngine::play_and_capture`) is exercised
+by an `#[ignore]`'d integration test that needs a live JACK server. It is
+not run in `cargo test`; invoke it manually after starting JACK:
+
+```bash
+# 1. Start JACK. The dummy driver works — no hardware needed.
+jackd -d dummy -r 48000 -p 1024 &
+
+# 2. Run the loopback test.
+cargo test -p ac-daemon --test it_loopback_ir -- --ignored
+```
+
+The test pre-writes a config with `output_port = "ac-daemon:in"` and
+`input_port = "ac-daemon:out"`, so the daemon self-connects its own
+JACK output to its own input — no `jack_connect` and no system audio
+devices required. It then runs a 0.5 s exponential sweep, deconvolves,
+and asserts the recovered linear IR has a dominant peak at least 40 dB
+above the pre-impulse floor and within `len/4` of the IR centre.
+
+A CPAL equivalent (e.g. via `snd-aloop` or a PipeWire virtual sink) is
+deferred until the CPAL routing path is fixed (issue #27).
+
 ## Decisions this architecture closes
 
 - "Should this new feature be accurate or pretty?" — Wrong framing.
