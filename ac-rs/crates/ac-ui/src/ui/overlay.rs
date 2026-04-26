@@ -413,13 +413,21 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 view.db_min + (view.db_max - view.db_min) * 0.25,
                 view.db_min,
             ];
+            // SPL-calibrated colorbar shows positive dB SPL values; the
+            // signed dBFS format would emit ugly `+30` etc. Switch format
+            // based on the calibration state of the active frame's channel.
+            let cb_spl = frame.meta.spl_offset_db;
             for (i, db) in tick_dbs.iter().enumerate() {
                 let t = i as f32 / (tick_dbs.len() as f32 - 1.0);
                 let y = bar_top + t * bar_h;
+                let label = match cb_spl {
+                    Some(off) => format!("{:.0}", db + off),
+                    None      => format!("{:+.0}", db),
+                };
                 painter.text(
                     Pos2::new(bar_right + 4.0, y),
                     Align2::LEFT_CENTER,
-                    format!("{:+.0}", db),
+                    label,
                     FontId::monospace(theme::GRID_LABEL_PX),
                     text_color,
                 );

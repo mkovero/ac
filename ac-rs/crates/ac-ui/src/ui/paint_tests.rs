@@ -124,6 +124,47 @@ fn overlay_shows_spectrum_readout() {
 }
 
 #[test]
+fn overlay_shows_dbspl_when_spl_calibrated() {
+    // Pistonphone-cal'd channel: peak at -3 dBFS with a +97 offset must
+    // read 94.0 dB SPL in the bottom-left readout. The dBFS suffix must
+    // not appear at all in this case.
+    let config = default_config();
+    let mut frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    frame.meta.spl_offset_db = Some(97.0);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: None,
+    };
+
+    let texts = run_overlay(input);
+    let has_spl = texts.iter().any(|t| t.contains("94.0 dB SPL"));
+    assert!(has_spl, "dB SPL readout not found in: {texts:?}");
+    let has_dbfs = texts.iter().any(|t| t.contains("dBFS"));
+    assert!(!has_dbfs, "dBFS must not appear when SPL-cal'd: {texts:?}");
+}
+
+#[test]
 fn overlay_shows_dbu_when_calibrated() {
     let config = default_config();
     let mut frame = test_frame(1000.0, -3.0, 0.003, 0.005);

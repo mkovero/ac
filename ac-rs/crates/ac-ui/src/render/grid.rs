@@ -21,6 +21,7 @@ pub fn draw_grid(
     show_labels: bool,
     show_freq_labels: bool,
     time_axis: Option<WaterfallTimeAxis>,
+    spl_offset_db: Option<f32>,
 ) {
     let stroke = Stroke::new(
         1.0,
@@ -59,7 +60,11 @@ pub fn draw_grid(
 
     match view_mode {
         ViewMode::Spectrum => {
-            // dB grid lines + labels on the Y axis.
+            // dB grid lines + labels on the Y axis. When the channel has an
+            // SPL offset, labels read in dB SPL (positive); the underlying
+            // `db_min..db_max` range stays in dBFS so zoom / scroll math is
+            // unchanged. The unit (`dBFS` vs `dB SPL`) is identified in the
+            // bottom-left readout — y-axis tick labels are just numbers.
             let db_step = 20.0_f32;
             let db_span = (view.db_max - view.db_min).max(0.0001);
             let mut db = (view.db_min / db_step).ceil() * db_step;
@@ -71,10 +76,11 @@ pub fn draw_grid(
                     stroke,
                 );
                 if show_labels {
+                    let label_db = db + spl_offset_db.unwrap_or(0.0);
                     painter.text(
                         Pos2::new(rect.left() - 3.0, y),
                         egui::Align2::RIGHT_CENTER,
-                        format!("{:.0}", db),
+                        format!("{:.0}", label_db),
                         egui::FontId::monospace(theme::GRID_LABEL_PX),
                         label_color,
                     );

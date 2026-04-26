@@ -855,6 +855,10 @@ impl App {
                 // Freq x-axis labels sit at the real cell bottom: the phase
                 // subplot when split, the grid rect otherwise.
                 let grid_freq_labels = show_labels && phase_rect.is_none();
+                let cell_spl_off = frames
+                    .get(cell.channel)
+                    .and_then(|f| f.as_ref())
+                    .and_then(|f| f.meta.spl_offset_db);
                 grid::draw_grid(
                     &painter,
                     grid_rect,
@@ -863,6 +867,7 @@ impl App {
                     show_labels,
                     grid_freq_labels,
                     time_axis,
+                    cell_spl_off,
                 );
                 let is_selected = selected_snap
                     .get(cell.channel)
