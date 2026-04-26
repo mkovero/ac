@@ -602,6 +602,7 @@ fn overlay_shows_loudness_strip_with_r128_pass() {
             lra_lu: 5.2,
             true_peak_dbtp: Some(-1.2),
             gated_duration_s: 17.3,
+            spl_offset_db: None,
         }),
     };
 
@@ -650,6 +651,7 @@ fn overlay_r128_fail_tag_when_far_off_target() {
             lra_lu: 1.0,
             true_peak_dbtp: Some(-0.3),
             gated_duration_s: 42.0,
+            spl_offset_db: None,
         }),
     };
 

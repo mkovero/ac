@@ -17,14 +17,17 @@ use crate::server::{MonitorParams, ServerState};
 use super::super::{busy_guard, resolve_input, send_pub, spawn_worker};
 
 /// Emit a `measurement/loudness` sidecar frame for one channel. Kept
-/// out of the worker body so the two analysis paths (FFT + CWT) can
-/// share it.
+/// out of the worker body so the FFT / CWT / CQT / reassigned analysis
+/// paths can share it. `spl_offset_db` mirrors the offset stamped on
+/// the spectrum frame for the same channel; the UI uses it to render
+/// LKFS / dBTP as K-weighted dB SPL when set.
 fn emit_loudness_frame(
     pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
     channel: u32,
     n_channels: u32,
     sr: u32,
     loudness: &LoudnessState,
+    spl_offset_db: Option<f64>,
     ts_ns: u64,
     xruns: u32,
 ) {
@@ -40,6 +43,7 @@ fn emit_loudness_frame(
         "lra_lu":           loudness.loudness_range(),
         "true_peak_dbtp":   json_finite(loudness.true_peak_dbtp()),
         "gated_duration_s": loudness.gated_duration_s(),
+        "spl_offset_db":    spl_offset_db,
         "timestamp":        ts_ns,
         "xruns":            xruns,
     });
@@ -395,7 +399,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                        &pub_tx, channel, n_channels, sr,
+                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
                     );
                     // Optional fractional-octave aggregation of the same
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
@@ -544,7 +549,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                        &pub_tx, channel, n_channels, sr,
+                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
                     );
                     continue;
                 }
@@ -601,7 +607,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                        &pub_tx, channel, n_channels, sr,
+                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
                     );
                     continue;
                 }
@@ -719,7 +726,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                        &pub_tx, channel, n_channels, sr,
+                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
                     );
                 }
             }

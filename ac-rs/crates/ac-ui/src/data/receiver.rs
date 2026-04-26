@@ -356,6 +356,8 @@ pub fn spawn(
                             true_peak_dbtp: Option<f64>,
                             #[serde(default)]
                             gated_duration_s: f64,
+                            #[serde(default)]
+                            spl_offset_db: Option<f64>,
                         }
                         match serde_json::from_str::<LoudnessFrame>(body) {
                             Ok(lf) => {
@@ -380,6 +382,7 @@ pub fn spawn(
                                         lra_lu: lf.lra_lu,
                                         true_peak_dbtp: lf.true_peak_dbtp,
                                         gated_duration_s: lf.gated_duration_s,
+                                        spl_offset_db: lf.spl_offset_db,
                                     },
                                 );
                                 status_c.connected.store(true, Ordering::Relaxed);

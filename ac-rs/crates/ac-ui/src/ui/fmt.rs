@@ -249,36 +249,53 @@ pub const R128_TOLERANCE_LOOSE_LU: f64 = 2.0;
 /// Build the top-right loudness status lines for the current meter
 /// readout. Returns up to three lines: one M/S/I/LRA summary, one
 /// dBTP + gated-duration, and (when integrated is valid) an R128
-/// pass/warn/fail tag. Lines are already formatted; the caller only
-/// paints them.
+/// pass/warn/fail tag.
+///
+/// **SPL composition.** When the readout's `spl_offset_db` is `Some`,
+/// M/S/I render as K-weighted dB SPL (`Mk`/`Sk`/`Ik`, suffix `dB SPL`)
+/// and the true-peak line becomes `Lpk(K) X dB SPL`. The R128 badge
+/// stays anchored on the raw integrated LKFS value because the
+/// `-23 LKFS` target is independent of the absolute reference — the
+/// delta is meaningful in either calibration state.
 pub fn loudness_readout_lines(l: &crate::data::types::LoudnessReadout) -> Vec<crate::ui::overlay::LoudnessLine> {
     use crate::ui::overlay::{LoudnessLine, LoudnessTint};
-    let fmt_lkfs = |v: Option<f64>| -> String {
+    let off = l.spl_offset_db;
+    let fmt_val = |v: Option<f64>| -> String {
         match v {
-            Some(x) if x.is_finite() => format!("{:+6.1}", x),
+            Some(x) if x.is_finite() => match off {
+                Some(o) => format!("{:6.1}", x + o),                // SPL → unsigned
+                None    => format!("{:+6.1}", x),                   // LKFS → signed
+            },
             _ => "  —  ".into(),
         }
     };
     let mut out = Vec::new();
     let lra = l.lra_lu;
-    let m = fmt_lkfs(l.momentary_lkfs);
-    let s = fmt_lkfs(l.short_term_lkfs);
-    let i = fmt_lkfs(l.integrated_lkfs);
-    out.push(LoudnessLine {
-        text: format!("M{m} S{s} I{i} LRA{lra:4.1}"),
-        tint: LoudnessTint::Default,
-    });
+    let m = fmt_val(l.momentary_lkfs);
+    let s = fmt_val(l.short_term_lkfs);
+    let i = fmt_val(l.integrated_lkfs);
+    let line1 = match off {
+        Some(_) => format!("Mk{m} Sk{s} Ik{i} dB SPL  LRA{lra:4.1}"),
+        None    => format!("M{m} S{s} I{i} LRA{lra:4.1}"),
+    };
+    out.push(LoudnessLine { text: line1, tint: LoudnessTint::Default });
     let tp = match l.true_peak_dbtp {
-        Some(v) if v.is_finite() => format!("{:+5.1}", v),
+        Some(v) if v.is_finite() => match off {
+            Some(o) => format!("{:5.1}", v + o),
+            None    => format!("{:+5.1}", v),
+        },
         _ => "  —".into(),
     };
     let dur = l.gated_duration_s;
-    out.push(LoudnessLine {
-        text: format!("dBTP {tp}   gated {dur:.1}s"),
-        tint: LoudnessTint::Default,
-    });
+    let line2 = match off {
+        Some(_) => format!("Lpk(K) {tp} dB SPL   gated {dur:.1}s"),
+        None    => format!("dBTP {tp}   gated {dur:.1}s"),
+    };
+    out.push(LoudnessLine { text: line2, tint: LoudnessTint::Default });
     // R128 pass/warn/fail badge on the integrated value. Only emit once
-    // integrated is defined — pre-gate silence stays quiet.
+    // integrated is defined — pre-gate silence stays quiet. The target
+    // (`-23 LKFS`) is independent of SPL calibration, so this branch
+    // intentionally ignores `spl_offset_db` and reads the raw LKFS.
     if let Some(i) = l.integrated_lkfs {
         if i.is_finite() {
             let delta = i - R128_TARGET_LKFS;
@@ -751,4 +768,60 @@ mod tests {
         assert_eq!(format_hz(1000.0).trim().len(), "1.00 kHz".len());
     }
 
+    // ── loudness_readout_lines: SPL composition ───────────────────────
+
+    fn dummy_readout() -> crate::data::types::LoudnessReadout {
+        crate::data::types::LoudnessReadout {
+            momentary_lkfs: Some(-23.0),
+            short_term_lkfs: Some(-23.0),
+            integrated_lkfs: Some(-23.0),
+            lra_lu: 4.5,
+            true_peak_dbtp: Some(-1.0),
+            gated_duration_s: 17.3,
+            spl_offset_db: None,
+        }
+    }
+
+    #[test]
+    fn loudness_lines_are_lkfs_when_uncalibrated() {
+        let lines = loudness_readout_lines(&dummy_readout());
+        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("M -23.0") || joined.contains("M-23.0"), "{joined}");
+        assert!(joined.contains("dBTP"), "{joined}");
+        assert!(joined.contains("LRA"), "{joined}");
+        assert!(!joined.contains("SPL"), "must not show SPL when uncalibrated: {joined}");
+        assert!(!joined.contains("Mk"),  "Mk only appears in SPL mode: {joined}");
+    }
+
+    #[test]
+    fn loudness_lines_compose_with_spl_calibration() {
+        // Pistonphone offset of +97 → integrated -23 LKFS reads 74 dB SPL
+        // (K-weighted). True peak shifts the same way.
+        let mut r = dummy_readout();
+        r.spl_offset_db = Some(97.0);
+        let lines = loudness_readout_lines(&r);
+        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("Mk"),    "K-suffix marker missing: {joined}");
+        assert!(joined.contains("Sk"),    "Sk-suffix marker missing: {joined}");
+        assert!(joined.contains("Ik"),    "Ik-suffix marker missing: {joined}");
+        assert!(joined.contains("dB SPL"),"dB SPL unit missing: {joined}");
+        assert!(joined.contains("74.0"),  "integrated at 74 dB SPL missing: {joined}");
+        assert!(joined.contains("Lpk(K)"),"true-peak label missing: {joined}");
+        assert!(joined.contains("96.0"),  "true peak at 96 dB SPL missing: {joined}");
+        // Old labels must not appear in SPL mode.
+        assert!(!joined.contains("dBTP"), "dBTP must be replaced: {joined}");
+    }
+
+    #[test]
+    fn r128_pass_unaffected_by_spl_offset() {
+        // Target is -23 LKFS regardless of SPL calibration; the badge
+        // anchors on the raw integrated value, not the offset reading.
+        let mut r = dummy_readout();
+        r.integrated_lkfs = Some(-23.0);
+        r.spl_offset_db = Some(97.0);
+        let lines = loudness_readout_lines(&r);
+        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("R128 PASS"), "PASS still expected at integrated=-23: {joined}");
+        assert!(joined.contains("Δ +0.0 LU"), "delta still measured against -23 LKFS: {joined}");
+    }
 }

@@ -210,6 +210,12 @@ pub struct LoudnessReadout {
     pub lra_lu: f64,
     pub true_peak_dbtp: Option<f64>,
     pub gated_duration_s: f64,
+    /// Mirrors the spectrum frame's offset for the same channel. When
+    /// set, M/S/I render as K-weighted dB SPL (`Mk`/`Sk`/`Ik`) and the
+    /// true-peak line becomes `Lpk(K) X dB SPL`. The R128 PASS/WARN/FAIL
+    /// badge stays anchored on raw integrated LKFS — its target
+    /// (`-23 LKFS`) is independent of the absolute SPL reference.
+    pub spl_offset_db: Option<f64>,
 }
 
 impl From<&SpectrumFrame> for FrameMeta {
