@@ -25,15 +25,34 @@
 //!
 //! ## Performance
 //!
-//! Scalar implementation only — no SIMD, no parallel rayon iter. The
-//! totals at the default 24 bpo / 30 Hz–0.9·Nyquist grid land around
-//! ~25 M f64 mul-adds/s at 50 Hz tick rate, comfortably under what one
-//! core handles. The `cwt.rs`-style AVX2 + rayon treatment can land later
-//! if a user-visible bottleneck shows up; tracked as a follow-up.
+//! Hot path uses an AVX2 + FMA dispatch on x86_64 with a scalar fallback.
+//! The kernel bank is split-of-arrays (`re` and `im` in separate
+//! `Vec<f64>`) to keep both inner dot products SIMD-friendly, and the
+//! `f32` → `f64` cast of the input window is hoisted into a thread-local
+//! scratch so it runs once per column instead of once per bin.
 
+use std::cell::RefCell;
 use std::f64::consts::PI;
 
-use realfft::num_complex::Complex;
+#[cfg(target_arch = "x86_64")]
+use std::sync::OnceLock;
+
+thread_local! {
+    /// Per-thread input-conversion scratch. Sized to the longest kernel
+    /// the active `CqtKernels` uses; the `f32` → `f64` cast of the right-
+    /// edge buffer slice runs into here once per `cqt_into` call, then
+    /// every bin reads its tail of this vec instead of re-casting
+    /// per element. Reused across calls — only resizes upward.
+    static CQT_SCRATCH_X: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "x86_64")]
+fn avx2_fma_available() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+    })
+}
 
 /// Default bins per octave. 24 = quarter-tones, fine enough for visual
 /// resolution, coarse enough to keep kernel counts modest.
@@ -94,11 +113,13 @@ pub struct CqtKernels {
 }
 
 struct Kernel {
-    /// Pre-conjugated, pre-windowed, pre-normalised samples. `dot(x, k)`
-    /// directly yields the analytic-signal coefficient for the bin's tone.
-    samples: Vec<Complex<f64>>,
-    /// Number of input samples this kernel consumes (equal to `samples.len()`,
-    /// surfaced for clarity in the dot-product loop).
+    /// Real part of the pre-conjugated, pre-windowed, pre-normalised
+    /// kernel. Length = `n`. SOA layout (paired with `im`) keeps each
+    /// inner dot product a clean `f64` stream that vectorises directly.
+    re: Vec<f64>,
+    /// Imaginary part of the kernel, length = `n`.
+    im: Vec<f64>,
+    /// Number of input samples this kernel consumes.
     n: usize,
 }
 
@@ -142,17 +163,86 @@ pub fn build_kernels(
         // Normalise so a unit cosine at f produces |X| = 1.
         let scale = 2.0 / wsum;
 
-        // Conjugate kernel: e^{-j 2π f i / sr}, windowed and scaled.
+        // Conjugate kernel: e^{-j 2π f i / sr}, windowed and scaled. Split
+        // into two `Vec<f64>`s so the AVX inner loop streams each
+        // independently.
         let omega = 2.0 * PI * f / sr;
-        let samples: Vec<Complex<f64>> = win.iter().enumerate().map(|(i, &w)| {
+        let mut re = Vec::with_capacity(n);
+        let mut im = Vec::with_capacity(n);
+        for (i, &w) in win.iter().enumerate() {
             let phase = -omega * i as f64;
-            Complex::new(w * scale * phase.cos(), w * scale * phase.sin())
-        }).collect();
-
-        Kernel { samples, n }
+            re.push(w * scale * phase.cos());
+            im.push(w * scale * phase.sin());
+        }
+        Kernel { re, im, n }
     }).collect();
 
     CqtKernels { bpo, q, sample_rate, freqs: freqs.to_vec(), kernels }
+}
+
+// --- MAC inner loop ---------------------------------------------------------
+//
+// Each kernel computes `acc = Σ x[i] * k_re[i]` and `Σ x[i] * k_im[i]` over
+// `n` `f64`s. The dispatcher picks AVX2+FMA on x86_64 when the CPU advertises
+// it, falling back to scalar on every other arch and the no-AVX boot path.
+// All slices are padded so a 4-wide load never reads outside the kernel's
+// valid range — the tail past `n / 4 * 4` is finished scalar to avoid
+// per-bin tail-zero padding.
+
+#[inline]
+fn mac_scalar(x: &[f64], k_re: &[f64], k_im: &[f64], n: usize) -> (f64, f64) {
+    let mut re = 0.0_f64;
+    let mut im = 0.0_f64;
+    for i in 0..n {
+        re += x[i] * k_re[i];
+        im += x[i] * k_im[i];
+    }
+    (re, im)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn mac_avx2_fma(x: &[f64], k_re: &[f64], k_im: &[f64], n: usize) -> (f64, f64) {
+    use std::arch::x86_64::*;
+    let chunks = n / 4;
+    let mut acc_re = _mm256_setzero_pd();
+    let mut acc_im = _mm256_setzero_pd();
+    for c in 0..chunks {
+        let off = c * 4;
+        let xv  = _mm256_loadu_pd(x.as_ptr().add(off));
+        let krv = _mm256_loadu_pd(k_re.as_ptr().add(off));
+        let kiv = _mm256_loadu_pd(k_im.as_ptr().add(off));
+        acc_re  = _mm256_fmadd_pd(xv, krv, acc_re);
+        acc_im  = _mm256_fmadd_pd(xv, kiv, acc_im);
+    }
+    let hsum = |v: __m256d| -> f64 {
+        let lo = _mm256_castpd256_pd128(v);
+        let hi = _mm256_extractf128_pd::<1>(v);
+        let s  = _mm_add_pd(lo, hi);
+        let s  = _mm_hadd_pd(s, s);
+        _mm_cvtsd_f64(s)
+    };
+    let mut re = hsum(acc_re);
+    let mut im = hsum(acc_im);
+    let tail_start = chunks * 4;
+    for i in tail_start..n {
+        re += x[i] * k_re[i];
+        im += x[i] * k_im[i];
+    }
+    (re, im)
+}
+
+#[inline]
+fn mac_dispatch(x: &[f64], k_re: &[f64], k_im: &[f64], n: usize) -> (f64, f64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if avx2_fma_available() {
+            // Safety: gated on a runtime cpuid check and the slices have
+            // length ≥ n by the caller's contract.
+            return unsafe { mac_avx2_fma(x, k_re, k_im, n) };
+        }
+    }
+    mac_scalar(x, k_re, k_im, n)
 }
 
 /// Compute one CQT column. Magnitudes are written to `mags_out` (resized to
@@ -166,33 +256,41 @@ pub fn cqt_into(buf: &[f32], kernels: &CqtKernels, mags_out: &mut Vec<f32>) {
     mags_out.clear();
     mags_out.reserve(kernels.n_bins());
     let buf_len = buf.len();
+    let max_n = kernels.max_kernel_len();
 
-    for k in &kernels.kernels {
-        if k.n == 0 {
-            mags_out.push(f32::NEG_INFINITY);
-            continue;
+    CQT_SCRATCH_X.with(|cell| {
+        let mut x = cell.borrow_mut();
+        // Hoist the f32 → f64 conversion: cast `min(buf_len, max_n)`
+        // samples from the right edge of `buf` once into thread-local
+        // scratch, then each kernel reads its tail.
+        let read_n = max_n.min(buf_len);
+        x.resize(read_n, 0.0);
+        let src_start = buf_len - read_n;
+        for (dst, &src) in x.iter_mut().zip(buf[src_start..].iter()) {
+            *dst = src as f64;
         }
-        if k.n > buf_len {
-            mags_out.push(f32::NAN);
-            continue;
+
+        for k in &kernels.kernels {
+            if k.n == 0 {
+                mags_out.push(f32::NEG_INFINITY);
+                continue;
+            }
+            if k.n > buf_len {
+                mags_out.push(f32::NAN);
+                continue;
+            }
+            // x's last `k.n` samples align with the kernel's domain.
+            let off = read_n - k.n;
+            let (re, im) = mac_dispatch(&x[off..off + k.n], &k.re, &k.im, k.n);
+            let mag2 = re * re + im * im;
+            let db = if mag2 > 1e-24 {
+                10.0 * mag2.log10()                          // 10·log10(|x|²) = 20·log10(|x|)
+            } else {
+                -240.0
+            };
+            mags_out.push(db as f32);
         }
-        let start = buf_len - k.n;
-        let mut acc_re = 0.0_f64;
-        let mut acc_im = 0.0_f64;
-        for i in 0..k.n {
-            let x = buf[start + i] as f64;
-            let kk = k.samples[i];
-            acc_re += x * kk.re;
-            acc_im += x * kk.im;
-        }
-        let mag = (acc_re * acc_re + acc_im * acc_im).sqrt();
-        let db = if mag > 1e-12 {
-            20.0 * mag.log10()
-        } else {
-            -240.0
-        };
-        mags_out.push(db as f32);
-    }
+    });
 }
 
 /// Convenience wrapper: allocates and returns a fresh magnitude vector.

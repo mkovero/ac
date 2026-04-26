@@ -29,10 +29,29 @@
 //! and `cwt`, scalar only on first cut — perf treatment can land later
 //! if a hot path appears.
 
+use std::cell::RefCell;
 use std::f64::consts::PI;
 use std::sync::Arc;
 
 use realfft::{num_complex::Complex, RealFftPlanner, RealToComplex};
+
+thread_local! {
+    /// Per-thread scratch buffers reused across `reassigned_into` calls.
+    /// Without these the hot path allocates 3 input vecs + 3 spectrum vecs
+    /// + 1 FFT scratch + 1 power accumulator on every column — about
+    /// 200 KB at the default 4096-sample / 1024-bin geometry. Resizing in
+    /// place keeps allocator traffic out of the hot path; the vecs only
+    /// shrink-by-resize never deallocate.
+    static SCRATCH_X:    RefCell<Vec<f64>>            = const { RefCell::new(Vec::new()) };
+    static SCRATCH_IN_H: RefCell<Vec<f64>>            = const { RefCell::new(Vec::new()) };
+    static SCRATCH_IN_T: RefCell<Vec<f64>>            = const { RefCell::new(Vec::new()) };
+    static SCRATCH_IN_D: RefCell<Vec<f64>>            = const { RefCell::new(Vec::new()) };
+    static SCRATCH_SP_H: RefCell<Vec<Complex<f64>>>   = const { RefCell::new(Vec::new()) };
+    static SCRATCH_SP_T: RefCell<Vec<Complex<f64>>>   = const { RefCell::new(Vec::new()) };
+    static SCRATCH_SP_D: RefCell<Vec<Complex<f64>>>   = const { RefCell::new(Vec::new()) };
+    static SCRATCH_FFT:  RefCell<Vec<Complex<f64>>>   = const { RefCell::new(Vec::new()) };
+    static SCRATCH_POW:  RefCell<Vec<f64>>            = const { RefCell::new(Vec::new()) };
+}
 
 /// Default FFT length. 4096 → ~11.7 Hz bin width at 48 kHz, with the
 /// reassignment step concentrating energy well below that.
@@ -188,92 +207,115 @@ pub fn reassigned_into(
     assert!(buf.len() >= n, "buf shorter than kernel.n: {} < {n}", buf.len());
     let n_half = n / 2 + 1;
     let n_out  = kernels.freqs_out.len();
+    let start  = buf.len() - n;
 
-    let start = buf.len() - n;
-    let x: Vec<f64> = buf[start..].iter().map(|&v| v as f64).collect();
+    SCRATCH_X.with(|x_cell|
+    SCRATCH_IN_H.with(|h_cell|
+    SCRATCH_IN_T.with(|t_cell|
+    SCRATCH_IN_D.with(|d_cell|
+    SCRATCH_SP_H.with(|sh_cell|
+    SCRATCH_SP_T.with(|st_cell|
+    SCRATCH_SP_D.with(|sd_cell|
+    SCRATCH_FFT.with(|fft_cell|
+    SCRATCH_POW.with(|pow_cell| {
+        let mut x      = x_cell.borrow_mut();
+        let mut in_h   = h_cell.borrow_mut();
+        let mut in_th  = t_cell.borrow_mut();
+        let mut in_dh  = d_cell.borrow_mut();
+        let mut sp_h   = sh_cell.borrow_mut();
+        let mut sp_th  = st_cell.borrow_mut();
+        let mut sp_dh  = sd_cell.borrow_mut();
+        let mut fft_sc = fft_cell.borrow_mut();
+        let mut acc    = pow_cell.borrow_mut();
 
-    // Three windowed inputs, three forward FFTs.
-    let mut in_h  = vec![0.0_f64; n];
-    let mut in_th = vec![0.0_f64; n];
-    let mut in_dh = vec![0.0_f64; n];
-    for i in 0..n {
-        in_h[i]  = x[i] * kernels.h[i];
-        in_th[i] = x[i] * kernels.th[i];
-        in_dh[i] = x[i] * kernels.dh[i];
-    }
+        x.resize(n, 0.0);
+        in_h.resize(n, 0.0);
+        in_th.resize(n, 0.0);
+        in_dh.resize(n, 0.0);
+        sp_h.resize(n_half, Complex::new(0.0, 0.0));
+        sp_th.resize(n_half, Complex::new(0.0, 0.0));
+        sp_dh.resize(n_half, Complex::new(0.0, 0.0));
+        let need_scratch = kernels.fft_plan.get_scratch_len();
+        if fft_sc.len() < need_scratch {
+            fft_sc.resize(need_scratch, Complex::new(0.0, 0.0));
+        }
+        acc.clear();
+        acc.resize(n_out, 0.0);
 
-    let scratch_len = kernels.fft_plan.get_scratch_len();
-    let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-    let mut sp_h    = vec![Complex::new(0.0, 0.0); n_half];
-    let mut sp_th   = vec![Complex::new(0.0, 0.0); n_half];
-    let mut sp_dh   = vec![Complex::new(0.0, 0.0); n_half];
+        // f32 → f64 once per call. The inner per-window loops then read
+        // from `x` (already-converted) instead of re-casting per bin.
+        for (dst, &src) in x.iter_mut().zip(buf[start..].iter()) {
+            *dst = src as f64;
+        }
+        for i in 0..n {
+            in_h[i]  = x[i] * kernels.h[i];
+            in_th[i] = x[i] * kernels.th[i];
+            in_dh[i] = x[i] * kernels.dh[i];
+        }
 
-    kernels.fft_plan.process_with_scratch(&mut in_h,  &mut sp_h,  &mut scratch).unwrap();
-    kernels.fft_plan.process_with_scratch(&mut in_th, &mut sp_th, &mut scratch).unwrap();
-    kernels.fft_plan.process_with_scratch(&mut in_dh, &mut sp_dh, &mut scratch).unwrap();
+        kernels.fft_plan.process_with_scratch(
+            &mut in_h, &mut sp_h, &mut fft_sc[..need_scratch],
+        ).expect("realfft length contract");
+        kernels.fft_plan.process_with_scratch(
+            &mut in_th, &mut sp_th, &mut fft_sc[..need_scratch],
+        ).expect("realfft length contract");
+        kernels.fft_plan.process_with_scratch(
+            &mut in_dh, &mut sp_dh, &mut fft_sc[..need_scratch],
+        ).expect("realfft length contract");
 
-    // Two-sided amplitude correction: real FFT returns one-sided spectrum,
-    // so peak amplitude for a cosine A·cos(2πfₖt) is (A/2)·sum(h). Scale
-    // by 2/sum(h) → |X_h[k]|·(2/sum(h)) = A directly.
-    let amp_scale = 2.0 / kernels.h_norm;
+        // Two-sided amplitude correction: real FFT returns one-sided spectrum,
+        // so peak amplitude for a cosine A·cos(2πfₖt) is (A/2)·sum(h). Scale
+        // by 2/sum(h) → |X_h[k]|·(2/sum(h)) = A directly.
+        let amp_scale = 2.0 / kernels.h_norm;
+        let amp_scale_sq = amp_scale * amp_scale;
 
-    // Power accumulator over the output grid + count for averaging.
-    let mut acc_pow   = vec![0.0_f64; n_out];
+        // First pass: find peak |X_h|² to anchor the noise gate.
+        let mut peak_mag2 = 0.0_f64;
+        for k in 1..(n_half - 1) {
+            let m2 = sp_h[k].norm_sqr();
+            if m2 > peak_mag2 { peak_mag2 = m2; }
+        }
+        let gate_pow = peak_mag2 * 10.0_f64.powf(DEFAULT_NOISE_FLOOR_DB as f64 / 10.0);
 
-    // First pass: find peak |X_h|² to anchor the noise gate.
-    let mut peak_mag2 = 0.0_f64;
-    for k in 1..(n_half - 1) {
-        let m2 = sp_h[k].norm_sqr();
-        if m2 > peak_mag2 { peak_mag2 = m2; }
-    }
-    let gate_pow = peak_mag2 * 10.0_f64.powf(DEFAULT_NOISE_FLOOR_DB as f64 / 10.0);
-
-    // Reassign bin-by-bin.
-    let sr = kernels.sample_rate as f64;
-    let two_pi = 2.0 * PI;
-    for k in 1..(n_half - 1) {
-        let xh = sp_h[k];
-        let mag2 = xh.norm_sqr();
-        if mag2 < 1e-30 { continue; }
-
-        let amp_sq = mag2 * amp_scale * amp_scale; // (|X_h|·amp_scale)² → amplitude²
-
-        let target = if mag2 < gate_pow {
-            // Noise-floor bin: skip reassignment, drop energy at nominal f.
-            kernels.nominal_out_idx[k]
-        } else {
-            // f̂_k = f_k + Im(X_dh[k] / X_h[k]) · sr / (2π).
-            // Im(a / b) = Im(a · conj(b)) / |b|²; we use the conj form so
-            // the divide-by-zero gate above protects both branches.
-            let xdh = sp_dh[k];
-            let im_a_conj_b = xdh.re * xh.im - xdh.im * xh.re;
-            let f_k   = k as f64 * sr / n as f64;
-            let f_hat = f_k + (im_a_conj_b / mag2) * sr / two_pi;
-            if f_hat.is_finite() {
-                out_bin_idx(f_hat as f32, &kernels.freqs_out)
-            } else {
+        // Reassign bin-by-bin.
+        let sr = kernels.sample_rate as f64;
+        let inv_two_pi = 1.0 / (2.0 * PI);
+        let inv_n = 1.0 / n as f64;
+        for k in 1..(n_half - 1) {
+            let xh = sp_h[k];
+            let mag2 = xh.norm_sqr();
+            if mag2 < 1e-30 { continue; }
+            let amp_sq = mag2 * amp_scale_sq;
+            let target = if mag2 < gate_pow {
                 kernels.nominal_out_idx[k]
-            }
-        };
-        acc_pow[target] += amp_sq;
-    }
+            } else {
+                let xdh = sp_dh[k];
+                let im_a_conj_b = xdh.re * xh.im - xdh.im * xh.re;
+                let f_k   = k as f64 * sr * inv_n;
+                let f_hat = f_k + (im_a_conj_b / mag2) * sr * inv_two_pi;
+                if f_hat.is_finite() {
+                    out_bin_idx(f_hat as f32, &kernels.freqs_out)
+                } else {
+                    kernels.nominal_out_idx[k]
+                }
+            };
+            acc[target] += amp_sq;
+        }
 
-    // Convert accumulated amplitude² to dBFS magnitude. Each tone funnels
-    // its full one-sided spectral energy (= A² · enbw under Parseval, with
-    // amp_scale = 2 / Σh) into one output bin; dividing by enbw recovers
-    // the underlying amplitude² so a unit cosine reads 0 dBFS.
-    mags_out.clear();
-    mags_out.reserve(n_out);
-    let inv_enbw = 1.0 / kernels.enbw;
-    for &p in &acc_pow {
-        let amp_sq = p * inv_enbw;
-        let db = if amp_sq > 1e-30 {
-            10.0 * amp_sq.log10()                            // 10·log10(amp²) = 20·log10(|amp|)
-        } else {
-            -240.0
-        };
-        mags_out.push(db as f32);
-    }
+        // ENBW-corrected amplitude² → dBFS.
+        mags_out.clear();
+        mags_out.reserve(n_out);
+        let inv_enbw = 1.0 / kernels.enbw;
+        for &p in acc.iter() {
+            let amp_sq = p * inv_enbw;
+            let db = if amp_sq > 1e-30 {
+                10.0 * amp_sq.log10()
+            } else {
+                -240.0
+            };
+            mags_out.push(db as f32);
+        }
+    })))))))));
 }
 
 /// Convenience wrapper.
