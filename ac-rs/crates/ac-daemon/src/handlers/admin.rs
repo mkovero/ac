@@ -201,10 +201,10 @@ pub fn set_analysis_mode(state: &ServerState, cmd: &Value) -> Value {
         Some(m) => m,
         None => return json!({"ok": false, "error": "missing 'mode' field"}),
     };
-    if mode != "fft" && mode != "cwt" {
+    if mode != "fft" && mode != "cwt" && mode != "cqt" {
         return json!({
             "ok": false,
-            "error": format!("invalid mode '{mode}': expected 'fft' or 'cwt'"),
+            "error": format!("invalid mode '{mode}': expected 'fft', 'cwt', or 'cqt'"),
         });
     }
     *state.analysis_mode.lock().unwrap() = mode.to_string();

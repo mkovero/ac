@@ -16,12 +16,6 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
         _ => "spectrum",
     };
 
-    if mode == "cqt" {
-        return Ok(ParsedCommand {
-            cmd: CommandKind::MonitorNotImplemented { technique: "cqt" },
-            show_plot,
-        });
-    }
     if mode == "reassigned" {
         return Ok(ParsedCommand {
             cmd: CommandKind::MonitorNotImplemented { technique: "reassigned" },
@@ -45,10 +39,10 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
         .map(|v| v.as_f64())
         .unwrap_or(0.1);
     check_empty(&tokens)?;
-    let cmd = if mode == "cwt" {
-        CommandKind::MonitorCwt { start_freq, end_freq, interval, channels }
-    } else {
-        CommandKind::Monitor { start_freq, end_freq, interval, channels }
+    let cmd = match mode {
+        "cwt" => CommandKind::MonitorCwt { start_freq, end_freq, interval, channels },
+        "cqt" => CommandKind::MonitorCqt { start_freq, end_freq, interval, channels },
+        _     => CommandKind::Monitor    { start_freq, end_freq, interval, channels },
     };
     Ok(ParsedCommand { cmd, show_plot })
 }
@@ -127,11 +121,19 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_cqt_not_implemented() {
+    fn test_monitor_cqt() {
         let p = parse(&args("monitor cqt")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::MonitorCqt { .. }));
+    }
+
+    #[test]
+    fn test_monitor_cqt_with_channels() {
+        let p = parse(&args("monitor cqt 0-3")).unwrap();
         match p.cmd {
-            CommandKind::MonitorNotImplemented { technique } => assert_eq!(technique, "cqt"),
-            other => panic!("expected MonitorNotImplemented, got {other:?}"),
+            CommandKind::MonitorCqt { channels, .. } => {
+                assert_eq!(channels, Some(vec![0, 1, 2, 3]));
+            }
+            other => panic!("expected MonitorCqt, got {other:?}"),
         }
     }
 

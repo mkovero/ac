@@ -332,6 +332,12 @@ pub enum CommandKind {
         interval: f64,
         channels: Option<Vec<u32>>,
     },
+    MonitorCqt {
+        start_freq: f64,
+        end_freq: f64,
+        interval: f64,
+        channels: Option<Vec<u32>>,
+    },
     MonitorNotImplemented {
         technique: &'static str,
     },

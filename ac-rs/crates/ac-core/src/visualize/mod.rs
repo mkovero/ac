@@ -3,6 +3,7 @@
 //! a standards-defined filterbank. See `ARCHITECTURE.md`.
 
 pub mod aggregate;
+pub mod cqt;
 pub mod cwt;
 pub mod fractional_octave;
 pub mod spectrum;

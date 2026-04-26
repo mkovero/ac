@@ -23,6 +23,7 @@ enum WSlot {
     Single,
     Waterfall,
     Cwt,
+    Cqt,
 }
 
 #[derive(Clone)]
@@ -677,6 +678,7 @@ impl App {
             (LayoutMode::Single, ViewMode::Spectrum,   _)     => Some(WSlot::Single),
             (LayoutMode::Single, ViewMode::Waterfall, "fft") => Some(WSlot::Waterfall),
             (LayoutMode::Single, ViewMode::Waterfall, "cwt") => Some(WSlot::Cwt),
+            (LayoutMode::Single, ViewMode::Waterfall, "cqt") => Some(WSlot::Cqt),
             _ => None,
         }
     }
@@ -824,18 +826,20 @@ impl App {
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
             KeyCode::KeyW => {
-                // W cycles the four canonical views:
+                // W cycles the five canonical views:
                 //   Matrix (Grid, spectrum)   → many channels at a glance
                 //   Single (spectrum)         → one channel, FFT
                 //   Waterfall (Single, FFT)   → one channel, time × freq (FFT)
                 //   CWT (Single, Morlet)      → one channel, time × freq (CWT)
+                //   CQT (Single, constant-Q)  → one channel, time × freq (CQT)
                 // Non-cycled layouts (Compare / Transfer / Sweep) jump back to
                 // Matrix so the key always advances deterministically.
                 let next = match self.current_w_slot() {
                     Some(WSlot::Matrix)    => WSlot::Single,
                     Some(WSlot::Single)    => WSlot::Waterfall,
                     Some(WSlot::Waterfall) => WSlot::Cwt,
-                    Some(WSlot::Cwt)       => WSlot::Matrix,
+                    Some(WSlot::Cwt)       => WSlot::Cqt,
+                    Some(WSlot::Cqt)       => WSlot::Matrix,
                     None                   => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -843,6 +847,7 @@ impl App {
                     WSlot::Single    => (LayoutMode::Single, ViewMode::Spectrum,  "fft", "view: single"),
                     WSlot::Waterfall => (LayoutMode::Single, ViewMode::Waterfall, "fft", "view: waterfall (fft)"),
                     WSlot::Cwt       => (LayoutMode::Single, ViewMode::Waterfall, "cwt", "view: waterfall (cwt)"),
+                    WSlot::Cqt       => (LayoutMode::Single, ViewMode::Waterfall, "cqt", "view: waterfall (cqt)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

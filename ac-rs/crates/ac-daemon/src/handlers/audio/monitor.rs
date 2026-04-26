@@ -191,6 +191,31 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // a fresh Vec each call (prev ~3.5% of CPU in madvise / allocator).
         let mut cwt_mags: Vec<f32> = Vec::with_capacity(cwt_n_scales);
 
+        // CQT state: separate from CWT because the lowest CQT bin needs
+        // ~Q · sr / f_min samples in the ring to keep Q constant. With
+        // bpo=24 (Q ≈ 34.1), 1 s of audio gives a usable f_min of ~34 Hz.
+        // Kernels are built once per (sr, bpo, freqs) — fixed for the
+        // worker's lifetime; live tunables can come later.
+        let cqt_bpo = ac_core::visualize::cqt::DEFAULT_BPO;
+        let cqt_ring_cap = sr as usize; // 1.0 s
+        let cqt_tick = 0.02_f64; // 20 ms capture per CQT tick (same cadence as CWT)
+        let cqt_f_min = ac_core::visualize::cqt::DEFAULT_F_MIN
+            .max(ac_core::visualize::cqt::min_supported_f(cqt_ring_cap, sr, cqt_bpo));
+        let cqt_freqs = ac_core::visualize::cqt::log_freqs(
+            cqt_f_min,
+            ac_core::visualize::cqt::default_f_max(sr),
+            cqt_bpo,
+        );
+        let cqt_kernels = ac_core::visualize::cqt::build_kernels(
+            &cqt_freqs, sr, cqt_bpo, cqt_ring_cap,
+        );
+        let mut cqt_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
+            .iter()
+            .map(|_| std::collections::VecDeque::with_capacity(cqt_ring_cap))
+            .collect();
+        let mut cqt_mags: Vec<f32> = Vec::with_capacity(cqt_freqs.len());
+        let mut cqt_log_counter = 0u32;
+
         // Sliding ring buffer for single-channel FFT path so refresh cadence
         // (`cur_interval`) can run faster than capture-window duration
         // (`cur_fft_n / sr`). Each tick pulls just the new samples that
@@ -230,6 +255,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             };
             let mode = analysis_mode.lock().unwrap().clone();
             let is_cwt = mode == "cwt";
+            let is_cqt = mode == "cqt";
 
             // Time-integration bookkeeping — run once per tick.
             let new_ti_mode = time_integration_shared.lock().unwrap().clone();
@@ -429,6 +455,66 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     }
                     continue;
                 }
+                if is_cqt {
+                    let samples = match eng.capture_block(cqt_tick) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            send_pub(&pub_tx, "error", &json!({
+                                "cmd":     "monitor_spectrum",
+                                "message": format!("capture error on ch{channel}: {e}"),
+                            }));
+                            return;
+                        }
+                    };
+                    xruns_total += eng.xruns();
+                    let _ = loudness[idx].push(&[&samples]);
+                    let ring = &mut cqt_rings[idx];
+                    ring.extend(samples.iter());
+                    while ring.len() > cqt_ring_cap {
+                        ring.pop_front();
+                    }
+                    // The kernel for the lowest bin needs the full ring.
+                    // Skip ticks until the ring has filled enough that the
+                    // lowest kernel produces a finite reading; the bins
+                    // above it produce earlier but a partial column would
+                    // confuse the waterfall.
+                    if ring.len() < cqt_kernels.max_kernel_len() {
+                        continue;
+                    }
+                    let t0 = std::time::Instant::now();
+                    let buf = ring.make_contiguous();
+                    ac_core::visualize::cqt::cqt_into(buf, &cqt_kernels, &mut cqt_mags);
+                    cqt_log_counter += 1;
+                    if cqt_log_counter % 50 == 1 {
+                        eprintln!(
+                            "cqt ch{channel}: {:.1}ms, ring={}, bins={}",
+                            t0.elapsed().as_secs_f64() * 1000.0,
+                            buf.len(),
+                            cqt_freqs.len(),
+                        );
+                    }
+                    let ts_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let frame = json!({
+                        "type":        "visualize/cqt",
+                        "cmd":         "monitor_spectrum",
+                        "channel":     channel,
+                        "n_channels":  n_channels,
+                        "sr":          sr,
+                        "bpo":         cqt_bpo,
+                        "magnitudes":  &cqt_mags,
+                        "frequencies": cqt_freqs,
+                        "timestamp":   ts_ns,
+                        "xruns":       xruns_total,
+                    });
+                    send_pub(&pub_tx, "data", &frame);
+                    emit_loudness_frame(
+                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                    );
+                    continue;
+                }
 
                 // FFT path. Each channel has its own sliding ring so refresh
                 // cadence (`cur_interval`) is decoupled from FFT window length
@@ -545,9 +631,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     );
                 }
             }
-            // Pace FFT mode to requested interval. CWT has its own cadence
-            // (short tick + sliding ring — see `cwt_tick`) and paces itself.
-            if !is_cwt {
+            // Pace FFT mode to requested interval. CWT/CQT have their own
+            // cadence (short tick + sliding ring) and pace themselves.
+            if !is_cwt && !is_cqt {
                 let elapsed = tick_start.elapsed().as_secs_f64();
                 if elapsed < cur_interval {
                     std::thread::sleep(std::time::Duration::from_secs_f64(

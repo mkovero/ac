@@ -698,6 +698,66 @@ fn server_idle_timeout_auto_disables_public_bind() {
 }
 
 #[test]
+fn monitor_cqt_emits_visualize_cqt_frame() {
+    // End-to-end smoke: set analysis mode → cqt, fire monitor_spectrum, and
+    // confirm the daemon publishes `visualize/cqt` frames with the expected
+    // payload shape (log-spaced freqs, magnitudes one-per-bin).
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "set_analysis_mode", "mode": "cqt"}));
+    assert_eq!(r["ok"], json!(true), "set_analysis_mode cqt: {r}");
+
+    let r = c.call(json!({"cmd": "monitor_spectrum", "freq_hz": 1000.0}));
+    assert_eq!(r["ok"], json!(true));
+
+    // The CQT branch waits for the ring to fill (1 s @ 48 kHz), then emits
+    // ~50 frames per second. Give it up to 5 s to produce one.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut frame: Option<Value> = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("visualize/cqt") => {
+                frame = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None    => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no visualize/cqt frame within 5 s");
+
+    let mags  = frame["magnitudes"].as_array().expect("magnitudes array");
+    let freqs = frame["frequencies"].as_array().expect("frequencies array");
+    assert_eq!(mags.len(), freqs.len(), "magnitudes/frequencies length mismatch");
+    assert!(!mags.is_empty(), "empty cqt column");
+    // Geometric spacing: f[k+1] / f[k] should be constant (= 2^(1/bpo)).
+    let f0 = freqs[0].as_f64().unwrap();
+    let f1 = freqs[1].as_f64().unwrap();
+    let f_last = freqs[freqs.len() - 1].as_f64().unwrap();
+    let ratio = f1 / f0;
+    let bpo = frame["bpo"].as_u64().unwrap() as f64;
+    let expected_ratio = 2.0_f64.powf(1.0 / bpo);
+    assert!(
+        (ratio - expected_ratio).abs() < 1e-3,
+        "freq ratio {ratio} (bpo={bpo}, expected {expected_ratio})"
+    );
+    assert!(f_last > f0, "freqs not monotonically increasing");
+}
+
+#[test]
+fn set_analysis_mode_rejects_garbage() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "set_analysis_mode", "mode": "wavelet-of-doom"}));
+    assert_eq!(r["ok"], json!(false));
+    let err = r["error"].as_str().unwrap_or("");
+    assert!(err.contains("invalid mode"), "got {err}");
+}
+
+#[test]
 fn server_idle_timeout_disabled_keeps_public_bind() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
