@@ -210,6 +210,7 @@ pub fn spawn(
                             sr: cf.sr,
                             channel: cf.channel,
                             n_channels: cf.n_channels,
+                            spl_offset_db: cf.spl_offset_db,
                             frame_id: slot_seq[slot],
                             ..SpectrumFrame::default()
                         };

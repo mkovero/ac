@@ -64,6 +64,7 @@ impl SyntheticSource {
                         thd_pct: 0.01 + 0.005 * ((t + ch as f32).sin() + 1.0),
                         thdn_pct: 0.02 + 0.005 * ((t + ch as f32).cos() + 1.0),
                         in_dbu: None,
+                        spl_offset_db: None,
                         sr: 48000,
                         clipping: false,
                         xruns: 0,

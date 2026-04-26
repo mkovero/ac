@@ -42,7 +42,7 @@ pub use audio::{
     generate, generate_pink, monitor_spectrum, plot, plot_level,
     sweep_frequency, sweep_ir, sweep_level,
 };
-pub use calibrate::{cal_reply, calibrate};
+pub use calibrate::{cal_reply, calibrate, calibrate_spl};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
 pub use transfer::{probe, transfer_stream};

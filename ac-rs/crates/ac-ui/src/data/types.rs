@@ -15,6 +15,11 @@ pub struct SpectrumFrame {
     #[serde(default)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
+    /// Daemon-supplied additive offset for dBFS → dB SPL conversion. `None`
+    /// keeps the readouts in dBFS; `Some(off)` makes the UI render `dB SPL`
+    /// using `dbspl = dbfs + off`.
+    #[serde(default)]
+    pub spl_offset_db: Option<f32>,
     pub sr: u32,
     #[serde(default)]
     pub clipping: bool,
@@ -53,6 +58,7 @@ impl Default for SpectrumFrame {
             thd_pct: 0.0,
             thdn_pct: 0.0,
             in_dbu: None,
+            spl_offset_db: None,
             sr: 48000,
             clipping: false,
             xruns: 0,
@@ -93,6 +99,10 @@ pub struct FrameMeta {
     #[allow(dead_code)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
+    /// Additive offset (`dB SPL = dBFS + spl_offset_db`) populated by the
+    /// daemon when the channel has been pistonphone-calibrated. `None`
+    /// preserves the dBFS readout convention.
+    pub spl_offset_db: Option<f32>,
     pub sr: u32,
     pub clipping: bool,
     #[allow(dead_code)]
@@ -118,6 +128,8 @@ pub struct CwtFrame {
     pub channel:     Option<u32>,
     #[serde(default)]
     pub n_channels:  Option<u32>,
+    #[serde(default)]
+    pub spl_offset_db: Option<f32>,
 }
 
 /// One H1 transfer function estimate from the daemon. Arrives on the `data`
@@ -208,6 +220,7 @@ impl From<&SpectrumFrame> for FrameMeta {
             thd_pct: f.thd_pct,
             thdn_pct: f.thdn_pct,
             in_dbu: f.in_dbu,
+            spl_offset_db: f.spl_offset_db,
             sr: f.sr,
             clipping: f.clipping,
             xruns: f.xruns,

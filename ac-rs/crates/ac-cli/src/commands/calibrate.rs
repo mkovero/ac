@@ -175,6 +175,78 @@ pub fn run_show(client: &mut AcClient) {
     }
 }
 
+/// `ac calibrate spl [input N] [output N]` — pistonphone-reference SPL.
+/// Sends `calibrate_spl`, prompts the user to seat the calibrator, and
+/// passes the keystroke through as `cal_reply` so the daemon's worker
+/// proceeds to the audio capture step. The captured dBFS shows up in the
+/// `cal_done` frame and is what later `dbfs → dB SPL` conversions use.
+pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
+    let (out_ch, in_ch) = match cmd {
+        CommandKind::CalibrateSpl { output_channel, input_channel } => {
+            (output_channel, input_channel)
+        }
+        _ => unreachable!(),
+    };
+
+    let mut cmd_json = serde_json::json!({"cmd": "calibrate_spl"});
+    if let Some(ch) = out_ch { cmd_json["output_channel"] = (*ch).into(); }
+    if let Some(ch) = in_ch  { cmd_json["input_channel"]  = (*ch).into(); }
+
+    check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate_spl");
+    println!("  SPL calibration started.");
+    println!("  Press Ctrl+C or type q to cancel.\n");
+
+    loop {
+        let frame = match client.recv_data(300_000) {
+            Some(f) => f,
+            None => {
+                eprintln!("  error: SPL calibration timed out");
+                return;
+            }
+        };
+        let (topic, data) = frame;
+
+        if topic == "cal_prompt" {
+            let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            println!("\n  {text}");
+            print!("  Press Enter to capture (q to cancel): ");
+            io::stdout().flush().ok();
+            let raw = read_line();
+            if raw.trim().eq_ignore_ascii_case("q") {
+                println!("  Calibration cancelled.");
+                client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
+                return;
+            }
+            // Any non-cancel reply releases the worker. The daemon ignores
+            // the value for SPL prompts (it just needs a sync point).
+            client.send_cmd(
+                &serde_json::json!({"cmd": "cal_reply", "vrms": serde_json::Value::Null}),
+                None,
+            );
+        } else if topic == "cal_done" {
+            let key  = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+            let dbfs = data
+                .get("mic_sensitivity_dbfs_at_94db_spl")
+                .and_then(|v| v.as_f64());
+            println!("\n  SPL calibration saved: [{key}]");
+            if let Some(d) = dbfs {
+                let offset = ac_core::shared::calibration::PISTONPHONE_REF_SPL - d;
+                println!("  Mic sensitivity: {d:.2} dBFS @ 94 dB SPL");
+                println!("  Offset:          dB SPL = dBFS + {offset:+.2}");
+            }
+            if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+                println!("  Note: {err}");
+            }
+            println!();
+            return;
+        } else if topic == "error" {
+            let msg = data.get("message").and_then(|v| v.as_str()).unwrap_or("error");
+            eprintln!("  error: {msg}");
+            return;
+        }
+    }
+}
+
 fn read_line() -> String {
     let mut line = String::new();
     io::stdin().read_line(&mut line).ok();

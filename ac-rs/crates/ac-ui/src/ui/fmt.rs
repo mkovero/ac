@@ -63,25 +63,46 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
 /// meaningful when a known pure tone is driving the system (sweep / thd /
 /// plot commands), not in live monitoring.
 ///
-/// When the channel has been calibrated, both dBu and dBV appear alongside
-/// the peak so the user sees the analog-domain level in either convention.
-/// dBV is derived from dBu via the fixed `dBV = dBu + 20·log10(V_ref_dbu)`
-/// relation (see `ac_core::shared::conversions::dbu_to_dbv`).
-pub fn spectrum_readout(stats: &BroadbandStats, in_dbu: Option<f32>) -> String {
+/// When the channel has been voltage-calibrated, both dBu and dBV appear
+/// alongside the peak so the user sees the analog-domain level in either
+/// convention. dBV is derived from dBu via the fixed
+/// `dBV = dBu + 20·log10(V_ref_dbu)` relation
+/// (see `ac_core::shared::conversions::dbu_to_dbv`).
+///
+/// When the channel has been pistonphone-calibrated (`spl_offset_db` is
+/// `Some`), peak and floor are reported in **dB SPL** instead of dBFS.
+/// `span_db` stays in dB (it's a difference) but its label drops `FS` to
+/// match. Both calibrations compose: a fully-cal'd channel shows dB SPL
+/// peak/floor *and* dBu/dBV.
+pub fn spectrum_readout(
+    stats:         &BroadbandStats,
+    in_dbu:        Option<f32>,
+    spl_offset_db: Option<f32>,
+) -> String {
     let cal = in_dbu
         .map(|dbu| {
             let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
             format!("   {:+.1} dBu   {:+.1} dBV", dbu, dbv)
         })
         .unwrap_or_default();
-    format!(
-        "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}",
-        stats.peak_db,
-        format_hz(stats.peak_hz).trim(),
-        stats.floor_db,
-        stats.span_db,
-        cal,
-    )
+    match spl_offset_db {
+        Some(off) => format!(
+            "peak {:>6.1} dB SPL @ {}  │  floor {:>6.1} dB SPL  │  span {:>5.1} dB{}",
+            stats.peak_db + off,
+            format_hz(stats.peak_hz).trim(),
+            stats.floor_db + off,
+            stats.span_db,
+            cal,
+        ),
+        None => format!(
+            "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}",
+            stats.peak_db,
+            format_hz(stats.peak_hz).trim(),
+            stats.floor_db,
+            stats.span_db,
+            cal,
+        ),
+    }
 }
 
 /// Live-monitor readout for the FFT knobs shown top-right in Spectrum mode.
@@ -161,15 +182,31 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
     parts.join("   ")
 }
 
-/// Hover crosshair readout label.
-pub fn hover_label(channel: usize, freq_hz: f32, readout: &HoverReadout) -> String {
+/// Hover crosshair readout label. When `spl_offset_db` is `Some`, the
+/// dB-magnitude variant (`Db`) is rendered as `dB SPL` with the offset
+/// applied; other variants (THD%, gain dB, time-ago) ignore SPL since
+/// they're not single-sample dBFS readings.
+pub fn hover_label(
+    channel:       usize,
+    freq_hz:       f32,
+    readout:       &HoverReadout,
+    spl_offset_db: Option<f32>,
+) -> String {
     match readout {
-        HoverReadout::Db(v) => format!(
-            "CH{} {} {:+6.1} dB",
-            channel,
-            format_hz(freq_hz),
-            v,
-        ),
+        HoverReadout::Db(v) => match spl_offset_db {
+            Some(off) => format!(
+                "CH{} {} {:>6.1} dB SPL",
+                channel,
+                format_hz(freq_hz),
+                v + off,
+            ),
+            None => format!(
+                "CH{} {} {:+6.1} dB",
+                channel,
+                format_hz(freq_hz),
+                v,
+            ),
+        },
         HoverReadout::Thd(v) => format!(
             "{} THD {:.4}%",
             format_hz(freq_hz),
@@ -335,7 +372,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None);
+        let s = spectrum_readout(&stats, None, None);
         assert!(s.contains("peak"));
         assert!(s.contains("-3.0 dBFS"));
         assert!(s.contains("1.00 kHz"));
@@ -355,7 +392,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None);
+        let s = spectrum_readout(&stats, None, None);
         assert!(!s.contains("THD"));
     }
 
@@ -367,7 +404,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, Some(4.0));
+        let s = spectrum_readout(&stats, Some(4.0), None);
         assert!(s.contains("+4.0 dBu"));
     }
 
@@ -379,7 +416,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None);
+        let s = spectrum_readout(&stats, None, None);
         assert!(!s.contains("dBu"));
         assert!(!s.contains("dBV"));
     }
@@ -395,9 +432,66 @@ mod tests {
         // 0 dBu is exactly V_ref_dbu (sqrt(0.6) V rms by default), which in
         // dBV is −2.218... dB. The readout must show both in the correct
         // relation.
-        let s = spectrum_readout(&stats, Some(0.0));
+        let s = spectrum_readout(&stats, Some(0.0), None);
         assert!(s.contains("+0.0 dBu"), "want dBu in: {s}");
         assert!(s.contains("-2.2 dBV"), "want dBV at −2.2 in: {s}");
+    }
+
+    #[test]
+    fn spectrum_readout_dbspl_when_spl_calibrated() {
+        // SPL cal example from the issue: pistonphone at 94 dB SPL captured
+        // -32 dBFS → spl_offset_db = 126. A peak at -3 dBFS reads 123 dB SPL,
+        // and the floor at -96 dBFS reads 30 dB SPL. The "dBFS" suffix must
+        // not appear when SPL is active.
+        let stats = BroadbandStats {
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None, Some(126.0));
+        assert!(s.contains("123.0 dB SPL"), "want SPL peak in: {s}");
+        assert!(s.contains("30.0 dB SPL"),  "want SPL floor in: {s}");
+        assert!(!s.contains("dBFS"),        "must not show dBFS: {s}");
+        assert!(s.contains("93.0 dB"),      "span unchanged: {s}");
+    }
+
+    #[test]
+    fn spectrum_readout_spl_round_trip_at_94() {
+        // Acceptance criterion: pistonphone reference at 94 dB SPL → reads
+        // 94 dB SPL. The peak is the captured dBFS at calibration time;
+        // applied SPL offset = 94 - peak. Check the readout reads 94 dB SPL.
+        let captured_dbfs = -32.0_f32;
+        let stats = BroadbandStats {
+            peak_db: captured_dbfs,
+            peak_hz: 1000.0,
+            floor_db: -90.0,
+            span_db: 58.0,
+        };
+        let off = 94.0 - captured_dbfs;
+        let s = spectrum_readout(&stats, None, Some(off));
+        assert!(s.contains("94.0 dB SPL"), "round-trip readout: {s}");
+    }
+
+    #[test]
+    fn hover_label_uses_dbspl_when_calibrated() {
+        let no_cal = hover_label(0, 1000.0, &HoverReadout::Db(-12.5), None);
+        assert!(no_cal.contains("-12.5 dB"));
+        assert!(!no_cal.contains("SPL"));
+
+        let cal = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0));
+        assert!(cal.contains("94.0 dB SPL"), "want SPL: {cal}");
+    }
+
+    #[test]
+    fn hover_label_non_db_variants_ignore_spl_offset() {
+        let thd = hover_label(0, 1000.0, &HoverReadout::Thd(0.5), Some(126.0));
+        assert!(thd.contains("THD 0.5000%"));
+        assert!(!thd.contains("SPL"));
+
+        let time = hover_label(0, 1000.0, &HoverReadout::TimeAgo(1.5), Some(126.0));
+        assert!(time.contains("t-"));
+        assert!(!time.contains("SPL"));
     }
 
     #[test]
@@ -411,7 +505,7 @@ mod tests {
                 floor_db: -96.0,
                 span_db: 93.0,
             };
-            let s = spectrum_readout(&stats, Some(dbu));
+            let s = spectrum_readout(&stats, Some(dbu), None);
             let expected = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
             let needle = format!("{:+.1} dBV", expected);
             assert!(s.contains(&needle), "want {needle} in: {s}");
@@ -601,7 +695,7 @@ mod tests {
 
     #[test]
     fn hover_db() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Db(-12.3));
+        let s = hover_label(0, 1000.0, &HoverReadout::Db(-12.3), None);
         assert!(s.contains("CH0"));
         assert!(s.contains("kHz"));
         assert!(s.contains("-12.3 dB"));
@@ -609,14 +703,14 @@ mod tests {
 
     #[test]
     fn hover_thd() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Thd(0.0034));
+        let s = hover_label(0, 1000.0, &HoverReadout::Thd(0.0034), None);
         assert!(s.contains("THD 0.0034%"));
         assert!(!s.contains("CH")); // Thd variant has no channel prefix
     }
 
     #[test]
     fn hover_gain() {
-        let s = hover_label(0, 5000.0, &HoverReadout::Gain(-1.23));
+        let s = hover_label(0, 5000.0, &HoverReadout::Gain(-1.23), None);
         assert!(s.contains("-1.23 dB"));
         assert!(s.contains("kHz"));
         assert!(!s.contains("CH")); // Gain variant has no channel prefix

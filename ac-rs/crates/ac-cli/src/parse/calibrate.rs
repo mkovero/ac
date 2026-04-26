@@ -42,6 +42,41 @@ pub(super) fn parse_calibrate(args: &[String], show_plot: bool) -> Result<Parsed
     })
 }
 
+/// `ac calibrate spl [input N] [output N]` — pistonphone-reference SPL cal.
+/// Voltage-cal arguments don't apply (no level / no playback), so this
+/// parser only knows about channel selection.
+pub(super) fn parse_calibrate_spl(args: &[String]) -> Result<ParsedCommand, String> {
+    let mut output_channel = None;
+    let mut input_channel = None;
+    let mut remaining: Vec<&String> = args.iter().collect();
+
+    while !remaining.is_empty() {
+        let key = expand(remaining[0]);
+        if (key == "output" || key == "input") && remaining.len() > 1 {
+            remaining.remove(0);
+            let val_str = remaining.remove(0);
+            let val: u32 = val_str.parse().map_err(|_| {
+                format!("calibrate spl: {key:?} value must be an integer, got {val_str:?}")
+            })?;
+            if key == "output" {
+                output_channel = Some(val);
+            } else {
+                input_channel = Some(val);
+            }
+        } else {
+            return Err(format!("calibrate spl: unexpected token {:?}", remaining[0]));
+        }
+    }
+
+    Ok(ParsedCommand {
+        cmd: CommandKind::CalibrateSpl {
+            output_channel,
+            input_channel,
+        },
+        show_plot: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -82,5 +117,35 @@ mod tests {
             }
             other => panic!("expected Calibrate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_calibrate_spl_default_channels() {
+        let p = parse(&args("calibrate spl")).unwrap();
+        match p.cmd {
+            CommandKind::CalibrateSpl { output_channel, input_channel } => {
+                assert!(output_channel.is_none());
+                assert!(input_channel.is_none());
+            }
+            other => panic!("expected CalibrateSpl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_calibrate_spl_with_channels() {
+        let p = parse(&args("calibrate spl input 2 output 1")).unwrap();
+        match p.cmd {
+            CommandKind::CalibrateSpl { output_channel, input_channel } => {
+                assert_eq!(output_channel, Some(1));
+                assert_eq!(input_channel, Some(2));
+            }
+            other => panic!("expected CalibrateSpl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cal_spl_alias() {
+        let p = parse(&args("cal spl")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::CalibrateSpl { .. }));
     }
 }

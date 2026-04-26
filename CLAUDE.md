@@ -25,7 +25,8 @@ jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ```bash
 ac devices                              # list audio ports
 ac setup output 11 input 0             # save port config
-ac calibrate                           # interactive calibration
+ac calibrate                           # interactive voltage calibration
+ac calibrate spl input 0               # pistonphone SPL calibration (94 dB ref)
 ac sweep level -20dbu 6dbu 1khz       # level sweep
 ac sweep frequency 20hz 20khz 0dbu    # freq sweep
 ac monitor                             # live spectrum (default input)

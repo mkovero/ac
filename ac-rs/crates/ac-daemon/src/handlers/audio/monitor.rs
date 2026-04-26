@@ -157,6 +157,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let cals: Vec<Option<Calibration>> = channels_worker.iter()
             .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
             .collect();
+        // Per-channel SPL offset (= 94 - mic_sens_dbfs); `None` when the
+        // channel hasn't been pistonphone-calibrated. Cached once at start
+        // — re-running `calibrate_spl` requires a `monitor` restart, same
+        // as voltage cal changes need today.
+        let spl_offsets: Vec<Option<f64>> =
+            cals.iter().map(|c| c.as_ref().and_then(Calibration::spl_offset_db)).collect();
         let mut eng = make_engine(fake);
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
@@ -376,15 +382,16 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     let frame = json!({
-                        "type":        "visualize/cwt",
-                        "cmd":         "monitor_spectrum",
-                        "channel":     channel,
-                        "n_channels":  n_channels,
-                        "sr":          sr,
-                        "magnitudes":  &cwt_mags,
-                        "frequencies": cwt_freqs,
-                        "timestamp":   ts_ns,
-                        "xruns":       xruns_total,
+                        "type":          "visualize/cwt",
+                        "cmd":           "monitor_spectrum",
+                        "channel":       channel,
+                        "n_channels":    n_channels,
+                        "sr":            sr,
+                        "magnitudes":    &cwt_mags,
+                        "frequencies":   cwt_freqs,
+                        "spl_offset_db": spl_offsets[idx],
+                        "timestamp":     ts_ns,
+                        "xruns":         xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -417,17 +424,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             }
                         }
                         let frac_frame = json!({
-                            "type":       "visualize/fractional_octave",
-                            "cmd":        "monitor_spectrum",
-                            "channel":    channel,
-                            "n_channels": n_channels,
-                            "sr":         sr,
-                            "bpo":        bpo,
-                            "weighting":  weighting_tag,
-                            "freqs":      band_centres,
-                            "spectrum":   band_levels.clone(),
-                            "timestamp":  ts_ns,
-                            "xruns":      xruns_total,
+                            "type":          "visualize/fractional_octave",
+                            "cmd":           "monitor_spectrum",
+                            "channel":       channel,
+                            "n_channels":    n_channels,
+                            "sr":            sr,
+                            "bpo":           bpo,
+                            "weighting":     weighting_tag,
+                            "freqs":         band_centres,
+                            "spectrum":      band_levels.clone(),
+                            "spl_offset_db": spl_offsets[idx],
+                            "timestamp":     ts_ns,
+                            "xruns":         xruns_total,
                         });
                         send_pub(&pub_tx, "data", &frac_frame);
 
@@ -457,20 +465,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 };
                                 let dur_s = integ.duration_s();
                                 let leq_frame = json!({
-                                    "type":       "visualize/fractional_octave_leq",
-                                    "cmd":        "monitor_spectrum",
-                                    "channel":    channel,
-                                    "n_channels": n_channels,
-                                    "sr":         sr,
-                                    "bpo":        bpo,
-                                    "weighting":  weighting_tag,
-                                    "mode":       cur_ti_mode,
-                                    "tau_s":      tau_s,
-                                    "duration_s": if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
-                                    "freqs":      band_centres,
-                                    "spectrum":   integrated,
-                                    "timestamp":  ts_ns,
-                                    "xruns":      xruns_total,
+                                    "type":          "visualize/fractional_octave_leq",
+                                    "cmd":           "monitor_spectrum",
+                                    "channel":       channel,
+                                    "n_channels":    n_channels,
+                                    "sr":            sr,
+                                    "bpo":           bpo,
+                                    "weighting":     weighting_tag,
+                                    "mode":          cur_ti_mode,
+                                    "tau_s":         tau_s,
+                                    "duration_s":    if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
+                                    "freqs":         band_centres,
+                                    "spectrum":      integrated,
+                                    "spl_offset_db": spl_offsets[idx],
+                                    "timestamp":     ts_ns,
+                                    "xruns":         xruns_total,
                                 });
                                 send_pub(&pub_tx, "data", &leq_frame);
                             }
@@ -521,16 +530,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     let frame = json!({
-                        "type":        "visualize/cqt",
-                        "cmd":         "monitor_spectrum",
-                        "channel":     channel,
-                        "n_channels":  n_channels,
-                        "sr":          sr,
-                        "bpo":         cqt_bpo,
-                        "magnitudes":  &cqt_mags,
-                        "frequencies": cqt_freqs,
-                        "timestamp":   ts_ns,
-                        "xruns":       xruns_total,
+                        "type":          "visualize/cqt",
+                        "cmd":           "monitor_spectrum",
+                        "channel":       channel,
+                        "n_channels":    n_channels,
+                        "sr":            sr,
+                        "bpo":           cqt_bpo,
+                        "magnitudes":    &cqt_mags,
+                        "frequencies":   cqt_freqs,
+                        "spl_offset_db": spl_offsets[idx],
+                        "timestamp":     ts_ns,
+                        "xruns":         xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -578,15 +588,16 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     let frame = json!({
-                        "type":        "visualize/reassigned",
-                        "cmd":         "monitor_spectrum",
-                        "channel":     channel,
-                        "n_channels":  n_channels,
-                        "sr":          sr,
-                        "magnitudes":  &reass_mags,
-                        "frequencies": reass_freqs_out,
-                        "timestamp":   ts_ns,
-                        "xruns":       xruns_total,
+                        "type":          "visualize/reassigned",
+                        "cmd":           "monitor_spectrum",
+                        "channel":       channel,
+                        "n_channels":    n_channels,
+                        "sr":            sr,
+                        "magnitudes":    &reass_mags,
+                        "frequencies":   reass_freqs_out,
+                        "spl_offset_db": spl_offsets[idx],
+                        "timestamp":     ts_ns,
+                        "xruns":         xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -674,6 +685,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "thd_pct":          r.thd_pct,
                                 "thdn_pct":         r.thdn_pct,
                                 "in_dbu":           in_dbu,
+                                "spl_offset_db":    spl_offsets[idx],
                                 "clipping":         r.clipping,
                                 "xruns":            xruns_total,
                             })
@@ -696,6 +708,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "sr":               sr,
                                 "freqs":            freqs,
                                 "spectrum":         spec,
+                                "spl_offset_db":    spl_offsets[idx],
                                 "xruns":            xruns_total,
                             })
                         }

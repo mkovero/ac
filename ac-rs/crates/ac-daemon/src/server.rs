@@ -350,6 +350,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "generate"            => handlers::generate(state, &cmd),
         "generate_pink"       => handlers::generate_pink(state, &cmd),
         "calibrate"           => handlers::calibrate(state, &cmd),
+        "calibrate_spl"       => handlers::calibrate_spl(state, &cmd),
         "cal_reply"           => handlers::cal_reply(state, &cmd),
         "dmm_read"            => handlers::dmm_read(state),
         "server_enable"       => handlers::server_enable(state),

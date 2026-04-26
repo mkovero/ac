@@ -22,6 +22,12 @@ pub struct CalibrationEntry {
     pub vrms_at_0dbfs_in: Option<f64>,
     #[serde(default = "default_ref_dbfs")]
     pub ref_dbfs: f64,
+    /// Captured input level (dBFS) when a 94 dB SPL pistonphone reference
+    /// is applied to this channel. With this value, any other dBFS reading
+    /// converts to dB SPL via `dbspl = dbfs - mic_sens_dbfs + 94.0`.
+    /// `None` until the SPL calibration step has been run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_sensitivity_dbfs_at_94db_spl: Option<f64>,
 }
 
 fn default_ref_freq() -> f64 { 1000.0 }
@@ -36,7 +42,14 @@ pub struct Calibration {
     pub vrms_at_0dbfs_out: Option<f64>,
     pub vrms_at_0dbfs_in: Option<f64>,
     pub ref_dbfs: f64,
+    pub mic_sensitivity_dbfs_at_94db_spl: Option<f64>,
 }
+
+/// Reference SPL of an acoustic pistonphone calibrator. ANSI S1.40 / IEC
+/// 60942 Class 1 calibrators emit either 94 dB SPL or 114 dB SPL — we
+/// hard-code 94 because that's the universally-supported value and lets
+/// `dbfs_to_dbspl` stay parameterless.
+pub const PISTONPHONE_REF_SPL: f64 = 94.0;
 
 impl Calibration {
     pub fn new(output_channel: u32, input_channel: u32) -> Self {
@@ -47,6 +60,7 @@ impl Calibration {
             vrms_at_0dbfs_out: None,
             vrms_at_0dbfs_in: None,
             ref_dbfs: -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: None,
         }
     }
 
@@ -66,6 +80,27 @@ impl Calibration {
     /// Convert a captured linear RMS (0–1 dBFS scale) to physical Vrms.
     pub fn in_vrms(&self, linear_rms: f64) -> Option<f64> {
         self.vrms_at_0dbfs_in.map(|v| linear_rms * v)
+    }
+
+    /// True when this channel has an SPL reference recorded.
+    pub fn spl_calibrated(&self) -> bool {
+        self.mic_sensitivity_dbfs_at_94db_spl.is_some()
+    }
+
+    /// Convert a dBFS reading to dB SPL using the pistonphone reference.
+    /// Returns `None` when SPL calibration is unset.
+    pub fn dbfs_to_dbspl(&self, dbfs: f64) -> Option<f64> {
+        self.mic_sensitivity_dbfs_at_94db_spl
+            .map(|m| dbfs - m + PISTONPHONE_REF_SPL)
+    }
+
+    /// Additive offset that converts dBFS → dB SPL (so `dbspl = dbfs +
+    /// spl_offset_db()`). Returned for transport in wire frames; the UI
+    /// applies it to whichever readout it's rendering. `None` when SPL
+    /// calibration is unset.
+    pub fn spl_offset_db(&self) -> Option<f64> {
+        self.mic_sensitivity_dbfs_at_94db_spl
+            .map(|m| PISTONPHONE_REF_SPL - m)
     }
 
     // -----------------------------------------------------------------------
@@ -96,6 +131,7 @@ impl Calibration {
             vrms_at_0dbfs_out: self.vrms_at_0dbfs_out,
             vrms_at_0dbfs_in:  self.vrms_at_0dbfs_in,
             ref_dbfs:        self.ref_dbfs,
+            mic_sensitivity_dbfs_at_94db_spl: self.mic_sensitivity_dbfs_at_94db_spl,
         });
 
         let out = serde_json::to_string_pretty(&all)?;
@@ -162,13 +198,29 @@ impl Calibration {
 
     fn from_entry(e: &CalibrationEntry) -> Self {
         Self {
-            output_channel:    e.output_channel,
-            input_channel:     e.input_channel,
-            ref_freq:          e.ref_freq,
-            vrms_at_0dbfs_out: e.vrms_at_0dbfs_out,
-            vrms_at_0dbfs_in:  e.vrms_at_0dbfs_in,
-            ref_dbfs:          e.ref_dbfs,
+            output_channel:                   e.output_channel,
+            input_channel:                    e.input_channel,
+            ref_freq:                         e.ref_freq,
+            vrms_at_0dbfs_out:                e.vrms_at_0dbfs_out,
+            vrms_at_0dbfs_in:                 e.vrms_at_0dbfs_in,
+            ref_dbfs:                         e.ref_dbfs,
+            mic_sensitivity_dbfs_at_94db_spl: e.mic_sensitivity_dbfs_at_94db_spl,
         }
+    }
+
+    /// Load the existing calibration entry for a channel pair, or return a
+    /// fresh one with defaults. Used by partial-update handlers (voltage
+    /// cal + SPL cal write to disjoint fields and must not clobber each
+    /// other's prior values).
+    pub fn load_or_new(
+        output_channel: u32,
+        input_channel: u32,
+        path: Option<&Path>,
+    ) -> Self {
+        Self::load(output_channel, input_channel, path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Self::new(output_channel, input_channel))
     }
 }
 
@@ -247,5 +299,82 @@ mod tests {
         assert!((cal.out_vrms(0.0).unwrap() - 1.0).abs() < 1e-12);
         // -20 dBFS → 0.1 Vrms
         assert!((cal.out_vrms(-20.0).unwrap() - 0.1).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dbfs_to_dbspl_round_trip() {
+        // Pistonphone applied at 94 dB SPL captured -32 dBFS → mic
+        // sensitivity is -32 dBFS @ 94 dB SPL. Re-applying the same dBFS
+        // input must read 94 dB SPL.
+        let mut cal = Calibration::new(0, 0);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-32.0);
+        let dbspl = cal.dbfs_to_dbspl(-32.0).unwrap();
+        assert!((dbspl - 94.0).abs() < 0.5, "round-trip got {dbspl}, expected 94");
+
+        // Linear: every 1 dB louder dBFS → 1 dB louder SPL.
+        let dbspl_quieter = cal.dbfs_to_dbspl(-50.0).unwrap();
+        assert!((dbspl_quieter - 76.0).abs() < 1e-9);
+        let dbspl_louder = cal.dbfs_to_dbspl(-10.0).unwrap();
+        assert!((dbspl_louder - 116.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spl_offset_db_matches_dbfs_to_dbspl() {
+        let mut cal = Calibration::new(0, 0);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-28.5);
+        let off = cal.spl_offset_db().unwrap();
+        for dbfs in &[-80.0, -45.5, -10.0, 0.0] {
+            let direct = cal.dbfs_to_dbspl(*dbfs).unwrap();
+            let via_off = dbfs + off;
+            assert!((direct - via_off).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn spl_calibrated_predicate() {
+        let mut cal = Calibration::new(0, 0);
+        assert!(!cal.spl_calibrated());
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+        assert!(cal.spl_calibrated());
+    }
+
+    #[test]
+    fn spl_field_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+
+        let mut cal = Calibration::new(2, 3);
+        cal.vrms_at_0dbfs_out = Some(1.0);
+        cal.vrms_at_0dbfs_in  = Some(0.5);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-31.7);
+        cal.save(Some(&path)).unwrap();
+
+        let loaded = Calibration::load(2, 3, Some(&path)).unwrap().unwrap();
+        assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-31.7));
+    }
+
+    #[test]
+    fn voltage_save_preserves_existing_spl() {
+        // Workflow: user runs SPL cal first (sets only the SPL field), then
+        // later runs voltage cal. The voltage handler uses load_or_new and
+        // mutates only the voltage fields, so the SPL value must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+
+        let mut spl_cal = Calibration::new(0, 1);
+        spl_cal.mic_sensitivity_dbfs_at_94db_spl = Some(-29.4);
+        spl_cal.save(Some(&path)).unwrap();
+
+        // Voltage-cal handler simulation — load existing, set voltage,
+        // save; SPL field stays.
+        let mut cal = Calibration::load_or_new(0, 1, Some(&path));
+        cal.vrms_at_0dbfs_out = Some(1.234);
+        cal.vrms_at_0dbfs_in  = Some(0.567);
+        cal.save(Some(&path)).unwrap();
+
+        let loaded = Calibration::load(0, 1, Some(&path)).unwrap().unwrap();
+        assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-29.4));
+        assert_eq!(loaded.vrms_at_0dbfs_out,                Some(1.234));
+        assert_eq!(loaded.vrms_at_0dbfs_in,                 Some(0.567));
     }
 }

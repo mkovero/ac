@@ -430,7 +430,9 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // any input (music, speech, noise, room response). Falls back
         // gracefully when the frame arrived with an empty spectrum.
         if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
-            let bottom_left = super::fmt::spectrum_readout(&stats, frame.meta.in_dbu);
+            let bottom_left = super::fmt::spectrum_readout(
+                &stats, frame.meta.in_dbu, frame.meta.spl_offset_db,
+            );
             painter.text(
                 Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
                 Align2::LEFT_BOTTOM,
@@ -544,7 +546,14 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        let label = super::fmt::hover_label(hover.channel, hover.freq_hz, &hover.readout);
+        let hover_spl_off = input
+            .frames
+            .get(hover.channel)
+            .and_then(|f| f.as_ref())
+            .and_then(|f| f.meta.spl_offset_db);
+        let label = super::fmt::hover_label(
+            hover.channel, hover.freq_hz, &hover.readout, hover_spl_off,
+        );
         // Pin the readout just above-right of the cursor, clamped so it
         // stays inside the hovered cell.
         let anchor = Pos2::new(

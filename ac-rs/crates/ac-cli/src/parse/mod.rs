@@ -359,6 +359,10 @@ pub enum CommandKind {
         input_channel: Option<u32>,
     },
     CalibrateShow,
+    CalibrateSpl {
+        output_channel: Option<u32>,
+        input_channel: Option<u32>,
+    },
     ServerEnable,
     ServerDisable,
     ServerConnections,
@@ -422,6 +426,13 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
             cmd: CommandKind::CalibrateShow,
             show_plot: false,
         });
+    }
+
+    // "ac calibrate spl [input N] [output N]" — pistonphone-reference SPL cal.
+    if verb == "calibrate" && args.first().map(|a| a.eq_ignore_ascii_case("spl")).unwrap_or(false) {
+        let mut spl_args = args.clone();
+        spl_args.remove(0);
+        return calibrate::parse_calibrate_spl(&spl_args);
     }
 
     let (args, show_plot) = extract_show(&args);
