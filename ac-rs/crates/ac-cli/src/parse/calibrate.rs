@@ -42,6 +42,47 @@ pub(super) fn parse_calibrate(args: &[String], show_plot: bool) -> Result<Parsed
     })
 }
 
+/// `ac calibrate mic-curve <path|clear> [input N] [output N]` — attach
+/// or clear a mic frequency-response correction curve. The CLI parses
+/// the file (so the user gets immediate feedback on bad files) and
+/// uploads validated arrays to the daemon; `path == "clear"` drops
+/// any stored curve on the channel.
+pub(super) fn parse_calibrate_mic_curve(args: &[String]) -> Result<ParsedCommand, String> {
+    if args.is_empty() {
+        return Err("calibrate mic-curve: expected <path|clear> [input N] [output N]".into());
+    }
+    let mut output_channel = None;
+    let mut input_channel = None;
+    let mut remaining: Vec<&String> = args.iter().collect();
+    let raw_path = remaining.remove(0).clone();
+    let path = if raw_path.eq_ignore_ascii_case("clear") {
+        None
+    } else {
+        Some(raw_path)
+    };
+    while !remaining.is_empty() {
+        let key = expand(remaining[0]);
+        if (key == "output" || key == "input") && remaining.len() > 1 {
+            remaining.remove(0);
+            let val_str = remaining.remove(0);
+            let val: u32 = val_str.parse().map_err(|_| {
+                format!("calibrate mic-curve: {key:?} value must be an integer, got {val_str:?}")
+            })?;
+            if key == "output" {
+                output_channel = Some(val);
+            } else {
+                input_channel = Some(val);
+            }
+        } else {
+            return Err(format!("calibrate mic-curve: unexpected token {:?}", remaining[0]));
+        }
+    }
+    Ok(ParsedCommand {
+        cmd: CommandKind::CalibrateMicCurve { path, output_channel, input_channel },
+        show_plot: false,
+    })
+}
+
 /// `ac calibrate spl [input N] [output N]` — pistonphone-reference SPL cal.
 /// Voltage-cal arguments don't apply (no level / no playback), so this
 /// parser only knows about channel selection.
@@ -147,5 +188,30 @@ mod tests {
     fn test_cal_spl_alias() {
         let p = parse(&args("cal spl")).unwrap();
         assert!(matches!(p.cmd, CommandKind::CalibrateSpl { .. }));
+    }
+
+    #[test]
+    fn test_calibrate_mic_curve_path() {
+        let p = parse(&args("calibrate mic-curve /tmp/foo.frd input 1")).unwrap();
+        match p.cmd {
+            CommandKind::CalibrateMicCurve { path, output_channel, input_channel } => {
+                assert_eq!(path, Some("/tmp/foo.frd".into()));
+                assert!(output_channel.is_none());
+                assert_eq!(input_channel, Some(1));
+            }
+            other => panic!("expected CalibrateMicCurve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_calibrate_mic_curve_clear() {
+        let p = parse(&args("cal mic-curve clear input 0")).unwrap();
+        match p.cmd {
+            CommandKind::CalibrateMicCurve { path, input_channel, .. } => {
+                assert!(path.is_none());
+                assert_eq!(input_channel, Some(0));
+            }
+            other => panic!("expected CalibrateMicCurve, got {other:?}"),
+        }
     }
 }

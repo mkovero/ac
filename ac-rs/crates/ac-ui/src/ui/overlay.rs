@@ -262,9 +262,17 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 (mode, _, _) => format!("  │  {mode}"),
             },
         };
+        // Mic-curve tag: surfaced loudly so the user knows the spectrum
+        // they're looking at has been frequency-corrected (or not). Three
+        // states match the daemon's `mic_correction` field.
+        let mic_tag = match frame.meta.mic_correction.as_deref() {
+            Some("on")  => "  │  mic-cal".to_string(),
+            Some("off") => "  │  mic-cal: off".to_string(),
+            _ => String::new(),
+        };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
@@ -273,9 +281,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 ioct_tag,
                 wt_tag,
                 time_tag,
+                mic_tag,
             ),
             ViewMode::Waterfall => format!(
-                "color {:.0}..{:.0} dB  │  {}..{}{}{}{}{}",
+                "color {:.0}..{:.0} dB  │  {}..{}{}{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
@@ -284,6 +293,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 ioct_tag,
                 wt_tag,
                 time_tag,
+                mic_tag,
             ),
         };
         painter.text(
@@ -439,7 +449,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // gracefully when the frame arrived with an empty spectrum.
         if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
             let bottom_left = super::fmt::spectrum_readout(
-                &stats, frame.meta.in_dbu, frame.meta.spl_offset_db,
+                &stats,
+                frame.meta.in_dbu,
+                frame.meta.spl_offset_db,
+                frame.meta.mic_correction.as_deref(),
             );
             painter.text(
                 Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),

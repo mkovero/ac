@@ -34,6 +34,7 @@ fn test_frame(freq: f32, dbfs: f32, thd: f32, thdn: f32) -> DisplayFrame {
             thdn_pct: thdn,
             in_dbu: None,
             spl_offset_db: None,
+            mic_correction: None,
             sr: 48000,
             clipping: false,
             xruns: 0,

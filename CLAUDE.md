@@ -27,6 +27,8 @@ ac devices                              # list audio ports
 ac setup output 11 input 0             # save port config
 ac calibrate                           # interactive voltage calibration
 ac calibrate spl input 0               # pistonphone SPL calibration (94 dB ref)
+ac calibrate mic-curve foo.frd input 0 # attach mic frequency-response correction
+ac calibrate mic-curve clear input 0   # remove mic correction from a channel
 ac sweep level -20dbu 6dbu 1khz       # level sweep
 ac sweep frequency 20hz 20khz 0dbu    # freq sweep
 ac monitor                             # live spectrum (default input)

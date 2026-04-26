@@ -126,6 +126,29 @@ impl App {
         }
     }
 
+    /// Push the local `mic_correction_enabled` flag to the daemon. Fire-
+    /// and-forget — the toggle is per-session and a missed roundtrip just
+    /// means the next frame keeps the previous tag (the local flag is the
+    /// authoritative UI-side value).
+    pub(super) fn send_mic_correction_enabled(&mut self) {
+        if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
+            return;
+        }
+        let enabled = self.mic_correction_enabled;
+        let Some(ctrl) = self.ensure_ctrl() else {
+            self.notify("mic-cal: no ctrl");
+            return;
+        };
+        let cmd = serde_json::json!({
+            "cmd":     "set_mic_correction_enabled",
+            "enabled": enabled,
+        });
+        if let Err(e) = ctrl.send(&cmd) {
+            log::warn!("set_mic_correction_enabled failed: {e}");
+            self.notify("mic-cal: ctrl error");
+        }
+    }
+
     pub(super) fn send_cwt_params(&mut self) {
         if self.analysis_mode != "cwt" {
             return;

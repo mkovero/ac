@@ -38,6 +38,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
+ "chrono",
  "printpdf",
  "proptest",
  "rand 0.8.5",
@@ -485,6 +486,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]

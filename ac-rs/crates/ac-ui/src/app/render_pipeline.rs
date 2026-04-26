@@ -140,6 +140,7 @@ impl App {
                         thdn_pct:         0.0,
                         in_dbu:           None,
                         spl_offset_db:    None,
+                        mic_correction:   None,
                         sr:               tf.sr,
                         clipping:         false,
                         xruns:            0,

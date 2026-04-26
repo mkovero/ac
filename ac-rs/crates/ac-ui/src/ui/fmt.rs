@@ -75,9 +75,10 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
 /// match. Both calibrations compose: a fully-cal'd channel shows dB SPL
 /// peak/floor *and* dBu/dBV.
 pub fn spectrum_readout(
-    stats:         &BroadbandStats,
-    in_dbu:        Option<f32>,
-    spl_offset_db: Option<f32>,
+    stats:          &BroadbandStats,
+    in_dbu:         Option<f32>,
+    spl_offset_db:  Option<f32>,
+    mic_correction: Option<&str>,
 ) -> String {
     let cal = in_dbu
         .map(|dbu| {
@@ -85,22 +86,29 @@ pub fn spectrum_readout(
             format!("   {:+.1} dBu   {:+.1} dBV", dbu, dbv)
         })
         .unwrap_or_default();
+    let mic = match mic_correction {
+        Some("on")  => "  [mic-corrected]",
+        Some("off") => "  [mic-cal off]",
+        _ => "",
+    };
     match spl_offset_db {
         Some(off) => format!(
-            "peak {:>6.1} dB SPL @ {}  │  floor {:>6.1} dB SPL  │  span {:>5.1} dB{}",
+            "peak {:>6.1} dB SPL @ {}  │  floor {:>6.1} dB SPL  │  span {:>5.1} dB{}{}",
             stats.peak_db + off,
             format_hz(stats.peak_hz).trim(),
             stats.floor_db + off,
             stats.span_db,
             cal,
+            mic,
         ),
         None => format!(
-            "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}",
+            "peak {:>6.1} dBFS @ {}  │  floor {:>6.1} dBFS  │  span {:>5.1} dB{}{}",
             stats.peak_db,
             format_hz(stats.peak_hz).trim(),
             stats.floor_db,
             stats.span_db,
             cal,
+            mic,
         ),
     }
 }
@@ -389,7 +397,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None, None);
+        let s = spectrum_readout(&stats, None, None, None);
         assert!(s.contains("peak"));
         assert!(s.contains("-3.0 dBFS"));
         assert!(s.contains("1.00 kHz"));
@@ -409,7 +417,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None, None);
+        let s = spectrum_readout(&stats, None, None, None);
         assert!(!s.contains("THD"));
     }
 
@@ -421,7 +429,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, Some(4.0), None);
+        let s = spectrum_readout(&stats, Some(4.0), None, None);
         assert!(s.contains("+4.0 dBu"));
     }
 
@@ -433,7 +441,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None, None);
+        let s = spectrum_readout(&stats, None, None, None);
         assert!(!s.contains("dBu"));
         assert!(!s.contains("dBV"));
     }
@@ -449,7 +457,7 @@ mod tests {
         // 0 dBu is exactly V_ref_dbu (sqrt(0.6) V rms by default), which in
         // dBV is −2.218... dB. The readout must show both in the correct
         // relation.
-        let s = spectrum_readout(&stats, Some(0.0), None);
+        let s = spectrum_readout(&stats, Some(0.0), None, None);
         assert!(s.contains("+0.0 dBu"), "want dBu in: {s}");
         assert!(s.contains("-2.2 dBV"), "want dBV at −2.2 in: {s}");
     }
@@ -466,7 +474,7 @@ mod tests {
             floor_db: -96.0,
             span_db: 93.0,
         };
-        let s = spectrum_readout(&stats, None, Some(126.0));
+        let s = spectrum_readout(&stats, None, Some(126.0), None);
         assert!(s.contains("123.0 dB SPL"), "want SPL peak in: {s}");
         assert!(s.contains("30.0 dB SPL"),  "want SPL floor in: {s}");
         assert!(!s.contains("dBFS"),        "must not show dBFS: {s}");
@@ -486,7 +494,7 @@ mod tests {
             span_db: 58.0,
         };
         let off = 94.0 - captured_dbfs;
-        let s = spectrum_readout(&stats, None, Some(off));
+        let s = spectrum_readout(&stats, None, Some(off), None);
         assert!(s.contains("94.0 dB SPL"), "round-trip readout: {s}");
     }
 
@@ -522,7 +530,7 @@ mod tests {
                 floor_db: -96.0,
                 span_db: 93.0,
             };
-            let s = spectrum_readout(&stats, Some(dbu), None);
+            let s = spectrum_readout(&stats, Some(dbu), None, None);
             let expected = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
             let needle = format!("{:+.1} dBV", expected);
             assert!(s.contains(&needle), "want {needle} in: {s}");
@@ -810,6 +818,48 @@ mod tests {
         assert!(joined.contains("96.0"),  "true peak at 96 dB SPL missing: {joined}");
         // Old labels must not appear in SPL mode.
         assert!(!joined.contains("dBTP"), "dBTP must be replaced: {joined}");
+    }
+
+    // ── spectrum_readout: mic-correction tag ──────────────────────────
+
+    #[test]
+    fn spectrum_readout_shows_mic_corrected_when_on() {
+        let stats = BroadbandStats {
+            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None, None, Some("on"));
+        assert!(s.contains("[mic-corrected]"), "expected mic tag in: {s}");
+    }
+
+    #[test]
+    fn spectrum_readout_shows_off_when_loaded_but_disabled() {
+        let stats = BroadbandStats {
+            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None, None, Some("off"));
+        assert!(s.contains("[mic-cal off]"), "expected off tag in: {s}");
+    }
+
+    #[test]
+    fn spectrum_readout_no_mic_tag_when_no_curve() {
+        let stats = BroadbandStats {
+            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+        };
+        let s_none = spectrum_readout(&stats, None, None, None);
+        let s_str = spectrum_readout(&stats, None, None, Some("none"));
+        assert!(!s_none.contains("mic-"), "no mic tag without curve: {s_none}");
+        assert!(!s_str.contains("mic-"),  "no mic tag for explicit \"none\": {s_str}");
+    }
+
+    #[test]
+    fn spectrum_readout_mic_tag_composes_with_spl() {
+        // Both calibrations active: peak in dB SPL with mic-corrected suffix.
+        let stats = BroadbandStats {
+            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+        };
+        let s = spectrum_readout(&stats, None, Some(97.0), Some("on"));
+        assert!(s.contains("dB SPL"), "{s}");
+        assert!(s.contains("[mic-corrected]"), "{s}");
     }
 
     #[test]

@@ -57,6 +57,50 @@ fn json_finite(v: f64) -> Value {
     if v.is_finite() { json!(v) } else { Value::Null }
 }
 
+/// Subtract the mic frequency-response correction from a magnitude column
+/// in-place. The mic over-reads by `curve.correction_at(f)` dB, so the
+/// truthful magnitude is `mag - correction`. Bins outside the curve's
+/// freq range clamp to the nearest endpoint (constant extrapolation).
+fn apply_mic_curve_inplace_f32(
+    curve: &ac_core::shared::calibration::MicResponse,
+    freqs: &[f32],
+    mags:  &mut [f32],
+) {
+    for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
+        if m.is_finite() {
+            *m -= curve.correction_at(f);
+        }
+    }
+}
+
+/// `f64` variant for the FFT path, where `spectrum_to_columns_wire`
+/// returns `Vec<f64>`.
+fn apply_mic_curve_inplace_f64(
+    curve: &ac_core::shared::calibration::MicResponse,
+    freqs: &[f64],
+    mags:  &mut [f64],
+) {
+    for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
+        if m.is_finite() {
+            *m -= curve.correction_at(f as f32) as f64;
+        }
+    }
+}
+
+/// Status flag stamped on every monitor frame so the UI knows whether
+/// the spectrum it received is mic-corrected, has a curve loaded but
+/// disabled (toggle off), or has no curve at all.
+fn mic_correction_tag(
+    curve_loaded: bool,
+    enabled:      bool,
+) -> &'static str {
+    match (curve_loaded, enabled) {
+        (false, _)    => "none",
+        (true, false) => "off",
+        (true, true)  => "on",
+    }
+}
+
 /// Per-channel time-integrator state for the `fractional_octave_leq`
 /// sidecar frame. Re-initialised when the mode changes or when the band
 /// count changes (ioct_bpo toggle).
@@ -149,6 +193,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let channels_worker = channels.clone();
     let in_ports_worker = in_ports.clone();
     let analysis_mode = state.analysis_mode.clone();
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
     let cwt_sigma_shared = state.cwt_sigma.clone();
     let cwt_n_scales_shared = state.cwt_n_scales.clone();
     let ioct_bpo_shared = state.ioct_bpo.clone();
@@ -167,6 +212,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // as voltage cal changes need today.
         let spl_offsets: Vec<Option<f64>> =
             cals.iter().map(|c| c.as_ref().and_then(Calibration::spl_offset_db)).collect();
+        // Per-channel mic frequency-response curves (cloned out of `cals`
+        // for cheap per-tick lookup). Same staleness caveat as above.
+        let mic_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> =
+            cals.iter().map(|c| c.as_ref().and_then(|c| c.mic_response.clone())).collect();
         let mut eng = make_engine(fake);
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
@@ -385,17 +434,25 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    if mc_enabled {
+                        if let Some(curve) = &mic_curves[idx] {
+                            apply_mic_curve_inplace_f32(curve, &cwt_freqs, &mut cwt_mags);
+                        }
+                    }
+                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
                     let frame = json!({
-                        "type":          "visualize/cwt",
-                        "cmd":           "monitor_spectrum",
-                        "channel":       channel,
-                        "n_channels":    n_channels,
-                        "sr":            sr,
-                        "magnitudes":    &cwt_mags,
-                        "frequencies":   cwt_freqs,
-                        "spl_offset_db": spl_offsets[idx],
-                        "timestamp":     ts_ns,
-                        "xruns":         xruns_total,
+                        "type":            "visualize/cwt",
+                        "cmd":             "monitor_spectrum",
+                        "channel":         channel,
+                        "n_channels":      n_channels,
+                        "sr":              sr,
+                        "magnitudes":      &cwt_mags,
+                        "frequencies":     cwt_freqs,
+                        "spl_offset_db":   spl_offsets[idx],
+                        "mic_correction":  mc_tag,
+                        "timestamp":       ts_ns,
+                        "xruns":           xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -429,18 +486,19 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             }
                         }
                         let frac_frame = json!({
-                            "type":          "visualize/fractional_octave",
-                            "cmd":           "monitor_spectrum",
-                            "channel":       channel,
-                            "n_channels":    n_channels,
-                            "sr":            sr,
-                            "bpo":           bpo,
-                            "weighting":     weighting_tag,
-                            "freqs":         band_centres,
-                            "spectrum":      band_levels.clone(),
-                            "spl_offset_db": spl_offsets[idx],
-                            "timestamp":     ts_ns,
-                            "xruns":         xruns_total,
+                            "type":           "visualize/fractional_octave",
+                            "cmd":            "monitor_spectrum",
+                            "channel":        channel,
+                            "n_channels":     n_channels,
+                            "sr":             sr,
+                            "bpo":            bpo,
+                            "weighting":      weighting_tag,
+                            "freqs":          band_centres,
+                            "spectrum":       band_levels.clone(),
+                            "spl_offset_db":  spl_offsets[idx],
+                            "mic_correction": mc_tag,
+                            "timestamp":      ts_ns,
+                            "xruns":          xruns_total,
                         });
                         send_pub(&pub_tx, "data", &frac_frame);
 
@@ -470,21 +528,22 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 };
                                 let dur_s = integ.duration_s();
                                 let leq_frame = json!({
-                                    "type":          "visualize/fractional_octave_leq",
-                                    "cmd":           "monitor_spectrum",
-                                    "channel":       channel,
-                                    "n_channels":    n_channels,
-                                    "sr":            sr,
-                                    "bpo":           bpo,
-                                    "weighting":     weighting_tag,
-                                    "mode":          cur_ti_mode,
-                                    "tau_s":         tau_s,
-                                    "duration_s":    if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
-                                    "freqs":         band_centres,
-                                    "spectrum":      integrated,
-                                    "spl_offset_db": spl_offsets[idx],
-                                    "timestamp":     ts_ns,
-                                    "xruns":         xruns_total,
+                                    "type":           "visualize/fractional_octave_leq",
+                                    "cmd":            "monitor_spectrum",
+                                    "channel":        channel,
+                                    "n_channels":     n_channels,
+                                    "sr":             sr,
+                                    "bpo":            bpo,
+                                    "weighting":      weighting_tag,
+                                    "mode":           cur_ti_mode,
+                                    "tau_s":          tau_s,
+                                    "duration_s":     if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
+                                    "freqs":          band_centres,
+                                    "spectrum":       integrated,
+                                    "spl_offset_db":  spl_offsets[idx],
+                                    "mic_correction": mc_tag,
+                                    "timestamp":      ts_ns,
+                                    "xruns":          xruns_total,
                                 });
                                 send_pub(&pub_tx, "data", &leq_frame);
                             }
@@ -534,18 +593,26 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    if mc_enabled {
+                        if let Some(curve) = &mic_curves[idx] {
+                            apply_mic_curve_inplace_f32(curve, &cqt_freqs, &mut cqt_mags);
+                        }
+                    }
+                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
                     let frame = json!({
-                        "type":          "visualize/cqt",
-                        "cmd":           "monitor_spectrum",
-                        "channel":       channel,
-                        "n_channels":    n_channels,
-                        "sr":            sr,
-                        "bpo":           cqt_bpo,
-                        "magnitudes":    &cqt_mags,
-                        "frequencies":   cqt_freqs,
-                        "spl_offset_db": spl_offsets[idx],
-                        "timestamp":     ts_ns,
-                        "xruns":         xruns_total,
+                        "type":           "visualize/cqt",
+                        "cmd":            "monitor_spectrum",
+                        "channel":        channel,
+                        "n_channels":     n_channels,
+                        "sr":             sr,
+                        "bpo":            cqt_bpo,
+                        "magnitudes":     &cqt_mags,
+                        "frequencies":    cqt_freqs,
+                        "spl_offset_db":  spl_offsets[idx],
+                        "mic_correction": mc_tag,
+                        "timestamp":      ts_ns,
+                        "xruns":          xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -593,17 +660,25 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    if mc_enabled {
+                        if let Some(curve) = &mic_curves[idx] {
+                            apply_mic_curve_inplace_f32(curve, &reass_freqs_out, &mut reass_mags);
+                        }
+                    }
+                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
                     let frame = json!({
-                        "type":          "visualize/reassigned",
-                        "cmd":           "monitor_spectrum",
-                        "channel":       channel,
-                        "n_channels":    n_channels,
-                        "sr":            sr,
-                        "magnitudes":    &reass_mags,
-                        "frequencies":   reass_freqs_out,
-                        "spl_offset_db": spl_offsets[idx],
-                        "timestamp":     ts_ns,
-                        "xruns":         xruns_total,
+                        "type":           "visualize/reassigned",
+                        "cmd":            "monitor_spectrum",
+                        "channel":        channel,
+                        "n_channels":     n_channels,
+                        "sr":             sr,
+                        "magnitudes":     &reass_mags,
+                        "frequencies":    reass_freqs_out,
+                        "spl_offset_db":  spl_offsets[idx],
+                        "mic_correction": mc_tag,
+                        "timestamp":      ts_ns,
+                        "xruns":          xruns_total,
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
@@ -664,6 +739,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                 {
                     let analyze_result = ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
                     let frame = match analyze_result {
                         Ok(r) => {
                             current_freqs[idx] = r.fundamental_hz;
@@ -672,13 +749,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .and_then(|c| c.in_vrms(r.linear_rms))
                                 .map(ac_core::shared::conversions::vrms_to_dbu);
                             let sr_f = sr as f64;
-                            let (spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                            let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &r.spectrum,
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
                                 ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
+                            if mc_enabled {
+                                if let Some(curve) = &mic_curves[idx] {
+                                    apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
+                                }
+                            }
                             json!({
                                 "type":             "visualize/spectrum",
                                 "cmd":              "monitor_spectrum",
@@ -693,6 +775,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "thdn_pct":         r.thdn_pct,
                                 "in_dbu":           in_dbu,
                                 "spl_offset_db":    spl_offsets[idx],
+                                "mic_correction":   mc_tag,
                                 "clipping":         r.clipping,
                                 "xruns":            xruns_total,
                             })
@@ -700,13 +783,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         Err(_) => {
                             let (spec, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
-                            let (spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                            let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &spec,
                                 sr_f,
                                 20.0,
                                 (sr_f / 2.0).max(21.0),
                                 ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                             );
+                            if mc_enabled {
+                                if let Some(curve) = &mic_curves[idx] {
+                                    apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
+                                }
+                            }
                             json!({
                                 "type":             "visualize/spectrum",
                                 "cmd":              "monitor_spectrum",
@@ -716,6 +804,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "freqs":            freqs,
                                 "spectrum":         spec,
                                 "spl_offset_db":    spl_offsets[idx],
+                                "mic_correction":   mc_tag,
                                 "xruns":            xruns_total,
                             })
                         }

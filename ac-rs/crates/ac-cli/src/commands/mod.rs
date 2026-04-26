@@ -35,6 +35,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::Calibrate { .. } => calibrate::run(&parsed.cmd, client),
         CommandKind::CalibrateShow => calibrate::run_show(client),
         CommandKind::CalibrateSpl { .. } => calibrate::run_spl(&parsed.cmd, client),
+        CommandKind::CalibrateMicCurve { .. } => calibrate::run_mic_curve(&parsed.cmd, client),
 
         CommandKind::SweepLevel { .. } => sweep::run_level(&parsed.cmd, client),
         CommandKind::SweepFrequency { .. } => sweep::run_frequency(&parsed.cmd, cfg, client),

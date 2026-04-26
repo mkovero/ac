@@ -702,6 +702,19 @@ impl App {
                     "peak hold: off"
                 });
             }
+            KeyCode::KeyM if self.modifiers.shift_key() => {
+                // Toggle daemon-side mic-curve correction. The flag is
+                // process-wide; the daemon stamps the per-channel state
+                // (`on` / `off` / `none`) on every monitor frame so the
+                // overlay tag follows automatically without local mirror.
+                self.mic_correction_enabled = !self.mic_correction_enabled;
+                self.send_mic_correction_enabled();
+                self.notify(if self.mic_correction_enabled {
+                    "mic-cal: on"
+                } else {
+                    "mic-cal: off"
+                });
+            }
             KeyCode::KeyM => {
                 self.min_hold_enabled = !self.min_hold_enabled;
                 self.reset_peak_holds();

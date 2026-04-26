@@ -85,6 +85,11 @@ pub struct ServerState {
     /// worker on its next tick. Clears per-channel LKFS-I / LRA / dBTP
     /// accumulators without restarting the monitor.
     pub loudness_reset_request: Arc<std::sync::atomic::AtomicBool>,
+    /// Process-wide toggle for daemon-side mic-curve correction. Defaults
+    /// to `true` so a freshly loaded curve takes effect immediately;
+    /// flipped via `set_mic_correction_enabled`. Per-channel curves are
+    /// still respected — this just gates whether they're applied.
+    pub mic_correction_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Live-tunable parameters for the `monitor_spectrum` FFT path. The worker
     /// re-reads these every tick so `set_monitor_params` takes effect without
     /// a restart. `active` flips true on worker spawn and false on exit;
@@ -155,6 +160,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         time_integration_mode: Arc::new(Mutex::new("off".to_string())),
         leq_reset_request:     Arc::new(std::sync::atomic::AtomicBool::new(false)),
         loudness_reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        mic_correction_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
     };
 
@@ -351,6 +357,8 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "generate_pink"       => handlers::generate_pink(state, &cmd),
         "calibrate"           => handlers::calibrate(state, &cmd),
         "calibrate_spl"       => handlers::calibrate_spl(state, &cmd),
+        "calibrate_mic_curve" => handlers::calibrate_mic_curve(state, &cmd),
+        "set_mic_correction_enabled" => handlers::set_mic_correction_enabled(state, &cmd),
         "cal_reply"           => handlers::cal_reply(state, &cmd),
         "dmm_read"            => handlers::dmm_read(state),
         "server_enable"       => handlers::server_enable(state),

@@ -363,6 +363,11 @@ pub enum CommandKind {
         output_channel: Option<u32>,
         input_channel: Option<u32>,
     },
+    CalibrateMicCurve {
+        path: Option<String>,                        // None = clear
+        output_channel: Option<u32>,
+        input_channel: Option<u32>,
+    },
     ServerEnable,
     ServerDisable,
     ServerConnections,
@@ -433,6 +438,17 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
         let mut spl_args = args.clone();
         spl_args.remove(0);
         return calibrate::parse_calibrate_spl(&spl_args);
+    }
+
+    // "ac calibrate mic-curve <path|clear> [input N] [output N]"
+    if verb == "calibrate"
+        && args.first().map(|a|
+            a.eq_ignore_ascii_case("mic-curve") || a.eq_ignore_ascii_case("miccurve"))
+        .unwrap_or(false)
+    {
+        let mut mc_args = args.clone();
+        mc_args.remove(0);
+        return calibrate::parse_calibrate_mic_curve(&mc_args);
     }
 
     let (args, show_plot) = extract_show(&args);

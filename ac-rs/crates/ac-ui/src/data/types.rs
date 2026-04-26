@@ -20,6 +20,13 @@ pub struct SpectrumFrame {
     /// using `dbspl = dbfs + off`.
     #[serde(default)]
     pub spl_offset_db: Option<f32>,
+    /// Daemon mic-correction state for the channel that produced this
+    /// frame. `"none"` = no curve loaded; `"on"` = curve loaded and
+    /// applied; `"off"` = curve loaded but the global toggle is off.
+    /// Only used at the type-tag level — the UI doesn't read the curve
+    /// itself (correction is already applied by the daemon).
+    #[serde(default)]
+    pub mic_correction: Option<String>,
     pub sr: u32,
     #[serde(default)]
     pub clipping: bool,
@@ -59,6 +66,7 @@ impl Default for SpectrumFrame {
             thdn_pct: 0.0,
             in_dbu: None,
             spl_offset_db: None,
+            mic_correction: None,
             sr: 48000,
             clipping: false,
             xruns: 0,
@@ -103,6 +111,11 @@ pub struct FrameMeta {
     /// daemon when the channel has been pistonphone-calibrated. `None`
     /// preserves the dBFS readout convention.
     pub spl_offset_db: Option<f32>,
+    /// Daemon mic-correction state. `None` / `Some("none")` → no curve;
+    /// `Some("on")` → curve loaded and applied; `Some("off")` → curve
+    /// loaded but the global toggle is off. Drives the top-right tag
+    /// chip and the bottom-left readout's `[mic-corrected]` suffix.
+    pub mic_correction: Option<String>,
     pub sr: u32,
     pub clipping: bool,
     #[allow(dead_code)]
@@ -130,6 +143,8 @@ pub struct CwtFrame {
     pub n_channels:  Option<u32>,
     #[serde(default)]
     pub spl_offset_db: Option<f32>,
+    #[serde(default)]
+    pub mic_correction: Option<String>,
 }
 
 /// One H1 transfer function estimate from the daemon. Arrives on the `data`
@@ -227,6 +242,7 @@ impl From<&SpectrumFrame> for FrameMeta {
             thdn_pct: f.thdn_pct,
             in_dbu: f.in_dbu,
             spl_offset_db: f.spl_offset_db,
+            mic_correction: f.mic_correction.clone(),
             sr: f.sr,
             clipping: f.clipping,
             xruns: f.xruns,

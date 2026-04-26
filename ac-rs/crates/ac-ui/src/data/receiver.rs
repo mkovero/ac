@@ -211,6 +211,7 @@ pub fn spawn(
                             channel: cf.channel,
                             n_channels: cf.n_channels,
                             spl_offset_db: cf.spl_offset_db,
+                            mic_correction: cf.mic_correction,
                             frame_id: slot_seq[slot],
                             ..SpectrumFrame::default()
                         };

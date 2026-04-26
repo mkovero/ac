@@ -247,6 +247,59 @@ pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
     }
 }
 
+/// `ac calibrate mic-curve <path|clear> [input N] [output N]` — parse the
+/// .frd / .txt file CLI-side (so bad files fail before the daemon round
+/// trip) and upload validated arrays to the daemon. `clear` drops any
+/// stored curve.
+pub fn run_mic_curve(cmd: &CommandKind, client: &mut AcClient) {
+    let (path, out_ch, in_ch) = match cmd {
+        CommandKind::CalibrateMicCurve { path, output_channel, input_channel } => {
+            (path.clone(), output_channel, input_channel)
+        }
+        _ => unreachable!(),
+    };
+
+    let mut cmd_json = match path {
+        None => serde_json::json!({"cmd": "calibrate_mic_curve", "op": "clear"}),
+        Some(ref p) => {
+            let text = match std::fs::read_to_string(p) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("  error: cannot read {p}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let curve = match ac_core::shared::calibration::parse_mic_curve(
+                &text, Some(p.clone()),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  error: parsing {p}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            serde_json::json!({
+                "cmd":         "calibrate_mic_curve",
+                "op":          "set",
+                "freqs_hz":    curve.freqs_hz,
+                "gain_db":     curve.gain_db,
+                "source_path": p,
+            })
+        }
+    };
+    if let Some(ch) = out_ch { cmd_json["output_channel"] = (*ch).into(); }
+    if let Some(ch) = in_ch  { cmd_json["input_channel"]  = (*ch).into(); }
+
+    let ack = check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate_mic_curve");
+    let key = ack.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+    let n   = ack.get("loaded").and_then(|v| v.as_u64()).unwrap_or(0);
+    if n == 0 {
+        println!("  Mic curve cleared on [{key}].");
+    } else {
+        println!("  Mic curve loaded on [{key}]: {n} points.");
+    }
+}
+
 fn read_line() -> String {
     let mut line = String::new();
     io::stdin().read_line(&mut line).ok();

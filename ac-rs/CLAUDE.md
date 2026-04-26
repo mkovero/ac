@@ -94,6 +94,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `S` | Screenshot |
 | `P` | Toggle peak hold (Spectrum view) — top-5 local maxima ranked by dB with ≥1/3-octave spacing, auto-decays at 20 dB/s after 1 s idle |
 | `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
+| `Shift+M` | Toggle daemon-side mic frequency-response correction. Per-channel curves are loaded via `ac calibrate mic-curve` and applied in the daemon before frame emission; the toggle gates application without unloading the curve. Top-right shows `mic-cal` (on) or `mic-cal: off` (loaded but disabled); bottom-left appends `[mic-corrected]` to the readout. |
 | `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
 | `Shift+O` | Cycle fractional-octave CWT aggregation (CWT mode only): off → 1/1 → 1/3 → 1/6 → 1/12 → 1/24 → off. Replaces the displayed CWT column with summed-power per band; preserves single-tone dBFS at synthetic isolated scales (kernel-overlap drift on real signals — see `ac-core::fractional_octave`); state shown top-right |
 | `A` | Cycle per-band frequency weighting: off → A → C → Z → off. Daemon adds the IEC 61672-1 Annex E dB offset at each band centre before emitting `fractional_octave` / `fractional_octave_leq`. Display-only — same Morlet-CWT caveat. |

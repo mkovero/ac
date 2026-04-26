@@ -285,6 +285,11 @@ pub struct App {
     min_holds: Vec<Option<Vec<f32>>>,
     min_last_update: Vec<Option<Instant>>,
     min_last_tick: Vec<Option<Instant>>,
+    /// Mirror of the daemon's `mic_correction_enabled` flag. Local copy
+    /// so `Shift+M` can toggle without a round-trip; the daemon's reply
+    /// to `set_mic_correction_enabled` is fire-and-forget. Defaults `true`
+    /// so a freshly loaded curve takes effect immediately.
+    pub(super) mic_correction_enabled: bool,
     /// Fractional-octave smoothing mode. `None` = raw spectrum; `Some(n)`
     /// smooths each bin with its neighbours inside ±f/2^(1/2n) so the
     /// linearly-spaced FFT output reads as a log-spaced curve. Typical
@@ -400,6 +405,7 @@ impl App {
             min_holds: Vec::new(),
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
+            mic_correction_enabled: true,
             // Default to 1/6 octave: gentle enough to preserve resonance
             // detail, heavy enough to calm the FFT grass. Users can cycle or
             // disable via `O`.
