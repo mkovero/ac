@@ -60,7 +60,25 @@ pub fn run_cqt(
     super::plot::launch_ui("spectrum", cfg, Some(&channels));
 }
 
-pub fn run_not_implemented(technique: &str) {
-    eprintln!("ac monitor {technique}: not yet implemented (tracked in ARCHITECTURE.md)");
-    std::process::exit(1);
+/// `ac monitor reassigned` — symmetric to `run_cwt`/`run_cqt`. Switches
+/// the server analysis mode to `reassigned`, then launches the monitor UI.
+pub fn run_reassigned(
+    cmd: &CommandKind,
+    cfg: &ac_core::config::Config,
+    client: &mut AcClient,
+) {
+    let channels = match cmd {
+        CommandKind::MonitorReassigned { channels, .. } => channels.clone(),
+        _ => unreachable!(),
+    };
+    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
+
+    let ack = client.send_cmd(
+        &serde_json::json!({"cmd": "set_analysis_mode", "mode": "reassigned"}),
+        None,
+    );
+    super::check_ack(ack, "set_analysis_mode reassigned");
+
+    super::plot::launch_ui("spectrum", cfg, Some(&channels));
 }
+

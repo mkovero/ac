@@ -165,20 +165,22 @@ pub fn spawn(
                         .map(|s| s.to_string());
                     if matches!(
                         type_tag.as_deref(),
-                        Some("visualize/cwt") | Some("visualize/cqt")
+                        Some("visualize/cwt")
+                            | Some("visualize/cqt")
+                            | Some("visualize/reassigned")
                     ) {
-                        // CWT/CQT column: magnitudes are already dBFS and
-                        // frequencies are log-spaced. Repackage as a
-                        // SpectrumFrame so the existing display pipeline
-                        // (triple-buffer → waterfall) consumes it unchanged.
-                        // The waterfall auto-detects log spacing from the
-                        // freqs step ratio (see app.rs log_spaced detection).
-                        // Both frame shapes are wire-identical; one parser
-                        // covers both.
+                        // CWT / CQT / reassigned column: magnitudes are
+                        // already dBFS and frequencies are log-spaced.
+                        // Repackage as a SpectrumFrame so the existing
+                        // display pipeline (triple-buffer → waterfall)
+                        // consumes it unchanged. The waterfall auto-detects
+                        // log spacing from the freqs step ratio (see
+                        // app.rs log_spaced detection). All three frame
+                        // shapes are wire-identical; one parser covers all.
                         let cf: CwtFrame = match serde_json::from_str(body) {
                             Ok(f) => f,
                             Err(e) => {
-                                log::warn!("cwt/cqt parse failed: {e}");
+                                log::warn!("cwt/cqt/reassigned parse failed: {e}");
                                 continue;
                             }
                         };
@@ -189,7 +191,7 @@ pub fn spawn(
                         let Some(slot) = slot else {
                             if !warned_overflow {
                                 log::warn!(
-                                    "receiver: cwt/cqt frame for channel {:?} exceeds {} preallocated slots; dropping",
+                                    "receiver: cwt/cqt/reassigned frame for channel {:?} exceeds {} preallocated slots; dropping",
                                     cf.channel,
                                     n_slots
                                 );

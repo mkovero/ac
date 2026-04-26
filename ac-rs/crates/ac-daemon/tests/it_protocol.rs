@@ -748,6 +748,44 @@ fn monitor_cqt_emits_visualize_cqt_frame() {
 }
 
 #[test]
+fn monitor_reassigned_emits_visualize_reassigned_frame() {
+    // Symmetric to the cqt smoke test: switch to reassigned mode, drive
+    // monitor_spectrum, confirm frame shape on the wire.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "set_analysis_mode", "mode": "reassigned"}));
+    assert_eq!(r["ok"], json!(true), "set_analysis_mode reassigned: {r}");
+
+    let r = c.call(json!({"cmd": "monitor_spectrum", "freq_hz": 1000.0}));
+    assert_eq!(r["ok"], json!(true));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut frame: Option<Value> = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("visualize/reassigned") => {
+                frame = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None    => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no visualize/reassigned frame within 5 s");
+
+    let mags  = frame["magnitudes"].as_array().expect("magnitudes array");
+    let freqs = frame["frequencies"].as_array().expect("frequencies array");
+    assert_eq!(mags.len(), freqs.len(), "magnitudes/frequencies length mismatch");
+    assert!(mags.len() >= 256, "reassigned column suspiciously short: {}", mags.len());
+    let f0 = freqs[0].as_f64().unwrap();
+    let f_last = freqs[freqs.len() - 1].as_f64().unwrap();
+    assert!(f_last > f0 * 100.0, "freqs span less than 2 decades: {f0}..{f_last}");
+}
+
+#[test]
 fn set_analysis_mode_rejects_garbage() {
     let d = Daemon::spawn();
     let c = Client::new(&d);

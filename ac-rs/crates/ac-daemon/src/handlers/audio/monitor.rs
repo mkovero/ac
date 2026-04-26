@@ -216,6 +216,28 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut cqt_mags: Vec<f32> = Vec::with_capacity(cqt_freqs.len());
         let mut cqt_log_counter = 0u32;
 
+        // Reassigned-spectrogram state. One forward FFT plan + Hann
+        // window plus its time-weighted and derivative variants are
+        // pre-built; the live tick reuses them across frames. The output
+        // grid is log-spaced (so the existing waterfall renders it
+        // unchanged), with more bins than the FFT length so reassignment
+        // can split closely-spaced peaks the FFT would smear together.
+        let reass_n        = ac_core::visualize::reassigned::DEFAULT_N;
+        let reass_n_out    = ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS;
+        let reass_tick     = 0.02_f64;
+        let reass_kernels  = ac_core::visualize::reassigned::build_kernels(
+            reass_n, sr, reass_n_out,
+            ac_core::visualize::reassigned::DEFAULT_F_MIN,
+            ac_core::visualize::reassigned::default_f_max(sr),
+        );
+        let reass_freqs_out: Vec<f32> = reass_kernels.freqs_out.clone();
+        let mut reass_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
+            .iter()
+            .map(|_| std::collections::VecDeque::with_capacity(reass_n))
+            .collect();
+        let mut reass_mags: Vec<f32> = Vec::with_capacity(reass_n_out);
+        let mut reass_log_counter = 0u32;
+
         // Sliding ring buffer for single-channel FFT path so refresh cadence
         // (`cur_interval`) can run faster than capture-window duration
         // (`cur_fft_n / sr`). Each tick pulls just the new samples that
@@ -254,8 +276,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 (mp.interval, mp.fft_n)
             };
             let mode = analysis_mode.lock().unwrap().clone();
-            let is_cwt = mode == "cwt";
-            let is_cqt = mode == "cqt";
+            let is_cwt        = mode == "cwt";
+            let is_cqt        = mode == "cqt";
+            let is_reassigned = mode == "reassigned";
 
             // Time-integration bookkeeping — run once per tick.
             let new_ti_mode = time_integration_shared.lock().unwrap().clone();
@@ -515,6 +538,62 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     );
                     continue;
                 }
+                if is_reassigned {
+                    let samples = match eng.capture_block(reass_tick) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            send_pub(&pub_tx, "error", &json!({
+                                "cmd":     "monitor_spectrum",
+                                "message": format!("capture error on ch{channel}: {e}"),
+                            }));
+                            return;
+                        }
+                    };
+                    xruns_total += eng.xruns();
+                    let _ = loudness[idx].push(&[&samples]);
+                    let ring = &mut reass_rings[idx];
+                    ring.extend(samples.iter());
+                    while ring.len() > reass_n {
+                        ring.pop_front();
+                    }
+                    if ring.len() < reass_n {
+                        continue;
+                    }
+                    let t0 = std::time::Instant::now();
+                    let buf = ring.make_contiguous();
+                    ac_core::visualize::reassigned::reassigned_into(
+                        buf, &reass_kernels, &mut reass_mags,
+                    );
+                    reass_log_counter += 1;
+                    if reass_log_counter % 50 == 1 {
+                        eprintln!(
+                            "reassigned ch{channel}: {:.1}ms, n={}, bins={}",
+                            t0.elapsed().as_secs_f64() * 1000.0,
+                            buf.len(),
+                            reass_freqs_out.len(),
+                        );
+                    }
+                    let ts_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let frame = json!({
+                        "type":        "visualize/reassigned",
+                        "cmd":         "monitor_spectrum",
+                        "channel":     channel,
+                        "n_channels":  n_channels,
+                        "sr":          sr,
+                        "magnitudes":  &reass_mags,
+                        "frequencies": reass_freqs_out,
+                        "timestamp":   ts_ns,
+                        "xruns":       xruns_total,
+                    });
+                    send_pub(&pub_tx, "data", &frame);
+                    emit_loudness_frame(
+                        &pub_tx, channel, n_channels, sr, &loudness[idx], ts_ns, xruns_total,
+                    );
+                    continue;
+                }
 
                 // FFT path. Each channel has its own sliding ring so refresh
                 // cadence (`cur_interval`) is decoupled from FFT window length
@@ -631,9 +710,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     );
                 }
             }
-            // Pace FFT mode to requested interval. CWT/CQT have their own
-            // cadence (short tick + sliding ring) and pace themselves.
-            if !is_cwt && !is_cqt {
+            // Pace FFT mode to requested interval. CWT/CQT/reassigned have
+            // their own cadence (short tick + sliding ring) and pace
+            // themselves.
+            if !is_cwt && !is_cqt && !is_reassigned {
                 let elapsed = tick_start.elapsed().as_secs_f64();
                 if elapsed < cur_interval {
                     std::thread::sleep(std::time::Duration::from_secs_f64(

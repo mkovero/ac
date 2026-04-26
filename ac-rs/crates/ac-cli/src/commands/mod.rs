@@ -45,8 +45,8 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
         CommandKind::MonitorCwt { .. } => monitor::run_cwt(&parsed.cmd, cfg, client),
         CommandKind::MonitorCqt { .. } => monitor::run_cqt(&parsed.cmd, cfg, client),
-        CommandKind::MonitorNotImplemented { technique } => {
-            monitor::run_not_implemented(technique)
+        CommandKind::MonitorReassigned { .. } => {
+            monitor::run_reassigned(&parsed.cmd, cfg, client)
         }
 
         CommandKind::Probe => probe::run(client),

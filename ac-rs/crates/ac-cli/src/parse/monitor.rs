@@ -16,13 +16,6 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
         _ => "spectrum",
     };
 
-    if mode == "reassigned" {
-        return Ok(ParsedCommand {
-            cmd: CommandKind::MonitorNotImplemented { technique: "reassigned" },
-            show_plot,
-        });
-    }
-
     let channels = if args.first().map_or(false, |a| is_channel_spec(a)) {
         Some(parse_channels(&args.remove(0))?)
     } else {
@@ -40,9 +33,10 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
         .unwrap_or(0.1);
     check_empty(&tokens)?;
     let cmd = match mode {
-        "cwt" => CommandKind::MonitorCwt { start_freq, end_freq, interval, channels },
-        "cqt" => CommandKind::MonitorCqt { start_freq, end_freq, interval, channels },
-        _     => CommandKind::Monitor    { start_freq, end_freq, interval, channels },
+        "cwt"        => CommandKind::MonitorCwt        { start_freq, end_freq, interval, channels },
+        "cqt"        => CommandKind::MonitorCqt        { start_freq, end_freq, interval, channels },
+        "reassigned" => CommandKind::MonitorReassigned { start_freq, end_freq, interval, channels },
+        _            => CommandKind::Monitor           { start_freq, end_freq, interval, channels },
     };
     Ok(ParsedCommand { cmd, show_plot })
 }
@@ -138,13 +132,19 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_reassigned_not_implemented() {
+    fn test_monitor_reassigned() {
         let p = parse(&args("monitor reassigned")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::MonitorReassigned { .. }));
+    }
+
+    #[test]
+    fn test_monitor_reassigned_with_channels() {
+        let p = parse(&args("monitor reassigned 0,2")).unwrap();
         match p.cmd {
-            CommandKind::MonitorNotImplemented { technique } => {
-                assert_eq!(technique, "reassigned");
+            CommandKind::MonitorReassigned { channels, .. } => {
+                assert_eq!(channels, Some(vec![0, 2]));
             }
-            other => panic!("expected MonitorNotImplemented, got {other:?}"),
+            other => panic!("expected MonitorReassigned, got {other:?}"),
         }
     }
 }
