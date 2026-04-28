@@ -19,7 +19,10 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+    pub async fn new(
+        window: Arc<Window>,
+        requested_present_mode: wgpu::PresentMode,
+    ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
@@ -61,13 +64,47 @@ impl RenderContext {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        // Pick the present mode the user asked for if the surface supports
+        // it; otherwise fall back to the surface's first advertised mode and
+        // log so the actual choice is auditable. `AutoVsync` / `AutoNoVsync`
+        // are wgpu virtual modes that always resolve, so the fallback path
+        // only fires for explicit `Mailbox` / `Immediate` / `FifoRelaxed`
+        // requests on surfaces that don't expose them (#110).
+        let present_mode =
+            if caps.present_modes.contains(&requested_present_mode)
+                || matches!(
+                    requested_present_mode,
+                    wgpu::PresentMode::AutoVsync | wgpu::PresentMode::AutoNoVsync
+                )
+            {
+                requested_present_mode
+            } else {
+                let fallback = *caps
+                    .present_modes
+                    .first()
+                    .unwrap_or(&wgpu::PresentMode::Fifo);
+                log::warn!(
+                    "present mode {:?} not supported by surface (have {:?}); using {:?}",
+                    requested_present_mode, caps.present_modes, fallback,
+                );
+                fallback
+            };
+        let info = adapter.get_info();
+        log::info!(
+            "wgpu: backend={:?} adapter={:?} driver={:?} driver_info={:?} present_mode={:?} max_latency=3",
+            info.backend, info.name, info.driver, info.driver_info, present_mode,
+        );
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
+            present_mode,
+            // 3 = true triple-buffering on Fifo: acquire returns immediately
+            // while the previously-presented frame is still on-screen, so the
+            // CPU isn't blocked waiting for vsync. Bumped from 2 alongside
+            // #110's runtime present-mode selection.
+            desired_maximum_frame_latency: 3,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
         };

@@ -70,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         initial_view: args.view,
         initial_sweep_kind: args.mode,
         monitor_channels,
+        present_mode: args.present_mode,
         wake: Some(wake),
     };
 
@@ -96,10 +97,37 @@ struct Args {
     benchmark: Option<f64>,
     view: ViewMode,
     mode: Option<SweepKind>,
+    /// wgpu surface present mode. Default `auto-vsync` resolves to `Fifo`
+    /// on desktop. `mailbox` is the workaround for NVIDIA + Vulkan
+    /// `present()` busy-spin (#109/#110); `immediate` skips vsync entirely
+    /// (tearing) for measuring the no-sync lower bound.
+    present_mode: wgpu::PresentMode,
+}
+
+fn parse_present_mode(s: &str) -> anyhow::Result<wgpu::PresentMode> {
+    match s {
+        "auto-vsync"    | "auto_vsync"    | "auto"      => Ok(wgpu::PresentMode::AutoVsync),
+        "auto-no-vsync" | "auto_no_vsync" | "no-vsync"  => Ok(wgpu::PresentMode::AutoNoVsync),
+        "fifo"                                          => Ok(wgpu::PresentMode::Fifo),
+        "fifo-relaxed"  | "fifo_relaxed"                => Ok(wgpu::PresentMode::FifoRelaxed),
+        "mailbox"                                       => Ok(wgpu::PresentMode::Mailbox),
+        "immediate"                                     => Ok(wgpu::PresentMode::Immediate),
+        other => anyhow::bail!(
+            "--present-mode: expected auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate, got {other}",
+        ),
+    }
 }
 
 impl Args {
     fn parse(args: impl Iterator<Item = String>) -> anyhow::Result<Self> {
+        // Env fallback for present mode — `AC_UI_PRESENT_MODE=mailbox`
+        // lets users flip the workaround without retyping the flag every
+        // launch. Explicit `--present-mode` always wins over the env.
+        let env_present_mode = std::env::var("AC_UI_PRESENT_MODE")
+            .ok()
+            .map(|v| parse_present_mode(&v))
+            .transpose()?
+            .unwrap_or(wgpu::PresentMode::AutoVsync);
         let mut out = Args {
             help: false,
             connect: "tcp://127.0.0.1:5557".to_string(),
@@ -112,6 +140,7 @@ impl Args {
             benchmark: None,
             view: ViewMode::Spectrum,
             mode: None,
+            present_mode: env_present_mode,
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -178,6 +207,12 @@ impl Args {
                         other => anyhow::bail!("--mode: expected sweep_frequency|sweep_level, got {other}"),
                     });
                 }
+                "--present-mode" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--present-mode requires value"))?;
+                    out.present_mode = parse_present_mode(&v)?;
+                }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
         }
@@ -241,6 +276,8 @@ Options:\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
   --view <mode>        Initial view: spectrum|waterfall [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
+  --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
+                       (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
   -h, --help           Show this help\n\n\
 Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
@@ -273,4 +310,50 @@ Mouse:\n  \
   Left-drag        pan\n  \
   Right-click      reset hovered cell\n"
     );
+}
+
+#[cfg(test)]
+mod present_mode_tests {
+    use super::parse_present_mode;
+    use wgpu::PresentMode;
+
+    #[test]
+    fn known_values_round_trip() {
+        let cases = [
+            ("auto-vsync",    PresentMode::AutoVsync),
+            ("auto",          PresentMode::AutoVsync),
+            ("auto-no-vsync", PresentMode::AutoNoVsync),
+            ("no-vsync",      PresentMode::AutoNoVsync),
+            ("fifo",          PresentMode::Fifo),
+            ("fifo-relaxed",  PresentMode::FifoRelaxed),
+            ("mailbox",       PresentMode::Mailbox),
+            ("immediate",     PresentMode::Immediate),
+        ];
+        for (s, want) in cases {
+            assert_eq!(parse_present_mode(s).unwrap(), want, "input {s:?}");
+        }
+    }
+
+    #[test]
+    fn underscored_aliases_match_dashed() {
+        assert_eq!(
+            parse_present_mode("auto_vsync").unwrap(),
+            parse_present_mode("auto-vsync").unwrap(),
+        );
+        assert_eq!(
+            parse_present_mode("auto_no_vsync").unwrap(),
+            parse_present_mode("auto-no-vsync").unwrap(),
+        );
+        assert_eq!(
+            parse_present_mode("fifo_relaxed").unwrap(),
+            parse_present_mode("fifo-relaxed").unwrap(),
+        );
+    }
+
+    #[test]
+    fn unknown_values_error_clearly() {
+        let err = parse_present_mode("vsync").unwrap_err().to_string();
+        assert!(err.contains("vsync"), "error mentions input: {err}");
+        assert!(err.contains("mailbox"), "error lists valid values: {err}");
+    }
 }

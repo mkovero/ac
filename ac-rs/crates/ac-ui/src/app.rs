@@ -141,6 +141,13 @@ pub struct AppInit {
     pub initial_view: ViewMode,
     pub initial_sweep_kind: Option<SweepKind>,
     pub monitor_channels: Option<Vec<u32>>,
+    /// Surface present mode requested by the caller — usually parsed from
+    /// `--present-mode` / `AC_UI_PRESENT_MODE` in main. Default
+    /// `AutoVsync` (= `Fifo` on desktop) keeps current behaviour;
+    /// `Mailbox` is the headline workaround for the NVIDIA + Vulkan
+    /// `present()` busy-spin diagnosed in #109. Falls back gracefully if
+    /// the surface doesn't advertise the mode (#110).
+    pub present_mode: wgpu::PresentMode,
     /// Proxy handed to background producer threads (receiver / synthetic) so
     /// they can wake the winit event loop the instant a new frame lands.
     /// Without this the UI sits in `ControlFlow::Wait` and won't repaint
@@ -327,6 +334,11 @@ pub struct App {
     /// measurement interval. Drops back to `Idle` once the value ages
     /// past `DATA_LIVELINESS_WINDOW`.
     last_data_arrival: Option<Instant>,
+    /// Surface present mode chosen by the caller (CLI / env / default).
+    /// Held here so `init_graphics` can hand it to `RenderContext::new`
+    /// when winit creates the window — instance/surface creation happens
+    /// after `App::new` so the value has to round-trip through state.
+    requested_present_mode: wgpu::PresentMode,
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
@@ -345,6 +357,7 @@ impl App {
         let sweep_kind = init.initial_sweep_kind;
         let monitor_channels = init.monitor_channels.clone();
         let wake = init.wake.clone();
+        let requested_present_mode = init.present_mode;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else {
@@ -434,6 +447,7 @@ impl App {
             benchmark_report: None,
             last_seen_frame_ns: 0,
             last_data_arrival: None,
+            requested_present_mode,
             needs_redraw: true,
             wake,
         }
@@ -483,7 +497,10 @@ impl App {
     }
 
     fn init_graphics(&mut self, window: Arc<Window>) {
-        let ctx = pollster::block_on(RenderContext::new(window.clone())).expect("wgpu init");
+        let ctx = pollster::block_on(RenderContext::new(
+            window.clone(),
+            self.requested_present_mode,
+        )).expect("wgpu init");
         let format = ctx.surface_format();
         let spectrum = SpectrumRenderer::new(&ctx.device, format);
         let waterfall = WaterfallRenderer::new(&ctx.device, &ctx.queue, format);
@@ -800,6 +817,7 @@ mod loop_tests {
             initial_view: ViewMode::Spectrum,
             initial_sweep_kind: None,
             monitor_channels: None,
+            present_mode: wgpu::PresentMode::AutoVsync,
             wake: None,
         })
     }
