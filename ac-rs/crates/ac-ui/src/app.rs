@@ -319,6 +319,14 @@ pub struct App {
     /// `about_to_wait` to decide whether new data arrived since the last
     /// render — if not, skip the redraw to save CPU.
     last_seen_frame_ns: u64,
+    /// Wall-clock timestamp of the most recent producer wake (data thread
+    /// `EventLoopProxy::send_event(())`). Used by `loop_directive` to
+    /// keep `RedrawContinuous` active while data is flowing, so the UI
+    /// renders at vsync between daemon ticks (smooth waterfall scroll,
+    /// peak-hold decay, hover labels) instead of being slaved to the
+    /// measurement interval. Drops back to `Idle` once the value ages
+    /// past `DATA_LIVELINESS_WINDOW`.
+    last_data_arrival: Option<Instant>,
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
@@ -425,6 +433,7 @@ impl App {
             benchmark_started: None,
             benchmark_report: None,
             last_seen_frame_ns: 0,
+            last_data_arrival: None,
             needs_redraw: true,
             wake,
         }
@@ -529,9 +538,25 @@ impl App {
             self.needs_redraw = true;
         }
 
-        let continuous = self.notification.is_some() || self.benchmark_secs.is_some();
+        // Continuous-repaint triggers — anything that visibly animates
+        // independently of input wakes. Slaving fps to the daemon tick
+        // rate (the post-#108 default) made `ac monitor` at fft_n≥32k feel
+        // stepped because data arrived at 20–30 Hz; widening the predicate
+        // here lets the UI render at vsync whenever there's actual motion
+        // on screen, while keeping the true-idle case on `Wait`.
+        let data_recent = self
+            .last_data_arrival
+            .is_some_and(|t| now.saturating_duration_since(t) < DATA_LIVELINESS_WINDOW);
+        let hold_active = self.peak_hold_enabled || self.min_hold_enabled;
+        let cursor_pinned = self.drag.is_some() || self.box_zoom.is_some();
+        let continuous = self.notification.is_some()
+            || self.benchmark_secs.is_some()
+            || data_recent
+            || hold_active
+            || cursor_pinned;
         if continuous {
-            // Notification fade / benchmark FPS counter need a steady tick.
+            // Notification fade / benchmark FPS counter / data flow / peak
+            // decay / drag preview all need a steady tick.
             self.needs_redraw = true;
         }
 
@@ -722,7 +747,10 @@ impl ApplicationHandler for App {
     fn user_event(&mut self, _elwt: &ActiveEventLoop, _event: ()) {
         // Producer thread signalled a new frame — schedule a redraw on the
         // next `about_to_wait` cycle. The frame itself is pulled from the
-        // triple buffer at render time.
+        // triple buffer at render time. Stamp `last_data_arrival` so the
+        // loop stays in continuous-repaint mode while data is flowing
+        // (UI renders at vsync between daemon ticks, see #108 follow-up).
+        self.last_data_arrival = Some(Instant::now());
         self.needs_redraw = true;
     }
 
@@ -846,6 +874,120 @@ mod loop_tests {
         let _ = app.loop_directive(t0);
         app.needs_redraw = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawIdle);
+        assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+    }
+
+    /// Decoupling guard: while data has arrived recently, the loop must
+    /// stay in `RedrawContinuous` so the UI renders at vsync (smooth
+    /// waterfall scroll, peak ramps, hover labels) instead of being
+    /// slaved to the daemon's measurement interval.
+    #[test]
+    fn data_arrival_starts_continuous() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0); // drain the initial paint
+        // Simulate a producer wake: this is what `user_event` does.
+        app.last_data_arrival = Some(t0);
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        assert_eq!(
+            app.loop_directive(t0 + Duration::from_millis(100)),
+            LoopDirective::RedrawContinuous,
+            "still inside DATA_LIVELINESS_WINDOW",
+        );
+    }
+
+    /// Once data has stopped flowing, the liveness window must expire and
+    /// the loop must fall fully idle — no continuous-repaint leak that
+    /// would re-create the #108 100 %-CPU symptom whenever a monitor was
+    /// stopped.
+    #[test]
+    fn data_arrival_window_expires() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+        app.last_data_arrival = Some(t0);
+        // Inside the window: continuous.
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        // Past the window with no further data: must go idle.
+        let past = t0 + DATA_LIVELINESS_WINDOW + Duration::from_millis(50);
+        // Flush the redraw that fires when crossing the boundary.
+        let _ = app.loop_directive(past);
+        assert_eq!(
+            app.loop_directive(past),
+            LoopDirective::Idle,
+            "past liveness window with no new data: must go idle",
+        );
+    }
+
+    /// Peak hold (and the symmetric min hold) are time-driven animations
+    /// — the held line decays toward live at 20 dB/s. While either is
+    /// enabled the loop runs continuous so the decay reads as motion;
+    /// toggling them off must drop the loop back to idle.
+    #[test]
+    fn peak_or_min_hold_keeps_continuous() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+
+        app.peak_hold_enabled = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        app.peak_hold_enabled = false;
+        app.min_hold_enabled = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        app.min_hold_enabled = false;
+        // Drain the paint that fires from `needs_redraw` flipping.
+        let _ = app.loop_directive(t0);
+        assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+    }
+
+    /// An active drag or box-zoom keeps the loop continuous so the rubber
+    /// band / pan preview tracks vsync even if the user holds the cursor
+    /// still mid-gesture. Releasing the mouse must drop the loop back to
+    /// idle.
+    #[test]
+    fn drag_or_box_zoom_keeps_continuous() {
+        use crate::app::input::{BoxZoomState, DragState};
+        use winit::dpi::PhysicalPosition;
+
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+
+        app.drag = Some(DragState {
+            start: PhysicalPosition::new(0.0, 0.0),
+            targets: Vec::new(),
+            start_log_min: 0.0,
+            start_log_max: 0.0,
+            start_db_min: 0.0,
+            start_db_max: 0.0,
+            cell_w_px: 1.0,
+            cell_h_px: 1.0,
+        });
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        app.drag = None;
+        app.box_zoom = Some(BoxZoomState {
+            start: PhysicalPosition::new(0.0, 0.0),
+            current: PhysicalPosition::new(0.0, 0.0),
+            targets: Vec::new(),
+            cell_left_px: 0.0,
+            cell_top_px: 0.0,
+            cell_w_px: 1.0,
+            cell_h_px: 1.0,
+            start_log_min: 0.0,
+            start_log_max: 0.0,
+            start_db_min: 0.0,
+            start_db_max: 0.0,
+            start_rows_f: 0.0,
+            waterfall: false,
+        });
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        app.box_zoom = None;
+        // Drain the redraw triggered by `needs_redraw` flipping.
+        let _ = app.loop_directive(t0);
         assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
     }
 

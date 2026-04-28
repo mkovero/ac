@@ -14,6 +14,18 @@ pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
 /// Frame cap for continuous repaint windows (notification fade, benchmark).
 pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How recently a frame must have arrived for the loop to stay in
+/// continuous-repaint mode. Lets the UI render at vsync between data
+/// ticks (so waterfall scroll, peak ramps, hover labels feel smooth at
+/// 60 fps even when the daemon emits at 30 Hz) without the #108
+/// regression: when monitoring stops, `last_data_arrival` ages past
+/// this window within ~half a second and the loop falls through to
+/// `Wait`. 500 ms covers a single missed tick at the slowest
+/// auto-picked monitor cadence (~33 ms) and short pauses on JACK
+/// xruns; longer than that and the user is no longer watching live
+/// data, so an idle UI is correct.
+pub const DATA_LIVELINESS_WINDOW: Duration = Duration::from_millis(500);
+
 /// Left/Right arrow tunes FFT monitor refresh rate in 1 ms steps (Left =
 /// slower, Right = faster). Clamped to [`MONITOR_INTERVAL_MIN_MS`,
 /// `MONITOR_INTERVAL_MAX_MS`]. The FLOOR/CEIL below bracket what the eye
