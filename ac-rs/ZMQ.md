@@ -80,9 +80,14 @@ Every frame carries a tier-prefixed `"type"`:
 |-------|---------------------------------------------|
 | 1     | `measurement/frequency_response/point`      |
 | 1     | `measurement/frequency_response/complete`   |
+| 1     | `measurement/spectrum_bands`                |
+| 1     | `measurement/impulse_response`              |
+| 1     | `measurement/loudness`                      |
 | 1     | `measurement/report`                        |
 | 2     | `visualize/spectrum`                        |
 | 2     | `visualize/cwt`                             |
+| 2     | `visualize/cqt`                             |
+| 2     | `visualize/reassigned`                      |
 | 2     | `visualize/fractional_octave`               |
 | 2     | `visualize/fractional_octave_leq`           |
 
@@ -209,11 +214,12 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
 
 ### `spectrum` frame
 
-Emitted continuously by `monitor_spectrum`.
+Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
+(default). The Tier-2-prefixed `type` is `visualize/spectrum`.
 
 ```json
 {
-  "type":             "spectrum",
+  "type":             "visualize/spectrum",
   "cmd":              "monitor_spectrum",
   "channel":          <int>,          // input channel index this frame describes
   "n_channels":       <int>,          // total channels being monitored (frame count per cycle)
@@ -224,7 +230,9 @@ Emitted continuously by `monitor_spectrum`.
   "fundamental_dbfs": <float>,
   "thd_pct":          <float>,
   "thdn_pct":         <float>,
-  "in_dbu":           <float> | null,
+  "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
+  "spl_offset_db":    <float> | null, // additive dBFS → dB SPL offset (calibration §)
+  "mic_correction":   "on" | "off" | "none",   // mic frequency-response state
   "clipping":         <bool>,
   "xruns":            <int>
 }
@@ -236,31 +244,49 @@ track a single channel should filter by `channel == <their-channel>` — old
 servers that do not emit either field should be treated as
 `channel = 0, n_channels = 1`.
 
-### `cwt` frame
+### `cwt` / `cqt` / `reassigned` frames
 
-Emitted continuously by `monitor_spectrum` when `analysis_mode` is `"cwt"`
-(see `set_analysis_mode`). Replaces the `spectrum` frame one-for-one —
-while CWT mode is active, no `spectrum` frames are published on the same
-worker. Magnitudes are already in dBFS and frequencies are log-spaced, so
+Emitted continuously by `monitor_spectrum` when `analysis_mode` is
+`"cwt"` / `"cqt"` / `"reassigned"` (see `set_analysis_mode`). Each
+mode replaces the `spectrum` frame one-for-one — while a Tier 2
+spectral mode is active, no `visualize/spectrum` frames are published
+on the same worker.
+
+The three frames share the same payload shape (only `type` differs):
+magnitudes are already in dBFS and frequencies are log-spaced, so
 subscribers that expect a linear spectrum should convert / branch.
 
 ```json
 {
-  "type":        "cwt",
-  "cmd":         "monitor_spectrum",
-  "channel":     <int>,            // input channel index this column describes
-  "n_channels":  <int>,            // total channels being monitored
-  "sr":          <int>,            // sample rate (Hz)
-  "magnitudes":  [<float>, ...],   // dBFS per scale, length = frequencies.len()
-  "frequencies": [<float>, ...],   // Hz per scale, log-spaced
-  "timestamp":   <int>,            // UNIX-epoch nanoseconds
-  "xruns":       <int>
+  "type":           "visualize/cwt" | "visualize/cqt" | "visualize/reassigned",
+  "cmd":            "monitor_spectrum",
+  "channel":        <int>,            // input channel index this column describes
+  "n_channels":     <int>,            // total channels being monitored
+  "sr":             <int>,            // sample rate (Hz)
+  "magnitudes":     [<float>, ...],   // dBFS per bin, length = frequencies.len()
+  "frequencies":    [<float>, ...],   // Hz per bin, log-spaced
+  "spl_offset_db":  <float> | null,   // additive dBFS → dB SPL offset (calibration §)
+  "mic_correction": "on" | "off" | "none",   // mic-curve state for this channel
+  "bpo":            <int>,            // CQT only: bins per octave used for this column
+  "timestamp":      <int>,            // UNIX-epoch nanoseconds
+  "xruns":          <int>
 }
 ```
 
-Default parameters (see `ac-core::cwt` constants): `σ = 12.0`,
-`n_scales = 512`, frequency axis spans `20 Hz` to `0.9 · sr/2`.
-Both `σ` and `n_scales` are tuneable at runtime via `set_analysis_mode`.
+**Default parameters per mode**:
+
+- **CWT** (`ac-core::visualize::cwt`): `σ = 12.0`, `n_scales = 512`,
+  frequency axis spans `20 Hz` to `0.9 · sr/2`. Both `σ` and `n_scales`
+  are runtime-tuneable via `set_analysis_mode`.
+- **CQT** (`ac-core::visualize::cqt`): `bpo = 24` (24 bins per octave),
+  `f_min = max(30 Hz, Q · sr / ring_len)`, `f_max = 0.9 · sr/2`. Daemon
+  worker uses a 1.0 s ring (longer than CWT's 0.15 s) so the lowest
+  bin's Q-invariant kernel fits.
+- **Reassigned** (`ac-core::visualize::reassigned`): `n = 4096`,
+  `n_out_bins = 1024`, log-spaced output grid from 20 Hz to
+  `0.9 · sr/2`. Auger-Flandrin frequency reassignment with a 60 dB
+  noise gate (bins below the column peak by that much keep their
+  nominal frequency).
 
 ### `fractional_octave` frame
 
@@ -273,17 +299,19 @@ column the `cwt` frame carries — there is no second CWT cost.
 
 ```json
 {
-  "type":       "fractional_octave",
-  "cmd":        "monitor_spectrum",
-  "channel":    <int>,
-  "n_channels": <int>,
-  "sr":         <int>,
-  "bpo":        <int>,            // bins per octave: 1, 3, 6, 12, or 24
-  "weighting":  "off" | "a" | "c" | "z",
-  "freqs":      [<float>, ...],   // band centres (Hz), anchored at 1 kHz
-  "spectrum":   [<float>, ...],   // dBFS per band (post-weighting offset)
-  "timestamp":  <int>,            // UNIX-epoch nanoseconds
-  "xruns":      <int>
+  "type":           "visualize/fractional_octave",
+  "cmd":            "monitor_spectrum",
+  "channel":        <int>,
+  "n_channels":     <int>,
+  "sr":             <int>,
+  "bpo":            <int>,            // bins per octave: 1, 3, 6, 12, or 24
+  "weighting":      "off" | "a" | "c" | "z",
+  "freqs":          [<float>, ...],   // band centres (Hz), anchored at 1 kHz
+  "spectrum":       [<float>, ...],   // dBFS per band (post-weighting offset)
+  "spl_offset_db":  <float> | null,   // additive dBFS → dB SPL (calibration §)
+  "mic_correction": "on" | "off" | "none",
+  "timestamp":      <int>,            // UNIX-epoch nanoseconds
+  "xruns":          <int>
 }
 ```
 
@@ -307,20 +335,22 @@ via `set_time_integration`; Leq can be zeroed live via `reset_leq`.
 
 ```json
 {
-  "type":       "fractional_octave_leq",
-  "cmd":        "monitor_spectrum",
-  "channel":    <int>,
-  "n_channels": <int>,
-  "sr":         <int>,
-  "bpo":        <int>,
-  "weighting":  "off" | "a" | "c" | "z",
-  "mode":       "fast" | "slow" | "leq",
-  "tau_s":      <float> | null,  // EMA time constant; null for leq
-  "duration_s": <float> | null,  // Leq-accumulator seconds; null for fast/slow
-  "freqs":      [<float>, ...],  // band centres (Hz)
-  "spectrum":   [<float>, ...],  // integrated dBFS per band
-  "timestamp":  <int>,
-  "xruns":      <int>
+  "type":           "visualize/fractional_octave_leq",
+  "cmd":            "monitor_spectrum",
+  "channel":        <int>,
+  "n_channels":     <int>,
+  "sr":             <int>,
+  "bpo":            <int>,
+  "weighting":      "off" | "a" | "c" | "z",
+  "mode":           "fast" | "slow" | "leq",
+  "tau_s":          <float> | null,  // EMA time constant; null for leq
+  "duration_s":     <float> | null,  // Leq-accumulator seconds; null for fast/slow
+  "freqs":          [<float>, ...],  // band centres (Hz)
+  "spectrum":       [<float>, ...],  // integrated dBFS per band
+  "spl_offset_db":  <float> | null,
+  "mic_correction": "on" | "off" | "none",
+  "timestamp":      <int>,
+  "xruns":          <int>
 }
 ```
 
@@ -328,6 +358,37 @@ Same **not IEC 61672** caveat as the upstream `fractional_octave` frame:
 the time constants and formulas match the standard but the band energies
 come from a Morlet CWT aggregation, not an IEC 61260 filterbank. Display
 use only.
+
+### `measurement/loudness` frame
+
+BS.1770-5 / EBU R128 loudness sidecar emitted by `monitor_spectrum`
+once per channel per tick (alongside the spectrum-shaped frame above).
+Tier 1 because the algorithms are standards-compliant; the values are
+suitable for delivery-loudness checks (R128 ±0.5 LU integrated target).
+
+```json
+{
+  "type":             "measurement/loudness",
+  "cmd":              "monitor_spectrum",
+  "channel":          <int>,
+  "n_channels":       <int>,
+  "sr":               <int>,
+  "momentary_lkfs":   <float> | null,   // 400 ms window; null pre-gate
+  "short_term_lkfs":  <float> | null,   // 3 s window
+  "integrated_lkfs":  <float> | null,   // gated, since worker start (or last reset)
+  "lra_lu":           <float>,          // EBU Tech 3342 loudness range
+  "true_peak_dbtp":   <float> | null,   // 4× polyphase oversampled peak
+  "gated_duration_s": <float>,          // wall-clock since gate first opened
+  "spl_offset_db":    <float> | null,   // when set, UI renders LKFS as K-weighted dB SPL
+  "timestamp":        <int>,
+  "xruns":            <int>
+}
+```
+
+Reset the integrated / LRA / true-peak accumulators live with the
+`reset_loudness` command. The R128 PASS / WARN / FAIL anchor stays
+on the raw `integrated_lkfs` regardless of `spl_offset_db` — the
+−23 LKFS target is independent of the absolute reference.
 
 ### `keepalive` frame
 
@@ -391,15 +452,18 @@ Requests the server process to exit cleanly after the current reply.
 
 ### `set_analysis_mode`
 
-Switches the spectrum analysis path used by `monitor_spectrum` between a
-standard windowed FFT (default) and a Morlet continuous wavelet transform.
-The mode is server-global; the next `monitor_spectrum` tick picks it up,
-even if a `monitor_spectrum` worker is already running.
+Switches the spectrum analysis path used by `monitor_spectrum` between
+windowed FFT (default), Morlet CWT, constant-Q transform, or
+Auger-Flandrin reassigned STFT. The mode is server-global; the next
+`monitor_spectrum` tick picks it up, even if a `monitor_spectrum`
+worker is already running.
 
 **Request**
 ```json
 { "cmd": "set_analysis_mode", "mode": "fft" }
 { "cmd": "set_analysis_mode", "mode": "cwt" }
+{ "cmd": "set_analysis_mode", "mode": "cqt" }
+{ "cmd": "set_analysis_mode", "mode": "reassigned" }
 { "cmd": "set_analysis_mode", "mode": "cwt", "sigma": 12.0, "n_scales": 512 }
 ```
 
@@ -407,10 +471,13 @@ even if a `monitor_spectrum` worker is already running.
 clamped 64–8192) tune the Morlet wavelet shape and frequency-axis density.
 Higher sigma = sharper frequency resolution, softer time resolution. More
 scales = finer frequency grid. Both persist until changed or daemon restart.
+The `cqt` and `reassigned` modes use fixed defaults (see the frame
+section above); runtime tunables for those are a follow-up.
 
 **Reply**
 ```json
-{ "ok": true, "mode": "fft" | "cwt", "sigma": <float>, "n_scales": <int> }
+{ "ok": true, "mode": "fft" | "cwt" | "cqt" | "reassigned",
+  "sigma": <float>, "n_scales": <int> }
 ```
 
 Unknown values for `mode` return `{ "ok": false, "error": "..." }` and
@@ -429,7 +496,8 @@ Returns the current analysis mode.
 
 **Reply**
 ```json
-{ "ok": true, "mode": "fft" | "cwt", "sigma": <float>, "n_scales": <int> }
+{ "ok": true, "mode": "fft" | "cwt" | "cqt" | "reassigned",
+  "sigma": <float>, "n_scales": <int> }
 ```
 
 ---
@@ -692,12 +760,19 @@ Look up a stored calibration entry.
 **Reply — found**
 ```json
 {
-  "ok":                true,
-  "found":             true,
-  "key":               "out0_in0",
-  "vrms_at_0dbfs_out": <float> | null,
-  "vrms_at_0dbfs_in":  <float> | null,
-  "ref_dbfs":          <float>
+  "ok":                                true,
+  "found":                             true,
+  "key":                               "out0_in0",
+  "vrms_at_0dbfs_out":                 <float> | null,
+  "vrms_at_0dbfs_in":                  <float> | null,
+  "ref_dbfs":                          <float>,
+  "mic_sensitivity_dbfs_at_94db_spl":  <float> | null,    // SPL cal layer
+  "mic_response": {                                        // mic-curve layer
+    "freqs_hz":    [<float>, ...],
+    "gain_db":     [<float>, ...],
+    "source_path": "<string>" | null,
+    "imported_at": "<RFC3339>"
+  } | null
 }
 ```
 
@@ -723,9 +798,11 @@ Returns all stored calibration entries.
   "ok": true,
   "calibrations": [
     {
-      "key":               "out0_in0",
-      "vrms_at_0dbfs_out": <float> | null,
-      "vrms_at_0dbfs_in":  <float> | null
+      "key":                               "out0_in0",
+      "vrms_at_0dbfs_out":                 <float> | null,
+      "vrms_at_0dbfs_in":                  <float> | null,
+      "mic_sensitivity_dbfs_at_94db_spl":  <float> | null,
+      "mic_response":                      { ... } | null
     }
   ]
 }
@@ -1091,6 +1168,8 @@ Client responds with `cal_reply` (see below).
 ### `cal_reply`
 
 Sends the user's DMM reading back to a running `calibrate` worker.
+Also used as a sync point by `calibrate_spl` (the `vrms` field is
+ignored there — only the act of replying releases the worker).
 
 **Request**
 ```json
@@ -1104,6 +1183,121 @@ Sends the user's DMM reading back to a running `calibrate` worker.
 ```json
 { "ok": true }
 ```
+
+---
+
+### `calibrate_spl`
+
+Pistonphone-reference SPL calibration. Captures `capture_s` seconds
+on the input channel after the user has applied a 94 dB SPL acoustic
+reference, computes the captured RMS in dBFS, and stores that value
+as `mic_sensitivity_dbfs_at_94db_spl` on the channel's cal entry. All
+future dBFS readings on this channel can then convert to dB SPL via
+`dbspl = dbfs - mic_sens_dbfs + 94.0`. Voltage-cal fields on the same
+entry are preserved (`Calibration::load_or_new`).
+
+**Request**
+```json
+{
+  "cmd":            "calibrate_spl",
+  "output_channel": <int>,        // optional, defaults to config
+  "input_channel":  <int>,        // optional, defaults to config
+  "capture_s":      <float>       // optional, default 1.0
+}
+```
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+Wire flow mirrors `calibrate`:
+
+1. Daemon emits `cal_prompt` with `kind: "spl"` asking the user to
+   seat the calibrator.
+2. Client responds with `cal_reply` (any value — only the act of
+   replying is meaningful).
+3. Daemon captures, computes, saves.
+4. Daemon emits `cal_done` then a terminal `done` / `error`.
+
+**DATA — `cal_done`** (SPL flavour)
+```json
+// topic: cal_done
+{
+  "key":                              "out0_in0",
+  "mic_sensitivity_dbfs_at_94db_spl": <float>,
+  "kind":                             "spl",
+  "error":                            "<message>"   // only on partial failure
+}
+```
+
+---
+
+### `calibrate_mic_curve`
+
+Attach (or clear) a mic frequency-response correction curve on a
+channel. The CLI parses the `.frd` / `.txt` file and uploads validated
+arrays so the daemon never has to read user-supplied paths and the
+flow works the same for local and remote daemons. Voltage and SPL
+fields on the same entry stay untouched.
+
+**Request — set**
+```json
+{
+  "cmd":            "calibrate_mic_curve",
+  "op":             "set",
+  "output_channel": <int>,           // optional, defaults to config
+  "input_channel":  <int>,           // optional, defaults to config
+  "freqs_hz":       [<float>, ...],  // strictly increasing, 16–4096 entries
+  "gain_db":        [<float>, ...],  // mic over-reads by this much; subtracted on read
+  "source_path":    "<string>"       // optional, informational only
+}
+```
+
+**Request — clear**
+```json
+{
+  "cmd":            "calibrate_mic_curve",
+  "op":             "clear",
+  "output_channel": <int>,
+  "input_channel":  <int>
+}
+```
+
+**Reply**
+```json
+{ "ok": true, "key": "out0_in0", "loaded": <int> }   // 0 after clear
+```
+
+Validation: `freqs_hz` must be strictly increasing and finite, length
+in `[16, 4096]`; `gain_db` must match length and be finite. Failures
+return `{ "ok": false, "error": "<reason>" }` and leave the prior
+curve (if any) untouched.
+
+---
+
+### `set_mic_correction_enabled`
+
+Process-wide gate for daemon-side mic-curve application. Per-channel
+curves stay loaded — this just controls whether they're applied to
+emitted frames. Used by the UI's `Shift+M` keybinding for
+diagnostics. Default on daemon start: `true`.
+
+**Request**
+```json
+{ "cmd": "set_mic_correction_enabled", "enabled": <bool> }
+```
+
+**Reply**
+```json
+{ "ok": true, "enabled": <bool> }
+```
+
+While enabled, every monitor frame's `mic_correction` field reads
+`"on"` (curve loaded and applied) or `"none"` (no curve on that
+channel). When disabled, channels with a loaded curve report `"off"`
+and emit raw uncorrected magnitudes; channels without a curve still
+report `"none"`.
 
 ---
 

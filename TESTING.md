@@ -2,20 +2,31 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test            # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 81)
+cd ac-rs && cargo test            # ~516 tests + 1 #[ignore]'d JACK-loopback runbook
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
-No JACK daemon or audio hardware required — pytest spawns `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connects via ZMQ.
+The `#[ignore]`'d test (`it_loopback_ir`) drives a Farina sweep
+through real JACK port-to-port loopback and is run manually after
+starting `jackd -d dummy` — see ARCHITECTURE.md → "Loopback IR
+runbook".
+
+No JACK daemon or audio hardware required for the default suite — pytest spawns `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connects via ZMQ.
 
 ## Rust tests
 
 ```bash
 cd ac-rs
-cargo test -p ac-core             # 43 unit tests — analysis, generator, calibration, config, conversions, CWT, transfer, GPIO
-cargo test -p ac-cli              # 50 parser tests — all commands, abbreviations, defaults, error cases
-cargo test -p ac-daemon           # 53 tests — 43 unit (audio backends, GPIO, handlers) + 10 integration (ZMQ protocol)
-cargo test -p ac-ui               # 81 tests — formatting, grid ticks, egui paint-capture overlay tests
+cargo test -p ac-core             # 243 unit tests — Tier 1 measurement (THD, filterbank, weighting,
+                                  #   noise, sweep IR, loudness), Tier 2 visualize (spectrum, CWT,
+                                  #   CQT, reassigned, fractional-octave, time integration), and
+                                  #   shared (3-layer calibration, conversions, generator, config)
+cargo test -p ac-cli              # 74 parse + 53 cmd tests — all commands, abbreviations, defaults,
+                                  #   error cases (incl. SPL / mic-curve subcommands)
+cargo test -p ac-daemon           # 34 integration tests + 1 #[ignore]'d loopback runbook —
+                                  #   ZMQ protocol, sweep IR, calibrate flows, monitor frame shapes
+cargo test -p ac-ui               # 112 tests — fmt formatting (incl. dB SPL / LKFS-as-SPL composition,
+                                  #   mic-corrected suffix), grid ticks, egui paint-capture overlay tests
 cargo test                        # all crates
 ```
 

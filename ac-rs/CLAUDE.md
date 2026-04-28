@@ -9,17 +9,19 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # 330 tests (ac-core 119, ac-cli 55, ac-daemon 43 + 11 it, ac-ui 102)
+cargo test                        # ~516 tests + 1 #[ignore]'d (JACK loopback runbook)
+                                  #   ac-core: 243   ac-cli: 74 parse + 53 cmd
+                                  #   ac-daemon: 34 + 1 ignored   ac-ui: 112
 ```
 
 ## Crate layout
 
 | Crate | Binary | Role |
 |-------|--------|------|
-| `ac-core` | — | Pure library — analysis, CWT, generator, calibration, config, conversions, IEC 61260-1 filterbank, Farina log-sweep IR, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, HTML + PDF report renderers. No sockets, no global state. 119 unit tests. |
-| `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 55 parser tests. |
-| `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 43 unit + 10 integration tests. |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/CWT, egui transfer/sweep views. Connects via ZMQ SUB + REQ. 102 tests. |
+| `ac-core` | — | Pure library — Tier 1 (`measurement/*`): IEC 61260-1 filterbank, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, IEC 60268-3 THD, ITU-R BS.468-4 CCIR weighting, BS.1770-5 / EBU R128 loudness, Farina log-sweep IR, HTML + PDF report renderers. Tier 2 (`visualize/*`): live FFT spectrum, Morlet CWT, constant-Q transform, Auger-Flandrin reassigned STFT, fractional-octave aggregator, time integration. Plus `shared/`: 3-layer calibration (voltage / SPL / mic-curve), conversions, generator, config. ~243 tests. |
+| `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 74 parser + 53 command tests. |
+| `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 34 integration tests + 1 #[ignore]'d JACK-loopback runbook (`tests/it_loopback_ir.rs`). |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum / waterfall (FFT / CWT / CQT / reassigned), egui transfer / sweep views. Connects via ZMQ SUB + REQ. 112 tests. |
 
 ## ac-daemon binary
 

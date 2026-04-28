@@ -12,7 +12,8 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 
 ```bash
 cd ac-rs && cargo build        # builds ac, ac-daemon, ac-ui
-cargo test                     # 330 tests (ac-core 119, ac-cli 55, ac-daemon 43 + 11 it, ac-ui 102)
+cargo test                     # ~516 tests + 1 #[ignore]'d JACK-loopback runbook
+                               # (ac-core 243, ac-cli 74 parse + 53 cmd, ac-daemon 34 + 1 ignored, ac-ui 112)
 ```
 
 ## Usage (quick reference)
@@ -33,6 +34,9 @@ ac sweep level -20dbu 6dbu 1khz       # level sweep
 ac sweep frequency 20hz 20khz 0dbu    # freq sweep
 ac monitor                             # live spectrum (default input)
 ac monitor 0-3,5                       # live spectrum on channels 0–3 and 5
+ac monitor cwt                         # Morlet CWT waterfall
+ac monitor cqt                         # constant-Q transform waterfall
+ac monitor reassigned                  # Auger-Flandrin reassigned spectrogram
 ac generate sine 0dbu 1khz            # play tone
 ac s f 20hz 20khz 0dbu show           # abbreviated + open plot
 ```
@@ -45,10 +49,10 @@ All args are positional and unit-tagged (no `--flags`). Abbreviations: `sweep`�
 ac-rs/                 (Rust — primary implementation)
   ZMQ.md               (wire protocol reference — authoritative)
   crates/
-    ac-core/           (pure library: analysis, generator, calibration, config, IEC 61260-1 filterbank, Farina log-sweep IR, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, HTML + PDF report renderers — 119 tests)
-    ac-cli/            (CLI client: parser, ZMQ client, CSV export — 50 tests)
-    ac-daemon/         (ZMQ REP+PUB server binary — 43 unit + 10 it tests)
-    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall, CWT, transfer, sweep — 81 tests)
+    ac-core/           (pure library: Tier 1 measurement (IEC 61260-1 filterbank, IEC 61672-1 A/C/Z, IEC 60268-3 THD, AES17 noise, BS.468-4 CCIR, BS.1770-5 loudness, Farina sweep IR, HTML + PDF report) and Tier 2 visualize (FFT spectrum, Morlet CWT, constant-Q, Auger-Flandrin reassigned, fractional-octave aggregator, time integration), plus 3-layer calibration (voltage / SPL / mic-curve) — 243 tests)
+    ac-cli/            (CLI client: parser, ZMQ client, CSV export — 74 parse + 53 cmd tests)
+    ac-daemon/         (ZMQ REP+PUB server binary — 34 it tests + 1 #[ignore]'d JACK-loopback runbook)
+    ac-ui/             (wgpu+egui GPU UI: spectrum, waterfall (FFT/CWT/CQT/reassigned), transfer, sweep — 112 tests)
 
 tests/                 (black-box pytest harness — spawns Rust daemon over ZMQ)
 ```

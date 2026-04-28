@@ -28,8 +28,8 @@ The entire stack is implemented in Rust:
 |-------|--------|------|
 | `ac-cli` | `ac` | CLI client — parser, ZMQ client, CSV export, UI launch |
 | `ac-daemon` | `ac-daemon` | ZMQ server — audio I/O, analysis, worker management |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum/waterfall/transfer/sweep views |
-| `ac-core` | (library) | Pure DSP — FFT, THD, generator, calibration, config |
+| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum / waterfall (FFT / CWT / CQT / reassigned) / transfer / sweep |
+| `ac-core` | (library) | Pure DSP — FFT, THD, sweep IR, fractional-octave filterbank, A/C/Z weighting, BS.1770-5 loudness, generator, calibration, config |
 
 ## Install
 
@@ -59,9 +59,14 @@ jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ac devices                          # list available audio ports
 ac setup output 11 input 0          # tell ac which channels to use
 ac calibrate                        # interactive level cal (enables dBu)
+ac calibrate spl input 0            # pistonphone SPL cal — readouts in dB SPL
+ac calibrate mic-curve mic.frd input 0   # attach mic frequency-response curve
 ac plot 20hz 20khz 0dbu 20ppd show  # measure THD vs frequency, open plot
 ac s f 20hz 20khz 0dbu              # fast output-only chirp
 ac m sh                             # live spectrum, GPU UI window
+ac monitor cwt                      # live Morlet-CWT waterfall
+ac monitor cqt                      # live constant-Q waterfall
+ac monitor reassigned               # live reassigned-STFT waterfall
 ```
 
 ## Commands
@@ -70,12 +75,13 @@ ac m sh                             # live spectrum, GPU UI window
 |---------|-------------|
 | `devices` | List audio ports |
 | `setup` | Configure hardware — output, input, reference, range, dmm, gpio |
-| `calibrate` | Interface calibration |
+| `calibrate` | Voltage cal (sine + DMM); `calibrate spl` adds 94 dB SPL pistonphone reference; `calibrate mic-curve <path>` attaches a mic frequency-response correction; `calibrate show` lists stored entries |
 | `generate` | Play a sine or pink noise tone |
-| `sweep` | Level ramp or frequency chirp |
+| `sweep` | Level ramp, frequency chirp, or `sweep ir` (Farina log-sweep impulse response) |
 | `plot` | Point-by-point THD measurement with PNG output |
 | `transfer` | H1 transfer function (magnitude, phase, coherence) |
-| `monitor` | Live spectrum with TUI bar chart |
+| `monitor` | Live spectrum + waterfall (FFT, CWT, CQT, or reassigned STFT — pick via `monitor <mode>` or cycle in-app with `W`) |
+| `report` | Render a `MeasurementReport` JSON to HTML or PDF |
 | `probe` | Auto-detect analog ports and loopback pairs (DMM + capture scan) |
 | `dmm` | One-off AC Vrms reading from SCPI multimeter |
 | `server` | Enable/disable server, show connections, connect to remote |
@@ -162,7 +168,8 @@ protocol.
 ```bash
 cd ac-rs
 cargo build                   # all crates (ac, ac-daemon, ac-ui)
-cargo test                    # 227 tests (ac-core 43, ac-cli 50, ac-daemon 43 + 10 it, ac-ui 81)
+cargo test                    # ~516 tests + 1 #[ignore]'d JACK-loopback runbook
+                              # (ac-core 243, ac-cli 74 parse + 53 cmd, ac-daemon 34 + 1 ignored, ac-ui 112)
 ```
 
 ## Dependencies

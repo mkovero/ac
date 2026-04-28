@@ -34,7 +34,7 @@ Properties:
 ### Tier 2 — Live analysis
 
 Commands: `ac monitor` (defaults to FFT spectrum), `ac monitor cwt`,
-`ac monitor cqt` (future), `ac monitor reassigned` (future), `ac tuner`.
+`ac monitor cqt`, `ac monitor reassigned`, `ac tuner`.
 
 Optimizes for: **insight, responsiveness, smooth interactive experience.**
 
@@ -90,9 +90,13 @@ ac-core/src/
   visualize/               # Tier 2
     mod.rs
     spectrum.rs            # Live FFT spectrum (moved from analysis.rs)
-    cwt.rs                 # Morlet CWT (moved from cwt.rs)
-    cqt.rs                 # Constant-Q transform (future)
-    aggregate.rs           # Display-column binning (moved from aggregate.rs)
+    cwt.rs                 # Morlet CWT
+    cqt.rs                 # Constant-Q transform (Brown 1991 / Schörkhuber-Klapuri)
+    reassigned.rs          # Auger-Flandrin reassigned spectrogram
+    aggregate.rs           # Display-column binning
+    fractional_octave.rs   # CWT-band aggregator + 1/N-octave grid
+    weighting_curves.rs    # IEC 61672-1 A/C/Z dB-offset table
+    time_integration.rs    # EMA fast/slow + Leq accumulator
 
   shared/                  # Tier 0 — used by both tiers
     mod.rs
@@ -153,8 +157,8 @@ user this is a live, exploratory view.
 - `ac monitor` — defaults to FFT spectrum
 - `ac monitor spectrum` — explicit form
 - `ac monitor cwt` — Morlet wavelet scalogram
-- `ac monitor cqt` — constant-Q transform (future)
-- `ac monitor reassigned` — reassigned spectrogram (future)
+- `ac monitor cqt` — constant-Q transform (Brown 1991 / Schörkhuber-Klapuri pragmatic)
+- `ac monitor reassigned` — Auger-Flandrin reassigned spectrogram
 - `ac tuner` — pitch tracker (Tier 2 but pre-existing; keep the name)
 
 The existing `monitor_spectrum` ZMQ command is retained as the transport
@@ -181,12 +185,47 @@ a path-like prefix.
 - `visualize/spectrum`
 - `visualize/cwt`
 - `visualize/cqt`
+- `visualize/reassigned`
+- `visualize/fractional_octave`
+- `visualize/fractional_octave_leq`
 - `visualize/tuner`
+
+All four spectrum-shaped frames (`spectrum`, `cwt`, `cqt`, `reassigned`)
+share the same `magnitudes` + `frequencies` payload and carry an
+optional `spl_offset_db` field plus a `mic_correction` tag — see the
+calibration composition note below.
 
 Existing frames (`type: "spectrum"`, `type: "tuner"`, etc.) are aliased
 during migration: the server emits both old and new types for one
 release cycle, then drops the old. Python test clients and existing UI
 code continue to work during the transition.
+
+## Calibration — three orthogonal layers
+
+Per-channel `CalibrationEntry` (in `shared/calibration.rs`, persisted to
+`~/.config/ac/cal.json`) carries three independently-applicable
+corrections. They compose: a fully-cal'd channel reads an absolute
+SPL value with mic-curve compensation and the analog-domain Vrms /
+dBu / dBV alongside.
+
+| Layer | Stored field | Source | Affects |
+|-------|--------------|--------|---------|
+| Voltage | `vrms_at_0dbfs_in` / `vrms_at_0dbfs_out` | `ac calibrate` (sine + DMM) | dBu / dBV readouts |
+| Absolute SPL | `mic_sensitivity_dbfs_at_94db_spl` | `ac calibrate spl` (94 dB pistonphone) | adds `spl_offset_db = 94 − captured_dbfs` to dBFS readouts so they read as **dB SPL** |
+| Mic curve | `mic_response { freqs_hz, gain_db, … }` | `ac calibrate mic-curve <path>` (.frd / .txt) | per-bin frequency-response correction subtracted from spectrum before frame emission |
+
+The voltage and SPL layers are pure dB offsets; the mic-curve layer is
+a per-frequency dB array applied by the daemon to every monitor frame
+type (`visualize/spectrum` / `cwt` / `cqt` / `reassigned` and the
+`fractional_octave[_leq]` sidecars). All three load from the same
+`(output_channel, input_channel)`-keyed entry; saving any one layer
+preserves the others via `Calibration::load_or_new`.
+
+Loudness (BS.1770-5 / R128) composes on top: when SPL cal is set, the
+M / S / I LKFS readouts surface as K-weighted dB SPL (`Mk` / `Sk` /
+`Ik` with `dB SPL` unit) while the R128 PASS / WARN / FAIL badge
+stays anchored on the raw integrated LKFS (the `-23 LKFS` target is
+independent of the absolute reference).
 
 ## `MeasurementReport` — Tier 1 output format
 
@@ -383,7 +422,15 @@ steps — nothing is broken en route.
       `printpdf`. Mirrors the HTML layout on a single A4 page; no
       external binary or Chromium dependency. Wired as
       `ac report <path.json> pdf`; writes sibling `.pdf`. #77.
-- [ ] Build `visualize/cqt.rs` if/when desired. Purely additive.
+- [x] Build `visualize/cqt.rs` — Brown 1991 / Schörkhuber-Klapuri
+      pragmatic constant-Q transform with AVX2+FMA inner MAC and
+      thread-local input scratch (#68, #88).
+- [x] Build `visualize/reassigned.rs` — Auger-Flandrin reassigned
+      STFT spectrogram with thread-local FFT plan + scratch (#69, #88).
+- [x] Build `shared/calibration.rs` SPL layer
+      (`mic_sensitivity_dbfs_at_94db_spl`) and mic-curve layer
+      (`mic_response`) with disjoint-field persistence and the
+      `calibrate_spl` / `calibrate_mic_curve` daemon commands (#63, #92).
 - [ ] After one release cycle, drop the legacy `type` names.
 
 ## Non-goals of this document
