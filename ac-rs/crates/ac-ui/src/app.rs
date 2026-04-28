@@ -703,18 +703,18 @@ impl ApplicationHandler for App {
                 elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
             LoopDirective::Idle => {
-                // Poll + redraw at ~60 Hz even when no explicit redraw is
-                // pending. Data arrives at ~5 Hz per channel, so without
-                // this the UI only paints 5 fps on single-channel
-                // monitoring — which is perceived as sluggishness (hover,
-                // cursor, waterfall scroll all look choppy). Rendering a
-                // static frame is cheap here (~3 ms CPU + ~3 ms GPU per
-                // `ac-ui --synthetic --benchmark`) and wgpu `AutoVsync`
-                // caps the actual rate at the display refresh.
-                request_redraw();
-                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    now + CONTINUOUS_REPAINT_INTERVAL,
-                ));
+                // True idle — block until something (data arrival, input,
+                // window event) wakes us. `04304252` previously kept a
+                // 60 Hz polling redraw here to mask 5 Hz sluggishness on
+                // single-channel monitoring; with monitor data now
+                // arriving at ~30 Hz that justification no longer holds,
+                // and on NVIDIA + Vulkan `AutoVsync` the driver busy-waits
+                // inside `surface.present()` so a forced 60 Hz redraw on
+                // an unchanged frame pegs CPU at 100 % (#108). Producer
+                // wakes via `EventLoopProxy::send_event` and any input
+                // event still set `needs_redraw`, so live use cases all
+                // route through `RedrawIdle` / `RedrawContinuous`.
+                elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
         }
     }
@@ -847,6 +847,43 @@ mod loop_tests {
         app.needs_redraw = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawIdle);
         assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+    }
+
+    /// Regression #108: the `Idle` directive must mean "no work pending,
+    /// block on events" — the `about_to_wait` arm for Idle MUST NOT call
+    /// `request_redraw` or `WaitUntil`. On NVIDIA + Vulkan `AutoVsync`
+    /// the proprietary driver busy-waits inside `surface.present()`, so a
+    /// 60 Hz forced redraw on a static frame burns one full core (100 %
+    /// CPU) regardless of which view is shown. The previous attempt at
+    /// fixing 5 Hz "sluggishness" in `04304252` reintroduced exactly
+    /// this; reverted in #108 since monitor data now arrives at ~30 Hz
+    /// and any genuine continuous-animation case (notification fade,
+    /// benchmark FPS) routes through `RedrawContinuous`.
+    ///
+    /// This test pins the directive-level contract: many sustained idle
+    /// ticks stay `Idle`, and no internal state (peak hold, min hold,
+    /// per-channel stores) silently flips them back to a redraw arm.
+    /// `about_to_wait`'s control-flow side is enforced by code review +
+    /// the comment block on the Idle arm.
+    #[test]
+    fn sustained_idle_never_silently_redraws() {
+        let mut app = fresh_app();
+        // Drain the seeded first-paint redraw.
+        let _ = app.loop_directive(Instant::now());
+
+        // Simulate 200 loop-tick iterations spaced 16 ms apart — what
+        // a 60 Hz polling cadence would give us if the bug returned.
+        let t0 = Instant::now();
+        for i in 0..200 {
+            let now = t0 + Duration::from_millis(i * 16);
+            assert_eq!(
+                app.loop_directive(now),
+                LoopDirective::Idle,
+                "tick {i} flipped to a redraw with no event — \
+                 #108 regression: something added request_redraw to Idle path",
+            );
+        }
+        assert!(!app.needs_redraw, "needs_redraw must stay false across idle ticks");
     }
 }
 
