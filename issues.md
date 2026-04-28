@@ -54,7 +54,7 @@ helpers from `monitor.rs` into a shared utility on first reuse.
 Filed as `blocker`. Will fail until Phase 3 lands — protects against
 future cross-tier parity regressions.
 
-- [ ] [#99](https://github.com/mkovero/ac/issues/99) (F) — cross-tier
+- [x] [#99](https://github.com/mkovero/ac/issues/99) (F) — cross-tier
       numeric parity test
 
 ## Phase 5 — extensions
