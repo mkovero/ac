@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use ac_core::shared::calibration::Calibration;
 
 use crate::audio::{make_engine, AudioEngine};
+use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
@@ -41,6 +42,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     let pub_tx       = state.pub_tx.clone();
     let fake         = state.fake_audio;
     let dut_reply_tx = state.dut_reply_tx.clone();
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let out_port_r     = out_port.clone();
     let in_port_r      = in_port.clone();
@@ -72,23 +74,38 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
 
         let sr  = eng.sample_rate();
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
+        let mic_curve_loaded = cal.as_ref()
+            .map(|c| c.mic_response.is_some()).unwrap_or(false);
+        let spl_offset_db = cal.as_ref().and_then(Calibration::spl_offset_db);
         let mut tests_done = 0usize;
 
         macro_rules! emit {
             ($r:expr) => {{
                 tests_done += 1;
+                let mc_tag = mic::mic_correction_tag(
+                    mic_curve_loaded,
+                    mic_corr_enabled.load(Ordering::Relaxed),
+                );
                 send_pub(&pub_tx, "data", &json!({
                     "type": "test_result", "cmd": "test_dut",
                     "name": $r.name, "pass": $r.pass,
                     "detail": $r.detail, "tolerance": $r.tolerance,
+                    "mic_correction":   mc_tag,
+                    "spl_offset_db":    spl_offset_db,
                 }));
             }};
             ($r:expr, $tag:expr) => {{
                 tests_done += 1;
+                let mc_tag = mic::mic_correction_tag(
+                    mic_curve_loaded,
+                    mic_corr_enabled.load(Ordering::Relaxed),
+                );
                 send_pub(&pub_tx, "data", &json!({
                     "type": "test_result", "cmd": "test_dut", "tag": $tag,
                     "name": $r.name, "pass": $r.pass,
                     "detail": $r.detail, "tolerance": $r.tolerance,
+                    "mic_correction":   mc_tag,
+                    "spl_offset_db":    spl_offset_db,
                 }));
             }};
         }

@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use ac_core::shared::calibration::Calibration;
 
 use crate::audio::{make_engine, AudioEngine};
+use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
@@ -40,6 +41,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     let dmm_host     = cfg.dmm_host.clone();
     let out_ch       = cfg.output_channel;
     let in_ch        = cfg.input_channel;
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let out_port_r     = out_port.clone();
     let in_port_r      = in_port.clone();
@@ -70,14 +72,29 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         let mut tests_run  = 0usize;
         let mut tests_pass = 0usize;
 
+        // Cal context for the active measurement channel — looked up
+        // once per worker, stamped on every emitted `test_result` so
+        // downstream readers can tell whether the test ran on a
+        // mic-curve'd channel and at what SPL offset (#103).
+        let cal_ctx = Calibration::load(out_ch, in_ch, None).ok().flatten();
+        let mic_curve_loaded = cal_ctx.as_ref()
+            .map(|c| c.mic_response.is_some()).unwrap_or(false);
+        let spl_offset_db = cal_ctx.as_ref().and_then(Calibration::spl_offset_db);
+
         macro_rules! emit {
             ($r:expr) => {{
                 if $r.pass { tests_pass += 1; }
                 tests_run += 1;
+                let mc_tag = mic::mic_correction_tag(
+                    mic_curve_loaded,
+                    mic_corr_enabled.load(Ordering::Relaxed),
+                );
                 send_pub(&pub_tx, "data", &json!({
                     "type": "test_result", "cmd": "test_hardware",
                     "name": $r.name, "pass": $r.pass,
                     "detail": $r.detail, "tolerance": $r.tolerance,
+                    "mic_correction":   mc_tag,
+                    "spl_offset_db":    spl_offset_db,
                 }));
             }};
         }

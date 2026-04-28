@@ -61,15 +61,16 @@ future cross-tier parity regressions.
 
 All depend on prior phases. Independent of each other.
 
-- [ ] [#100](https://github.com/mkovero/ac/issues/100) (G) — CSV export
+- [x] [#100](https://github.com/mkovero/ac/issues/100) (G) — CSV export
       records cal + processing context
-- [ ] [#101](https://github.com/mkovero/ac/issues/101) (H) — apply
+- [x] [#101](https://github.com/mkovero/ac/issues/101) (H) — apply
       calibration layers in transfer paths (refuse mic-curve on the
       reference leg)
-- [ ] [#102](https://github.com/mkovero/ac/issues/102) (J) —
+- [x] [#102](https://github.com/mkovero/ac/issues/102) (J) —
       report_html / report_pdf surface SPL + mic-curve provenance
-- [ ] [#103](https://github.com/mkovero/ac/issues/103) (K) —
-      `test_dut` / `test_hw` results carry mic + SPL context
+- [x] [#103](https://github.com/mkovero/ac/issues/103) (K) —
+      `test_dut` / `test_hw` results carry mic + SPL context (envelope
+      stamp; per-subtest mic-curve apply deferred as a follow-up)
 
 ## Phase 6 — deep loudness integration
 
