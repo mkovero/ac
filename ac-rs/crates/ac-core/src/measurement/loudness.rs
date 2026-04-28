@@ -455,10 +455,14 @@ impl ChannelChain {
     }
 
     fn push(&mut self, samples: &[f32]) -> usize {
+        // Stream sample-by-sample through the K-weighting cascade without
+        // collecting into an intermediate `Vec<f32>` (#108). On a 50 Hz
+        // tick at 48 kHz that's ~50 allocs/sec/channel saved, plus the
+        // collect/drop overhead.
         let mut tiles_emitted = 0;
-        let filtered = self.k.apply(samples);
-        for y in filtered {
-            let sq = (y as f64) * (y as f64);
+        for &x in samples {
+            let y = self.k.process_sample(x as f64);
+            let sq = y * y;
             self.running_tile_sum += sq;
             self.samples_in_tile += 1;
             if self.samples_in_tile >= self.tile_len {
