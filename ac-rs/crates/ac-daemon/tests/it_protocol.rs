@@ -349,7 +349,7 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
             }
             Some((t, v)) if t == "measurement/report" => {
                 assert_eq!(v["report"]["data"]["kind"], json!("impulse_response"));
-                assert_eq!(v["report"]["schema_version"], json!(1));
+                assert_eq!(v["report"]["schema_version"], json!(2));
                 got_report = true;
             }
             Some((t, _)) if t == "done" => break,
@@ -650,7 +650,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(1));
+                    assert_eq!(v["report"]["schema_version"], json!(2));
                     got_report = true;
                 }
             }

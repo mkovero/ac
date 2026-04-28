@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bumped on any breaking field change.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -104,6 +104,38 @@ pub struct CalibrationSnapshot {
     pub vrms_at_0dbfs_in: Option<f64>,
     pub ref_freq_hz: f64,
     pub ref_level_dbfs: f64,
+    /// Pistonphone SPL cal (94 dB ref) when present at capture time.
+    /// `None` on uncalibrated channels and on legacy `schema_version: 1`
+    /// reports (the field defaults to absent). When set, downstream
+    /// readers can convert any dBFS value in the report to dB SPL via
+    /// `dbspl = dbfs - mic_sens_dbfs + 94.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_sensitivity_dbfs_at_94db_spl: Option<f64>,
+    /// Mic frequency-response correction provenance — NOT the full
+    /// curve. The curve itself stays in `cal.json`; the report records
+    /// enough to identify which curve was active when the measurement
+    /// was taken (so a year-later reader can tell whether the points
+    /// they're looking at were mic-corrected, and against which file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_response: Option<MicResponseRef>,
+}
+
+/// Pointer-style record of a mic-response curve attached to a channel
+/// when a measurement was captured. Keeps reports small (the full
+/// curve is many KB of `(freq, gain)` pairs) while preserving the
+/// information a reader needs: how many points it had, where it came
+/// from, and when it was imported.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MicResponseRef {
+    /// Number of `(freq, gain)` points in the curve at capture time.
+    pub n_points:    usize,
+    /// Original `.frd` / `.txt` path the curve was imported from, when
+    /// the user provided one. Informational only — the curve itself is
+    /// in `cal.json`, not at this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    /// RFC3339 timestamp the curve was imported into `cal.json`.
+    pub imported_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -358,7 +390,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"schema_version\": 2"));
     }
 
     #[test]
@@ -542,7 +574,7 @@ mod tests {
     /// Every Tier 1 measurement module must emit a populated
     /// `StandardsCitation` — non-empty `standard` and `clause`. Serialising a
     /// report built from each `citation()` round-trips cleanly and survives
-    /// with `schema_version == 1`. See #72 for the audit workflow.
+    /// at the current `SCHEMA_VERSION`. See #72 for the audit workflow.
     #[test]
     fn every_measurement_module_emits_populated_citation() {
         let citations = [
@@ -567,9 +599,86 @@ mod tests {
                 standard: Some(c.clone()),
             };
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 1"));
+            assert!(json.contains("\"schema_version\": 2"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
+    }
+
+    // ─── CalibrationSnapshot: SPL + mic_response provenance (#94) ────
+
+    #[test]
+    fn cal_snapshot_round_trips_spl_and_mic_response() {
+        let snap = CalibrationSnapshot {
+            output_channel: 0,
+            input_channel:  1,
+            vrms_at_0dbfs_out: Some(1.234),
+            vrms_at_0dbfs_in:  Some(0.567),
+            ref_freq_hz:     1000.0,
+            ref_level_dbfs:  -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: Some(-31.7),
+            mic_response: Some(MicResponseRef {
+                n_points:    157,
+                source_path: Some("/tmp/umik.frd".into()),
+                imported_at: "2026-04-15T12:00:00Z".into(),
+            }),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: CalibrationSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, back);
+    }
+
+    #[test]
+    fn cal_snapshot_omits_mic_fields_when_absent() {
+        // Voltage-only channel: the new fields must not appear in the
+        // serialised JSON so reports stay compact and old readers stay
+        // happy.
+        let snap = CalibrationSnapshot {
+            output_channel: 0,
+            input_channel:  0,
+            vrms_at_0dbfs_out: None,
+            vrms_at_0dbfs_in:  Some(1.0),
+            ref_freq_hz:     1000.0,
+            ref_level_dbfs:  -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: None,
+            mic_response: None,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
+        assert!(!json.contains("mic_response"),                     "{json}");
+    }
+
+    #[test]
+    fn legacy_schema_v1_report_decodes_with_new_snapshot_fields_defaulted() {
+        // A `schema_version: 1` report from before #94 lacks the
+        // mic_sensitivity / mic_response fields entirely. It must
+        // still decode under the new struct, with the new fields
+        // defaulting to None.
+        let legacy = r#"{
+            "schema_version": 1,
+            "ac_version": "0.1.0",
+            "timestamp_utc": "2026-04-21T00:00:00Z",
+            "method": {"kind":"stepped_sine","n_points":1},
+            "stimulus": {"sample_rate_hz":48000,"f_start_hz":1000,"f_stop_hz":1000,"level_dbfs":-20,"n_points":1},
+            "integration": {"duration_s":1.0,"window":"hann"},
+            "calibration": {
+                "output_channel": 0,
+                "input_channel":  0,
+                "vrms_at_0dbfs_out": 1.0,
+                "vrms_at_0dbfs_in":  0.5,
+                "ref_freq_hz":   1000.0,
+                "ref_level_dbfs": -10.0
+            },
+            "data": {"kind":"frequency_response","points":[]}
+        }"#;
+        let r: MeasurementReport = serde_json::from_str(legacy)
+            .expect("legacy v1 report must still decode");
+        let cal = r.calibration.expect("calibration block present");
+        assert!(cal.mic_sensitivity_dbfs_at_94db_spl.is_none());
+        assert!(cal.mic_response.is_none());
+        assert_eq!(cal.vrms_at_0dbfs_in, Some(0.5));
+        // Note: schema_version on the loaded struct is 1, not the
+        // current SCHEMA_VERSION — the value reflects what was on disk.
+        assert_eq!(r.schema_version, 1);
     }
 }

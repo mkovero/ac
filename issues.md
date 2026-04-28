@@ -24,7 +24,7 @@ below, organised into 7 phases by dependency / risk.
 Must land first; everything that surfaces SPL / mic provenance
 depends on the snapshot carrying those fields.
 
-- [ ] [#94](https://github.com/mkovero/ac/issues/94) (B) — extend
+- [x] [#94](https://github.com/mkovero/ac/issues/94) (B) — extend
       `CalibrationSnapshot` with SPL + mic_response provenance
 
 ## Phase 2 — quick wins (parallel)
