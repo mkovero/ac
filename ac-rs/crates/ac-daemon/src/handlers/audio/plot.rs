@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-    MeasurementReport, StimulusParams, SCHEMA_VERSION,
+    MeasurementReport, ProcessingChain, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::Calibration;
@@ -133,6 +133,19 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         eng.stop();
 
         let timestamp = now_iso8601_utc();
+        // Snapshot the processing-chain state at report-build time so a
+        // re-loaded report tells the reader what was active during this
+        // capture (#105). `mic_correction_applied` reads true exactly
+        // when the per-point loop above ran `apply_mic_curve_to_analysis`
+        // — the same predicate as the wire frame's `mic_correction` tag.
+        let mc_applied = mic_curve_opt.is_some()
+            && mic_corr_enabled.load(Ordering::Relaxed);
+        let chain = ProcessingChain {
+            weighting:              band_weighting_shared.lock().unwrap().clone(),
+            smoothing_bpo:          None,
+            time_integration:       time_integration_shared.lock().unwrap().clone(),
+            mic_correction_applied: mc_applied,
+        };
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version:     env!("CARGO_PKG_VERSION").to_string(),
@@ -155,6 +168,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             calibration: snapshot_from_cal(cal.as_ref()),
             data:        MeasurementData::FrequencyResponse { points },
             notes:       None,
+            processing_chain: chain.clone(),
         };
 
         send_pub(&pub_tx, "data", &json!({
@@ -196,6 +210,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 &timestamp,
                 report_dir.as_deref(),
                 cal.as_ref(),
+                chain.clone(),
             );
         }
 
@@ -318,6 +333,7 @@ fn emit_spectrum_bands(
     timestamp: &str,
     report_dir: Option<&std::path::Path>,
     cal: Option<&Calibration>,
+    chain: ProcessingChain,
 ) {
     let f_max = (sr as f64 * 0.45).min(stop_hz.max(start_hz));
     let f_min = start_hz.max(1.0);
@@ -366,6 +382,7 @@ fn emit_spectrum_bands(
             levels_dbfs: levels,
         },
         notes: None,
+        processing_chain: chain,
     };
 
     match serde_json::to_value(&bands_report) {

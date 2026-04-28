@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use ac_core::measurement::report::{
-    IntegrationParams, MeasurementData, MeasurementMethod, MeasurementReport, SCHEMA_VERSION,
-    StimulusParams,
+    IntegrationParams, MeasurementData, MeasurementMethod, MeasurementReport, ProcessingChain,
+    SCHEMA_VERSION, StimulusParams,
 };
 use ac_core::measurement::sweep::{
     citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep, log_sweep,
@@ -234,6 +234,14 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
             calibration: snapshot_from_cal(cal.as_ref()),
             data,
             notes: None,
+            // sweep_ir's IR isn't yet mic-curve-corrected (deferred from
+            // #97 to a follow-up). The snapshot still captures the curve
+            // provenance via `calibration.mic_response`; downstream
+            // tools can apply the correction post-hoc.
+            processing_chain: ProcessingChain {
+                mic_correction_applied: false,
+                ..Default::default()
+            },
         };
         send_pub(&pub_tx, "measurement/report", &json!({
             "cmd": "sweep_ir",

@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 
 use crate::measurement::report::{
     CalibrationSnapshot, FrequencyResponsePoint, MeasurementData, MeasurementMethod,
+    ProcessingChain,
     MeasurementReport,
 };
 
@@ -51,6 +52,7 @@ pub fn render_html(report: &MeasurementReport) -> String {
     if let Some(cal) = &report.calibration {
         write_calibration(&mut out, cal);
     }
+    write_processing_chain(&mut out, &report.processing_chain);
     write_data(&mut out, &report.data);
     if let Some(notes) = &report.notes {
         let _ = writeln!(out, "<h2>Notes</h2><pre>{}</pre>", html_escape(notes));
@@ -204,6 +206,49 @@ fn write_calibration(out: &mut String, c: &CalibrationSnapshot) {
     } else {
         let _ = writeln!(out, "<dt>mic response</dt><dd>not loaded (uncorrected)</dd>");
     }
+    let _ = writeln!(out, "</dl>");
+}
+
+/// Render the active overlay / processing state captured with the
+/// report. When the chain is "all-off + uncorrected" (default for
+/// reports built from `ProcessingChain::default()` or legacy v1/v2
+/// reports without the field), the section collapses to a one-line
+/// "Processing: raw" summary so simple reports stay tidy.
+fn write_processing_chain(out: &mut String, chain: &ProcessingChain) {
+    let is_default = chain.weighting == "off"
+        && chain.smoothing_bpo.is_none()
+        && chain.time_integration == "off"
+        && !chain.mic_correction_applied;
+    if is_default {
+        let _ = writeln!(out, "<h2>Processing</h2>");
+        let _ = writeln!(out, "<p>raw — no smoothing, weighting, time integration, or mic-curve correction applied.</p>");
+        return;
+    }
+    let _ = writeln!(out, "<h2>Processing</h2>");
+    let _ = writeln!(out, "<dl class=\"meta\">");
+    let _ = writeln!(
+        out,
+        "<dt>weighting</dt><dd>{}</dd>",
+        html_escape(&chain.weighting),
+    );
+    match chain.smoothing_bpo {
+        Some(n) => {
+            let _ = writeln!(out, "<dt>smoothing</dt><dd>1/{n} octave</dd>");
+        }
+        None => {
+            let _ = writeln!(out, "<dt>smoothing</dt><dd>off</dd>");
+        }
+    }
+    let _ = writeln!(
+        out,
+        "<dt>time integration</dt><dd>{}</dd>",
+        html_escape(&chain.time_integration),
+    );
+    let _ = writeln!(
+        out,
+        "<dt>mic correction</dt><dd>{}</dd>",
+        if chain.mic_correction_applied { "applied" } else { "not applied" },
+    );
     let _ = writeln!(out, "</dl>");
 }
 
@@ -559,6 +604,7 @@ mod tests {
                 ],
             },
             notes: Some("bench run 2026-04-22".into()),
+            processing_chain: crate::measurement::report::ProcessingChain::default(),
         }
     }
 
@@ -618,6 +664,38 @@ mod tests {
         assert!(html.contains("Spectrum Bands"));
         assert!(html.contains("Class 1"));
         assert!(html.contains("125.00"));
+    }
+
+    #[test]
+    fn processing_section_collapses_to_raw_when_chain_is_default() {
+        // Default chain (all-off + uncorrected) renders the one-line
+        // summary instead of a key/value table — keeps simple reports
+        // tidy.
+        let html = render_html(&sample_fr_report());
+        assert!(html.contains("<h2>Processing</h2>"), "section heading missing");
+        assert!(html.contains("raw — no smoothing"),
+            "default-chain summary missing: {html}");
+    }
+
+    #[test]
+    fn processing_section_renders_active_state() {
+        use crate::measurement::report::ProcessingChain;
+        let mut r = sample_fr_report();
+        r.processing_chain = ProcessingChain {
+            weighting:              "a".into(),
+            smoothing_bpo:          Some(6),
+            time_integration:       "fast".into(),
+            mic_correction_applied: true,
+        };
+        let html = render_html(&r);
+        assert!(html.contains("<dt>weighting</dt><dd>a</dd>"),
+            "weighting row missing: {html}");
+        assert!(html.contains("<dt>smoothing</dt><dd>1/6 octave</dd>"),
+            "smoothing row missing: {html}");
+        assert!(html.contains("<dt>time integration</dt><dd>fast</dd>"),
+            "time-integration row missing: {html}");
+        assert!(html.contains("<dt>mic correction</dt><dd>applied</dd>"),
+            "mic correction row missing: {html}");
     }
 
     #[test]

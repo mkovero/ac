@@ -15,7 +15,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bumped on any breaking field change.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// History:
+/// - v1: original schema (pre-#94).
+/// - v2: SPL field + mic-curve provenance on `CalibrationSnapshot` (#94).
+/// - v3: `processing_chain` records the active overlay state at
+///   capture time (#105). Field defaults to "all-off" so v1/v2
+///   reports still decode under the current struct.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -30,6 +37,45 @@ pub struct MeasurementReport {
     pub data: MeasurementData,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Active overlay / processing state at capture time (#105). Lets
+    /// a year-later reader tell whether the values reflect smoothing,
+    /// weighting, time integration, or mic-correction. Defaults to
+    /// "all-off" so legacy `schema_version: 1`/`2` reports still
+    /// decode without the field present.
+    #[serde(default)]
+    pub processing_chain: ProcessingChain,
+}
+
+/// Overlay / processing state recorded with a `MeasurementReport` so a
+/// re-loaded report can tell which corrections were active during
+/// capture. Matches the keys Tier 1 wire frames carry under #98 — the
+/// snapshot is the archival counterpart of that envelope.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProcessingChain {
+    /// Active band-weighting curve: `"off"`, `"a"`, `"c"`, or `"z"`.
+    pub weighting: String,
+    /// Fractional-octave smoothing in bins per octave when active;
+    /// `None` means no smoothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoothing_bpo: Option<u32>,
+    /// Active time-integration mode: `"off"`, `"fast"`, `"slow"`,
+    /// `"leq"`.
+    pub time_integration: String,
+    /// Was the per-channel mic-curve correction applied to the data
+    /// in this report? When `true`, callers can interpret the
+    /// values as the true acoustic level the mic was capturing.
+    pub mic_correction_applied: bool,
+}
+
+impl Default for ProcessingChain {
+    fn default() -> Self {
+        Self {
+            weighting:              "off".into(),
+            smoothing_bpo:          None,
+            time_integration:       "off".into(),
+            mic_correction_applied: false,
+        }
+    }
 }
 
 /// The measurement technique. `kind` is a discriminant so new methods
@@ -346,6 +392,7 @@ mod tests {
                 ],
             },
             notes: None,
+            processing_chain: ProcessingChain::default(),
         }
     }
 
@@ -390,7 +437,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 2"));
+        assert!(json.contains("\"schema_version\": 3"));
     }
 
     #[test]
@@ -437,6 +484,7 @@ mod tests {
                 levels_dbfs: vec![-30.0, -20.0, -40.0],
             },
             notes: None,
+            processing_chain: ProcessingChain::default(),
         }
     }
 
@@ -492,6 +540,7 @@ mod tests {
                 }],
             },
             notes: None,
+            processing_chain: ProcessingChain::default(),
         }
     }
 
@@ -541,6 +590,7 @@ mod tests {
                 ccir_weighted_dbfs: None,
             },
             notes: None,
+            processing_chain: ProcessingChain::default(),
         }
     }
 
@@ -599,7 +649,7 @@ mod tests {
                 standard: Some(c.clone()),
             };
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 2"));
+            assert!(json.contains("\"schema_version\": 3"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
@@ -646,6 +696,51 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
         assert!(!json.contains("mic_response"),                     "{json}");
+    }
+
+    // ─── ProcessingChain (#105) ─────────────────────────────────────────
+
+    #[test]
+    fn processing_chain_default_is_all_off() {
+        let p = ProcessingChain::default();
+        assert_eq!(p.weighting,        "off");
+        assert_eq!(p.smoothing_bpo,    None);
+        assert_eq!(p.time_integration, "off");
+        assert!(!p.mic_correction_applied);
+    }
+
+    #[test]
+    fn processing_chain_round_trips() {
+        let p = ProcessingChain {
+            weighting:              "a".into(),
+            smoothing_bpo:          Some(6),
+            time_integration:       "fast".into(),
+            mic_correction_applied: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ProcessingChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn legacy_schema_v2_report_decodes_with_default_processing_chain() {
+        // A v2 report (post-#94, pre-#105) lacks `processing_chain`.
+        // Must still decode under the v3 struct, with the field
+        // defaulting to "all-off" so a year-later reader of an old
+        // archive doesn't crash.
+        let legacy = r#"{
+            "schema_version": 2,
+            "ac_version": "0.1.0",
+            "timestamp_utc": "2026-04-22T00:00:00Z",
+            "method": {"kind":"stepped_sine","n_points":1},
+            "stimulus": {"sample_rate_hz":48000,"f_start_hz":1000,"f_stop_hz":1000,"level_dbfs":-20,"n_points":1},
+            "integration": {"duration_s":1.0,"window":"hann"},
+            "data": {"kind":"frequency_response","points":[]}
+        }"#;
+        let r: MeasurementReport = serde_json::from_str(legacy)
+            .expect("legacy v2 report must still decode");
+        assert_eq!(r.schema_version, 2);
+        assert_eq!(r.processing_chain, ProcessingChain::default());
     }
 
     #[test]

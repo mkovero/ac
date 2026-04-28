@@ -52,6 +52,7 @@ pub fn render_pdf(report: &MeasurementReport) -> Result<Vec<u8>> {
     y = draw_method(&current, &font_bold, &font, &font_mono, y, report);
     y = draw_stimulus(&current, &font_bold, &font_mono, y, report);
     y = draw_calibration(&current, &font_bold, &font_mono, y, report);
+    y = draw_processing_chain(&current, &font_bold, &font_mono, y, report);
 
     match &report.data {
         MeasurementData::FrequencyResponse { points } => {
@@ -221,6 +222,37 @@ fn draw_calibration(
             y = kv_row(layer, font_bold, font_mono, y, "mic response", "uncorrected");
         }
     }
+    y - 2.0
+}
+
+/// Active overlay / processing chain block (#105). Mirrors the HTML
+/// `write_processing_chain` block: collapsed to "raw" when nothing is
+/// active, full key/value table otherwise.
+fn draw_processing_chain(
+    layer: &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_mono: &IndirectFontRef,
+    y: f32,
+    r: &MeasurementReport,
+) -> f32 {
+    let chain = &r.processing_chain;
+    let is_default = chain.weighting == "off"
+        && chain.smoothing_bpo.is_none()
+        && chain.time_integration == "off"
+        && !chain.mic_correction_applied;
+    let mut y = section_heading(layer, font_bold, y, "Processing");
+    if is_default {
+        return kv_row(layer, font_bold, font_mono, y, "state", "raw") - 2.0;
+    }
+    y = kv_row(layer, font_bold, font_mono, y, "weighting", &chain.weighting);
+    let smoothing = match chain.smoothing_bpo {
+        Some(n) => format!("1/{n} octave"),
+        None    => "off".to_string(),
+    };
+    y = kv_row(layer, font_bold, font_mono, y, "smoothing", &smoothing);
+    y = kv_row(layer, font_bold, font_mono, y, "time integration", &chain.time_integration);
+    y = kv_row(layer, font_bold, font_mono, y, "mic correction",
+               if chain.mic_correction_applied { "applied" } else { "not applied" });
     y - 2.0
 }
 
@@ -631,6 +663,7 @@ mod tests {
                 }).collect(),
             },
             notes: Some("unit test".into()),
+            processing_chain: crate::measurement::report::ProcessingChain::default(),
         }
     }
 

@@ -87,8 +87,11 @@ channel reads K-weighted dB SPL with mic-correction.
 
 Low priority, not on critical path.
 
-- [ ] [#105](https://github.com/mkovero/ac/issues/105) (L) —
+- [x] [#105](https://github.com/mkovero/ac/issues/105) (L) —
       `MeasurementReport` records the active processing chain
+      (`ProcessingChain { weighting, smoothing_bpo, time_integration,
+      mic_correction_applied }`; schema bumped 2 → 3; HTML/PDF
+      renderers surface the chain)
 
 ## Dependency graph
 
