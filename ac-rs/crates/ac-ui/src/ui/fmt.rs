@@ -128,17 +128,35 @@ pub fn top_right_status(sr: u32, channel_label: &str) -> String {
 
 /// Tier 2 technique badge shown top-right so the reader knows which
 /// live-analysis technique is producing the view. `analysis_mode` is
-/// the server-global setting (`"fft"` or `"cwt"`); unknown values
-/// are surfaced verbatim so bad state is visible instead of silent.
+/// the server-global setting (`"fft"` / `"cwt"` / `"cqt"` /
+/// `"reassigned"`); unknown values are surfaced verbatim so bad state
+/// is visible instead of silent.
+///
+/// `cqt_f_min_hz` is the active CQT grid's lowest displayed bin —
+/// dynamic because the daemon clamps it above
+/// `cqt::DEFAULT_F_MIN` based on the ring length / sample rate. The
+/// caller reads it from the most recent CQT frame's `freqs[0]`. For
+/// other modes the value is ignored.
 pub fn tier_badge(
     analysis_mode: &str,
     fft_n: u32,
     cwt_sigma: f32,
     cwt_n_scales: usize,
+    cqt_f_min_hz: f32,
 ) -> String {
     match analysis_mode {
         "fft" => format!("FFT · N={fft_n} · Hann"),
         "cwt" => format!("CWT · Morlet · σ={cwt_sigma:.0} · N_scales={cwt_n_scales}"),
+        "cqt" => format!(
+            "CQT · {} bpo · fmin={:.0} Hz",
+            ac_core::visualize::cqt::DEFAULT_BPO,
+            cqt_f_min_hz,
+        ),
+        "reassigned" => format!(
+            "Reassigned · N={} · {} bins · Hann",
+            ac_core::visualize::reassigned::DEFAULT_N,
+            ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS,
+        ),
         other => format!("{other}"),
     }
 }
@@ -594,15 +612,41 @@ mod tests {
 
     #[test]
     fn tier_badge_fft() {
-        assert_eq!(tier_badge("fft", 16384, 12.0, 512), "FFT · N=16384 · Hann");
+        assert_eq!(tier_badge("fft", 16384, 12.0, 512, 0.0), "FFT · N=16384 · Hann");
     }
 
     #[test]
     fn tier_badge_cwt() {
         assert_eq!(
-            tier_badge("cwt", 16384, 12.0, 512),
+            tier_badge("cwt", 16384, 12.0, 512, 0.0),
             "CWT · Morlet · σ=12 · N_scales=512",
         );
+    }
+
+    #[test]
+    fn tier_badge_cqt_uses_live_f_min() {
+        // The badge picks up the runtime f_min the daemon clamped to
+        // (≈ 34 Hz at default ring at 48 kHz with bpo=24). It does
+        // not hardcode the const 30 Hz.
+        assert_eq!(
+            tier_badge("cqt", 0, 0.0, 0, 34.13),
+            "CQT · 24 bpo · fmin=34 Hz",
+        );
+    }
+
+    #[test]
+    fn tier_badge_reassigned() {
+        assert_eq!(
+            tier_badge("reassigned", 0, 0.0, 0, 0.0),
+            "Reassigned · N=4096 · 1024 bins · Hann",
+        );
+    }
+
+    #[test]
+    fn tier_badge_unknown_mode_falls_through() {
+        // Unknown values surface verbatim so bad state is visible
+        // instead of silent.
+        assert_eq!(tier_badge("future-mode", 0, 0.0, 0, 0.0), "future-mode");
     }
 
     #[test]

@@ -31,9 +31,9 @@ depends on the snapshot carrying those fields.
 
 Both small (<100 LOC), independent.
 
-- [ ] [#95](https://github.com/mkovero/ac/issues/95) (C) —
+- [x] [#95](https://github.com/mkovero/ac/issues/95) (C) —
       `get_calibration` / `list_calibrations` return all three cal layers
-- [ ] [#96](https://github.com/mkovero/ac/issues/96) (E) —
+- [x] [#96](https://github.com/mkovero/ac/issues/96) (E) —
       `tier_badge` parameterises CQT + reassigned modes
 
 ## Phase 3 — headline correctness (parallel after Phase 1)

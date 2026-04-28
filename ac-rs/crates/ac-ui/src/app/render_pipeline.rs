@@ -708,11 +708,26 @@ impl App {
             interval_ms: self.monitor_interval_ms,
             fft_n: self.monitor_fft_n,
         });
+        // For the CQT badge we need the live `f_min` — the daemon
+        // clamps it dynamically above the const default based on ring
+        // length / sample rate, so the only authoritative source is
+        // the active channel's most recent frame. Other modes ignore
+        // this value.
+        let cqt_f_min_snap = if self.analysis_mode == "cqt" {
+            frames
+                .get(self.config.active_channel)
+                .and_then(|f| f.as_ref())
+                .and_then(|f| f.freqs.first().copied())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let tier_badge_snap = Some(crate::ui::fmt::tier_badge(
             &self.analysis_mode,
             self.monitor_fft_n,
             self.cwt_sigma,
             self.cwt_n_scales,
+            cqt_f_min_snap,
         ));
         let sweep_snap = if in_sweep_layout {
             Some(self.sweep_last.clone())
