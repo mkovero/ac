@@ -87,6 +87,7 @@ dependencies = [
  "pollster",
  "serde",
  "serde_json",
+ "tempfile",
  "triple_buffer",
  "wgpu",
  "winit",
