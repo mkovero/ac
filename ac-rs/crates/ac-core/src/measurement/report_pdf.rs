@@ -51,6 +51,7 @@ pub fn render_pdf(report: &MeasurementReport) -> Result<Vec<u8>> {
     y = draw_header(&current, &font, &font_mono, y, report);
     y = draw_method(&current, &font_bold, &font, &font_mono, y, report);
     y = draw_stimulus(&current, &font_bold, &font_mono, y, report);
+    y = draw_calibration(&current, &font_bold, &font_mono, y, report);
 
     match &report.data {
         MeasurementData::FrequencyResponse { points } => {
@@ -169,6 +170,56 @@ fn draw_stimulus(
         ("n_points",     r.stimulus.n_points.to_string()),
     ] {
         y = kv_row(layer, font_bold, font_mono, y, label, &value);
+    }
+    y - 2.0
+}
+
+/// Calibration block — renders the three orthogonal layers
+/// (voltage / SPL pistonphone / mic frequency-response curve) so a
+/// printed report carries the cal context the values were captured
+/// under. Empty `report.calibration` collapses the section to a one-
+/// line "uncalibrated" stub. See #102.
+fn draw_calibration(
+    layer: &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_mono: &IndirectFontRef,
+    y: f32,
+    r: &MeasurementReport,
+) -> f32 {
+    let mut y = section_heading(layer, font_bold, y, "Calibration");
+    let Some(c) = r.calibration.as_ref() else {
+        return kv_row(layer, font_bold, font_mono, y, "state", "uncalibrated") - 2.0;
+    };
+    y = kv_row(layer, font_bold, font_mono, y, "channels",
+               &format!("out {} / in {}", c.output_channel, c.input_channel));
+    match c.vrms_at_0dbfs_in {
+        Some(v) => {
+            y = kv_row(layer, font_bold, font_mono, y, "in V@0dBFS",
+                       &format!("{v:.6} V"));
+        }
+        None => {
+            y = kv_row(layer, font_bold, font_mono, y, "voltage", "not calibrated");
+        }
+    }
+    match c.mic_sensitivity_dbfs_at_94db_spl {
+        Some(s) => {
+            let off = 94.0 - s;
+            y = kv_row(layer, font_bold, font_mono, y, "SPL ref",
+                       &format!("94 dB SPL @ {s:.2} dBFS (offset {off:+.2} dB)"));
+        }
+        None => {
+            y = kv_row(layer, font_bold, font_mono, y, "SPL", "not calibrated");
+        }
+    }
+    match &c.mic_response {
+        Some(mic) => {
+            let path = mic.source_path.as_deref().unwrap_or("(no path)");
+            y = kv_row(layer, font_bold, font_mono, y, "mic response",
+                       &format!("{} ({} pts, {})", path, mic.n_points, mic.imported_at));
+        }
+        None => {
+            y = kv_row(layer, font_bold, font_mono, y, "mic response", "uncorrected");
+        }
     }
     y - 2.0
 }

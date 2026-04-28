@@ -180,6 +180,30 @@ fn write_calibration(out: &mut String, c: &CalibrationSnapshot) {
         "<dt>reference</dt><dd>{:.2} Hz @ {:.2} dBFS</dd>",
         c.ref_freq_hz, c.ref_level_dbfs
     );
+    // SPL pistonphone reference (#94 / #102): when set, downstream
+    // readings convert to dB SPL via `dbspl = dbfs + (94 − mic_sens)`.
+    if let Some(mic_sens) = c.mic_sensitivity_dbfs_at_94db_spl {
+        let offset = 94.0 - mic_sens;
+        let _ = writeln!(
+            out,
+            "<dt>SPL reference</dt>\
+             <dd>94 dB SPL @ {mic_sens:.2} dBFS captured (offset {offset:+.2} dB)</dd>",
+        );
+    } else {
+        let _ = writeln!(out, "<dt>SPL reference</dt><dd>not calibrated</dd>");
+    }
+    // Mic frequency-response correction provenance (#92 / #102).
+    if let Some(mic) = &c.mic_response {
+        let path = mic.source_path.as_deref().unwrap_or("(no path recorded)");
+        let _ = writeln!(
+            out,
+            "<dt>mic response</dt>\
+             <dd>{} ({} points, imported {})</dd>",
+            html_escape(path), mic.n_points, html_escape(&mic.imported_at),
+        );
+    } else {
+        let _ = writeln!(out, "<dt>mic response</dt><dd>not loaded (uncorrected)</dd>");
+    }
     let _ = writeln!(out, "</dl>");
 }
 
@@ -594,6 +618,56 @@ mod tests {
         assert!(html.contains("Spectrum Bands"));
         assert!(html.contains("Class 1"));
         assert!(html.contains("125.00"));
+    }
+
+    #[test]
+    fn calibration_section_renders_all_three_layers_when_present() {
+        use crate::measurement::report::{CalibrationSnapshot, MicResponseRef};
+        let mut r = sample_fr_report();
+        r.calibration = Some(CalibrationSnapshot {
+            output_channel:    0,
+            input_channel:     0,
+            vrms_at_0dbfs_out: Some(1.0),
+            vrms_at_0dbfs_in:  Some(0.5),
+            ref_freq_hz:       1000.0,
+            ref_level_dbfs:    -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: Some(-32.0),
+            mic_response: Some(MicResponseRef {
+                n_points:    157,
+                source_path: Some("/tmp/umik.frd".into()),
+                imported_at: "2026-04-15T12:00:00Z".into(),
+            }),
+        });
+        let html = render_html(&r);
+        // Voltage cal still rendered.
+        assert!(html.contains("V<sub>RMS</sub>@0dBFS in"), "voltage missing: {html}");
+        // SPL pistonphone reference + computed offset (94 - (-32) = 126).
+        assert!(html.contains("94 dB SPL"), "SPL ref label missing: {html}");
+        assert!(html.contains("-32.00 dBFS"), "captured dBFS missing: {html}");
+        assert!(html.contains("+126.00 dB"), "offset missing or wrong: {html}");
+        // Mic-curve provenance.
+        assert!(html.contains("/tmp/umik.frd"), "curve path missing: {html}");
+        assert!(html.contains("157 points"), "n_points missing: {html}");
+        assert!(html.contains("2026-04-15T12:00:00Z"), "imported_at missing: {html}");
+    }
+
+    #[test]
+    fn calibration_section_says_uncorrected_when_absent() {
+        use crate::measurement::report::CalibrationSnapshot;
+        let mut r = sample_fr_report();
+        r.calibration = Some(CalibrationSnapshot {
+            output_channel:    0,
+            input_channel:     0,
+            vrms_at_0dbfs_out: None,
+            vrms_at_0dbfs_in:  None,
+            ref_freq_hz:       1000.0,
+            ref_level_dbfs:    -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: None,
+            mic_response: None,
+        });
+        let html = render_html(&r);
+        assert!(html.contains("not calibrated"), "SPL stub missing: {html}");
+        assert!(html.contains("uncorrected"),    "mic stub missing: {html}");
     }
 
     #[test]
