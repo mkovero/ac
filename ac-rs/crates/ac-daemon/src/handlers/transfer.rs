@@ -6,7 +6,10 @@ use std::sync::atomic::Ordering;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 
+use ac_core::shared::calibration::Calibration;
+
 use crate::audio::make_engine;
+use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
@@ -105,13 +108,49 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
+    // Calibration discipline (#101): a mic-curve on the **reference**
+    // channel is a misconfiguration — H1 = Y/X is a ratio, applying a
+    // mic correction to the reference leg cancels against the meas-leg
+    // correction (or worse, biases it the wrong way when only one leg
+    // has a curve). Refuse the request synchronously with a clear
+    // message so the user knows to clear the curve or swap channels.
+    let out_ch = cfg.output_channel;
+    for &(_, ref_ch) in &pairs {
+        if let Ok(Some(cal)) = Calibration::load(out_ch, ref_ch, None) {
+            if cal.mic_response.is_some() {
+                return json!({
+                    "ok": false,
+                    "error": format!(
+                        "transfer ref channel {ref_ch} has a mic-curve loaded — \
+                         transfer is a ratio, applying a curve to the reference leg \
+                         is wrong. Run `ac calibrate mic-curve clear input {ref_ch}` \
+                         or swap meas/ref."
+                    ),
+                });
+            }
+        }
+    }
+
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let out_port_r    = out_port.clone();
     let meas_port_r   = unique_ports.first().cloned().unwrap_or_default();
     let ref_port_r    = unique_ports.get(1).cloned().unwrap_or_else(|| meas_port_r.clone());
     let pairs_r       = pairs.clone();
+
+    // Per-pair measurement-channel mic-curves. Loaded once at worker
+    // start; ref-channel curves were already refused above.
+    let pair_meas_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> = pairs
+        .iter()
+        .map(|&(meas, _)| {
+            Calibration::load(out_ch, meas, None)
+                .ok()
+                .flatten()
+                .and_then(|c| c.mic_response.clone())
+        })
+        .collect();
 
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
@@ -216,11 +255,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // reference) scale linearly with core count. The rings are
             // read-only inside the per-pair closure; JSON is built on the
             // worker thread and published back in original pair order.
+            let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
             let messages: Vec<Value> = pairs
                 .par_iter()
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
-                .filter_map(|((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt)| {
+                .zip(pair_meas_curves.par_iter())
+                .filter_map(|(((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt), curve_opt)| {
                     let meas = rings.get(mi)?.as_slice();
                     let refb = rings.get(ri)?.as_slice();
                     let delay = delay_opt.unwrap_or(0);
@@ -240,22 +281,36 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     };
 
                     let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
-                    let mag   = indices.iter().map(|&i| result.magnitude_db[i]).collect::<Vec<_>>();
+                    let mut mag = indices.iter()
+                        .map(|&i| result.magnitude_db[i])
+                        .collect::<Vec<_>>();
                     let phase = indices.iter().map(|&i| result.phase_deg[i]).collect::<Vec<_>>();
                     let coh   = indices.iter().map(|&i| result.coherence[i]).collect::<Vec<_>>();
 
+                    // Mic-curve correction (#101) on the measurement leg
+                    // only — the reference leg was guarded above. H1's
+                    // dB magnitude has the mic over-read embedded; subtract
+                    // the curve at each downsampled bin to recover truth.
+                    if mc_enabled {
+                        if let Some(curve) = curve_opt.as_ref() {
+                            mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
+                        }
+                    }
+                    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
+
                     Some(json!({
-                        "type":          "transfer_stream",
-                        "cmd":           "transfer_stream",
-                        "freqs":         freqs,
-                        "magnitude_db":  mag,
-                        "phase_deg":     phase,
-                        "coherence":     coh,
-                        "delay_samples": result.delay_samples,
-                        "delay_ms":      result.delay_ms,
-                        "ref_channel":   ref_ch,
-                        "meas_channel":  meas_ch,
-                        "sr":            sr,
+                        "type":           "transfer_stream",
+                        "cmd":            "transfer_stream",
+                        "freqs":          freqs,
+                        "magnitude_db":   mag,
+                        "phase_deg":      phase,
+                        "coherence":      coh,
+                        "delay_samples":  result.delay_samples,
+                        "delay_ms":       result.delay_ms,
+                        "ref_channel":    ref_ch,
+                        "meas_channel":   meas_ch,
+                        "sr":             sr,
+                        "mic_correction": mc_tag,
                     }))
                 })
                 .collect();

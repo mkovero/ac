@@ -984,6 +984,46 @@ fn get_and_list_calibrations_return_all_three_layers() {
 }
 
 #[test]
+fn transfer_stream_refuses_mic_curve_on_reference_channel() {
+    // #101 (H): H1 is a ratio. Applying a mic-curve to the reference
+    // leg cancels (or worse, biases) the measurement-leg correction.
+    // The daemon refuses the request with a clear message instead of
+    // silently producing a wrong transfer.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // Attach a synthetic curve to channel 1 (will be the reference).
+    let mut freqs = Vec::new();
+    let mut gains = Vec::new();
+    let log_min = 100.0_f64.ln();
+    let log_max = 10_000.0_f64.ln();
+    for i in 0..24 {
+        let t = i as f64 / 23.0;
+        freqs.push((log_min + t * (log_max - log_min)).exp());
+        gains.push(2.0);
+    }
+    let r = c.call(json!({
+        "cmd":           "calibrate_mic_curve",
+        "op":            "set",
+        "input_channel": 1,
+        "freqs_hz":      freqs,
+        "gain_db":       gains,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    // Try to start transfer with channel 1 as the reference. Must refuse.
+    let r = c.call(json!({
+        "cmd":         "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+    }));
+    assert_eq!(r["ok"], json!(false), "expected refusal: {r}");
+    let err = r["error"].as_str().unwrap_or("");
+    assert!(err.contains("ref channel 1"), "error message wrong: {err}");
+    assert!(err.contains("mic-curve"), "error message wrong: {err}");
+}
+
+#[test]
 fn calibrate_mic_curve_set_then_clear() {
     // End-to-end: upload a synthetic curve, verify cal entry is written,
     // verify the `loaded` count comes back; then `op = clear` and verify
