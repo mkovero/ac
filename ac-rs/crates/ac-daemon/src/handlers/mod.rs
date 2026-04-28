@@ -30,6 +30,7 @@ mod calibrate;
 pub(crate) mod mic;
 mod test_dut;
 mod test_hw;
+mod test_software;
 mod transfer;
 
 pub use admin::{
@@ -48,6 +49,7 @@ pub use calibrate::{
 };
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
+pub use test_software::test_software;
 pub use transfer::{probe, transfer_stream};
 
 // ---------------------------------------------------------------------------

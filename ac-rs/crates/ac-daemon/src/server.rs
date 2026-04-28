@@ -366,6 +366,7 @@ fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_so
         "server_connections"  => handlers::server_connections(state),
         "transfer_stream"     => handlers::transfer_stream(state, &cmd),
         "probe"               => handlers::probe(state, &cmd),
+        "test_software"       => handlers::test_software(state),
         "test_hardware"       => handlers::test_hardware(state, &cmd),
         "test_dut"            => handlers::test_dut(state, &cmd),
         "dut_reply"           => handlers::dut_reply(state),
