@@ -14,7 +14,9 @@ The `ip` of audio — terse, positional, unit-tagged arguments.
 
 The analysis stack is split into two tiers — **reference measurement**
 (reproducible, standards-aligned, archivable) and **live analysis**
-(responsive, display-first). Full model and placement rules:
+(responsive, calibration-aware, frame-streamed). Both tiers produce
+trustworthy numbers; the split is about which *technique* is in use,
+not about numeric rigor. Full model and placement rules:
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Every Tier 1 module carries a `StandardsCitation` audited against the

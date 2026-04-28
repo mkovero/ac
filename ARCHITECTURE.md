@@ -36,30 +36,55 @@ Properties:
 Commands: `ac monitor` (defaults to FFT spectrum), `ac monitor cwt`,
 `ac monitor cqt`, `ac monitor reassigned`, `ac tuner`.
 
-Optimizes for: **insight, responsiveness, smooth interactive experience.**
+Goal: **show the user what the signal is doing right now, with numbers
+they can trust.** Every visible dB value is a real, calibration-aware
+measurement at the technique's bin centre — not a sketch or a hint.
+What separates Tier 2 from Tier 1 is the *technique* (Morlet wavelet,
+constant-Q kernel, reassigned STFT, …) not the numeric rigor inside
+that technique.
 
 Properties:
-- Values shown are real measurements, computed with the same numeric
-  rigor (f64 internally, dBFS-calibrated) as Tier 1. A dB value on a
-  Tier 2 waterfall is as accurate as the technique allows.
-- Where performance or visual fluidity would be compromised by strict
-  adherence to a standard's computation method, Tier 2 chooses the
-  smoother user experience. Example: the existing CWT display uses
-  Morlet wavelets (not IEC 61260 filter shapes) because Morlet gives
-  better time-frequency resolution for a given CPU budget.
-- Output is **visualization first, extractable data second**. Frames
-  are ephemeral, optimized for display update rates.
-- Tested for correctness against synthetic signals (a pure tone reads
-  the expected dBFS within tolerance), not against compliance masks.
+- Numeric rigor matches Tier 1: f64 internally, dBFS calibrated, peak
+  amplitude correctly recovered for an aligned cosine. The voltage /
+  SPL / mic-curve calibration layers (`shared/calibration.rs`) apply
+  identically to Tier 1 and Tier 2 reads — a level shown on a CWT
+  waterfall reflects the same physical quantity as the same level
+  read off `ac plot`.
+- The technique itself is chosen for time-frequency behaviour and
+  per-frame CPU budget, not for standards conformance. CWT uses
+  Morlet wavelets, CQT uses Hann-windowed Q-invariant kernels,
+  reassigned uses Auger-Flandrin reassignment — none is an
+  IEC 61260-1 fractional-octave filterbank. A CWT band level is a
+  real, calibrated level at that *kernel's* centre frequency, but it
+  is not "the 1/3-octave band level per IEC 61260-1 Class 1."
+- Every influence on a displayed number — calibration (voltage / SPL /
+  mic-curve), smoothing, fractional-octave aggregation, A / C / Z
+  weighting, time integration, mic-correction enable — is surfaced
+  as a labelled tag in the overlay so the user can always tell what
+  is affecting the reading, and toggling any of them shows the effect
+  live.
+- Output is a continuous **frame stream** — magnitudes + frequencies
+  per tick — not an archived report. Subscribers that want long-term
+  storage record the frames; the daemon does not.
+- Tested for correctness against synthetic signals: pure tones read
+  expected dBFS within bin-leakage tolerance, calibrated cosines read
+  expected dB SPL with both SPL offset and mic-correction applied,
+  chirps track diagonally on log-frequency axes.
 
 ### The seam between tiers
 
-A user reading a value off a Tier 2 display can trust the number for
-what it represents. What they cannot do is **cite that number as a
-standards-compliant measurement** if the technique itself is not
-standards-defined. The CWT waterfall's 2 kHz reading is a real dBFS
-value at that scale — it is not "the 1/3-octave band level per
-IEC 61260-1 Class 1."
+The split is not "Tier 1 = trustworthy, Tier 2 = best-effort." Both
+tiers produce trustworthy numbers; the difference is what *claim* the
+number can carry.
+
+A Tier 2 value is a real, calibrated measurement at the analysis
+technique's bin — exactly as accurate as f64 / dBFS / SPL math allows
+within that technique's bin-leakage envelope. What a user cannot do
+is **cite that number as a standards-compliant measurement** if the
+technique itself is not the one a standard names. The CWT waterfall's
+2 kHz reading is a real dB SPL value at that wavelet scale — it is not
+"the 1/3-octave band level per IEC 61260-1 Class 1," because the
+filter shape isn't IEC's.
 
 This is the correct boundary: if a report needs a citable per-band
 level, the user runs `ac plot` (or the future `ac noise`) with the
@@ -68,8 +93,11 @@ right now, they use `ac monitor cwt`. Both are measurement. Only one
 carries a standards citation.
 
 UI surfaces show a small badge on Tier 2 views labeling the technique
-("Morlet CWT, σ=12") so the user knows what they are looking at. No
-disclaimer about trustworthiness — just factual labeling.
+("Morlet CWT, σ=12") plus tags for every active influence (mic-cal,
+1/3 oct, wt A, time fast, …) so the user can always reconstruct what
+the displayed number means. No disclaimer about trustworthiness —
+just factual labeling, backed by the daemon stamping the same flags
+on every wire frame so external subscribers see the same context.
 
 ## Module organization
 
