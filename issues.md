@@ -79,8 +79,9 @@ LOC: FIR design + per-sample filter loop + parity tests at three
 frequencies + a bench. Composes with SPL cal (#89) so a calibrated
 channel reads K-weighted dB SPL with mic-correction.
 
-- [ ] [#104](https://github.com/mkovero/ac/issues/104) (I) — integrate
-      mic-curve into BS.1770-5 path
+- [x] [#104](https://github.com/mkovero/ac/issues/104) (I) — integrate
+      mic-curve into BS.1770-5 path (per-sample inverse-curve FIR
+      before K-weighting; 55× realtime in release)
 
 ## Phase 7 — backlog
 

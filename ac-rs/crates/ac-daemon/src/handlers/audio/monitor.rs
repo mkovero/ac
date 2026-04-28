@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use ac_core::measurement::loudness::LoudnessState;
 use ac_core::shared::calibration::Calibration;
+use ac_core::shared::mic_curve_filter::{MicCurveFir, DEFAULT_N_TAPS};
 use ac_core::visualize::time_integration::{
     EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S,
 };
@@ -19,8 +20,11 @@ use super::super::{busy_guard, resolve_input, send_pub, spawn_worker};
 /// Emit a `measurement/loudness` sidecar frame for one channel. Kept
 /// out of the worker body so the FFT / CWT / CQT / reassigned analysis
 /// paths can share it. `spl_offset_db` mirrors the offset stamped on
-/// the spectrum frame for the same channel; the UI uses it to render
-/// LKFS / dBTP as K-weighted dB SPL when set.
+/// the spectrum frame for the same channel; `mic_correction` reflects
+/// whether the LKFS values were computed on samples that had already
+/// passed through the per-channel mic-curve FIR (#104) — `"on"` means
+/// LKFS / LRA / dBTP report the *corrected* (true acoustic) levels.
+#[allow(clippy::too_many_arguments)]
 fn emit_loudness_frame(
     pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
     channel: u32,
@@ -28,6 +32,7 @@ fn emit_loudness_frame(
     sr: u32,
     loudness: &LoudnessState,
     spl_offset_db: Option<f64>,
+    mic_correction: &str,
     ts_ns: u64,
     xruns: u32,
 ) {
@@ -44,10 +49,36 @@ fn emit_loudness_frame(
         "true_peak_dbtp":   json_finite(loudness.true_peak_dbtp()),
         "gated_duration_s": loudness.gated_duration_s(),
         "spl_offset_db":    spl_offset_db,
+        "mic_correction":   mic_correction,
         "timestamp":        ts_ns,
         "xruns":            xruns,
     });
     send_pub(pub_tx, "data", &frame);
+}
+
+/// Push captured samples to the loudness state, optionally filtering
+/// through the per-channel mic-curve FIR first (#104). When the FIR
+/// is bypassed (toggle off, or no curve loaded), pushes the raw
+/// samples — preserves the existing dBTP / LKFS path so a channel
+/// without a curve sees no behavioural change.
+///
+/// The FIR's delay-line state persists across calls so block boundaries
+/// are seamless. Toggling the global enable flag mid-stream causes a
+/// brief discontinuity (one FIR-length of stale history); document'd
+/// in the wire frame's `mic_correction` field flipping `"on"` → `"off"`.
+fn push_loudness_with_optional_fir(
+    loudness:         &mut LoudnessState,
+    fir:              &mut Option<MicCurveFir>,
+    mic_corr_enabled: bool,
+    samples:          &[f32],
+) {
+    if let (true, Some(fir)) = (mic_corr_enabled, fir.as_mut()) {
+        let mut filtered = samples.to_vec();
+        fir.process_inplace(&mut filtered);
+        let _ = loudness.push(&[&filtered]);
+    } else {
+        let _ = loudness.push(&[samples]);
+    }
 }
 
 /// Convert a possibly-infinite `f64` to JSON — `null` when not finite,
@@ -185,6 +216,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         let sr = eng.sample_rate();
+        // Per-channel mic-curve FIRs for the loudness path (#104). One
+        // FIR per channel, built once at start when the curve is loaded,
+        // bypassed when no curve or when the global toggle is off. The
+        // FIR runs *before* K-weighting / dBTP so LKFS reflects the
+        // mic-corrected acoustic level.
+        let mut loudness_firs: Vec<Option<MicCurveFir>> = mic_curves
+            .iter()
+            .map(|c| c.as_ref().map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS)))
+            .collect();
         let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
         let mut xruns_total = 0u32;
 
@@ -365,7 +405,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     xruns_total += eng.xruns();
                     // Feed the raw capture into the loudness meter before
                     // any downstream consumers touch it.
-                    let _ = loudness[idx].push(&[&samples]);
+                    push_loudness_with_optional_fir(
+                        &mut loudness[idx], &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                    );
                     let ring = &mut cwt_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > ring_cap {
@@ -419,7 +462,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
                         &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
+                        &loudness[idx], spl_offsets[idx], mc_tag,
+                        ts_ns, xruns_total,
                     );
                     // Optional fractional-octave aggregation of the same
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
@@ -525,7 +569,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                     };
                     xruns_total += eng.xruns();
-                    let _ = loudness[idx].push(&[&samples]);
+                    push_loudness_with_optional_fir(
+                        &mut loudness[idx], &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                    );
                     let ring = &mut cqt_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > cqt_ring_cap {
@@ -579,7 +626,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
                         &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
+                        &loudness[idx], spl_offsets[idx], mc_tag,
+                        ts_ns, xruns_total,
                     );
                     continue;
                 }
@@ -595,7 +643,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                     };
                     xruns_total += eng.xruns();
-                    let _ = loudness[idx].push(&[&samples]);
+                    push_loudness_with_optional_fir(
+                        &mut loudness[idx], &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                    );
                     let ring = &mut reass_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > reass_n {
@@ -645,7 +696,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
                         &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
+                        &loudness[idx], spl_offsets[idx], mc_tag,
+                        ts_ns, xruns_total,
                     );
                     continue;
                 }
@@ -688,7 +740,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 xruns_total += eng.xruns();
                 // Loudness runs on the raw capture, independent of the
                 // FFT-N sliding ring.
-                let _ = loudness[idx].push(&[&new]);
+                push_loudness_with_optional_fir(
+                    &mut loudness[idx], &mut loudness_firs[idx],
+                    mic_corr_enabled.load(Ordering::Relaxed), &new,
+                );
                 let ring = &mut fft_rings[idx];
                 ring.extend(new.iter());
                 while ring.len() > cur_fft_n as usize {
@@ -778,7 +833,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .unwrap_or(0);
                     emit_loudness_frame(
                         &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], ts_ns, xruns_total,
+                        &loudness[idx], spl_offsets[idx], mc_tag,
+                        ts_ns, xruns_total,
                     );
                 }
             }
