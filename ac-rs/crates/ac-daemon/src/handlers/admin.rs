@@ -146,12 +146,14 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
         Ok(None) => json!({"ok": true, "found": false}),
         Ok(Some(cal)) => json!({
-            "ok":                true,
-            "found":             true,
-            "key":               cal.key(),
-            "vrms_at_0dbfs_out": cal.vrms_at_0dbfs_out,
-            "vrms_at_0dbfs_in":  cal.vrms_at_0dbfs_in,
-            "ref_dbfs":          cal.ref_dbfs,
+            "ok":                                true,
+            "found":                             true,
+            "key":                               cal.key(),
+            "vrms_at_0dbfs_out":                 cal.vrms_at_0dbfs_out,
+            "vrms_at_0dbfs_in":                  cal.vrms_at_0dbfs_in,
+            "ref_dbfs":                          cal.ref_dbfs,
+            "mic_sensitivity_dbfs_at_94db_spl":  cal.mic_sensitivity_dbfs_at_94db_spl,
+            "mic_response":                      cal.mic_response,
         }),
     }
 }
@@ -161,9 +163,11 @@ pub fn list_calibrations(_state: &ServerState) -> Value {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
         Ok(cals) => {
             let list: Vec<Value> = cals.iter().map(|c| json!({
-                "key":               c.key(),
-                "vrms_at_0dbfs_out": c.vrms_at_0dbfs_out,
-                "vrms_at_0dbfs_in":  c.vrms_at_0dbfs_in,
+                "key":                               c.key(),
+                "vrms_at_0dbfs_out":                 c.vrms_at_0dbfs_out,
+                "vrms_at_0dbfs_in":                  c.vrms_at_0dbfs_in,
+                "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
+                "mic_response":                      c.mic_response,
             })).collect();
             json!({"ok": true, "calibrations": list})
         }

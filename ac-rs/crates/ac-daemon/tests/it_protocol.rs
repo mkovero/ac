@@ -829,6 +829,73 @@ fn calibrate_spl_records_capture_dbfs() {
 }
 
 #[test]
+fn get_and_list_calibrations_return_all_three_layers() {
+    // After loading voltage cal (via the existing `calibrate` fake-mode
+    // path is awkward — easier to just inject via `calibrate_spl` +
+    // `calibrate_mic_curve` which write their own fields), `get_calibration`
+    // and `list_calibrations` must return the SPL field and the
+    // mic_response provenance, matching the schema documented in ZMQ.md.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // SPL cal — spawn worker, prompt arrives, we reply, daemon captures.
+    let r = c.call(json!({
+        "cmd": "calibrate_spl",
+        "input_channel": 0,
+        "capture_s": 0.1,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("cal_prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
+
+    // Mic-curve — synthetic 24-point curve.
+    let mut freqs = Vec::new();
+    let mut gains = Vec::new();
+    let log_min = 100.0_f64.ln();
+    let log_max = 10_000.0_f64.ln();
+    for i in 0..24 {
+        let t = i as f64 / 23.0;
+        freqs.push((log_min + t * (log_max - log_min)).exp());
+        gains.push(2.5 * t);
+    }
+    let r = c.call(json!({
+        "cmd":           "calibrate_mic_curve",
+        "op":            "set",
+        "input_channel": 0,
+        "freqs_hz":      freqs,
+        "gain_db":       gains,
+        "source_path":   "/tmp/synthetic.frd",
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    // get_calibration must surface both new fields.
+    let r = c.call(json!({"cmd": "get_calibration", "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["found"], json!(true));
+    assert!(r["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
+        "missing or wrong-typed mic_sensitivity_dbfs_at_94db_spl in: {r}");
+    let mr = r["mic_response"].as_object().expect("mic_response object");
+    assert_eq!(mr["freqs_hz"].as_array().unwrap().len(), 24);
+    assert_eq!(mr["gain_db"].as_array().unwrap().len(), 24);
+    assert_eq!(mr["source_path"], json!("/tmp/synthetic.frd"));
+    assert!(mr["imported_at"].is_string());
+
+    // list_calibrations must surface them too — find the entry we just wrote.
+    let r = c.call(json!({"cmd": "list_calibrations"}));
+    assert_eq!(r["ok"], json!(true));
+    let cals = r["calibrations"].as_array().expect("calibrations array");
+    let entry = cals.iter().find(|e| e["key"].as_str() == Some("out0_in0"))
+        .expect("out0_in0 entry not in list");
+    assert!(entry["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
+        "list_calibrations entry missing mic_sensitivity field: {entry}");
+    assert!(entry["mic_response"].is_object(),
+        "list_calibrations entry missing mic_response: {entry}");
+}
+
+#[test]
 fn calibrate_mic_curve_set_then_clear() {
     // End-to-end: upload a synthetic curve, verify cal entry is written,
     // verify the `loaded` count comes back; then `op = clear` and verify
