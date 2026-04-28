@@ -57,49 +57,11 @@ fn json_finite(v: f64) -> Value {
     if v.is_finite() { json!(v) } else { Value::Null }
 }
 
-/// Subtract the mic frequency-response correction from a magnitude column
-/// in-place. The mic over-reads by `curve.correction_at(f)` dB, so the
-/// truthful magnitude is `mag - correction`. Bins outside the curve's
-/// freq range clamp to the nearest endpoint (constant extrapolation).
-fn apply_mic_curve_inplace_f32(
-    curve: &ac_core::shared::calibration::MicResponse,
-    freqs: &[f32],
-    mags:  &mut [f32],
-) {
-    for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
-        if m.is_finite() {
-            *m -= curve.correction_at(f);
-        }
-    }
-}
-
-/// `f64` variant for the FFT path, where `spectrum_to_columns_wire`
-/// returns `Vec<f64>`.
-fn apply_mic_curve_inplace_f64(
-    curve: &ac_core::shared::calibration::MicResponse,
-    freqs: &[f64],
-    mags:  &mut [f64],
-) {
-    for (m, &f) in mags.iter_mut().zip(freqs.iter()) {
-        if m.is_finite() {
-            *m -= curve.correction_at(f as f32) as f64;
-        }
-    }
-}
-
-/// Status flag stamped on every monitor frame so the UI knows whether
-/// the spectrum it received is mic-corrected, has a curve loaded but
-/// disabled (toggle off), or has no curve at all.
-fn mic_correction_tag(
-    curve_loaded: bool,
-    enabled:      bool,
-) -> &'static str {
-    match (curve_loaded, enabled) {
-        (false, _)    => "none",
-        (true, false) => "off",
-        (true, true)  => "on",
-    }
-}
+// mic-curve helpers live in `super::super::mic` (handlers/mic.rs) since
+// the Tier 1 handlers also need them; see #97 / #98.
+use crate::handlers::mic::{
+    apply_mic_curve_inplace_f32, apply_mic_curve_inplace_f64, mic_correction_tag,
+};
 
 /// Per-channel time-integrator state for the `fractional_octave_leq`
 /// sidecar frame. Re-initialised when the mode changes or when the band

@@ -663,6 +663,94 @@ fn plot_with_bpo_emits_spectrum_bands() {
     assert!(got_report, "never saw measurement/report with spectrum_bands data");
 }
 
+#[test]
+fn plot_frames_carry_processing_context_envelope() {
+    // After Phase 3 (#97 + #98) Tier 1 frames must carry the same
+    // processing-context envelope Tier 2 monitor frames already do —
+    // mic_correction, spl_offset_db, weighting, time_integration,
+    // smoothing_bpo. The MeasurementReport's CalibrationSnapshot must
+    // record SPL and mic-curve provenance when those are set.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // Set up SPL cal.
+    let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3)).expect("cal_prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5)).expect("cal_done");
+
+    // Attach a synthetic 24-point mic-curve.
+    let mut freqs = Vec::new();
+    let mut gains = Vec::new();
+    let log_min = 100.0_f64.ln();
+    let log_max = 10_000.0_f64.ln();
+    for i in 0..24 {
+        let t = i as f64 / 23.0;
+        freqs.push((log_min + t * (log_max - log_min)).exp());
+        gains.push(2.0 * t);                                    // ramp 0..2 dB
+    }
+    let r = c.call(json!({
+        "cmd":           "calibrate_mic_curve",
+        "op":            "set",
+        "input_channel": 0,
+        "freqs_hz":      freqs,
+        "gain_db":       gains,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    // Drive a tiny `plot` and grab the first per-point frame + the report.
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   1000.0,
+        "stop_hz":    1000.0,
+        "level_dbfs": -10.0,
+        "ppd":        1,
+        "duration":   0.1,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let mut point_frame: Option<Value> = None;
+    let mut report_frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline && !(point_frame.is_some() && report_frame.is_some()) {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" => {
+                if v["type"] == json!("measurement/frequency_response/point")
+                    && point_frame.is_none()
+                {
+                    point_frame = Some(v);
+                } else if v["type"] == json!("measurement/report")
+                    && report_frame.is_none()
+                {
+                    report_frame = Some(v);
+                }
+            }
+            Some(_) => continue,
+            None    => break,
+        }
+    }
+    let pf = point_frame.expect("missing per-point frame");
+    let rf = report_frame.expect("missing measurement/report");
+
+    // Envelope keys present on the per-point frame (#98).
+    assert_eq!(pf["mic_correction"],   json!("on"));
+    assert!(pf["spl_offset_db"].is_f64(), "spl_offset_db not f64: {pf:?}");
+    assert_eq!(pf["weighting"],        json!("off"));
+    assert_eq!(pf["time_integration"], json!("off"));
+    assert!(pf.get("smoothing_bpo").is_some(), "smoothing_bpo key missing");
+
+    // CalibrationSnapshot in the report carries SPL + mic_response (#94 →
+    // populated here per #97).
+    let cal = rf["report"]["calibration"].as_object()
+        .expect("calibration block missing");
+    assert!(cal["mic_sensitivity_dbfs_at_94db_spl"].is_f64(), "{cal:?}");
+    let mr = cal["mic_response"].as_object().expect("mic_response missing");
+    assert_eq!(mr["n_points"], json!(24));
+    assert!(mr["imported_at"].is_string());
+}
+
 // ---------------------------------------------------------------------------
 // server_idle_timeout — daemon folds the public bind back to localhost after
 // the configured idle CTRL-activity window expires. See issue #58.

@@ -13,11 +13,12 @@ use ac_core::measurement::sweep::{
     citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep, log_sweep,
     SweepParams,
 };
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{busy_guard, resolve_input, resolve_output, send_pub, spawn_worker};
+use super::super::{busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker};
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_level");
@@ -130,11 +131,19 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
     let out_port   = resolve_output(&cfg, state);
     let in_port    = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
+    let out_ch     = cfg.output_channel;
+    let in_ch      = cfg.input_channel;
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;
 
     let worker = spawn_worker(state, "sweep_ir", move |_stop| {
+        // Calibration snapshot — the IR itself is NOT yet mic-curve-
+        // corrected (the FIR-based deep correction is tracked as a
+        // follow-up to #97; the curve provenance is preserved in the
+        // report so a downstream tool can apply correction post hoc).
+        let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
+
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
             send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
@@ -222,7 +231,7 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
                 duration_s: duration,
                 window: "farina-inverse".into(),
             },
-            calibration: None,
+            calibration: snapshot_from_cal(cal.as_ref()),
             data,
             notes: None,
         };

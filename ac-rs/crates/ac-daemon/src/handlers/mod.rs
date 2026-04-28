@@ -27,6 +27,7 @@ use crate::workers::{cmd_group, Group, WorkerHandle};
 mod admin;
 mod audio;
 mod calibrate;
+pub(crate) mod mic;
 mod test_dut;
 mod test_hw;
 mod transfer;
@@ -238,6 +239,54 @@ pub(super) fn downsample(spec: &[f64], freqs: &[f64], max_pts: usize) -> (Vec<f6
     (s, f)
 }
 
+/// Build a `CalibrationSnapshot` (Tier 1 archival record, #94) from a
+/// loaded `Calibration`. The snapshot carries provenance only for the
+/// mic-curve — the full curve stays in `cal.json`. `None` when no cal
+/// was loaded.
+pub(super) fn snapshot_from_cal(
+    cal: Option<&Calibration>,
+) -> Option<ac_core::measurement::report::CalibrationSnapshot> {
+    use ac_core::measurement::report::{CalibrationSnapshot, MicResponseRef};
+    cal.map(|c| CalibrationSnapshot {
+        output_channel:    c.output_channel,
+        input_channel:     c.input_channel,
+        vrms_at_0dbfs_out: c.vrms_at_0dbfs_out,
+        vrms_at_0dbfs_in:  c.vrms_at_0dbfs_in,
+        ref_freq_hz:       c.ref_freq,
+        ref_level_dbfs:    c.ref_dbfs,
+        mic_sensitivity_dbfs_at_94db_spl: c.mic_sensitivity_dbfs_at_94db_spl,
+        mic_response: c.mic_response.as_ref().map(|r| MicResponseRef {
+            n_points:    r.freqs_hz.len(),
+            source_path: r.source_path.clone(),
+            imported_at: r.imported_at.clone(),
+        }),
+    })
+}
+
+/// Processing-context envelope stamped on every Tier 1 frame so the
+/// reader (UI, CSV exporter, downstream tooling) can tell exactly what
+/// state was active when the measurement was taken — same envelope
+/// Tier 2 frames already carry. See #98.
+pub(super) struct Tier1Ctx<'a> {
+    pub mic_correction:   &'a str,         // "on" | "off" | "none"
+    pub spl_offset_db:    Option<f64>,
+    pub weighting:        &'a str,         // "off" | "a" | "c" | "z"
+    pub time_integration: &'a str,         // "off" | "fast" | "slow" | "leq"
+    pub smoothing_bpo:    Option<u32>,     // reserved; daemon doesn't smooth today
+}
+
+impl Default for Tier1Ctx<'_> {
+    fn default() -> Self {
+        Self {
+            mic_correction:   "none",
+            spl_offset_db:    None,
+            weighting:        "off",
+            time_integration: "off",
+            smoothing_bpo:    None,
+        }
+    }
+}
+
 pub(super) fn sweep_point_frame(
     r: &ac_core::shared::types::AnalysisResult,
     cal: Option<&Calibration>,
@@ -245,6 +294,7 @@ pub(super) fn sweep_point_frame(
     cmd_name: &str,
     level_dbfs: f64,
     freq_hz: Option<f64>,
+    ctx: &Tier1Ctx<'_>,
 ) -> Value {
     let out_vrms = cal.and_then(|c| c.out_vrms(level_dbfs));
     let in_vrms  = cal.and_then(|c| c.in_vrms(r.linear_rms));
@@ -285,6 +335,14 @@ pub(super) fn sweep_point_frame(
         "gain_db":           gain_db,
         "vrms_at_0dbfs_out": cal.and_then(|c| c.vrms_at_0dbfs_out),
         "vrms_at_0dbfs_in":  cal.and_then(|c| c.vrms_at_0dbfs_in),
+        // Processing-context envelope (#98) — matches the keys the Tier 2
+        // monitor frames carry. `null` / `"off"` / `"none"` when inactive
+        // so external subscribers always see the keys.
+        "mic_correction":    ctx.mic_correction,
+        "spl_offset_db":     ctx.spl_offset_db,
+        "weighting":         ctx.weighting,
+        "time_integration":  ctx.time_integration,
+        "smoothing_bpo":     ctx.smoothing_bpo,
     });
 
     if let Some(f) = freq_hz {

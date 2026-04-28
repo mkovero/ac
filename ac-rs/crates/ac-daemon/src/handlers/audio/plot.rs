@@ -17,8 +17,10 @@ use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    busy_guard, resolve_input, resolve_output, send_pub, spawn_worker, sweep_point_frame,
+    busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker,
+    sweep_point_frame, Tier1Ctx,
 };
+use crate::handlers::mic;
 
 fn now_iso8601_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -43,11 +45,18 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let fake     = state.fake_audio;
     let out_ch   = cfg.output_channel;
     let in_ch    = cfg.input_channel;
+    // Processing-context shared state — same Arc clones the monitor
+    // worker uses so #97 + #98 wire the same envelope onto Tier 1.
+    let mic_corr_enabled         = state.mic_correction_enabled.clone();
+    let band_weighting_shared    = state.band_weighting.clone();
+    let time_integration_shared  = state.time_integration_mode.clone();
 
     let report_dir = cfg.report_dir.clone();
 
     let worker = spawn_worker(state, "plot", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
+        let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
+        let spl_offset    = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -77,7 +86,27 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, *freq, 10) {
-                Ok(r) => {
+                Ok(mut r) => {
+                    // Mic-curve correction (#97): applied to the analysis
+                    // result in place — spectrum bins, fundamental, harmonics,
+                    // THD recomputed. linear_rms / noise_floor untouched (see
+                    // `mic::apply_mic_curve_to_analysis` doc).
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    if mc_enabled {
+                        if let Some(curve) = &mic_curve_opt {
+                            mic::apply_mic_curve_to_analysis(curve, &mut r);
+                        }
+                    }
+                    let mc_tag = mic::mic_correction_tag(mic_curve_opt.is_some(), mc_enabled);
+                    let weighting = band_weighting_shared.lock().unwrap().clone();
+                    let time_int  = time_integration_shared.lock().unwrap().clone();
+                    let ctx = Tier1Ctx {
+                        mic_correction:   mc_tag,
+                        spl_offset_db:    spl_offset,
+                        weighting:        &weighting,
+                        time_integration: &time_int,
+                        smoothing_bpo:    None,
+                    };
                     points.push(FrequencyResponsePoint {
                         freq_hz:          *freq,
                         fundamental_dbfs: r.fundamental_dbfs,
@@ -88,7 +117,9 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                         clipping:         r.clipping,
                         ac_coupled:       r.ac_coupled,
                     });
-                    let frame = sweep_point_frame(&r, cal.as_ref(), n, "plot", level_dbfs, Some(*freq));
+                    let frame = sweep_point_frame(
+                        &r, cal.as_ref(), n, "plot", level_dbfs, Some(*freq), &ctx,
+                    );
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
@@ -121,7 +152,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 duration_s: duration,
                 window:     "hann".into(),
             },
-            calibration: None,
+            calibration: snapshot_from_cal(cal.as_ref()),
             data:        MeasurementData::FrequencyResponse { points },
             notes:       None,
         };
@@ -164,6 +195,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 duration,
                 &timestamp,
                 report_dir.as_deref(),
+                cal.as_ref(),
             );
         }
 
@@ -195,9 +227,14 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let fake     = state.fake_audio;
     let out_ch   = cfg.output_channel;
     let in_ch    = cfg.input_channel;
+    let mic_corr_enabled        = state.mic_correction_enabled.clone();
+    let band_weighting_shared   = state.band_weighting.clone();
+    let time_integration_shared = state.time_integration_mode.clone();
 
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
+        let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
+        let spl_offset    = cal.as_ref().and_then(Calibration::spl_offset_db);
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
         let mut eng = make_engine(fake);
@@ -224,9 +261,26 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
             xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
-                Ok(r) => {
-                    let frame = sweep_point_frame(&r, cal.as_ref(), n, "plot_level",
-                                                  level_dbfs, Some(freq_hz));
+                Ok(mut r) => {
+                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+                    if mc_enabled {
+                        if let Some(curve) = &mic_curve_opt {
+                            mic::apply_mic_curve_to_analysis(curve, &mut r);
+                        }
+                    }
+                    let mc_tag = mic::mic_correction_tag(mic_curve_opt.is_some(), mc_enabled);
+                    let weighting = band_weighting_shared.lock().unwrap().clone();
+                    let time_int  = time_integration_shared.lock().unwrap().clone();
+                    let ctx = Tier1Ctx {
+                        mic_correction:   mc_tag,
+                        spl_offset_db:    spl_offset,
+                        weighting:        &weighting,
+                        time_integration: &time_int,
+                        smoothing_bpo:    None,
+                    };
+                    let frame = sweep_point_frame(
+                        &r, cal.as_ref(), n, "plot_level", level_dbfs, Some(freq_hz), &ctx,
+                    );
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
@@ -263,6 +317,7 @@ fn emit_spectrum_bands(
     duration: f64,
     timestamp: &str,
     report_dir: Option<&std::path::Path>,
+    cal: Option<&Calibration>,
 ) {
     let f_max = (sr as f64 * 0.45).min(stop_hz.max(start_hz));
     let f_min = start_hz.max(1.0);
@@ -303,7 +358,7 @@ fn emit_spectrum_bands(
             duration_s: duration,
             window:     "butterworth-bp".into(),
         },
-        calibration: None,
+        calibration: snapshot_from_cal(cal),
         data: MeasurementData::SpectrumBands {
             bpo:         bpo as u32,
             class:       fb.class().label().to_string(),

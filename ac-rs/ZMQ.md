@@ -208,7 +208,16 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "in_dbu":           <float> | null,
   "gain_db":          <float> | null,
   "vrms_at_0dbfs_out":<float> | null,
-  "vrms_at_0dbfs_in": <float> | null
+  "vrms_at_0dbfs_in": <float> | null,
+  // Processing-context envelope (#98): same shape Tier 2 monitor
+  // frames carry. fundamental / harmonic / spectrum values reflect
+  // the active mic-curve correction when `mic_correction == "on"`;
+  // see #97 for the corrected fields.
+  "mic_correction":   "on" | "off" | "none",
+  "spl_offset_db":    <float> | null,
+  "weighting":        "off" | "a" | "c" | "z",
+  "time_integration": "off" | "fast" | "slow" | "leq",
+  "smoothing_bpo":    <int> | null
 }
 ```
 

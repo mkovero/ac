@@ -42,9 +42,11 @@ The actual "make Tier 1 match the doc" work. Substantial — ~600 LOC
 across four handlers. Lift the existing `apply_mic_curve_inplace_*`
 helpers from `monitor.rs` into a shared utility on first reuse.
 
-- [ ] [#97](https://github.com/mkovero/ac/issues/97) (A) — apply
-      mic-curve in Tier 1 capture paths (`plot`, `sweep`, `sweep ir`)
-- [ ] [#98](https://github.com/mkovero/ac/issues/98) (D) — Tier 1
+- [x] [#97](https://github.com/mkovero/ac/issues/97) (A) — apply
+      mic-curve in Tier 1 capture paths (`plot`, `plot_level` —
+      `sweep_ir` IR-correction deferred to a follow-up; the snapshot
+      records the curve provenance regardless)
+- [x] [#98](https://github.com/mkovero/ac/issues/98) (D) — Tier 1
       frames carry the full processing-context envelope
 
 ## Phase 4 — validation gate
