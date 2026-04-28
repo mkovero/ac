@@ -17,19 +17,24 @@ pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
 /// Left/Right arrow tunes FFT monitor refresh rate in 1 ms steps (Left =
 /// slower, Right = faster). Clamped to [`MONITOR_INTERVAL_MIN_MS`,
 /// `MONITOR_INTERVAL_MAX_MS`]. The FLOOR/CEIL below bracket what the eye
-/// perceives as "live": below 33 ms (30 Hz) we're wasting CPU past the
-/// display refresh, above 50 ms (20 Hz) the motion starts to step.
+/// perceives as "live": 33 ms (30 Hz) is the smoothness floor; we keep the
+/// ceiling at the same value so the auto-pick never drops below 30 Hz at
+/// huge N (#108 follow-up — the previous 50 ms ceiling pinned fft_n≥32k
+/// monitors at 20 fps, which read as visibly stepped after the idle
+/// 60 Hz polling redraw was removed).
 pub const MONITOR_INTERVAL_MIN_MS: u32 = 1;
 pub const MONITOR_INTERVAL_MAX_MS: u32 = 1000;
 pub const MONITOR_INTERVAL_FLOOR_MS: u32 = 33;
-pub const MONITOR_INTERVAL_CEIL_MS: u32 = 50;
+pub const MONITOR_INTERVAL_CEIL_MS: u32 = 33;
 
 /// Pick a smooth monitor tick for a given FFT size + sample rate. Targets
 /// ~window/8 (87.5% overlap) so consecutive frames share most of their
-/// input and motion reads as continuous even when N is large; floored at
-/// 33 ms so tiny N doesn't burn cycles past the display refresh, ceilinged
-/// at 50 ms so huge N still feels alive rather than stepped. Arrow keys
-/// still let the user push outside this band manually.
+/// input and motion reads as continuous even when N is large; with the
+/// FLOOR == CEIL band collapsed to 30 Hz, the result is always 33 ms —
+/// large N just gets denser overlap (~97 % at fft_n=65k) rather than a
+/// slower visible cadence. Arrow keys still let the user push outside
+/// this band manually (down to MONITOR_INTERVAL_MIN_MS or up to
+/// MONITOR_INTERVAL_MAX_MS).
 pub fn auto_monitor_interval_ms(fft_n: u32, sr_hz: u32) -> u32 {
     let sr = sr_hz.max(1) as f32;
     let window_ms = (fft_n as f32 * 1000.0) / sr;
@@ -180,9 +185,26 @@ mod ladder_tests {
     #[test]
     fn auto_interval_ceils_for_huge_n() {
         // Huge windows cap at the "still feels live" ceiling even though
-        // window/8 would suggest much slower ticks.
+        // window/8 would suggest much slower ticks. With FLOOR==CEIL=33ms
+        // (#108 follow-up) every fft_n≥8192 lands at 33ms = 30 Hz.
         assert_eq!(auto_monitor_interval_ms(32768, 48_000), MONITOR_INTERVAL_CEIL_MS);
         assert_eq!(auto_monitor_interval_ms(65536, 48_000), MONITOR_INTERVAL_CEIL_MS);
+        assert_eq!(auto_monitor_interval_ms(131_072, 48_000), MONITOR_INTERVAL_CEIL_MS);
+    }
+
+    /// Specific regression guard for the post-#108 fps drop: fft_n≥65k
+    /// must auto-tick at ≤ 33 ms (≥ 30 fps). Before this change the
+    /// auto-pick clamped to 50 ms and the UI fell to ~20 fps once the
+    /// 60 Hz idle polling redraw was removed.
+    #[test]
+    fn auto_interval_at_or_below_30hz_floor_for_huge_n() {
+        for &n in &[32_768u32, 65_536, 131_072] {
+            let tick = auto_monitor_interval_ms(n, 48_000);
+            assert!(
+                tick <= 33,
+                "fft_n={n} auto-tick {tick} ms > 33 ms — regression of #108 follow-up",
+            );
+        }
     }
 
     #[test]
