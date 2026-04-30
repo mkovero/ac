@@ -316,10 +316,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
         // Sliding ring buffer for CWT: holds ~0.5 s of audio per channel so
         // low-frequency wavelets (20 Hz @ sigma=12 ≈ 0.6 s support) see
-        // enough data. Short 50 ms captures feed the ring; the CWT runs on
-        // the full ring each tick giving ~20 Hz update rate.
+        // enough data. The capture-per-tick window matches the UI's
+        // monitor_interval (read live from `monitor_params_shared` below)
+        // so the daemon doesn't emit faster than the UI can paint —
+        // pre-#109 CWT was hardcoded to 20 ms (50 Hz) regardless of
+        // `--max-fps`, so a UI capped at 30 fps still received 50
+        // frames/sec, with the extras dropped by skip-when-unchanged.
+        // Floor at 16 ms (display refresh) and ceil at 100 ms so a wild
+        // user override doesn't break the sliding-ring assumption.
         let ring_cap = (sr as f64 * 0.15).ceil() as usize; // 0.15 s — enough for 20 Hz
-        let cwt_tick = 0.02_f64; // 20 ms capture per CWT tick
         let mut cwt_rings: Vec<std::collections::VecDeque<f32>> =
             channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(ring_cap)).collect();
         let mut cwt_log_counter = 0u32;
@@ -334,7 +339,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // worker's lifetime; live tunables can come later.
         let cqt_bpo = ac_core::visualize::cqt::DEFAULT_BPO;
         let cqt_ring_cap = sr as usize; // 1.0 s
-        let cqt_tick = 0.02_f64; // 20 ms capture per CQT tick (same cadence as CWT)
+        // CQT tick paced from `monitor_params.interval` like CWT (#109).
         let cqt_f_min = ac_core::visualize::cqt::DEFAULT_F_MIN
             .max(ac_core::visualize::cqt::min_supported_f(cqt_ring_cap, sr, cqt_bpo));
         let cqt_freqs = ac_core::visualize::cqt::log_freqs(
@@ -360,7 +365,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // can split closely-spaced peaks the FFT would smear together.
         let reass_n        = ac_core::visualize::reassigned::DEFAULT_N;
         let reass_n_out    = ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS;
-        let reass_tick     = 0.02_f64;
+        // Reassigned tick paced from `monitor_params.interval` (#109).
         let reass_kernels  = ac_core::visualize::reassigned::build_kernels(
             reass_n, sr, reass_n_out,
             ac_core::visualize::reassigned::DEFAULT_F_MIN,
@@ -493,6 +498,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     eng.flush_capture();
                 }
                 if is_cwt {
+                    // Pace the capture tick to the UI's requested
+                    // interval, clamped to [16 ms, 100 ms]. Pre-#109 this
+                    // was hardcoded 20 ms regardless of `--max-fps`,
+                    // so CWT emitted at 50 fps even when the UI was
+                    // capped at 30 — wasted work on both sides.
+                    let cwt_tick = cur_interval.clamp(0.016, 0.100);
                     let samples = match eng.capture_block(cwt_tick) {
                         Ok(s) => s,
                         Err(e) => {
@@ -659,6 +670,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     continue;
                 }
                 if is_cqt {
+                    let cqt_tick = cur_interval.clamp(0.016, 0.100);
                     let samples = match eng.capture_block(cqt_tick) {
                         Ok(s) => s,
                         Err(e) => {
@@ -733,6 +745,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     continue;
                 }
                 if is_reassigned {
+                    let reass_tick = cur_interval.clamp(0.016, 0.100);
                     let samples = match eng.capture_block(reass_tick) {
                         Ok(s) => s,
                         Err(e) => {
