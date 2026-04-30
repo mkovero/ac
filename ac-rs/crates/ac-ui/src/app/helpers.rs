@@ -12,12 +12,16 @@ use crate::data::synthetic::SyntheticHandle;
 pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
 
 /// Frame cap for continuous repaint windows (notification fade, benchmark,
-/// data flow). Default 33 ms (≈ 30 Hz) — matches the daemon's auto-picked
-/// monitor cadence, and cuts per-`present()` cost in half compared to the
-/// previous 16 ms (60 Hz) for users on stacks where the GPU driver doesn't
-/// kernel-block on vsync (notably NVIDIA + Vulkan + Linux, see #109/#110).
-/// Override at runtime via `--max-fps` / `AC_UI_MAX_FPS`.
-pub const CONTINUOUS_REPAINT_INTERVAL_DEFAULT: Duration = Duration::from_millis(33);
+/// data flow). Default 16 ms (≈ 60 Hz) — matches typical display refresh.
+/// With the skip-when-unchanged gate in `loop_directive` (#109) the cap
+/// is a ceiling, not a target: at 30 Hz daemon data the loop paints
+/// 30 fps regardless because there's nothing new to draw between data
+/// ticks. The cap binds only on cases that genuinely benefit from 60 Hz
+/// — drag/zoom feedback, peak-hold decay, multi-channel rapid mixes.
+/// Override at runtime via `--max-fps` / `AC_UI_MAX_FPS` (e.g. drop to
+/// 30 on stacks where each `present()` is unusually expensive — see
+/// #109's NVIDIA+Vulkan+X11 thread).
+pub const CONTINUOUS_REPAINT_INTERVAL_DEFAULT: Duration = Duration::from_millis(16);
 
 /// Lowest `--max-fps` value the parser accepts. 5 Hz is the minimum cadence
 /// at which peak-hold decay and waterfall scroll still read as motion
