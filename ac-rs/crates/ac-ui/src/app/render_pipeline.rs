@@ -1580,12 +1580,26 @@ fn build_scope_polyline(
     (pairs, scroll_dx)
 }
 
+/// Number of x-axis columns the spectrum is aggregated into before
+/// deposition. Sized to match the ember substrate width so adjacent
+/// columns fall on adjacent pixels and the LineList renderer doesn't pile
+/// dozens of FFT bins into the same column. Smaller values make the trace
+/// feel chunkier without changing the underlying signal interpretation.
+const EMBER_SPECTRUM_COLS: usize = 512;
+
 /// `SpectrumFrame` → mirrored-envelope LineList. Logarithmic frequency
 /// axis on x; magnitude renders as a symmetric envelope around y = 0.5
 /// (top trace at 0.5 + amp, bottom at 0.5 − amp, where amp scales with
 /// the bin's normalised dB). Bins below `db_min` break the polyline so
 /// the trace disappears off-screen rather than pinning a glowing baseline
 /// at y = 0; bins above `db_max` clamp to the top edge as expected.
+///
+/// Bins are first aggregated by max-magnitude into `EMBER_SPECTRUM_COLS`
+/// log-spaced columns. Without this, linear FFT output (~11.7 Hz/bin at
+/// 96 kHz / N=8192) collides ~15 bins per pixel in the top decade of a
+/// log x-axis, producing visible moiré/aliasing in the rendered trace.
+/// Max-aggregation matches the existing spectrum view's behaviour: peaks
+/// dominate over averaging so transients still register cleanly.
 fn build_spectrum_polyline(
     frame: &crate::data::types::DisplayFrame,
     view: &CellView,
@@ -1594,22 +1608,35 @@ fn build_spectrum_polyline(
     let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
     let span_f = (log_max - log_min).max(1e-6);
     let span_db = (view.db_max - view.db_min).max(1e-3);
+    let n_cols = EMBER_SPECTRUM_COLS;
+    let mut col_max: Vec<f32> = vec![f32::NEG_INFINITY; n_cols];
     let n = frame.freqs.len().min(frame.spectrum.len());
-    let mut pairs = Vec::with_capacity(n * 4);
-    let mut prev: Option<([f32; 2], [f32; 2])> = None;
     for i in 0..n {
         let f = frame.freqs[i];
         let mag = frame.spectrum[i];
-        let valid = f.is_finite()
-            && f >= view.freq_min
-            && f <= view.freq_max
-            && mag.is_finite()
-            && mag >= view.db_min;
-        if !valid {
+        if !f.is_finite() || f < view.freq_min || f > view.freq_max
+            || !mag.is_finite() || mag < view.db_min {
+            continue;
+        }
+        let xn = (f.max(1.0).log10() - log_min) / span_f;
+        if !(0.0..=1.0).contains(&xn) {
+            continue;
+        }
+        let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+        if mag > col_max[col] {
+            col_max[col] = mag;
+        }
+    }
+
+    let mut pairs = Vec::with_capacity(n_cols * 4);
+    let mut prev: Option<([f32; 2], [f32; 2])> = None;
+    for col in 0..n_cols {
+        let mag = col_max[col];
+        if !mag.is_finite() {
             prev = None;
             continue;
         }
-        let x = ((f.max(1.0).log10() - log_min) / span_f).clamp(0.0, 1.0);
+        let x = (col as f32 + 0.5) / n_cols as f32;
         let n_mag = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
         let amp = 0.45 * n_mag;
         let top = [x, 0.5 + amp];
