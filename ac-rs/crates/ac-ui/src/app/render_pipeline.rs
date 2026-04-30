@@ -31,10 +31,6 @@ use super::TimeIntegrationMode;
 
 const EMBER_SCOPE_SAMPLE_RATE: f32 = 48_000.0;
 const EMBER_SCOPE_SINE_HZ:     f32 = 1_000.0;
-/// Strip-chart window: ~100 cycles of 1 kHz fit at 10 px / cycle on a
-/// 1024-px substrate, no aliasing. Scroll speed at 60 fps ≈ 17 % of width
-/// per frame — visible left-flying motion.
-const EMBER_SCOPE_WINDOW_S:    f32 = 0.1;
 
 /// Build the overlay payload describing the active time-integration
 /// state. Returns `None` when the mode is off so the overlay renders
@@ -1115,7 +1111,8 @@ impl App {
                         &mut self.ember_sine_phase,
                         EMBER_SCOPE_SAMPLE_RATE,
                         EMBER_SCOPE_SINE_HZ,
-                        EMBER_SCOPE_WINDOW_S,
+                        self.ember_scope_window_s,
+                        self.ember_scope_y_gain,
                         dt,
                     );
                     ember.set_tau_p(0.6);
@@ -1137,11 +1134,15 @@ impl App {
                         .filter(|f| !f.spectrum.is_empty())
                         .map(|f| build_spectrum_polyline(f, &view))
                         .unwrap_or_default();
-                    // Long persistence so successive measurements fade-blend
-                    // — the "free diff workflow" of unified.md §5.
-                    ember.set_tau_p(5.0);
-                    ember.set_intensity(0.06);
-                    ember.set_tone(0.6, 1.2);
+                    // 0.06 saturated everything — the polyline rasterizer
+                    // hits ~1000 pixels/frame, intensity multiplies, and
+                    // with tau=5 s the trace pinned at L>>1 → LUT clamped
+                    // to white. Drop 20× and shorten tau to 2.5 s so a
+                    // moved peak's old position fades visibly while the
+                    // new one paints in.
+                    ember.set_tau_p(2.5);
+                    ember.set_intensity(0.003);
+                    ember.set_tone(0.6, 1.5);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
@@ -1537,6 +1538,7 @@ fn build_scope_polyline(
     sample_rate:  f32,
     sine_freq_hz: f32,
     window_s:     f32,
+    y_gain:       f32,
     dt:           f32,
 ) -> (Vec<[f32; 2]>, f32) {
     let scroll_dx = (dt / window_s.max(1e-3)).clamp(0.0, 1.0);
@@ -1545,12 +1547,13 @@ fn build_scope_polyline(
     let two_pi = std::f32::consts::TAU;
     let phase_step = two_pi * sine_freq_hz / sample_rate;
     let denom = (n.saturating_sub(1)).max(1) as f32;
+    let amp = y_gain.clamp(0.01, 0.5);
     for i in 0..n {
         let s = sine_phase.sin();
         *sine_phase = (*sine_phase + phase_step) % two_pi;
         let frac = i as f32 / denom;
         let x = (1.0 - scroll_dx) + frac * scroll_dx;
-        let y = 0.5 + 0.45 * s;
+        let y = 0.5 + amp * s;
         pts.push([x, y]);
     }
     (pts, scroll_dx)

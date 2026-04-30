@@ -271,6 +271,14 @@ pub struct App {
     /// Separate from `last_render` so the value is fresh at the moment the
     /// substrate runs (last_render is updated at the *end* of redraw).
     pub(super) ember_last_tick: Option<Instant>,
+    /// Scope view: vertical amplitude (multiplier on the synthetic sine,
+    /// in [0,1] substrate-y units). Mouse-scroll over the cell shrinks /
+    /// grows it; default 0.45 = ~90 % of cell height edge-to-edge.
+    pub(super) ember_scope_y_gain: f32,
+    /// Scope view: strip-chart window in seconds. Ctrl+scroll over the
+    /// cell shrinks / grows it. Smaller window → fewer cycles fit, faster
+    /// scroll across the cell.
+    pub(super) ember_scope_window_s: f32,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -461,6 +469,8 @@ impl App {
             ember: None,
             ember_sine_phase: 0.0,
             ember_last_tick: None,
+            ember_scope_y_gain: 0.45,
+            ember_scope_window_s: 0.1,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,

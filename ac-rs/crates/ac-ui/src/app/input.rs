@@ -209,6 +209,24 @@ impl App {
         let ctrl = self.modifiers.control_key();
         let waterfall = matches!(self.config.view_mode, ViewMode::Waterfall);
 
+        // Scope: scroll = y-amplitude (vertical gain), Ctrl+Scroll =
+        // strip-chart window (time per width). The renderer-side cell_view
+        // freq/dB axes don't apply here — there's no calibrated dBFS or
+        // freq axis on the scope, so we route both knobs to the synthetic-
+        // generator parameters that *do* mean something visually.
+        if matches!(self.config.view_mode, ViewMode::Scope) {
+            if ctrl {
+                let new_w = (self.ember_scope_window_s * factor).clamp(0.005, 2.0);
+                self.ember_scope_window_s = new_w;
+                self.notify(&format!("scope window: {:.0} ms", new_w * 1000.0));
+            } else {
+                let new_g = (self.ember_scope_y_gain * factor).clamp(0.02, 0.5);
+                self.ember_scope_y_gain = new_g;
+                self.notify(&format!("scope y-gain: {:.2}", new_g));
+            }
+            return;
+        }
+
         // Ctrl+Shift+Scroll — "gain knob": pan the dB window up/down without
         // changing its span. Scroll up = trace rides higher in the cell
         // (floor+ceiling both shift down by the same amount). Step is 2 dB
