@@ -360,15 +360,17 @@ pub struct App {
     /// (≈ 30 Hz) keeps NVIDIA's expensive `present()` cost from
     /// doubling vs the matched-to-data-rate baseline (#109/#110).
     continuous_interval: Duration,
-    /// Deadline for the next continuous-mode paint, set when
-    /// `loop_directive` returns `RedrawContinuous` and consumed
-    /// (or extended) on the next tick. The whole point: data-thread
-    /// `EventLoopProxy::send_event` wakes interrupt `WaitUntil` early,
-    /// and without an explicit "next paint at" we'd paint on every wake
-    /// — i.e. once per *data tick per channel* (#109 follow-up). With
-    /// this we paint on the first wake at-or-after the deadline and
-    /// coalesce all wakes in between.
-    next_continuous_paint_at: Option<Instant>,
+    /// Wall-clock of the most recent continuous-mode paint. Used as a
+    /// min-gap rate limiter: the next paint may happen no sooner than
+    /// `last_continuous_paint_at + continuous_interval`. Pre-#109 this
+    /// was a *deadline* (fixed grid) which had a phase race with
+    /// regular data arrival — daemon ticks at 16 ms, UI deadline at
+    /// 16 ms, any thread-scheduling jitter and the deadline tick read
+    /// stale `last_frame_ns`, skipped, and the effective paint rate
+    /// halved. Min-gap pacing paints on data arrival (or any wake that
+    /// brings new content) provided the gap has elapsed, so dropped
+    /// frames from phase races can't happen.
+    last_continuous_paint_at: Option<Instant>,
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
@@ -481,7 +483,7 @@ impl App {
             last_data_arrival: None,
             requested_present_mode,
             continuous_interval,
-            next_continuous_paint_at: None,
+            last_continuous_paint_at: None,
             needs_redraw: true,
             wake,
         }
@@ -609,37 +611,40 @@ impl App {
             || cursor_pinned;
 
         if continuous {
-            let due = self
-                .next_continuous_paint_at
-                .map_or(true, |t| now >= t);
-            if due {
-                let animating = self.notification.is_some()
-                    || self.benchmark_secs.is_some()
-                    || hold_active
-                    || cursor_pinned;
-                let paint = new_data || animating || self.needs_redraw;
-                self.next_continuous_paint_at = Some(now + self.continuous_interval);
-                if paint {
-                    self.last_painted_frame_ns = current_ns;
-                    self.needs_redraw = false;
-                    return LoopDirective::RedrawContinuous;
-                }
-                // No visible change since the last paint — drop this tick
-                // entirely. The wgpu surface keeps showing the previous
-                // frame at zero CPU cost; `about_to_wait` re-arms WaitUntil.
-                return LoopDirective::Idle;
+            // Min-gap pacing: paint as soon as new content is available
+            // (new data, animation, or input event), provided we haven't
+            // painted within the last `continuous_interval`. Replaces
+            // earlier fixed-deadline pacing which had a phase race —
+            // daemon ticks aligned with UI deadlines meant a microsecond
+            // of scheduling jitter was enough to read stale
+            // `last_frame_ns` and drop the paint, halving effective fps.
+            let rate_ok = self
+                .last_continuous_paint_at
+                .map_or(true, |t| now.saturating_duration_since(t) >= self.continuous_interval);
+            let animating = self.notification.is_some()
+                || self.benchmark_secs.is_some()
+                || hold_active
+                || cursor_pinned;
+            let want_paint = new_data || animating || self.needs_redraw;
+            if rate_ok && want_paint {
+                self.last_continuous_paint_at = Some(now);
+                self.last_painted_frame_ns = current_ns;
+                self.needs_redraw = false;
+                return LoopDirective::RedrawContinuous;
             }
-            // Continuous mode active but not yet due. `about_to_wait` will
-            // see `next_continuous_paint_at = Some(t)` and `WaitUntil(t)`,
-            // so we wake exactly at the deadline regardless of how many
-            // data-thread events fire in between.
+            // Either rate-limited (we just painted; wait for the gap to
+            // elapse) or no visible change yet (the wake was just the
+            // producer's `send_event` for a frame matching what we
+            // already rendered). `about_to_wait` will re-arm
+            // `WaitUntil(next_eligible)` so we wake at the earliest
+            // paint-eligible instant if no event fires sooner.
             return LoopDirective::Idle;
         }
 
-        // Not in continuous mode — drop any leftover deadline so the next
-        // entry into continuous mode paints immediately rather than waiting
-        // out a stale interval.
-        self.next_continuous_paint_at = None;
+        // Not in continuous mode — drop any leftover paint timestamp so
+        // the next entry into continuous mode paints immediately rather
+        // than waiting out a stale gap.
+        self.last_continuous_paint_at = None;
 
         if self.needs_redraw || new_data {
             self.needs_redraw = false;
@@ -795,34 +800,33 @@ impl ApplicationHandler for App {
             }
         };
         match directive {
-            LoopDirective::RedrawContinuous => {
+            LoopDirective::RedrawContinuous | LoopDirective::RedrawIdle => {
                 request_redraw();
-                // The next paint deadline was just set inside
-                // `loop_directive`; wake exactly there, ignoring producer
-                // events in between (they're already coalesced via
-                // `last_data_arrival` + the `due` check on next entry).
-                let deadline = self
-                    .next_continuous_paint_at
-                    .unwrap_or_else(|| now + self.continuous_interval);
-                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
-            }
-            LoopDirective::RedrawIdle => {
-                request_redraw();
+                // Pure event-driven: producer wakes (data), input events,
+                // and the rate-limiter's `WaitUntil(next_eligible)` from
+                // the Idle arm below all bring the loop back here when
+                // something might want to paint. No pre-scheduled
+                // deadline — `loop_directive` rate-limits inline using
+                // `last_continuous_paint_at`, so we don't need a fixed
+                // grid that races with data arrival.
                 elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
             LoopDirective::Idle => {
-                // Either truly idle, or paced (continuous mode active but
-                // not yet due to paint). The pacing path covers the bug
-                // that motivated #109's deeper rework: data-thread
-                // `send_event(())` wakes were interrupting `WaitUntil`
-                // and triggering a paint per wake (= N × data_rate fps),
-                // ignoring the rate cap entirely. Now we only paint at the
-                // pre-set deadline; everything else just refreshes state.
-                if let Some(t) = self.next_continuous_paint_at {
-                    elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(t));
-                } else {
-                    elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+                // If continuous mode is active and we just painted, wake
+                // at the earliest paint-eligible instant so animations
+                // (peak-hold decay, notification fade) keep ticking even
+                // if no data arrives in that window. Without this, an
+                // animating-only state stalls until the next input event.
+                if let Some(t) = self.last_continuous_paint_at {
+                    let next_eligible = t + self.continuous_interval;
+                    if next_eligible > now {
+                        elwt.set_control_flow(
+                            winit::event_loop::ControlFlow::WaitUntil(next_eligible),
+                        );
+                        return;
+                    }
                 }
+                elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
         }
     }
@@ -1006,11 +1010,11 @@ mod loop_tests {
         // not about content-change suppression.
         app.peak_hold_enabled = true;
 
-        // First wake in continuous mode: paint now, schedule next.
+        // First wake in continuous mode: paint now, stamp the gap.
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
         assert!(
-            app.next_continuous_paint_at.is_some(),
-            "RedrawContinuous must arm a paint deadline",
+            app.last_continuous_paint_at.is_some(),
+            "RedrawContinuous must stamp last_continuous_paint_at",
         );
 
         // Subsequent wakes inside the interval: no paint, just keep state
@@ -1060,11 +1064,53 @@ mod loop_tests {
         );
     }
 
-    /// New skip-when-unchanged behaviour (#109): in continuous mode, a
-    /// tick that arrives "due" but with nothing visibly changed since
-    /// the last paint must NOT repaint. This is what makes
-    /// `--max-fps 60` against a 30 Hz daemon land at the data rate
-    /// instead of forcing 60 redundant presents.
+    /// Min-gap pacing (replaces fixed-deadline pacing): a wake that
+    /// brings new content arriving exactly *at* the gap boundary must
+    /// produce a paint, not skip it. Pre-fix this was deadline-based
+    /// and had a phase race — daemon ticks aligned with UI deadlines
+    /// could read stale `last_frame_ns` (the receiver thread's
+    /// atomic store hadn't propagated yet) and skip the paint, halving
+    /// effective fps. Min-gap pacing is content-driven, so as long as
+    /// the gap has elapsed and there's new content, we paint.
+    #[test]
+    fn paint_at_gap_boundary_when_new_content() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+
+        // Enter continuous + paint once. last_continuous_paint_at = t0.
+        app.last_data_arrival = Some(t0);
+        app.peak_hold_enabled = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        // Wake exactly at +continuous_interval (gap met). Animation is
+        // active so we have content to paint. Must paint, not skip.
+        let at_boundary = t0 + app.continuous_interval;
+        assert_eq!(
+            app.loop_directive(at_boundary),
+            LoopDirective::RedrawContinuous,
+            "wake at gap boundary with content must paint (no phase race)",
+        );
+
+        // And one nanosecond before the boundary: rate-limited, defer.
+        let mut app = fresh_app();
+        let _ = app.loop_directive(t0);
+        app.last_data_arrival = Some(t0);
+        app.peak_hold_enabled = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        let just_before = t0 + app.continuous_interval - Duration::from_nanos(1);
+        assert_eq!(
+            app.loop_directive(just_before),
+            LoopDirective::Idle,
+            "wake one ns before gap boundary: rate-limited, no paint",
+        );
+    }
+
+    /// Skip-when-unchanged (#109): in continuous mode, a wake that
+    /// brings nothing visibly new since the last paint must NOT
+    /// repaint. This is what makes `--max-fps 60` against a 30 Hz
+    /// daemon land at the data rate instead of forcing 60 redundant
+    /// presents.
     #[test]
     fn skip_paint_when_nothing_changed() {
         let mut app = fresh_app();
@@ -1079,21 +1125,23 @@ mod loop_tests {
 
         // Now drop the animation (simulates: peak hold decay finished,
         // we're just observing flat data). Within the liveness window
-        // this still counts as continuous, but the deadline tick must
-        // skip when nothing has changed since the last paint.
+        // this still counts as continuous, but past the min-gap with
+        // no new data and no animation, we must NOT paint.
         app.peak_hold_enabled = false;
         let due = t0 + app.continuous_interval + Duration::from_millis(1);
         assert_eq!(
             app.loop_directive(due),
             LoopDirective::Idle,
-            "deadline tick with no new data + no animation: skip paint",
+            "wake past min-gap with no new data + no animation: skip paint",
         );
 
-        // Still continuous (data is recent), so the deadline must have
-        // been advanced for the next tick rather than dropped.
-        assert!(
-            app.next_continuous_paint_at.is_some_and(|t| t > due),
-            "skipped tick still re-arms next deadline",
+        // The last-paint stamp from the original RedrawContinuous stays
+        // put — min-gap is enforced from `last_continuous_paint_at`,
+        // not from a moving deadline. Skipped wakes don't shift it.
+        assert_eq!(
+            app.last_continuous_paint_at,
+            Some(t0),
+            "skipped wake must NOT update last_continuous_paint_at",
         );
     }
 
