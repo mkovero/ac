@@ -23,7 +23,9 @@ use bytemuck::{Pod, Zeroable};
 
 const TEX_W: u32 = 1024;
 const TEX_H: u32 = 512;
-const POINT_CAPACITY: usize = 16384;
+/// LineList pairs: each emitted line segment costs two vertices, and we want
+/// headroom for 192 kHz × 30 fps worst case (~12 800 line endpoints).
+const POINT_CAPACITY: usize = 32768;
 const LUT_WIDTH: u32 = 256;
 const LUT_PALETTES: u32 = 2;
 
@@ -278,7 +280,11 @@ impl EmberRenderer {
                 targets: &r16f_target_add,
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::PointList,
+                // LineList so consecutive sample pairs draw a continuous
+                // 1 px line. PointList leaves visible gaps when adjacent
+                // samples are >1 px apart in screen space (768 samples /
+                // frame across a 1024 px buffer leaves 4 px gaps).
+                topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -378,10 +384,15 @@ impl EmberRenderer {
             front_is_latest: false,
             cleared: false,
 
-            tau_p:       1.5,
-            intensity:   0.10,
-            gamma:       0.55,
-            gain:        1.0,
+            // Tuned for "ember on pure black": short-ish persistence so the
+            // trace feels alive, gain × gamma curve such that a sustained
+            // 1 kHz sine saturates the LUT to white-hot at peaks while
+            // off-trace pixels stay at L=0 (black after the sqrt(t) floor
+            // applied in the display shader).
+            tau_p:       0.8,
+            intensity:   0.12,
+            gamma:       0.6,
+            gain:        0.4,
             palette_row: 0,
 
             sample_rate:    48_000.0,
@@ -457,11 +468,15 @@ impl EmberRenderer {
         };
 
         // Generate synthetic samples (Phase 0a).
+        // LineList → emit each consecutive sample pair as two vertices, skip
+        // pairs that straddle a wraparound (where x decreases) to avoid a
+        // ghost line dragged across the cell at every sweep boundary.
         self.point_scratch.clear();
-        let n_samples = ((dt * self.sample_rate) as usize).min(POINT_CAPACITY);
+        let n_samples = ((dt * self.sample_rate) as usize).min(POINT_CAPACITY / 2);
         let two_pi = std::f32::consts::TAU;
         let phase_step = two_pi * self.sine_freq_hz / self.sample_rate;
         let sweep_samples = (self.sweep_period_s * self.sample_rate).max(1.0);
+        let mut prev: Option<[f32; 2]> = None;
         for _ in 0..n_samples {
             let s = self.sine_phase.sin();
             self.sine_phase = (self.sine_phase + phase_step) % two_pi;
@@ -469,7 +484,14 @@ impl EmberRenderer {
             self.sample_counter = self.sample_counter.wrapping_add(1);
             let x = (counter as f32 % sweep_samples) / sweep_samples;
             let y = 0.5 + 0.45 * s;
-            self.point_scratch.push([x, y]);
+            let cur = [x, y];
+            if let Some(p) = prev {
+                if cur[0] >= p[0] {
+                    self.point_scratch.push(p);
+                    self.point_scratch.push(cur);
+                }
+            }
+            prev = Some(cur);
         }
         if !self.point_scratch.is_empty() {
             queue.write_buffer(

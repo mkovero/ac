@@ -42,5 +42,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let t = clamp(pow(scaled, params.gamma), 0.0, 1.0);
     let lut_x = i32(t * 255.0 + 0.5);
     let rgba = textureLoad(lut, vec2<i32>(lut_x, i32(params.palette_row)), 0);
-    return vec4(rgba.rgb, 1.0);
+    // Multiply by sqrt(t) so off-trace pixels (L=0) hit pure black instead
+    // of the LUT's lowest entry (which for blackbody is bright deep red).
+    // sqrt gives a soft floor that still preserves hue at low t.
+    return vec4(rgba.rgb * sqrt(t), 1.0);
 }
