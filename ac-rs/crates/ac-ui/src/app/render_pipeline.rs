@@ -1142,8 +1142,12 @@ impl App {
                 ViewMode::SpectrumEmber => {
                     let active = self.config.active_channel;
                     let view = self.cell_views.get(active).copied().unwrap_or_default();
-                    let polyline = self
-                        .last_frames
+                    // Read from the local `frames` copy, not self.last_frames
+                    // — by this point in redraw it carries the daemon's
+                    // weighting / time integration AND the UI-side
+                    // fractional-octave smoothing applied at line 188 above.
+                    // self.last_frames is the un-smoothed source.
+                    let polyline = frames
                         .get(active)
                         .and_then(|f| f.as_ref())
                         .filter(|f| !f.spectrum.is_empty())
