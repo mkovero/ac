@@ -330,6 +330,17 @@ pub struct App {
     /// `about_to_wait` to decide whether new data arrived since the last
     /// render — if not, skip the redraw to save CPU.
     last_seen_frame_ns: u64,
+    /// Last `last_frame_ns` we actually painted with. Distinct from
+    /// `last_seen_frame_ns` so the skip-when-unchanged check in
+    /// `loop_directive` is always a real "frame newer than what's on
+    /// screen?" test — not "have we ever seen this frame?". Without
+    /// this, `--max-fps 60` against a 30 Hz daemon paints the same
+    /// content twice per data tick on the wgpu/NVIDIA stack where
+    /// each `present()` is ~16 ms of CPU; with it, identical-content
+    /// frames are dropped and the actual paint rate falls back to the
+    /// content-change rate (= data rate). The `--max-fps` value
+    /// becomes a true upper bound rather than a target. (#109.)
+    last_painted_frame_ns: u64,
     /// Wall-clock timestamp of the most recent producer wake (data thread
     /// `EventLoopProxy::send_event(())`). Used by `loop_directive` to
     /// keep `RedrawContinuous` active while data is flowing, so the UI
@@ -466,6 +477,7 @@ impl App {
             benchmark_started: None,
             benchmark_report: None,
             last_seen_frame_ns: 0,
+            last_painted_frame_ns: 0,
             last_data_arrival: None,
             requested_present_mode,
             continuous_interval,
@@ -563,26 +575,28 @@ impl App {
             }
         }
 
-        // Producer threads wake us via `send_event(())`; we just dedupe on
-        // `last_frame_ns` so back-to-back wakes for the same frame don't
-        // trigger redundant renders.
+        // Producer threads wake us via `send_event(())`; track the latest
+        // frame we've seen so we can dedupe back-to-back wakes for the
+        // same frame.
         let current_ns = self
             .source
             .as_ref()
             .and_then(|s| s.status())
             .map(|st| st.last_frame_ns.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
-        if current_ns != self.last_seen_frame_ns {
-            self.last_seen_frame_ns = current_ns;
-            self.needs_redraw = true;
-        }
+        self.last_seen_frame_ns = current_ns;
+
+        // Skip-when-unchanged: the cheapest way to make `--max-fps 60`
+        // not pin a CPU on stacks where each `present()` costs a full
+        // vsync interval. Frames are dropped when there's nothing
+        // visibly new since the last paint — `--max-fps` becomes an
+        // upper bound rather than a forced target.
+        let new_data = current_ns != self.last_painted_frame_ns;
 
         // Continuous-repaint triggers — anything that visibly animates
-        // independently of input wakes. Slaving fps to the daemon tick
-        // rate (the post-#108 default) made `ac monitor` at fft_n≥32k feel
-        // stepped because data arrived at 20–30 Hz; widening the predicate
-        // here lets the UI render at vsync whenever there's actual motion
-        // on screen, while keeping the true-idle case on `Wait`.
+        // independently of input wakes. With skip-when-unchanged, these
+        // also gate paints: in continuous mode we only paint when at
+        // least one of `new_data`, animating, or input changed.
         let data_recent = self
             .last_data_arrival
             .is_some_and(|t| now.saturating_duration_since(t) < DATA_LIVELINESS_WINDOW);
@@ -595,19 +609,25 @@ impl App {
             || cursor_pinned;
 
         if continuous {
-            // Strict pacing: paint only when the deadline has passed. Every
-            // data-thread `send_event(())` wakes us; without this gate we'd
-            // paint once per wake (= N × data_rate fps with N channels)
-            // instead of at `continuous_interval`. The gate also coalesces
-            // input events that arrive between paints, which is what the
-            // user perceives as "the rate cap actually working" (#109).
             let due = self
                 .next_continuous_paint_at
                 .map_or(true, |t| now >= t);
             if due {
+                let animating = self.notification.is_some()
+                    || self.benchmark_secs.is_some()
+                    || hold_active
+                    || cursor_pinned;
+                let paint = new_data || animating || self.needs_redraw;
                 self.next_continuous_paint_at = Some(now + self.continuous_interval);
-                self.needs_redraw = false;
-                return LoopDirective::RedrawContinuous;
+                if paint {
+                    self.last_painted_frame_ns = current_ns;
+                    self.needs_redraw = false;
+                    return LoopDirective::RedrawContinuous;
+                }
+                // No visible change since the last paint — drop this tick
+                // entirely. The wgpu surface keeps showing the previous
+                // frame at zero CPU cost; `about_to_wait` re-arms WaitUntil.
+                return LoopDirective::Idle;
             }
             // Continuous mode active but not yet due. `about_to_wait` will
             // see `next_continuous_paint_at = Some(t)` and `WaitUntil(t)`,
@@ -621,8 +641,9 @@ impl App {
         // out a stale interval.
         self.next_continuous_paint_at = None;
 
-        if self.needs_redraw {
+        if self.needs_redraw || new_data {
             self.needs_redraw = false;
+            self.last_painted_frame_ns = current_ns;
             LoopDirective::RedrawIdle
         } else {
             LoopDirective::Idle
@@ -941,22 +962,27 @@ mod loop_tests {
         assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
     }
 
-    /// Decoupling guard: while data has arrived recently, the loop must
-    /// stay in `RedrawContinuous` so the UI renders at vsync (smooth
-    /// waterfall scroll, peak ramps, hover labels) instead of being
-    /// slaved to the daemon's measurement interval.
+    /// Decoupling guard: while data has arrived recently AND something
+    /// visibly animates (peak hold here), the loop must stay in
+    /// `RedrawContinuous` so the UI renders at vsync. With the
+    /// skip-when-unchanged gate added in #109, plain "data arrived"
+    /// without new content produces `Idle`; an animating overlay is the
+    /// trigger that locks the rate to vsync between data ticks.
     #[test]
     fn data_arrival_starts_continuous() {
         let mut app = fresh_app();
         let t0 = Instant::now();
         let _ = app.loop_directive(t0); // drain the initial paint
-        // Simulate a producer wake: this is what `user_event` does.
+        // Simulate a producer wake plus a time-driven animation, so the
+        // skip-when-unchanged gate fires `paint` even without new data
+        // (the test scaffolding can't easily inject `last_frame_ns`).
         app.last_data_arrival = Some(t0);
+        app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
         assert_eq!(
-            app.loop_directive(t0 + Duration::from_millis(100)),
+            app.loop_directive(t0 + app.continuous_interval),
             LoopDirective::RedrawContinuous,
-            "still inside DATA_LIVELINESS_WINDOW",
+            "still animating: paints at the next deadline",
         );
     }
 
@@ -975,6 +1001,10 @@ mod loop_tests {
         let _ = app.loop_directive(t0);
 
         app.last_data_arrival = Some(t0);
+        // Force a steady time-driven animation so paints aren't dropped
+        // by the skip-when-unchanged gate; this test is about *pacing*,
+        // not about content-change suppression.
+        app.peak_hold_enabled = true;
 
         // First wake in continuous mode: paint now, schedule next.
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
@@ -1014,16 +1044,56 @@ mod loop_tests {
         let t0 = Instant::now();
         let _ = app.loop_directive(t0);
         app.last_data_arrival = Some(t0);
+        app.peak_hold_enabled = true;  // animating, so the inside-window
+                                       // tick paints rather than skipping.
         // Inside the window: continuous.
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
-        // Past the window with no further data: must go idle.
+        // Stop the animation too — outside the liveness window with no
+        // animation and no input, the loop must reach `Idle`.
+        app.peak_hold_enabled = false;
         let past = t0 + DATA_LIVELINESS_WINDOW + Duration::from_millis(50);
-        // Flush the redraw that fires when crossing the boundary.
         let _ = app.loop_directive(past);
         assert_eq!(
             app.loop_directive(past),
             LoopDirective::Idle,
-            "past liveness window with no new data: must go idle",
+            "past liveness window with no new data, no animation: must idle",
+        );
+    }
+
+    /// New skip-when-unchanged behaviour (#109): in continuous mode, a
+    /// tick that arrives "due" but with nothing visibly changed since
+    /// the last paint must NOT repaint. This is what makes
+    /// `--max-fps 60` against a 30 Hz daemon land at the data rate
+    /// instead of forcing 60 redundant presents.
+    #[test]
+    fn skip_paint_when_nothing_changed() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+
+        // Enter continuous mode by faking a recent data arrival and an
+        // animating overlay so the first paint actually happens.
+        app.last_data_arrival = Some(t0);
+        app.peak_hold_enabled = true;
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+
+        // Now drop the animation (simulates: peak hold decay finished,
+        // we're just observing flat data). Within the liveness window
+        // this still counts as continuous, but the deadline tick must
+        // skip when nothing has changed since the last paint.
+        app.peak_hold_enabled = false;
+        let due = t0 + app.continuous_interval + Duration::from_millis(1);
+        assert_eq!(
+            app.loop_directive(due),
+            LoopDirective::Idle,
+            "deadline tick with no new data + no animation: skip paint",
+        );
+
+        // Still continuous (data is recent), so the deadline must have
+        // been advanced for the next tick rather than dropped.
+        assert!(
+            app.next_continuous_paint_at.is_some_and(|t| t > due),
+            "skipped tick still re-arms next deadline",
         );
     }
 
