@@ -29,8 +29,7 @@ use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 
 use super::TimeIntegrationMode;
 
-const EMBER_SCOPE_SAMPLE_RATE: f32 = 48_000.0;
-const EMBER_SCOPE_SINE_HZ:     f32 = 1_000.0;
+const EMBER_SCOPE_SINE_HZ: f32 = 1_000.0;
 
 /// Build the overlay payload describing the active time-integration
 /// state. Returns `None` when the mode is off so the overlay renders
@@ -1107,9 +1106,20 @@ impl App {
 
             match view_mode {
                 ViewMode::Scope => {
+                    // Inlined `current_sr()` because `self.ember` is already
+                    // mut-borrowed above and a method call would need the
+                    // whole `&self`. `self.last_frames` is a different field
+                    // — Rust's split borrow lets us touch it independently.
+                    let sr = self
+                        .last_frames
+                        .iter()
+                        .flatten()
+                        .map(|f| f.meta.sr)
+                        .find(|&s| s > 0)
+                        .unwrap_or(48_000) as f32;
                     let (polyline, scroll_dx) = build_scope_polyline(
                         &mut self.ember_sine_phase,
-                        EMBER_SCOPE_SAMPLE_RATE,
+                        sr,
                         EMBER_SCOPE_SINE_HZ,
                         self.ember_scope_window_s,
                         self.ember_scope_y_gain,
