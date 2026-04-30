@@ -349,6 +349,15 @@ pub struct App {
     /// (≈ 30 Hz) keeps NVIDIA's expensive `present()` cost from
     /// doubling vs the matched-to-data-rate baseline (#109/#110).
     continuous_interval: Duration,
+    /// Deadline for the next continuous-mode paint, set when
+    /// `loop_directive` returns `RedrawContinuous` and consumed
+    /// (or extended) on the next tick. The whole point: data-thread
+    /// `EventLoopProxy::send_event` wakes interrupt `WaitUntil` early,
+    /// and without an explicit "next paint at" we'd paint on every wake
+    /// — i.e. once per *data tick per channel* (#109 follow-up). With
+    /// this we paint on the first wake at-or-after the deadline and
+    /// coalesce all wakes in between.
+    next_continuous_paint_at: Option<Instant>,
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
@@ -460,6 +469,7 @@ impl App {
             last_data_arrival: None,
             requested_present_mode,
             continuous_interval,
+            next_continuous_paint_at: None,
             needs_redraw: true,
             wake,
         }
@@ -583,19 +593,37 @@ impl App {
             || data_recent
             || hold_active
             || cursor_pinned;
+
         if continuous {
-            // Notification fade / benchmark FPS counter / data flow / peak
-            // decay / drag preview all need a steady tick.
-            self.needs_redraw = true;
+            // Strict pacing: paint only when the deadline has passed. Every
+            // data-thread `send_event(())` wakes us; without this gate we'd
+            // paint once per wake (= N × data_rate fps with N channels)
+            // instead of at `continuous_interval`. The gate also coalesces
+            // input events that arrive between paints, which is what the
+            // user perceives as "the rate cap actually working" (#109).
+            let due = self
+                .next_continuous_paint_at
+                .map_or(true, |t| now >= t);
+            if due {
+                self.next_continuous_paint_at = Some(now + self.continuous_interval);
+                self.needs_redraw = false;
+                return LoopDirective::RedrawContinuous;
+            }
+            // Continuous mode active but not yet due. `about_to_wait` will
+            // see `next_continuous_paint_at = Some(t)` and `WaitUntil(t)`,
+            // so we wake exactly at the deadline regardless of how many
+            // data-thread events fire in between.
+            return LoopDirective::Idle;
         }
+
+        // Not in continuous mode — drop any leftover deadline so the next
+        // entry into continuous mode paints immediately rather than waiting
+        // out a stale interval.
+        self.next_continuous_paint_at = None;
 
         if self.needs_redraw {
             self.needs_redraw = false;
-            if continuous {
-                LoopDirective::RedrawContinuous
-            } else {
-                LoopDirective::RedrawIdle
-            }
+            LoopDirective::RedrawIdle
         } else {
             LoopDirective::Idle
         }
@@ -748,39 +776,44 @@ impl ApplicationHandler for App {
         match directive {
             LoopDirective::RedrawContinuous => {
                 request_redraw();
-                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    now + self.continuous_interval,
-                ));
+                // The next paint deadline was just set inside
+                // `loop_directive`; wake exactly there, ignoring producer
+                // events in between (they're already coalesced via
+                // `last_data_arrival` + the `due` check on next entry).
+                let deadline = self
+                    .next_continuous_paint_at
+                    .unwrap_or_else(|| now + self.continuous_interval);
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
             }
             LoopDirective::RedrawIdle => {
                 request_redraw();
                 elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
             LoopDirective::Idle => {
-                // True idle — block until something (data arrival, input,
-                // window event) wakes us. `04304252` previously kept a
-                // 60 Hz polling redraw here to mask 5 Hz sluggishness on
-                // single-channel monitoring; with monitor data now
-                // arriving at ~30 Hz that justification no longer holds,
-                // and on NVIDIA + Vulkan `AutoVsync` the driver busy-waits
-                // inside `surface.present()` so a forced 60 Hz redraw on
-                // an unchanged frame pegs CPU at 100 % (#108). Producer
-                // wakes via `EventLoopProxy::send_event` and any input
-                // event still set `needs_redraw`, so live use cases all
-                // route through `RedrawIdle` / `RedrawContinuous`.
-                elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+                // Either truly idle, or paced (continuous mode active but
+                // not yet due to paint). The pacing path covers the bug
+                // that motivated #109's deeper rework: data-thread
+                // `send_event(())` wakes were interrupting `WaitUntil`
+                // and triggering a paint per wake (= N × data_rate fps),
+                // ignoring the rate cap entirely. Now we only paint at the
+                // pre-set deadline; everything else just refreshes state.
+                if let Some(t) = self.next_continuous_paint_at {
+                    elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(t));
+                } else {
+                    elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+                }
             }
         }
     }
 
     fn user_event(&mut self, _elwt: &ActiveEventLoop, _event: ()) {
-        // Producer thread signalled a new frame — schedule a redraw on the
-        // next `about_to_wait` cycle. The frame itself is pulled from the
-        // triple buffer at render time. Stamp `last_data_arrival` so the
-        // loop stays in continuous-repaint mode while data is flowing
-        // (UI renders at vsync between daemon ticks, see #108 follow-up).
+        // Producer thread signalled a new frame. Stamp `last_data_arrival`
+        // so the loop stays in continuous-repaint mode while data flows;
+        // do NOT set `needs_redraw` — the continuous-tick deadline is the
+        // sole source of truth for paint timing in that mode. The latest
+        // frame is pulled from the triple buffer at the next paint.
+        // (#109 rate-limiter fix.)
         self.last_data_arrival = Some(Instant::now());
-        self.needs_redraw = true;
     }
 
     fn exiting(&mut self, _elwt: &ActiveEventLoop) {
@@ -927,6 +960,50 @@ mod loop_tests {
         );
     }
 
+    /// Pins the actual rate-limiter behaviour, which the original
+    /// "decouple" PR claimed but didn't deliver. Symptom: producer threads
+    /// wake `about_to_wait` via `EventLoopProxy::send_event(())`, which
+    /// interrupts `WaitUntil(continuous_interval)` early. Pre-fix every
+    /// such wake hit `if continuous { needs_redraw = true; }` and produced
+    /// a paint, so a 4-channel monitor at 30 Hz fired 120 paints/sec
+    /// instead of 30. With this fix, all wakes between deadline ticks
+    /// coalesce to a single paint at-or-after the deadline.
+    #[test]
+    fn continuous_mode_rate_limits_paints() {
+        let mut app = fresh_app();
+        let t0 = Instant::now();
+        let _ = app.loop_directive(t0);
+
+        app.last_data_arrival = Some(t0);
+
+        // First wake in continuous mode: paint now, schedule next.
+        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        assert!(
+            app.next_continuous_paint_at.is_some(),
+            "RedrawContinuous must arm a paint deadline",
+        );
+
+        // Subsequent wakes inside the interval: no paint, just keep state
+        // moving. This is the regression-guard part — pre-fix every wake
+        // returned RedrawContinuous.
+        let interval_ms = app.continuous_interval.as_millis() as u64;
+        for ms in [1, 5, 10, interval_ms / 2, interval_ms - 1] {
+            assert_eq!(
+                app.loop_directive(t0 + Duration::from_millis(ms)),
+                LoopDirective::Idle,
+                "wake at +{ms} ms inside interval ({} ms) must NOT paint",
+                interval_ms,
+            );
+        }
+
+        // At the deadline: paint again, schedule next.
+        assert_eq!(
+            app.loop_directive(t0 + app.continuous_interval),
+            LoopDirective::RedrawContinuous,
+            "wake at deadline must paint",
+        );
+    }
+
     /// Once data has stopped flowing, the liveness window must expire and
     /// the loop must fall fully idle — no continuous-repaint leak that
     /// would re-create the #108 100 %-CPU symptom whenever a monitor was
@@ -963,14 +1040,16 @@ mod loop_tests {
         app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
 
+        // Advance past the freshly-armed continuous deadline so the next
+        // call is genuinely "due" again (rate-limiter is now strict).
+        let past = t0 + app.continuous_interval + Duration::from_millis(10);
         app.peak_hold_enabled = false;
         app.min_hold_enabled = true;
-        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        assert_eq!(app.loop_directive(past), LoopDirective::RedrawContinuous);
 
         app.min_hold_enabled = false;
-        // Drain the paint that fires from `needs_redraw` flipping.
-        let _ = app.loop_directive(t0);
-        assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+        let _ = app.loop_directive(past);
+        assert_eq!(app.loop_directive(past), LoopDirective::Idle);
     }
 
     /// An active drag or box-zoom keeps the loop continuous so the rubber
@@ -998,6 +1077,10 @@ mod loop_tests {
         });
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
 
+        // Advance past the deadline before flipping to box-zoom — otherwise
+        // the strict rate-limiter coalesces the second paint into the
+        // already-scheduled tick.
+        let past = t0 + app.continuous_interval + Duration::from_millis(10);
         app.drag = None;
         app.box_zoom = Some(BoxZoomState {
             start: PhysicalPosition::new(0.0, 0.0),
@@ -1014,12 +1097,11 @@ mod loop_tests {
             start_rows_f: 0.0,
             waterfall: false,
         });
-        assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
+        assert_eq!(app.loop_directive(past), LoopDirective::RedrawContinuous);
 
         app.box_zoom = None;
-        // Drain the redraw triggered by `needs_redraw` flipping.
-        let _ = app.loop_directive(t0);
-        assert_eq!(app.loop_directive(t0), LoopDirective::Idle);
+        let _ = app.loop_directive(past);
+        assert_eq!(app.loop_directive(past), LoopDirective::Idle);
     }
 
     /// Regression #108: the `Idle` directive must mean "no work pending,
