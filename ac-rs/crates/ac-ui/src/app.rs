@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use triple_buffer::Input;
 use winit::application::ApplicationHandler;
@@ -148,6 +148,10 @@ pub struct AppInit {
     /// `present()` busy-spin diagnosed in #109. Falls back gracefully if
     /// the surface doesn't advertise the mode (#110).
     pub present_mode: wgpu::PresentMode,
+    /// Sleep between successive `RedrawContinuous` ticks. `--max-fps` /
+    /// `AC_UI_MAX_FPS` map to `Duration::from_millis(1000 / hz)`; default
+    /// is `CONTINUOUS_REPAINT_INTERVAL_DEFAULT` (33 ms ≈ 30 Hz).
+    pub continuous_interval: Duration,
     /// Proxy handed to background producer threads (receiver / synthetic) so
     /// they can wake the winit event loop the instant a new frame lands.
     /// Without this the UI sits in `ControlFlow::Wait` and won't repaint
@@ -339,6 +343,12 @@ pub struct App {
     /// when winit creates the window — instance/surface creation happens
     /// after `App::new` so the value has to round-trip through state.
     requested_present_mode: wgpu::PresentMode,
+    /// Sleep budget between continuous-repaint frames. Picked from
+    /// `--max-fps` / `AC_UI_MAX_FPS` and set in stone for the App's
+    /// lifetime; feeds `WaitUntil` in `about_to_wait`. Default 33 ms
+    /// (≈ 30 Hz) keeps NVIDIA's expensive `present()` cost from
+    /// doubling vs the matched-to-data-rate baseline (#109/#110).
+    continuous_interval: Duration,
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
@@ -358,6 +368,7 @@ impl App {
         let monitor_channels = init.monitor_channels.clone();
         let wake = init.wake.clone();
         let requested_present_mode = init.present_mode;
+        let continuous_interval = init.continuous_interval;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else {
@@ -448,6 +459,7 @@ impl App {
             last_seen_frame_ns: 0,
             last_data_arrival: None,
             requested_present_mode,
+            continuous_interval,
             needs_redraw: true,
             wake,
         }
@@ -737,7 +749,7 @@ impl ApplicationHandler for App {
             LoopDirective::RedrawContinuous => {
                 request_redraw();
                 elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    now + CONTINUOUS_REPAINT_INTERVAL,
+                    now + self.continuous_interval,
                 ));
             }
             LoopDirective::RedrawIdle => {
@@ -818,6 +830,7 @@ mod loop_tests {
             initial_sweep_kind: None,
             monitor_channels: None,
             present_mode: wgpu::PresentMode::AutoVsync,
+            continuous_interval: CONTINUOUS_REPAINT_INTERVAL_DEFAULT,
             wake: None,
         })
     }

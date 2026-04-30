@@ -11,8 +11,22 @@ use crate::data::synthetic::SyntheticHandle;
 /// at the same boundary instead of leaking state forever.
 pub const NOTIFICATION_TTL: Duration = Duration::from_millis(1200);
 
-/// Frame cap for continuous repaint windows (notification fade, benchmark).
-pub const CONTINUOUS_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
+/// Frame cap for continuous repaint windows (notification fade, benchmark,
+/// data flow). Default 33 ms (≈ 30 Hz) — matches the daemon's auto-picked
+/// monitor cadence, and cuts per-`present()` cost in half compared to the
+/// previous 16 ms (60 Hz) for users on stacks where the GPU driver doesn't
+/// kernel-block on vsync (notably NVIDIA + Vulkan + Linux, see #109/#110).
+/// Override at runtime via `--max-fps` / `AC_UI_MAX_FPS`.
+pub const CONTINUOUS_REPAINT_INTERVAL_DEFAULT: Duration = Duration::from_millis(33);
+
+/// Lowest `--max-fps` value the parser accepts. 5 Hz is the minimum cadence
+/// at which peak-hold decay and waterfall scroll still read as motion
+/// rather than stepped state changes; below that we'd be misadvertising
+/// "continuous" repaint.
+pub const MAX_FPS_MIN: u32 = 5;
+/// Upper end. 240 Hz covers gaming-grade displays; beyond that the GPU
+/// is the bottleneck anyway and we should stop forcing more presents.
+pub const MAX_FPS_MAX: u32 = 240;
 
 /// How recently a frame must have arrived for the loop to stay in
 /// continuous-repaint mode. Lets the UI render at vsync between data

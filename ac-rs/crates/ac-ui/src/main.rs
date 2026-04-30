@@ -5,8 +5,11 @@ mod theme;
 mod ui;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use app::{App, AppInit, SourceKind};
+use app::{
+    App, AppInit, SourceKind, CONTINUOUS_REPAINT_INTERVAL_DEFAULT, MAX_FPS_MAX, MAX_FPS_MIN,
+};
 use data::control::CtrlClient;
 use data::store::{ChannelStore, LoudnessStore, SweepStore, TransferStore, VirtualChannelStore};
 use data::types::{SweepKind, ViewMode};
@@ -71,6 +74,7 @@ fn main() -> anyhow::Result<()> {
         initial_sweep_kind: args.mode,
         monitor_channels,
         present_mode: args.present_mode,
+        continuous_interval: args.continuous_interval,
         wake: Some(wake),
     };
 
@@ -102,6 +106,26 @@ struct Args {
     /// `present()` busy-spin (#109/#110); `immediate` skips vsync entirely
     /// (tearing) for measuring the no-sync lower bound.
     present_mode: wgpu::PresentMode,
+    /// Sleep budget between continuous-repaint frames. Default 30 fps
+    /// matches the daemon auto-pick at typical fft_n; on stacks where
+    /// `present()` is cheap (Wayland + radv, Apple Silicon) bump to 60
+    /// for smoother motion. On stacks where `present()` is expensive
+    /// (NVIDIA + Vulkan + X11) leave at 30 or drop further.
+    continuous_interval: Duration,
+}
+
+fn parse_max_fps(s: &str) -> anyhow::Result<Duration> {
+    let hz: u32 = s.parse().map_err(|e| anyhow::anyhow!(
+        "--max-fps: expected integer hz in [{MAX_FPS_MIN}, {MAX_FPS_MAX}], got {s:?}: {e}",
+    ))?;
+    if !(MAX_FPS_MIN..=MAX_FPS_MAX).contains(&hz) {
+        anyhow::bail!(
+            "--max-fps: {hz} hz out of range [{MAX_FPS_MIN}, {MAX_FPS_MAX}]",
+        );
+    }
+    // Round-down ms — `Duration::from_millis(1000 / hz)` for hz=30 → 33 ms,
+    // matching the existing default. Avoids floating-point.
+    Ok(Duration::from_millis((1000 / hz) as u64))
 }
 
 fn parse_present_mode(s: &str) -> anyhow::Result<wgpu::PresentMode> {
@@ -128,6 +152,11 @@ impl Args {
             .map(|v| parse_present_mode(&v))
             .transpose()?
             .unwrap_or(wgpu::PresentMode::AutoVsync);
+        let env_continuous_interval = std::env::var("AC_UI_MAX_FPS")
+            .ok()
+            .map(|v| parse_max_fps(&v))
+            .transpose()?
+            .unwrap_or(CONTINUOUS_REPAINT_INTERVAL_DEFAULT);
         let mut out = Args {
             help: false,
             connect: "tcp://127.0.0.1:5557".to_string(),
@@ -141,6 +170,7 @@ impl Args {
             view: ViewMode::Spectrum,
             mode: None,
             present_mode: env_present_mode,
+            continuous_interval: env_continuous_interval,
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -213,6 +243,12 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--present-mode requires value"))?;
                     out.present_mode = parse_present_mode(&v)?;
                 }
+                "--max-fps" => {
+                    let v = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--max-fps requires value"))?;
+                    out.continuous_interval = parse_max_fps(&v)?;
+                }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
         }
@@ -278,6 +314,8 @@ Options:\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
+  --max-fps <hz>       Cap continuous-repaint rate. Default 30; bump to 60 on stacks with cheap present()\n  \
+                       (env: AC_UI_MAX_FPS) — every doubling of fps roughly doubles GPU-driver CPU\n  \
   -h, --help           Show this help\n\n\
 Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
@@ -355,5 +393,40 @@ mod present_mode_tests {
         let err = parse_present_mode("vsync").unwrap_err().to_string();
         assert!(err.contains("vsync"), "error mentions input: {err}");
         assert!(err.contains("mailbox"), "error lists valid values: {err}");
+    }
+}
+
+#[cfg(test)]
+mod max_fps_tests {
+    use super::parse_max_fps;
+    use std::time::Duration;
+
+    #[test]
+    fn standard_rates() {
+        assert_eq!(parse_max_fps("30").unwrap(), Duration::from_millis(33));
+        assert_eq!(parse_max_fps("60").unwrap(), Duration::from_millis(16));
+        // Floor case (5 Hz = 200 ms) and ceiling (240 Hz = 4 ms).
+        assert_eq!(parse_max_fps("5").unwrap(),   Duration::from_millis(200));
+        assert_eq!(parse_max_fps("240").unwrap(), Duration::from_millis(4));
+    }
+
+    #[test]
+    fn out_of_range_rejected() {
+        for s in ["0", "1", "4", "241", "1000"] {
+            assert!(
+                parse_max_fps(s).is_err(),
+                "{s} hz should have been rejected as out of range",
+            );
+        }
+    }
+
+    #[test]
+    fn non_integer_rejected() {
+        for s in ["abc", "60hz", "60.5", ""] {
+            assert!(
+                parse_max_fps(s).is_err(),
+                "{s:?} should have been rejected as non-integer",
+            );
+        }
     }
 }
