@@ -81,6 +81,7 @@ impl App {
         };
         let spectrum = self.spectrum.as_mut().unwrap();
         let waterfall = self.waterfall.as_mut().unwrap();
+        let ember = self.ember.as_mut().unwrap();
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
         let egui_state = self.egui_state.as_mut().unwrap();
 
@@ -515,6 +516,7 @@ impl App {
             match view_mode {
                 ViewMode::Spectrum => spectrum_uploads.reserve(cells.len()),
                 ViewMode::Waterfall => waterfall_uploads.reserve(cells.len()),
+                ViewMode::Scope => {}
             }
         }
 
@@ -681,6 +683,12 @@ impl App {
                         new_row: frame.new_row.as_deref().map(|v| v.as_slice()),
                     });
                 }
+                ViewMode::Scope => {
+                    // Phase 0a: ember substrate runs from a synthetic source
+                    // inside the renderer, not from any DisplayFrame. Cell
+                    // iteration left intact so Single layout still computes
+                    // the viewport rect — but no per-channel data is staged.
+                }
             }
         }
 
@@ -691,6 +699,7 @@ impl App {
             ViewMode::Waterfall => {
                 waterfall.upload(&ctx.device, &ctx.queue, n_channels, &waterfall_uploads);
             }
+            ViewMode::Scope => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -1079,6 +1088,13 @@ impl App {
         let spectrum_writes = ctx.timing.as_ref().map(|t| t.spectrum_writes());
         let egui_writes     = ctx.timing.as_ref().map(|t| t.egui_writes());
 
+        // Ember substrate: decay + deposit happen as their own off-screen
+        // render passes ahead of the surface clear, so the display pass
+        // inside the spectrum pass can sample the freshly written buffer.
+        if matches!(view_mode, ViewMode::Scope) {
+            ember.advance(&ctx.device, &ctx.queue, &mut encoder, [0.0, 0.0, 1.0, 1.0]);
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("spectrum pass"),
@@ -1102,6 +1118,7 @@ impl App {
             match view_mode {
                 ViewMode::Spectrum => spectrum.draw(&mut pass),
                 ViewMode::Waterfall => waterfall.draw(&mut pass),
+                ViewMode::Scope => ember.draw(&mut pass),
             }
         }
 

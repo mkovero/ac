@@ -119,6 +119,10 @@ pub fn draw_grid(
                 );
             }
         }
+        ViewMode::Scope => {
+            // Phase 0a: ember substrate paints its own field. Skip grid
+            // overlay so the persistence-buffer aesthetic isn't broken up.
+        }
     }
 }
 

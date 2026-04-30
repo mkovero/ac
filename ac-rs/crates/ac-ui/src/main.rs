@@ -230,7 +230,8 @@ impl Args {
                     out.view = match v.as_str() {
                         "spectrum" => ViewMode::Spectrum,
                         "waterfall" => ViewMode::Waterfall,
-                        other => anyhow::bail!("--view: expected spectrum|waterfall, got {other}"),
+                        "scope" => ViewMode::Scope,
+                        other => anyhow::bail!("--view: expected spectrum|waterfall|scope, got {other}"),
                     };
                 }
                 "--mode" => {

@@ -805,6 +805,28 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   selection naturally encompasses old and new views; introducing
   a second binary fragments the UX without benefit.
 
+- `(2026-04-30) Phase 0a substrate runs the synthetic sine source
+  internally; ScopeFrame wire schema (OQ7) deferred to 0b.` —
+  Lets the substrate's deposit/decay/display pipeline be validated
+  in isolation without committing to a wire-format decision that
+  is independent of substrate viability.
+
+- `(2026-04-30) Phase 0a uses three separate render passes
+  (decay → deposit → display) over an R16Float ping-pong texture
+  pair, no compute shaders.` — wgpu disallows reading and writing
+  the same texture in one pass; ping-pong avoids the problem
+  without needing storage-binding feature gates that vary by
+  backend. Compute approach deferred — only worth the complexity
+  if the profiler shows the decay-pass cost dominating the frame
+  budget (OQ5).
+
+- `(2026-04-30) Initial palette pair shipped: blackbody (Tanner
+  Helland Planck approximation) and a hand-tuned warm ramp.` —
+  Resolves OQ3 for v1 by shipping both behind a single `set_palette`
+  toggle. Default to blackbody; perceptual readability comparison
+  on real measurement views (Bode, coherence) waits until those
+  views are wired in Phase 2.
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -815,6 +837,19 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
   current state inventoried against ac-rs codebase, view catalog
   drafted, rendering substrate spec drafted, phasing plan
   established, open questions enumerated. No code written.
+
+- `(2026-04-30) Phase 0a — substrate scaffolded.` — Added
+  `ac-ui/src/render/ember.rs` (~580 lines) plus three WGSL files
+  (`ember_decay.wgsl`, `ember_deposit.wgsl`, `ember_display.wgsl`).
+  EmberRenderer holds the R16Float ping-pong pair, three render
+  pipelines, palette LUT (blackbody + warm baked at startup), a
+  vertex buffer for deposit points, and a synthetic-sine driver
+  that emits one (x,y) point per audio sample at 48 kHz / 1 kHz.
+  Wired through `ViewMode::Scope` with a new `WSlot::Scope`
+  variant in the W-key cycle and a `--view scope` CLI flag.
+  All 141 ac-ui tests pass; full workspace 580 pass + 1 ignored.
+  Visual validation (the "clean glowing trace" criterion in §8)
+  is left to the user — needs a display.
 
 ---
 

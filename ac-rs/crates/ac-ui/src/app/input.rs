@@ -25,6 +25,7 @@ enum WSlot {
     Cwt,
     Cqt,
     Reassigned,
+    Scope,
 }
 
 #[derive(Clone)]
@@ -681,6 +682,7 @@ impl App {
             (LayoutMode::Single, ViewMode::Waterfall, "cwt")        => Some(WSlot::Cwt),
             (LayoutMode::Single, ViewMode::Waterfall, "cqt")        => Some(WSlot::Cqt),
             (LayoutMode::Single, ViewMode::Waterfall, "reassigned") => Some(WSlot::Reassigned),
+            (LayoutMode::Single, ViewMode::Scope,      _)            => Some(WSlot::Scope),
             _ => None,
         }
     }
@@ -856,7 +858,8 @@ impl App {
                     Some(WSlot::Waterfall)  => WSlot::Cwt,
                     Some(WSlot::Cwt)        => WSlot::Cqt,
                     Some(WSlot::Cqt)        => WSlot::Reassigned,
-                    Some(WSlot::Reassigned) => WSlot::Matrix,
+                    Some(WSlot::Reassigned) => WSlot::Scope,
+                    Some(WSlot::Scope)      => WSlot::Matrix,
                     None                    => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -866,6 +869,7 @@ impl App {
                     WSlot::Cwt        => (LayoutMode::Single, ViewMode::Waterfall, "cwt",        "view: waterfall (cwt)"),
                     WSlot::Cqt        => (LayoutMode::Single, ViewMode::Waterfall, "cqt",        "view: waterfall (cqt)"),
                     WSlot::Reassigned => (LayoutMode::Single, ViewMode::Waterfall, "reassigned", "view: waterfall (reassigned)"),
+                    WSlot::Scope      => (LayoutMode::Single, ViewMode::Scope,     "fft",        "view: scope (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

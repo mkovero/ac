@@ -295,6 +295,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 time_tag,
                 mic_tag,
             ),
+            ViewMode::Scope => "scope (ember 0a) │ synthetic 1 kHz".to_string(),
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),

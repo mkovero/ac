@@ -21,6 +21,7 @@ use crate::data::types::{
     TransferPair, ViewMode,
 };
 use crate::render::context::RenderContext;
+use crate::render::ember::EmberRenderer;
 use crate::render::spectrum::SpectrumRenderer;
 use crate::render::waterfall::WaterfallRenderer;
 use crate::theme;
@@ -259,6 +260,7 @@ pub struct App {
     render_ctx: Option<RenderContext>,
     spectrum: Option<SpectrumRenderer>,
     waterfall: Option<WaterfallRenderer>,
+    pub(super) ember: Option<EmberRenderer>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -393,6 +395,8 @@ impl App {
         let continuous_interval = init.continuous_interval;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
+        } else if matches!(init.initial_view, ViewMode::Scope) {
+            LayoutMode::Single
         } else {
             LayoutMode::Grid
         };
@@ -444,6 +448,7 @@ impl App {
             render_ctx: None,
             spectrum: None,
             waterfall: None,
+            ember: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
@@ -540,6 +545,7 @@ impl App {
         let format = ctx.surface_format();
         let spectrum = SpectrumRenderer::new(&ctx.device, format);
         let waterfall = WaterfallRenderer::new(&ctx.device, &ctx.queue, format);
+        let ember = EmberRenderer::new(&ctx.device, &ctx.queue, format);
         let egui_renderer = egui_wgpu::Renderer::new(&ctx.device, format, None, 1, false);
         self.egui_ctx.set_visuals(render_pipeline::dark_visuals());
         let viewport_id = self.egui_ctx.viewport_id();
@@ -548,6 +554,7 @@ impl App {
         self.render_ctx = Some(ctx);
         self.spectrum = Some(spectrum);
         self.waterfall = Some(waterfall);
+        self.ember = Some(ember);
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
     }
