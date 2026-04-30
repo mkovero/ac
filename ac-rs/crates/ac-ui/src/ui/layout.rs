@@ -134,3 +134,84 @@ pub fn to_pixel_rect(cell: &CellRect, width: f32, height: f32) -> egui::Rect {
     let y0 = height - (cell.y + cell.h) * height;
     egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Visibility set tests. The render pipeline gates per-channel
+    //! preprocessing (smoothing, peak/min hold) on
+    //! `cells.iter().map(|c| c.channel)` (#111). These tests pin which
+    //! channels each layout exposes so that filter set is auditable
+    //! without touching the wgpu/egui-bound render pipeline itself.
+    use super::*;
+    use std::collections::HashSet;
+
+    fn visible(cells: &[CellRect]) -> HashSet<usize> {
+        cells.iter().map(|c| c.channel).collect()
+    }
+
+    #[test]
+    fn single_layout_exposes_only_active_channel() {
+        let cells = compute(
+            LayoutMode::Single,
+            8,
+            3,
+            &[false; 8],
+            GridParams::default(),
+        );
+        assert_eq!(visible(&cells), HashSet::from([3]));
+    }
+
+    #[test]
+    fn compare_layout_exposes_only_selected() {
+        let mut sel = vec![false; 8];
+        sel[1] = true;
+        sel[5] = true;
+        let cells = compute(LayoutMode::Compare, 8, 0, &sel, GridParams::default());
+        assert_eq!(visible(&cells), HashSet::from([1, 5]));
+    }
+
+    #[test]
+    fn sweep_layout_exposes_only_channel_zero() {
+        let cells = compute(
+            LayoutMode::Sweep,
+            8,
+            5,
+            &[false; 8],
+            GridParams::default(),
+        );
+        assert_eq!(visible(&cells), HashSet::from([0]));
+    }
+
+    #[test]
+    fn grid_layout_pages_change_visible_set() {
+        // 8 channels, force a 2×2 = 4-cell page so paging splits 0..4
+        // and 4..8 onto separate pages.
+        let small_cell = GridParams { cell_size: Some(0.5), page: 0 };
+        let page0 = compute(LayoutMode::Grid, 8, 0, &[false; 8], small_cell);
+        let page1 = compute(
+            LayoutMode::Grid,
+            8,
+            0,
+            &[false; 8],
+            GridParams { page: 1, ..small_cell },
+        );
+        let v0 = visible(&page0);
+        let v1 = visible(&page1);
+        assert!(!v0.is_empty(), "page 0 must show at least one cell");
+        assert!(!v1.is_empty(), "page 1 must show at least one cell");
+        assert!(v0.is_disjoint(&v1), "different pages must show different channels");
+        assert_eq!(v0.union(&v1).count(), 8, "all 8 channels covered across pages");
+    }
+
+    #[test]
+    fn grid_layout_handles_short_selected_slice() {
+        // Compare layout reads `selected.get(i).copied().unwrap_or(false)`,
+        // so a `&selected` shorter than n_channels must not panic — the
+        // visibility-gated render pipeline computes `cells` before the
+        // `selected.resize(n_total, false)` call (#111), so this is the
+        // path it actually exercises.
+        let sel: Vec<bool> = vec![true]; // only channel 0 selected
+        let cells = compute(LayoutMode::Compare, 4, 0, &sel, GridParams::default());
+        assert_eq!(visible(&cells), HashSet::from([0]));
+    }
+}

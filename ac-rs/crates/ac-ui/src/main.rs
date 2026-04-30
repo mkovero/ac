@@ -10,7 +10,6 @@ use std::time::Duration;
 use app::{
     App, AppInit, SourceKind, CONTINUOUS_REPAINT_INTERVAL_DEFAULT, MAX_FPS_MAX, MAX_FPS_MIN,
 };
-use data::control::CtrlClient;
 use data::store::{ChannelStore, LoudnessStore, SweepStore, TransferStore, VirtualChannelStore};
 use data::types::{SweepKind, ViewMode};
 
@@ -261,18 +260,6 @@ impl Args {
         }
         Ok(out)
     }
-}
-
-/// Best-effort sync probe of the daemon's `devices` reply to discover how
-/// many capture slots to preallocate. Short timeouts — if the daemon isn't
-/// up yet we fall back to a safe default rather than blocking startup.
-fn probe_daemon_channels(ctrl_endpoint: &str) -> Option<usize> {
-    let ctrl = CtrlClient::connect(ctrl_endpoint).ok()?;
-    let reply = ctrl.send(&serde_json::json!({ "cmd": "devices" })).ok()?;
-    reply
-        .get("capture")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.len())
 }
 
 fn parse_channel_spec(s: &str) -> anyhow::Result<Vec<u32>> {

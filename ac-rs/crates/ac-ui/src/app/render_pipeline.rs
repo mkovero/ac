@@ -152,6 +152,25 @@ impl App {
             frames.push(frame);
         }
 
+        // Compute the visible-cell layout once, up-front, so the heavy
+        // per-channel preprocessing below (smoothing, peak hold, min
+        // hold) only touches channels that will actually be rendered.
+        // Pre-#111 these loops iterated every channel regardless of
+        // layout — paged Grid showing 4 of 8 channels still ran the
+        // smoothing filter on the hidden 4. `layout::compute` already
+        // knows the visible set; reuse it for both gating and the
+        // upload-building loop further down. (#111)
+        let n_channels = frames.len();
+        let cells = layout::compute(
+            self.config.layout,
+            n_channels,
+            self.config.active_channel,
+            &self.selected,
+            grid_params_snap,
+        );
+        let visible_channels: std::collections::HashSet<usize> =
+            cells.iter().map(|c| c.channel).collect();
+
         // Fractional-octave smoothing. Runs before peak-hold so the held max
         // is taken over the smoothed trace the user is actually looking at;
         // it also keeps the frame-level `spectrum` consistent with what the
@@ -159,7 +178,11 @@ impl App {
         // `(n_frac, n_bins, last_freq)` to avoid a log-range recompute per
         // frame.
         if let Some(n_frac) = self.smoothing_frac {
-            for frame in frames.iter_mut().flatten() {
+            for (idx, slot) in frames.iter_mut().enumerate() {
+                if !visible_channels.contains(&idx) {
+                    continue;
+                }
+                let Some(frame) = slot.as_mut() else { continue };
                 if frame.freqs.is_empty() || frame.spectrum.is_empty() {
                     continue;
                 }
@@ -218,10 +241,16 @@ impl App {
         // the held max. Virtual (transfer) channels are skipped — peak-hold
         // is a spectrum-only concept. A bin-count mismatch (FFT-N change we
         // missed, or a late first frame at a different N) re-seeds the
-        // buffer instead of panicking or silently clipping.
+        // buffer instead of panicking or silently clipping. Hidden channels
+        // (off-page Grid, deselected Compare, non-active Single) are
+        // skipped too — their held buffer keeps its previous value and
+        // resumes from there when the channel comes back into view (#111).
         if self.peak_hold_enabled {
             let now = Instant::now();
             for (i, slot) in frames.iter().enumerate().take(n_real) {
+                if !visible_channels.contains(&i) {
+                    continue;
+                }
                 let Some(frame) = slot.as_ref() else { continue };
                 if frame.new_row.is_none() || frame.spectrum.is_empty() {
                     continue;
@@ -289,10 +318,13 @@ impl App {
         // Min-hold accumulator: mirror of the peak loop with the comparator
         // flipped. Same decay rule so a brief gap in the signal doesn't pin
         // the trace down forever at whatever accidental silence the buffer
-        // captured.
+        // captured. Visibility-gated identically to the peak path (#111).
         if self.min_hold_enabled {
             let now = Instant::now();
             for (i, slot) in frames.iter().enumerate().take(n_real) {
+                if !visible_channels.contains(&i) {
+                    continue;
+                }
                 let Some(frame) = slot.as_ref() else { continue };
                 if frame.new_row.is_none() || frame.spectrum.is_empty() {
                     continue;
@@ -355,14 +387,11 @@ impl App {
             self.waterfall_inited.resize(n_total, false);
         }
 
-        let n_channels = frames.len();
-        let cells = layout::compute(
-            self.config.layout,
-            n_channels,
-            self.config.active_channel,
-            &self.selected,
-            grid_params_snap,
-        );
+        // `cells` and `n_channels` were computed up front for the
+        // visibility-gated preprocessing above (#111); they're still
+        // valid here — `selected` only grows during this redraw, never
+        // shrinks, and the layout depends only on `selected`'s values
+        // at present-known indices. Drop the duplicate call.
         let in_sweep_layout = matches!(self.config.layout, LayoutMode::Sweep);
         if let Some(ss) = self.sweep_store.as_ref() {
             if !self.config.frozen {
