@@ -7,10 +7,14 @@
 // becomes the next one.
 
 struct Params {
-    decay: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    decay:     f32,
+    /// Horizontal scroll, in normalised texture coords. 0 = stationary
+    /// (pure decay). >0 = strip-chart: the destination texel at uv.x reads
+    /// the source at (uv.x + scroll_dx), so old content moves leftward and
+    /// the rightmost band falls off the source domain (returns 0 = fresh).
+    scroll_dx: f32,
+    _pad0:     f32,
+    _pad1:     f32,
 }
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -23,7 +27,6 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    // Triangle strip covering NDC [-1,1]², matching waterfall's pattern.
     let u = f32(vid & 1u);
     let v = f32((vid >> 1u) & 1u);
     var out: VsOut;
@@ -34,8 +37,12 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let src_uv_x = in.uv.x + params.scroll_dx;
+    if (src_uv_x >= 1.0 || src_uv_x < 0.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
     let dims = textureDimensions(src);
-    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    let coord = vec2<i32>(vec2<f32>(src_uv_x, in.uv.y) * vec2<f32>(dims));
     let l = textureLoad(src, coord, 0).r;
     return vec4(l * params.decay, 0.0, 0.0, 1.0);
 }
