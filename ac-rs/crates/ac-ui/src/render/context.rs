@@ -24,8 +24,13 @@ impl RenderContext {
         requested_present_mode: wgpu::PresentMode,
     ) -> anyhow::Result<Self> {
         let size = window.inner_size();
+        // Make GL available alongside the default Vulkan/Metal/DX12 set
+        // so users can `WGPU_BACKEND=gl ac-ui` on stacks where the Vulkan
+        // WSI implementation is slow per-`present()` (notably NVIDIA on
+        // Linux X11; see #109). wgpu's env-var selection picks among
+        // whatever's enabled at instance creation.
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::PRIMARY | wgpu::Backends::GL,
             ..Default::default()
         });
         let surface = instance.create_surface(window.clone())?;
