@@ -231,7 +231,10 @@ impl Args {
                         "spectrum" => ViewMode::Spectrum,
                         "waterfall" => ViewMode::Waterfall,
                         "scope" => ViewMode::Scope,
-                        other => anyhow::bail!("--view: expected spectrum|waterfall|scope, got {other}"),
+                        "spectrum_ember" | "spectrum-ember" => ViewMode::SpectrumEmber,
+                        other => anyhow::bail!(
+                            "--view: expected spectrum|waterfall|scope|spectrum_ember, got {other}"
+                        ),
                     };
                 }
                 "--mode" => {

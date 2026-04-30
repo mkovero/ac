@@ -26,6 +26,7 @@ enum WSlot {
     Cqt,
     Reassigned,
     Scope,
+    SpectrumEmber,
 }
 
 #[derive(Clone)]
@@ -682,7 +683,8 @@ impl App {
             (LayoutMode::Single, ViewMode::Waterfall, "cwt")        => Some(WSlot::Cwt),
             (LayoutMode::Single, ViewMode::Waterfall, "cqt")        => Some(WSlot::Cqt),
             (LayoutMode::Single, ViewMode::Waterfall, "reassigned") => Some(WSlot::Reassigned),
-            (LayoutMode::Single, ViewMode::Scope,      _)            => Some(WSlot::Scope),
+            (LayoutMode::Single, ViewMode::Scope,         _)         => Some(WSlot::Scope),
+            (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
             _ => None,
         }
     }
@@ -853,23 +855,25 @@ impl App {
                 // Non-cycled layouts (Compare / Transfer / Sweep) jump back to
                 // Matrix so the key always advances deterministically.
                 let next = match self.current_w_slot() {
-                    Some(WSlot::Matrix)     => WSlot::Single,
-                    Some(WSlot::Single)     => WSlot::Waterfall,
-                    Some(WSlot::Waterfall)  => WSlot::Cwt,
-                    Some(WSlot::Cwt)        => WSlot::Cqt,
-                    Some(WSlot::Cqt)        => WSlot::Reassigned,
-                    Some(WSlot::Reassigned) => WSlot::Scope,
-                    Some(WSlot::Scope)      => WSlot::Matrix,
-                    None                    => WSlot::Matrix,
+                    Some(WSlot::Matrix)        => WSlot::Single,
+                    Some(WSlot::Single)        => WSlot::Waterfall,
+                    Some(WSlot::Waterfall)     => WSlot::Cwt,
+                    Some(WSlot::Cwt)           => WSlot::Cqt,
+                    Some(WSlot::Cqt)           => WSlot::Reassigned,
+                    Some(WSlot::Reassigned)    => WSlot::Scope,
+                    Some(WSlot::Scope)         => WSlot::SpectrumEmber,
+                    Some(WSlot::SpectrumEmber) => WSlot::Matrix,
+                    None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
-                    WSlot::Matrix     => (LayoutMode::Grid,   ViewMode::Spectrum,  "fft",        "view: matrix"),
-                    WSlot::Single     => (LayoutMode::Single, ViewMode::Spectrum,  "fft",        "view: single"),
-                    WSlot::Waterfall  => (LayoutMode::Single, ViewMode::Waterfall, "fft",        "view: waterfall (fft)"),
-                    WSlot::Cwt        => (LayoutMode::Single, ViewMode::Waterfall, "cwt",        "view: waterfall (cwt)"),
-                    WSlot::Cqt        => (LayoutMode::Single, ViewMode::Waterfall, "cqt",        "view: waterfall (cqt)"),
-                    WSlot::Reassigned => (LayoutMode::Single, ViewMode::Waterfall, "reassigned", "view: waterfall (reassigned)"),
-                    WSlot::Scope      => (LayoutMode::Single, ViewMode::Scope,     "fft",        "view: scope (ember)"),
+                    WSlot::Matrix        => (LayoutMode::Grid,   ViewMode::Spectrum,      "fft",        "view: matrix"),
+                    WSlot::Single        => (LayoutMode::Single, ViewMode::Spectrum,      "fft",        "view: single"),
+                    WSlot::Waterfall     => (LayoutMode::Single, ViewMode::Waterfall,     "fft",        "view: waterfall (fft)"),
+                    WSlot::Cwt           => (LayoutMode::Single, ViewMode::Waterfall,     "cwt",        "view: waterfall (cwt)"),
+                    WSlot::Cqt           => (LayoutMode::Single, ViewMode::Waterfall,     "cqt",        "view: waterfall (cqt)"),
+                    WSlot::Reassigned    => (LayoutMode::Single, ViewMode::Waterfall,     "reassigned", "view: waterfall (reassigned)"),
+                    WSlot::Scope         => (LayoutMode::Single, ViewMode::Scope,         "fft",        "view: scope (ember)"),
+                    WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

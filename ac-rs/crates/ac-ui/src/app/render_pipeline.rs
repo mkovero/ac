@@ -29,6 +29,13 @@ use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 
 use super::TimeIntegrationMode;
 
+const EMBER_SCOPE_SAMPLE_RATE: f32 = 48_000.0;
+const EMBER_SCOPE_SINE_HZ:     f32 = 1_000.0;
+/// Strip-chart window: ~100 cycles of 1 kHz fit at 10 px / cycle on a
+/// 1024-px substrate, no aliasing. Scroll speed at 60 fps ≈ 17 % of width
+/// per frame — visible left-flying motion.
+const EMBER_SCOPE_WINDOW_S:    f32 = 0.1;
+
 /// Build the overlay payload describing the active time-integration
 /// state. Returns `None` when the mode is off so the overlay renders
 /// nothing; otherwise carries the mode label and its τ (for fast/slow)
@@ -516,7 +523,7 @@ impl App {
             match view_mode {
                 ViewMode::Spectrum => spectrum_uploads.reserve(cells.len()),
                 ViewMode::Waterfall => waterfall_uploads.reserve(cells.len()),
-                ViewMode::Scope => {}
+                ViewMode::Scope | ViewMode::SpectrumEmber => {}
             }
         }
 
@@ -683,11 +690,11 @@ impl App {
                         new_row: frame.new_row.as_deref().map(|v| v.as_slice()),
                     });
                 }
-                ViewMode::Scope => {
-                    // Phase 0a: ember substrate runs from a synthetic source
-                    // inside the renderer, not from any DisplayFrame. Cell
-                    // iteration left intact so Single layout still computes
-                    // the viewport rect — but no per-channel data is staged.
+                ViewMode::Scope | ViewMode::SpectrumEmber => {
+                    // Ember-substrate views consume polylines built later in
+                    // this method (synthetic sine for Scope, the active
+                    // channel's spectrum frame for SpectrumEmber). The cell
+                    // iteration is kept so Single-layout viewport math runs.
                 }
             }
         }
@@ -699,7 +706,7 @@ impl App {
             ViewMode::Waterfall => {
                 waterfall.upload(&ctx.device, &ctx.queue, n_channels, &waterfall_uploads);
             }
-            ViewMode::Scope => {}
+            ViewMode::Scope | ViewMode::SpectrumEmber => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -1091,8 +1098,58 @@ impl App {
         // Ember substrate: decay + deposit happen as their own off-screen
         // render passes ahead of the surface clear, so the display pass
         // inside the spectrum pass can sample the freshly written buffer.
-        if matches!(view_mode, ViewMode::Scope) {
-            ember.advance(&ctx.device, &ctx.queue, &mut encoder, [0.0, 0.0, 1.0, 1.0]);
+        // The renderer is substrate-only — caller supplies the polyline
+        // and scroll velocity per view kind.
+        if matches!(view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
+            let now = Instant::now();
+            let dt = self
+                .ember_last_tick
+                .map(|t| now.saturating_duration_since(t).as_secs_f32())
+                .unwrap_or(1.0 / 60.0)
+                .clamp(0.0, 0.25);
+            self.ember_last_tick = Some(now);
+
+            match view_mode {
+                ViewMode::Scope => {
+                    let (polyline, scroll_dx) = build_scope_polyline(
+                        &mut self.ember_sine_phase,
+                        EMBER_SCOPE_SAMPLE_RATE,
+                        EMBER_SCOPE_SINE_HZ,
+                        EMBER_SCOPE_WINDOW_S,
+                        dt,
+                    );
+                    ember.set_tau_p(0.6);
+                    ember.set_intensity(0.002);
+                    ember.set_tone(0.6, 0.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, scroll_dx, dt,
+                    );
+                }
+                ViewMode::SpectrumEmber => {
+                    let active = self.config.active_channel;
+                    let view = self.cell_views.get(active).copied().unwrap_or_default();
+                    let polyline = self
+                        .last_frames
+                        .get(active)
+                        .and_then(|f| f.as_ref())
+                        .filter(|f| !f.spectrum.is_empty())
+                        .map(|f| build_spectrum_polyline(f, &view))
+                        .unwrap_or_default();
+                    // Long persistence so successive measurements fade-blend
+                    // — the "free diff workflow" of unified.md §5.
+                    ember.set_tau_p(5.0);
+                    ember.set_intensity(0.06);
+                    ember.set_tone(0.6, 1.2);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
+                _ => {}
+            }
         }
 
         {
@@ -1118,7 +1175,7 @@ impl App {
             match view_mode {
                 ViewMode::Spectrum => spectrum.draw(&mut pass),
                 ViewMode::Waterfall => waterfall.draw(&mut pass),
-                ViewMode::Scope => ember.draw(&mut pass),
+                ViewMode::Scope | ViewMode::SpectrumEmber => ember.draw(&mut pass),
             }
         }
 
@@ -1468,6 +1525,66 @@ fn draw_peak_overlay(
 // re-export here so existing call sites in this file don't have to fully
 // qualify the path.
 use crate::ui::fmt::format_freq_compact;
+
+/// Synthetic 1 kHz sine sampled at 48 kHz, mapped to the ember substrate as
+/// a strip-chart polyline: new samples occupy the rightmost band of width
+/// `dt / window_s`, oldest on the left of the band, newest at x = 1.0. The
+/// returned `scroll_dx` matches that band width and is what the caller
+/// passes to `EmberRenderer::advance` to keep the pre-existing substrate
+/// shifted in lockstep.
+fn build_scope_polyline(
+    sine_phase:   &mut f32,
+    sample_rate:  f32,
+    sine_freq_hz: f32,
+    window_s:     f32,
+    dt:           f32,
+) -> (Vec<[f32; 2]>, f32) {
+    let scroll_dx = (dt / window_s.max(1e-3)).clamp(0.0, 1.0);
+    let n = ((dt * sample_rate) as usize).min(8000);
+    let mut pts = Vec::with_capacity(n);
+    let two_pi = std::f32::consts::TAU;
+    let phase_step = two_pi * sine_freq_hz / sample_rate;
+    let denom = (n.saturating_sub(1)).max(1) as f32;
+    for i in 0..n {
+        let s = sine_phase.sin();
+        *sine_phase = (*sine_phase + phase_step) % two_pi;
+        let frac = i as f32 / denom;
+        let x = (1.0 - scroll_dx) + frac * scroll_dx;
+        let y = 0.5 + 0.45 * s;
+        pts.push([x, y]);
+    }
+    (pts, scroll_dx)
+}
+
+/// `SpectrumFrame` → ember polyline. Logarithmic frequency axis matching
+/// the cell's view window; dB axis linear in the cell's `db_min..db_max`.
+/// Produces one vertex per visible bin (those whose freq falls inside the
+/// window); fewer than 2 → empty polyline → ember just decays this frame.
+fn build_spectrum_polyline(
+    frame: &crate::data::types::DisplayFrame,
+    view: &CellView,
+) -> Vec<[f32; 2]> {
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
+    let span_f = (log_max - log_min).max(1e-6);
+    let span_db = (view.db_max - view.db_min).max(1e-3);
+    let n = frame.freqs.len().min(frame.spectrum.len());
+    let mut pts = Vec::with_capacity(n);
+    for i in 0..n {
+        let f = frame.freqs[i];
+        if !(f.is_finite() && f >= view.freq_min && f <= view.freq_max) {
+            continue;
+        }
+        let mag = frame.spectrum[i];
+        if !mag.is_finite() {
+            continue;
+        }
+        let x = ((f.max(1.0).log10() - log_min) / span_f).clamp(0.0, 1.0);
+        let y = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
+        pts.push([x, y]);
+    }
+    pts
+}
 
 #[cfg(test)]
 mod tests {

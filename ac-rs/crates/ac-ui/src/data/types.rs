@@ -269,10 +269,13 @@ pub enum LayoutMode {
 pub enum ViewMode {
     Spectrum,
     Waterfall,
-    /// Phosphor-persistence ember substrate. Phase 0a drives a synthetic
-    /// 1 kHz sine through a single scope view to validate the deposition +
-    /// decay + tone-mapped display pipeline. See `unified.md`.
+    /// Ember substrate driven by a synthetic 1 kHz sine on a strip-chart
+    /// scope. Phase 0a validation. See `unified.md`.
     Scope,
+    /// Ember substrate driven by the active channel's `SpectrumFrame`s.
+    /// Static (no scroll) with long persistence so successive measurements
+    /// fade-blend, giving the free diff workflow promised in unified.md §5.
+    SpectrumEmber,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

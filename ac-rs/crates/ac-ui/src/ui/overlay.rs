@@ -295,7 +295,14 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 time_tag,
                 mic_tag,
             ),
-            ViewMode::Scope => "scope (ember 0a) │ synthetic 1 kHz".to_string(),
+            ViewMode::Scope => "scope (ember) │ synthetic 1 kHz".to_string(),
+            ViewMode::SpectrumEmber => format!(
+                "spectrum (ember) │ {}..{}{}{}",
+                format_hz(view.freq_min).trim(),
+                format_hz(view.freq_max).trim(),
+                smooth_tag,
+                mic_tag,
+            ),
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),
@@ -326,7 +333,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
         if let Some(badge) = input.tier_badge.as_deref() {
-            if !matches!(input.config.view_mode, ViewMode::Scope) {
+            if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
                 painter.text(
                     Pos2::new(
                         screen.right() - 8.0,
@@ -451,7 +458,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // any input (music, speech, noise, room response). Falls back
         // gracefully when the frame arrived with an empty spectrum.
         // Suppressed in Scope mode where the substrate owns the cell.
-        if !matches!(input.config.view_mode, ViewMode::Scope) {
+        if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
             if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
                 let bottom_left = super::fmt::spectrum_readout(
                     &stats,

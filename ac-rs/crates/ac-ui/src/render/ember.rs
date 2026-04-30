@@ -17,8 +17,6 @@
 //! on the render thread. Real audio sources land in Phase 0b once the wire
 //! protocol question (unified.md OQ7) is decided.
 
-use std::time::Instant;
-
 use bytemuck::{Pod, Zeroable};
 
 const TEX_W: u32 = 1024;
@@ -87,15 +85,6 @@ pub struct EmberRenderer {
     gain:        f32,
     palette_row: u32,
 
-    sample_rate:  f32,
-    /// Strip-chart window in seconds: each frame, the substrate texture
-    /// scrolls left by `dt / window_s` of its width, and new samples land
-    /// in the rightmost band of width `dt / window_s`. A larger value
-    /// gives a longer trail before the trace falls off the left edge.
-    window_s:     f32,
-    sine_freq_hz: f32,
-    sine_phase:   f32,
-    last_tick:    Option<Instant>,
 
     point_scratch: Vec<[f32; 2]>,
 }
@@ -388,31 +377,24 @@ impl EmberRenderer {
             front_is_latest: false,
             cleared: false,
 
-            // Tuned for "ember on pure black" with the strip-chart at
-            // window_s=0.1: each 1 kHz sample lands in a ~17 px right-edge
-            // band per frame, and LineList pairs paint ~1600 px with each
-            // line covering many y-pixels. With the previous intensity of
-            // 0.12 every band saturated within milliseconds — drop ~60× so
-            // pixels on the trace ramp up to L≈3 (saturating to LUT max
-            // through gain×gamma) while everything else stays at L=0.
+            // Tunable per-view via setters; defaults here suit a strip-chart
+            // scope feeding ~800 line pairs/frame into a thin band. For a
+            // spectrum view (sparse static polyline, no scroll) bump tau_p
+            // up via `set_tau_p` so successive measurements fade-blend.
             tau_p:       0.6,
             intensity:   0.002,
             gamma:       0.6,
             gain:        0.5,
             palette_row: 0,
-
-            sample_rate:  48_000.0,
-            // 0.1 s window: ~100 cycles of 1 kHz fit on screen → 10 px/cycle,
-            // visible without aliasing. Scroll speed 17 % of width per
-            // 60 fps frame — a clear left-flying motion without making the
-            // band so wide that deposits drown the substrate.
-            window_s:     0.1,
-            sine_freq_hz: 1_000.0,
-            sine_phase:   0.0,
-            last_tick:    None,
-
             point_scratch: Vec::with_capacity(POINT_CAPACITY),
         }
+    }
+
+    pub fn set_tau_p(&mut self, tau_p: f32) { self.tau_p = tau_p.max(1e-3); }
+    pub fn set_intensity(&mut self, v: f32) { self.intensity = v.max(0.0); }
+    pub fn set_tone(&mut self, gamma: f32, gain: f32) {
+        self.gamma = gamma.max(0.05);
+        self.gain  = gain.max(0.0);
     }
 
     pub fn set_palette(&mut self, idx: u32) {
@@ -422,23 +404,25 @@ impl EmberRenderer {
     pub fn active_palette(&self) -> u32 { self.palette_row }
 
     /// Run decay + deposit. Must be called outside any surface render pass.
+    ///
     /// `viewport` selects where `draw()` will land on the surface (in
-    /// surface-normalised [0,1] coords; (x,y) is the bottom-left and (w,h)
-    /// the size).
+    /// surface-normalised [0,1] coords; `(x,y)` = bottom-left, `(w,h)` = size).
+    /// `polyline` is a sequence of `(x,y)` vertices in [0,1]² substrate-local
+    /// coords; consecutive vertices are connected with a 1-pixel line.
+    /// `scroll_dx_norm` ∈ [0,1] shifts the existing substrate leftward by
+    /// that fraction of its width before depositing — pass 0.0 for a static
+    /// view (e.g. spectrum), `dt / window_s` for a strip-chart scope.
     pub fn advance(
         &mut self,
         device: &wgpu::Device,
         queue:  &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         viewport: [f32; 4],
+        polyline: &[[f32; 2]],
+        scroll_dx_norm: f32,
+        dt: f32,
     ) {
-        let now = Instant::now();
-        let dt = self
-            .last_tick
-            .map(|t| now.saturating_duration_since(t).as_secs_f32())
-            .unwrap_or(1.0 / 60.0)
-            .min(0.25);
-        self.last_tick = Some(now);
+        let dt = dt.clamp(0.0, 0.25);
 
         if !self.cleared {
             clear_substrate(encoder, &self.front_view);
@@ -446,8 +430,8 @@ impl EmberRenderer {
             self.cleared = true;
         }
 
-        let decay = (-dt / self.tau_p.max(1e-3)).exp();
-        let scroll_dx = (dt / self.window_s.max(1e-3)).clamp(0.0, 1.0);
+        let decay = (-dt / self.tau_p).exp();
+        let scroll_dx = scroll_dx_norm.clamp(0.0, 1.0);
         queue.write_buffer(
             &self.decay_uniform,
             0,
@@ -470,36 +454,24 @@ impl EmberRenderer {
             }),
         );
 
-        // Pick src/dst for this frame's ping-pong step.
         let (src_view_for_decay_bg, dst_view) = if self.front_is_latest {
             (&self.decay_bg_from_front, &self.back_view)
         } else {
             (&self.decay_bg_from_back, &self.front_view)
         };
 
-        // Strip-chart deposition. New samples land in the rightmost band of
-        // width `scroll_dx`, mapped linearly so the newest sample sits at
-        // x = 1.0 and the oldest sample of this frame sits at the left edge
-        // of the band. Older content has already been scrolled left by the
-        // decay pass.
+        // Convert polyline → LineList pairs (each pair is one segment).
+        // Capacity-clamped: capping at POINT_CAPACITY/2 input vertices means
+        // at most POINT_CAPACITY GPU vertices — ample for the audio rates
+        // we care about.
         self.point_scratch.clear();
-        let n_samples = ((dt * self.sample_rate) as usize).min(POINT_CAPACITY / 2);
-        let two_pi = std::f32::consts::TAU;
-        let phase_step = two_pi * self.sine_freq_hz / self.sample_rate;
-        let denom = (n_samples.saturating_sub(1)).max(1) as f32;
-        let mut prev: Option<[f32; 2]> = None;
-        for i in 0..n_samples {
-            let s = self.sine_phase.sin();
-            self.sine_phase = (self.sine_phase + phase_step) % two_pi;
-            let frac = i as f32 / denom;
-            let x = (1.0 - scroll_dx) + frac * scroll_dx;
-            let y = 0.5 + 0.45 * s;
-            let cur = [x, y];
-            if let Some(p) = prev {
-                self.point_scratch.push(p);
-                self.point_scratch.push(cur);
+        let max_in = POINT_CAPACITY / 2 + 1;
+        let used = polyline.len().min(max_in);
+        if used >= 2 {
+            for w in polyline[..used].windows(2) {
+                self.point_scratch.push(w[0]);
+                self.point_scratch.push(w[1]);
             }
-            prev = Some(cur);
         }
         if !self.point_scratch.is_empty() {
             queue.write_buffer(
@@ -553,7 +525,7 @@ impl EmberRenderer {
         }
 
         self.front_is_latest = !self.front_is_latest;
-        let _ = device;
+        let _ = device;  // not used yet — kept for symmetry with set_palette / future on-the-fly resize
     }
 
     /// Render the latest substrate to the surface.

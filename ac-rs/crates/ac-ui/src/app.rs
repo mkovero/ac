@@ -261,6 +261,16 @@ pub struct App {
     spectrum: Option<SpectrumRenderer>,
     waterfall: Option<WaterfallRenderer>,
     pub(super) ember: Option<EmberRenderer>,
+    /// Phase 0a synthetic-sine generator state for `ViewMode::Scope`. Phase
+    /// continuity matters: regenerating sine_phase from scratch each frame
+    /// would cause audible-rate phase jumps between frames, visible as
+    /// stuttering on the strip-chart.
+    pub(super) ember_sine_phase: f32,
+    /// Timestamp of the previous ember frame, used to derive `dt` for both
+    /// the synthetic generator (samples per frame) and the substrate decay.
+    /// Separate from `last_render` so the value is fresh at the moment the
+    /// substrate runs (last_render is updated at the *end* of redraw).
+    pub(super) ember_last_tick: Option<Instant>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -395,7 +405,7 @@ impl App {
         let continuous_interval = init.continuous_interval;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
-        } else if matches!(init.initial_view, ViewMode::Scope) {
+        } else if matches!(init.initial_view, ViewMode::Scope | ViewMode::SpectrumEmber) {
             LayoutMode::Single
         } else {
             LayoutMode::Grid
@@ -449,6 +459,8 @@ impl App {
             spectrum: None,
             waterfall: None,
             ember: None,
+            ember_sine_phase: 0.0,
+            ember_last_tick: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,
