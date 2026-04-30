@@ -1,6 +1,32 @@
 use crate::client::AcClient;
 use crate::parse::CommandKind;
 
+/// Resolve the channel list, defaulting to the configured `input_channel`,
+/// and print a one-liner so it's obvious which channel(s) the UI will
+/// monitor (was a silent default before; users hit it via "why is ac-ui
+/// showing a different view than ac monitor?" — they were on different
+/// implicit defaults).
+fn resolve_channels_or_default(
+    explicit: Option<Vec<u32>>,
+    cfg: &ac_core::config::Config,
+    cmd_label: &str,
+) -> Vec<u32> {
+    match explicit {
+        Some(chs) => {
+            let pretty = chs.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            eprintln!("  {cmd_label}: channels {pretty}  (explicit)");
+            chs
+        }
+        None => {
+            let ch = cfg.input_channel;
+            eprintln!(
+                "  {cmd_label}: channel {ch}  (configured input — `ac setup input <N>` to change, or pass an explicit channel spec)"
+            );
+            vec![ch]
+        }
+    }
+}
+
 pub fn run(
     cmd: &CommandKind,
     cfg: &ac_core::config::Config,
@@ -9,7 +35,7 @@ pub fn run(
         CommandKind::Monitor { channels, .. } => channels.clone(),
         _ => unreachable!(),
     };
-    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
+    let channels = resolve_channels_or_default(channels, cfg, "ac monitor");
 
     super::plot::launch_ui("spectrum", cfg, Some(&channels));
 }
@@ -27,7 +53,7 @@ pub fn run_cwt(
         CommandKind::MonitorCwt { channels, .. } => channels.clone(),
         _ => unreachable!(),
     };
-    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
+    let channels = resolve_channels_or_default(channels, cfg, "ac monitor cwt");
 
     let ack = client.send_cmd(
         &serde_json::json!({"cmd": "set_analysis_mode", "mode": "cwt"}),
@@ -49,7 +75,7 @@ pub fn run_cqt(
         CommandKind::MonitorCqt { channels, .. } => channels.clone(),
         _ => unreachable!(),
     };
-    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
+    let channels = resolve_channels_or_default(channels, cfg, "ac monitor cqt");
 
     let ack = client.send_cmd(
         &serde_json::json!({"cmd": "set_analysis_mode", "mode": "cqt"}),
@@ -71,7 +97,7 @@ pub fn run_reassigned(
         CommandKind::MonitorReassigned { channels, .. } => channels.clone(),
         _ => unreachable!(),
     };
-    let channels = channels.unwrap_or_else(|| vec![cfg.input_channel]);
+    let channels = resolve_channels_or_default(channels, cfg, "ac monitor reassigned");
 
     let ack = client.send_cmd(
         &serde_json::json!({"cmd": "set_analysis_mode", "mode": "reassigned"}),

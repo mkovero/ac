@@ -31,6 +31,15 @@ pub struct SpectrumRenderer {
     capacity_channels: usize,
     active_channels: u32,
     max_bins: u32,
+    /// Reused per-frame staging for the packed spectrum upload. Pre-#109
+    /// we allocated `Vec::with_capacity(n_channels × max_bins)` on every
+    /// `upload()` call — at 8 ch × 4096 bins × 60 fps that's ~7.7 MB/s
+    /// of allocation thrash plus the same in NVIDIA staging-buffer churn
+    /// from `queue.write_buffer`. Hold the buffer across frames; only
+    /// the inner `resize` triggers heap work, and only when the channel
+    /// count or bin count grows.
+    spectrum_packed: Vec<f32>,
+    metas: Vec<ChannelMeta>,
 }
 
 impl SpectrumRenderer {
@@ -117,6 +126,8 @@ impl SpectrumRenderer {
             capacity_channels,
             active_channels: 0,
             max_bins: 0,
+            spectrum_packed: Vec::new(),
+            metas: Vec::new(),
         }
     }
 
@@ -156,26 +167,35 @@ impl SpectrumRenderer {
             );
         }
 
-        let mut spectrum_packed = vec![0.0_f32; total_floats];
-        let mut metas: Vec<ChannelMeta> = Vec::with_capacity(uploads.len());
+        // Reuse the persistent scratch buffers; `resize` is a no-op once
+        // they reach steady-state capacity. Avoids ~7.7 MB/s of heap
+        // alloc + free on a typical 8 ch × 4096 bin × 60 fps workload.
+        self.spectrum_packed.clear();
+        self.spectrum_packed.resize(total_floats, 0.0_f32);
+        self.metas.clear();
+        self.metas.reserve(uploads.len());
         for (idx, u) in uploads.iter().enumerate() {
             let off = idx * max_bins;
             let n = u.spectrum.len();
-            spectrum_packed[off..off + n].copy_from_slice(&u.spectrum);
+            self.spectrum_packed[off..off + n].copy_from_slice(&u.spectrum);
             if n < max_bins {
                 let last_s = *u.spectrum.last().unwrap_or(&-140.0);
                 for j in n..max_bins {
-                    spectrum_packed[off + j] = last_s;
+                    self.spectrum_packed[off + j] = last_s;
                 }
             }
             let mut meta = u.meta;
             meta.offset = off as u32;
             meta.n_bins = n as u32;
-            metas.push(meta);
+            self.metas.push(meta);
         }
 
-        queue.write_buffer(&self.spectrum_buf, 0, bytemuck::cast_slice(&spectrum_packed));
-        queue.write_buffer(&self.channel_buf, 0, bytemuck::cast_slice(&metas));
+        queue.write_buffer(
+            &self.spectrum_buf,
+            0,
+            bytemuck::cast_slice(&self.spectrum_packed),
+        );
+        queue.write_buffer(&self.channel_buf, 0, bytemuck::cast_slice(&self.metas));
 
         self.active_channels = uploads.len() as u32;
         self.max_bins = max_bins as u32;

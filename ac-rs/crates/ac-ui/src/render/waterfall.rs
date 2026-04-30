@@ -92,6 +92,13 @@ pub struct WaterfallRenderer {
     write_row:         Vec<u32>,
     active_cells:      u32,
     active_palette:    u32,
+    /// Persistent staging for `queue.write_texture` row-padding. Pre-#109
+    /// the per-row branch where `row.len() != history_bins` did
+    /// `vec![-200.0; history_bins]` on every upload — at 8 ch × 4096 bins
+    /// × 30 fps that's a few MB/s of allocation thrash. Held across
+    /// frames so only the inner `resize` does any heap work.
+    row_padded: Vec<f32>,
+    metas:      Vec<WaterfallCellMeta>,
 }
 
 impl WaterfallRenderer {
@@ -215,6 +222,8 @@ impl WaterfallRenderer {
             write_row: vec![0; history_layers as usize],
             active_cells: 0,
             active_palette: 0,
+            row_padded: Vec::new(),
+            metas: Vec::new(),
         }
     }
 
@@ -275,18 +284,24 @@ impl WaterfallRenderer {
             );
         }
 
-        let mut metas: Vec<WaterfallCellMeta> = Vec::with_capacity(uploads.len());
+        // Reuse the persistent metas / row-padding scratch buffers; pre-#109
+        // both were `Vec::with_capacity(...)` / `vec![-200.0; bins]` per
+        // upload, allocating low-MB/s on a typical multi-channel workload.
+        self.metas.clear();
+        self.metas.reserve(uploads.len());
         for u in uploads {
             if let Some(row) = u.new_row {
                 if !row.is_empty() && u.channel < self.write_row.len() {
                     let n = row.len().min(self.history_bins as usize);
-                    let mut padded;
                     let row_slice: &[f32] = if (n as u32) == self.history_bins {
                         &row[..n]
                     } else {
-                        padded = vec![-200.0_f32; self.history_bins as usize];
-                        padded[..n].copy_from_slice(&row[..n]);
-                        &padded[..]
+                        // Resize-to-fit: `resize` extends with the fill
+                        // value the first time, no-ops once steady-state.
+                        self.row_padded.clear();
+                        self.row_padded.resize(self.history_bins as usize, -200.0_f32);
+                        self.row_padded[..n].copy_from_slice(&row[..n]);
+                        &self.row_padded[..]
                     };
                     let row_idx = self.write_row[u.channel];
                     queue.write_texture(
@@ -322,7 +337,7 @@ impl WaterfallRenderer {
                 0
             };
 
-            metas.push(WaterfallCellMeta {
+            self.metas.push(WaterfallCellMeta {
                 viewport: u.viewport,
                 db_min: u.db_min,
                 db_max: u.db_max,
@@ -345,7 +360,7 @@ impl WaterfallRenderer {
             });
         }
 
-        queue.write_buffer(&self.cells_buf, 0, bytemuck::cast_slice(&metas));
+        queue.write_buffer(&self.cells_buf, 0, bytemuck::cast_slice(&self.metas));
         self.active_cells = uploads.len() as u32;
     }
 

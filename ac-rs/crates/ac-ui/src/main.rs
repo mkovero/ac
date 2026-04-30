@@ -28,14 +28,21 @@ fn main() -> anyhow::Result<()> {
     } else if args.synthetic {
         (None, 2)
     } else {
-        match probe_daemon_channels(&args.ctrl) {
-            Some(n) if n >= 1 => {
-                log::info!("discovered {n} capture channels from daemon");
-                (None, n)
+        // Default to the configured input channel (mirrors what `ac monitor`
+        // sends when invoked without an explicit channel spec). Without
+        // this `ac-ui` standalone would probe the daemon and light up
+        // every capture port — turning a casual launch into 8-channel ×
+        // 4096-bin × 60 fps render work, which is gratuitous on stacks
+        // where each present is expensive (#109).
+        match ac_core::config::load(None) {
+            Ok(cfg) => {
+                let ch = cfg.input_channel;
+                log::info!("defaulting to configured input_channel={ch} (override with --channels)");
+                (Some(vec![ch]), 1)
             }
-            _ => {
-                log::warn!("daemon probe failed; defaulting to 2 channel slots");
-                (None, 2)
+            Err(e) => {
+                log::warn!("could not load config ({e}); defaulting to channel 0");
+                (Some(vec![0]), 1)
             }
         }
     };
