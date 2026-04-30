@@ -326,17 +326,19 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
         if let Some(badge) = input.tier_badge.as_deref() {
-            painter.text(
-                Pos2::new(
-                    screen.right() - 8.0,
-                    screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
-                ),
-                Align2::RIGHT_TOP,
-                badge,
-                FontId::monospace(theme::STATUS_PX),
-                text_color,
-            );
-            stack_row += 1.0;
+            if !matches!(input.config.view_mode, ViewMode::Scope) {
+                painter.text(
+                    Pos2::new(
+                        screen.right() - 8.0,
+                        screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
+                    ),
+                    Align2::RIGHT_TOP,
+                    badge,
+                    FontId::monospace(theme::STATUS_PX),
+                    text_color,
+                );
+                stack_row += 1.0;
+            }
         }
 
         // Loudness strip — BS.1770-5 / R128 meter for the active channel.
@@ -448,20 +450,23 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // Broadband stats derived from the displayed spectrum — honest for
         // any input (music, speech, noise, room response). Falls back
         // gracefully when the frame arrived with an empty spectrum.
-        if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
-            let bottom_left = super::fmt::spectrum_readout(
-                &stats,
-                frame.meta.in_dbu,
-                frame.meta.spl_offset_db,
-                frame.meta.mic_correction.as_deref(),
-            );
-            painter.text(
-                Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
-                Align2::LEFT_BOTTOM,
-                bottom_left,
-                FontId::monospace(theme::READOUT_PX),
-                text_color,
-            );
+        // Suppressed in Scope mode where the substrate owns the cell.
+        if !matches!(input.config.view_mode, ViewMode::Scope) {
+            if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
+                let bottom_left = super::fmt::spectrum_readout(
+                    &stats,
+                    frame.meta.in_dbu,
+                    frame.meta.spl_offset_db,
+                    frame.meta.mic_correction.as_deref(),
+                );
+                painter.text(
+                    Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                    Align2::LEFT_BOTTOM,
+                    bottom_left,
+                    FontId::monospace(theme::READOUT_PX),
+                    text_color,
+                );
+            }
         }
     }
 

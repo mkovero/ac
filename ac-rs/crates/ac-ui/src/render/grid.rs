@@ -23,6 +23,12 @@ pub fn draw_grid(
     time_axis: Option<WaterfallTimeAxis>,
     spl_offset_db: Option<f32>,
 ) {
+    // Scope mode owns its full cell — no spectrum-style freq/dB grid or
+    // axis labels. The substrate aesthetic is "ember on pure black";
+    // overlay clutter breaks it.
+    if matches!(view_mode, ViewMode::Scope) {
+        return;
+    }
     let stroke = Stroke::new(
         1.0,
         Color32::from_rgba_unmultiplied(255, 140, 80, (0.05 * 255.0) as u8),

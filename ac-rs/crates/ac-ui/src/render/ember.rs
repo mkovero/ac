@@ -388,19 +388,25 @@ impl EmberRenderer {
             front_is_latest: false,
             cleared: false,
 
-            // Tuned for "ember on pure black": short-ish persistence so the
-            // trace feels alive, gain × gamma curve such that a sustained
-            // 1 kHz sine saturates the LUT to white-hot at peaks while
-            // off-trace pixels stay at L=0 (black after the sqrt(t) floor
-            // applied in the display shader).
-            tau_p:       0.8,
-            intensity:   0.12,
+            // Tuned for "ember on pure black" with the strip-chart at
+            // window_s=0.1: each 1 kHz sample lands in a ~17 px right-edge
+            // band per frame, and LineList pairs paint ~1600 px with each
+            // line covering many y-pixels. With the previous intensity of
+            // 0.12 every band saturated within milliseconds — drop ~60× so
+            // pixels on the trace ramp up to L≈3 (saturating to LUT max
+            // through gain×gamma) while everything else stays at L=0.
+            tau_p:       0.6,
+            intensity:   0.002,
             gamma:       0.6,
-            gain:        0.4,
+            gain:        0.5,
             palette_row: 0,
 
             sample_rate:  48_000.0,
-            window_s:     1.5,
+            // 0.1 s window: ~100 cycles of 1 kHz fit on screen → 10 px/cycle,
+            // visible without aliasing. Scroll speed 17 % of width per
+            // 60 fps frame — a clear left-flying motion without making the
+            // band so wide that deposits drown the substrate.
+            window_s:     0.1,
             sine_freq_hz: 1_000.0,
             sine_phase:   0.0,
             last_tick:    None,
