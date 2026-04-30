@@ -588,17 +588,15 @@ impl App {
             .unwrap_or(0);
         self.last_seen_frame_ns = current_ns;
 
-        // Skip-when-unchanged: the cheapest way to make `--max-fps 60`
-        // not pin a CPU on stacks where each `present()` costs a full
-        // vsync interval. Frames are dropped when there's nothing
-        // visibly new since the last paint — `--max-fps` becomes an
-        // upper bound rather than a forced target.
+        // Used by the non-continuous (input-only) path below to decide
+        // whether a fresh frame justifies a one-shot RedrawIdle. In
+        // continuous mode, paint timing is purely gap-paced — content
+        // freshness doesn't gate paints any more (see "content-blind"
+        // comment below).
         let new_data = current_ns != self.last_painted_frame_ns;
 
         // Continuous-repaint triggers — anything that visibly animates
-        // independently of input wakes. With skip-when-unchanged, these
-        // also gate paints: in continuous mode we only paint when at
-        // least one of `new_data`, animating, or input changed.
+        // independently of input wakes.
         let data_recent = self
             .last_data_arrival
             .is_some_and(|t| now.saturating_duration_since(t) < DATA_LIVELINESS_WINDOW);
@@ -611,33 +609,30 @@ impl App {
             || cursor_pinned;
 
         if continuous {
-            // Min-gap pacing: paint as soon as new content is available
-            // (new data, animation, or input event), provided we haven't
-            // painted within the last `continuous_interval`. Replaces
-            // earlier fixed-deadline pacing which had a phase race —
-            // daemon ticks aligned with UI deadlines meant a microsecond
-            // of scheduling jitter was enough to read stale
-            // `last_frame_ns` and drop the paint, halving effective fps.
+            // Min-gap pacing, content-blind: paint at every gap-eligible
+            // wake whether or not anything has changed since the last
+            // paint. Earlier we tried to skip "redundant" paints (frames
+            // with no new content), but on fixed-refresh Wayland +
+            // NVIDIA Vulkan/GL each skipped present is a missed vsync
+            // and reads as visible judder — the compositor keeps the
+            // previous frame on screen but the eye still picks up the
+            // irregular cadence as stutter. Cost of presenting an
+            // identical frame is small relative to the perceived loss
+            // of smoothness, so accept it. Idle (no data, no animation)
+            // still drops out of `continuous` and pays nothing.
             let rate_ok = self
                 .last_continuous_paint_at
                 .map_or(true, |t| now.saturating_duration_since(t) >= self.continuous_interval);
-            let animating = self.notification.is_some()
-                || self.benchmark_secs.is_some()
-                || hold_active
-                || cursor_pinned;
-            let want_paint = new_data || animating || self.needs_redraw;
-            if rate_ok && want_paint {
+            if rate_ok {
                 self.last_continuous_paint_at = Some(now);
                 self.last_painted_frame_ns = current_ns;
                 self.needs_redraw = false;
                 return LoopDirective::RedrawContinuous;
             }
-            // Either rate-limited (we just painted; wait for the gap to
-            // elapse) or no visible change yet (the wake was just the
-            // producer's `send_event` for a frame matching what we
-            // already rendered). `about_to_wait` will re-arm
-            // `WaitUntil(next_eligible)` so we wake at the earliest
-            // paint-eligible instant if no event fires sooner.
+            // Rate-limited (we just painted within `continuous_interval`).
+            // `about_to_wait` re-arms `WaitUntil(next_eligible)` so the
+            // very next gap-tick fires regardless of whether a producer
+            // event arrives in that window — what gives smooth motion.
             return LoopDirective::Idle;
         }
 
@@ -1064,39 +1059,36 @@ mod loop_tests {
         );
     }
 
-    /// Min-gap pacing (replaces fixed-deadline pacing): a wake that
-    /// brings new content arriving exactly *at* the gap boundary must
-    /// produce a paint, not skip it. Pre-fix this was deadline-based
-    /// and had a phase race — daemon ticks aligned with UI deadlines
-    /// could read stale `last_frame_ns` (the receiver thread's
-    /// atomic store hadn't propagated yet) and skip the paint, halving
-    /// effective fps. Min-gap pacing is content-driven, so as long as
-    /// the gap has elapsed and there's new content, we paint.
+    /// Min-gap pacing: the boundary itself counts as gap-eligible
+    /// (`now - last_paint >= interval` is `>=`, not `>`). Pre-fix
+    /// this was deadline-based and had a phase race — daemon ticks
+    /// aligned with UI deadlines could read stale `last_frame_ns`
+    /// and skip the paint, halving effective fps. Min-gap pacing
+    /// has no grid to align with: as long as the gap has elapsed,
+    /// we paint regardless of content (continuous mode is
+    /// content-blind by design — see
+    /// `continuous_mode_paints_every_gap_even_without_new_content`).
     #[test]
-    fn paint_at_gap_boundary_when_new_content() {
+    fn paint_at_gap_boundary() {
         let mut app = fresh_app();
         let t0 = Instant::now();
         let _ = app.loop_directive(t0);
 
-        // Enter continuous + paint once. last_continuous_paint_at = t0.
         app.last_data_arrival = Some(t0);
-        app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
 
-        // Wake exactly at +continuous_interval (gap met). Animation is
-        // active so we have content to paint. Must paint, not skip.
+        // Wake exactly at +continuous_interval: gap met, paint.
         let at_boundary = t0 + app.continuous_interval;
         assert_eq!(
             app.loop_directive(at_boundary),
             LoopDirective::RedrawContinuous,
-            "wake at gap boundary with content must paint (no phase race)",
+            "wake at gap boundary must paint (no phase race)",
         );
 
-        // And one nanosecond before the boundary: rate-limited, defer.
+        // One ns before the boundary: rate-limited, defer.
         let mut app = fresh_app();
         let _ = app.loop_directive(t0);
         app.last_data_arrival = Some(t0);
-        app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
         let just_before = t0 + app.continuous_interval - Duration::from_nanos(1);
         assert_eq!(
@@ -1106,42 +1098,43 @@ mod loop_tests {
         );
     }
 
-    /// Skip-when-unchanged (#109): in continuous mode, a wake that
-    /// brings nothing visibly new since the last paint must NOT
-    /// repaint. This is what makes `--max-fps 60` against a 30 Hz
-    /// daemon land at the data rate instead of forcing 60 redundant
-    /// presents.
+    /// Continuous mode is content-blind by design (#109 follow-up):
+    /// in continuous mode every gap-eligible wake paints, regardless
+    /// of whether `last_frame_ns` has advanced. The earlier
+    /// "skip-when-unchanged" optimisation traded perceived smoothness
+    /// for CPU on Wayland-NVIDIA — each skipped present was a missed
+    /// vsync and the eye reads that as judder. Cost of presenting
+    /// duplicate content is small; perceived stutter is large; so
+    /// we present every vsync while continuous mode holds, and rely
+    /// on falling out of `continuous` for the idle savings.
     #[test]
-    fn skip_paint_when_nothing_changed() {
+    fn continuous_mode_paints_every_gap_even_without_new_content() {
         let mut app = fresh_app();
         let t0 = Instant::now();
         let _ = app.loop_directive(t0);
 
-        // Enter continuous mode by faking a recent data arrival and an
-        // animating overlay so the first paint actually happens.
+        // Enter continuous mode via data_recent only — no animation,
+        // no input. Pre-revert this scenario would skip subsequent
+        // paints because nothing "looked new"; post-revert each
+        // gap-eligible wake paints to keep vsync cadence smooth.
         app.last_data_arrival = Some(t0);
-        app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
 
-        // Now drop the animation (simulates: peak hold decay finished,
-        // we're just observing flat data). Within the liveness window
-        // this still counts as continuous, but past the min-gap with
-        // no new data and no animation, we must NOT paint.
-        app.peak_hold_enabled = false;
-        let due = t0 + app.continuous_interval + Duration::from_millis(1);
+        // No animation, no new last_frame_ns, but past the gap →
+        // paint anyway. This is the regression guard against
+        // re-introducing skip-when-unchanged.
+        let past_gap = t0 + app.continuous_interval + Duration::from_millis(1);
         assert_eq!(
-            app.loop_directive(due),
-            LoopDirective::Idle,
-            "wake past min-gap with no new data + no animation: skip paint",
+            app.loop_directive(past_gap),
+            LoopDirective::RedrawContinuous,
+            "continuous mode must present every gap-eligible vsync \
+             regardless of content change (#109 follow-up: skip-when-\
+             unchanged caused visible stutter on Wayland-NVIDIA)",
         );
-
-        // The last-paint stamp from the original RedrawContinuous stays
-        // put — min-gap is enforced from `last_continuous_paint_at`,
-        // not from a moving deadline. Skipped wakes don't shift it.
         assert_eq!(
             app.last_continuous_paint_at,
-            Some(t0),
-            "skipped wake must NOT update last_continuous_paint_at",
+            Some(past_gap),
+            "successful paint must update last_continuous_paint_at",
         );
     }
 
