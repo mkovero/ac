@@ -30,6 +30,11 @@ use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 use super::TimeIntegrationMode;
 
 const EMBER_SCOPE_SINE_HZ: f32 = 1_000.0;
+/// Fallback sample rate when no real-channel frame has arrived yet to read
+/// the live `meta.sr` from. Same value the existing `App::current_sr()` uses
+/// (control.rs); kept in sync via this constant rather than scattering
+/// magic 48 000 literals across the codebase.
+const EMBER_FALLBACK_SR: u32 = 48_000;
 
 /// Build the overlay payload describing the active time-integration
 /// state. Returns `None` when the mode is off so the overlay renders
@@ -1116,7 +1121,7 @@ impl App {
                         .flatten()
                         .map(|f| f.meta.sr)
                         .find(|&s| s > 0)
-                        .unwrap_or(48_000) as f32;
+                        .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let (polyline, scroll_dx) = build_scope_polyline(
                         &mut self.ember_sine_phase,
                         sr,
@@ -1144,13 +1149,13 @@ impl App {
                         .filter(|f| !f.spectrum.is_empty())
                         .map(|f| build_spectrum_polyline(f, &view))
                         .unwrap_or_default();
-                    // 0.06 saturated everything — the polyline rasterizer
-                    // hits ~1000 pixels/frame, intensity multiplies, and
-                    // with tau=5 s the trace pinned at L>>1 → LUT clamped
-                    // to white. Drop 20× and shorten tau to 2.5 s so a
-                    // moved peak's old position fades visibly while the
-                    // new one paints in.
-                    ember.set_tau_p(2.5);
+                    // tau_p 1.2 s — short enough that an old peak's
+                    // afterglow is gone in ~3 s, fast enough to keep up
+                    // with sweeping or moving sources. The mirrored-envelope
+                    // polyline doubles the per-frame deposit count vs a
+                    // single trace, so intensity already nets out about
+                    // right at 0.003.
+                    ember.set_tau_p(1.2);
                     ember.set_intensity(0.003);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
@@ -1537,12 +1542,12 @@ fn draw_peak_overlay(
 // qualify the path.
 use crate::ui::fmt::format_freq_compact;
 
-/// Synthetic 1 kHz sine sampled at 48 kHz, mapped to the ember substrate as
-/// a strip-chart polyline: new samples occupy the rightmost band of width
-/// `dt / window_s`, oldest on the left of the band, newest at x = 1.0. The
-/// returned `scroll_dx` matches that band width and is what the caller
-/// passes to `EmberRenderer::advance` to keep the pre-existing substrate
-/// shifted in lockstep.
+/// Synthetic 1 kHz sine, sample rate read from the live system, mapped to
+/// the ember substrate as a strip-chart LineList: new samples occupy the
+/// rightmost band of width `dt / window_s`, oldest on the left of the
+/// band, newest at x = 1.0. Each returned pair is one connected segment;
+/// since wraparound is impossible inside a single frame's band, every
+/// consecutive sample pair is emitted unconditionally.
 fn build_scope_polyline(
     sine_phase:   &mut f32,
     sample_rate:  f32,
@@ -1553,26 +1558,34 @@ fn build_scope_polyline(
 ) -> (Vec<[f32; 2]>, f32) {
     let scroll_dx = (dt / window_s.max(1e-3)).clamp(0.0, 1.0);
     let n = ((dt * sample_rate) as usize).min(8000);
-    let mut pts = Vec::with_capacity(n);
+    let mut pairs = Vec::with_capacity(n.saturating_sub(1) * 2);
     let two_pi = std::f32::consts::TAU;
     let phase_step = two_pi * sine_freq_hz / sample_rate;
     let denom = (n.saturating_sub(1)).max(1) as f32;
     let amp = y_gain.clamp(0.01, 0.5);
+    let mut prev: Option<[f32; 2]> = None;
     for i in 0..n {
         let s = sine_phase.sin();
         *sine_phase = (*sine_phase + phase_step) % two_pi;
         let frac = i as f32 / denom;
         let x = (1.0 - scroll_dx) + frac * scroll_dx;
         let y = 0.5 + amp * s;
-        pts.push([x, y]);
+        let cur = [x, y];
+        if let Some(p) = prev {
+            pairs.push(p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
     }
-    (pts, scroll_dx)
+    (pairs, scroll_dx)
 }
 
-/// `SpectrumFrame` → ember polyline. Logarithmic frequency axis matching
-/// the cell's view window; dB axis linear in the cell's `db_min..db_max`.
-/// Produces one vertex per visible bin (those whose freq falls inside the
-/// window); fewer than 2 → empty polyline → ember just decays this frame.
+/// `SpectrumFrame` → mirrored-envelope LineList. Logarithmic frequency
+/// axis on x; magnitude renders as a symmetric envelope around y = 0.5
+/// (top trace at 0.5 + amp, bottom at 0.5 − amp, where amp scales with
+/// the bin's normalised dB). Bins below `db_min` break the polyline so
+/// the trace disappears off-screen rather than pinning a glowing baseline
+/// at y = 0; bins above `db_max` clamp to the top edge as expected.
 fn build_spectrum_polyline(
     frame: &crate::data::types::DisplayFrame,
     view: &CellView,
@@ -1582,21 +1595,34 @@ fn build_spectrum_polyline(
     let span_f = (log_max - log_min).max(1e-6);
     let span_db = (view.db_max - view.db_min).max(1e-3);
     let n = frame.freqs.len().min(frame.spectrum.len());
-    let mut pts = Vec::with_capacity(n);
+    let mut pairs = Vec::with_capacity(n * 4);
+    let mut prev: Option<([f32; 2], [f32; 2])> = None;
     for i in 0..n {
         let f = frame.freqs[i];
-        if !(f.is_finite() && f >= view.freq_min && f <= view.freq_max) {
-            continue;
-        }
         let mag = frame.spectrum[i];
-        if !mag.is_finite() {
+        let valid = f.is_finite()
+            && f >= view.freq_min
+            && f <= view.freq_max
+            && mag.is_finite()
+            && mag >= view.db_min;
+        if !valid {
+            prev = None;
             continue;
         }
         let x = ((f.max(1.0).log10() - log_min) / span_f).clamp(0.0, 1.0);
-        let y = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
-        pts.push([x, y]);
+        let n_mag = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
+        let amp = 0.45 * n_mag;
+        let top = [x, 0.5 + amp];
+        let bot = [x, 0.5 - amp];
+        if let Some((prev_top, prev_bot)) = prev {
+            pairs.push(prev_top);
+            pairs.push(top);
+            pairs.push(prev_bot);
+            pairs.push(bot);
+        }
+        prev = Some((top, bot));
     }
-    pts
+    pairs
 }
 
 #[cfg(test)]

@@ -86,7 +86,6 @@ pub struct EmberRenderer {
     palette_row: u32,
 
 
-    point_scratch: Vec<[f32; 2]>,
 }
 
 impl EmberRenderer {
@@ -386,7 +385,6 @@ impl EmberRenderer {
             gamma:       0.6,
             gain:        0.5,
             palette_row: 0,
-            point_scratch: Vec::with_capacity(POINT_CAPACITY),
         }
     }
 
@@ -407,8 +405,10 @@ impl EmberRenderer {
     ///
     /// `viewport` selects where `draw()` will land on the surface (in
     /// surface-normalised [0,1] coords; `(x,y)` = bottom-left, `(w,h)` = size).
-    /// `polyline` is a sequence of `(x,y)` vertices in [0,1]² substrate-local
-    /// coords; consecutive vertices are connected with a 1-pixel line.
+    /// `line_pairs` is a flat LineList: every two consecutive vertices form
+    /// one line segment. The caller controls connectivity — emit a pair for
+    /// every connected segment, omit pairs where the polyline should break
+    /// (e.g. spectrum bins below the dB floor).
     /// `scroll_dx_norm` ∈ [0,1] shifts the existing substrate leftward by
     /// that fraction of its width before depositing — pass 0.0 for a static
     /// view (e.g. spectrum), `dt / window_s` for a strip-chart scope.
@@ -418,7 +418,7 @@ impl EmberRenderer {
         queue:  &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         viewport: [f32; 4],
-        polyline: &[[f32; 2]],
+        line_pairs: &[[f32; 2]],
         scroll_dx_norm: f32,
         dt: f32,
     ) {
@@ -460,24 +460,17 @@ impl EmberRenderer {
             (&self.decay_bg_from_back, &self.front_view)
         };
 
-        // Convert polyline → LineList pairs (each pair is one segment).
-        // Capacity-clamped: capping at POINT_CAPACITY/2 input vertices means
-        // at most POINT_CAPACITY GPU vertices — ample for the audio rates
-        // we care about.
-        self.point_scratch.clear();
-        let max_in = POINT_CAPACITY / 2 + 1;
-        let used = polyline.len().min(max_in);
-        if used >= 2 {
-            for w in polyline[..used].windows(2) {
-                self.point_scratch.push(w[0]);
-                self.point_scratch.push(w[1]);
-            }
-        }
-        if !self.point_scratch.is_empty() {
+        // Caller built a LineList already — clamp count and upload as-is.
+        // Each two consecutive vertices form one segment; broken polylines
+        // (e.g. spectrum bins below the dB floor) skip the pair instead of
+        // pinning a vertex at the floor.
+        let n_pairs = (line_pairs.len() / 2).min(POINT_CAPACITY / 2);
+        let used = n_pairs * 2;
+        if used > 0 {
             queue.write_buffer(
                 &self.point_vbuf,
                 0,
-                bytemuck::cast_slice(&self.point_scratch),
+                bytemuck::cast_slice(&line_pairs[..used]),
             );
         }
 
@@ -503,7 +496,7 @@ impl EmberRenderer {
         }
 
         // Deposit pass: additive into dst (which now holds decayed values).
-        if !self.point_scratch.is_empty() {
+        if used > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ember deposit pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -521,7 +514,7 @@ impl EmberRenderer {
             pass.set_pipeline(&self.deposit_pipeline);
             pass.set_bind_group(0, &self.deposit_bg, &[]);
             pass.set_vertex_buffer(0, self.point_vbuf.slice(..));
-            pass.draw(0..self.point_scratch.len() as u32, 0..1);
+            pass.draw(0..used as u32, 0..1);
         }
 
         self.front_is_latest = !self.front_is_latest;
