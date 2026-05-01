@@ -1149,26 +1149,46 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 { "ok": true }
 ```
 
-**DATA — `cal_prompt`** (step 1: output voltage):
+**DATA — `cal_prompt`** (step 1: output voltage at the DAC, while a
+1 kHz tone is playing at `ref_dbfs`):
 ```json
 // topic: cal_prompt
 {
   "step":     1,
   "text":     "<instructions for the user>",
-  "dmm_vrms": <float> | null   // auto-read from DMM if configured
+  "dmm_vrms": <float> | null,  // auto-read from DMM if configured
+  "ref_dbfs": <float>          // peak-referenced dBFS of the played tone
 }
 ```
 
-Client responds with `cal_reply` (see below).
+**DATA — `cal_prompt`** (step 2: input voltage at the ADC; the tone
+keeps playing so the daemon can also read the captured input dBFS):
+```json
+// topic: cal_prompt
+{
+  "step":          2,
+  "text":          "<instructions for the user>",
+  "dmm_vrms":      <float> | null, // DMM read; or step 1's reading when loopback
+  "captured_dbfs": <float>,        // RMS-referenced dBFS captured at the ADC
+  "loopback":      <bool>          // true → captured ≈ ref_dbfs - 3.01 dB,
+                                   //         step 1's reading is pre-filled
+}
+```
+
+Both prompts: client responds with `cal_reply` (see below). The user
+enters the analog Vrms read from a DMM at the relevant point; the
+daemon converts to "Vrms at 0 dBFS peak" before saving:
+- `vrms_at_0dbfs_out = reading / dbfs_to_amplitude(ref_dbfs)`
+- `vrms_at_0dbfs_in  = reading / dbfs_to_amplitude(captured_dbfs)`
 
 **DATA — `cal_done`**:
 ```json
 // topic: cal_done
 {
   "key":               "out0_in0",
-  "vrms_at_0dbfs_out": <float> | null,
-  "vrms_at_0dbfs_in":  <float> | null,
-  "error":             "<message>"   // only present on partial failure
+  "vrms_at_0dbfs_out": <float> | null,  // post-scale, projected to 0 dBFS
+  "vrms_at_0dbfs_in":  <float> | null,  // post-scale, projected to 0 dBFS
+  "error":             "<message>"      // only present on partial failure
 }
 ```
 

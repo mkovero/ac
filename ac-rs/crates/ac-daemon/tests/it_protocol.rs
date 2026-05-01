@@ -302,6 +302,54 @@ fn calibrate_prompt_reply_cycle() {
 }
 
 #[test]
+fn calibrate_scales_user_reading_to_zero_dbfs() {
+    // Reference tone plays at `ref_dbfs` (default -10 dBFS), so a Vrms
+    // reading taken there is `1 / dbfs_to_amplitude(ref_dbfs)` smaller
+    // than the Vrms at 0 dBFS. The handler MUST apply that scaling
+    // before saving — otherwise a user who calibrates at -10 dBFS and
+    // reads 2.095 V would get `0 dBu = 2.095 V` from `ac generate`,
+    // ~10 dB hotter than what they asked for.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    // Step 1 prompt → reply with a known DAC reading.
+    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 1 prompt");
+    let user_out_vrms = 2.095_f64;
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": user_out_vrms}));
+
+    // Step 2 prompt — fake backend loops the played tone back, so the
+    // captured input level matches the played `ref_dbfs - 3.01` (RMS
+    // vs peak), and the handler should flag `loopback: true`.
+    let p2 = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 2 prompt");
+    assert_eq!(p2["loopback"], json!(true), "expected loopback flag in step 2: {p2}");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": user_out_vrms}));
+
+    let done = c.wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    // ref_dbfs = -10 → out_scale = 10^(10/20) ≈ 3.16228.
+    let expected_out = user_out_vrms * 10f64.powf(10.0 / 20.0);
+    let saved_out = done["vrms_at_0dbfs_out"].as_f64().expect("out");
+    assert!(
+        (saved_out - expected_out).abs() < 1e-6,
+        "vrms_at_0dbfs_out: got {saved_out}, want {expected_out}",
+    );
+
+    // Cross-check via get_calibration so we know it round-tripped to disk.
+    let r = c.call(json!({"cmd": "get_calibration",
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["found"], json!(true));
+    let stored_out = r["vrms_at_0dbfs_out"].as_f64().expect("stored out");
+    assert!((stored_out - expected_out).abs() < 1e-6);
+}
+
+#[test]
 fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     // Fake backend implements `play_and_capture` as a delayed loopback
     // (see audio/fake.rs). Running a Farina sweep through it and

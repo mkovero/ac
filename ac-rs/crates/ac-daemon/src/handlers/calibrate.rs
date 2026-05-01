@@ -30,61 +30,113 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     let pub_tx       = state.pub_tx.clone();
     let fake         = state.fake_audio;
     let out_port     = resolve_output(&cfg, state);
+    let mut cfg_in   = cfg.clone();
+    cfg_in.input_channel = in_ch;
+    cfg_in.input_port    = None;
+    let in_port      = resolve_input(&cfg_in, state);
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
         let mut eng = make_engine(fake);
-        if let Err(e) = eng.start(&[out_port.clone()], None) {
+        // Open both directions: output for the reference tone, input so
+        // step 2 can measure the actual ADC dBFS instead of assuming
+        // unity-gain loopback when scaling the user's DMM reading.
+        if let Err(e) = eng.start(&[out_port.clone()], Some(&in_port)) {
             send_pub(&pub_tx, "error", &json!({"cmd":"calibrate","message":format!("{e}")}));
             return;
         }
         let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
         eng.set_tone(1000.0, amp);
 
-        // Step 1 — output voltage
+        // Step 1 — output voltage. User's DMM reading is the analog
+        // Vrms at the DAC output while the tone is playing at `ref_dbfs`,
+        // so the projected 0 dBFS Vrms is `reading / amp(ref_dbfs)`.
         let (tx1, rx1) = crossbeam_channel::bounded(1);
         *cal_reply_tx.lock().unwrap() = Some(tx1);
         let dmm_v1 = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
         send_pub(&pub_tx, "cal_prompt", &json!({
-            "step":     1,
-            "text":     "Measure output Vrms at DUT input. Enter reading or press Enter to skip.",
-            "dmm_vrms": dmm_v1,
+            "step":      1,
+            "text":      format!(
+                "Output cal — measure DAC output Vrms with DMM (1 kHz @ {ref_dbfs:.1} dBFS). \
+                 Enter reading or press Enter to skip."),
+            "dmm_vrms":  dmm_v1,
+            "ref_dbfs":  ref_dbfs,
         }));
-        let out_vrms = wait_cal_reply(&rx1, &stop, 120);
+        let out_reading = wait_cal_reply(&rx1, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
         if stop.load(Ordering::Relaxed) {
             eng.set_silence(); eng.stop(); return;
         }
 
-        // Step 2 — input voltage
+        // Step 2 — input voltage. We need the *captured* input dBFS to
+        // convert the user's DMM reading into `vrms_at_0dbfs_in`, so
+        // capture briefly before prompting (after a short settle so the
+        // fresh tone fills the ring). If the input is silent / unwired,
+        // fall back to assuming loopback (`captured_dbfs = ref_dbfs`).
+        eng.flush_capture();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let captured_rms = capture_rms(&mut *eng, 0.3);
+        let captured_dbfs = rms_to_dbfs(captured_rms);
+        let in_dbfs_for_scale = if captured_dbfs > -80.0 {
+            captured_dbfs
+        } else {
+            ref_dbfs
+        };
+
+        // Loopback heuristic: a unity-gain DAC→ADC loop puts captured
+        // RMS-dBFS at `ref_dbfs - 3.01` (the sine peak/RMS factor). When
+        // it lines up within ±2 dB, the user's output reading IS the
+        // input reading — pre-fill it so they just hit Enter and the
+        // prompt stops feeling redundant.
+        let loopback_dbfs = ref_dbfs - 20.0 * 2f64.sqrt().log10();
+        let is_loopback = (captured_dbfs - loopback_dbfs).abs() <= 2.0;
+        let dmm_v2_real = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
+        let dmm_v2 = dmm_v2_real.or(if is_loopback { out_reading } else { None });
+
+        let prompt_text = if is_loopback {
+            format!(
+                "Input cal — loopback detected ({captured_dbfs:.1} dBFS captured). \
+                 Press Enter to reuse the output reading, or override (q to cancel).")
+        } else {
+            format!(
+                "Input cal — measure ADC input Vrms with DMM (captured {captured_dbfs:.1} dBFS). \
+                 Enter reading or press Enter to skip.")
+        };
         let (tx2, rx2) = crossbeam_channel::bounded(1);
         *cal_reply_tx.lock().unwrap() = Some(tx2);
-        let dmm_v2 = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
         send_pub(&pub_tx, "cal_prompt", &json!({
-            "step":     2,
-            "text":     "Measure input Vrms at DUT output. Enter reading or press Enter to skip.",
-            "dmm_vrms": dmm_v2,
+            "step":          2,
+            "text":          prompt_text,
+            "dmm_vrms":      dmm_v2,
+            "captured_dbfs": captured_dbfs,
+            "loopback":      is_loopback,
         }));
-        let in_vrms = wait_cal_reply(&rx2, &stop, 120);
+        let in_reading = wait_cal_reply(&rx2, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
 
         eng.set_silence();
         eng.stop();
+
+        // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
+        let out_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
+        let in_scale  = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(in_dbfs_for_scale);
+        let vrms_at_0dbfs_out = out_reading.map(|v| v * out_scale);
+        let vrms_at_0dbfs_in  = in_reading.map(|v| v * in_scale);
 
         // Load existing entry to preserve unrelated fields (notably the
         // SPL pistonphone reading set by `calibrate_spl`); only voltage
         // fields are overwritten here.
         let mut cal = Calibration::load_or_new(out_ch, in_ch, None);
         cal.ref_dbfs          = ref_dbfs;
-        cal.vrms_at_0dbfs_out = out_vrms;
-        cal.vrms_at_0dbfs_in  = in_vrms;
+        cal.vrms_at_0dbfs_out = vrms_at_0dbfs_out;
+        cal.vrms_at_0dbfs_in  = vrms_at_0dbfs_in;
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
         let mut cal_done_frame = json!({
             "key":               key,
-            "vrms_at_0dbfs_out": out_vrms,
-            "vrms_at_0dbfs_in":  in_vrms,
+            "vrms_at_0dbfs_out": vrms_at_0dbfs_out,
+            "vrms_at_0dbfs_in":  vrms_at_0dbfs_in,
         });
         if let Some(ref e) = save_err { cal_done_frame["error"] = json!(e); }
         send_pub(&pub_tx, "cal_done", &cal_done_frame);
