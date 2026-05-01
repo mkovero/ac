@@ -125,7 +125,14 @@ pub trait AudioEngine: Send + 'static {
     fn backend_name(&self) -> &'static str { "unknown" }
 }
 
-/// Build an audio engine: fake → JACK (if available) → CPAL → fake.
+/// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.
+///
+/// Linux is JACK-only on purpose: CPAL on Linux means ALSA, which both
+/// competes with JACK for the hardware and inherits the no-op routing
+/// methods from the `AudioEngine` default impls, breaking any command
+/// that relies on port routing (probe, transfer, test_hardware, test_dut
+/// — see issue #27). If you actually want CPAL on Linux, run with
+/// `--fake-audio` for tests or wire JACK up over ALSA the normal way.
 pub fn make_engine(fake_audio: bool) -> Box<dyn AudioEngine> {
     if fake_audio {
         return Box::new(fake::FakeEngine::new());
@@ -136,13 +143,20 @@ pub fn make_engine(fake_audio: bool) -> Box<dyn AudioEngine> {
         return Box::new(jack_backend::JackEngine::new());
     }
 
-    #[cfg(feature = "cpal-audio")]
+    #[cfg(all(feature = "cpal-audio", not(target_os = "linux")))]
     {
         return Box::new(cpal_backend::CpalEngine::new());
     }
 
     #[allow(unreachable_code)]
     {
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "ac-daemon: JACK not running — falling back to fake audio. \
+             Start JACK first (e.g. `jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2`); \
+             CPAL/ALSA fallback is disabled on Linux on purpose."
+        );
+        #[cfg(not(target_os = "linux"))]
         eprintln!("ac-daemon: no audio backend available, falling back to fake audio");
         Box::new(fake::FakeEngine::new())
     }

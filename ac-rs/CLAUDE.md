@@ -40,8 +40,9 @@ ac-daemon [--local] [--fake-audio] [--ctrl-port N] [--data-port N]
 
 | File | When used |
 |------|-----------|
-| `jack_backend.rs` | Default (JACK must be running) |
-| `fake.rs` | `--fake-audio` flag; returns clean sine so `analyze()` gets plausible output |
+| `jack_backend.rs` | Default (JACK must be running). **Required on Linux** — see issue #27. |
+| `cpal_backend.rs` | macOS/Windows fallback when JACK is unavailable. Disabled on Linux at runtime (`#[cfg(not(target_os = "linux"))]` in `make_engine`). |
+| `fake.rs` | `--fake-audio` flag; returns clean sine so `analyze()` gets plausible output. Also the Linux fallback when JACK isn't running, so missing-JACK fails loudly instead of silently grabbing ALSA. |
 
 ## Server loop (`ac-daemon/src/server.rs`)
 

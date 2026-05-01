@@ -18,7 +18,7 @@ cargo test                     # ~516 tests + 1 #[ignore]'d JACK-loopback runboo
 
 ## Usage (quick reference)
 
-Audio backend is auto-detected: JACK if available, otherwise CPAL. When using JACK, it must be running first:
+Audio backend is auto-detected: JACK if available, else CPAL on macOS/Windows. **Linux is JACK-only** — the CPAL/ALSA fallback is disabled there on purpose (it competes with JACK for hardware and inherits no-op routing). When using JACK, it must be running first:
 ```bash
 jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ```

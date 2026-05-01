@@ -1,13 +1,20 @@
-//! CPAL audio backend — fallback when JACK is not running.
+//! CPAL audio backend — fallback when JACK is not running on macOS/Windows.
 //!
 //! Enabled by the `cpal-audio` feature flag. To build with CPAL support:
 //!   1. Uncomment the `cpal` dep in Cargo.toml
 //!   2. Uncomment the `cpal-audio` feature in Cargo.toml
 //!   3. `cargo build -p ac-daemon --features cpal-audio`
 //!
-//! Port names are formatted as `cpal:<device-name>:ch<N>`.
+//! Port names are formatted as `cpal:<device-name>:ch{N}`.
 //! `start()` ignores port names and opens the default I/O device pair;
 //! port-level routing is a JACK-specific concept.
+//!
+//! On Linux this module is compiled (so the unit tests still run) but
+//! `make_engine` never picks it — the runtime selection in `audio/mod.rs`
+//! is gated on `not(target_os = "linux")`. Hence the dead-code allow:
+//! on Linux, only the `tests` mod actually exercises the items here.
+
+#![cfg_attr(target_os = "linux", allow(dead_code))]
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
