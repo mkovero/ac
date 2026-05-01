@@ -45,7 +45,21 @@ pub(crate) fn real_fft_plan(n: usize) -> Arc<dyn RealToComplex<f64>> {
 }
 
 /// Run `f` with borrowed access to the cached Hann window for length `n`
-/// and its RMS normalization constant `wc`.
+/// and its **coherent-gain** normalization constant `wc = mean(w[i])`.
+///
+/// Callers normalize their FFT magnitudes as `|FFT[k]| / ((n/2) · wc)` so
+/// that an integer-bin sine of peak amplitude `A` reads back as `A` at the
+/// peak bin — i.e. a 0 dBFS digital sine produces `fundamental_dbfs = 0`.
+///
+/// (Pre-2026-05 the cache stored the window RMS `sqrt(mean(w²)) ≈ 0.6124`
+/// instead, inherited from a Python reference. With that value every FFT
+/// magnitude — `fundamental_dbfs`, `spectrum`, harmonic levels — read
+/// `20·log10(0.5/0.6124) ≈ 1.78 dB` low, regardless of N. THD/THD+N were
+/// unaffected because they're amplitude ratios; `linear_rms` was unaffected
+/// because it's time-domain. See the FF400 loopback verification on
+/// 2026-05-01: a 0 dBu/-18.6 dBFS played sine read as -12.6 dBFS captured
+/// where -10.8 was expected after the cal-modelled hardware gain plus
+/// scallop, with the residual ≈1.8 dB tracking exactly to this constant.)
 pub(crate) fn with_hann_window<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) -> R {
     HANN_CACHE.with(|cell| {
         let mut c = cell.borrow_mut();
@@ -55,7 +69,7 @@ pub(crate) fn with_hann_window<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) ->
             for i in 0..n {
                 c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
             }
-            c.wc = (c.win.iter().map(|w| w * w).sum::<f64>() / n as f64).sqrt();
+            c.wc = c.win.iter().sum::<f64>() / n as f64;
             c.n = n;
         }
         f(&c.win, c.wc)

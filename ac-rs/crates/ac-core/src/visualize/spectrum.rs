@@ -81,14 +81,13 @@ mod tests {
         assert!(spec.iter().all(|&x| x.is_finite()));
     }
 
-    /// The "amplitude spectrum" returned by `spectrum_only` uses the
-    /// `/(N/2)/wc` convention inherited from the Python reference, where
-    /// `wc` is the Hann window's RMS (≈0.6124). For an integer-bin sine
-    /// of amplitude A the peak bin therefore reads `A · 0.5/wc ≈ A · 0.8165`
-    /// — independent of N. This test asserts that reading is stable across
-    /// the FFT sizes the UI cycles through (1024 … 65536), using an
-    /// integer-bin frequency (984.375 Hz = SR/1024 · 21) so scalloping
-    /// cannot contaminate the comparison.
+    /// `spectrum_only` normalizes by `(N/2) · CG` where `CG = mean(w[i])` is
+    /// the Hann coherent gain (≈0.5). For an integer-bin sine of peak
+    /// amplitude A, the peak bin therefore reads exactly A — independent
+    /// of N. This test asserts that reading is stable across the FFT
+    /// sizes the UI cycles through (1024 … 65536), using an integer-bin
+    /// frequency (984.375 Hz = SR/1024 · 21) so scalloping cannot
+    /// contaminate the comparison.
     #[test]
     fn spectrum_only_peak_magnitude_stable_across_n() {
         const AMP: f64 = 0.5;
@@ -156,17 +155,15 @@ mod tests {
 
     /// Off-bin (scalloped) readings must never exceed the on-bin reading,
     /// and worst-case Hann scalloping loss must stay within the
-    /// theoretical bound (≈1.42 dB for the un-normalized window; the
-    /// RMS-normalized convention used here has a slightly looser bound
-    /// because the bin-centre boost disappears). Asserts both bounds
-    /// across N.
+    /// theoretical bound (≈1.42 dB at frac=0.5, i.e. ratio ≥ 0.85).
+    /// Asserts both bounds across N.
     #[test]
     fn spectrum_only_scalloping_bounded_across_n() {
         const AMP: f64 = 0.5;
-        // Empirical ceiling for Hann peak-bin loss at frac=0.5 with the
-        // `/(N/2)/wc` convention: measured ≈-3.8 dB → ≈0.65× the on-bin
-        // reading. 0.60 is a safe floor.
-        const MIN_RATIO: f64 = 0.60;
+        // Hann scallop loss at frac=0.5 is ~-1.42 dB (ratio ≈0.849). 0.80
+        // is a safe floor that still catches a regression past the
+        // theoretical worst case.
+        const MIN_RATIO: f64 = 0.80;
         for &n in &[2048usize, 8192, 32768] {
             let bin_hz = SR as f64 / n as f64;
             // On-bin reference.
@@ -190,6 +187,32 @@ mod tests {
                     on_bin_peak * MIN_RATIO
                 );
             }
+        }
+    }
+
+    /// Regression: peak bin of an integer-bin sine reads back the peak
+    /// amplitude of the input signal — i.e. coherent-gain normalized.
+    ///
+    /// Before 2026-05-01 the cache stored window RMS (≈0.6124) as `wc`
+    /// instead of the coherent gain (≈0.5), so peak bins read
+    /// `A · 0.5/0.6124 ≈ A · 0.8165` — a constant -1.78 dB shortfall on
+    /// every FFT-derived dBFS reading (`fundamental_dbfs`, spectrum
+    /// columns, harmonic levels, monitor peak readouts). Caught while
+    /// chasing FFT visualization "off by ~2 dB" reports against a real
+    /// FF400 loopback.
+    #[test]
+    fn spectrum_only_peak_equals_signal_peak() {
+        const AMP: f64 = 0.5;
+        const FREQ: f64 = 984.375; // integer-bin for every N below
+        const TOL: f64 = 1e-3;
+        for &n in &[1024usize, 4096, 16384, 65536] {
+            let samples = pure_sine(FREQ, AMP, SR, n);
+            let (spec, _) = spectrum_only(&samples, SR);
+            let peak = spec.iter().cloned().fold(0.0_f64, f64::max);
+            assert!(
+                (peak - AMP).abs() < TOL,
+                "N={n}: peak {peak:.6} != signal peak {AMP} (tol {TOL})"
+            );
         }
     }
 
