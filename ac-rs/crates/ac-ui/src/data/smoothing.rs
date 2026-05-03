@@ -7,9 +7,14 @@
 //! that measurement tools like REW / OSM / ARTA ship by default.
 //!
 //! Implementation notes:
-//! - Input is dB (already log-magnitude). Arithmetic mean in dB is the
-//!   geometric mean of linear magnitude — what every audio tool means by
-//!   "1/3 octave smoothing" in practice.
+//! - Input is dB (already log-magnitude). Smoothing is done in the **power
+//!   domain**: convert dB → linear power (`10^(dB/10)`), arithmetic-mean
+//!   over the window, convert back (`10·log10(mean)`). Power-mean is what
+//!   REW / OSM / ARTA actually do — it preserves the broad shape, only
+//!   reduces a single-bin tone by ~`10·log10(N_bins_in_window)` (e.g.
+//!   1/6 oct ≈ 20 bins → ~13 dB), instead of *arithmetic mean in dB*
+//!   (= geometric mean in linear), which is dominated by the floor and
+//!   pulls a tone down by 100 dB+ — the bug fixed on 2026-05-03.
 //! - Per-bin window indices are precomputed once per (n, n_bins, sr) tuple
 //!   and reused across frames. A linear scan over sorted freqs gives both
 //!   lo and hi indices in O(n_bins) amortised.
@@ -88,8 +93,12 @@ impl OctaveWindows {
 }
 
 /// Smooth a dB-magnitude spectrum with the given precomputed windows.
-/// Arithmetic mean across each bin's window, skipping non-finite samples.
-/// Returns a new Vec so the caller can keep the raw spectrum too.
+/// Power-domain mean across each bin's window (`10·log10(mean(10^(dB/10)))`),
+/// skipping non-finite samples. Returns a new Vec so the caller can keep
+/// the raw spectrum too.
+///
+/// Floor: results below `-200 dBFS` are clamped to `-200` so that empty /
+/// near-zero windows don't blow up the y-axis with `-inf`.
 pub fn smooth_db(spectrum: &[f32], windows: &OctaveWindows) -> Vec<f32> {
     let n = spectrum.len().min(windows.n_bins);
     let mut out = vec![0.0f32; n];
@@ -100,16 +109,17 @@ pub fn smooth_db(spectrum: &[f32], windows: &OctaveWindows) -> Vec<f32> {
             out[i] = spectrum[i];
             continue;
         }
-        let mut sum = 0.0f32;
+        let mut pwr_sum = 0.0f32;
         let mut count = 0u32;
         for &v in &spectrum[lo..hi] {
             if v.is_finite() {
-                sum += v;
+                pwr_sum += 10f32.powf(v * 0.1);
                 count += 1;
             }
         }
         out[i] = if count > 0 {
-            sum / count as f32
+            let mean_pwr = pwr_sum / count as f32;
+            (10.0 * mean_pwr.max(1e-20).log10()).max(-200.0)
         } else {
             spectrum[i]
         };
@@ -185,6 +195,45 @@ mod tests {
         // Wider smoothing spreads the spike over more neighbours, so the
         // peak value drops further.
         assert!(out_wide[spike_idx] < out_narrow[spike_idx]);
+    }
+
+    /// Regression: a tone surrounded by a deep noise floor must NOT be
+    /// pulled down to the floor by smoothing. Pre-2026-05-03 the function
+    /// took an arithmetic mean in dB (= geometric mean in linear), so a
+    /// 0 dBFS spike with a -130 dBFS floor showed up at ~-124 dBFS after
+    /// smoothing — making the spectrum view of a real loopback tone read
+    /// 40+ dB low. Power-mean keeps the post-smoothing peak within
+    /// `10·log10(N_bins_in_window)` of the input peak.
+    #[test]
+    fn tone_in_deep_noise_keeps_peak_within_window_loss() {
+        let freqs = linear_freqs(4096, 48_000.0);
+        let mut spec = vec![-130.0f32; freqs.len()];
+        let spike_idx = 1000;
+        spec[spike_idx] = 0.0;
+
+        let w = OctaveWindows::build(6, &freqs);
+        let out = smooth_db(&spec, &w);
+
+        // Window count at this bin determines the theoretical max loss.
+        let lo = w.lo[spike_idx] as usize;
+        let hi = w.hi[spike_idx] as usize;
+        let n_in_window = (hi - lo) as f32;
+        let theoretical_loss_db = 10.0 * n_in_window.log10();
+        // Allow 0.5 dB headroom over the theoretical loss for the noise
+        // floor's tiny contribution to the mean power.
+        assert!(
+            out[spike_idx] >= -theoretical_loss_db - 0.5,
+            "smoothed peak {:.2} dBFS is below the {:.2} dBFS theoretical \
+             power-mean loss for {} bins in window — smoother is pulling \
+             the peak toward the floor again",
+            out[spike_idx], -theoretical_loss_db, n_in_window,
+        );
+        assert!(
+            out[spike_idx] > -50.0,
+            "smoothed peak {:.2} dBFS suggests the dB-arithmetic-mean bug \
+             is back (geometric-mean-in-linear pulls peaks to the floor)",
+            out[spike_idx],
+        );
     }
 
     #[test]
