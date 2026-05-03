@@ -208,31 +208,56 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
     parts.join("   ")
 }
 
-/// Hover crosshair readout label. When `spl_offset_db` is `Some`, the
-/// dB-magnitude variant (`Db`) is rendered as `dB SPL` with the offset
-/// applied; other variants (THD%, gain dB, time-ago) ignore SPL since
+/// Hover crosshair readout label.
+///
+/// For `Db` readouts (dBFS magnitude at a cursor position):
+/// - `spl_offset_db = Some(off)` — render `dB SPL` (`v + off`); takes
+///   precedence over voltage cal since pistonphone-cal'd channels are
+///   acoustic and dBu/dBV would be misleading.
+/// - `dbu_offset_db = Some(off)` — voltage-cal'd channel: render
+///   `dBFS / dBu / dBV` so the user can read the analog level off any
+///   bin without picking up the bottom-strip readout. Sine-on-bin
+///   assumption — scallop biases the result by up to ~1.4 dB at
+///   worst-case frequencies; the bottom-strip in_dbu (time-domain RMS)
+///   is the authoritative reading for clean tones.
+/// - neither — bare dBFS as before.
+///
+/// Other variants (THD%, gain dB, time-ago) ignore both offsets since
 /// they're not single-sample dBFS readings.
 pub fn hover_label(
     channel:       usize,
     freq_hz:       f32,
     readout:       &HoverReadout,
     spl_offset_db: Option<f32>,
+    dbu_offset_db: Option<f32>,
 ) -> String {
     match readout {
-        HoverReadout::Db(v) => match spl_offset_db {
-            Some(off) => format!(
-                "CH{} {} {:>6.1} dB SPL",
-                channel,
-                format_hz(freq_hz),
-                v + off,
-            ),
-            None => format!(
-                "CH{} {} {:+6.1} dB",
-                channel,
-                format_hz(freq_hz),
-                v,
-            ),
-        },
+        HoverReadout::Db(v) => {
+            if let Some(off) = spl_offset_db {
+                format!(
+                    "CH{} {} {:>6.1} dB SPL",
+                    channel,
+                    format_hz(freq_hz),
+                    v + off,
+                )
+            } else if let Some(off) = dbu_offset_db {
+                let dbu = v + off;
+                let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
+                format!(
+                    "CH{} {} {:+6.1} dBFS  {:+6.2} dBu  {:+6.2} dBV",
+                    channel,
+                    format_hz(freq_hz),
+                    v, dbu, dbv,
+                )
+            } else {
+                format!(
+                    "CH{} {} {:+6.1} dB",
+                    channel,
+                    format_hz(freq_hz),
+                    v,
+                )
+            }
+        }
         HoverReadout::Thd(v) => format!(
             "{} THD {:.4}%",
             format_hz(freq_hz),
@@ -518,23 +543,45 @@ mod tests {
 
     #[test]
     fn hover_label_uses_dbspl_when_calibrated() {
-        let no_cal = hover_label(0, 1000.0, &HoverReadout::Db(-12.5), None);
+        let no_cal = hover_label(0, 1000.0, &HoverReadout::Db(-12.5), None, None);
         assert!(no_cal.contains("-12.5 dB"));
         assert!(!no_cal.contains("SPL"));
+        assert!(!no_cal.contains("dBu"));
 
-        let cal = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0));
+        let cal = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0), None);
         assert!(cal.contains("94.0 dB SPL"), "want SPL: {cal}");
     }
 
     #[test]
     fn hover_label_non_db_variants_ignore_spl_offset() {
-        let thd = hover_label(0, 1000.0, &HoverReadout::Thd(0.5), Some(126.0));
+        let thd = hover_label(0, 1000.0, &HoverReadout::Thd(0.5), Some(126.0), None);
         assert!(thd.contains("THD 0.5000%"));
         assert!(!thd.contains("SPL"));
 
-        let time = hover_label(0, 1000.0, &HoverReadout::TimeAgo(1.5), Some(126.0));
+        let time = hover_label(0, 1000.0, &HoverReadout::TimeAgo(1.5), Some(126.0), None);
         assert!(time.contains("t-"));
         assert!(!time.contains("SPL"));
+    }
+
+    #[test]
+    fn hover_label_voltage_cal_shows_dbfs_dbu_dbv() {
+        // FF400-rig cal example: vrms_at_0dbfs_in = 3.5331 V, dbu_ref = sqrt(0.6).
+        // dbu_offset = 20·log10(3.5331 / (sqrt(2) · 0.7746)) ≈ 10.17 dB.
+        // For a -10 dBFS bin (peak-ref), expected dBu = ~+0.17.
+        let s = hover_label(0, 1000.0, &HoverReadout::Db(-10.0), None, Some(10.17));
+        assert!(s.contains("-10.0 dBFS"), "want dBFS: {s}");
+        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu near +0.17: {s}");
+        assert!(s.contains("dBV"), "want dBV: {s}");
+    }
+
+    #[test]
+    fn hover_label_spl_offset_overrides_dbu_offset() {
+        // Pistonphone-cal'd channels are acoustic; rendering dBu/dBV would
+        // be misleading. SPL takes precedence when both offsets are present.
+        let s = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0), Some(10.17));
+        assert!(s.contains("dB SPL"), "want SPL: {s}");
+        assert!(!s.contains("dBu"), "should not show dBu when SPL active: {s}");
     }
 
     #[test]
@@ -764,7 +811,7 @@ mod tests {
 
     #[test]
     fn hover_db() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Db(-12.3), None);
+        let s = hover_label(0, 1000.0, &HoverReadout::Db(-12.3), None, None);
         assert!(s.contains("CH0"));
         assert!(s.contains("kHz"));
         assert!(s.contains("-12.3 dB"));
@@ -772,14 +819,14 @@ mod tests {
 
     #[test]
     fn hover_thd() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Thd(0.0034), None);
+        let s = hover_label(0, 1000.0, &HoverReadout::Thd(0.0034), None, None);
         assert!(s.contains("THD 0.0034%"));
         assert!(!s.contains("CH")); // Thd variant has no channel prefix
     }
 
     #[test]
     fn hover_gain() {
-        let s = hover_label(0, 5000.0, &HoverReadout::Gain(-1.23), None);
+        let s = hover_label(0, 5000.0, &HoverReadout::Gain(-1.23), None, None);
         assert!(s.contains("-1.23 dB"));
         assert!(s.contains("kHz"));
         assert!(!s.contains("CH")); // Gain variant has no channel prefix

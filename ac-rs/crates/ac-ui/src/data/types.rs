@@ -15,6 +15,14 @@ pub struct SpectrumFrame {
     #[serde(default)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
+    /// Daemon-supplied additive offset for dBFS → dBu conversion. `None`
+    /// when the channel is uncalibrated. `Some(off)` lets the UI compute
+    /// `dbu = dbfs + off` for any cursor position without the FFT bin
+    /// reading needing a live cal lookup; dBV is then `dbu_to_dbv(dbu)`.
+    /// Sine-on-bin assumption — scallop loss biases the result by up to
+    /// ~1.4 dB at worst-case frequencies.
+    #[serde(default)]
+    pub dbu_offset_db: Option<f32>,
     /// Daemon-supplied additive offset for dBFS → dB SPL conversion. `None`
     /// keeps the readouts in dBFS; `Some(off)` makes the UI render `dB SPL`
     /// using `dbspl = dbfs + off`.
@@ -65,6 +73,7 @@ impl Default for SpectrumFrame {
             thd_pct: 0.0,
             thdn_pct: 0.0,
             in_dbu: None,
+            dbu_offset_db: None,
             spl_offset_db: None,
             mic_correction: None,
             sr: 48000,
@@ -107,6 +116,10 @@ pub struct FrameMeta {
     #[allow(dead_code)]
     pub thdn_pct: f32,
     pub in_dbu: Option<f32>,
+    /// Per-channel dBFS → dBu offset (`dbu = dbfs + dbu_offset_db`). `None`
+    /// when uncalibrated. Mirrored from the spectrum frame; consumed by the
+    /// hover readout to render dBFS / dBu / dBV at the cursor.
+    pub dbu_offset_db: Option<f32>,
     /// Additive offset (`dB SPL = dBFS + spl_offset_db`) populated by the
     /// daemon when the channel has been pistonphone-calibrated. `None`
     /// preserves the dBFS readout convention.
@@ -241,6 +254,7 @@ impl From<&SpectrumFrame> for FrameMeta {
             thd_pct: f.thd_pct,
             thdn_pct: f.thdn_pct,
             in_dbu: f.in_dbu,
+            dbu_offset_db: f.dbu_offset_db,
             spl_offset_db: f.spl_offset_db,
             mic_correction: f.mic_correction.clone(),
             sr: f.sr,

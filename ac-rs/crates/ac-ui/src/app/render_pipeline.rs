@@ -147,6 +147,7 @@ impl App {
                         thd_pct:          0.0,
                         thdn_pct:         0.0,
                         in_dbu:           None,
+                        dbu_offset_db:    None,
                         spl_offset_db:    None,
                         mic_correction:   None,
                         sr:               tf.sr,

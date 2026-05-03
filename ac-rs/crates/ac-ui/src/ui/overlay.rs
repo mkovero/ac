@@ -580,13 +580,14 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        let hover_spl_off = input
+        let hover_meta = input
             .frames
             .get(hover.channel)
             .and_then(|f| f.as_ref())
-            .and_then(|f| f.meta.spl_offset_db);
+            .map(|f| (f.meta.spl_offset_db, f.meta.dbu_offset_db));
+        let (hover_spl_off, hover_dbu_off) = hover_meta.unwrap_or((None, None));
         let label = super::fmt::hover_label(
-            hover.channel, hover.freq_hz, &hover.readout, hover_spl_off,
+            hover.channel, hover.freq_hz, &hover.readout, hover_spl_off, hover_dbu_off,
         );
         // Pin the readout just above-right of the cursor, clamped so it
         // stays inside the hovered cell.

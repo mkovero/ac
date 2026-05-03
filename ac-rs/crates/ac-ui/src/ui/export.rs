@@ -180,6 +180,7 @@ mod tests {
                 thd_pct:          0.01,
                 thdn_pct:         0.02,
                 in_dbu,
+                dbu_offset_db:    None,
                 spl_offset_db:    spl,
                 mic_correction:   mic_correction.map(str::to_string),
                 sr,

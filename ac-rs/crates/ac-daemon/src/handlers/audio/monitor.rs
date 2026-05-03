@@ -879,6 +879,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let in_dbu = cal
                                 .and_then(|c| c.in_vrms(r.linear_rms))
                                 .map(ac_core::shared::conversions::vrms_to_dbu);
+                            // Per-bin dBFS → dBu conversion offset:
+                            //   analog_vrms = sample_peak × cal_in / sqrt(2)   (sine assumption)
+                            //   dBu = dbfs_peak + 20·log10(cal_in / (sqrt(2)·dbu_ref))
+                            // UI overlays this on hover readouts so any cursor
+                            // position shows dBFS / dBu / dBV without a round-trip.
+                            let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
+                                20.0 * (v / (std::f64::consts::SQRT_2
+                                    * ac_core::shared::conversions::get_dbu_ref())).log10()
+                            });
                             let sr_f = sr as f64;
                             let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &r.spectrum,
@@ -905,6 +914,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "thd_pct":          r.thd_pct,
                                 "thdn_pct":         r.thdn_pct,
                                 "in_dbu":           in_dbu,
+                                "dbu_offset_db":    dbu_offset_db,
                                 "spl_offset_db":    spl_offsets[idx],
                                 "mic_correction":   mc_tag,
                                 "clipping":         r.clipping,
@@ -912,6 +922,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             })
                         }
                         Err(_) => {
+                            let cal = cals[idx].as_ref();
+                            let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
+                                20.0 * (v / (std::f64::consts::SQRT_2
+                                    * ac_core::shared::conversions::get_dbu_ref())).log10()
+                            });
                             let (spec, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
                             let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
@@ -934,6 +949,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "sr":               sr,
                                 "freqs":            freqs,
                                 "spectrum":         spec,
+                                "dbu_offset_db":    dbu_offset_db,
                                 "spl_offset_db":    spl_offsets[idx],
                                 "mic_correction":   mc_tag,
                                 "xruns":            xruns_total,

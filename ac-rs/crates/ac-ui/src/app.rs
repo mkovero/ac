@@ -487,10 +487,13 @@ impl App {
             min_last_update: Vec::new(),
             min_last_tick: Vec::new(),
             mic_correction_enabled: true,
-            // Default to 1/6 octave: gentle enough to preserve resonance
-            // detail, heavy enough to calm the FFT grass. Users can cycle or
-            // disable via `O`.
-            smoothing_frac: Some(6),
+            // Default smoothing OFF — show the raw FFT trace so peaks read
+            // at their actual amplitude. Cycle through 1/24..1/3 with `O`
+            // when a calmer floor is wanted (single-bin tones drop by
+            // ~10·log10(N_bins_in_window) at each setting; that's physics,
+            // not a bug). Bottom-strip in_dbu always uses time-domain RMS
+            // so the analog-level readout is unaffected by this default.
+            smoothing_frac: None,
             smoothing_cache: None,
             palette_scroll_accum: 0.0,
             output_dir,
