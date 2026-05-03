@@ -34,6 +34,7 @@ fn test_frame(freq: f32, dbfs: f32, thd: f32, thdn: f32) -> DisplayFrame {
             thdn_pct: thdn,
             in_dbu: None,
             dbu_offset_db: None,
+            peaks: std::sync::Arc::new(Vec::new()),
             spl_offset_db: None,
             mic_correction: None,
             sr: 48000,
@@ -419,8 +420,13 @@ fn overlay_shows_hover_db_readout() {
     };
 
     let texts = run_overlay(input);
-    let has_hover = texts.iter().any(|t| t.contains("CH0") && t.contains("-12.3 dB") && t.contains("kHz"));
-    assert!(has_hover, "hover readout not found in: {texts:?}");
+    // Cursor info now lands in the bottom-left footer (instead of next
+    // to the cursor) so it doesn't obstruct the trace. Look for the
+    // `cursor <freq> <dB>` pattern emitted by `cursor_readout`.
+    let has_hover = texts
+        .iter()
+        .any(|t| t.contains("cursor") && t.contains("kHz") && t.contains("-12.3"));
+    assert!(has_hover, "cursor readout not found in: {texts:?}");
 }
 
 // ── Notification ──────────────────────────────────────────────────

@@ -454,22 +454,44 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        // Broadband stats derived from the displayed spectrum — honest for
-        // any input (music, speech, noise, room response). Falls back
-        // gracefully when the frame arrived with an empty spectrum.
+        // Footer readout. When the cursor is over a cell of this channel,
+        // show cursor-tracked freq + dBFS / dBu / dBV / dB SPL (scallop-
+        // corrected by snapping to the daemon's interpolated peaks when
+        // close to one). Otherwise fall back to the broadband stats —
+        // honest for any input (music, speech, noise, room response).
         // Suppressed in Scope mode where the substrate owns the cell.
         if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
-            if let Some(stats) = super::fmt::broadband_stats(&frame.spectrum, &frame.freqs) {
-                let bottom_left = super::fmt::spectrum_readout(
-                    &stats,
-                    frame.meta.in_dbu,
-                    frame.meta.spl_offset_db,
-                    frame.meta.mic_correction.as_deref(),
-                );
+            let hover_for_this_channel = input
+                .hover
+                .as_ref()
+                .filter(|h| h.channel == display_ch);
+            let bottom_left = if let Some(hover) = hover_for_this_channel {
+                if let crate::ui::overlay::HoverReadout::Db(v) = hover.readout {
+                    Some(super::fmt::cursor_readout(
+                        hover.freq_hz,
+                        v,
+                        &frame.meta.peaks,
+                        frame.meta.dbu_offset_db,
+                        frame.meta.spl_offset_db,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                super::fmt::broadband_stats(&frame.spectrum, &frame.freqs).map(|stats| {
+                    super::fmt::spectrum_readout(
+                        &stats,
+                        frame.meta.in_dbu,
+                        frame.meta.spl_offset_db,
+                        frame.meta.mic_correction.as_deref(),
+                    )
+                })
+            };
+            if let Some(text) = bottom_left {
                 painter.text(
                     Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
                     Align2::LEFT_BOTTOM,
-                    bottom_left,
+                    text,
                     FontId::monospace(theme::READOUT_PX),
                     text_color,
                 );
@@ -580,28 +602,34 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        let hover_meta = input
-            .frames
-            .get(hover.channel)
-            .and_then(|f| f.as_ref())
-            .map(|f| (f.meta.spl_offset_db, f.meta.dbu_offset_db));
-        let (hover_spl_off, hover_dbu_off) = hover_meta.unwrap_or((None, None));
-        let label = super::fmt::hover_label(
-            hover.channel, hover.freq_hz, &hover.readout, hover_spl_off, hover_dbu_off,
-        );
-        // Pin the readout just above-right of the cursor, clamped so it
-        // stays inside the hovered cell.
-        let anchor = Pos2::new(
-            (hover.cursor.x + 8.0).min(hover.rect.right() - 4.0),
-            (hover.cursor.y - 8.0).max(hover.rect.top() + 4.0),
-        );
-        painter.text(
-            anchor,
-            Align2::LEFT_BOTTOM,
-            label,
-            FontId::monospace(theme::READOUT_PX),
-            text_color,
-        );
+        // For dB readouts (spectrum / spectrum-ember) the cursor values
+        // are reported in the bottom-left footer instead — keeps the
+        // trace unobstructed and lets the dBu/dBV trio breathe. Other
+        // readouts (THD%, gain dB, time-ago in waterfall) still pin
+        // the label next to the cursor since their footer carries
+        // unrelated stats.
+        if !matches!(hover.readout, super::overlay::HoverReadout::Db(_)) {
+            let hover_meta = input
+                .frames
+                .get(hover.channel)
+                .and_then(|f| f.as_ref())
+                .map(|f| (f.meta.spl_offset_db, f.meta.dbu_offset_db));
+            let (hover_spl_off, hover_dbu_off) = hover_meta.unwrap_or((None, None));
+            let label = super::fmt::hover_label(
+                hover.channel, hover.freq_hz, &hover.readout, hover_spl_off, hover_dbu_off,
+            );
+            let anchor = Pos2::new(
+                (hover.cursor.x + 8.0).min(hover.rect.right() - 4.0),
+                (hover.cursor.y - 8.0).max(hover.rect.top() + 4.0),
+            );
+            painter.text(
+                anchor,
+                Align2::LEFT_BOTTOM,
+                label,
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
+        }
     }
 
     if let Some(snap) = input.timing {

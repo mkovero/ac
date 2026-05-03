@@ -208,6 +208,67 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
     parts.join("   ")
 }
 
+/// Cursor-driven footer readout for the spectrum / waterfall views. Used
+/// instead of plastering a label next to the crosshair (which obstructs
+/// the trace and collides with other annotations). Replaces the
+/// broadband stats when the cursor is over a cell.
+///
+/// `cursor_db_at_bin` is the dBFS the cursor is currently over (raw bin
+/// magnitude). `peaks` is the daemon's parabolic-interpolated peak list
+/// — when the cursor sits within `snap_tol_hz` of a peak frequency, the
+/// readout snaps to that peak's scallop-corrected dBFS and the line is
+/// suffixed with `▲` so the user can tell measured-vs-interpolated.
+///
+/// SPL takes precedence over voltage cal (acoustic channels render as
+/// dB SPL); voltage cal renders dBFS / dBu / dBV; uncal'd renders dBFS
+/// only.
+pub fn cursor_readout(
+    cursor_freq_hz:   f32,
+    cursor_db_at_bin: f32,
+    peaks:            &[[f32; 2]],
+    dbu_offset_db:    Option<f32>,
+    spl_offset_db:    Option<f32>,
+) -> String {
+    // Snap window: 1% of cursor freq, floor at 2 Hz so low-freq peaks
+    // (where 1% is sub-Hz) still snap reliably.
+    let snap_tol_hz = (cursor_freq_hz * 0.01).max(2.0);
+    let mut best: Option<(f32, f32)> = None;
+    let mut best_dist = f32::INFINITY;
+    for p in peaks {
+        let d = (p[0] - cursor_freq_hz).abs();
+        if d < best_dist && d <= snap_tol_hz {
+            best_dist = d;
+            best = Some((p[0], p[1]));
+        }
+    }
+    let (freq, db, snapped) = match best {
+        Some((f, d)) => (f, d, true),
+        None         => (cursor_freq_hz, cursor_db_at_bin, false),
+    };
+    let snap_tag = if snapped { "  ▲" } else { "" };
+
+    if let Some(off) = spl_offset_db {
+        format!(
+            "cursor {} {:>6.1} dB SPL{}",
+            format_hz(freq),
+            db + off,
+            snap_tag,
+        )
+    } else if let Some(off) = dbu_offset_db {
+        let dbu = db + off;
+        let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
+        format!(
+            "cursor {} {:+6.2} dBFS  {:+6.2} dBu  {:+6.2} dBV{}",
+            format_hz(freq), db, dbu, dbv, snap_tag,
+        )
+    } else {
+        format!(
+            "cursor {} {:+6.2} dBFS{}",
+            format_hz(freq), db, snap_tag,
+        )
+    }
+}
+
 /// Hover crosshair readout label.
 ///
 /// For `Db` readouts (dBFS magnitude at a cursor position):

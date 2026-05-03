@@ -888,6 +888,24 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 20.0 * (v / (std::f64::consts::SQRT_2
                                     * ac_core::shared::conversions::get_dbu_ref())).log10()
                             });
+                            // Parabolic-interpolated peaks on the linear FFT
+                            // (before column aggregation), so the cursor can
+                            // show scallop-corrected dBFS on hover. Threshold
+                            // 80 dB below the strongest bin keeps noise-floor
+                            // bumps out; n_max=64 covers a busy harmonic
+                            // spectrum without bloating the wire frame.
+                            let raw_n = r.spectrum.len();
+                            let raw_freqs: Vec<f64> = (0..raw_n)
+                                .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
+                                .collect();
+                            let peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
+                                &r.spectrum, &raw_freqs, 64,
+                                r.fundamental_dbfs as f32 - 80.0,
+                            );
+                            let peaks_json: Vec<serde_json::Value> = peaks
+                                .iter()
+                                .map(|p| json!([p.freq_hz, p.dbfs]))
+                                .collect();
                             let sr_f = sr as f64;
                             let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                 &r.spectrum,
@@ -910,6 +928,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 "sr":               sr,
                                 "freqs":            freqs,
                                 "spectrum":         spec,
+                                "peaks":            peaks_json,
                                 "fundamental_dbfs": r.fundamental_dbfs,
                                 "thd_pct":          r.thd_pct,
                                 "thdn_pct":         r.thdn_pct,

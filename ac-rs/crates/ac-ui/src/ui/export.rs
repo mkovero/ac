@@ -181,6 +181,7 @@ mod tests {
                 thdn_pct:         0.02,
                 in_dbu,
                 dbu_offset_db:    None,
+                peaks:            Arc::new(Vec::new()),
                 spl_offset_db:    spl,
                 mic_correction:   mic_correction.map(str::to_string),
                 sr,

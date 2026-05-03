@@ -65,6 +65,7 @@ impl SyntheticSource {
                         thdn_pct: 0.02 + 0.005 * ((t + ch as f32).cos() + 1.0),
                         in_dbu: None,
                         dbu_offset_db: None,
+                        peaks: Vec::new(),
                         spl_offset_db: None,
                         mic_correction: None,
                         sr: 48000,

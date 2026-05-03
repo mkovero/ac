@@ -148,6 +148,7 @@ impl App {
                         thdn_pct:         0.0,
                         in_dbu:           None,
                         dbu_offset_db:    None,
+                        peaks:            Arc::new(Vec::new()),
                         spl_offset_db:    None,
                         mic_correction:   None,
                         sr:               tf.sr,
