@@ -220,8 +220,8 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
 /// suffixed with `▲` so the user can tell measured-vs-interpolated.
 ///
 /// SPL takes precedence over voltage cal (acoustic channels render as
-/// dB SPL); voltage cal renders dBFS / dBu / dBV; uncal'd renders dBFS
-/// only.
+/// dB SPL); voltage cal renders dBFS + dBu (dBV is a fixed −2.2 dB
+/// offset from dBu, redundant in the footer); uncal'd renders dBFS only.
 pub fn cursor_readout(
     cursor_freq_hz:   f32,
     cursor_db_at_bin: f32,
@@ -256,10 +256,9 @@ pub fn cursor_readout(
         )
     } else if let Some(off) = dbu_offset_db {
         let dbu = db + off;
-        let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
         format!(
-            "cursor {} {:+6.2} dBFS  {:+6.2} dBu  {:+6.2} dBV{}",
-            format_hz(freq), db, dbu, dbv, snap_tag,
+            "cursor {} {:+6.2} dBFS  {:+6.2} dBu{}",
+            format_hz(freq), db, dbu, snap_tag,
         )
     } else {
         format!(
@@ -634,6 +633,42 @@ mod tests {
         assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
             "want dBu near +0.17: {s}");
         assert!(s.contains("dBV"), "want dBV: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_voltage_cal_shows_dbfs_dbu_only() {
+        // FF400-rig cal example: dbu_offset ≈ 10.17 dB. Cursor at a
+        // -10 dBFS bin → ~+0.17 dBu. dBV is intentionally NOT in the
+        // cursor footer — it's a fixed -2.2 dB constant offset from
+        // dBu, so showing it crowds the readout with redundant info.
+        let s = cursor_readout(1000.0, -10.0, &[], Some(10.17), None);
+        assert!(s.contains("cursor"), "expected cursor prefix: {s}");
+        assert!(s.contains("-10.00 dBFS"), "want dBFS: {s}");
+        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu near +0.17: {s}");
+        assert!(!s.contains("dBV"), "dBV must not appear in cursor footer: {s}");
+        assert!(!s.contains("▲"), "no peaks supplied -> no snap marker: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_snaps_to_peak_when_close() {
+        // Cursor 999 Hz, peak in the daemon's list at exactly 1000.0 Hz
+        // with the scallop-corrected -10.05 dBFS — within the 1% snap
+        // tolerance, so the readout should report 1000 Hz / -10.05 dBFS
+        // and flag with ▲.
+        let peaks = [[1000.0_f32, -10.05]];
+        let s = cursor_readout(999.0, -11.20, &peaks, None, None);
+        assert!(s.contains("-10.05 dBFS"), "want corrected dBFS: {s}");
+        assert!(s.contains("▲"), "expected snap marker: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_uncalibrated_shows_dbfs_only() {
+        let s = cursor_readout(1000.0, -10.0, &[], None, None);
+        assert!(s.contains("-10.00 dBFS"));
+        assert!(!s.contains("dBu"));
+        assert!(!s.contains("dBV"));
+        assert!(!s.contains("dB SPL"));
     }
 
     #[test]
