@@ -454,48 +454,49 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        // Footer readout. When the cursor is over a cell of this channel,
-        // show cursor-tracked freq + dBFS / dBu / dBV / dB SPL (scallop-
-        // corrected by snapping to the daemon's interpolated peaks when
-        // close to one). Otherwise fall back to the broadband stats —
-        // honest for any input (music, speech, noise, room response).
-        // Suppressed in Scope mode where the substrate owns the cell.
-        if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
-            let hover_for_this_channel = input
-                .hover
-                .as_ref()
-                .filter(|h| h.channel == display_ch);
-            let bottom_left = if let Some(hover) = hover_for_this_channel {
-                if let crate::ui::overlay::HoverReadout::Db(v) = hover.readout {
-                    Some(super::fmt::cursor_readout(
-                        hover.freq_hz,
-                        v,
-                        &frame.meta.peaks,
-                        frame.meta.dbu_offset_db,
-                        frame.meta.spl_offset_db,
-                    ))
-                } else {
-                    None
-                }
+        // Footer readout. Only meaningful in the Spectrum view, where
+        // the y-axis is dB and "broadband peak / floor / span / dBu"
+        // describes what's actually drawn. On Waterfall (FFT / CWT /
+        // CQT / reassigned) the y-axis is frequency and the magnitude
+        // lives on the colormap, so a one-line magnitude legend is
+        // misleading rather than helpful — drop it. Cursor readout
+        // still wins when hovering a cell of this channel.
+        let hover_for_this_channel = input
+            .hover
+            .as_ref()
+            .filter(|h| h.channel == display_ch);
+        let bottom_left = if let Some(hover) = hover_for_this_channel {
+            if let crate::ui::overlay::HoverReadout::Db(v) = hover.readout {
+                Some(super::fmt::cursor_readout(
+                    hover.freq_hz,
+                    v,
+                    &frame.meta.peaks,
+                    frame.meta.dbu_offset_db,
+                    frame.meta.spl_offset_db,
+                ))
             } else {
-                super::fmt::broadband_stats(&frame.spectrum, &frame.freqs).map(|stats| {
-                    super::fmt::spectrum_readout(
-                        &stats,
-                        frame.meta.in_dbu,
-                        frame.meta.spl_offset_db,
-                        frame.meta.mic_correction.as_deref(),
-                    )
-                })
-            };
-            if let Some(text) = bottom_left {
-                painter.text(
-                    Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
-                    Align2::LEFT_BOTTOM,
-                    text,
-                    FontId::monospace(theme::READOUT_PX),
-                    text_color,
-                );
+                None
             }
+        } else if matches!(input.config.view_mode, ViewMode::Spectrum) {
+            super::fmt::broadband_stats(&frame.spectrum, &frame.freqs).map(|stats| {
+                super::fmt::spectrum_readout(
+                    &stats,
+                    frame.meta.in_dbu,
+                    frame.meta.spl_offset_db,
+                    frame.meta.mic_correction.as_deref(),
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(text) = bottom_left {
+            painter.text(
+                Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                Align2::LEFT_BOTTOM,
+                text,
+                FontId::monospace(theme::READOUT_PX),
+                text_color,
+            );
         }
     }
 

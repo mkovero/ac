@@ -324,6 +324,108 @@ fn set_monitor_params_live_updates_running_worker() {
 }
 
 #[test]
+fn monitor_spectrum_wire_values_match_fake_tone() {
+    // End-to-end value-correctness test: spin up the daemon with the
+    // fake-audio backend (deterministic 1 kHz sine + 1% 2nd-harmonic at
+    // 0.1 peak on channel 0; see audio/fake.rs), open monitor_spectrum,
+    // and assert every numeric field on the wire matches the known
+    // signal within published tolerances. Catches regressions in:
+    //   - FFT magnitude normalisation (`fundamental_dbfs` ≈ -20 dBFS),
+    //   - parabolic peak interpolation (`peaks[0]` within ≤0.4 dB and
+    //     ≤1 Hz of (1000.0, -20.0)),
+    //   - 2nd-harmonic detection (`peaks` contains 2000 Hz @ ~-60 dBFS),
+    //   - cal-offset wiring (`dbu_offset_db`/`spl_offset_db`/`in_dbu`
+    //     all null when no cal is loaded for the test channel).
+    //
+    // If you change the wire schema, the FFT path, or the peak
+    // detector, this test is your first line of defence — failing it
+    // means the cursor footer can't be trusted.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "channels": [0],
+        "interval_ms": 100,
+        "fft_n": 8192,
+    }));
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+
+    // Skip the first frame or two — the FFT ring is still filling and
+    // the first analyze() may include partial-window edge artefacts.
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut accepted = 0;
+    while Instant::now() < deadline {
+        let Some((topic, payload)) = c.recv_pub(2_000) else { break };
+        if topic != "data" { continue; }
+        if payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum") { continue; }
+        if payload.get("spectrum").and_then(Value::as_array).map_or(true, |a| a.is_empty()) {
+            continue;
+        }
+        accepted += 1;
+        if accepted >= 2 {
+            frame = Some(payload);
+            break;
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no usable spectrum frame within 5 s");
+
+    // ── 1. Wire schema: cal offsets are null when no cal is loaded ──
+    assert!(frame.get("dbu_offset_db").map_or(true, |v| v.is_null()),
+        "dbu_offset_db must be null without cal: {frame}");
+    assert!(frame.get("spl_offset_db").map_or(true, |v| v.is_null()),
+        "spl_offset_db must be null without cal: {frame}");
+    assert!(frame.get("in_dbu").map_or(true, |v| v.is_null()),
+        "in_dbu must be null without cal: {frame}");
+
+    // ── 2. fundamental_dbfs ≈ -20 dBFS (with up to ~1.5 dB Hann scallop) ──
+    let fund_dbfs = frame["fundamental_dbfs"].as_f64().expect("fundamental_dbfs");
+    assert!(
+        (fund_dbfs - (-20.0)).abs() < 1.5,
+        "fundamental_dbfs = {fund_dbfs:.3} dBFS, want ~-20.0 (raw bin, scallop ≤1.42 dB)",
+    );
+    // fundamental_hz must lock onto the actual fake-tone freq within
+    // ±20 Hz (the same find-peak window the daemon uses).
+    let fund_hz = frame["freq_hz"].as_f64().expect("freq_hz");
+    assert!(
+        (fund_hz - 1000.0).abs() < 20.0,
+        "fundamental_hz = {fund_hz:.2} Hz, want ~1000 Hz",
+    );
+
+    // ── 3. peaks[]: parabolic interp recovers the tone within 0.4 dB ──
+    let peaks = frame["peaks"].as_array().expect("peaks array");
+    assert!(!peaks.is_empty(), "expected at least one detected peak");
+    let p0 = peaks[0].as_array().expect("peak entry [freq, db]");
+    let p0_hz   = p0[0].as_f64().expect("peak freq");
+    let p0_dbfs = p0[1].as_f64().expect("peak dbfs");
+    assert!(
+        (p0_hz - 1000.0).abs() < 1.0,
+        "peaks[0] freq = {p0_hz:.3} Hz, want 1000.0 ±1.0",
+    );
+    assert!(
+        (p0_dbfs - (-20.0)).abs() < 0.4,
+        "peaks[0] dbfs = {p0_dbfs:.3} dBFS, want -20.0 ±0.4 (parabolic interp)",
+    );
+
+    // ── 4. 2nd harmonic at 2000 Hz, ~-60 dBFS (1% of fundamental amp) ──
+    let h2 = peaks
+        .iter()
+        .filter_map(|v| v.as_array())
+        .find(|p| {
+            let f = p[0].as_f64().unwrap_or(0.0);
+            (f - 2000.0).abs() < 2.0
+        })
+        .expect("2nd harmonic peak at ~2000 Hz");
+    let h2_dbfs = h2[1].as_f64().unwrap();
+    assert!(
+        (h2_dbfs - (-60.0)).abs() < 1.0,
+        "2nd-harmonic dbfs = {h2_dbfs:.3} dBFS, want ~-60 ±1.0",
+    );
+}
+
+#[test]
 fn calibrate_prompt_reply_cycle() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
