@@ -195,6 +195,56 @@ fn generate_stop_emits_done_frame() {
 }
 
 #[test]
+fn generate_routes_all_channels_in_request() {
+    // Reproduces the post-2026-05-01 reboot scenario on the FF400 rig:
+    // DAC chip enumeration order shifted, so the user shotguns
+    // `ac generate sine 0-17 ...` to hit *some* analog output. The CLI
+    // sent `channels: [0..17]` but the daemon ignored the field and
+    // only opened `cfg.output_channel` — so even the shotgun missed.
+    // Lock in: every channel in the request must show up in `out_ports`.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let chans: Vec<u32> = (0..6).collect();
+    let r = c.call(json!({
+        "cmd": "generate",
+        "freq_hz": 1000.0,
+        "level_dbfs": -20.0,
+        "channels": chans,
+    }));
+    assert_eq!(r["ok"], json!(true), "generate ack: {r}");
+    let ports = r["out_ports"].as_array().expect("out_ports array");
+    assert_eq!(
+        ports.len(), chans.len(),
+        "expected {} ports for channels {:?}, got {:?}", chans.len(), chans, ports,
+    );
+    // Each port name must be unique — otherwise the daemon collapsed
+    // distinct channel indices to the sticky default.
+    let names: std::collections::HashSet<&str> =
+        ports.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(names.len(), ports.len(), "duplicate port in out_ports: {ports:?}");
+
+    let _ = c.call(json!({"cmd":"stop"}));
+}
+
+#[test]
+fn generate_no_channels_falls_back_to_configured_default() {
+    // Bare `ac generate sine ...` (no channel spec) must still route to
+    // the configured `output_channel` — this path doesn't go through
+    // `resolve_output_by_channel` and was a regression risk when adding
+    // multi-channel support.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "generate", "freq_hz": 1000.0, "level_dbfs": -20.0}));
+    assert_eq!(r["ok"], json!(true));
+    let ports = r["out_ports"].as_array().expect("out_ports array");
+    assert_eq!(ports.len(), 1, "default-channel generate should give one port");
+
+    let _ = c.call(json!({"cmd":"stop"}));
+}
+
+#[test]
 fn busy_guard_blocks_duplicate() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
