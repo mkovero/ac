@@ -511,7 +511,7 @@ impl App {
             ember_phase3d_el: 0.4,
             ember_phase3d_zoom: 1.0,
             ember_phase3d_history: VecDeque::new(),
-            ember_phase3d_cap: 4800,
+            ember_phase3d_cap: 1800,
             ember_takens_carrier_phase: 0.0,
             ember_takens_am_phase: 0.0,
             ember_takens_tau_samples: 24,

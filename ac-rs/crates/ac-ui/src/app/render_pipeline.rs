@@ -1235,8 +1235,13 @@ impl App {
                         EMBER_GONIO_AMP,
                         dt,
                     );
-                    ember.set_tau_p(0.4);
-                    ember.set_intensity(0.0025);
+                    // Trajectory views revisit the same Lissajous pixels
+                    // ~50× per second (1 kHz carrier on a closed orbit) —
+                    // an order of magnitude denser than Scope's strip-
+                    // chart deposit. Short τ_p + low intensity keeps the
+                    // trail visible without saturating to white.
+                    ember.set_tau_p(0.12);
+                    ember.set_intensity(0.0008);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1264,8 +1269,15 @@ impl App {
                         EMBER_GONIO_AMP,
                         dt,
                     );
-                    ember.set_tau_p(0.4);
-                    ember.set_intensity(0.0025);
+                    // PhaseScope3D iterates the entire history every frame
+                    // (z-axis encodes age, so each sample's projected
+                    // position changes as it slides toward the back).
+                    // That's ~6× the per-frame deposit count of Goniometer
+                    // and the tube curve revisits the same screen pixels
+                    // many times — needs an order-of-magnitude lower
+                    // intensity than the 2D views.
+                    ember.set_tau_p(0.08);
+                    ember.set_intensity(0.00025);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1289,8 +1301,13 @@ impl App {
                         self.ember_takens_tau_samples,
                         dt,
                     );
-                    ember.set_tau_p(0.6);
-                    ember.set_intensity(0.0025);
+                    // Takens orbit is closed and revisited per cycle of
+                    // the carrier (~800 Hz → ~800 revisits/sec). Same
+                    // tuning rationale as Goniometer; slightly longer
+                    // τ_p so the AM envelope's pulse beat (3 Hz) leaves
+                    // a visible afterglow between cycles.
+                    ember.set_tau_p(0.15);
+                    ember.set_intensity(0.0008);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
