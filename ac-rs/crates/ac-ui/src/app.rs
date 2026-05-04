@@ -327,6 +327,13 @@ pub struct App {
     /// adjust geometrically. Lower = faster fade (more transient feel);
     /// higher = longer trails (more diff-friendly). Default 1.0.
     pub(super) ember_tau_p_scale: f32,
+    /// Running peak of the (L, R) real-audio source for the
+    /// Goniometer / PhaseScope3D auto-gain. Updated at dispatch from
+    /// each frame's max(|L|, |R|) and decayed slowly so transient
+    /// loudness peaks don't permanently shrink the figure. Inverse of
+    /// this drives the per-frame display scale so the figure fills
+    /// ~90 % of the cell regardless of input level.
+    pub(super) ember_stereo_peak: f32,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -542,6 +549,7 @@ impl App {
             ember_takens_history: VecDeque::new(),
             ember_intensity_scale: 1.0,
             ember_tau_p_scale: 1.0,
+            ember_stereo_peak: 0.5,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,

@@ -1246,12 +1246,23 @@ impl App {
                         want,
                     );
                     self.gonio_real_audio_state = status;
+                    let amp = match &real_pair {
+                        Some((l, r)) => {
+                            update_stereo_peak(&mut self.ember_stereo_peak, l, r, dt);
+                            // Map running peak → display gain so peak signal
+                            // hits ~90 % of cell. Cap so a 10 dBFS input
+                            // doesn't blow up the figure off-screen on the
+                            // next frame, and so silence doesn't div-by-tiny.
+                            (0.9 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0)
+                        }
+                        None => EMBER_GONIO_AMP,
+                    };
                     let polyline = build_goniometer_polyline(
                         &mut self.ember_gonio_carrier_phase,
                         &mut self.ember_gonio_phase_offset,
                         sr,
                         self.ember_gonio_rotation_ms,
-                        EMBER_GONIO_AMP,
+                        amp,
                         dt,
                         real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
@@ -1285,6 +1296,13 @@ impl App {
                         want,
                     );
                     self.gonio_real_audio_state = status;
+                    let amp = match &real_pair {
+                        Some((l, r)) => {
+                            update_stereo_peak(&mut self.ember_stereo_peak, l, r, dt);
+                            (0.9 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0)
+                        }
+                        None => EMBER_GONIO_AMP,
+                    };
                     let polyline = build_phase3d_polyline(
                         &mut self.ember_gonio_carrier_phase,
                         &mut self.ember_gonio_phase_offset,
@@ -1294,7 +1312,7 @@ impl App {
                         self.ember_phase3d_az,
                         self.ember_phase3d_el,
                         self.ember_phase3d_zoom,
-                        EMBER_GONIO_AMP,
+                        amp,
                         dt,
                         real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
@@ -1834,6 +1852,32 @@ fn build_spectrum_polyline(
         prev = Some((top, bot));
     }
     pairs
+}
+
+/// Auto-gain peak tracker for the stereo trajectory views.
+/// `peak` is updated to the max of the per-frame sample max and a
+/// time-decayed previous value, so transient loudness spikes don't
+/// permanently shrink the figure (decay is gradual) and silence
+/// gradually re-expands it. Decay constant ~0.5 s — fast enough to
+/// follow musical dynamics, slow enough that level changes don't
+/// pump visibly.
+fn update_stereo_peak(peak: &mut f32, l: &[f32], r: &[f32], dt: f32) {
+    let frame_peak = l
+        .iter()
+        .chain(r.iter())
+        .map(|s| s.abs())
+        .fold(0.0_f32, f32::max);
+    // Exponential decay: peak *= exp(-dt/tau). Convert to per-frame
+    // factor; clamped so a long stall (window minimised) doesn't
+    // amplify forever to the lower bound.
+    let tau_s = 0.5;
+    let decay = (-dt / tau_s).exp();
+    *peak = peak.max(frame_peak) * decay + frame_peak * (1.0 - decay);
+    // Floor — silence shouldn't drive the auto-gain to infinity (the
+    // dispatch site additionally clamps the resulting amp factor).
+    if *peak < 0.001 {
+        *peak = 0.001;
+    }
 }
 
 /// Look up `(active_channel, active_channel + 1)` in the scope store
