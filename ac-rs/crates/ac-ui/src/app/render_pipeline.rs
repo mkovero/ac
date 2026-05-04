@@ -37,11 +37,15 @@ const EMBER_SCOPE_SINE_HZ: f32 = 1_000.0;
 /// magic 48 000 literals across the codebase.
 const EMBER_FALLBACK_SR: u32 = 48_000;
 
-/// Phase 1 trajectory views: synthetic stereo carriers for Goniometer +
-/// PhaseScope3D. Two incommensurate frequencies so the Lissajous orbit
-/// keeps evolving instead of locking onto a closed curve.
-const EMBER_GONIO_FREQ_L: f32 = 1_000.0;
-const EMBER_GONIO_FREQ_R: f32 = 1_300.0;
+/// Phase 1 trajectory views: synthetic stereo for Goniometer +
+/// PhaseScope3D. Same 1 kHz carrier on both channels, plus a slow phase
+/// drift on R so the goniometer walks through every phase state
+/// (vertical line → tilted ellipse → circle → ellipse other way →
+/// horizontal line) on a ~3 s cycle. That's what a goniometer is *for*
+/// — two different carriers would just draw a Lissajous of an
+/// uncorrelated pair, which encodes no useful phase information.
+const EMBER_GONIO_FREQ: f32 = 1_000.0;
+const EMBER_GONIO_PHASE_DRIFT_HZ: f32 = 0.3;
 const EMBER_GONIO_AMP: f32 = 0.7;
 /// Phase 1 Takens: AM-modulated mono carrier — without modulation a pure
 /// sine produces a static ellipse regardless of τ, which makes the τ knob
@@ -1228,8 +1232,8 @@ impl App {
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let polyline = build_goniometer_polyline(
-                        &mut self.ember_stereo_phase_l,
-                        &mut self.ember_stereo_phase_r,
+                        &mut self.ember_gonio_carrier_phase,
+                        &mut self.ember_gonio_phase_offset,
                         sr,
                         self.ember_gonio_rotation_ms,
                         EMBER_GONIO_AMP,
@@ -1258,8 +1262,8 @@ impl App {
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let polyline = build_phase3d_polyline(
-                        &mut self.ember_stereo_phase_l,
-                        &mut self.ember_stereo_phase_r,
+                        &mut self.ember_gonio_carrier_phase,
+                        &mut self.ember_gonio_phase_offset,
                         &mut self.ember_phase3d_history,
                         self.ember_phase3d_cap,
                         sr,
@@ -1807,12 +1811,15 @@ fn build_spectrum_polyline(
     pairs
 }
 
-/// Goniometer (unified.md §6 / Appendix A). Synthetic stereo (1.0 kHz L,
-/// 1.3 kHz R), optional M/S rotation. Returns LineList pairs in the
-/// substrate's [0,1]×[0,1] coordinate system, centred at (0.5, 0.5).
+/// Goniometer (unified.md §6 / Appendix A). Same 1 kHz carrier on L and
+/// R with a slowly-drifting phase offset on R; the figure cycles through
+/// all phase states (in-phase line → ellipse → circle → anti-phase
+/// line) on a ~3 s loop, exactly what a phase scope is for. Returns
+/// LineList pairs in the substrate's [0,1]×[0,1] coordinates, centred
+/// at (0.5, 0.5).
 fn build_goniometer_polyline(
-    phase_l: &mut f32,
-    phase_r: &mut f32,
+    carrier_phase: &mut f32,
+    phase_offset: &mut f32,
     sample_rate: f32,
     rotation_ms: bool,
     amp: f32,
@@ -1824,15 +1831,15 @@ fn build_goniometer_polyline(
     }
     let mut pairs = Vec::with_capacity(n.saturating_sub(1) * 2);
     let two_pi = std::f32::consts::TAU;
-    let step_l = two_pi * EMBER_GONIO_FREQ_L / sample_rate;
-    let step_r = two_pi * EMBER_GONIO_FREQ_R / sample_rate;
+    let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
+    let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
     let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
     let mut prev: Option<[f32; 2]> = None;
     for _ in 0..n {
-        let l = amp * phase_l.sin();
-        let r = amp * phase_r.sin();
-        *phase_l = (*phase_l + step_l) % two_pi;
-        *phase_r = (*phase_r + step_r) % two_pi;
+        let l = amp * carrier_phase.sin();
+        let r = amp * (*carrier_phase + *phase_offset).sin();
+        *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
+        *phase_offset = (*phase_offset + step_offset) % two_pi;
         // M/S: in-phase mono → vertical line (y axis); out-of-phase →
         // horizontal (x axis). Matches analog meter convention.
         let (px, py) = if rotation_ms {
@@ -1915,8 +1922,8 @@ fn build_takens_polyline(
 /// producing a tube of orbits receding from the viewer.
 #[allow(clippy::too_many_arguments)]
 fn build_phase3d_polyline(
-    phase_l: &mut f32,
-    phase_r: &mut f32,
+    carrier_phase: &mut f32,
+    phase_offset: &mut f32,
     history: &mut VecDeque<[f32; 2]>,
     history_cap: usize,
     sample_rate: f32,
@@ -1928,13 +1935,13 @@ fn build_phase3d_polyline(
 ) -> Vec<[f32; 2]> {
     let n = ((dt * sample_rate) as usize).min(8000);
     let two_pi = std::f32::consts::TAU;
-    let step_l = two_pi * EMBER_GONIO_FREQ_L / sample_rate;
-    let step_r = two_pi * EMBER_GONIO_FREQ_R / sample_rate;
+    let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
+    let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
     for _ in 0..n {
-        let l = amp * phase_l.sin();
-        let r = amp * phase_r.sin();
-        *phase_l = (*phase_l + step_l) % two_pi;
-        *phase_r = (*phase_r + step_r) % two_pi;
+        let l = amp * carrier_phase.sin();
+        let r = amp * (*carrier_phase + *phase_offset).sin();
+        *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
+        *phase_offset = (*phase_offset + step_offset) % two_pi;
         history.push_front([l, r]);
     }
     while history.len() > history_cap {

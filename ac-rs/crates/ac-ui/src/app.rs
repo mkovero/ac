@@ -280,11 +280,14 @@ pub struct App {
     /// scroll across the cell.
     pub(super) ember_scope_window_s: f32,
     /// Phase 1 trajectory views (unified.md §6) — synthetic stereo source
-    /// shared by Goniometer + PhaseScope3D. Two incommensurate carriers
-    /// (1.0 kHz on L, 1.3 kHz on R) so the Lissajous keeps evolving instead
-    /// of drawing a single static curve.
-    pub(super) ember_stereo_phase_l: f32,
-    pub(super) ember_stereo_phase_r: f32,
+    /// shared by Goniometer + PhaseScope3D. Same 1 kHz carrier on both
+    /// channels, with a slowly-drifting phase offset (0.3 Hz) so the
+    /// figure walks through every phase state — in-phase line → ellipse
+    /// → circle → ellipse → anti-phase line — in a ~3 s loop. That's
+    /// what a goniometer actually visualizes; two incommensurate
+    /// frequencies would just draw a meaningless Lissajous.
+    pub(super) ember_gonio_carrier_phase: f32,
+    pub(super) ember_gonio_phase_offset: f32,
     /// Goniometer rotation: `true` = M/S ((L−R)/√2, (L+R)/√2), `false` = raw
     /// (L, R). Default M/S — matches the analog-meter convention where
     /// in-phase mono draws a vertical line, out-of-phase a horizontal one.
@@ -509,8 +512,8 @@ impl App {
             ember_last_tick: None,
             ember_scope_y_gain: 0.45,
             ember_scope_window_s: 0.1,
-            ember_stereo_phase_l: 0.0,
-            ember_stereo_phase_r: 0.0,
+            ember_gonio_carrier_phase: 0.0,
+            ember_gonio_phase_offset: 0.0,
             ember_gonio_rotation_ms: true,
             ember_phase3d_az: 0.6,
             ember_phase3d_el: 0.4,
