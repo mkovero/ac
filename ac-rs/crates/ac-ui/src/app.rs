@@ -305,6 +305,11 @@ pub struct App {
     pub(super) ember_takens_tau_samples: usize,
     /// Mono delay-line. Front = newest. Capacity grows with τ + frame size.
     pub(super) ember_takens_history: VecDeque<f32>,
+    /// Global intensity multiplier applied to *every* ember view's base
+    /// intensity at dispatch time. `,` / `.` adjust it geometrically
+    /// (×1.25 per press) so the user can tune deposit brightness live
+    /// without rebuilding. Default 1.0 leaves per-view tuning intact.
+    pub(super) ember_intensity_scale: f32,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -516,6 +521,7 @@ impl App {
             ember_takens_am_phase: 0.0,
             ember_takens_tau_samples: 24,
             ember_takens_history: VecDeque::new(),
+            ember_intensity_scale: 1.0,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,

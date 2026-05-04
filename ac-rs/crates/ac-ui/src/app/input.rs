@@ -757,6 +757,17 @@ impl App {
     /// Returns None when the app is in a non-cycled layout (Compare, Transfer,
     /// Sweep); pressing W from any of those jumps back to the start of the
     /// cycle (Matrix).
+    fn is_ember_view(&self) -> bool {
+        matches!(
+            self.config.view_mode,
+            ViewMode::Scope
+                | ViewMode::SpectrumEmber
+                | ViewMode::Goniometer
+                | ViewMode::PhaseScope3D
+                | ViewMode::Takens
+        )
+    }
+
     fn current_w_slot(&self) -> Option<WSlot> {
         match (self.config.layout, self.config.view_mode, self.analysis_mode.as_str()) {
             (LayoutMode::Grid,   ViewMode::Spectrum,   _)     => Some(WSlot::Matrix),
@@ -924,6 +935,31 @@ impl App {
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
                 self.adjust_hovered_db_span(20.0);
+            }
+            // Ember-substrate intensity tuning. Geometric step (×1.25) so a
+            // few presses span the order of magnitude that separates "too
+            // dim to see" from "saturated white." Active in every ember
+            // view (Scope, SpectrumEmber, Goniometer, PhaseScope3D, Takens);
+            // ignored in Spectrum/Waterfall where intensity isn't a thing.
+            KeyCode::Comma => {
+                if self.is_ember_view() {
+                    self.ember_intensity_scale =
+                        (self.ember_intensity_scale / 1.25).clamp(0.05, 20.0);
+                    self.notify(&format!(
+                        "ember intensity ×{:.2}",
+                        self.ember_intensity_scale
+                    ));
+                }
+            }
+            KeyCode::Period => {
+                if self.is_ember_view() {
+                    self.ember_intensity_scale =
+                        (self.ember_intensity_scale * 1.25).clamp(0.05, 20.0);
+                    self.notify(&format!(
+                        "ember intensity ×{:.2}",
+                        self.ember_intensity_scale
+                    ));
+                }
             }
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;

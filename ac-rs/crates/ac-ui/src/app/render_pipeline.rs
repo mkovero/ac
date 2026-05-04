@@ -1182,7 +1182,7 @@ impl App {
                         dt,
                     );
                     ember.set_tau_p(0.6);
-                    ember.set_intensity(0.002);
+                    ember.set_intensity(0.002 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.5);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1211,7 +1211,7 @@ impl App {
                     // single trace, so intensity already nets out about
                     // right at 0.003.
                     ember.set_tau_p(1.2);
-                    ember.set_intensity(0.003);
+                    ember.set_intensity(0.003 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1241,7 +1241,7 @@ impl App {
                     // chart deposit. Short τ_p + low intensity keeps the
                     // trail visible without saturating to white.
                     ember.set_tau_p(0.12);
-                    ember.set_intensity(0.0008);
+                    ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1277,7 +1277,7 @@ impl App {
                     // many times — needs an order-of-magnitude lower
                     // intensity than the 2D views.
                     ember.set_tau_p(0.08);
-                    ember.set_intensity(0.00025);
+                    ember.set_intensity(0.00025 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
@@ -1307,7 +1307,7 @@ impl App {
                     // τ_p so the AM envelope's pulse beat (3 Hz) leaves
                     // a visible afterglow between cycles.
                     ember.set_tau_p(0.15);
-                    ember.set_intensity(0.0008);
+                    ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
                         &ctx.device, &ctx.queue, &mut encoder,
