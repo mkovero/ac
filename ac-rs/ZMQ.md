@@ -297,6 +297,53 @@ subscribers that expect a linear spectrum should convert / branch.
   noise gate (bins below the column peak by that much keep their
   nominal frequency).
 
+### `visualize/scope` frame
+
+Emitted by `monitor_spectrum` once per channel per tick, **alongside**
+the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
+(not instead of it). Carries raw f32 audio samples — no calibration,
+no mic-curve, just the unmodified per-tick capture truncated to the
+newest 2048 samples. Consumed by `ac-ui`'s Goniometer / PhaseScope3D
+trajectory views (`unified.md` Phase 0b, resolves §9 OQ7).
+
+```json
+{
+  "type":       "visualize/scope",
+  "cmd":        "monitor_spectrum",
+  "channel":    <int>,            // input channel index
+  "n_channels": <int>,            // total channels being monitored
+  "sr":         <int>,            // sample rate (Hz)
+  "frame_idx":  <int>,            // monotonic per-tick counter (see below)
+  "samples":    [<float>, ...],   // raw f32 in [-1, 1], length ≤ 2048
+  "timestamp":  <int>,            // tick-wide UNIX-epoch nanoseconds
+  "xruns":      <int>
+}
+```
+
+**`frame_idx` synchronization.** The counter increments exactly once
+per worker tick, so every channel's frame from the same capture tick
+shares the same `frame_idx`. Subscribers that need a synchronized L/R
+pair (Goniometer / PhaseScope3D) match frames by `frame_idx` rather
+than relying on receive-order or `timestamp` (which is also tick-wide
+but coarser).
+
+**No calibration.** The trajectory consumers are dimensionless —
+displaying a Lissajous figure of `(L, R)` doesn't need voltage or SPL
+correction, and the mic-curve FIR adds compute / latency to a
+already-large payload. Calibrated quantities live on the
+`visualize/spectrum` (or `cwt` / etc.) frame for the same channel.
+
+**Sample cap.** 2048 floats = 8 KB per frame per channel. At 192 kHz
+× 200 ms tick the per-channel capture is ~38 k samples; we truncate
+to the newest 2048 (~10 ms of audio at 192 kHz, which is plenty for a
+60 fps render window). Visible aliasing on the Goniometer figure is
+the failure mode that would prompt a v2 decimator.
+
+**Bandwidth.** Worst case is 2 channels × 8 KB × 100 ticks/s
+≈ 1.6 MB/s — comfortably within ZMQ inproc / localhost throughput
+and below the existing `transfer_stream` payload size at long
+sweep N.
+
 ### `fractional_octave` frame
 
 Emitted by `monitor_spectrum` **only when** `analysis_mode` is `"cwt"`

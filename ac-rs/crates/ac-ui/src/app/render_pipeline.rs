@@ -782,6 +782,12 @@ impl App {
             .as_ref()
             .filter(|_| loudness_focus_ch < n_real)
             .and_then(|store| store.read(loudness_focus_ch as u32));
+        // Snapshot the trajectory-view source state computed at the
+        // dispatch site of the *previous* render frame. The 1-frame
+        // lag is invisible for a status caption and avoids reordering
+        // the overlay-paint vs substrate-deposit ordering inside this
+        // method.
+        let gonio_state_snap = self.gonio_real_audio_state;
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -1094,6 +1100,7 @@ impl App {
                     time_integration: time_integration_snap.clone(),
                     band_weighting: band_weighting_snap,
                     loudness: loudness_snap,
+                    gonio_state: gonio_state_snap,
                 },
             );
         });
@@ -1231,6 +1238,14 @@ impl App {
                         .map(|f| f.meta.sr)
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
+                    let want = ((dt * sr) as usize).clamp(64, 4096);
+                    let (status, real_pair) = resolve_stereo_pair(
+                        self.config.active_channel,
+                        self.monitor_channels.as_deref(),
+                        self.scope_store.as_ref(),
+                        want,
+                    );
+                    self.gonio_real_audio_state = status;
                     let polyline = build_goniometer_polyline(
                         &mut self.ember_gonio_carrier_phase,
                         &mut self.ember_gonio_phase_offset,
@@ -1238,6 +1253,7 @@ impl App {
                         self.ember_gonio_rotation_ms,
                         EMBER_GONIO_AMP,
                         dt,
+                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
                     // Trajectory views revisit the same Lissajous pixels
                     // ~50× per second (1 kHz carrier on a closed orbit) —
@@ -1261,6 +1277,14 @@ impl App {
                         .map(|f| f.meta.sr)
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
+                    let want = ((dt * sr) as usize).clamp(64, 4096);
+                    let (status, real_pair) = resolve_stereo_pair(
+                        self.config.active_channel,
+                        self.monitor_channels.as_deref(),
+                        self.scope_store.as_ref(),
+                        want,
+                    );
+                    self.gonio_real_audio_state = status;
                     let polyline = build_phase3d_polyline(
                         &mut self.ember_gonio_carrier_phase,
                         &mut self.ember_gonio_phase_offset,
@@ -1272,6 +1296,7 @@ impl App {
                         self.ember_phase3d_zoom,
                         EMBER_GONIO_AMP,
                         dt,
+                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
                     // PhaseScope3D iterates the entire history every frame
                     // (z-axis encodes age, so each sample's projected
@@ -1811,12 +1836,84 @@ fn build_spectrum_polyline(
     pairs
 }
 
-/// Goniometer (unified.md §6 / Appendix A). Same 1 kHz carrier on L and
-/// R with a slowly-drifting phase offset on R; the figure cycles through
-/// all phase states (in-phase line → ellipse → circle → anti-phase
-/// line) on a ~3 s loop, exactly what a phase scope is for. Returns
-/// LineList pairs in the substrate's [0,1]×[0,1] coordinates, centred
-/// at (0.5, 0.5).
+/// Look up `(active_channel, active_channel + 1)` in the scope store
+/// and decide whether the trajectory views can render real audio. Used
+/// by both Goniometer and PhaseScope3D dispatch arms — the same
+/// pairing logic + state-classification belongs in one place.
+///
+/// `active_slot` is the UI slot index (`config.active_channel`); the
+/// physical capture id is `monitor_channels[active_slot]`. The R
+/// candidate is the *physical* id immediately after L, regardless of
+/// what slot (or no slot) it occupies in the UI grid — the user
+/// requested a stereo pair by launching `--channels N,N+1`.
+///
+/// Returns:
+/// - `(Real { l, r }, Some((l_samples, r_samples)))` when both channels
+///   have recent matching scope frames.
+/// - `(NoSecondChannel { l }, None)` when L is in the monitor set but
+///   the +1 physical id is not.
+/// - `(NotStreamingYet { l, r }, None)` when both are in the set but
+///   no recent scope frames.
+/// - `(NoAudio, None)` when there's no scope store or the active slot
+///   has no resolved physical id (e.g. synthetic mode).
+fn resolve_stereo_pair(
+    active_slot: usize,
+    monitor_channels: Option<&[u32]>,
+    scope_store: Option<&crate::data::store::ScopeStore>,
+    want_samples: usize,
+) -> (
+    crate::data::types::StereoStatus,
+    Option<(Vec<f32>, Vec<f32>)>,
+) {
+    use crate::data::types::StereoStatus;
+    let store = match scope_store {
+        Some(s) => s,
+        None => return (StereoStatus::NoAudio, None),
+    };
+    let phys_l = match monitor_channels.and_then(|cs| cs.get(active_slot).copied()) {
+        Some(p) => p,
+        None => return (StereoStatus::NoAudio, None),
+    };
+    let phys_r = match phys_l.checked_add(1) {
+        Some(p) => p,
+        None => return (StereoStatus::NoSecondChannel { l: phys_l }, None),
+    };
+    let in_monitor = monitor_channels
+        .map(|cs| cs.contains(&phys_r))
+        .unwrap_or(false);
+    if !in_monitor {
+        return (StereoStatus::NoSecondChannel { l: phys_l }, None);
+    }
+    let max_age = std::time::Duration::from_millis(250);
+    match (
+        store.read_recent(phys_l, want_samples, max_age),
+        store.read_recent(phys_r, want_samples, max_age),
+    ) {
+        (Some((_, fi_l, sl)), Some((_, fi_r, sr_buf)))
+            if fi_l.abs_diff(fi_r) <= 1 && sl.len() == sr_buf.len() && !sl.is_empty() =>
+        {
+            (StereoStatus::Real { l: phys_l, r: phys_r }, Some((sl, sr_buf)))
+        }
+        _ => (StereoStatus::NotStreamingYet { l: phys_l, r: phys_r }, None),
+    }
+}
+
+/// Goniometer (unified.md §6 / Appendix A).
+///
+/// `real = Some((l, r))` — equal-length slices of f32 audio in [-1, 1]
+/// from `active_channel` and `active_channel + 1` (`unified.md` Phase
+/// 0b). When provided, the carrier/phase synthesizer is bypassed and
+/// neither phase accumulator advances — the synthetic state stays
+/// frozen so a subsequent fallback (wire frames stop arriving) resumes
+/// from where it last ran instead of jumping in time.
+///
+/// `real = None` — synthetic 1 kHz carrier on both with a 0.3 Hz phase
+/// drift on R. The figure cycles through every phase state (in-phase
+/// line → ellipse → circle → anti-phase line) on a ~3 s loop.
+///
+/// Defensive: mismatched lengths or empty slices in `Some(...)` fall
+/// back to the synthetic body. Builder is otherwise pure — never
+/// panics on caller misuse.
 fn build_goniometer_polyline(
     carrier_phase: &mut f32,
     phase_offset: &mut f32,
@@ -1824,7 +1921,34 @@ fn build_goniometer_polyline(
     rotation_ms: bool,
     amp: f32,
     dt: f32,
+    real: Option<(&[f32], &[f32])>,
 ) -> Vec<[f32; 2]> {
+    let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
+    let project = |l: f32, r: f32| -> [f32; 2] {
+        let (px, py) = if rotation_ms {
+            ((l - r) * inv_sqrt2, (l + r) * inv_sqrt2)
+        } else {
+            (l, r)
+        };
+        [0.5 + 0.45 * px, 0.5 + 0.45 * py]
+    };
+
+    if let Some((ls, rs)) = real {
+        if !ls.is_empty() && ls.len() == rs.len() {
+            let mut pairs = Vec::with_capacity(ls.len().saturating_sub(1) * 2);
+            let mut prev: Option<[f32; 2]> = None;
+            for (l, r) in ls.iter().zip(rs.iter()) {
+                let cur = project(amp * *l, amp * *r);
+                if let Some(p) = prev {
+                    pairs.push(p);
+                    pairs.push(cur);
+                }
+                prev = Some(cur);
+            }
+            return pairs;
+        }
+    }
+
     let n = ((dt * sample_rate) as usize).min(8000);
     if n == 0 {
         return Vec::new();
@@ -1833,21 +1957,13 @@ fn build_goniometer_polyline(
     let two_pi = std::f32::consts::TAU;
     let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
     let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
-    let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
     let mut prev: Option<[f32; 2]> = None;
     for _ in 0..n {
         let l = amp * carrier_phase.sin();
         let r = amp * (*carrier_phase + *phase_offset).sin();
         *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
         *phase_offset = (*phase_offset + step_offset) % two_pi;
-        // M/S: in-phase mono → vertical line (y axis); out-of-phase →
-        // horizontal (x axis). Matches analog meter convention.
-        let (px, py) = if rotation_ms {
-            ((l - r) * inv_sqrt2, (l + r) * inv_sqrt2)
-        } else {
-            (l, r)
-        };
-        let cur = [0.5 + 0.45 * px, 0.5 + 0.45 * py];
+        let cur = project(l, r);
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -1932,17 +2048,29 @@ fn build_phase3d_polyline(
     zoom: f32,
     amp: f32,
     dt: f32,
+    real: Option<(&[f32], &[f32])>,
 ) -> Vec<[f32; 2]> {
-    let n = ((dt * sample_rate) as usize).min(8000);
-    let two_pi = std::f32::consts::TAU;
-    let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
-    let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
-    for _ in 0..n {
-        let l = amp * carrier_phase.sin();
-        let r = amp * (*carrier_phase + *phase_offset).sin();
-        *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
-        *phase_offset = (*phase_offset + step_offset) % two_pi;
-        history.push_front([l, r]);
+    let pushed_real = match real {
+        Some((ls, rs)) if !ls.is_empty() && ls.len() == rs.len() => {
+            for (l, r) in ls.iter().zip(rs.iter()) {
+                history.push_front([amp * *l, amp * *r]);
+            }
+            true
+        }
+        _ => false,
+    };
+    if !pushed_real {
+        let n = ((dt * sample_rate) as usize).min(8000);
+        let two_pi = std::f32::consts::TAU;
+        let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
+        let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
+        for _ in 0..n {
+            let l = amp * carrier_phase.sin();
+            let r = amp * (*carrier_phase + *phase_offset).sin();
+            *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
+            *phase_offset = (*phase_offset + step_offset) % two_pi;
+            history.push_front([l, r]);
+        }
     }
     while history.len() > history_cap {
         history.pop_back();
@@ -2124,6 +2252,7 @@ mod tests {
         let mut pr = 0.0_f32;
         let pairs = build_goniometer_polyline(
             &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            None,
         );
         // Two consecutive vertices form one connected segment, so the
         // pair count is always even and every emitted vertex must sit
@@ -2145,7 +2274,7 @@ mod tests {
         let dt = 0.01;
         let n = (dt * sr) as usize;
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, sr, true, EMBER_GONIO_AMP, dt,
+            &mut pl, &mut pr, sr, true, EMBER_GONIO_AMP, dt, None,
         );
         assert_eq!(
             pairs.len(),
@@ -2163,7 +2292,7 @@ mod tests {
         let mut pl = 0.5_f32;
         let mut pr = 1.7_f32;
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, false, EMBER_GONIO_AMP, 0.05,
+            &mut pl, &mut pr, 48_000.0, false, EMBER_GONIO_AMP, 0.05, None,
         );
         for [x, y] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
@@ -2233,6 +2362,7 @@ mod tests {
             let _ = build_phase3d_polyline(
                 &mut pl, &mut pr, &mut hist, cap, 48_000.0,
                 0.6, 0.4, 1.0, EMBER_GONIO_AMP, 1.0 / 60.0,
+                None,
             );
         }
         assert!(
@@ -2271,7 +2401,7 @@ mod tests {
         // dt=0 means the builder pushes no fresh samples, just iterates.
         let pairs = build_phase3d_polyline(
             &mut pl, &mut pr, &mut hist, 2, 48_000.0,
-            1.2, -0.3, 1.5, EMBER_GONIO_AMP, 0.0,
+            1.2, -0.3, 1.5, EMBER_GONIO_AMP, 0.0, None,
         );
         // Find the projected point for the i=1 entry (z=0).
         // Iteration produces [prev, cur] pairs across consecutive
@@ -2284,6 +2414,96 @@ mod tests {
             (centre[0] - 0.5).abs() < 1e-5 && (centre[1] - 0.5).abs() < 1e-5,
             "L=R=z=0 should project to (0.5, 0.5), got {:?}",
             centre
+        );
+    }
+
+    // ---- Phase 0b real-audio path tests (unified.md §9 OQ7) ----
+
+    /// When `real` is provided, the M/S rotation algebra applies
+    /// directly to the supplied samples. L=R ⇒ (L−R) = 0 → x stays at
+    /// 0.5 for every emitted vertex.
+    #[test]
+    fn goniometer_real_audio_l_eq_r_traces_vertical() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let l: Vec<f32> = (0..32).map(|i| (i as f32 * 0.1).sin()).collect();
+        let r = l.clone();
+        let pairs = build_goniometer_polyline(
+            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            Some((&l, &r)),
+        );
+        assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
+        for [x, _] in &pairs {
+            assert!(
+                (x - 0.5).abs() < 1e-5,
+                "L=R should project x ≈ 0.5, got {x}",
+            );
+        }
+    }
+
+    /// Mismatched-length real input falls back to the synthetic body
+    /// (returns a non-empty polyline rather than panicking or emitting
+    /// from a partial walk of the slices).
+    #[test]
+    fn goniometer_real_audio_mismatched_lengths_falls_back() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let l: Vec<f32> = vec![0.1, 0.2, 0.3];
+        let r: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let pairs = build_goniometer_polyline(
+            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            Some((&l, &r)),
+        );
+        // Synthetic fallback at dt × sr = 800 produces ~798 line pairs;
+        // the mismatched-real branch would only emit ~2 if it walked
+        // the shorter slice. Anything > 100 vertices means the
+        // synthetic fallback ran.
+        assert!(
+            pairs.len() > 100,
+            "expected synthetic fallback (>100 vertices); got {}",
+            pairs.len(),
+        );
+    }
+
+    /// Real-audio branch must NOT advance the synthetic phase
+    /// accumulators, so when the wire briefly drops the next synthetic
+    /// frame resumes from the last advance — no audible/visible time
+    /// jump.
+    #[test]
+    fn goniometer_real_audio_does_not_advance_phase_state() {
+        let mut pl = 0.42_f32;
+        let mut pr = 0.13_f32;
+        let pl_before = pl;
+        let pr_before = pr;
+        let l: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
+        let r = l.clone();
+        let _ = build_goniometer_polyline(
+            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            Some((&l, &r)),
+        );
+        assert_eq!(pl, pl_before, "carrier_phase must stay frozen in real branch");
+        assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
+    }
+
+    /// PhaseScope3D real-audio branch pushes `samples.len()` entries
+    /// into history (not `(dt * sr)` — that's the synthetic path).
+    #[test]
+    fn phase3d_real_audio_pushes_n_history_entries() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let mut hist = VecDeque::<[f32; 2]>::new();
+        let l: Vec<f32> = vec![0.1; 7];
+        let r: Vec<f32> = vec![0.2; 7];
+        let _ = build_phase3d_polyline(
+            &mut pl, &mut pr, &mut hist, 100, 48_000.0,
+            0.6, 0.4, 1.0, EMBER_GONIO_AMP, 1.0 / 60.0,
+            Some((&l, &r)),
+        );
+        assert_eq!(
+            hist.len(),
+            7,
+            "real-audio branch should push exactly 7 entries; got {}",
+            hist.len(),
         );
     }
 }

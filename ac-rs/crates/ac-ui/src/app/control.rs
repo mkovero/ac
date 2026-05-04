@@ -39,6 +39,8 @@ impl App {
         self.sweep_store = Some(sweep_store.clone());
         let loudness_store = init.loudness_store.clone();
         self.loudness_store = Some(loudness_store.clone());
+        let scope_store = init.scope_store.clone();
+        self.scope_store = Some(scope_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -60,6 +62,7 @@ impl App {
                     virtual_channels,
                     sweep_store,
                     loudness_store,
+                    scope_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));

@@ -727,14 +727,48 @@ Each is tagged with the section(s) it gates.
   best, more compute). Recommendation: ship the knob plus
   autocorrelation auto-mode in v1; AMI is a v2 refinement.
 
-- **OQ7 [§6]** — `ScopeFrame` source: should the daemon publish
-  raw scope frames as a new `visualize/scope` wire type, or
-  should `ac-ui` access the JACK ring directly when running on
-  the same host? Direct access is cheaper but ties scope view
-  to local-host operation. Wire frames are slower but
-  consistent. Recommendation: wire frames at low rate (e.g. 60
-  Hz batched packets, ~800 samples/packet at 48 kHz) to keep the
-  architecture uniform; revisit if bandwidth becomes a problem.
+- **OQ7 [§6]** — `[RESOLVED 2026-05-04 — see §10]` `ScopeFrame`
+  source: wire frames via a new `visualize/scope` topic. Daemon
+  emits per-channel f32 samples per `monitor_spectrum` tick,
+  capped at 2048 samples per frame; UI consumes via
+  `data/receiver.rs` → `data/store.rs::ScopeStore`. Resolved in
+  favour of wire frames (over direct JACK-ring access) because
+  the daemon already runs `monitor_spectrum` worker — adding a
+  sidecar emit there is cheaper than a second consumer of the
+  JACK ring, and it keeps the architecture uniform across
+  same-host vs remote operation.
+
+- **OQ11 [§6]** — Takens auto-τ via autocorrelation-first-zero.
+  Defer until at least one real-audio path exists (now: yes,
+  via Phase 0b — but Takens is mono-only and the synthetic
+  carrier still applies; revisit when Takens consumes
+  `active_channel` real audio).
+
+- **OQ12 [§6]** — Resolved 2026-05-04 by Phase 0b: Goniometer
+  M/S↔raw rotation toggle is bound to plain `R` (Goniometer
+  view only). Replaces the broken-on-trackpad scroll-toggle that
+  flipped on every micro-event.
+
+- **OQ13 [§6]** — PhaseScope3D camera nudge keys vs scroll-only:
+  scroll for v1 (zoom plain, az on Ctrl+scroll, el on
+  Shift+scroll). Add keyboard nudge keys later if useful.
+
+- **OQ14 [§6]** — Auto-expand monitor channel set when
+  Goniometer is the initial view (`--channels 0` →
+  `[0, 1]`)? V1: no, user opts in via `--channels 0,1`. The
+  overlay says "synthetic — no stereo (ch 1 not present)" so
+  the user knows what to do. Revisit if it proves an annoying
+  trip-up in daily use.
+
+- **OQ15 [§6]** — Mic-curve correction on `visualize/scope`
+  samples? V1: no; trajectory views are dimensionless. Calibrated
+  quantities live on the `visualize/spectrum` (or `cwt` / etc.)
+  frame the user already has.
+
+- **OQ16 [§6]** — Adaptive scope cap at high SR (192 kHz × 200
+  ms tick = ~38 k samples >> 2048 cap). V1: truncate to newest
+  2048 (~10 ms @ 192 kHz); revisit if visible aliasing appears
+  on the Goniometer figure.
 
 - **OQ8 [§6]** — Vector-fitting library choice for pole-zero:
   hand-port of `vectfit3`, wrap a C library via FFI, or pure
@@ -827,6 +861,44 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   on real measurement views (Bode, coherence) waits until those
   views are wired in Phase 2.
 
+- `(2026-05-04) Phase 0b ScopeFrame wire schema: JSON
+  visualize/scope, one frame per channel per monitor_spectrum tick,
+  samples capped at 2048, frame_idx synchronizes L+R.` — Resolves
+  OQ7. JSON for parity with every other visualize/* topic; cap
+  matches the largest plausible UI render-frame at 60 Hz (~16 ms ×
+  48 kHz ≈ 800 samples + headroom). Bandwidth ≤8 KB/frame ×
+  ~100 frames/s = 800 KB/s worst case, well below ZMQ inproc
+  throughput.
+
+- `(2026-05-04) Phase 0b stereo pairing happens at the dispatch
+  site, not the builder.` — Builder takes
+  `Option<(&[f32], &[f32])>`; the Goniometer / PhaseScope3D
+  dispatch arms validate frame_idx within ±1 tick + length
+  equality before passing Some. Keeps the builder pure /
+  unit-testable; the synthetic-fallback path remains identical.
+
+- `(2026-05-04) ScopeStore is Arc<Mutex<HashMap<u32, ring>>>
+  mirroring LoudnessStore — per-physical-channel, no preallocated
+  slots.` — `ChannelStore`'s triple-buffer scheme keys by slot index
+  and preallocates at start; the late-arriving per-channel scope
+  stream doesn't fit that, especially for users running
+  `--channels 10,11`. Mutex contention is irrelevant at
+  ~100 ops/s × ~8 KB.
+
+- `(2026-05-04) Phase 0b stereo only fires when both channels are
+  in the monitor set.` — No automatic monitor-channel expansion;
+  the user opts in via `--channels N,N+1`. Overlay reads
+  "synthetic — no stereo (ch Y not present)" otherwise so the
+  user knows what to do. (See OQ14 — revisit if this trips users
+  up regularly.)
+
+- `(2026-05-04) Goniometer M/S↔raw rotation: bound to plain R
+  key (Goniometer view only); preceding scroll-toggle removed.` —
+  Trackpad scroll deltas flipped the binary toggle on every
+  micro-event, which made the figure thrash between rotations.
+  Resolves OQ12. Ctrl+R global reset retained behind its
+  modifier guard.
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -850,6 +922,65 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
   All 141 ac-ui tests pass; full workspace 580 pass + 1 ignored.
   Visual validation (the "clean glowing trace" criterion in §8)
   is left to the user — needs a display.
+
+- `(2026-05-04) Phase 0a follow-ups + Phase 1 trajectory views +
+  Phase 0b real-stereo plumbing — backfilled log entry.` — The
+  log was stale between 2026-04-30 (Phase 0a scaffold) and
+  2026-05-04. This entry covers everything that landed in that
+  window:
+  - **Phase 0a follow-ups** (April 30 → May 3, ~10 commits):
+    `SpectrumEmber` view consuming real `SpectrumFrame`s through
+    the substrate; per-column FFT-bin aggregation to kill log-axis
+    moiré; mirrored-envelope polyline; faster fade; sample rate
+    pulled live from frames instead of hardcoded; post-smoothing
+    feed (so `O`/`A`/`I` keys apply); strip-chart scroll and
+    deposit-density tuning on Scope; `,` / `.` keys for live
+    intensity tuning across all ember views; black-background
+    cleanup; continuous-trace smoothing.
+  - **Phase 1 — trajectory views** (commit `899df16`, May 3):
+    `ViewMode::{Goniometer, PhaseScope3D, Takens}` on the substrate.
+    Goniometer + PhaseScope3D originally drove a 1.0 / 1.3 kHz
+    incommensurate Lissajous; replaced with a same-1 kHz carrier
+    plus 0.3 Hz phase drift on R so the figure cycles through every
+    phase state in ~3 s — the demo a phase scope is *for*. Takens
+    uses an AM-modulated 800 Hz mono carrier with a τ knob (scroll
+    sweeps 1..=4096 samples geometrically). PhaseScope3D camera:
+    plain scroll = zoom, Ctrl+scroll = az, Shift+scroll = el.
+    8 new ac-ui tests (builder connectivity, substrate-box
+    invariants, history caps, orthographic-centre projection).
+  - **Phase 1 saturation tuning** (commit `22ca57c`, May 4): the
+    initial τ_p / intensity values were tuned like Scope's
+    strip-chart but trajectory views revisit the same Lissajous
+    pixels ~50× per second — the substrate saturated to white.
+    Dropped τ_p (0.4–0.6 → 0.08–0.15) and intensity (0.0025 →
+    0.0008 / 0.00025) to restore visible fade. PhaseScope3D
+    history cap dropped 4800 → 1800.
+  - **Phase 0b — real stereo audio** (May 4): new
+    `visualize/scope` ZMQ topic in the daemon emitting raw f32
+    samples per channel per `monitor_spectrum` tick (capped 2048;
+    `frame_idx` synchronises L+R within a tick). UI plumbed via
+    `ScopeFrame` type, `ScopeStore` (`Arc<Mutex<HashMap<u32,
+    VecDeque<f32>>>>`) populated by the receiver, and a
+    `resolve_stereo_pair` dispatch helper that takes
+    `active_channel` as L and `active_channel + 1` as R. Builders
+    `build_goniometer_polyline` / `build_phase3d_polyline` gain
+    `Option<(&[f32], &[f32])>` argument; real-audio branch
+    bypasses synthetic phase advancement so cold-start fallback
+    is seamless. Overlay shows source state via `StereoStatus`
+    enum: `ch X + Y` / `synthetic — no stereo (ch Y not present)`
+    / `synthetic — daemon not streaming scope yet (ch X+Y)` /
+    `synthetic 1 kHz + 0.3 Hz phase walk`. R-key (Goniometer
+    only) toggles M/S↔raw rotation; the preceding broken-on-
+    trackpad scroll-toggle was removed. Resolves §9 OQ7 and
+    OQ12.
+  - **Tests**: ac-ui from 141 → 166 passing; ac-daemon adds
+    `monitor_spectrum_emits_scope_frames` integration test
+    asserting non-empty samples in [-1, 1], shared `frame_idx`
+    across L+R within a tick, and monotonic per-tick increment.
+  - Visual validation (the "real Lissajous tracks input phase"
+    criterion) left to the user — needs JACK + at least 2
+    channels in the monitor set: `ac-ui --view goniometer
+    --channels 0,1`.
 
 ---
 

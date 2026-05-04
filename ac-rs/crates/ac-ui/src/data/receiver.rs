@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{LoudnessStore, SweepStore, TransferStore, VirtualChannelStore};
+use super::store::{LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore};
 use super::types::{
-    CwtFrame, LoudnessReadout, SpectrumFrame, SweepDone, SweepPoint, TransferFrame, TransferPair,
+    CwtFrame, LoudnessReadout, ScopeFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
+    TransferPair,
 };
 
 pub struct ReceiverStatus {
@@ -55,6 +56,7 @@ pub fn spawn(
     virtual_channels: VirtualChannelStore,
     sweep: SweepStore,
     loudness: LoudnessStore,
+    scope: ScopeStore,
     wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -393,6 +395,27 @@ pub fn spawn(
                             }
                             Err(e) => {
                                 log::warn!("measurement/loudness parse failed: {e}");
+                            }
+                        }
+                        continue;
+                    }
+                    if type_tag.as_deref() == Some("visualize/scope") {
+                        // unified.md Phase 0b: raw audio for the
+                        // Goniometer / PhaseScope3D trajectory views.
+                        // Store keyed by physical channel id straight from
+                        // the wire (no route_slot) — the UI dispatch site
+                        // resolves slot → physical via `monitor_channels`
+                        // and looks up active+1 there.
+                        match serde_json::from_str::<ScopeFrame>(body) {
+                            Ok(sf) => {
+                                scope.write(sf);
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
+                            }
+                            Err(e) => {
+                                log::warn!("visualize/scope parse failed: {e}");
                             }
                         }
                         continue;

@@ -426,6 +426,102 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
 }
 
 #[test]
+fn monitor_spectrum_emits_scope_frames() {
+    // unified.md Phase 0b: the daemon must emit a `visualize/scope`
+    // sidecar frame per channel per tick alongside the spectrum frame.
+    // Both channels of one tick share the same `frame_idx` so the UI
+    // can pair L+R for the Goniometer view. Asserting on:
+    //   - frames arrive at all (regression catch if the emit is removed)
+    //   - non-empty f32 samples in [-1, 1]
+    //   - capped at SCOPE_MAX_SAMPLES = 2048
+    //   - both channels of a tick share frame_idx within 0 (strict)
+    //   - successive tick frame_idx values are monotonic (allowing for
+    //     channel interleaving so a single channel sees +1 / +2 jumps).
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd":         "monitor_spectrum",
+        "channels":    [0, 1],
+        "interval_ms": 100,
+        "fft_n":       8192,
+    }));
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+
+    // Collect scope frames for ~3 s — that's ~30 ticks at 100 ms, more
+    // than enough to see several L+R pairs and detect missing emits.
+    let mut frames_by_idx: std::collections::HashMap<u64, Vec<Value>> =
+        std::collections::HashMap::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        if remaining <= 0 { break; }
+        let Some((topic, payload)) = c.recv_pub(remaining.max(1)) else { break };
+        if topic != "data" { continue; }
+        if payload.get("type").and_then(Value::as_str) != Some("visualize/scope") { continue; }
+        let frame_idx = payload["frame_idx"].as_u64().expect("frame_idx u64");
+        frames_by_idx.entry(frame_idx).or_default().push(payload);
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    assert!(
+        !frames_by_idx.is_empty(),
+        "expected visualize/scope frames; got none in 3 s",
+    );
+
+    // Every observed frame must carry samples in [-1, 1] and ≤2048 long.
+    for frames in frames_by_idx.values() {
+        for f in frames {
+            let samples = f["samples"].as_array().expect("samples array");
+            assert!(!samples.is_empty(), "samples must be non-empty: {f}");
+            assert!(
+                samples.len() <= 2048,
+                "samples capped at 2048; got {} (frame: {f})",
+                samples.len(),
+            );
+            for s in samples {
+                let v = s.as_f64().expect("f64 sample");
+                assert!(
+                    (-1.000_001..=1.000_001).contains(&v),
+                    "sample out of [-1,1]: {v} (frame: {f})",
+                );
+            }
+        }
+    }
+
+    // At least one tick must contain both channel 0 AND channel 1 with
+    // the SAME frame_idx — that's the L+R pairing the UI relies on.
+    let mut paired_ticks = 0;
+    for frames in frames_by_idx.values() {
+        let mut chans: Vec<u64> = frames
+            .iter()
+            .filter_map(|f| f["channel"].as_u64())
+            .collect();
+        chans.sort();
+        chans.dedup();
+        if chans.len() >= 2 && chans.contains(&0) && chans.contains(&1) {
+            paired_ticks += 1;
+        }
+    }
+    assert!(
+        paired_ticks >= 3,
+        "expected ≥3 ticks with both ch 0 and ch 1 sharing frame_idx; got {paired_ticks}",
+    );
+
+    // Tick counter must be monotonic (per-tick increment, not per-channel).
+    let mut idxs: Vec<u64> = frames_by_idx.keys().copied().collect();
+    idxs.sort();
+    let mut prev = idxs[0];
+    for &i in &idxs[1..] {
+        assert!(
+            i >= prev,
+            "frame_idx must be monotonic: saw {prev} then {i}",
+        );
+        prev = i;
+    }
+}
+
+#[test]
 fn calibrate_prompt_reply_cycle() {
     let d = Daemon::spawn();
     let c = Client::new(&d);

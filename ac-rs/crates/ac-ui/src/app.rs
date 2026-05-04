@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, LoudnessStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
 };
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
@@ -133,6 +133,7 @@ pub struct AppInit {
     pub virtual_channels: VirtualChannelStore,
     pub sweep_store: SweepStore,
     pub loudness_store: LoudnessStore,
+    pub scope_store: ScopeStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -186,6 +187,15 @@ pub struct App {
     /// Per-channel BS.1770 / R128 meter — populated by the receiver from
     /// `measurement/loudness` frames; consumed by the overlay.
     loudness_store: Option<LoudnessStore>,
+    /// Per-channel raw audio ring populated by the receiver from
+    /// `visualize/scope` frames; consumed by the Goniometer /
+    /// PhaseScope3D dispatch arms (`unified.md` Phase 0b).
+    pub(super) scope_store: Option<ScopeStore>,
+    /// Computed each render frame at the Goniometer / PhaseScope3D
+    /// dispatch arm; read by the overlay so the caption surfaces
+    /// "ch X + Y" vs "synthetic — no stereo" vs "synthetic — daemon
+    /// not streaming scope yet" to the user.
+    pub(super) gonio_real_audio_state: crate::data::types::StereoStatus,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -479,6 +489,8 @@ impl App {
             sweep_last: SweepState::default(),
             sweep_selected_idx: None,
             loudness_store: None,
+            scope_store: None,
+            gonio_real_audio_state: crate::data::types::StereoStatus::NoAudio,
             monitor_spectrum_active: false,
             monitor_channels,
             analysis_mode: "fft".to_string(),
@@ -946,7 +958,7 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, LoudnessStore, SweepStore, TransferStore, VirtualChannelStore,
+        ChannelStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -959,6 +971,7 @@ mod loop_tests {
             virtual_channels: VirtualChannelStore::new(),
             sweep_store: SweepStore::new(),
             loudness_store: LoudnessStore::new(),
+            scope_store: ScopeStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

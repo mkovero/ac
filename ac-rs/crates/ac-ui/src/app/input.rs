@@ -235,18 +235,13 @@ impl App {
         // scroll routes to the view's own meaningful knob.
         match self.config.view_mode {
             ViewMode::Goniometer => {
-                // Synthetic source has fixed amplitude in the builder; the
-                // M/S vs LR rotation is the only Goniometer-meaningful knob
-                // exposed today. Scroll toggles it (one-tick hysteresis is
-                // overkill for a binary, so any non-zero scroll flips).
-                if scroll_y.abs() > 0.0 {
-                    self.ember_gonio_rotation_ms = !self.ember_gonio_rotation_ms;
-                    self.notify(if self.ember_gonio_rotation_ms {
-                        "gonio: M/S rotation"
-                    } else {
-                        "gonio: raw L/R"
-                    });
-                }
+                // M/S↔raw rotation lives on the `R` key (no modifier).
+                // Trackpads emit dozens of scroll deltas per physical
+                // gesture, so a binary scroll-toggle flipped on every
+                // micro-event and looked broken; the keyboard variant
+                // is one keypress = one toggle. Swallow scroll here so
+                // it doesn't fall through to spectrum-style freq/dB zoom
+                // on the Goniometer cell (which has neither axis).
                 return;
             }
             ViewMode::PhaseScope3D => {
@@ -1110,6 +1105,23 @@ impl App {
             }
             KeyCode::BracketRight => {
                 self.shift_hovered_db_floor(5.0);
+            }
+            // unified.md Phase 0b — Goniometer-only `R` toggles M/S vs raw
+            // L/R rotation. MUST come before the unguarded `KeyR` arm
+            // below so the more-specific match wins; the existing Ctrl+R
+            // reset stays distinct because of its `control_key()` guard.
+            KeyCode::KeyR
+                if !self.modifiers.control_key()
+                    && !self.modifiers.shift_key()
+                    && matches!(self.config.view_mode, ViewMode::Goniometer) =>
+            {
+                self.ember_gonio_rotation_ms = !self.ember_gonio_rotation_ms;
+                let label = if self.ember_gonio_rotation_ms {
+                    "M/S"
+                } else {
+                    "raw L/R"
+                };
+                self.notify(&format!("goniometer rotation: {label}"));
             }
             KeyCode::KeyR if self.modifiers.control_key() => {
                 self.reset_all_views();

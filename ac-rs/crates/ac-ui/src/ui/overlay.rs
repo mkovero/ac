@@ -2,7 +2,8 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, TransferPair, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, StereoStatus, TransferPair,
+    ViewMode,
 };
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
@@ -106,6 +107,34 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
+    /// Goniometer / PhaseScope3D source state — drives the status caption
+    /// so the reader sees whether the figure is real audio (and which
+    /// physical channels) or one of the synthetic-fallback variants.
+    /// Computed at the dispatch site each render frame; defaults to
+    /// `NoAudio` for non-trajectory views.
+    pub gonio_state: StereoStatus,
+}
+
+/// Format the trajectory-view status line. `view_label` is the short
+/// view name (e.g. `"goniometer"`, `"phase 3d"`) — interpolated into
+/// every variant of the message so the format stays consistent across
+/// Goniometer and PhaseScope3D.
+fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
+    match status {
+        StereoStatus::Real { l, r } => {
+            format!("{view_label} (ember) │ ch {l} + {r}")
+        }
+        StereoStatus::NoSecondChannel { l } => format!(
+            "{view_label} (ember) │ synthetic — no stereo (ch {} not present)",
+            l + 1
+        ),
+        StereoStatus::NotStreamingYet { l, r } => format!(
+            "{view_label} (ember) │ synthetic — daemon not streaming scope yet (ch {l}+{r})"
+        ),
+        StereoStatus::NoAudio => {
+            format!("{view_label} (ember) │ synthetic 1 kHz + 0.3 Hz phase walk")
+        }
+    }
 }
 
 /// Overlay payload for the per-band time-integration status.
@@ -303,12 +332,8 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 smooth_tag,
                 mic_tag,
             ),
-            ViewMode::Goniometer => {
-                "goniometer (ember) │ synthetic 1.0/1.3 kHz stereo".to_string()
-            }
-            ViewMode::PhaseScope3D => {
-                "phase 3d (ember) │ synthetic 1.0/1.3 kHz stereo".to_string()
-            }
+            ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
+            ViewMode::PhaseScope3D => format_stereo_status_line("phase 3d", input.gonio_state),
             ViewMode::Takens => {
                 "takens (ember) │ synthetic AM 800 Hz · τ knob".to_string()
             }

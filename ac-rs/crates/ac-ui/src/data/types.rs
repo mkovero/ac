@@ -277,6 +277,44 @@ impl From<&SpectrumFrame> for FrameMeta {
     }
 }
 
+/// Goniometer / PhaseScope3D source-state, computed each frame at the
+/// dispatch site and surfaced in the overlay caption. `unified.md`
+/// Phase 0b — lets the user tell at a glance whether the figure
+/// they're looking at is real audio or the synthetic fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StereoStatus {
+    /// Real wire-fed audio for both channels of a stereo pair.
+    Real { l: u32, r: u32 },
+    /// `active_channel` is in the monitor set but `+1` isn't.
+    NoSecondChannel { l: u32 },
+    /// Both channels are in the set but no recent scope frames have
+    /// arrived yet (cold start, or the daemon stopped streaming).
+    NotStreamingYet { l: u32, r: u32 },
+    /// No daemon source — synthetic mode or pre-connect.
+    NoAudio,
+}
+
+impl Default for StereoStatus {
+    fn default() -> Self {
+        Self::NoAudio
+    }
+}
+
+/// `visualize/scope` wire frame — raw f32 audio samples for one channel
+/// per `monitor_spectrum` tick (`unified.md` Phase 0b, resolves §9 OQ7).
+/// Consumed by the Goniometer / PhaseScope3D trajectory views; the
+/// `frame_idx` field synchronizes L+R channels across the same tick so
+/// the UI can pair them without relying on receive order.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeFrame {
+    pub channel: u32,
+    pub sr: u32,
+    pub frame_idx: u64,
+    pub samples: Vec<f32>,
+    #[serde(default)]
+    pub n_channels: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     Grid,

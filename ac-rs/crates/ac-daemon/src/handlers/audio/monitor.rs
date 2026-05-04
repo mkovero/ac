@@ -56,6 +56,50 @@ fn emit_loudness_frame(
     send_pub(pub_tx, "data", &frame);
 }
 
+/// Cap on `samples` per scope frame so the wire payload stays bounded
+/// regardless of sample rate / tick budget. 2048 f32 = 8 KB per channel
+/// per tick; at 192 kHz × 200 ms the per-tick capture is ~38 k samples,
+/// so we truncate to the newest 2048 (≈10 ms @ 192 kHz, plenty for
+/// trajectory rendering at 60 fps). Visible aliasing is the failure mode
+/// to watch for and would prompt a v2 decimator.
+const SCOPE_MAX_SAMPLES: usize = 2048;
+
+/// Emit a `visualize/scope` sidecar frame for one channel — raw f32
+/// samples (no voltage / SPL / mic-curve calibration applied), used by
+/// the UI's Goniometer / PhaseScope3D trajectory views (`unified.md`
+/// Phase 0b / OQ7). `frame_idx` is the per-tick monotonic counter
+/// shared across both channels of a stereo pair; the UI uses it to
+/// confirm L and R came from the same capture before pairing them.
+#[allow(clippy::too_many_arguments)]
+fn emit_scope_frame(
+    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    channel: u32,
+    n_channels: u32,
+    sr: u32,
+    samples: &[f32],
+    frame_idx: u64,
+    ts_ns: u64,
+    xruns: u32,
+) {
+    let tail = if samples.len() > SCOPE_MAX_SAMPLES {
+        &samples[samples.len() - SCOPE_MAX_SAMPLES..]
+    } else {
+        samples
+    };
+    let frame = json!({
+        "type":       "visualize/scope",
+        "cmd":        "monitor_spectrum",
+        "channel":    channel,
+        "n_channels": n_channels,
+        "sr":         sr,
+        "frame_idx":  frame_idx,
+        "samples":    tail,
+        "timestamp":  ts_ns,
+        "xruns":      xruns,
+    });
+    send_pub(pub_tx, "data", &frame);
+}
+
 /// Push captured samples to the loudness state, optionally filtering
 /// through the per-channel mic-curve FIR first (#104). When the FIR
 /// is bypassed (toggle off, or no curve loaded), pushes the raw
@@ -296,6 +340,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             .collect();
         let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
         let mut xruns_total = 0u32;
+        // Per-tick monotonic counter shared across all channels in the
+        // tick. Phase 0b: the UI's Goniometer / PhaseScope3D pair L and
+        // R scope frames by `frame_idx`, so it MUST increment exactly
+        // once per tick — not once per (tick, channel). Wraps on u64
+        // overflow (~600 years at 1 kHz tick rate; not a real concern).
+        let mut frame_idx: u64 = 0;
 
         // #93: per-channel reconnect-failure state for the multi-channel
         // path. Single-channel never touches `eng.reconnect_input()` and
@@ -412,6 +462,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
+            // Bump the per-tick counter and snapshot a tick-wide
+            // timestamp BEFORE the per-channel loop so every scope
+            // frame in this tick carries the same `frame_idx` /
+            // `tick_ts_ns`. The existing per-channel `ts_ns` calls in
+            // the loudness/spectrum branches stay as-is; only scope
+            // frames need tick-wide alignment.
+            frame_idx = frame_idx.wrapping_add(1);
+            let tick_ts_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
             let (cur_interval, cur_fft_n) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n)
@@ -520,6 +581,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     push_loudness_with_optional_fir(
                         &mut loudness[idx], &mut loudness_firs[idx],
                         mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                    );
+                    emit_scope_frame(
+                        &pub_tx, channel, n_channels, sr, &samples,
+                        frame_idx, tick_ts_ns, xruns_total,
                     );
                     let ring = &mut cwt_rings[idx];
                     ring.extend(samples.iter());
@@ -686,6 +751,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         &mut loudness[idx], &mut loudness_firs[idx],
                         mic_corr_enabled.load(Ordering::Relaxed), &samples,
                     );
+                    emit_scope_frame(
+                        &pub_tx, channel, n_channels, sr, &samples,
+                        frame_idx, tick_ts_ns, xruns_total,
+                    );
                     let ring = &mut cqt_rings[idx];
                     ring.extend(samples.iter());
                     while ring.len() > cqt_ring_cap {
@@ -760,6 +829,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     push_loudness_with_optional_fir(
                         &mut loudness[idx], &mut loudness_firs[idx],
                         mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                    );
+                    emit_scope_frame(
+                        &pub_tx, channel, n_channels, sr, &samples,
+                        frame_idx, tick_ts_ns, xruns_total,
                     );
                     let ring = &mut reass_rings[idx];
                     ring.extend(samples.iter());
@@ -857,6 +930,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 push_loudness_with_optional_fir(
                     &mut loudness[idx], &mut loudness_firs[idx],
                     mic_corr_enabled.load(Ordering::Relaxed), &new,
+                );
+                emit_scope_frame(
+                    &pub_tx, channel, n_channels, sr, &new,
+                    frame_idx, tick_ts_ns, xruns_total,
                 );
                 let ring = &mut fft_rings[idx];
                 ring.extend(new.iter());
