@@ -898,11 +898,27 @@ impl App {
                     // the next W press keeps meaning "advance".
                     return;
                 }
+                let prev_view = self.config.view_mode;
                 self.config.layout = layout;
                 self.config.view_mode = view_mode;
                 if matches!(view_mode, ViewMode::Waterfall) {
                     for init in &mut self.waterfall_inited {
                         *init = false;
+                    }
+                }
+                // Apply the per-view default dB window when the view
+                // family actually changes (line-plot ↔ colormap), so
+                // cycling W lands on a sane gain instead of the user
+                // re-tweaking every time. Keep the cell's current
+                // window when staying within the same family — they
+                // share the same default and the user may have
+                // adjusted intentionally.
+                let prev_default = crate::theme::default_db_window_for_view(prev_view);
+                let next_default = crate::theme::default_db_window_for_view(view_mode);
+                if prev_default != next_default {
+                    for view in self.cell_views.iter_mut() {
+                        view.db_min = next_default.0;
+                        view.db_max = next_default.1;
                     }
                 }
                 self.reset_peak_holds();
