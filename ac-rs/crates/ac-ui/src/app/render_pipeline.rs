@@ -677,6 +677,17 @@ impl App {
                             false,
                         )
                     };
+                    // When `frozen` (Enter key), suppress new-row uploads so
+                    // the waterfall stops scrolling. Cached frames in
+                    // `last_frames` keep their `new_row = Some(..)` from
+                    // when they were first read, so without this gate the
+                    // GPU would re-push the same row every redraw — making
+                    // the flow appear to continue while the data is frozen.
+                    let new_row = if self.config.frozen {
+                        None
+                    } else {
+                        frame.new_row.as_deref().map(|v| v.as_slice())
+                    };
                     waterfall_uploads.push(WaterfallCellUpload {
                         channel: cell.channel,
                         viewport: [cell.x, cell.y, cell.w, cell.h],
@@ -689,7 +700,7 @@ impl App {
                         freq_last,
                         log_spaced,
                         rows_visible: view.rows_visible_f,
-                        new_row: frame.new_row.as_deref().map(|v| v.as_slice()),
+                        new_row,
                     });
                 }
                 ViewMode::Scope | ViewMode::SpectrumEmber => {

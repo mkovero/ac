@@ -235,6 +235,18 @@ impl WaterfallRenderer {
         self.active_palette
     }
 
+    /// Wipe the entire history texture and reset every channel's
+    /// write-cursor back to row 0. Called when the analysis source
+    /// changes (FFT ↔ CWT ↔ CQT ↔ reassigned) so the user doesn't
+    /// see stale rows from the previous mode bleeding into the new
+    /// view. Cheap: one texture write per layer, not in the hot path.
+    pub fn clear_history(&mut self, queue: &wgpu::Queue) {
+        clear_history(queue, &self.history_tex, self.history_bins, self.history_layers);
+        for slot in self.write_row.iter_mut() {
+            *slot = 0;
+        }
+    }
+
     pub fn upload(
         &mut self,
         device: &wgpu::Device,

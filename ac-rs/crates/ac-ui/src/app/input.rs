@@ -905,6 +905,16 @@ impl App {
                     for init in &mut self.waterfall_inited {
                         *init = false;
                     }
+                    // Wipe the history texture so old rows from the
+                    // previous analysis source (e.g. FFT) don't bleed
+                    // into the new view (e.g. CWT). Each W press into
+                    // a Waterfall sub-mode starts with a clean slate
+                    // tied to the measurement at hand.
+                    if let (Some(ctx), Some(wf)) =
+                        (self.render_ctx.as_ref(), self.waterfall.as_mut())
+                    {
+                        wf.clear_history(&ctx.queue);
+                    }
                 }
                 // Apply the per-view default dB window when the view
                 // family actually changes (line-plot ↔ colormap), so
