@@ -931,13 +931,21 @@ impl App {
             KeyCode::Minus | KeyCode::NumpadSubtract => {
                 self.adjust_hovered_db_span(20.0);
             }
-            // Ember-substrate intensity tuning. Geometric step (×1.25) so a
-            // few presses span the order of magnitude that separates "too
-            // dim to see" from "saturated white." Active in every ember
-            // view (Scope, SpectrumEmber, Goniometer, PhaseScope3D, Takens);
-            // ignored in Spectrum/Waterfall where intensity isn't a thing.
-            KeyCode::Comma => {
-                if self.is_ember_view() {
+            // Ember-substrate live tuning. Geometric ×1.25 step so a few
+            // presses span the order of magnitude that separates extremes.
+            // Bare , / .  → deposit intensity (brightness).
+            // Shift + , / .  → τ_p (fade rate; lower = snappier trail).
+            // Active in every ember view (Scope, SpectrumEmber, Goniometer,
+            // PhaseScope3D, Takens); ignored elsewhere.
+            KeyCode::Comma if self.is_ember_view() => {
+                if self.modifiers.shift_key() {
+                    self.ember_tau_p_scale =
+                        (self.ember_tau_p_scale / 1.25).clamp(0.1, 10.0);
+                    self.notify(&format!(
+                        "ember τ_p ×{:.2}",
+                        self.ember_tau_p_scale
+                    ));
+                } else {
                     self.ember_intensity_scale =
                         (self.ember_intensity_scale / 1.25).clamp(0.05, 20.0);
                     self.notify(&format!(
@@ -946,8 +954,15 @@ impl App {
                     ));
                 }
             }
-            KeyCode::Period => {
-                if self.is_ember_view() {
+            KeyCode::Period if self.is_ember_view() => {
+                if self.modifiers.shift_key() {
+                    self.ember_tau_p_scale =
+                        (self.ember_tau_p_scale * 1.25).clamp(0.1, 10.0);
+                    self.notify(&format!(
+                        "ember τ_p ×{:.2}",
+                        self.ember_tau_p_scale
+                    ));
+                } else {
                     self.ember_intensity_scale =
                         (self.ember_intensity_scale * 1.25).clamp(0.05, 20.0);
                     self.notify(&format!(

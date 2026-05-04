@@ -323,6 +323,10 @@ pub struct App {
     /// (×1.25 per press) so the user can tune deposit brightness live
     /// without rebuilding. Default 1.0 leaves per-view tuning intact.
     pub(super) ember_intensity_scale: f32,
+    /// Global τ_p multiplier — ember fade rate. `Shift+,` / `Shift+.`
+    /// adjust geometrically. Lower = faster fade (more transient feel);
+    /// higher = longer trails (more diff-friendly). Default 1.0.
+    pub(super) ember_tau_p_scale: f32,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -537,6 +541,7 @@ impl App {
             ember_takens_tau_samples: 24,
             ember_takens_history: VecDeque::new(),
             ember_intensity_scale: 1.0,
+            ember_tau_p_scale: 1.0,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,

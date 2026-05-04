@@ -1192,7 +1192,7 @@ impl App {
                         self.ember_scope_y_gain,
                         dt,
                     );
-                    ember.set_tau_p(0.6);
+                    ember.set_tau_p(0.6 * self.ember_tau_p_scale);
                     ember.set_intensity(0.002 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.5);
                     ember.advance(
@@ -1221,7 +1221,7 @@ impl App {
                     // polyline doubles the per-frame deposit count vs a
                     // single trace, so intensity already nets out about
                     // right at 0.003.
-                    ember.set_tau_p(1.2);
+                    ember.set_tau_p(1.2 * self.ember_tau_p_scale);
                     ember.set_intensity(0.003 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
@@ -1260,7 +1260,7 @@ impl App {
                     // an order of magnitude denser than Scope's strip-
                     // chart deposit. Short τ_p + low intensity keeps the
                     // trail visible without saturating to white.
-                    ember.set_tau_p(0.12);
+                    ember.set_tau_p(0.12 * self.ember_tau_p_scale);
                     ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
@@ -1305,7 +1305,7 @@ impl App {
                     // and the tube curve revisits the same screen pixels
                     // many times — needs an order-of-magnitude lower
                     // intensity than the 2D views.
-                    ember.set_tau_p(0.08);
+                    ember.set_tau_p(0.08 * self.ember_tau_p_scale);
                     ember.set_intensity(0.00025 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
@@ -1335,7 +1335,7 @@ impl App {
                     // tuning rationale as Goniometer; slightly longer
                     // τ_p so the AM envelope's pulse beat (3 Hz) leaves
                     // a visible afterglow between cycles.
-                    ember.set_tau_p(0.15);
+                    ember.set_tau_p(0.15 * self.ember_tau_p_scale);
                     ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
