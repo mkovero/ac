@@ -375,128 +375,37 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
         }
 
-        // Waterfall colorbar: vertical gradient sampled from the same
-        // inferno LUT the GPU uses, with dB tick labels every 20 dB. Anchored
-        // under the gain line so the reader sees "color X..Y dB" above and
-        // the actual scale below.
-        if matches!(input.config.view_mode, ViewMode::Waterfall) {
-            // Anchor the colorbar below the entire top-right status stack so
-            // it never overlaps the gain / tier / loudness lines above it.
-            let stack_bottom = screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0);
-            let bar_top = stack_bottom + 10.0;
-            let bar_h = (screen.bottom() - bar_top - 40.0).clamp(140.0, 260.0);
-            let bar_w = 16.0_f32;
-            let label_col_w = 44.0_f32;
-            let bar_right = screen.right() - 8.0 - label_col_w;
-            let bar_left = bar_right - bar_w;
-            let strips = 48_usize;
-            // COLORMAP_LUT is laid out as `[palette 0 row, palette 1 row, …]`,
-            // each row 256 RGBA8 texels. Offset into the active row so the
-            // legend follows Shift+Scroll palette cycling.
-            let palette_off = (input.active_palette as usize) * 256 * 4;
-            for i in 0..strips {
-                // Top strip = max dB (hottest) so the bar visually matches
-                // the "loud up, quiet down" mental model.
-                let t = 1.0 - (i as f32 + 0.5) / strips as f32;
-                let lut_idx = ((t * 255.0).round() as usize).min(255);
-                let off = palette_off + lut_idx * 4;
-                let color = Color32::from_rgb(
-                    COLORMAP_LUT[off],
-                    COLORMAP_LUT[off + 1],
-                    COLORMAP_LUT[off + 2],
-                );
-                let y0 = bar_top + (i as f32) * bar_h / strips as f32;
-                let y1 = bar_top + (i as f32 + 1.0) * bar_h / strips as f32;
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(bar_left, y0),
-                        Pos2::new(bar_right, y1),
-                    ),
-                    CornerRadius::ZERO,
-                    color,
-                );
-            }
-            painter.rect_stroke(
-                Rect::from_min_max(
-                    Pos2::new(bar_left, bar_top),
-                    Pos2::new(bar_right, bar_top + bar_h),
-                ),
-                CornerRadius::ZERO,
-                Stroke::new(1.0, text_color),
-                StrokeKind::Inside,
-            );
-            // Labels: db_max at top, db_min at bottom, ~3 ticks between.
-            let tick_dbs = [
-                view.db_max,
-                view.db_min + (view.db_max - view.db_min) * 0.75,
-                view.db_min + (view.db_max - view.db_min) * 0.50,
-                view.db_min + (view.db_max - view.db_min) * 0.25,
-                view.db_min,
-            ];
-            // SPL-calibrated colorbar shows positive dB SPL values; the
-            // signed dBFS format would emit ugly `+30` etc. Switch format
-            // based on the calibration state of the active frame's channel.
-            let cb_spl = frame.meta.spl_offset_db;
-            for (i, db) in tick_dbs.iter().enumerate() {
-                let t = i as f32 / (tick_dbs.len() as f32 - 1.0);
-                let y = bar_top + t * bar_h;
-                let label = match cb_spl {
-                    Some(off) => format!("{:.0}", db + off),
-                    None      => format!("{:+.0}", db),
-                };
-                painter.text(
-                    Pos2::new(bar_right + 4.0, y),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::monospace(theme::GRID_LABEL_PX),
-                    text_color,
-                );
-            }
-        }
+        // Waterfall colorbar removed: the gradient + dB tick labels
+        // pinned to the right edge took up real estate without earning
+        // it — the colormap range is already stated compactly in the
+        // top-right status line ("color X..Y dB"), and per-view dB-window
+        // defaults (theme::default_db_window_for_view) plus +/- and
+        // [/] keys cover any retuning needed. Removing it gives the
+        // waterfall trace the full pane width.
 
-        // Footer readout. Only meaningful in the Spectrum view, where
-        // the y-axis is dB and "broadband peak / floor / span / dBu"
-        // describes what's actually drawn. On Waterfall (FFT / CWT /
-        // CQT / reassigned) the y-axis is frequency and the magnitude
-        // lives on the colormap, so a one-line magnitude legend is
-        // misleading rather than helpful — drop it. Cursor readout
-        // still wins when hovering a cell of this channel.
-        let hover_for_this_channel = input
-            .hover
-            .as_ref()
-            .filter(|h| h.channel == display_ch);
-        let bottom_left = if let Some(hover) = hover_for_this_channel {
-            if let crate::ui::overlay::HoverReadout::Db(v) = hover.readout {
-                Some(super::fmt::cursor_readout(
+        // Footer readout: ONLY the cursor's value when hovering this
+        // channel. No broadband fallback — toggling between cursor and
+        // broadband stats every time the mouse crosses the cell edge
+        // was confusing, and the broadband peak/floor/span info doesn't
+        // describe the cursor's position anyway. Suppressed in Scope /
+        // SpectrumEmber where the substrate owns the cell.
+        if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
+            if let Some(hover) = input.hover.as_ref().filter(|h| h.channel == display_ch) {
+                let text = super::fmt::cursor_readout(
                     hover.freq_hz,
-                    v,
+                    &hover.readout,
                     &frame.meta.peaks,
                     frame.meta.dbu_offset_db,
                     frame.meta.spl_offset_db,
-                ))
-            } else {
-                None
+                );
+                painter.text(
+                    Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                    Align2::LEFT_BOTTOM,
+                    text,
+                    FontId::monospace(theme::READOUT_PX),
+                    text_color,
+                );
             }
-        } else if matches!(input.config.view_mode, ViewMode::Spectrum) {
-            super::fmt::broadband_stats(&frame.spectrum, &frame.freqs).map(|stats| {
-                super::fmt::spectrum_readout(
-                    &stats,
-                    frame.meta.in_dbu,
-                    frame.meta.spl_offset_db,
-                    frame.meta.mic_correction.as_deref(),
-                )
-            })
-        } else {
-            None
-        };
-        if let Some(text) = bottom_left {
-            painter.text(
-                Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
-                Align2::LEFT_BOTTOM,
-                text,
-                FontId::monospace(theme::READOUT_PX),
-                text_color,
-            );
         }
     }
 
@@ -585,6 +494,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     }
 
     if let Some(hover) = input.hover.as_ref() {
+        // Crosshair only — every cursor value (dBFS / dBu / time-ago /
+        // THD / gain) lands in the bottom-left footer via cursor_readout
+        // so labels never obstruct the trace or compete with peak-hold /
+        // fundamental annotations.
         let crosshair = Stroke::new(
             1.0,
             Color32::from_rgba_unmultiplied(255, 255, 255, (0.55 * 255.0) as u8),
@@ -603,34 +516,6 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ],
             crosshair,
         );
-        // For dB readouts (spectrum / spectrum-ember) the cursor values
-        // are reported in the bottom-left footer instead — keeps the
-        // trace unobstructed and lets the dBu/dBV trio breathe. Other
-        // readouts (THD%, gain dB, time-ago in waterfall) still pin
-        // the label next to the cursor since their footer carries
-        // unrelated stats.
-        if !matches!(hover.readout, super::overlay::HoverReadout::Db(_)) {
-            let hover_meta = input
-                .frames
-                .get(hover.channel)
-                .and_then(|f| f.as_ref())
-                .map(|f| (f.meta.spl_offset_db, f.meta.dbu_offset_db));
-            let (hover_spl_off, hover_dbu_off) = hover_meta.unwrap_or((None, None));
-            let label = super::fmt::hover_label(
-                hover.channel, hover.freq_hz, &hover.readout, hover_spl_off, hover_dbu_off,
-            );
-            let anchor = Pos2::new(
-                (hover.cursor.x + 8.0).min(hover.rect.right() - 4.0),
-                (hover.cursor.y - 8.0).max(hover.rect.top() + 4.0),
-            );
-            painter.text(
-                anchor,
-                Align2::LEFT_BOTTOM,
-                label,
-                FontId::monospace(theme::READOUT_PX),
-                text_color,
-            );
-        }
     }
 
     if let Some(snap) = input.timing {

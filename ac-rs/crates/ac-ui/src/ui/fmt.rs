@@ -208,63 +208,85 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
     parts.join("   ")
 }
 
-/// Cursor-driven footer readout for the spectrum / waterfall views. Used
-/// instead of plastering a label next to the crosshair (which obstructs
-/// the trace and collides with other annotations). Replaces the
-/// broadband stats when the cursor is over a cell.
+/// Cursor-driven footer readout for the spectrum / waterfall / sweep
+/// views. Replaces the broadband stats line whenever the cursor is
+/// over a cell — keeps the trace unobstructed and gives the dBu /
+/// time-ago / THD numbers room to breathe.
 ///
-/// `cursor_db_at_bin` is the dBFS the cursor is currently over (raw bin
-/// magnitude). `peaks` is the daemon's parabolic-interpolated peak list
-/// — when the cursor sits within `snap_tol_hz` of a peak frequency, the
-/// readout snaps to that peak's scallop-corrected dBFS and the line is
-/// suffixed with `▲` so the user can tell measured-vs-interpolated.
-///
-/// SPL takes precedence over voltage cal (acoustic channels render as
-/// dB SPL); voltage cal renders dBFS + dBu (dBV is a fixed −2.2 dB
-/// offset from dBu, redundant in the footer); uncal'd renders dBFS only.
+/// Variant handling:
+/// - `Db(v)`: cursor is on a dB-magnitude axis (Spectrum) or sampling a
+///   colormap pixel (Waterfall). Snap to the daemon's parabolic-
+///   interpolated peak list when within ~1 % of a known peak freq, else
+///   show the raw bin value. Voltage cal adds `dBu`; SPL cal swaps the
+///   line to `dB SPL`. `▲` flags peak-snapped (= scallop-corrected) values.
+/// - `TimeAgo(s)`: Waterfall / CWT y-axis (cursor's Y is time, not dB).
+///   Show `<freq>  t-<elapsed>`. No magnitude — would need a texture
+///   readback we don't currently do.
+/// - `Thd(v)` / `Gain(v)`: Sweep cursor panels. Show their value with
+///   the cursor freq.
 pub fn cursor_readout(
     cursor_freq_hz:   f32,
-    cursor_db_at_bin: f32,
+    readout:          &crate::ui::overlay::HoverReadout,
     peaks:            &[[f32; 2]],
     dbu_offset_db:    Option<f32>,
     spl_offset_db:    Option<f32>,
 ) -> String {
-    // Snap window: 1% of cursor freq, floor at 2 Hz so low-freq peaks
-    // (where 1% is sub-Hz) still snap reliably.
-    let snap_tol_hz = (cursor_freq_hz * 0.01).max(2.0);
-    let mut best: Option<(f32, f32)> = None;
-    let mut best_dist = f32::INFINITY;
-    for p in peaks {
-        let d = (p[0] - cursor_freq_hz).abs();
-        if d < best_dist && d <= snap_tol_hz {
-            best_dist = d;
-            best = Some((p[0], p[1]));
-        }
-    }
-    let (freq, db, snapped) = match best {
-        Some((f, d)) => (f, d, true),
-        None         => (cursor_freq_hz, cursor_db_at_bin, false),
-    };
-    let snap_tag = if snapped { "  ▲" } else { "" };
+    use crate::ui::overlay::HoverReadout;
+    match *readout {
+        HoverReadout::Db(cursor_db_at_bin) => {
+            // Snap window: 1% of cursor freq, floor at 2 Hz so low-freq
+            // peaks (where 1% is sub-Hz) still snap reliably.
+            let snap_tol_hz = (cursor_freq_hz * 0.01).max(2.0);
+            let mut best: Option<(f32, f32)> = None;
+            let mut best_dist = f32::INFINITY;
+            for p in peaks {
+                let d = (p[0] - cursor_freq_hz).abs();
+                if d < best_dist && d <= snap_tol_hz {
+                    best_dist = d;
+                    best = Some((p[0], p[1]));
+                }
+            }
+            let (freq, db, snapped) = match best {
+                Some((f, d)) => (f, d, true),
+                None         => (cursor_freq_hz, cursor_db_at_bin, false),
+            };
+            let snap_tag = if snapped { "  ▲" } else { "" };
 
-    if let Some(off) = spl_offset_db {
-        format!(
-            "cursor {} {:>6.1} dB SPL{}",
-            format_hz(freq),
-            db + off,
-            snap_tag,
-        )
-    } else if let Some(off) = dbu_offset_db {
-        let dbu = db + off;
-        format!(
-            "cursor {} {:+6.2} dBFS  {:+6.2} dBu{}",
-            format_hz(freq), db, dbu, snap_tag,
-        )
-    } else {
-        format!(
-            "cursor {} {:+6.2} dBFS{}",
-            format_hz(freq), db, snap_tag,
-        )
+            if let Some(off) = spl_offset_db {
+                format!(
+                    "cursor {} {:>6.1} dB SPL{}",
+                    format_hz(freq),
+                    db + off,
+                    snap_tag,
+                )
+            } else if let Some(off) = dbu_offset_db {
+                let dbu = db + off;
+                format!(
+                    "cursor {} {:+6.2} dBFS  {:+6.2} dBu{}",
+                    format_hz(freq), db, dbu, snap_tag,
+                )
+            } else {
+                format!(
+                    "cursor {} {:+6.2} dBFS{}",
+                    format_hz(freq), db, snap_tag,
+                )
+            }
+        }
+        HoverReadout::TimeAgo(s) => format!(
+            "cursor {}  t-{}",
+            format_hz(cursor_freq_hz),
+            format_time_ago(s),
+        ),
+        HoverReadout::Thd(v) => format!(
+            "cursor {}  THD {:.4}%",
+            format_hz(cursor_freq_hz),
+            v,
+        ),
+        HoverReadout::Gain(v) => format!(
+            "cursor {}  {:+.2} dB",
+            format_hz(cursor_freq_hz),
+            v,
+        ),
     }
 }
 
@@ -282,61 +304,6 @@ pub fn cursor_readout(
 ///   is the authoritative reading for clean tones.
 /// - neither — bare dBFS as before.
 ///
-/// Other variants (THD%, gain dB, time-ago) ignore both offsets since
-/// they're not single-sample dBFS readings.
-pub fn hover_label(
-    channel:       usize,
-    freq_hz:       f32,
-    readout:       &HoverReadout,
-    spl_offset_db: Option<f32>,
-    dbu_offset_db: Option<f32>,
-) -> String {
-    match readout {
-        HoverReadout::Db(v) => {
-            if let Some(off) = spl_offset_db {
-                format!(
-                    "CH{} {} {:>6.1} dB SPL",
-                    channel,
-                    format_hz(freq_hz),
-                    v + off,
-                )
-            } else if let Some(off) = dbu_offset_db {
-                let dbu = v + off;
-                let dbv = ac_core::shared::conversions::dbu_to_dbv(dbu as f64) as f32;
-                format!(
-                    "CH{} {} {:+6.1} dBFS  {:+6.2} dBu  {:+6.2} dBV",
-                    channel,
-                    format_hz(freq_hz),
-                    v, dbu, dbv,
-                )
-            } else {
-                format!(
-                    "CH{} {} {:+6.1} dB",
-                    channel,
-                    format_hz(freq_hz),
-                    v,
-                )
-            }
-        }
-        HoverReadout::Thd(v) => format!(
-            "{} THD {:.4}%",
-            format_hz(freq_hz),
-            v,
-        ),
-        HoverReadout::Gain(v) => format!(
-            "{} {:+.2} dB",
-            format_hz(freq_hz),
-            v,
-        ),
-        HoverReadout::TimeAgo(s) => format!(
-            "CH{} {} t-{}",
-            channel,
-            format_hz(freq_hz),
-            format_time_ago(*s),
-        ),
-    }
-}
-
 /// Format a non-negative time-ago in seconds as a short human label: `12ms`,
 /// `340ms`, `1.23s`, `17.5s`. Anchors the waterfall/CWT hover readout.
 pub fn format_time_ago(s: f32) -> String {
@@ -602,46 +569,12 @@ mod tests {
     }
 
     #[test]
-    fn hover_label_uses_dbspl_when_calibrated() {
-        let no_cal = hover_label(0, 1000.0, &HoverReadout::Db(-12.5), None, None);
-        assert!(no_cal.contains("-12.5 dB"));
-        assert!(!no_cal.contains("SPL"));
-        assert!(!no_cal.contains("dBu"));
-
-        let cal = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0), None);
-        assert!(cal.contains("94.0 dB SPL"), "want SPL: {cal}");
-    }
-
-    #[test]
-    fn hover_label_non_db_variants_ignore_spl_offset() {
-        let thd = hover_label(0, 1000.0, &HoverReadout::Thd(0.5), Some(126.0), None);
-        assert!(thd.contains("THD 0.5000%"));
-        assert!(!thd.contains("SPL"));
-
-        let time = hover_label(0, 1000.0, &HoverReadout::TimeAgo(1.5), Some(126.0), None);
-        assert!(time.contains("t-"));
-        assert!(!time.contains("SPL"));
-    }
-
-    #[test]
-    fn hover_label_voltage_cal_shows_dbfs_dbu_dbv() {
-        // FF400-rig cal example: vrms_at_0dbfs_in = 3.5331 V, dbu_ref = sqrt(0.6).
-        // dbu_offset = 20·log10(3.5331 / (sqrt(2) · 0.7746)) ≈ 10.17 dB.
-        // For a -10 dBFS bin (peak-ref), expected dBu = ~+0.17.
-        let s = hover_label(0, 1000.0, &HoverReadout::Db(-10.0), None, Some(10.17));
-        assert!(s.contains("-10.0 dBFS"), "want dBFS: {s}");
-        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
-            "want dBu near +0.17: {s}");
-        assert!(s.contains("dBV"), "want dBV: {s}");
-    }
-
-    #[test]
     fn cursor_readout_voltage_cal_shows_dbfs_dbu_only() {
         // FF400-rig cal example: dbu_offset ≈ 10.17 dB. Cursor at a
         // -10 dBFS bin → ~+0.17 dBu. dBV is intentionally NOT in the
         // cursor footer — it's a fixed -2.2 dB constant offset from
         // dBu, so showing it crowds the readout with redundant info.
-        let s = cursor_readout(1000.0, -10.0, &[], Some(10.17), None);
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), &[], Some(10.17), None);
         assert!(s.contains("cursor"), "expected cursor prefix: {s}");
         assert!(s.contains("-10.00 dBFS"), "want dBFS: {s}");
         assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
@@ -657,14 +590,14 @@ mod tests {
         // tolerance, so the readout should report 1000 Hz / -10.05 dBFS
         // and flag with ▲.
         let peaks = [[1000.0_f32, -10.05]];
-        let s = cursor_readout(999.0, -11.20, &peaks, None, None);
+        let s = cursor_readout(999.0, &HoverReadout::Db(-11.20), &peaks, None, None);
         assert!(s.contains("-10.05 dBFS"), "want corrected dBFS: {s}");
         assert!(s.contains("▲"), "expected snap marker: {s}");
     }
 
     #[test]
     fn cursor_readout_uncalibrated_shows_dbfs_only() {
-        let s = cursor_readout(1000.0, -10.0, &[], None, None);
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), &[], None, None);
         assert!(s.contains("-10.00 dBFS"));
         assert!(!s.contains("dBu"));
         assert!(!s.contains("dBV"));
@@ -672,10 +605,21 @@ mod tests {
     }
 
     #[test]
-    fn hover_label_spl_offset_overrides_dbu_offset() {
-        // Pistonphone-cal'd channels are acoustic; rendering dBu/dBV would
+    fn cursor_readout_waterfall_time_ago_renders_freq_and_age() {
+        // Waterfall / CWT cursors carry seconds-ago instead of dB. Footer
+        // should show freq + age, no magnitude.
+        let s = cursor_readout(1000.0, &HoverReadout::TimeAgo(1.234), &[], None, None);
+        assert!(s.contains("kHz"), "want kHz unit: {s}");
+        assert!(s.contains("t-"), "want time-ago marker: {s}");
+        assert!(!s.contains("dBFS"));
+        assert!(!s.contains("dBu"));
+    }
+
+    #[test]
+    fn cursor_readout_spl_offset_overrides_dbu_offset() {
+        // Pistonphone-cal'd channels are acoustic; rendering dBu would
         // be misleading. SPL takes precedence when both offsets are present.
-        let s = hover_label(0, 1000.0, &HoverReadout::Db(-32.0), Some(126.0), Some(10.17));
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-32.0), &[], Some(10.17), Some(126.0));
         assert!(s.contains("dB SPL"), "want SPL: {s}");
         assert!(!s.contains("dBu"), "should not show dBu when SPL active: {s}");
     }
@@ -901,31 +845,6 @@ mod tests {
         let s = sweep_readout(&pt);
         assert!(s.contains("THD 0.0012%"));
         assert!(s.contains("THD+N 0.0046%"));
-    }
-
-    // ── hover_label ───────────────────────────────────────────────────
-
-    #[test]
-    fn hover_db() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Db(-12.3), None, None);
-        assert!(s.contains("CH0"));
-        assert!(s.contains("kHz"));
-        assert!(s.contains("-12.3 dB"));
-    }
-
-    #[test]
-    fn hover_thd() {
-        let s = hover_label(0, 1000.0, &HoverReadout::Thd(0.0034), None, None);
-        assert!(s.contains("THD 0.0034%"));
-        assert!(!s.contains("CH")); // Thd variant has no channel prefix
-    }
-
-    #[test]
-    fn hover_gain() {
-        let s = hover_label(0, 5000.0, &HoverReadout::Gain(-1.23), None, None);
-        assert!(s.contains("-1.23 dB"));
-        assert!(s.contains("kHz"));
-        assert!(!s.contains("CH")); // Gain variant has no channel prefix
     }
 
     // ── format_hz ─────────────────────────────────────────────────────

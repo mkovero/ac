@@ -83,10 +83,69 @@ fn default_config() -> DisplayConfig {
     DisplayConfig::default()
 }
 
-// ── Spectrum readout ──────────────────────────────────────────────
+// ── Cursor readout (footer) ───────────────────────────────────────
+//
+// Pre-2026-05-04 the bottom-left footer showed broadband peak/floor/
+// span/dBu while the cursor was idle. That toggled to a cursor-tracked
+// readout on hover and back when the cursor left, which the user found
+// confusing. Now: the footer renders ONLY when hovering, with values
+// that follow the cursor.
+//
+// These tests verify the cal-aware readout still paints correctly,
+// just in the new hover-driven form.
+
+fn hover_at(channel: usize, freq_hz: f32, db: f32) -> HoverInfo {
+    HoverInfo {
+        channel,
+        rect: Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)),
+        cursor: Pos2::new(640.0, 360.0),
+        freq_hz,
+        readout: HoverReadout::Db(db),
+    }
+}
 
 #[test]
-fn overlay_shows_spectrum_readout() {
+fn overlay_shows_cursor_readout_when_hovering() {
+    let config = default_config();
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView::default()];
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: Some(hover_at(0, 1000.0, -12.0)),
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: None,
+    };
+
+    let texts = run_overlay(input);
+    let has_cursor = texts.iter().any(|t| t.contains("cursor") && t.contains("-12.0"));
+    assert!(has_cursor, "cursor readout not found in: {texts:?}");
+    let has_thd = texts.iter().any(|t| t.contains("THD"));
+    assert!(!has_thd, "THD must not appear in cursor readout: {texts:?}");
+}
+
+#[test]
+fn overlay_hides_footer_when_not_hovering() {
+    // Toggling broadband ↔ cursor every time the mouse crossed the cell
+    // edge was the bug we fixed — assert the footer stays empty so we
+    // don't regress.
     let config = default_config();
     let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
     let frames = [Some(frame)];
@@ -116,21 +175,17 @@ fn overlay_shows_spectrum_readout() {
     };
 
     let texts = run_overlay(input);
-    let has_readout = texts.iter().any(|t| {
-        t.contains("peak") && t.contains("-3.0 dBFS") && t.contains("floor") && t.contains("span")
-    });
-    assert!(has_readout, "broadband readout not found in: {texts:?}");
-    // THD must NOT appear in the monitor readout — it's meaningless on
-    // broadband signals.
-    let has_thd = texts.iter().any(|t| t.contains("THD"));
-    assert!(!has_thd, "THD must not appear in monitor readout: {texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("peak")),
+        "broadband readout must not paint without hover: {texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("cursor")),
+        "cursor readout must not paint without hover: {texts:?}");
 }
 
 #[test]
 fn overlay_shows_dbspl_when_spl_calibrated() {
-    // Pistonphone-cal'd channel: peak at -3 dBFS with a +97 offset must
-    // read 94.0 dB SPL in the bottom-left readout. The dBFS suffix must
-    // not appear at all in this case.
+    // Pistonphone-cal'd channel: cursor at -3 dBFS with a +97 offset
+    // must read 94.0 dB SPL in the cursor footer. The dBFS suffix
+    // must not appear when SPL-cal'd.
     let config = default_config();
     let mut frame = test_frame(1000.0, -3.0, 0.003, 0.005);
     frame.meta.spl_offset_db = Some(97.0);
@@ -146,7 +201,7 @@ fn overlay_shows_dbspl_when_spl_calibrated() {
         notification: None,
         timing: None,
         gpu_supported: true,
-        hover: None,
+        hover: Some(hover_at(0, 1000.0, -3.0)),
         show_help: false,
         monitor_params: None,
         n_real: 1,
@@ -169,9 +224,11 @@ fn overlay_shows_dbspl_when_spl_calibrated() {
 
 #[test]
 fn overlay_shows_dbu_when_calibrated() {
+    // Voltage-cal'd channel: cursor at -10 dBFS with a dbu_offset of
+    // +10 dB → +0.0 dBu in the footer.
     let config = default_config();
     let mut frame = test_frame(1000.0, -3.0, 0.003, 0.005);
-    frame.meta.in_dbu = Some(4.0);
+    frame.meta.dbu_offset_db = Some(10.0);
     let frames = [Some(frame)];
     let cell_views = [CellView::default()];
 
@@ -184,7 +241,7 @@ fn overlay_shows_dbu_when_calibrated() {
         notification: None,
         timing: None,
         gpu_supported: true,
-        hover: None,
+        hover: Some(hover_at(0, 1000.0, -10.0)),
         show_help: false,
         monitor_params: None,
         n_real: 1,
@@ -199,7 +256,7 @@ fn overlay_shows_dbu_when_calibrated() {
     };
 
     let texts = run_overlay(input);
-    let has_dbu = texts.iter().any(|t| t.contains("+4.0 dBu"));
+    let has_dbu = texts.iter().any(|t| t.contains("+0.00 dBu"));
     assert!(has_dbu, "dBu readout not found in: {texts:?}");
 }
 
