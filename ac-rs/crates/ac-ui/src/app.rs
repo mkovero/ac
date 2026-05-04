@@ -196,15 +196,6 @@ pub struct App {
     /// "synthetic — no stereo" vs "synthetic — daemon not streaming
     /// scope yet" to the user.
     pub(super) gonio_real_audio_state: crate::data::types::StereoStatus,
-    /// Mono counterpart of `gonio_real_audio_state` — set at the
-    /// Takens dispatch arm. The Takens view consumes a single channel
-    /// (`active_channel`) so it doesn't need the +1 pairing logic.
-    pub(super) takens_real_audio_state: crate::data::types::MonoStatus,
-    /// Running peak of the Takens real-audio source for auto-gain.
-    /// Same role as `ember_stereo_peak` for Goniometer; tracked
-    /// separately so switching views doesn't interfere with each
-    /// other's auto-gain state.
-    pub(super) ember_takens_peak: f32,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -311,14 +302,6 @@ pub struct App {
     /// (L, R). Default M/S — matches the analog-meter convention where
     /// in-phase mono draws a vertical line, out-of-phase a horizontal one.
     pub(super) ember_gonio_rotation_ms: bool,
-    /// Takens delay-embedding state. Synthetic AM-modulated 800 Hz carrier
-    /// (3 Hz envelope) so the orbit shape pulses visibly under any τ.
-    pub(super) ember_takens_carrier_phase: f32,
-    pub(super) ember_takens_am_phase: f32,
-    /// τ in samples — user-knob via mouse scroll. Clamped 1..=4096.
-    pub(super) ember_takens_tau_samples: usize,
-    /// Mono delay-line. Front = newest. Capacity grows with τ + frame size.
-    pub(super) ember_takens_history: VecDeque<f32>,
     /// Global intensity multiplier applied to *every* ember view's base
     /// intensity at dispatch time. `,` / `.` adjust it geometrically
     /// (×1.25 per press) so the user can tune deposit brightness live
@@ -474,7 +457,7 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens
+                | ViewMode::IoTransfer
         ) {
             LayoutMode::Single
         } else {
@@ -502,8 +485,6 @@ impl App {
             loudness_store: None,
             scope_store: None,
             gonio_real_audio_state: crate::data::types::StereoStatus::NoAudio,
-            takens_real_audio_state: crate::data::types::MonoStatus::NoAudio,
-            ember_takens_peak: 0.5,
             monitor_spectrum_active: false,
             monitor_channels,
             analysis_mode: "fft".to_string(),
@@ -540,10 +521,6 @@ impl App {
             ember_gonio_carrier_phase: 0.0,
             ember_gonio_phase_offset: 0.0,
             ember_gonio_rotation_ms: true,
-            ember_takens_carrier_phase: 0.0,
-            ember_takens_am_phase: 0.0,
-            ember_takens_tau_samples: 24,
-            ember_takens_history: VecDeque::new(),
             ember_intensity_scale: 1.0,
             ember_tau_p_scale: 1.0,
             ember_stereo_peak: 0.5,

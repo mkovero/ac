@@ -145,9 +145,9 @@ fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
         "scope"                                 => Ok(ViewMode::Scope),
         "spectrum_ember"  | "spectrum-ember"    => Ok(ViewMode::SpectrumEmber),
         "goniometer"                            => Ok(ViewMode::Goniometer),
-        "takens"                                => Ok(ViewMode::Takens),
+        "iotransfer" | "io_transfer" | "io-transfer" => Ok(ViewMode::IoTransfer),
         other => anyhow::bail!(
-            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|takens, got {other}",
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer, got {other}",
         ),
     }
 }
@@ -318,7 +318,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
-  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|takens [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -371,7 +371,9 @@ mod view_mode_tests {
             ("spectrum_ember",   ViewMode::SpectrumEmber),
             ("spectrum-ember",   ViewMode::SpectrumEmber),
             ("goniometer",       ViewMode::Goniometer),
-            ("takens",           ViewMode::Takens),
+            ("iotransfer",       ViewMode::IoTransfer),
+            ("io_transfer",      ViewMode::IoTransfer),
+            ("io-transfer",      ViewMode::IoTransfer),
         ];
         for (s, want) in cases {
             assert_eq!(parse_view_mode(s).unwrap(), want, "input {s:?}");
@@ -383,7 +385,7 @@ mod view_mode_tests {
         let err = parse_view_mode("nyquist").unwrap_err().to_string();
         assert!(err.contains("nyquist"), "error mentions input: {err}");
         assert!(
-            err.contains("goniometer") && err.contains("takens"),
+            err.contains("goniometer") && err.contains("iotransfer"),
             "error lists Phase 1 view names: {err}"
         );
     }

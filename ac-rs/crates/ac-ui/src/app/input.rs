@@ -28,7 +28,7 @@ enum WSlot {
     Scope,
     SpectrumEmber,
     Goniometer,
-    Takens,
+    IoTransfer,
 }
 
 #[derive(Clone)]
@@ -243,19 +243,12 @@ impl App {
                 // on the Goniometer cell (which has neither axis).
                 return;
             }
-            ViewMode::Takens => {
-                // Plain scroll = τ in samples (geometric so the user can
-                // sweep across orders of magnitude). Ctrl+scroll reserved
-                // for future amplitude / dim toggles. The history needs to
-                // be cleared when τ jumps so the ring buffer doesn't carry
-                // pre-jump samples that pair against post-jump τ values.
-                let new_tau =
-                    ((self.ember_takens_tau_samples as f32 * factor) as usize).clamp(1, 4096);
-                if new_tau != self.ember_takens_tau_samples {
-                    self.ember_takens_tau_samples = new_tau;
-                    self.ember_takens_history.clear();
-                    self.notify(&format!("takens τ: {} samples", new_tau));
-                }
+            ViewMode::IoTransfer => {
+                // No axes on the IoTransfer cell — swallow scroll so it
+                // doesn't fall through to spectrum-style freq/dB zoom.
+                // (Future: Ctrl+scroll could pan the auto-gain target
+                // if the user wants finer control over how much of the
+                // cell the trace fills.)
                 return;
             }
             _ => {}
@@ -733,7 +726,7 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens
+                | ViewMode::IoTransfer
         )
     }
 
@@ -748,7 +741,7 @@ impl App {
             (LayoutMode::Single, ViewMode::Scope,         _)         => Some(WSlot::Scope),
             (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
             (LayoutMode::Single, ViewMode::Goniometer,    _)         => Some(WSlot::Goniometer),
-            (LayoutMode::Single, ViewMode::Takens,        _)         => Some(WSlot::Takens),
+            (LayoutMode::Single, ViewMode::IoTransfer,    _)         => Some(WSlot::IoTransfer),
             _ => None,
         }
     }
@@ -909,7 +902,7 @@ impl App {
             // Bare , / .  → deposit intensity (brightness).
             // Shift + , / .  → τ_p (fade rate; lower = snappier trail).
             // Active in every ember view (Scope, SpectrumEmber, Goniometer,
-            // PhaseScope3D, Takens); ignored elsewhere.
+            // IoTransfer); ignored elsewhere.
             KeyCode::Comma if self.is_ember_view() => {
                 if self.modifiers.shift_key() {
                     self.ember_tau_p_scale =
@@ -967,8 +960,8 @@ impl App {
                     Some(WSlot::Reassigned)    => WSlot::Scope,
                     Some(WSlot::Scope)         => WSlot::SpectrumEmber,
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                    Some(WSlot::Goniometer)    => WSlot::Takens,
-                    Some(WSlot::Takens)        => WSlot::Matrix,
+                    Some(WSlot::Goniometer)    => WSlot::IoTransfer,
+                    Some(WSlot::IoTransfer)    => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -981,7 +974,7 @@ impl App {
                     WSlot::Scope         => (LayoutMode::Single, ViewMode::Scope,         "fft",        "view: scope (ember)"),
                     WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
                     WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft",        "view: goniometer (ember)"),
-                    WSlot::Takens        => (LayoutMode::Single, ViewMode::Takens,        "fft",        "view: takens (ember)"),
+                    WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft",        "view: iotransfer (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so
@@ -1112,8 +1105,7 @@ impl App {
             KeyCode::KeyR if self.modifiers.control_key() => {
                 self.reset_all_views();
             }
-            // Wipe the ember substrate to black + drop view-local history
-            // (PhaseScope3D tube, Takens delay-line) + reset the stereo
+            // Wipe the ember substrate to black + reset the stereo
             // auto-gain peak so the next signal autoscales fresh. Useful
             // when A/B-ing test signals: without this the prior content
             // hangs around for ~1 s of τ_p decay and bleeds into what
@@ -1126,7 +1118,6 @@ impl App {
                 if let Some(ember) = self.ember.as_mut() {
                     ember.request_clear();
                 }
-                self.ember_takens_history.clear();
                 self.ember_stereo_peak = 0.5;
                 self.notify("ember: cleared");
             }

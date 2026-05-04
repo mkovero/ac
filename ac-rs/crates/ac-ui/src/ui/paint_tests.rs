@@ -133,8 +133,6 @@ fn overlay_shows_cursor_readout_when_hovering() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -183,8 +181,6 @@ fn overlay_hides_footer_when_not_hovering() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -231,8 +227,6 @@ fn overlay_shows_dbspl_when_spl_calibrated() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -274,8 +268,6 @@ fn overlay_shows_dbu_when_calibrated() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -315,8 +307,6 @@ fn overlay_shows_clip_when_clipping() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -352,8 +342,6 @@ fn overlay_no_clip_when_not_clipping() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -392,8 +380,6 @@ fn overlay_shows_frozen() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -430,8 +416,6 @@ fn overlay_shows_connected() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -466,8 +450,6 @@ fn overlay_shows_disconnected() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -513,8 +495,6 @@ fn overlay_shows_hover_db_readout() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -557,8 +537,6 @@ fn overlay_shows_notification() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -596,8 +574,6 @@ fn overlay_shows_sample_rate() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -639,8 +615,6 @@ fn overlay_shows_time_fast_tag() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -677,8 +651,6 @@ fn overlay_shows_band_weighting_tag() {
         band_weighting: Some("A"),
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -723,8 +695,6 @@ fn overlay_shows_loudness_strip_with_r128_pass() {
             spl_offset_db: None,
         }),
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -775,8 +745,6 @@ fn overlay_r128_fail_tag_when_far_off_target() {
             spl_offset_db: None,
         }),
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);
@@ -820,8 +788,6 @@ fn overlay_shows_leq_duration() {
         band_weighting: None,
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
-        takens_state: crate::data::types::MonoStatus::NoAudio,
-        takens_tau_samples: 24,
     };
 
     let texts = run_overlay(input);

@@ -936,6 +936,28 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   silent-fallback to a synthesised port name → loud Result error
   when the channel is out of range.
 
+- `(2026-05-05) Takens dropped — academic origin (dynamical-
+  systems phase-space), 1 % THD orbit deformation barely visible,
+  no audio analyser ships a Takens view (Audio Precision, Prism,
+  Studer test sets, etc.). Replaced with IoTransfer for the same
+  diagnostic question.` — Honest re-evaluation: Takens is a
+  phase-space-reconstruction tool from chaos research, not
+  standard bench practice for distortion-shape diagnosis.
+
+- `(2026-05-05) IoTransfer view added — input-vs-output transfer
+  Lissajous on the existing substrate.` — Channel semantics:
+  `active = ref input`, `active + 1 = DUT output`. Linear
+  pass-through DUT → diagonal at slope = gain; soft compression
+  → S-curve; hard clipping → flat tops on the diagonal;
+  asymmetric class-A → asymmetric line about origin; crossover
+  distortion → kink near zero; slew-limiting → hysteresis loop.
+  This is the textbook analog-bench distortion-shape view (Audio
+  Precision, Studer, Prism — every distortion analyser has it).
+  Implementation reuses Goniometer's resolve_stereo_pair,
+  update_stereo_peak, StereoStatus, scope_store path; the
+  `build_iotransfer_polyline` body is Goniometer's raw-rotation
+  path with relabelled axes.
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -1019,6 +1041,27 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
 
+- `(2026-05-05) — Phase 1.5 trajectory cleanup: dropped Takens,
+  added IoTransfer.` — Takens removed end-to-end (ViewMode +
+  WSlot variants, App fields, build_takens_polyline + helpers +
+  3 unit tests, --view CLI flag, W-cycle slot, MonoStatus enum,
+  format_takens_status_line, OverlayInput fields). IoTransfer
+  added: new `build_iotransfer_polyline` (Goniometer's raw-
+  rotation path with axes relabelled X = ref input, Y = DUT
+  output), reuses every Phase 0b helper (resolve_stereo_pair,
+  update_stereo_peak, StereoStatus, scope_store), state-aware
+  overlay caption ("iotransfer (ember) │ ref ch L → dut ch R"
+  / synthetic fallbacks). Tests: 4 new IoTransfer (unity-
+  diagonal, clipped flat-tops, synthetic fallback in unit box,
+  phase-state freeze), 3 dropped (takens history /  τ skip /
+  real-audio freeze). 165 ac-ui tests passing.
+  W-cycle is now Scope → SpectrumEmber → Goniometer →
+  IoTransfer — every slot earning its place. Visual:
+  `ac-ui --view iotransfer --channels 0,1`, send a known sine
+  to ref-in, route through DUT into +1; clean line = linear,
+  flat tops = clipping, S-curve = soft compression, ellipse
+  opening = phase shift.
+
 ---
 
 ## Appendix A — Per-view (x,y) reference card
@@ -1030,9 +1073,7 @@ for strip-chart), `H` is complex transfer function, `f` is freq.
 |---------------|----------------------------------|----------------------|
 | Scope         | (t mod W, s/A)                   | ScopeFrame            |
 | Goniometer    | ((L−R)/√2, (L+R)/√2)             | stereo ScopeFrame     |
-| 3D phase      | proj₃→₂(L, R, axis_z)            | stereo ScopeFrame     |
-| Takens (2D)   | (s(t), s(t−τ))                   | mono ScopeFrame       |
-| Takens (3D)   | proj(s(t), s(t−τ), s(t−2τ))      | mono ScopeFrame       |
+| IoTransfer    | (ref, dut_out)                   | scope pair (ref, dut+1) |
 | Bode mag      | (log f, mag_db)                  | TransferFrame         |
 | Bode phase    | (log f, φ)                       | TransferFrame         |
 | Coherence     | (log f, γ²)                      | TransferFrame         |

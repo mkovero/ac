@@ -300,27 +300,6 @@ impl Default for StereoStatus {
     }
 }
 
-/// Takens delay-embedding source-state — mono counterpart of
-/// `StereoStatus`. Used by the overlay caption so the user knows
-/// whether the orbit they're looking at is real audio (which channel)
-/// or the synthetic AM 800 Hz fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MonoStatus {
-    /// Real wire-fed audio from `active_channel`.
-    Real { ch: u32 },
-    /// Active channel is in the monitor set but no recent scope frames
-    /// have arrived yet (cold start, or the daemon stopped streaming).
-    NotStreamingYet { ch: u32 },
-    /// No daemon source — synthetic mode or pre-connect.
-    NoAudio,
-}
-
-impl Default for MonoStatus {
-    fn default() -> Self {
-        Self::NoAudio
-    }
-}
-
 /// `visualize/scope` wire frame — raw f32 audio samples for one channel
 /// per `monitor_spectrum` tick (`unified.md` Phase 0b, resolves §9 OQ7).
 /// Consumed by the Goniometer trajectory view; the `frame_idx` field
@@ -366,9 +345,15 @@ pub enum ViewMode {
     /// `active_channel` as L and `active_channel + 1` as R via Phase 0b
     /// `visualize/scope` frames. Phase 1 of unified.md.
     Goniometer,
-    /// Takens delay embedding (mono). Pairs (s(t), s(t−τ)) drawn into
-    /// the substrate. τ is a user knob (scroll). Phase 1.
-    Takens,
+    /// Input/Output transfer Lissajous — classic analog-bench
+    /// distortion-shape view. X = active_channel reference signal,
+    /// Y = active_channel + 1 DUT output (raw, no M/S rotation). A
+    /// linear pass-through DUT traces a diagonal line at slope = gain;
+    /// nonlinear DUTs deform the line into shapes that map directly
+    /// to distortion type (soft compression → S-curve, hard clipping
+    /// → flat tops, asymmetric class-A → asymmetric line about
+    /// origin, …). Phase 1.5 of unified.md.
+    IoTransfer,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

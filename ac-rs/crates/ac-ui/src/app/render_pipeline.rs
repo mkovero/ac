@@ -4,7 +4,6 @@
 //! submits the frame. All overlays (peak-hold, monitor stats) are painted
 //! inside the single egui pass driven from `redraw`.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -47,12 +46,6 @@ const EMBER_FALLBACK_SR: u32 = 48_000;
 const EMBER_GONIO_FREQ: f32 = 1_000.0;
 const EMBER_GONIO_PHASE_DRIFT_HZ: f32 = 0.3;
 const EMBER_GONIO_AMP: f32 = 0.7;
-/// Phase 1 Takens: AM-modulated mono carrier — without modulation a pure
-/// sine produces a static ellipse regardless of τ, which makes the τ knob
-/// look like it's doing nothing. The 3 Hz envelope makes the orbit pulse
-/// so the user can see τ's effect on the trajectory shape.
-const EMBER_TAKENS_CARRIER_HZ: f32 = 800.0;
-const EMBER_TAKENS_AM_HZ: f32 = 3.0;
 
 /// Build the overlay payload describing the active time-integration
 /// state. Returns `None` when the mode is off so the overlay renders
@@ -549,7 +542,7 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens => {}
+                | ViewMode::IoTransfer => {}
             }
         }
 
@@ -730,7 +723,7 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens => {
+                | ViewMode::IoTransfer => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
                     // channel's spectrum frame for SpectrumEmber, synthetic
@@ -751,7 +744,7 @@ impl App {
             ViewMode::Scope
             | ViewMode::SpectrumEmber
             | ViewMode::Goniometer
-            | ViewMode::Takens => {}
+            | ViewMode::IoTransfer => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -785,8 +778,6 @@ impl App {
         // the overlay-paint vs substrate-deposit ordering inside this
         // method.
         let gonio_state_snap = self.gonio_real_audio_state;
-        let takens_state_snap = self.takens_real_audio_state;
-        let takens_tau_snap = self.ember_takens_tau_samples;
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -1100,8 +1091,6 @@ impl App {
                     band_weighting: band_weighting_snap,
                     loudness: loudness_snap,
                     gonio_state: gonio_state_snap,
-                    takens_state: takens_state_snap,
-                    takens_tau_samples: takens_tau_snap,
                 },
             );
         });
@@ -1161,7 +1150,7 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens
+                | ViewMode::IoTransfer
         ) {
             let now = Instant::now();
             let dt = self
@@ -1280,7 +1269,7 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
-                ViewMode::Takens => {
+                ViewMode::IoTransfer => {
                     let sr = self
                         .last_frames
                         .iter()
@@ -1289,36 +1278,32 @@ impl App {
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let want = ((dt * sr) as usize).clamp(64, 4096);
-                    let (status, real) = resolve_mono_source(
+                    let (status, real_pair) = resolve_stereo_pair(
                         self.config.active_channel,
                         self.monitor_channels.as_deref(),
                         self.scope_store.as_ref(),
                         want,
                     );
-                    self.takens_real_audio_state = status;
-                    let amp = match &real {
-                        Some(s) => {
-                            update_mono_peak(&mut self.ember_takens_peak, s, dt);
-                            (0.9 / self.ember_takens_peak.max(0.02)).clamp(0.5, 50.0)
+                    self.gonio_real_audio_state = status;
+                    let amp = match &real_pair {
+                        Some((l, r)) => {
+                            update_stereo_peak(&mut self.ember_stereo_peak, l, r, dt);
+                            (0.9 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0)
                         }
-                        None => 1.0, // synthetic carrier already includes its own amp envelope
+                        None => EMBER_GONIO_AMP,
                     };
-                    let polyline = build_takens_polyline(
-                        &mut self.ember_takens_carrier_phase,
-                        &mut self.ember_takens_am_phase,
-                        &mut self.ember_takens_history,
+                    let polyline = build_iotransfer_polyline(
+                        &mut self.ember_gonio_carrier_phase,
+                        &mut self.ember_gonio_phase_offset,
                         sr,
-                        self.ember_takens_tau_samples,
                         amp,
                         dt,
-                        real.as_deref(),
+                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
-                    // Takens orbit is closed and revisited per cycle of
-                    // the carrier (~800 Hz → ~800 revisits/sec). Same
-                    // tuning rationale as Goniometer; slightly longer
-                    // τ_p so the AM envelope's pulse beat (3 Hz) leaves
-                    // a visible afterglow between cycles.
-                    ember.set_tau_p(0.15 * self.ember_tau_p_scale);
+                    // Same revisit-density profile as Goniometer's raw
+                    // mode (1 kHz carrier on a closed loop), so
+                    // identical tuning works.
+                    ember.set_tau_p(0.12 * self.ember_tau_p_scale);
                     ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
@@ -1357,7 +1342,7 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::Takens => ember.draw(&mut pass),
+                | ViewMode::IoTransfer => ember.draw(&mut pass),
             }
         }
 
@@ -1979,80 +1964,65 @@ fn build_goniometer_polyline(
     pairs
 }
 
-/// Takens delay embedding (unified.md §6 / Appendix A).
+/// IoTransfer (unified.md §6, Phase 1.5) — input/output transfer
+/// Lissajous, the textbook analog-bench distortion-shape view.
 ///
-/// `real = Some(samples)` — f32 audio in [-1, 1] from `active_channel`
-/// (`unified.md` Phase 0b). When provided, the synthetic AM carrier is
-/// bypassed and neither phase accumulator advances. Samples are scaled
-/// by `amp` (auto-gain at the dispatch site) before going into the
-/// delay-line history.
+/// `real = Some((l, r))` — `l` is the reference signal,
+/// `r` is the DUT output. Plot `(L, R)` raw — no M/S rotation.
+/// Linear pass-through DUT: y = G·x → straight line at slope G.
+/// Hard clipping: flat tops on the diagonal at the DUT rails.
+/// Soft compression / class-A asymmetry / crossover / slew-limiting
+/// each leave a recognisable geometric signature.
 ///
-/// `real = None` — synthetic AM-modulated 800 Hz carrier (3 Hz envelope)
-/// for the substrate-validation case. `amp` is the carrier amplitude.
-///
-/// Pairs `(s(t-τ), s(t))` are deposited as a connected polyline. The
-/// delay-line `history` persists across frames (front = newest); first
-/// frames produce no output until history covers τ.
-fn build_takens_polyline(
+/// `real = None` — synthetic 1 kHz carrier + 0.3 Hz phase drift on R,
+/// same source as Goniometer. The orbit will be a slowly-rotating
+/// ellipse (which is what a "DUT" with a 90° phase shift would
+/// actually look like — also a useful baseline shape to recognise).
+fn build_iotransfer_polyline(
     carrier_phase: &mut f32,
-    am_phase: &mut f32,
-    history: &mut VecDeque<f32>,
+    phase_offset: &mut f32,
     sample_rate: f32,
-    tau_samples: usize,
     amp: f32,
     dt: f32,
-    real: Option<&[f32]>,
+    real: Option<(&[f32], &[f32])>,
 ) -> Vec<[f32; 2]> {
-    let n_real = match real {
-        Some(samples) if !samples.is_empty() => {
-            for s in samples {
-                history.push_front(amp * *s);
+    let project = |x: f32, y: f32| -> [f32; 2] {
+        // Raw X/Y — no rotation. x = ref input, y = DUT output.
+        // Perfect linear DUT puts the trace on the y=x diagonal.
+        [0.5 + 0.45 * x, 0.5 + 0.45 * y]
+    };
+
+    if let Some((ls, rs)) = real {
+        if !ls.is_empty() && ls.len() == rs.len() {
+            let mut pairs = Vec::with_capacity(ls.len().saturating_sub(1) * 2);
+            let mut prev: Option<[f32; 2]> = None;
+            for (l, r) in ls.iter().zip(rs.iter()) {
+                let cur = project(amp * *l, amp * *r);
+                if let Some(p) = prev {
+                    pairs.push(p);
+                    pairs.push(cur);
+                }
+                prev = Some(cur);
             }
-            samples.len()
+            return pairs;
         }
-        _ => 0,
-    };
-    let n = if n_real > 0 {
-        n_real
-    } else {
-        let n = ((dt * sample_rate) as usize).min(8000);
-        if n == 0 {
-            return Vec::new();
-        }
-        let two_pi = std::f32::consts::TAU;
-        let step_carrier = two_pi * EMBER_TAKENS_CARRIER_HZ / sample_rate;
-        let step_am = two_pi * EMBER_TAKENS_AM_HZ / sample_rate;
-        for _ in 0..n {
-            let env = 0.6 + 0.4 * am_phase.sin();
-            let s = amp * env * carrier_phase.sin();
-            *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
-            *am_phase = (*am_phase + step_am) % two_pi;
-            history.push_front(s);
-        }
-        n
-    };
-    // Cap history at τ + frame budget + slack so it doesn't grow without
-    // bound when the user cranks τ down. +1 slack keeps the τ-th element
-    // valid even on the first sample of the next frame.
-    let cap = tau_samples + n + 1;
-    while history.len() > cap {
-        history.pop_back();
     }
-    if history.len() < tau_samples + 2 {
-        // Not enough delay-line history yet to form even one (s(t-τ), s(t))
-        // pair — substrate stays dark for a few frames on cold start.
+
+    let n = ((dt * sample_rate) as usize).min(8000);
+    if n == 0 {
         return Vec::new();
     }
     let mut pairs = Vec::with_capacity(n.saturating_sub(1) * 2);
+    let two_pi = std::f32::consts::TAU;
+    let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
+    let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
     let mut prev: Option<[f32; 2]> = None;
-    // Walk the n newest samples (most-recent first via VecDeque indexing).
-    // `history[0]` = newest, `history[i]` = i samples ago, so the τ-delayed
-    // partner of `history[i]` is `history[i + τ]`.
-    let walk = n.min(history.len().saturating_sub(tau_samples));
-    for i in 0..walk {
-        let s_t = history[i];
-        let s_tau = history[i + tau_samples];
-        let cur = [0.5 + 0.45 * s_tau, 0.5 + 0.45 * s_t];
+    for _ in 0..n {
+        let l = amp * carrier_phase.sin();
+        let r = amp * (*carrier_phase + *phase_offset).sin();
+        *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
+        *phase_offset = (*phase_offset + step_offset) % two_pi;
+        let cur = project(l, r);
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -2060,47 +2030,6 @@ fn build_takens_polyline(
         prev = Some(cur);
     }
     pairs
-}
-
-/// Look up `active_channel` mono samples in the scope store for the
-/// Takens view. Returns the source state + raw slice. Mono counterpart
-/// of `resolve_stereo_pair`.
-fn resolve_mono_source(
-    active_slot: usize,
-    monitor_channels: Option<&[u32]>,
-    scope_store: Option<&crate::data::store::ScopeStore>,
-    want_samples: usize,
-) -> (crate::data::types::MonoStatus, Option<Vec<f32>>) {
-    use crate::data::types::MonoStatus;
-    let store = match scope_store {
-        Some(s) => s,
-        None => return (MonoStatus::NoAudio, None),
-    };
-    let phys = match monitor_channels.and_then(|cs| cs.get(active_slot).copied()) {
-        Some(p) => p,
-        None => return (MonoStatus::NoAudio, None),
-    };
-    let max_age = std::time::Duration::from_millis(250);
-    match store.read_recent(phys, want_samples, max_age) {
-        Some((_, _, samples)) if !samples.is_empty() => {
-            (MonoStatus::Real { ch: phys }, Some(samples))
-        }
-        _ => (MonoStatus::NotStreamingYet { ch: phys }, None),
-    }
-}
-
-/// Auto-gain peak tracker for the Takens mono view. Same role as
-/// `update_stereo_peak` but operates on a single slice — kept
-/// separate so toggling between Goniometer and Takens doesn't pump
-/// each other's gain state.
-fn update_mono_peak(peak: &mut f32, samples: &[f32], dt: f32) {
-    let frame_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
-    let tau_s = 0.5;
-    let decay = (-dt / tau_s).exp();
-    *peak = peak.max(frame_peak) * decay + frame_peak * (1.0 - decay);
-    if *peak < 0.001 {
-        *peak = 0.001;
-    }
 }
 
 #[cfg(test)]
@@ -2296,55 +2225,6 @@ mod tests {
         }
     }
 
-    /// Takens history must lengthen by `n` samples each frame, capped
-    /// at τ + n + 1.
-    #[test]
-    fn takens_history_lengthens_then_caps() {
-        let mut carrier = 0.0_f32;
-        let mut am = 0.0_f32;
-        let mut hist = VecDeque::<f32>::new();
-        let sr = 48_000.0;
-        let dt = 1.0 / 60.0;
-        let tau = 24;
-        let n = (dt * sr) as usize;
-        // First call: history populates with `n` samples.
-        let _ = build_takens_polyline(
-            &mut carrier, &mut am, &mut hist, sr, tau, 1.0, dt, None,
-        );
-        assert_eq!(hist.len(), n.min(tau + n + 1));
-        // Many calls later: history caps at tau + n + 1.
-        for _ in 0..50 {
-            let _ = build_takens_polyline(
-                &mut carrier, &mut am, &mut hist, sr, tau, 1.0, dt, None,
-            );
-        }
-        assert!(
-            hist.len() <= tau + n + 1,
-            "history len {} exceeds cap {}",
-            hist.len(),
-            tau + n + 1
-        );
-    }
-
-    /// On the first frame, history is shorter than τ → no pairs emitted.
-    #[test]
-    fn takens_skips_until_history_covers_tau() {
-        let mut carrier = 0.0_f32;
-        let mut am = 0.0_f32;
-        let mut hist = VecDeque::<f32>::new();
-        let sr = 48_000.0;
-        // dt × sr = 10 samples; τ = 200 → history can't cover τ until
-        // many frames in. First frame must yield no pairs.
-        let pairs = build_takens_polyline(
-            &mut carrier, &mut am, &mut hist, sr, 200, 1.0, 10.0 / sr, None,
-        );
-        assert!(
-            pairs.is_empty(),
-            "expected no pairs on first frame (hist < τ); got {}",
-            pairs.len()
-        );
-    }
-
     // ---- Phase 0b real-audio path tests (unified.md §9 OQ7) ----
 
     /// When `real` is provided, the M/S rotation algebra applies
@@ -2413,29 +2293,94 @@ mod tests {
         assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
     }
 
-    /// Takens real-audio branch: when a slice is provided, the
-    /// synthetic carrier/AM phases stay frozen and the supplied
-    /// samples are pushed into history (count == samples.len(),
-    /// not (dt × sr)).
+    // ---- Phase 1.5 IoTransfer tests ----
+
+    /// Perfect linear pass-through (R == L) ⇒ every emitted vertex
+    /// satisfies x == y — the trace is the y=x diagonal. This is the
+    /// reference shape for "DUT is linear at unity gain."
     #[test]
-    fn takens_real_audio_freezes_phase_and_uses_supplied_samples() {
-        let mut carrier = 0.42_f32;
-        let mut am = 0.13_f32;
-        let carrier_before = carrier;
-        let am_before = am;
-        let mut hist = VecDeque::<f32>::new();
-        let samples: Vec<f32> = vec![0.5; 11];
-        let _ = build_takens_polyline(
-            &mut carrier, &mut am, &mut hist, 48_000.0, 4, 1.0, 1.0 / 60.0,
-            Some(&samples),
+    fn iotransfer_real_audio_unity_traces_diagonal() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let l: Vec<f32> = (0..32).map(|i| (i as f32 * 0.1).sin()).collect();
+        let r = l.clone();
+        let pairs = build_iotransfer_polyline(
+            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
+            Some((&l, &r)),
         );
-        assert_eq!(
-            hist.len(),
-            11,
-            "real-audio branch must push exactly 11 entries; got {}",
-            hist.len()
+        assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
+        for [x, y] in &pairs {
+            assert!(
+                (x - y).abs() < 1e-5,
+                "y=x diagonal expected; got ({x}, {y})",
+            );
+        }
+    }
+
+    /// Hard clipping at the DUT: when R is hard-clipped to ±0.5 while
+    /// L sweeps full ±1, vertices where L > 0.5 (in scaled coords)
+    /// must cluster at the substrate y coordinate corresponding to
+    /// 0.5 — the visual "flat top" signature of clipping.
+    #[test]
+    fn iotransfer_real_audio_clipped_traces_flat_tops() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let l: Vec<f32> = (0..64).map(|i| (i as f32 * 0.2).sin()).collect();
+        let r: Vec<f32> = l.iter().map(|&v| v.clamp(-0.5, 0.5)).collect();
+        let pairs = build_iotransfer_polyline(
+            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
+            Some((&l, &r)),
         );
-        assert_eq!(carrier, carrier_before, "carrier phase must stay frozen");
-        assert_eq!(am, am_before, "am phase must stay frozen");
+        // Substrate map: y = 0.5 + 0.45 * R. R clipped at +0.5 → y =
+        // 0.725. Find any vertex where the corresponding L > 0.5
+        // (i.e. x > 0.5 + 0.45*0.5 = 0.725) and verify y is pinned
+        // at 0.725 ± float tolerance.
+        let mut saw_flat_top = false;
+        for [x, y] in &pairs {
+            if *x > 0.725 + 1e-4 {
+                assert!(
+                    (y - 0.725).abs() < 1e-4,
+                    "x = {x} should hit clipped y = 0.725; got y = {y}",
+                );
+                saw_flat_top = true;
+            }
+        }
+        assert!(saw_flat_top, "expected at least one flat-top sample");
+    }
+
+    /// Synthetic fallback (real = None) must produce non-empty pairs
+    /// inside the substrate's [0,1] viewport.
+    #[test]
+    fn iotransfer_synthetic_fallback_in_unit_box() {
+        let mut pl = 0.0_f32;
+        let mut pr = 0.0_f32;
+        let pairs = build_iotransfer_polyline(
+            &mut pl, &mut pr, 48_000.0, EMBER_GONIO_AMP, 1.0 / 60.0,
+            None,
+        );
+        assert!(!pairs.is_empty(), "synthetic fallback should produce pairs");
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    /// Real-audio branch must NOT advance synthetic phase state, so a
+    /// later fallback resumes from where it last advanced — same
+    /// freeze invariant Goniometer has.
+    #[test]
+    fn iotransfer_real_audio_does_not_advance_phase_state() {
+        let mut pl = 0.42_f32;
+        let mut pr = 0.13_f32;
+        let pl_before = pl;
+        let pr_before = pr;
+        let l: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
+        let r = l.clone();
+        let _ = build_iotransfer_polyline(
+            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
+            Some((&l, &r)),
+        );
+        assert_eq!(pl, pl_before, "carrier_phase must stay frozen in real branch");
+        assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
     }
 }

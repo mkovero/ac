@@ -2,8 +2,8 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, MonoStatus, StereoStatus,
-    TransferPair, ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, StereoStatus, TransferPair,
+    ViewMode,
 };
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
@@ -107,12 +107,6 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
-    /// Takens source state — drives the takens-view status caption.
-    pub takens_state: MonoStatus,
-    /// Current Takens τ in samples — surfaced in the status caption so
-    /// the user can see what their `scroll` knob has set τ to without
-    /// looking away to the notification line.
-    pub takens_tau_samples: usize,
     /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
     /// physical channels) or one of the synthetic-fallback variants.
@@ -144,19 +138,23 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
     }
 }
 
-/// Format the Takens status line — mono counterpart of the stereo
-/// formatter. Caption surfaces which channel the orbit is reading
-/// from, plus the current τ in samples.
-fn format_takens_status_line(status: MonoStatus, tau_samples: usize) -> String {
+/// Format the IoTransfer status line. Reuses StereoStatus — the
+/// `Real { l, r }` variant carries `l = ref-input channel` and
+/// `r = DUT-output channel`.
+fn format_iotransfer_status_line(status: StereoStatus) -> String {
     match status {
-        MonoStatus::Real { ch } => {
-            format!("takens (ember) │ ch {ch} · τ {tau_samples} samp")
+        StereoStatus::Real { l, r } => {
+            format!("iotransfer (ember) │ ref ch {l} → dut ch {r}")
         }
-        MonoStatus::NotStreamingYet { ch } => format!(
-            "takens (ember) │ synthetic — daemon not streaming scope yet (ch {ch}) · τ {tau_samples} samp"
+        StereoStatus::NoSecondChannel { l } => format!(
+            "iotransfer (ember) │ synthetic — no DUT pair (ch {} not present)",
+            l + 1
         ),
-        MonoStatus::NoAudio => {
-            format!("takens (ember) │ synthetic AM 800 Hz · τ {tau_samples} samp")
+        StereoStatus::NotStreamingYet { l, r } => format!(
+            "iotransfer (ember) │ synthetic — daemon not streaming scope yet (ref ch {l} → dut ch {r})"
+        ),
+        StereoStatus::NoAudio => {
+            "iotransfer (ember) │ synthetic — no daemon source".to_string()
         }
     }
 }
@@ -357,9 +355,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 mic_tag,
             ),
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
-            ViewMode::Takens => {
-                format_takens_status_line(input.takens_state, input.takens_tau_samples)
-            }
+            ViewMode::IoTransfer => format_iotransfer_status_line(input.gonio_state),
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),
