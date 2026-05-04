@@ -1141,6 +1141,25 @@ impl App {
             KeyCode::KeyR if self.modifiers.control_key() => {
                 self.reset_all_views();
             }
+            // Wipe the ember substrate to black + drop view-local history
+            // (PhaseScope3D tube, Takens delay-line) + reset the stereo
+            // auto-gain peak so the next signal autoscales fresh. Useful
+            // when A/B-ing test signals: without this the prior content
+            // hangs around for ~1 s of τ_p decay and bleeds into what
+            // looks like the new signal.
+            KeyCode::KeyZ
+                if !self.modifiers.control_key()
+                    && !self.modifiers.shift_key()
+                    && self.is_ember_view() =>
+            {
+                if let Some(ember) = self.ember.as_mut() {
+                    ember.request_clear();
+                }
+                self.ember_phase3d_history.clear();
+                self.ember_takens_history.clear();
+                self.ember_stereo_peak = 0.5;
+                self.notify("ember: cleared");
+            }
             KeyCode::Tab => {
                 let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
                 let n_virt = self.virtual_channels.len();

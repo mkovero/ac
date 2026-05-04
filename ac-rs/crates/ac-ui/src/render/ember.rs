@@ -401,6 +401,14 @@ impl EmberRenderer {
 
     pub fn active_palette(&self) -> u32 { self.palette_row }
 
+    /// Wipe the substrate to black on the next `advance()` call. Used by
+    /// the Z key to give the user a clean slate when they switch test
+    /// signals — otherwise prior content fades naturally over τ_p, which
+    /// can confuse A/B comparisons that change input within ~1 s.
+    pub fn request_clear(&mut self) {
+        self.cleared = false;
+    }
+
     /// Run decay + deposit. Must be called outside any surface render pass.
     ///
     /// `viewport` selects where `draw()` will land on the surface (in
