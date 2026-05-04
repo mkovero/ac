@@ -17,19 +17,30 @@ use super::super::{
 /// which is the only practical workaround when DAC chip enumeration
 /// reorders ports across reboots and the user doesn't yet know which
 /// JACK index is the analog one this session.
-fn resolve_channels(cmd: &Value, cfg: &ac_core::config::Config, state: &ServerState) -> Vec<String> {
+///
+/// Returns `Err` with a human-readable message when *any* channel is
+/// out of range — the caller surfaces it as a `400` reply instead of
+/// silently connecting to a non-existent port name and producing no
+/// audio.
+fn resolve_channels(
+    cmd: &Value,
+    cfg: &ac_core::config::Config,
+    state: &ServerState,
+) -> Result<Vec<String>, String> {
     let channels: Vec<u32> = cmd
         .get("channels")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_u64().map(|u| u as u32)).collect())
         .unwrap_or_default();
     if channels.is_empty() {
-        return vec![resolve_output(cfg, state)];
+        return Ok(vec![resolve_output(cfg, state)]);
     }
-    let mut ports: Vec<String> =
-        channels.iter().map(|&c| resolve_output_by_channel(cfg, state, c)).collect();
+    let mut ports: Vec<String> = channels
+        .iter()
+        .map(|&c| resolve_output_by_channel(cfg, state, c))
+        .collect::<Result<Vec<_>, _>>()?;
     ports.dedup();
-    ports
+    Ok(ports)
 }
 
 pub fn generate(state: &ServerState, cmd: &Value) -> Value {
@@ -38,7 +49,10 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_ports = resolve_channels(cmd, &cfg, state);
+    let out_ports = match resolve_channels(cmd, &cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
 
     let pub_tx   = state.pub_tx.clone();
     let fake     = state.fake_audio;
@@ -73,7 +87,10 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
     let cfg        = state.cfg.lock().unwrap().clone();
 
-    let out_ports = resolve_channels(cmd, &cfg, state);
+    let out_ports = match resolve_channels(cmd, &cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
 
     let pub_tx = state.pub_tx.clone();
     let fake   = state.fake_audio;

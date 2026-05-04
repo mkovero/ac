@@ -555,20 +555,31 @@ impl AudioEngine for JackEngine {
     fn backend_name(&self) -> &'static str { "jack" }
 
     fn playback_ports(&self) -> Vec<String> {
+        // IS_INPUT | IS_PHYSICAL — JACK's `IS_INPUT` flag is "audio
+        // flows INTO this port", so without `IS_PHYSICAL` the query
+        // also returns the daemon's own `ac-daemon:in`, any
+        // PipeWire/PulseAudio bridge sinks, Ardour bus inputs, etc.
+        // The user's "channel N" mental model is "Nth physical output
+        // jack on the soundcard", so PHYSICAL is the right filter.
+        let flags = jack::PortFlags::IS_INPUT | jack::PortFlags::IS_PHYSICAL;
         if let Some(ref ac) = self._async_client {
-            ac.as_client().ports(None, Some("32 bit float mono audio"), jack::PortFlags::IS_INPUT)
+            ac.as_client().ports(None, Some("32 bit float mono audio"), flags)
         } else if let Ok((c, _)) = Client::new("ac-daemon-probe", ClientOptions::NO_START_SERVER) {
-            c.ports(None, Some("32 bit float mono audio"), jack::PortFlags::IS_INPUT)
+            c.ports(None, Some("32 bit float mono audio"), flags)
         } else {
             Vec::new()
         }
     }
 
     fn capture_ports(&self) -> Vec<String> {
+        // Symmetric to playback_ports — only hardware capture ports
+        // (excludes the daemon's own `ac-daemon:out`, virtual sources,
+        // bridge clients, etc.).
+        let flags = jack::PortFlags::IS_OUTPUT | jack::PortFlags::IS_PHYSICAL;
         if let Some(ref ac) = self._async_client {
-            ac.as_client().ports(None, Some("32 bit float mono audio"), jack::PortFlags::IS_OUTPUT)
+            ac.as_client().ports(None, Some("32 bit float mono audio"), flags)
         } else if let Ok((c, _)) = Client::new("ac-daemon-probe", ClientOptions::NO_START_SERVER) {
-            c.ports(None, Some("32 bit float mono audio"), jack::PortFlags::IS_OUTPUT)
+            c.ports(None, Some("32 bit float mono audio"), flags)
         } else {
             Vec::new()
         }

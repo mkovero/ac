@@ -164,19 +164,29 @@ pub(super) fn resolve_output(cfg: &Config, state: &ServerState) -> String {
 /// Resolve a specific output channel index to a playback port. Used when
 /// the caller supplied an explicit `channels` list, where the sticky
 /// `cfg.output_port` only applies to `cfg.output_channel` and other
-/// indices must come from the engine's playback-port list.
+/// indices must come from the engine's playback-port list. Returns
+/// `Err` with a human-readable message when the index is out of range
+/// — the caller surfaces it as a loud failure rather than silently
+/// connecting to a synthesized port name JACK doesn't recognise.
 pub(super) fn resolve_output_by_channel(
     cfg: &Config,
     state: &ServerState,
     channel: u32,
-) -> String {
+) -> Result<String, String> {
     if channel == cfg.output_channel {
-        return resolve_output(cfg, state);
+        return Ok(resolve_output(cfg, state));
     }
     let ports = cached_playback_ports(state);
-    ports.get(channel as usize)
-        .cloned()
-        .unwrap_or_else(|| format!("system:playback_{}", channel as usize + 1))
+    if let Some(p) = ports.get(channel as usize) {
+        Ok(p.clone())
+    } else {
+        Err(format!(
+            "channel {} is out of range — only {} physical playback port(s) available: {}",
+            channel,
+            ports.len(),
+            ports.join(", "),
+        ))
+    }
 }
 
 /// Resolve input port: config sticky name, or fall back to channel index in engine list.
