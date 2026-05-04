@@ -27,6 +27,9 @@ enum WSlot {
     Reassigned,
     Scope,
     SpectrumEmber,
+    Goniometer,
+    PhaseScope3D,
+    Takens,
 }
 
 #[derive(Clone)]
@@ -225,6 +228,67 @@ impl App {
                 self.notify(&format!("scope y-gain: {:.2}", new_g));
             }
             return;
+        }
+
+        // Trajectory views (unified.md Phase 1) — per-view scroll mappings.
+        // The cell freq/dB axes don't apply to these substrate views, so
+        // scroll routes to the view's own meaningful knob.
+        match self.config.view_mode {
+            ViewMode::Goniometer => {
+                // Synthetic source has fixed amplitude in the builder; the
+                // M/S vs LR rotation is the only Goniometer-meaningful knob
+                // exposed today. Scroll toggles it (one-tick hysteresis is
+                // overkill for a binary, so any non-zero scroll flips).
+                if scroll_y.abs() > 0.0 {
+                    self.ember_gonio_rotation_ms = !self.ember_gonio_rotation_ms;
+                    self.notify(if self.ember_gonio_rotation_ms {
+                        "gonio: M/S rotation"
+                    } else {
+                        "gonio: raw L/R"
+                    });
+                }
+                return;
+            }
+            ViewMode::PhaseScope3D => {
+                // Plain scroll = zoom; Ctrl+scroll = azimuth; Shift+scroll
+                // = elevation. Steps chosen so a fast flick reorients the
+                // tube in a few ticks without overshooting wildly.
+                if ctrl {
+                    self.ember_phase3d_az += scroll_y * 0.1;
+                    self.notify(&format!(
+                        "phase3d az: {:.2} rad",
+                        self.ember_phase3d_az
+                    ));
+                } else if shift {
+                    self.ember_phase3d_el =
+                        (self.ember_phase3d_el + scroll_y * 0.1).clamp(-1.5, 1.5);
+                    self.notify(&format!(
+                        "phase3d el: {:.2} rad",
+                        self.ember_phase3d_el
+                    ));
+                } else {
+                    let new_z = (self.ember_phase3d_zoom * factor).clamp(0.2, 4.0);
+                    self.ember_phase3d_zoom = new_z;
+                    self.notify(&format!("phase3d zoom: {:.2}", new_z));
+                }
+                return;
+            }
+            ViewMode::Takens => {
+                // Plain scroll = τ in samples (geometric so the user can
+                // sweep across orders of magnitude). Ctrl+scroll reserved
+                // for future amplitude / dim toggles. The history needs to
+                // be cleared when τ jumps so the ring buffer doesn't carry
+                // pre-jump samples that pair against post-jump τ values.
+                let new_tau =
+                    ((self.ember_takens_tau_samples as f32 * factor) as usize).clamp(1, 4096);
+                if new_tau != self.ember_takens_tau_samples {
+                    self.ember_takens_tau_samples = new_tau;
+                    self.ember_takens_history.clear();
+                    self.notify(&format!("takens τ: {} samples", new_tau));
+                }
+                return;
+            }
+            _ => {}
         }
 
         // Ctrl+Shift+Scroll — "gain knob": pan the dB window up/down without
@@ -703,6 +767,9 @@ impl App {
             (LayoutMode::Single, ViewMode::Waterfall, "reassigned") => Some(WSlot::Reassigned),
             (LayoutMode::Single, ViewMode::Scope,         _)         => Some(WSlot::Scope),
             (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
+            (LayoutMode::Single, ViewMode::Goniometer,    _)         => Some(WSlot::Goniometer),
+            (LayoutMode::Single, ViewMode::PhaseScope3D,  _)         => Some(WSlot::PhaseScope3D),
+            (LayoutMode::Single, ViewMode::Takens,        _)         => Some(WSlot::Takens),
             _ => None,
         }
     }
@@ -880,7 +947,10 @@ impl App {
                     Some(WSlot::Cqt)           => WSlot::Reassigned,
                     Some(WSlot::Reassigned)    => WSlot::Scope,
                     Some(WSlot::Scope)         => WSlot::SpectrumEmber,
-                    Some(WSlot::SpectrumEmber) => WSlot::Matrix,
+                    Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
+                    Some(WSlot::Goniometer)    => WSlot::PhaseScope3D,
+                    Some(WSlot::PhaseScope3D)  => WSlot::Takens,
+                    Some(WSlot::Takens)        => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -892,6 +962,9 @@ impl App {
                     WSlot::Reassigned    => (LayoutMode::Single, ViewMode::Waterfall,     "reassigned", "view: waterfall (reassigned)"),
                     WSlot::Scope         => (LayoutMode::Single, ViewMode::Scope,         "fft",        "view: scope (ember)"),
                     WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
+                    WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft",        "view: goniometer (ember)"),
+                    WSlot::PhaseScope3D  => (LayoutMode::Single, ViewMode::PhaseScope3D,  "fft",        "view: phase 3d (ember)"),
+                    WSlot::Takens        => (LayoutMode::Single, ViewMode::Takens,        "fft",        "view: takens (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

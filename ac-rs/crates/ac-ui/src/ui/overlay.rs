@@ -303,6 +303,15 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 smooth_tag,
                 mic_tag,
             ),
+            ViewMode::Goniometer => {
+                "goniometer (ember) │ synthetic 1.0/1.3 kHz stereo".to_string()
+            }
+            ViewMode::PhaseScope3D => {
+                "phase 3d (ember) │ synthetic 1.0/1.3 kHz stereo".to_string()
+            }
+            ViewMode::Takens => {
+                "takens (ember) │ synthetic AM 800 Hz · τ knob".to_string()
+            }
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),

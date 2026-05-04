@@ -134,6 +134,21 @@ fn parse_max_fps(s: &str) -> anyhow::Result<Duration> {
     Ok(Duration::from_millis((1000 / hz) as u64))
 }
 
+fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
+    match s {
+        "spectrum"                              => Ok(ViewMode::Spectrum),
+        "waterfall"                             => Ok(ViewMode::Waterfall),
+        "scope"                                 => Ok(ViewMode::Scope),
+        "spectrum_ember"  | "spectrum-ember"    => Ok(ViewMode::SpectrumEmber),
+        "goniometer"                            => Ok(ViewMode::Goniometer),
+        "phase_scope_3d"  | "phase-scope-3d"    => Ok(ViewMode::PhaseScope3D),
+        "takens"                                => Ok(ViewMode::Takens),
+        other => anyhow::bail!(
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|phase_scope_3d|takens, got {other}",
+        ),
+    }
+}
+
 fn parse_present_mode(s: &str) -> anyhow::Result<wgpu::PresentMode> {
     match s {
         "auto-vsync"    | "auto_vsync"    | "auto"      => Ok(wgpu::PresentMode::AutoVsync),
@@ -227,15 +242,7 @@ impl Args {
                     let v = it
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("--view requires value"))?;
-                    out.view = match v.as_str() {
-                        "spectrum" => ViewMode::Spectrum,
-                        "waterfall" => ViewMode::Waterfall,
-                        "scope" => ViewMode::Scope,
-                        "spectrum_ember" | "spectrum-ember" => ViewMode::SpectrumEmber,
-                        other => anyhow::bail!(
-                            "--view: expected spectrum|waterfall|scope|spectrum_ember, got {other}"
-                        ),
-                    };
+                    out.view = parse_view_mode(&v)?;
                 }
                 "--mode" => {
                     let v = it
@@ -308,7 +315,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
-  --view <mode>        Initial view: spectrum|waterfall [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|phase_scope_3d|takens [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -346,6 +353,39 @@ Mouse:\n  \
   Left-drag        pan\n  \
   Right-click      reset hovered cell\n"
     );
+}
+
+#[cfg(test)]
+mod view_mode_tests {
+    use super::{parse_view_mode, ViewMode};
+
+    #[test]
+    fn parses_all_known_view_names() {
+        let cases = [
+            ("spectrum",         ViewMode::Spectrum),
+            ("waterfall",        ViewMode::Waterfall),
+            ("scope",            ViewMode::Scope),
+            ("spectrum_ember",   ViewMode::SpectrumEmber),
+            ("spectrum-ember",   ViewMode::SpectrumEmber),
+            ("goniometer",       ViewMode::Goniometer),
+            ("phase_scope_3d",   ViewMode::PhaseScope3D),
+            ("phase-scope-3d",   ViewMode::PhaseScope3D),
+            ("takens",           ViewMode::Takens),
+        ];
+        for (s, want) in cases {
+            assert_eq!(parse_view_mode(s).unwrap(), want, "input {s:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_view_errors_helpfully() {
+        let err = parse_view_mode("nyquist").unwrap_err().to_string();
+        assert!(err.contains("nyquist"), "error mentions input: {err}");
+        assert!(
+            err.contains("goniometer") && err.contains("takens"),
+            "error lists Phase 1 view names: {err}"
+        );
+    }
 }
 
 #[cfg(test)]

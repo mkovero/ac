@@ -302,6 +302,16 @@ pub enum ViewMode {
     /// Static (no scroll) with long persistence so successive measurements
     /// fade-blend, giving the free diff workflow promised in unified.md §5.
     SpectrumEmber,
+    /// 2D stereo phase scope. Synthetic stereo source (1.0 kHz L, 1.3 kHz
+    /// R — incommensurate to keep the Lissajous evolving). Phase 1 of
+    /// unified.md; real-audio plumbing is OQ7 / Phase 0b.
+    Goniometer,
+    /// 3D phase scope. Same synthetic stereo as Goniometer with z = recent
+    /// time, projected through a CPU-side az/el camera. Phase 1.
+    PhaseScope3D,
+    /// Takens delay embedding (mono). AM-modulated 800 Hz carrier; pairs
+    /// (s(t), s(t−τ)) drawn into the substrate. τ is a user knob. Phase 1.
+    Takens,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

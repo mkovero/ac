@@ -279,6 +279,32 @@ pub struct App {
     /// cell shrinks / grows it. Smaller window → fewer cycles fit, faster
     /// scroll across the cell.
     pub(super) ember_scope_window_s: f32,
+    /// Phase 1 trajectory views (unified.md §6) — synthetic stereo source
+    /// shared by Goniometer + PhaseScope3D. Two incommensurate carriers
+    /// (1.0 kHz on L, 1.3 kHz on R) so the Lissajous keeps evolving instead
+    /// of drawing a single static curve.
+    pub(super) ember_stereo_phase_l: f32,
+    pub(super) ember_stereo_phase_r: f32,
+    /// Goniometer rotation: `true` = M/S ((L−R)/√2, (L+R)/√2), `false` = raw
+    /// (L, R). Default M/S — matches the analog-meter convention where
+    /// in-phase mono draws a vertical line, out-of-phase a horizontal one.
+    pub(super) ember_gonio_rotation_ms: bool,
+    /// PhaseScope3D camera (radians for az/el; multiplier for zoom).
+    pub(super) ember_phase3d_az: f32,
+    pub(super) ember_phase3d_el: f32,
+    pub(super) ember_phase3d_zoom: f32,
+    /// PhaseScope3D (L, R) tail. Front = newest. Capped at `ember_phase3d_cap`
+    /// so the projected tube has a fixed length in samples regardless of dt.
+    pub(super) ember_phase3d_history: VecDeque<[f32; 2]>,
+    pub(super) ember_phase3d_cap: usize,
+    /// Takens delay-embedding state. Synthetic AM-modulated 800 Hz carrier
+    /// (3 Hz envelope) so the orbit shape pulses visibly under any τ.
+    pub(super) ember_takens_carrier_phase: f32,
+    pub(super) ember_takens_am_phase: f32,
+    /// τ in samples — user-knob via mouse scroll. Clamped 1..=4096.
+    pub(super) ember_takens_tau_samples: usize,
+    /// Mono delay-line. Front = newest. Capacity grows with τ + frame size.
+    pub(super) ember_takens_history: VecDeque<f32>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
@@ -413,7 +439,14 @@ impl App {
         let continuous_interval = init.continuous_interval;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
-        } else if matches!(init.initial_view, ViewMode::Scope | ViewMode::SpectrumEmber) {
+        } else if matches!(
+            init.initial_view,
+            ViewMode::Scope
+                | ViewMode::SpectrumEmber
+                | ViewMode::Goniometer
+                | ViewMode::PhaseScope3D
+                | ViewMode::Takens
+        ) {
             LayoutMode::Single
         } else {
             LayoutMode::Grid
@@ -471,6 +504,18 @@ impl App {
             ember_last_tick: None,
             ember_scope_y_gain: 0.45,
             ember_scope_window_s: 0.1,
+            ember_stereo_phase_l: 0.0,
+            ember_stereo_phase_r: 0.0,
+            ember_gonio_rotation_ms: true,
+            ember_phase3d_az: 0.6,
+            ember_phase3d_el: 0.4,
+            ember_phase3d_zoom: 1.0,
+            ember_phase3d_history: VecDeque::new(),
+            ember_phase3d_cap: 4800,
+            ember_takens_carrier_phase: 0.0,
+            ember_takens_am_phase: 0.0,
+            ember_takens_tau_samples: 24,
+            ember_takens_history: VecDeque::new(),
             egui_ctx: egui::Context::default(),
             egui_state: None,
             egui_renderer: None,

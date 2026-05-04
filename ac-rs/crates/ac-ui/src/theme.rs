@@ -72,9 +72,12 @@ pub const DEFAULT_COLORMAP_DB_MAX: f32 = -10.0;
 pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f32, f32) {
     use crate::data::types::ViewMode;
     match view_mode {
-        ViewMode::Spectrum | ViewMode::SpectrumEmber | ViewMode::Scope => {
-            (DEFAULT_DB_MIN, DEFAULT_DB_MAX)
-        }
+        ViewMode::Spectrum
+        | ViewMode::SpectrumEmber
+        | ViewMode::Scope
+        | ViewMode::Goniometer
+        | ViewMode::PhaseScope3D
+        | ViewMode::Takens => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
         ViewMode::Waterfall => (DEFAULT_COLORMAP_DB_MIN, DEFAULT_COLORMAP_DB_MAX),
     }
 }

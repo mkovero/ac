@@ -26,7 +26,14 @@ pub fn draw_grid(
     // Scope mode owns its full cell — no spectrum-style freq/dB grid or
     // axis labels. The substrate aesthetic is "ember on pure black";
     // overlay clutter breaks it.
-    if matches!(view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
+    if matches!(
+        view_mode,
+        ViewMode::Scope
+            | ViewMode::SpectrumEmber
+            | ViewMode::Goniometer
+            | ViewMode::PhaseScope3D
+            | ViewMode::Takens
+    ) {
         return;
     }
     let stroke = Stroke::new(
@@ -125,7 +132,11 @@ pub fn draw_grid(
                 );
             }
         }
-        ViewMode::Scope | ViewMode::SpectrumEmber => {
+        ViewMode::Scope
+        | ViewMode::SpectrumEmber
+        | ViewMode::Goniometer
+        | ViewMode::PhaseScope3D
+        | ViewMode::Takens => {
             // Ember-substrate views paint their own field on pure black —
             // skip the spectrum/waterfall axis grid. Unreachable here
             // because of the early return at the top of the function, but
