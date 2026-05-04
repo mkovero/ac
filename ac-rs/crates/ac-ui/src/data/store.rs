@@ -343,8 +343,8 @@ impl LoudnessStore {
     }
 }
 
-/// Per-channel ring of raw audio samples consumed by Goniometer /
-/// PhaseScope3D (`unified.md` Phase 0b). Keyed by *physical* channel id
+/// Per-channel ring of raw audio samples consumed by Goniometer
+/// (`unified.md` Phase 0b). Keyed by *physical* channel id
 /// straight from the wire (no slot-allocation), mirroring `LoudnessStore`
 /// so per-physical-channel late-arriving streams (e.g. `--channels
 /// 10,11`) just work without preallocating slots in `ChannelStore`'s

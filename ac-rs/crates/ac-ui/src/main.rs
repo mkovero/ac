@@ -145,10 +145,9 @@ fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
         "scope"                                 => Ok(ViewMode::Scope),
         "spectrum_ember"  | "spectrum-ember"    => Ok(ViewMode::SpectrumEmber),
         "goniometer"                            => Ok(ViewMode::Goniometer),
-        "phase_scope_3d"  | "phase-scope-3d"    => Ok(ViewMode::PhaseScope3D),
         "takens"                                => Ok(ViewMode::Takens),
         other => anyhow::bail!(
-            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|phase_scope_3d|takens, got {other}",
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|takens, got {other}",
         ),
     }
 }
@@ -319,7 +318,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
-  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|phase_scope_3d|takens [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|takens [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -372,8 +371,6 @@ mod view_mode_tests {
             ("spectrum_ember",   ViewMode::SpectrumEmber),
             ("spectrum-ember",   ViewMode::SpectrumEmber),
             ("goniometer",       ViewMode::Goniometer),
-            ("phase_scope_3d",   ViewMode::PhaseScope3D),
-            ("phase-scope-3d",   ViewMode::PhaseScope3D),
             ("takens",           ViewMode::Takens),
         ];
         for (s, want) in cases {

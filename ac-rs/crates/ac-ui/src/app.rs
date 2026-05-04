@@ -191,11 +191,20 @@ pub struct App {
     /// `visualize/scope` frames; consumed by the Goniometer /
     /// PhaseScope3D dispatch arms (`unified.md` Phase 0b).
     pub(super) scope_store: Option<ScopeStore>,
-    /// Computed each render frame at the Goniometer / PhaseScope3D
-    /// dispatch arm; read by the overlay so the caption surfaces
-    /// "ch X + Y" vs "synthetic — no stereo" vs "synthetic — daemon
-    /// not streaming scope yet" to the user.
+    /// Computed each render frame at the Goniometer dispatch arm;
+    /// read by the overlay so the caption surfaces "ch X + Y" vs
+    /// "synthetic — no stereo" vs "synthetic — daemon not streaming
+    /// scope yet" to the user.
     pub(super) gonio_real_audio_state: crate::data::types::StereoStatus,
+    /// Mono counterpart of `gonio_real_audio_state` — set at the
+    /// Takens dispatch arm. The Takens view consumes a single channel
+    /// (`active_channel`) so it doesn't need the +1 pairing logic.
+    pub(super) takens_real_audio_state: crate::data::types::MonoStatus,
+    /// Running peak of the Takens real-audio source for auto-gain.
+    /// Same role as `ember_stereo_peak` for Goniometer; tracked
+    /// separately so switching views doesn't interfere with each
+    /// other's auto-gain state.
+    pub(super) ember_takens_peak: f32,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -302,14 +311,6 @@ pub struct App {
     /// (L, R). Default M/S — matches the analog-meter convention where
     /// in-phase mono draws a vertical line, out-of-phase a horizontal one.
     pub(super) ember_gonio_rotation_ms: bool,
-    /// PhaseScope3D camera (radians for az/el; multiplier for zoom).
-    pub(super) ember_phase3d_az: f32,
-    pub(super) ember_phase3d_el: f32,
-    pub(super) ember_phase3d_zoom: f32,
-    /// PhaseScope3D (L, R) tail. Front = newest. Capped at `ember_phase3d_cap`
-    /// so the projected tube has a fixed length in samples regardless of dt.
-    pub(super) ember_phase3d_history: VecDeque<[f32; 2]>,
-    pub(super) ember_phase3d_cap: usize,
     /// Takens delay-embedding state. Synthetic AM-modulated 800 Hz carrier
     /// (3 Hz envelope) so the orbit shape pulses visibly under any τ.
     pub(super) ember_takens_carrier_phase: f32,
@@ -473,7 +474,6 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens
         ) {
             LayoutMode::Single
@@ -502,6 +502,8 @@ impl App {
             loudness_store: None,
             scope_store: None,
             gonio_real_audio_state: crate::data::types::StereoStatus::NoAudio,
+            takens_real_audio_state: crate::data::types::MonoStatus::NoAudio,
+            ember_takens_peak: 0.5,
             monitor_spectrum_active: false,
             monitor_channels,
             analysis_mode: "fft".to_string(),
@@ -538,11 +540,6 @@ impl App {
             ember_gonio_carrier_phase: 0.0,
             ember_gonio_phase_offset: 0.0,
             ember_gonio_rotation_ms: true,
-            ember_phase3d_az: 0.6,
-            ember_phase3d_el: 0.4,
-            ember_phase3d_zoom: 1.0,
-            ember_phase3d_history: VecDeque::new(),
-            ember_phase3d_cap: 1800,
             ember_takens_carrier_phase: 0.0,
             ember_takens_am_phase: 0.0,
             ember_takens_tau_samples: 24,

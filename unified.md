@@ -899,6 +899,43 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   Resolves OQ12. Ctrl+R global reset retained behind its
   modifier guard.
 
+- `(2026-05-04) PhaseScope3D dropped.` — The history-iteration
+  approach (re-project all samples each frame at z based on
+  deque-index) fights the substrate's deposit-then-fade contract:
+  every frame redeposits samples at slightly-shifted positions,
+  producing visible venetian-blind / lattice artefacts that
+  obscure the actual 3D structure. Fixing it cleanly would need
+  wallclock-anchored z + auto-rotation (parallax) + reduced
+  history density — significant scope for a view that's lower-
+  leverage than Goniometer / Takens. Removed end-to-end (variant,
+  builder, App fields, --view flag, W-cycle slot, tests). The
+  ember substrate slot it occupied collapses to: Scope →
+  SpectrumEmber → Goniometer → Takens.
+
+- `(2026-05-04) Takens delay embedding wired to real audio
+  (active_channel mono via scope_store).` — `MonoStatus` enum
+  (Real { ch } / NotStreamingYet { ch } / NoAudio) drives a
+  state-aware caption; auto-gain (separate `ember_takens_peak`
+  tracker) so quiet content fills the cell; synthetic AM 800 Hz
+  stays as fallback when no scope frames have arrived. Status
+  caption shows current τ in samples so the user can read the
+  scroll-knob value without looking at the notification line.
+
+- `(2026-05-04) Z key wipes ember substrate to black + drops
+  per-view history rings + resets stereo/takens auto-gain peaks.`
+  — Lets the user A/B test signals cleanly without τ_p decay
+  bleeding old content into the new figure.
+
+- `(2026-05-04) JACK port enumeration filters to IS_PHYSICAL.`
+  — Bug: 'ac generate sine 10 -10' was resolving channel 10 to
+  the daemon's own 'ac-daemon:in' port (the daemon's own audio
+  sink, IS_INPUT-flagged from JACK's POV). Adding IS_PHYSICAL to
+  both playback_ports() and capture_ports() filters out the
+  daemon's own ports, PipeWire/PulseAudio bridges, and other
+  client buses. resolve_output_by_channel also changed from
+  silent-fallback to a synthesised port name → loud Result error
+  when the channel is out of range.
+
 ---
 
 ## 11. [STATUS] Progress log

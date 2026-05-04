@@ -76,7 +76,6 @@ pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f
         | ViewMode::SpectrumEmber
         | ViewMode::Scope
         | ViewMode::Goniometer
-        | ViewMode::PhaseScope3D
         | ViewMode::Takens => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
         ViewMode::Waterfall => (DEFAULT_COLORMAP_DB_MIN, DEFAULT_COLORMAP_DB_MAX),
     }

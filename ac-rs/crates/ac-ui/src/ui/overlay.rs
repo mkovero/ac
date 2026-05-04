@@ -2,8 +2,8 @@ use egui::{Align2, Color32, Context, CornerRadius, FontId, Pos2, Rect, Stroke, S
 
 use crate::data::smoothing;
 use crate::data::types::{
-    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, StereoStatus, TransferPair,
-    ViewMode,
+    CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, MonoStatus, StereoStatus,
+    TransferPair, ViewMode,
 };
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
@@ -107,7 +107,13 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
-    /// Goniometer / PhaseScope3D source state — drives the status caption
+    /// Takens source state — drives the takens-view status caption.
+    pub takens_state: MonoStatus,
+    /// Current Takens τ in samples — surfaced in the status caption so
+    /// the user can see what their `scroll` knob has set τ to without
+    /// looking away to the notification line.
+    pub takens_tau_samples: usize,
+    /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
     /// physical channels) or one of the synthetic-fallback variants.
     /// Computed at the dispatch site each render frame; defaults to
@@ -115,15 +121,16 @@ pub struct OverlayInput<'a> {
     pub gonio_state: StereoStatus,
 }
 
-/// Format the trajectory-view status line. `view_label` is the short
-/// view name (e.g. `"goniometer"`, `"phase 3d"`) — interpolated into
-/// every variant of the message so the format stays consistent across
-/// Goniometer and PhaseScope3D.
+/// Format the goniometer status line. `view_label` is the short view
+/// name interpolated into every variant of the message; today only
+/// Goniometer uses this — PhaseScope3D was dropped in favour of
+/// keeping the substrate simple.
 fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
     match status {
         StereoStatus::Real { l, r } => {
             format!("{view_label} (ember) │ ch {l} + {r}")
         }
+
         StereoStatus::NoSecondChannel { l } => format!(
             "{view_label} (ember) │ synthetic — no stereo (ch {} not present)",
             l + 1
@@ -133,6 +140,23 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
         ),
         StereoStatus::NoAudio => {
             format!("{view_label} (ember) │ synthetic 1 kHz + 0.3 Hz phase walk")
+        }
+    }
+}
+
+/// Format the Takens status line — mono counterpart of the stereo
+/// formatter. Caption surfaces which channel the orbit is reading
+/// from, plus the current τ in samples.
+fn format_takens_status_line(status: MonoStatus, tau_samples: usize) -> String {
+    match status {
+        MonoStatus::Real { ch } => {
+            format!("takens (ember) │ ch {ch} · τ {tau_samples} samp")
+        }
+        MonoStatus::NotStreamingYet { ch } => format!(
+            "takens (ember) │ synthetic — daemon not streaming scope yet (ch {ch}) · τ {tau_samples} samp"
+        ),
+        MonoStatus::NoAudio => {
+            format!("takens (ember) │ synthetic AM 800 Hz · τ {tau_samples} samp")
         }
     }
 }
@@ -333,9 +357,8 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 mic_tag,
             ),
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
-            ViewMode::PhaseScope3D => format_stereo_status_line("phase 3d", input.gonio_state),
             ViewMode::Takens => {
-                "takens (ember) │ synthetic AM 800 Hz · τ knob".to_string()
+                format_takens_status_line(input.takens_state, input.takens_tau_samples)
             }
         };
         painter.text(

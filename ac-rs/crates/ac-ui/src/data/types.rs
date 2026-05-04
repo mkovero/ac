@@ -277,10 +277,10 @@ impl From<&SpectrumFrame> for FrameMeta {
     }
 }
 
-/// Goniometer / PhaseScope3D source-state, computed each frame at the
-/// dispatch site and surfaced in the overlay caption. `unified.md`
-/// Phase 0b — lets the user tell at a glance whether the figure
-/// they're looking at is real audio or the synthetic fallback.
+/// Goniometer source-state, computed each frame at the dispatch site
+/// and surfaced in the overlay caption. `unified.md` Phase 0b — lets
+/// the user tell at a glance whether the figure they're looking at is
+/// real audio or the synthetic fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StereoStatus {
     /// Real wire-fed audio for both channels of a stereo pair.
@@ -300,11 +300,32 @@ impl Default for StereoStatus {
     }
 }
 
+/// Takens delay-embedding source-state — mono counterpart of
+/// `StereoStatus`. Used by the overlay caption so the user knows
+/// whether the orbit they're looking at is real audio (which channel)
+/// or the synthetic AM 800 Hz fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonoStatus {
+    /// Real wire-fed audio from `active_channel`.
+    Real { ch: u32 },
+    /// Active channel is in the monitor set but no recent scope frames
+    /// have arrived yet (cold start, or the daemon stopped streaming).
+    NotStreamingYet { ch: u32 },
+    /// No daemon source — synthetic mode or pre-connect.
+    NoAudio,
+}
+
+impl Default for MonoStatus {
+    fn default() -> Self {
+        Self::NoAudio
+    }
+}
+
 /// `visualize/scope` wire frame — raw f32 audio samples for one channel
 /// per `monitor_spectrum` tick (`unified.md` Phase 0b, resolves §9 OQ7).
-/// Consumed by the Goniometer / PhaseScope3D trajectory views; the
-/// `frame_idx` field synchronizes L+R channels across the same tick so
-/// the UI can pair them without relying on receive order.
+/// Consumed by the Goniometer trajectory view; the `frame_idx` field
+/// synchronizes L+R channels across the same tick so the UI can pair
+/// them without relying on receive order.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScopeFrame {
     pub channel: u32,
@@ -340,15 +361,13 @@ pub enum ViewMode {
     /// Static (no scroll) with long persistence so successive measurements
     /// fade-blend, giving the free diff workflow promised in unified.md §5.
     SpectrumEmber,
-    /// 2D stereo phase scope. Synthetic stereo source (1.0 kHz L, 1.3 kHz
-    /// R — incommensurate to keep the Lissajous evolving). Phase 1 of
-    /// unified.md; real-audio plumbing is OQ7 / Phase 0b.
+    /// 2D stereo phase scope. Same 1 kHz carrier on both with a 0.3 Hz
+    /// phase drift on R for the synthetic source; real-audio path uses
+    /// `active_channel` as L and `active_channel + 1` as R via Phase 0b
+    /// `visualize/scope` frames. Phase 1 of unified.md.
     Goniometer,
-    /// 3D phase scope. Same synthetic stereo as Goniometer with z = recent
-    /// time, projected through a CPU-side az/el camera. Phase 1.
-    PhaseScope3D,
-    /// Takens delay embedding (mono). AM-modulated 800 Hz carrier; pairs
-    /// (s(t), s(t−τ)) drawn into the substrate. τ is a user knob. Phase 1.
+    /// Takens delay embedding (mono). Pairs (s(t), s(t−τ)) drawn into
+    /// the substrate. τ is a user knob (scroll). Phase 1.
     Takens,
 }
 

@@ -37,13 +37,13 @@ const EMBER_SCOPE_SINE_HZ: f32 = 1_000.0;
 /// magic 48 000 literals across the codebase.
 const EMBER_FALLBACK_SR: u32 = 48_000;
 
-/// Phase 1 trajectory views: synthetic stereo for Goniometer +
-/// PhaseScope3D. Same 1 kHz carrier on both channels, plus a slow phase
-/// drift on R so the goniometer walks through every phase state
-/// (vertical line → tilted ellipse → circle → ellipse other way →
-/// horizontal line) on a ~3 s cycle. That's what a goniometer is *for*
-/// — two different carriers would just draw a Lissajous of an
-/// uncorrelated pair, which encodes no useful phase information.
+/// Phase 1 trajectory views: synthetic stereo for Goniometer. Same
+/// 1 kHz carrier on both channels, plus a slow phase drift on R so the
+/// goniometer walks through every phase state (vertical line → tilted
+/// ellipse → circle → ellipse other way → horizontal line) on a ~3 s
+/// cycle. That's what a goniometer is *for* — two different carriers
+/// would just draw a Lissajous of an uncorrelated pair, which encodes
+/// no useful phase information.
 const EMBER_GONIO_FREQ: f32 = 1_000.0;
 const EMBER_GONIO_PHASE_DRIFT_HZ: f32 = 0.3;
 const EMBER_GONIO_AMP: f32 = 0.7;
@@ -549,7 +549,6 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens => {}
             }
         }
@@ -731,7 +730,6 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
@@ -753,7 +751,6 @@ impl App {
             ViewMode::Scope
             | ViewMode::SpectrumEmber
             | ViewMode::Goniometer
-            | ViewMode::PhaseScope3D
             | ViewMode::Takens => {}
         }
 
@@ -788,6 +785,8 @@ impl App {
         // the overlay-paint vs substrate-deposit ordering inside this
         // method.
         let gonio_state_snap = self.gonio_real_audio_state;
+        let takens_state_snap = self.takens_real_audio_state;
+        let takens_tau_snap = self.ember_takens_tau_samples;
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -1101,6 +1100,8 @@ impl App {
                     band_weighting: band_weighting_snap,
                     loudness: loudness_snap,
                     gonio_state: gonio_state_snap,
+                    takens_state: takens_state_snap,
+                    takens_tau_samples: takens_tau_snap,
                 },
             );
         });
@@ -1160,7 +1161,6 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens
         ) {
             let now = Instant::now();
@@ -1280,58 +1280,6 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
-                ViewMode::PhaseScope3D => {
-                    let sr = self
-                        .last_frames
-                        .iter()
-                        .flatten()
-                        .map(|f| f.meta.sr)
-                        .find(|&s| s > 0)
-                        .unwrap_or(EMBER_FALLBACK_SR) as f32;
-                    let want = ((dt * sr) as usize).clamp(64, 4096);
-                    let (status, real_pair) = resolve_stereo_pair(
-                        self.config.active_channel,
-                        self.monitor_channels.as_deref(),
-                        self.scope_store.as_ref(),
-                        want,
-                    );
-                    self.gonio_real_audio_state = status;
-                    let amp = match &real_pair {
-                        Some((l, r)) => {
-                            update_stereo_peak(&mut self.ember_stereo_peak, l, r, dt);
-                            (0.9 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0)
-                        }
-                        None => EMBER_GONIO_AMP,
-                    };
-                    let polyline = build_phase3d_polyline(
-                        &mut self.ember_gonio_carrier_phase,
-                        &mut self.ember_gonio_phase_offset,
-                        &mut self.ember_phase3d_history,
-                        self.ember_phase3d_cap,
-                        sr,
-                        self.ember_phase3d_az,
-                        self.ember_phase3d_el,
-                        self.ember_phase3d_zoom,
-                        amp,
-                        dt,
-                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
-                    );
-                    // PhaseScope3D iterates the entire history every frame
-                    // (z-axis encodes age, so each sample's projected
-                    // position changes as it slides toward the back).
-                    // That's ~6× the per-frame deposit count of Goniometer
-                    // and the tube curve revisits the same screen pixels
-                    // many times — needs an order-of-magnitude lower
-                    // intensity than the 2D views.
-                    ember.set_tau_p(0.08 * self.ember_tau_p_scale);
-                    ember.set_intensity(0.00025 * self.ember_intensity_scale);
-                    ember.set_tone(0.6, 0.6);
-                    ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
-                        [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
-                    );
-                }
                 ViewMode::Takens => {
                     let sr = self
                         .last_frames
@@ -1340,13 +1288,30 @@ impl App {
                         .map(|f| f.meta.sr)
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
+                    let want = ((dt * sr) as usize).clamp(64, 4096);
+                    let (status, real) = resolve_mono_source(
+                        self.config.active_channel,
+                        self.monitor_channels.as_deref(),
+                        self.scope_store.as_ref(),
+                        want,
+                    );
+                    self.takens_real_audio_state = status;
+                    let amp = match &real {
+                        Some(s) => {
+                            update_mono_peak(&mut self.ember_takens_peak, s, dt);
+                            (0.9 / self.ember_takens_peak.max(0.02)).clamp(0.5, 50.0)
+                        }
+                        None => 1.0, // synthetic carrier already includes its own amp envelope
+                    };
                     let polyline = build_takens_polyline(
                         &mut self.ember_takens_carrier_phase,
                         &mut self.ember_takens_am_phase,
                         &mut self.ember_takens_history,
                         sr,
                         self.ember_takens_tau_samples,
+                        amp,
                         dt,
+                        real.as_deref(),
                     );
                     // Takens orbit is closed and revisited per cycle of
                     // the carrier (~800 Hz → ~800 revisits/sec). Same
@@ -1392,7 +1357,6 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens => ember.draw(&mut pass),
             }
         }
@@ -1881,9 +1845,7 @@ fn update_stereo_peak(peak: &mut f32, l: &[f32], r: &[f32], dt: f32) {
 }
 
 /// Look up `(active_channel, active_channel + 1)` in the scope store
-/// and decide whether the trajectory views can render real audio. Used
-/// by both Goniometer and PhaseScope3D dispatch arms — the same
-/// pairing logic + state-classification belongs in one place.
+/// and decide whether the Goniometer can render real audio.
 ///
 /// `active_slot` is the UI slot index (`config.active_channel`); the
 /// physical capture id is `monitor_channels[active_slot]`. The R
@@ -2017,33 +1979,58 @@ fn build_goniometer_polyline(
     pairs
 }
 
-/// Takens delay embedding (unified.md §6 / Appendix A). Synthetic AM-mod
-/// 800 Hz carrier; pairs `(s(t-τ), s(t))` deposited as a connected
-/// polyline. The delay-line `history` persists across frames (front =
-/// newest); first frames produce no output until history covers τ.
+/// Takens delay embedding (unified.md §6 / Appendix A).
+///
+/// `real = Some(samples)` — f32 audio in [-1, 1] from `active_channel`
+/// (`unified.md` Phase 0b). When provided, the synthetic AM carrier is
+/// bypassed and neither phase accumulator advances. Samples are scaled
+/// by `amp` (auto-gain at the dispatch site) before going into the
+/// delay-line history.
+///
+/// `real = None` — synthetic AM-modulated 800 Hz carrier (3 Hz envelope)
+/// for the substrate-validation case. `amp` is the carrier amplitude.
+///
+/// Pairs `(s(t-τ), s(t))` are deposited as a connected polyline. The
+/// delay-line `history` persists across frames (front = newest); first
+/// frames produce no output until history covers τ.
 fn build_takens_polyline(
     carrier_phase: &mut f32,
     am_phase: &mut f32,
     history: &mut VecDeque<f32>,
     sample_rate: f32,
     tau_samples: usize,
+    amp: f32,
     dt: f32,
+    real: Option<&[f32]>,
 ) -> Vec<[f32; 2]> {
-    let n = ((dt * sample_rate) as usize).min(8000);
-    if n == 0 {
-        return Vec::new();
-    }
-    let two_pi = std::f32::consts::TAU;
-    let step_carrier = two_pi * EMBER_TAKENS_CARRIER_HZ / sample_rate;
-    let step_am = two_pi * EMBER_TAKENS_AM_HZ / sample_rate;
-    // Generate this frame's samples, push newest at the front.
-    for _ in 0..n {
-        let env = 0.6 + 0.4 * am_phase.sin();
-        let s = env * carrier_phase.sin();
-        *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
-        *am_phase = (*am_phase + step_am) % two_pi;
-        history.push_front(s);
-    }
+    let n_real = match real {
+        Some(samples) if !samples.is_empty() => {
+            for s in samples {
+                history.push_front(amp * *s);
+            }
+            samples.len()
+        }
+        _ => 0,
+    };
+    let n = if n_real > 0 {
+        n_real
+    } else {
+        let n = ((dt * sample_rate) as usize).min(8000);
+        if n == 0 {
+            return Vec::new();
+        }
+        let two_pi = std::f32::consts::TAU;
+        let step_carrier = two_pi * EMBER_TAKENS_CARRIER_HZ / sample_rate;
+        let step_am = two_pi * EMBER_TAKENS_AM_HZ / sample_rate;
+        for _ in 0..n {
+            let env = 0.6 + 0.4 * am_phase.sin();
+            let s = amp * env * carrier_phase.sin();
+            *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
+            *am_phase = (*am_phase + step_am) % two_pi;
+            history.push_front(s);
+        }
+        n
+    };
     // Cap history at τ + frame budget + slack so it doesn't grow without
     // bound when the user cranks τ down. +1 slack keeps the τ-th element
     // valid even on the first sample of the next frame.
@@ -2075,80 +2062,45 @@ fn build_takens_polyline(
     pairs
 }
 
-/// 3D phase scope (unified.md §6 / Appendix A). Same synthetic stereo as
-/// Goniometer; z = recent-time, projected to 2D via a CPU-side az/el
-/// camera. The (L,R) `history` persists across frames (front = newest)
-/// and is iterated in full each frame — older samples sit deeper into z,
-/// producing a tube of orbits receding from the viewer.
-#[allow(clippy::too_many_arguments)]
-fn build_phase3d_polyline(
-    carrier_phase: &mut f32,
-    phase_offset: &mut f32,
-    history: &mut VecDeque<[f32; 2]>,
-    history_cap: usize,
-    sample_rate: f32,
-    az: f32,
-    el: f32,
-    zoom: f32,
-    amp: f32,
-    dt: f32,
-    real: Option<(&[f32], &[f32])>,
-) -> Vec<[f32; 2]> {
-    let pushed_real = match real {
-        Some((ls, rs)) if !ls.is_empty() && ls.len() == rs.len() => {
-            for (l, r) in ls.iter().zip(rs.iter()) {
-                history.push_front([amp * *l, amp * *r]);
-            }
-            true
-        }
-        _ => false,
+/// Look up `active_channel` mono samples in the scope store for the
+/// Takens view. Returns the source state + raw slice. Mono counterpart
+/// of `resolve_stereo_pair`.
+fn resolve_mono_source(
+    active_slot: usize,
+    monitor_channels: Option<&[u32]>,
+    scope_store: Option<&crate::data::store::ScopeStore>,
+    want_samples: usize,
+) -> (crate::data::types::MonoStatus, Option<Vec<f32>>) {
+    use crate::data::types::MonoStatus;
+    let store = match scope_store {
+        Some(s) => s,
+        None => return (MonoStatus::NoAudio, None),
     };
-    if !pushed_real {
-        let n = ((dt * sample_rate) as usize).min(8000);
-        let two_pi = std::f32::consts::TAU;
-        let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
-        let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
-        for _ in 0..n {
-            let l = amp * carrier_phase.sin();
-            let r = amp * (*carrier_phase + *phase_offset).sin();
-            *carrier_phase = (*carrier_phase + step_carrier) % two_pi;
-            *phase_offset = (*phase_offset + step_offset) % two_pi;
-            history.push_front([l, r]);
+    let phys = match monitor_channels.and_then(|cs| cs.get(active_slot).copied()) {
+        Some(p) => p,
+        None => return (MonoStatus::NoAudio, None),
+    };
+    let max_age = std::time::Duration::from_millis(250);
+    match store.read_recent(phys, want_samples, max_age) {
+        Some((_, _, samples)) if !samples.is_empty() => {
+            (MonoStatus::Real { ch: phys }, Some(samples))
         }
+        _ => (MonoStatus::NotStreamingYet { ch: phys }, None),
     }
-    while history.len() > history_cap {
-        history.pop_back();
+}
+
+/// Auto-gain peak tracker for the Takens mono view. Same role as
+/// `update_stereo_peak` but operates on a single slice — kept
+/// separate so toggling between Goniometer and Takens doesn't pump
+/// each other's gain state.
+fn update_mono_peak(peak: &mut f32, samples: &[f32], dt: f32) {
+    let frame_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+    let tau_s = 0.5;
+    let decay = (-dt / tau_s).exp();
+    *peak = peak.max(frame_peak) * decay + frame_peak * (1.0 - decay);
+    if *peak < 0.001 {
+        *peak = 0.001;
     }
-    if history.len() < 2 {
-        return Vec::new();
-    }
-    let cap = history_cap.max(1) as f32;
-    let cos_az = az.cos();
-    let sin_az = az.sin();
-    let cos_el = el.cos();
-    let sin_el = el.sin();
-    let z = zoom.max(0.05);
-    let mut pairs = Vec::with_capacity((history.len() - 1) * 2);
-    let mut prev: Option<[f32; 2]> = None;
-    for (i, lr) in history.iter().enumerate() {
-        let l = lr[0];
-        let r = lr[1];
-        // z spans [+1, -1] from newest to oldest so the freshest sample
-        // sits at the front and the tail trails toward the back.
-        let z_axis = 1.0 - 2.0 * (i as f32) / cap;
-        // Y-up rotation by az, then X-axis rotation by el.
-        let x1 = cos_az * l + sin_az * z_axis;
-        let z1 = -sin_az * l + cos_az * z_axis;
-        let y1 = cos_el * r + sin_el * z1;
-        // Orthographic — discard the post-rotation depth. Recentre to [0,1].
-        let cur = [0.5 + 0.45 * z * x1, 0.5 + 0.45 * z * y1];
-        if let Some(p) = prev {
-            pairs.push(p);
-            pairs.push(cur);
-        }
-        prev = Some(cur);
-    }
-    pairs
 }
 
 #[cfg(test)]
@@ -2357,13 +2309,13 @@ mod tests {
         let n = (dt * sr) as usize;
         // First call: history populates with `n` samples.
         let _ = build_takens_polyline(
-            &mut carrier, &mut am, &mut hist, sr, tau, dt,
+            &mut carrier, &mut am, &mut hist, sr, tau, 1.0, dt, None,
         );
         assert_eq!(hist.len(), n.min(tau + n + 1));
         // Many calls later: history caps at tau + n + 1.
         for _ in 0..50 {
             let _ = build_takens_polyline(
-                &mut carrier, &mut am, &mut hist, sr, tau, dt,
+                &mut carrier, &mut am, &mut hist, sr, tau, 1.0, dt, None,
             );
         }
         assert!(
@@ -2384,80 +2336,12 @@ mod tests {
         // dt × sr = 10 samples; τ = 200 → history can't cover τ until
         // many frames in. First frame must yield no pairs.
         let pairs = build_takens_polyline(
-            &mut carrier, &mut am, &mut hist, sr, 200, 10.0 / sr,
+            &mut carrier, &mut am, &mut hist, sr, 200, 1.0, 10.0 / sr, None,
         );
         assert!(
             pairs.is_empty(),
             "expected no pairs on first frame (hist < τ); got {}",
             pairs.len()
-        );
-    }
-
-    /// PhaseScope3D history caps at `history_cap` regardless of how many
-    /// samples are pushed in.
-    #[test]
-    fn phase3d_history_caps_at_capacity() {
-        let mut pl = 0.0_f32;
-        let mut pr = 0.0_f32;
-        let mut hist = VecDeque::<[f32; 2]>::new();
-        let cap = 100;
-        // Push 5× capacity over many frames.
-        for _ in 0..20 {
-            let _ = build_phase3d_polyline(
-                &mut pl, &mut pr, &mut hist, cap, 48_000.0,
-                0.6, 0.4, 1.0, EMBER_GONIO_AMP, 1.0 / 60.0,
-                None,
-            );
-        }
-        assert!(
-            hist.len() <= cap,
-            "history len {} exceeds cap {}",
-            hist.len(),
-            cap
-        );
-    }
-
-    /// PhaseScope3D orthographic projection: a (0,0,z) sample stays on
-    /// the cell's vertical centerline (x = 0.5) regardless of azimuth,
-    /// and at z=0 it lands on (0.5, 0.5) for any az/el/zoom. We test the
-    /// latter — the (L,R)=(0,0) case is what an in-phase silence would
-    /// project to.
-    #[test]
-    fn phase3d_origin_projects_to_centre() {
-        // History containing a single (0,0) entry at index 0 with cap=1
-        // → z_axis = 1.0 - 2.0*0/1.0 = 1.0. With L=R=0, all rotated
-        // values reduce to multiples of z, then orthographic discards
-        // depth and the orthographic plane sees (sin(az)*z, sin(el)*z).
-        // To test the property "L=R=0 ⇒ x=0.5,y=0.5" we need z=0 too,
-        // which we set up by choosing cap=1 and i=0 carefully — actually
-        // i=0/cap=1 gives z=1, so we need cap=2 with index 0 giving
-        // z = 1 - 2*0/2 = 1.0 — still not zero. Use cap=2 and index 1:
-        // z = 1 - 2*1/2 = 0. We can't directly set the index iterated,
-        // but we can prepopulate history with two entries and call with
-        // cap=2 — the iteration walks both; the second projects to
-        // centre when L=R=0.
-        let mut pl = 0.0_f32;
-        let mut pr = 0.0_f32;
-        let mut hist = VecDeque::<[f32; 2]>::new();
-        // Pre-populate with two zero-zero entries; cap=2 keeps both.
-        hist.push_front([0.0, 0.0]);
-        hist.push_front([0.0, 0.0]);
-        // dt=0 means the builder pushes no fresh samples, just iterates.
-        let pairs = build_phase3d_polyline(
-            &mut pl, &mut pr, &mut hist, 2, 48_000.0,
-            1.2, -0.3, 1.5, EMBER_GONIO_AMP, 0.0, None,
-        );
-        // Find the projected point for the i=1 entry (z=0).
-        // Iteration produces [prev, cur] pairs across consecutive
-        // history entries; at i=0 z=1, at i=1 z=0 with L=R=0 →
-        // (x',y') = (0,0) → centre.
-        // The second deposited vertex is the cur for (i=1).
-        assert!(pairs.len() >= 2, "expected at least one pair");
-        let centre = pairs[1];
-        assert!(
-            (centre[0] - 0.5).abs() < 1e-5 && (centre[1] - 0.5).abs() < 1e-5,
-            "L=R=z=0 should project to (0.5, 0.5), got {:?}",
-            centre
         );
     }
 
@@ -2529,25 +2413,29 @@ mod tests {
         assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
     }
 
-    /// PhaseScope3D real-audio branch pushes `samples.len()` entries
-    /// into history (not `(dt * sr)` — that's the synthetic path).
+    /// Takens real-audio branch: when a slice is provided, the
+    /// synthetic carrier/AM phases stay frozen and the supplied
+    /// samples are pushed into history (count == samples.len(),
+    /// not (dt × sr)).
     #[test]
-    fn phase3d_real_audio_pushes_n_history_entries() {
-        let mut pl = 0.0_f32;
-        let mut pr = 0.0_f32;
-        let mut hist = VecDeque::<[f32; 2]>::new();
-        let l: Vec<f32> = vec![0.1; 7];
-        let r: Vec<f32> = vec![0.2; 7];
-        let _ = build_phase3d_polyline(
-            &mut pl, &mut pr, &mut hist, 100, 48_000.0,
-            0.6, 0.4, 1.0, EMBER_GONIO_AMP, 1.0 / 60.0,
-            Some((&l, &r)),
+    fn takens_real_audio_freezes_phase_and_uses_supplied_samples() {
+        let mut carrier = 0.42_f32;
+        let mut am = 0.13_f32;
+        let carrier_before = carrier;
+        let am_before = am;
+        let mut hist = VecDeque::<f32>::new();
+        let samples: Vec<f32> = vec![0.5; 11];
+        let _ = build_takens_polyline(
+            &mut carrier, &mut am, &mut hist, 48_000.0, 4, 1.0, 1.0 / 60.0,
+            Some(&samples),
         );
         assert_eq!(
             hist.len(),
-            7,
-            "real-audio branch should push exactly 7 entries; got {}",
-            hist.len(),
+            11,
+            "real-audio branch must push exactly 11 entries; got {}",
+            hist.len()
         );
+        assert_eq!(carrier, carrier_before, "carrier phase must stay frozen");
+        assert_eq!(am, am_before, "am phase must stay frozen");
     }
 }

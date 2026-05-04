@@ -31,7 +31,6 @@ pub fn draw_grid(
         ViewMode::Scope
             | ViewMode::SpectrumEmber
             | ViewMode::Goniometer
-            | ViewMode::PhaseScope3D
             | ViewMode::Takens
     ) {
         return;
@@ -135,7 +134,6 @@ pub fn draw_grid(
         ViewMode::Scope
         | ViewMode::SpectrumEmber
         | ViewMode::Goniometer
-        | ViewMode::PhaseScope3D
         | ViewMode::Takens => {
             // Ember-substrate views paint their own field on pure black —
             // skip the spectrum/waterfall axis grid. Unreachable here

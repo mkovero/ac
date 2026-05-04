@@ -28,7 +28,6 @@ enum WSlot {
     Scope,
     SpectrumEmber,
     Goniometer,
-    PhaseScope3D,
     Takens,
 }
 
@@ -242,30 +241,6 @@ impl App {
                 // is one keypress = one toggle. Swallow scroll here so
                 // it doesn't fall through to spectrum-style freq/dB zoom
                 // on the Goniometer cell (which has neither axis).
-                return;
-            }
-            ViewMode::PhaseScope3D => {
-                // Plain scroll = zoom; Ctrl+scroll = azimuth; Shift+scroll
-                // = elevation. Steps chosen so a fast flick reorients the
-                // tube in a few ticks without overshooting wildly.
-                if ctrl {
-                    self.ember_phase3d_az += scroll_y * 0.1;
-                    self.notify(&format!(
-                        "phase3d az: {:.2} rad",
-                        self.ember_phase3d_az
-                    ));
-                } else if shift {
-                    self.ember_phase3d_el =
-                        (self.ember_phase3d_el + scroll_y * 0.1).clamp(-1.5, 1.5);
-                    self.notify(&format!(
-                        "phase3d el: {:.2} rad",
-                        self.ember_phase3d_el
-                    ));
-                } else {
-                    let new_z = (self.ember_phase3d_zoom * factor).clamp(0.2, 4.0);
-                    self.ember_phase3d_zoom = new_z;
-                    self.notify(&format!("phase3d zoom: {:.2}", new_z));
-                }
                 return;
             }
             ViewMode::Takens => {
@@ -758,7 +733,6 @@ impl App {
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::PhaseScope3D
                 | ViewMode::Takens
         )
     }
@@ -774,7 +748,6 @@ impl App {
             (LayoutMode::Single, ViewMode::Scope,         _)         => Some(WSlot::Scope),
             (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
             (LayoutMode::Single, ViewMode::Goniometer,    _)         => Some(WSlot::Goniometer),
-            (LayoutMode::Single, ViewMode::PhaseScope3D,  _)         => Some(WSlot::PhaseScope3D),
             (LayoutMode::Single, ViewMode::Takens,        _)         => Some(WSlot::Takens),
             _ => None,
         }
@@ -994,8 +967,7 @@ impl App {
                     Some(WSlot::Reassigned)    => WSlot::Scope,
                     Some(WSlot::Scope)         => WSlot::SpectrumEmber,
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                    Some(WSlot::Goniometer)    => WSlot::PhaseScope3D,
-                    Some(WSlot::PhaseScope3D)  => WSlot::Takens,
+                    Some(WSlot::Goniometer)    => WSlot::Takens,
                     Some(WSlot::Takens)        => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
@@ -1009,7 +981,6 @@ impl App {
                     WSlot::Scope         => (LayoutMode::Single, ViewMode::Scope,         "fft",        "view: scope (ember)"),
                     WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
                     WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft",        "view: goniometer (ember)"),
-                    WSlot::PhaseScope3D  => (LayoutMode::Single, ViewMode::PhaseScope3D,  "fft",        "view: phase 3d (ember)"),
                     WSlot::Takens        => (LayoutMode::Single, ViewMode::Takens,        "fft",        "view: takens (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
@@ -1155,7 +1126,6 @@ impl App {
                 if let Some(ember) = self.ember.as_mut() {
                     ember.request_clear();
                 }
-                self.ember_phase3d_history.clear();
                 self.ember_takens_history.clear();
                 self.ember_stereo_peak = 0.5;
                 self.notify("ember: cleared");

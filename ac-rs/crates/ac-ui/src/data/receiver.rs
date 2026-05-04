@@ -401,7 +401,8 @@ pub fn spawn(
                     }
                     if type_tag.as_deref() == Some("visualize/scope") {
                         // unified.md Phase 0b: raw audio for the
-                        // Goniometer / PhaseScope3D trajectory views.
+                        // Goniometer trajectory view (and Takens
+                        // mono-channel path when wired).
                         // Store keyed by physical channel id straight from
                         // the wire (no route_slot) — the UI dispatch site
                         // resolves slot → physical via `monitor_channels`
