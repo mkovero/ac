@@ -211,25 +211,34 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
 /// Cursor-driven footer readout for the spectrum / waterfall / sweep
 /// views. Replaces the broadband stats line whenever the cursor is
 /// over a cell — keeps the trace unobstructed and gives the dBu /
-/// time-ago / THD numbers room to breathe.
+/// time-ago / THD numbers room to breathe. No "cursor" prefix — the
+/// only thing that emits a per-frequency value at a moving point is
+/// the cursor, so the prefix would be redundant noise.
+///
+/// `sampled_db_at_freq` is the dBFS the current frame's spectrum holds
+/// at `cursor_freq_hz`. Used for the colormap views (Waterfall / CWT /
+/// CQT / reassigned), where the cursor's Y is time so we can't read a
+/// magnitude off the Y axis. Surfacing the "now" value at that freq
+/// gives the user the dB they used to read off the colorbar legend.
 ///
 /// Variant handling:
-/// - `Db(v)`: cursor is on a dB-magnitude axis (Spectrum) or sampling a
-///   colormap pixel (Waterfall). Snap to the daemon's parabolic-
-///   interpolated peak list when within ~1 % of a known peak freq, else
-///   show the raw bin value. Voltage cal adds `dBu`; SPL cal swaps the
-///   line to `dB SPL`. `▲` flags peak-snapped (= scallop-corrected) values.
-/// - `TimeAgo(s)`: Waterfall / CWT y-axis (cursor's Y is time, not dB).
-///   Show `<freq>  t-<elapsed>`. No magnitude — would need a texture
-///   readback we don't currently do.
+/// - `Db(v)`: Spectrum view (cursor's Y *is* dB). Snap to the daemon's
+///   parabolic-interpolated peak list when within ~1 % of a known peak
+///   freq, else show the raw bin value. Voltage cal adds `dBu`; SPL
+///   swaps the line to `dB SPL`. `▲` flags peak-snapped (=
+///   scallop-corrected) values.
+/// - `TimeAgo(s)`: Waterfall / CWT cursor — Y is time. Shows freq +
+///   age + (when we have it) dBFS at that freq from the latest frame,
+///   plus dBu / dB SPL via the same cal offsets the spectrum view uses.
 /// - `Thd(v)` / `Gain(v)`: Sweep cursor panels. Show their value with
 ///   the cursor freq.
 pub fn cursor_readout(
-    cursor_freq_hz:   f32,
-    readout:          &crate::ui::overlay::HoverReadout,
-    peaks:            &[[f32; 2]],
-    dbu_offset_db:    Option<f32>,
-    spl_offset_db:    Option<f32>,
+    cursor_freq_hz:     f32,
+    readout:            &crate::ui::overlay::HoverReadout,
+    sampled_db_at_freq: Option<f32>,
+    peaks:              &[[f32; 2]],
+    dbu_offset_db:      Option<f32>,
+    spl_offset_db:      Option<f32>,
 ) -> String {
     use crate::ui::overlay::HoverReadout;
     match *readout {
@@ -254,7 +263,7 @@ pub fn cursor_readout(
 
             if let Some(off) = spl_offset_db {
                 format!(
-                    "cursor {} {:>6.1} dB SPL{}",
+                    "{} {:>6.1} dB SPL{}",
                     format_hz(freq),
                     db + off,
                     snap_tag,
@@ -262,32 +271,86 @@ pub fn cursor_readout(
             } else if let Some(off) = dbu_offset_db {
                 let dbu = db + off;
                 format!(
-                    "cursor {} {:+6.2} dBFS  {:+6.2} dBu{}",
+                    "{} {:+6.2} dBFS  {:+6.2} dBu{}",
                     format_hz(freq), db, dbu, snap_tag,
                 )
             } else {
                 format!(
-                    "cursor {} {:+6.2} dBFS{}",
+                    "{} {:+6.2} dBFS{}",
                     format_hz(freq), db, snap_tag,
                 )
             }
         }
-        HoverReadout::TimeAgo(s) => format!(
-            "cursor {}  t-{}",
-            format_hz(cursor_freq_hz),
-            format_time_ago(s),
-        ),
+        HoverReadout::TimeAgo(s) => {
+            let age = format_time_ago(s);
+            // Magnitude at cursor freq from the latest frame's spectrum.
+            // This is "now" not "at hover time" — proper time-keyed sample
+            // would need a CPU-side row history we don't keep yet — but
+            // it's the most useful single number to surface for a
+            // colormap-axis cursor that lost its colorbar legend.
+            match sampled_db_at_freq {
+                Some(db) => {
+                    if let Some(off) = spl_offset_db {
+                        format!(
+                            "{} {:>6.1} dB SPL  t-{}",
+                            format_hz(cursor_freq_hz), db + off, age,
+                        )
+                    } else if let Some(off) = dbu_offset_db {
+                        let dbu = db + off;
+                        format!(
+                            "{} {:+6.2} dBFS  {:+6.2} dBu  t-{}",
+                            format_hz(cursor_freq_hz), db, dbu, age,
+                        )
+                    } else {
+                        format!(
+                            "{} {:+6.2} dBFS  t-{}",
+                            format_hz(cursor_freq_hz), db, age,
+                        )
+                    }
+                }
+                None => format!("{}  t-{}", format_hz(cursor_freq_hz), age),
+            }
+        }
         HoverReadout::Thd(v) => format!(
-            "cursor {}  THD {:.4}%",
+            "{}  THD {:.4}%",
             format_hz(cursor_freq_hz),
             v,
         ),
         HoverReadout::Gain(v) => format!(
-            "cursor {}  {:+.2} dB",
+            "{}  {:+.2} dB",
             format_hz(cursor_freq_hz),
             v,
         ),
     }
+}
+
+/// Sample a column-aggregated spectrum at a target frequency and return
+/// the dB value of the nearest column. `freqs` is monotonically
+/// increasing; values outside the range fall back to the nearest end.
+/// `None` if the spectrum is empty (e.g. fresh frame before any FFT).
+pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f32) -> Option<f32> {
+    if spectrum.is_empty() || spectrum.len() != freqs.len() {
+        return None;
+    }
+    // Binary search the log-spaced freq grid; pick whichever neighbour
+    // is closer in log-Hz so we don't bias toward the lower bin.
+    let idx = freqs.partition_point(|&f| f < target_hz);
+    let pick = if idx == 0 {
+        0
+    } else if idx >= freqs.len() {
+        freqs.len() - 1
+    } else {
+        let lo = freqs[idx - 1].max(f32::MIN_POSITIVE);
+        let hi = freqs[idx].max(f32::MIN_POSITIVE);
+        let t  = target_hz.max(f32::MIN_POSITIVE);
+        if (t.ln() - lo.ln()).abs() < (t.ln() - hi.ln()).abs() {
+            idx - 1
+        } else {
+            idx
+        }
+    };
+    let v = spectrum[pick];
+    if v.is_finite() { Some(v) } else { None }
 }
 
 /// Hover crosshair readout label.
@@ -574,8 +637,9 @@ mod tests {
         // -10 dBFS bin → ~+0.17 dBu. dBV is intentionally NOT in the
         // cursor footer — it's a fixed -2.2 dB constant offset from
         // dBu, so showing it crowds the readout with redundant info.
-        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), &[], Some(10.17), None);
-        assert!(s.contains("cursor"), "expected cursor prefix: {s}");
+        // No "cursor" prefix either — context makes it obvious.
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), None, &[], Some(10.17), None);
+        assert!(!s.starts_with("cursor"), "should not start with literal 'cursor': {s}");
         assert!(s.contains("-10.00 dBFS"), "want dBFS: {s}");
         assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
             "want dBu near +0.17: {s}");
@@ -590,14 +654,14 @@ mod tests {
         // tolerance, so the readout should report 1000 Hz / -10.05 dBFS
         // and flag with ▲.
         let peaks = [[1000.0_f32, -10.05]];
-        let s = cursor_readout(999.0, &HoverReadout::Db(-11.20), &peaks, None, None);
+        let s = cursor_readout(999.0, &HoverReadout::Db(-11.20), None, &peaks, None, None);
         assert!(s.contains("-10.05 dBFS"), "want corrected dBFS: {s}");
         assert!(s.contains("▲"), "expected snap marker: {s}");
     }
 
     #[test]
     fn cursor_readout_uncalibrated_shows_dbfs_only() {
-        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), &[], None, None);
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), None, &[], None, None);
         assert!(s.contains("-10.00 dBFS"));
         assert!(!s.contains("dBu"));
         assert!(!s.contains("dBV"));
@@ -605,23 +669,81 @@ mod tests {
     }
 
     #[test]
-    fn cursor_readout_waterfall_time_ago_renders_freq_and_age() {
-        // Waterfall / CWT cursors carry seconds-ago instead of dB. Footer
-        // should show freq + age, no magnitude.
-        let s = cursor_readout(1000.0, &HoverReadout::TimeAgo(1.234), &[], None, None);
-        assert!(s.contains("kHz"), "want kHz unit: {s}");
+    fn cursor_readout_waterfall_with_sampled_db_shows_freq_db_age() {
+        // Colormap views (Waterfall / CWT / CQT / reassigned) lost their
+        // colorbar legend, so the cursor footer is now the only place a
+        // dB value lives. Sampling the latest frame at the cursor freq
+        // surfaces the value the user used to read off the colorbar.
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::TimeAgo(1.234),
+            Some(-25.5),
+            &[],
+            None,
+            None,
+        );
+        assert!(s.contains("kHz"), "want freq unit: {s}");
+        assert!(s.contains("-25.50 dBFS"), "want sampled dBFS: {s}");
         assert!(s.contains("t-"), "want time-ago marker: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_waterfall_without_sample_falls_back_to_freq_age() {
+        // Brand-new channel before any FFT row arrived: the latest
+        // spectrum is empty, so we just show freq + age.
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::TimeAgo(1.234),
+            None,
+            &[],
+            None,
+            None,
+        );
+        assert!(s.contains("kHz"));
+        assert!(s.contains("t-"));
         assert!(!s.contains("dBFS"));
-        assert!(!s.contains("dBu"));
+    }
+
+    #[test]
+    fn cursor_readout_waterfall_with_voltage_cal_adds_dbu() {
+        // Voltage-cal'd channel: waterfall cursor should also pick up
+        // the dBu conversion using the same dbu_offset as the spectrum view.
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::TimeAgo(0.5),
+            Some(-10.0),
+            &[],
+            Some(10.17),
+            None,
+        );
+        assert!(s.contains("-10.00 dBFS"));
+        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu derived from sampled dBFS + offset: {s}");
+        assert!(s.contains("t-"));
     }
 
     #[test]
     fn cursor_readout_spl_offset_overrides_dbu_offset() {
         // Pistonphone-cal'd channels are acoustic; rendering dBu would
         // be misleading. SPL takes precedence when both offsets are present.
-        let s = cursor_readout(1000.0, &HoverReadout::Db(-32.0), &[], Some(10.17), Some(126.0));
+        let s = cursor_readout(1000.0, &HoverReadout::Db(-32.0), None, &[], Some(10.17), Some(126.0));
         assert!(s.contains("dB SPL"), "want SPL: {s}");
         assert!(!s.contains("dBu"), "should not show dBu when SPL active: {s}");
+    }
+
+    #[test]
+    fn sample_spectrum_db_at_freq_picks_nearest_log_bin() {
+        // 4 log-spaced columns: 100, 1000, 10_000, 24_000. Sampling at
+        // 800 Hz should pick column 1 (1000 Hz, log-distance 0.097)
+        // not column 0 (100 Hz, log-distance 0.903). At 200 Hz it
+        // should pick column 0.
+        let freqs    = vec![100.0_f32, 1000.0, 10_000.0, 24_000.0];
+        let spectrum = vec![-80.0_f32, -10.0,    -90.0,     -120.0];
+        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 800.0),  Some(-10.0));
+        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 200.0),  Some(-80.0));
+        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 50.0),   Some(-80.0));
+        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 30000.0),Some(-120.0));
+        assert_eq!(sample_spectrum_db_at_freq(&[], &freqs, 1000.0), None);
     }
 
     #[test]

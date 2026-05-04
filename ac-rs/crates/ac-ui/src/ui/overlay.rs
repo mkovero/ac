@@ -391,9 +391,19 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // SpectrumEmber where the substrate owns the cell.
         if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
             if let Some(hover) = input.hover.as_ref().filter(|h| h.channel == display_ch) {
+                // For colormap views (Waterfall / CWT / CQT / reassigned)
+                // the cursor's Y is time and the magnitude isn't on any
+                // axis — sample the latest frame's spectrum at the cursor
+                // freq so the footer surfaces the dB the colorbar legend
+                // used to show. For Spectrum view this falls through
+                // unused; the Db variant carries the value directly.
+                let sampled_db = super::fmt::sample_spectrum_db_at_freq(
+                    &frame.spectrum, &frame.freqs, hover.freq_hz,
+                );
                 let text = super::fmt::cursor_readout(
                     hover.freq_hz,
                     &hover.readout,
+                    sampled_db,
                     &frame.meta.peaks,
                     frame.meta.dbu_offset_db,
                     frame.meta.spl_offset_db,

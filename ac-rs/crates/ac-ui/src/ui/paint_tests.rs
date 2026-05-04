@@ -135,10 +135,17 @@ fn overlay_shows_cursor_readout_when_hovering() {
     };
 
     let texts = run_overlay(input);
-    let has_cursor = texts.iter().any(|t| t.contains("cursor") && t.contains("-12.0"));
+    let has_cursor = texts
+        .iter()
+        .any(|t| t.contains("kHz") && t.contains("-12.0") && t.contains("dBFS"));
     assert!(has_cursor, "cursor readout not found in: {texts:?}");
     let has_thd = texts.iter().any(|t| t.contains("THD"));
     assert!(!has_thd, "THD must not appear in cursor readout: {texts:?}");
+    // No literal "cursor" prefix — context makes it obvious.
+    assert!(
+        !texts.iter().any(|t| t.starts_with("cursor")),
+        "cursor footer must not start with 'cursor': {texts:?}"
+    );
 }
 
 #[test]
@@ -177,8 +184,12 @@ fn overlay_hides_footer_when_not_hovering() {
     let texts = run_overlay(input);
     assert!(!texts.iter().any(|t| t.contains("peak")),
         "broadband readout must not paint without hover: {texts:?}");
-    assert!(!texts.iter().any(|t| t.contains("cursor")),
-        "cursor readout must not paint without hover: {texts:?}");
+    // The freq+dBFS line that the cursor would emit must be absent;
+    // any "X.XX kHz  -YY.Y dBFS" residue would mean the footer leaked.
+    assert!(
+        !texts.iter().any(|t| t.contains("kHz") && t.contains("dBFS")),
+        "cursor readout must not paint without hover: {texts:?}"
+    );
 }
 
 #[test]
@@ -477,12 +488,12 @@ fn overlay_shows_hover_db_readout() {
     };
 
     let texts = run_overlay(input);
-    // Cursor info now lands in the bottom-left footer (instead of next
-    // to the cursor) so it doesn't obstruct the trace. Look for the
-    // `cursor <freq> <dB>` pattern emitted by `cursor_readout`.
+    // Cursor info lands in the bottom-left footer instead of next to
+    // the cursor (no obstruction, no "cursor" prefix). Match on the
+    // freq + dB pattern that cursor_readout emits.
     let has_hover = texts
         .iter()
-        .any(|t| t.contains("cursor") && t.contains("kHz") && t.contains("-12.3"));
+        .any(|t| t.contains("kHz") && t.contains("-12.3"));
     assert!(has_hover, "cursor readout not found in: {texts:?}");
 }
 
