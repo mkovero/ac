@@ -927,6 +927,10 @@ impl App {
                         Some(winit::window::Fullscreen::Borderless(None))
                     });
                 }
+                // Phase 6: persist the fullscreen flip — `snapshot_ui_state`
+                // reads the live window state at flush time, so we just
+                // need to mark dirty.
+                self.mark_ui_dirty();
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
                 self.adjust_hovered_db_span(-20.0);

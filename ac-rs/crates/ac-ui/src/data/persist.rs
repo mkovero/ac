@@ -47,6 +47,12 @@ pub struct UiState {
     /// meter convention); user toggles via `R` while in Goniometer.
     #[serde(default = "default_gonio_rotation")]
     pub ember_gonio_rotation_ms: bool,
+    /// Window fullscreen state. Captured from `winit::Window::fullscreen()`
+    /// at save time; applied via `set_fullscreen` after the window
+    /// is created. Default false — first-launch users see a windowed
+    /// instance.
+    #[serde(default)]
+    pub fullscreen: bool,
 }
 
 fn default_intensity() -> f32 { 1.0 }
@@ -61,6 +67,7 @@ impl Default for UiState {
             ember_intensity_scale:   default_intensity(),
             ember_tau_p_scale:       default_tau_p(),
             ember_gonio_rotation_ms: default_gonio_rotation(),
+            fullscreen:              false,
         }
     }
 }
@@ -239,12 +246,14 @@ mod tests {
         s.ember_intensity_scale = 2.5;
         s.ember_tau_p_scale = 0.4;
         s.ember_gonio_rotation_ms = false;
+        s.fullscreen = true;
         save_to(&path, &s);
         let loaded = load_from(&path);
         assert_eq!(loaded.view_mode.as_deref(), Some("nyquist"));
         assert_eq!(loaded.ember_intensity_scale, 2.5);
         assert_eq!(loaded.ember_tau_p_scale, 0.4);
         assert!(!loaded.ember_gonio_rotation_ms);
+        assert!(loaded.fullscreen);
         let _ = std::fs::remove_file(&path);
     }
 

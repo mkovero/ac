@@ -454,6 +454,11 @@ pub struct App {
     /// Redraw flushes to disk when `now - dirty_since > 500 ms` so
     /// rapid key-mashing doesn't write the file every frame.
     pub(super) ui_dirty_since: Option<Instant>,
+    /// Phase 6: persisted fullscreen flag waiting for the window to
+    /// exist. `init_graphics` consumes this and calls
+    /// `Window::set_fullscreen` so a session that quit fullscreen
+    /// returns fullscreen on next launch. `None` after consumption.
+    pub(super) pending_fullscreen: Option<bool>,
     /// Phase 6: when true, `flush_ui_state_if_due` and the exit-flush
     /// in `ApplicationHandler::exiting` are no-ops. Set by tests +
     /// `--no-persist` so test runs don't pollute the user's real
@@ -500,6 +505,10 @@ impl App {
         let resolved_intensity = persisted.ember_intensity_scale;
         let resolved_tau_p = persisted.ember_tau_p_scale;
         let resolved_gonio_rotation = persisted.ember_gonio_rotation_ms;
+        // Capture the persisted fullscreen flag for init_graphics to
+        // apply once the window exists (winit doesn't allow setting
+        // fullscreen before creation).
+        let pending_fullscreen = if persisted.fullscreen { Some(true) } else { None };
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else if matches!(
@@ -626,6 +635,7 @@ impl App {
             last_continuous_paint_at: None,
             needs_redraw: true,
             ui_dirty_since: None,
+            pending_fullscreen,
             disable_persist,
             wake,
         }
@@ -637,6 +647,15 @@ impl App {
     /// reflects the latest mutator's effect, including in rapid-fire
     /// keypress sequences where the previous flush hasn't run yet.
     pub(super) fn snapshot_ui_state(&self) -> crate::data::persist::UiState {
+        // Fullscreen lives on the winit Window, not on App — read it
+        // live so the persisted value reflects the user's last F-key
+        // toggle. Falls back to false when render_ctx isn't yet
+        // initialised (early shutdown before first window).
+        let fullscreen = self
+            .render_ctx
+            .as_ref()
+            .map(|c| c.window.fullscreen().is_some())
+            .unwrap_or(false);
         crate::data::persist::UiState {
             schema_version:          crate::data::persist::SCHEMA_VERSION,
             view_mode:               Some(
@@ -645,6 +664,7 @@ impl App {
             ember_intensity_scale:   self.ember_intensity_scale,
             ember_tau_p_scale:       self.ember_tau_p_scale,
             ember_gonio_rotation_ms: self.ember_gonio_rotation_ms,
+            fullscreen,
         }
     }
 
@@ -735,6 +755,12 @@ impl App {
         self.ember = Some(ember);
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
+        // Phase 6: apply persisted fullscreen now that the window
+        // exists. Take + leave None so we don't keep re-applying on
+        // any future init_graphics call (defensive — shouldn't happen).
+        if let Some(true) = self.pending_fullscreen.take() {
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
     }
 
     fn notify(&mut self, msg: &str) {
