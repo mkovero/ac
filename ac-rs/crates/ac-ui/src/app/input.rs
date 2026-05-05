@@ -952,6 +952,7 @@ impl App {
                         self.ember_intensity_scale
                     ));
                 }
+                self.mark_ui_dirty();
             }
             KeyCode::Period if self.is_ember_view() => {
                 if self.modifiers.shift_key() {
@@ -969,6 +970,7 @@ impl App {
                         self.ember_intensity_scale
                     ));
                 }
+                self.mark_ui_dirty();
             }
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;
@@ -1059,6 +1061,7 @@ impl App {
                 }
                 self.reset_peak_holds();
                 self.notify(label);
+                self.mark_ui_dirty();
             }
             KeyCode::ArrowUp if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
                 self.cwt_sigma = (self.cwt_sigma + 1.0).min(24.0);
@@ -1144,6 +1147,7 @@ impl App {
                     "raw L/R"
                 };
                 self.notify(&format!("goniometer rotation: {label}"));
+                self.mark_ui_dirty();
             }
             KeyCode::KeyR if self.modifiers.control_key() => {
                 self.reset_all_views();

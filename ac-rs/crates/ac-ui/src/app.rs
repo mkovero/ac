@@ -141,6 +141,17 @@ pub struct AppInit {
     pub synthetic_params: Option<(usize, usize, f32)>,
     pub benchmark_secs: Option<f64>,
     pub initial_view: ViewMode,
+    /// `true` when `--view` was passed on the CLI; `false` for the
+    /// default. `App::new` uses this to decide whether the persisted
+    /// `ui.json` view_mode wins (no `--view`) or the CLI override
+    /// wins (`--view ...`). `unified.md` Phase 6.
+    pub initial_view_via_cli: bool,
+    /// Phase 6: when `true`, App::new skips reading `~/.config/ac/ui.json`
+    /// and `flush_ui_state_if_due` becomes a no-op. Tests set this so
+    /// they don't read the developer's real persisted state nor write
+    /// to it; `--no-persist` CLI flag also sets it for benchmarking
+    /// runs that shouldn't pollute the on-disk state.
+    pub disable_persist: bool,
     pub initial_sweep_kind: Option<SweepKind>,
     pub monitor_channels: Option<Vec<u32>>,
     /// Surface present mode requested by the caller — usually parsed from
@@ -433,6 +444,16 @@ pub struct App {
     /// Set by input handlers so the next `about_to_wait` requests a redraw
     /// even without new data (e.g. key press changed layout, mouse drag).
     needs_redraw: bool,
+    /// Phase 6 persistence: when a persisted-state mutator runs (W
+    /// cycle, ,/. tau_p, R rotation), this is set to `Some(now)`.
+    /// Redraw flushes to disk when `now - dirty_since > 500 ms` so
+    /// rapid key-mashing doesn't write the file every frame.
+    pub(super) ui_dirty_since: Option<Instant>,
+    /// Phase 6: when true, `flush_ui_state_if_due` and the exit-flush
+    /// in `ApplicationHandler::exiting` are no-ops. Set by tests +
+    /// `--no-persist` so test runs don't pollute the user's real
+    /// `~/.config/ac/ui.json`.
+    pub(super) disable_persist: bool,
     /// Proxy handed to producer threads so they can wake the loop on frame
     /// arrival. Cloned out during `start_data_source`; kept here only so the
     /// clone is retained if we ever need to re-wire a new source.
@@ -450,10 +471,34 @@ impl App {
         let wake = init.wake.clone();
         let requested_present_mode = init.present_mode;
         let continuous_interval = init.continuous_interval;
+        // Phase 6: load persisted UI prefs. Silent-fallback to defaults
+        // on missing/corrupt/version-mismatch (load_from logs warnings
+        // but never panics). View_mode from disk wins ONLY when the
+        // user didn't pass --view explicitly — CLI always overrides
+        // persistence (single-launch override pattern). Skipped
+        // entirely when `disable_persist` is set (tests, --no-persist).
+        let disable_persist = init.disable_persist;
+        let persisted = if disable_persist {
+            crate::data::persist::UiState::default()
+        } else {
+            crate::data::persist::load()
+        };
+        let resolved_view = if init.initial_view_via_cli {
+            init.initial_view
+        } else {
+            persisted
+                .view_mode
+                .as_deref()
+                .and_then(crate::data::persist::view_mode_from_token)
+                .unwrap_or(init.initial_view)
+        };
+        let resolved_intensity = persisted.ember_intensity_scale;
+        let resolved_tau_p = persisted.ember_tau_p_scale;
+        let resolved_gonio_rotation = persisted.ember_gonio_rotation_ms;
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
         } else if matches!(
-            init.initial_view,
+            resolved_view,
             ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
@@ -469,7 +514,7 @@ impl App {
             LayoutMode::Grid
         };
         let config = DisplayConfig {
-            view_mode: init.initial_view,
+            view_mode: resolved_view,
             layout,
             ..DisplayConfig::default()
         };
@@ -525,9 +570,9 @@ impl App {
             ember_scope_window_s: 0.1,
             ember_gonio_carrier_phase: 0.0,
             ember_gonio_phase_offset: 0.0,
-            ember_gonio_rotation_ms: true,
-            ember_intensity_scale: 1.0,
-            ember_tau_p_scale: 1.0,
+            ember_gonio_rotation_ms: resolved_gonio_rotation,
+            ember_intensity_scale: resolved_intensity,
+            ember_tau_p_scale: resolved_tau_p,
             ember_stereo_peak: 0.5,
             egui_ctx: egui::Context::default(),
             egui_state: None,
@@ -573,8 +618,51 @@ impl App {
             continuous_interval,
             last_continuous_paint_at: None,
             needs_redraw: true,
+            ui_dirty_since: None,
+            disable_persist,
             wake,
         }
+    }
+
+    /// Phase 6: snapshot the persistable subset of App state into a
+    /// `UiState` for save-to-disk. Pure read — does no I/O. Pull a
+    /// fresh value each time (no caching) so the snapshot always
+    /// reflects the latest mutator's effect, including in rapid-fire
+    /// keypress sequences where the previous flush hasn't run yet.
+    pub(super) fn snapshot_ui_state(&self) -> crate::data::persist::UiState {
+        crate::data::persist::UiState {
+            schema_version:          crate::data::persist::SCHEMA_VERSION,
+            view_mode:               Some(
+                crate::data::persist::view_mode_token(self.config.view_mode).to_string(),
+            ),
+            ember_intensity_scale:   self.ember_intensity_scale,
+            ember_tau_p_scale:       self.ember_tau_p_scale,
+            ember_gonio_rotation_ms: self.ember_gonio_rotation_ms,
+        }
+    }
+
+    /// Phase 6: mark UI state dirty. Caller invokes from any code
+    /// path that mutates a persisted field (W cycle, , / . , Shift+,
+    /// / Shift+. , R rotation toggle). Debounced flush in `redraw`
+    /// writes to disk ~500 ms after the last mutation.
+    pub(super) fn mark_ui_dirty(&mut self) {
+        self.ui_dirty_since = Some(Instant::now());
+    }
+
+    /// Phase 6: if the dirty timer has elapsed, write the current
+    /// UiState to disk and clear the timer. Cheap when not dirty
+    /// (single Option check). Called once per redraw.
+    pub(super) fn flush_ui_state_if_due(&mut self) {
+        if self.disable_persist {
+            return;
+        }
+        let Some(t0) = self.ui_dirty_since else { return };
+        if t0.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        let snap = self.snapshot_ui_state();
+        crate::data::persist::save(&snap);
+        self.ui_dirty_since = None;
     }
 
     pub fn benchmark_report(&self) -> Option<&str> {
@@ -932,6 +1020,13 @@ impl ApplicationHandler for App {
         // are fine — the daemon cleans up on its own disconnect timeout.
         self.send_transfer_stream_stop();
         self.send_monitor_spectrum_stop();
+        // Phase 6: force-flush UI state on shutdown so changes from
+        // the last debounce window aren't lost. Skips if not dirty
+        // or if persistence is disabled (tests, --no-persist).
+        if !self.disable_persist && self.ui_dirty_since.is_some() {
+            crate::data::persist::save(&self.snapshot_ui_state());
+            self.ui_dirty_since = None;
+        }
     }
 }
 
@@ -971,6 +1066,8 @@ mod loop_tests {
             synthetic_params: None,
             benchmark_secs: None,
             initial_view: ViewMode::Spectrum,
+            initial_view_via_cli: true, // Tests pin view explicitly.
+            disable_persist: true,      // Tests must not touch ~/.config/ac/ui.json.
             initial_sweep_kind: None,
             monitor_channels: None,
             present_mode: wgpu::PresentMode::AutoVsync,

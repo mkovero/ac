@@ -1009,6 +1009,29 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   TransferResult in place (single struct, no separate
   ComplexTransferResult type, no plumbing duplication).
 
+- `(2026-05-05) Phase 6 — UI state persistence.` — v1 persists
+  the small set of user-tunable knobs that change per-session
+  (`view_mode`, `ember_intensity_scale`, `ember_tau_p_scale`,
+  `ember_gonio_rotation_ms`) to `~/.config/ac/ui.json`.
+  Per-cell dB windows / freq zooms intentionally NOT persisted
+  in v1 — they get tweaked dozens of times per session in normal
+  use, and persisting them means a stale window from yesterday
+  clamps today's measurements off-screen until the user resets.
+  ViewMode persisted as a string token (not the enum directly)
+  so renaming a variant doesn't bork old configs — unknown
+  tokens silently fall back. Schema versioned; missing /
+  corrupt / version-mismatch all fall back to defaults via
+  `log::warn`. Save is debounced ~500 ms after the last
+  mutator (W cycle, ,/. for intensity, Shift+,/. for τ_p, R
+  for goniometer rotation) so rapid keypress sequences don't
+  write the file every frame; force-flushed on
+  `ApplicationHandler::exiting`. CLI override: `--view`
+  always wins for the launch session (single-launch override
+  pattern); next save captures the new view as the persisted
+  default. New `--no-persist` flag and matching test fixture
+  `disable_persist: true` keep test runs from polluting the
+  developer's real on-disk state.
+
 - `(2026-05-05) Phase 4 — Nyquist locus on the substrate.` —
   Plot (Re H, Im H) parametrically as a curve in the complex
   plane, parameterised by frequency. Consumes the re/im fields
@@ -1108,6 +1131,20 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     criterion) left to the user — needs JACK + at least 2
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
+
+- `(2026-05-05) — Phase 6 UI state persistence.` — Survives
+  restarts. New `data/persist.rs` module (UiState struct,
+  schema_version=1, JSON I/O, ViewMode ↔ string-token
+  conversion). App::new loads on startup; mutators
+  (`mark_ui_dirty`) flag for debounced disk write in `redraw`
+  (500 ms quiet window so key-mashing doesn't hammer the
+  filesystem); `--view` overrides persistence per-launch;
+  `--no-persist` disables both directions for benchmark / test
+  use. 7 new persist unit tests (default round-trip,
+  missing-file fallback, corrupt-file fallback, schema-
+  mismatch fallback, full save/load round-trip, every
+  ViewMode round-trips through the string token, unknown
+  token returns None). 637 workspace tests passing.
 
 - `(2026-05-05) — Phase 4 Nyquist locus on the substrate.` —
   First view to consume Phase 3's re/im fields. Parametric (Re,

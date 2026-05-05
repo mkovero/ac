@@ -81,6 +81,12 @@ use super::App;
 impl App {
     pub(super) fn redraw(&mut self) {
         let frame_start = Instant::now();
+        // Phase 6: debounced flush of persisted UI state. Cheap when
+        // nothing's dirty; writes ~500 ms after the last mutator. Done
+        // here rather than in input handlers so the actual disk write
+        // (which involves serialise + create_dir_all + write) is
+        // shifted off the keypress critical path.
+        self.flush_ui_state_if_due();
         let grid_params_snap = self.grid_params();
         // Drain any worker-error message the receiver picked up on the
         // `error` PUB topic BEFORE we take any long-lived &mut borrows on

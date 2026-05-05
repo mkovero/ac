@@ -81,6 +81,8 @@ fn main() -> anyhow::Result<()> {
         synthetic_params: Some((n_channels, args.bins.max(16), args.rate.max(0.5))),
         benchmark_secs: args.benchmark,
         initial_view: args.view,
+        initial_view_via_cli: args.view_set_via_cli,
+        disable_persist: args.no_persist,
         initial_sweep_kind: args.mode,
         monitor_channels,
         present_mode: args.present_mode,
@@ -110,6 +112,14 @@ struct Args {
     output_dir: PathBuf,
     benchmark: Option<f64>,
     view: ViewMode,
+    /// `true` when the user passed `--view`. Lets `App::new` decide
+    /// whether to honour the persisted ui.json view_mode (no `--view`)
+    /// or the CLI override (`--view ...`). `unified.md` Phase 6.
+    view_set_via_cli: bool,
+    /// `--no-persist` — skip both reading and writing
+    /// `~/.config/ac/ui.json`. For benchmark / test runs that
+    /// shouldn't pollute the on-disk state.
+    no_persist: bool,
     mode: Option<SweepKind>,
     /// wgpu surface present mode. Default `auto-vsync` resolves to `Fifo`
     /// on desktop. `mailbox` is the workaround for NVIDIA + Vulkan
@@ -197,6 +207,8 @@ impl Args {
             output_dir: default_output_dir(),
             benchmark: None,
             view: ViewMode::Spectrum,
+            view_set_via_cli: false,
+            no_persist: false,
             mode: None,
             present_mode: env_present_mode,
             continuous_interval: env_continuous_interval,
@@ -246,11 +258,15 @@ impl Args {
                             .parse()?,
                     );
                 }
+                "--no-persist" => {
+                    out.no_persist = true;
+                }
                 "--view" => {
                     let v = it
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("--view requires value"))?;
                     out.view = parse_view_mode(&v)?;
+                    out.view_set_via_cli = true;
                 }
                 "--mode" => {
                     let v = it
@@ -323,6 +339,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
+  --no-persist         Don't read/write ~/.config/ac/ui.json this session\n  \
   --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
