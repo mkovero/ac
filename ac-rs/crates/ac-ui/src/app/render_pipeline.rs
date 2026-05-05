@@ -93,6 +93,18 @@ impl App {
             }
             self.notify(&err);
         }
+        // Phase 2: BodeMag / Coherence need a transfer pair registered for
+        // the daemon to produce TransferFrames. Resolve it BEFORE the
+        // render_ctx mutable borrow below — `ensure_transfer_pair_for_active`
+        // takes &mut self (it can call `restart_transfer_stream` and
+        // `notify`), which would conflict with the render_ctx partial borrow
+        // that spans the rest of redraw.
+        let bode_pair: Option<crate::data::types::TransferPair> = matches!(
+            self.config.view_mode,
+            ViewMode::BodeMag | ViewMode::Coherence,
+        )
+        .then(|| self.ensure_transfer_pair_for_active())
+        .flatten();
         let ctx = match self.render_ctx.as_mut() {
             Some(c) => c,
             None => return,
@@ -542,7 +554,9 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::IoTransfer => {}
+                | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence => {}
             }
         }
 
@@ -723,7 +737,9 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::IoTransfer => {
+                | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
                     // channel's spectrum frame for SpectrumEmber, synthetic
@@ -744,7 +760,9 @@ impl App {
             ViewMode::Scope
             | ViewMode::SpectrumEmber
             | ViewMode::Goniometer
-            | ViewMode::IoTransfer => {}
+            | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -778,6 +796,7 @@ impl App {
         // the overlay-paint vs substrate-deposit ordering inside this
         // method.
         let gonio_state_snap = self.gonio_real_audio_state;
+        let bode_pair_snap = bode_pair;
         let time_integration_snap = build_time_integration_overlay(
             self.time_integration,
             &frames,
@@ -1091,6 +1110,7 @@ impl App {
                     band_weighting: band_weighting_snap,
                     loudness: loudness_snap,
                     gonio_state: gonio_state_snap,
+                    bode_pair: bode_pair_snap,
                 },
             );
         });
@@ -1151,6 +1171,8 @@ impl App {
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence
         ) {
             let now = Instant::now();
             let dt = self
@@ -1312,6 +1334,50 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
+                ViewMode::BodeMag => {
+                    let active = self.config.active_channel;
+                    let view = self.cell_views.get(active).copied().unwrap_or_default();
+                    let polyline = bode_pair
+                        .and_then(|p| {
+                            self.virtual_channels
+                                .store_for(p)
+                                .and_then(|s| s.read())
+                                .map(|f| build_bodemag_polyline(&f, &view))
+                        })
+                        .unwrap_or_default();
+                    // Long τ_p (~4 s) so successive measurements
+                    // fade-blend — the "free diff" workflow promised
+                    // in unified.md §5. Single-trace polyline at the
+                    // transfer worker's ~10 Hz tick is much sparser
+                    // than spectrum, so intensity is bumped vs
+                    // SpectrumEmber to keep visibility.
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
+                ViewMode::Coherence => {
+                    let polyline = bode_pair
+                        .and_then(|p| {
+                            self.virtual_channels
+                                .store_for(p)
+                                .and_then(|s| s.read())
+                                .map(|f| build_coherence_polyline(&f))
+                        })
+                        .unwrap_or_default();
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1342,7 +1408,9 @@ impl App {
                 ViewMode::Scope
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
-                | ViewMode::IoTransfer => ember.draw(&mut pass),
+                | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence => ember.draw(&mut pass),
             }
         }
 
@@ -1799,6 +1867,121 @@ fn build_spectrum_polyline(
             pairs.push(bot);
         }
         prev = Some((top, bot));
+    }
+    pairs
+}
+
+/// `TransferFrame` → Bode-magnitude single-trace LineList. Logarithmic
+/// frequency on x, signed dB on y mapped through the cell's
+/// `db_min`/`db_max` window. Phase 2 of unified.md — long τ_p in the
+/// dispatch arm gives the free fade-diff workflow promised in §5.
+///
+/// Bins are aggregated by max-magnitude into `EMBER_SPECTRUM_COLS`
+/// log-spaced columns (same anti-moiré pattern `build_spectrum_polyline`
+/// uses; transfer frames arrive log-spaced from the daemon already, but
+/// column-binning still helps when the cell freq window is zoomed).
+/// Bins outside the cell's freq or dB window break the polyline.
+fn build_bodemag_polyline(
+    frame: &crate::data::types::TransferFrame,
+    view: &CellView,
+) -> Vec<[f32; 2]> {
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
+    let span_f = (log_max - log_min).max(1e-6);
+    let span_db = (view.db_max - view.db_min).max(1e-3);
+    let n_cols = EMBER_SPECTRUM_COLS;
+    let mut col_max: Vec<f32> = vec![f32::NEG_INFINITY; n_cols];
+    let n = frame.freqs.len().min(frame.magnitude_db.len());
+    for i in 0..n {
+        let f = frame.freqs[i];
+        let mag = frame.magnitude_db[i];
+        if !f.is_finite() || f < view.freq_min || f > view.freq_max
+            || !mag.is_finite() {
+            continue;
+        }
+        let xn = (f.max(1.0).log10() - log_min) / span_f;
+        if !(0.0..=1.0).contains(&xn) {
+            continue;
+        }
+        let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+        if mag > col_max[col] {
+            col_max[col] = mag;
+        }
+    }
+    let mut pairs = Vec::with_capacity(n_cols * 2);
+    let mut prev: Option<[f32; 2]> = None;
+    for col in 0..n_cols {
+        let mag = col_max[col];
+        if !mag.is_finite() {
+            prev = None;
+            continue;
+        }
+        let x = (col as f32 + 0.5) / n_cols as f32;
+        // Single trace at y = (mag − db_min) / span_db, centred in the
+        // cell with 0.45 padding so the dB window edges aren't hard
+        // against the cell border.
+        let n_db = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
+        let y = 0.05 + 0.9 * n_db;
+        let cur = [x, y];
+        if let Some(p) = prev {
+            pairs.push(p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
+    }
+    pairs
+}
+
+/// `TransferFrame` → coherence γ²(f) single-trace LineList. y is the
+/// raw coherence value (already in [0, 1]) padded to fit the cell.
+/// Aggregated by *min* per column — for coherence we want the
+/// pessimistic value (one bad bin in a column means "don't trust
+/// this region"), the inverse of the spectrum's max-aggregation
+/// which prioritises peaks. Phase 2 of unified.md.
+fn build_coherence_polyline(
+    frame: &crate::data::types::TransferFrame,
+) -> Vec<[f32; 2]> {
+    // Coherence views always span the full audio band — no cell
+    // freq-window dependence (γ² is dimensionless and useful across
+    // the whole band regardless of where the user has zoomed the dB
+    // axis on Bode).
+    let log_min = 20.0_f32.log10();
+    let log_max = 24_000.0_f32.log10();
+    let span_f = (log_max - log_min).max(1e-6);
+    let n_cols = EMBER_SPECTRUM_COLS;
+    let mut col_min: Vec<f32> = vec![f32::INFINITY; n_cols];
+    let n = frame.freqs.len().min(frame.coherence.len());
+    for i in 0..n {
+        let f = frame.freqs[i];
+        let c = frame.coherence[i];
+        if !f.is_finite() || !c.is_finite() {
+            continue;
+        }
+        let xn = (f.max(1.0).log10() - log_min) / span_f;
+        if !(0.0..=1.0).contains(&xn) {
+            continue;
+        }
+        let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+        if c < col_min[col] {
+            col_min[col] = c;
+        }
+    }
+    let mut pairs = Vec::with_capacity(n_cols * 2);
+    let mut prev: Option<[f32; 2]> = None;
+    for col in 0..n_cols {
+        let c = col_min[col];
+        if !c.is_finite() {
+            prev = None;
+            continue;
+        }
+        let x = (col as f32 + 0.5) / n_cols as f32;
+        let y = 0.05 + 0.9 * c.clamp(0.0, 1.0);
+        let cur = [x, y];
+        if let Some(p) = prev {
+            pairs.push(p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
     }
     pairs
 }
@@ -2382,5 +2565,125 @@ mod tests {
         );
         assert_eq!(pl, pl_before, "carrier_phase must stay frozen in real branch");
         assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
+    }
+
+    // ---- Phase 2 BodeMag + Coherence builder tests ----
+
+    fn transfer_frame_lin_log_db(
+        freqs: Vec<f32>,
+        magnitude_db: Vec<f32>,
+        coherence: Vec<f32>,
+    ) -> crate::data::types::TransferFrame {
+        crate::data::types::TransferFrame {
+            freqs,
+            magnitude_db,
+            phase_deg: vec![0.0; 0],
+            coherence,
+            delay_samples: 0,
+            delay_ms: 0.0,
+            meas_channel: 0,
+            ref_channel: 1,
+            sr: 48_000,
+        }
+    }
+
+    /// Generate a realistic-density log-spaced test frame matching
+    /// what the daemon emits (~2000 bins downsampled from the full
+    /// FFT). Test fixtures need this density so `build_bodemag_polyline`
+    /// (which bins into 512 log-spaced columns) gets multiple bins
+    /// per column and produces a continuous polyline; sparser
+    /// fixtures break the trace into single-column fragments that
+    /// emit no pairs.
+    fn dense_freqs(n: usize, f_min: f32, f_max: f32) -> Vec<f32> {
+        let log_min = f_min.log10();
+        let log_max = f_max.log10();
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1).max(1) as f32;
+                10.0_f32.powf(log_min + t * (log_max - log_min))
+            })
+            .collect()
+    }
+
+    /// BodeMag emits a polyline whose every vertex sits inside the
+    /// substrate's [0,1] viewport (with a small padding margin).
+    #[test]
+    fn bodemag_pairs_stay_in_unit_box() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let mags: Vec<f32> = freqs.iter().map(|&f| 10.0 * (f / 1000.0).log10()).collect();
+        let f = transfer_frame_lin_log_db(freqs, mags, vec![]);
+        let v = view(20.0, 24_000.0);
+        let pairs = build_bodemag_polyline(&f, &v);
+        assert!(!pairs.is_empty(), "expected non-empty polyline");
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    /// Flat unity-gain transfer (mag = 0 dB everywhere) → trace at
+    /// the y coordinate corresponding to 0 dB. With the BodeMag
+    /// default window (-40..+40), 0 dB lands at y = 0.05 + 0.9·0.5 =
+    /// 0.5 (mid-cell).
+    #[test]
+    fn bodemag_unity_gain_traces_mid_cell() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let mags = vec![0.0; freqs.len()];
+        let f = transfer_frame_lin_log_db(freqs, mags, vec![]);
+        let v = CellView {
+            freq_min: 20.0,
+            freq_max: 24_000.0,
+            db_min: -40.0,
+            db_max: 40.0,
+            ..CellView::default()
+        };
+        let pairs = build_bodemag_polyline(&f, &v);
+        assert!(!pairs.is_empty(), "expected non-empty polyline");
+        for [_, y] in &pairs {
+            assert!(
+                (y - 0.5).abs() < 1e-4,
+                "0 dB should map to y = 0.5 in a (-40, 40) window; got {y}",
+            );
+        }
+    }
+
+    /// Coherence stays in the substrate cell regardless of input
+    /// values (clamped to [0,1] before mapping).
+    #[test]
+    fn coherence_pairs_stay_in_unit_box() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        // Mix of valid coherence + a couple of out-of-range values
+        // (defensive: the daemon shouldn't emit these but the builder
+        // shouldn't panic if it does).
+        let coh: Vec<f32> = freqs.iter().enumerate().map(|(i, _)| {
+            match i % 5 {
+                0 => 0.0,
+                1 => 0.5,
+                2 => 1.0,
+                3 => 1.2,  // out of range — should clamp
+                _ => -0.1, // out of range — should clamp
+            }
+        }).collect();
+        let f = transfer_frame_lin_log_db(freqs, vec![], coh);
+        let pairs = build_coherence_polyline(&f);
+        assert!(!pairs.is_empty(), "expected non-empty polyline");
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    /// Empty TransferFrame → empty polyline (no panic on cold start).
+    #[test]
+    fn bodemag_empty_frame_yields_empty_polyline() {
+        let f = transfer_frame_lin_log_db(vec![], vec![], vec![]);
+        let v = view(20.0, 24_000.0);
+        assert!(build_bodemag_polyline(&f, &v).is_empty());
+    }
+
+    #[test]
+    fn coherence_empty_frame_yields_empty_polyline() {
+        let f = transfer_frame_lin_log_db(vec![], vec![], vec![]);
+        assert!(build_coherence_polyline(&f).is_empty());
     }
 }

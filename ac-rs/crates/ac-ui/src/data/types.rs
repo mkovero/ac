@@ -354,6 +354,19 @@ pub enum ViewMode {
     /// → flat tops, asymmetric class-A → asymmetric line about
     /// origin, …). Phase 1.5 of unified.md.
     IoTransfer,
+    /// Bode magnitude on the ember substrate. Reads
+    /// `(active_channel, active_channel + 1)` as a transfer pair from
+    /// `VirtualChannelStore`; auto-registers the pair on view-entry
+    /// so the daemon's transfer worker starts producing TransferFrames.
+    /// Long τ_p (~4 s) so successive measurements fade-blend → free
+    /// before/after diff workflow without explicit overlay logic.
+    /// Phase 2 of unified.md.
+    BodeMag,
+    /// Coherence γ²(f) on the ember substrate. Same pair convention
+    /// as `BodeMag` (auto-registers `active + active+1`). Y axis is
+    /// dimensionless [0, 1] — visually obvious where the FRF is
+    /// trustworthy (γ² ≈ 1) vs unreliable (γ² < 0.8). Phase 2.
+    Coherence,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

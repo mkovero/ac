@@ -958,6 +958,23 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   `build_iotransfer_polyline` body is Goniometer's raw-rotation
   path with relabelled axes.
 
+- `(2026-05-05) Phase 2 — BodeMag + Coherence on the substrate.`
+  — Reuses the existing `transfer_stream` daemon worker (no new
+  wire schema); auto-registers `(active, active+1)` as a
+  TransferPair on view-entry via new
+  `App::ensure_transfer_pair_for_active` so the user thinks
+  "I want bode of ch N → ch N+1" and gets it without manually
+  registering pairs first. Builders `build_bodemag_polyline`
+  (signed dB, single-trace, max-aggregation per log-spaced
+  column — same anti-moiré pattern as `build_spectrum_polyline`)
+  and `build_coherence_polyline` (γ²(f), min-aggregation per
+  column for pessimistic γ²). Long τ_p (~4 s) gives the free
+  fade-diff workflow promised in §5: tweak a console knob,
+  watch the new curve fade in over the previous one.
+  BodeMag default dB window changed to (-40, +40) so unity gain
+  lands at mid-cell — typical Bode work centres around 0 dB,
+  not the spectrum default of (-120, 0).
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -1041,6 +1058,28 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
 
+- `(2026-05-05) — Phase 2 frequency-domain views: BodeMag +
+  Coherence on the substrate.` — Both consume the existing
+  `transfer_stream` wire frame (no new daemon work). Auto-pair
+  registration: when the user enters BodeMag or Coherence,
+  `App::ensure_transfer_pair_for_active` registers
+  `(monitor[active], monitor[active]+1)` as a TransferPair if
+  not already there + (re)starts the daemon worker. Substrate
+  parameters: τ_p ≈ 4 s, intensity 0.005, γ 0.6 / gain 1.5
+  (single-trace at the transfer worker's ~10 Hz tick — much
+  sparser deposit than spectrum so intensity is bumped vs
+  SpectrumEmber). 5 new builder unit tests + the existing
+  parser test extended for `bode_mag` / `bodemag` /
+  `coherence` / `coh` aliases. 170 ac-ui tests passing.
+  W-cycle is now Scope → SpectrumEmber → Goniometer →
+  IoTransfer → BodeMag → Coherence — six ember slots covering
+  signal-time, signal-freq, stereo-phase, distortion-shape, and
+  the diff-friendly Bode/coherence pair.
+  Visual: `ac-ui --view bode_mag --channels 0,1`, then
+  externally route a known signal through your DUT (ref ch 0,
+  DUT out ch 1). Watch the magnitude curve fade-trail under
+  itself as you change the DUT.
+
 - `(2026-05-05) — Phase 1.5 trajectory cleanup: dropped Takens,
   added IoTransfer.` — Takens removed end-to-end (ViewMode +
   WSlot variants, App fields, build_takens_polyline + helpers +
@@ -1074,10 +1113,10 @@ for strip-chart), `H` is complex transfer function, `f` is freq.
 | Scope         | (t mod W, s/A)                   | ScopeFrame            |
 | Goniometer    | ((L−R)/√2, (L+R)/√2)             | stereo ScopeFrame     |
 | IoTransfer    | (ref, dut_out)                   | scope pair (ref, dut+1) |
-| Bode mag      | (log f, mag_db)                  | TransferFrame         |
-| Bode phase    | (log f, φ)                       | TransferFrame         |
+| BodeMag       | (log f, mag_db)                  | TransferFrame         |
 | Coherence     | (log f, γ²)                      | TransferFrame         |
-| Group delay   | (log f, −dφ/dω)                  | TransferFrame         |
+| Bode phase    | (log f, φ)                       | TransferFrame (Phase 2.5) |
+| Group delay   | (log f, −dφ/dω)                  | TransferFrame (Phase 2.5) |
 | Nyquist       | (Re H, Im H)                     | ComplexTransferFrame  |
 | IR            | (t, IFFT(H))                     | ComplexTransferFrame  |
 | Pole-zero     | (Re p, Im p)                     | rational fit of H     |

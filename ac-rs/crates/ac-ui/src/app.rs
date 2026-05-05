@@ -458,6 +458,8 @@ impl App {
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence
         ) {
             LayoutMode::Single
         } else {

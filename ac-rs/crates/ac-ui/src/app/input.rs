@@ -29,6 +29,8 @@ enum WSlot {
     SpectrumEmber,
     Goniometer,
     IoTransfer,
+    BodeMag,
+    Coherence,
 }
 
 #[derive(Clone)]
@@ -250,6 +252,18 @@ impl App {
                 // if the user wants finer control over how much of the
                 // cell the trace fills.)
                 return;
+            }
+            ViewMode::Coherence => {
+                // Coherence y is fixed [0, 1] and the builder uses a
+                // hardcoded full-band x range — neither axis takes
+                // user input. Swallow scroll.
+                return;
+            }
+            ViewMode::BodeMag => {
+                // BodeMag has both freq (x) and dB (y) axes — let the
+                // standard spectrum-style scroll-zoom path handle it
+                // (plain = both axes; Shift = freq only; Ctrl =
+                // dB only). Falls through.
             }
             _ => {}
         }
@@ -727,6 +741,8 @@ impl App {
                 | ViewMode::SpectrumEmber
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
+                | ViewMode::BodeMag
+                | ViewMode::Coherence
         )
     }
 
@@ -742,6 +758,8 @@ impl App {
             (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
             (LayoutMode::Single, ViewMode::Goniometer,    _)         => Some(WSlot::Goniometer),
             (LayoutMode::Single, ViewMode::IoTransfer,    _)         => Some(WSlot::IoTransfer),
+            (LayoutMode::Single, ViewMode::BodeMag,       _)         => Some(WSlot::BodeMag),
+            (LayoutMode::Single, ViewMode::Coherence,     _)         => Some(WSlot::Coherence),
             _ => None,
         }
     }
@@ -961,7 +979,9 @@ impl App {
                     Some(WSlot::Scope)         => WSlot::SpectrumEmber,
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
                     Some(WSlot::Goniometer)    => WSlot::IoTransfer,
-                    Some(WSlot::IoTransfer)    => WSlot::Matrix,
+                    Some(WSlot::IoTransfer)    => WSlot::BodeMag,
+                    Some(WSlot::BodeMag)       => WSlot::Coherence,
+                    Some(WSlot::Coherence)     => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -975,6 +995,8 @@ impl App {
                     WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
                     WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft",        "view: goniometer (ember)"),
                     WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft",        "view: iotransfer (ember)"),
+                    WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft",        "view: bode mag (ember)"),
+                    WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft",        "view: coherence (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

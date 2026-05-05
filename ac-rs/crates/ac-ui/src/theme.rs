@@ -76,7 +76,14 @@ pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f
         | ViewMode::SpectrumEmber
         | ViewMode::Scope
         | ViewMode::Goniometer
-        | ViewMode::IoTransfer => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
+        | ViewMode::IoTransfer
+        | ViewMode::Coherence => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
+        // Bode magnitude is a transfer-function ratio centred near
+        // 0 dB (unity gain). The wide spectrum default (-120..0) would
+        // pin unity to the top edge — wrong frame for distortion /
+        // EQ-tweak work where the user wants to see ±N dB excursions
+        // around 0. 80 dB span centred at 0 puts unity at mid-cell.
+        ViewMode::BodeMag => (-40.0, 40.0),
         ViewMode::Waterfall => (DEFAULT_COLORMAP_DB_MIN, DEFAULT_COLORMAP_DB_MAX),
     }
 }

@@ -22,6 +22,41 @@ impl App {
         self.send_transfer_stream_start(0, 0);
     }
 
+    /// Ensure a transfer pair exists for the current `active_channel`
+    /// using the same active+1 convention as Goniometer / IoTransfer:
+    /// `meas = monitor_channels[active]`, `ref = active+1`. If both
+    /// channels are in the monitor set and the pair isn't already
+    /// registered, register it and (re)start the transfer worker so
+    /// the daemon begins producing TransferFrames for it.
+    ///
+    /// Used by the BodeMag / Coherence dispatch arms — the user is
+    /// thinking "I want the bode/coherence of ch N → ch N+1" and gets
+    /// it without having to manually register pairs first.
+    ///
+    /// Returns the pair (whether newly-registered or pre-existing) so
+    /// the caller can look up the latest frame from
+    /// `virtual_channels`. Returns `None` when no `active+1` is in
+    /// the monitor set or no monitor channels are configured.
+    pub(super) fn ensure_transfer_pair_for_active(
+        &mut self,
+    ) -> Option<crate::data::types::TransferPair> {
+        let active = self.config.active_channel;
+        let monitor = self.monitor_channels.as_deref()?;
+        let meas = monitor.get(active).copied()?;
+        let ref_ch = meas.checked_add(1)?;
+        // Require the +1 channel to be in the monitor set so the
+        // daemon's transfer worker actually has a port to capture.
+        if !monitor.contains(&ref_ch) {
+            return None;
+        }
+        let pair = crate::data::types::TransferPair { meas, ref_ch };
+        if self.virtual_channels.add(pair) {
+            self.notify(&format!("transfer pair registered: ch {meas} → ch {ref_ch}"));
+            self.restart_transfer_stream();
+        }
+        Some(pair)
+    }
+
     pub(super) fn start_data_source(&mut self) {
         let init = match self.init.take() {
             Some(i) => i,

@@ -107,6 +107,12 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
+    /// Phase 2 BodeMag / Coherence: the transfer pair the dispatch
+    /// arm resolved (if any). `None` means no pair was registrable
+    /// (active+1 isn't in the monitor set or no monitor channels).
+    /// Surfaced in the status caption so the user knows whether
+    /// they're looking at real data or "no data yet".
+    pub bode_pair: Option<TransferPair>,
     /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
     /// physical channels) or one of the synthetic-fallback variants.
@@ -156,6 +162,28 @@ fn format_iotransfer_status_line(status: StereoStatus) -> String {
         StereoStatus::NoAudio => {
             "iotransfer (ember) │ synthetic — no daemon source".to_string()
         }
+    }
+}
+
+/// Format the BodeMag / Coherence status line. `view_label` is the
+/// short view name; `pair` carries the meas+ref channel ids the
+/// dispatch arm resolved (None when the user's active+1 isn't in the
+/// monitor set). y range is appended for at-a-glance scale: dB window
+/// for Bode, [0,1] for coherence.
+fn format_transfer_status_line(
+    view_label: &str,
+    pair: Option<TransferPair>,
+    y_min: f32,
+    y_max: f32,
+) -> String {
+    match pair {
+        Some(p) => format!(
+            "{view_label} (ember) │ meas ch {} → ref ch {}  │  Y {:.0}..{:.0}",
+            p.meas, p.ref_ch, y_min, y_max,
+        ),
+        None => format!(
+            "{view_label} (ember) │ no transfer pair (need active+1 in monitor set)",
+        ),
     }
 }
 
@@ -356,6 +384,12 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ),
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
             ViewMode::IoTransfer => format_iotransfer_status_line(input.gonio_state),
+            ViewMode::BodeMag => format_transfer_status_line(
+                "bode mag", input.bode_pair, view.db_min, view.db_max,
+            ),
+            ViewMode::Coherence => format_transfer_status_line(
+                "coherence", input.bode_pair, 0.0, 1.0,
+            ),
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),
