@@ -244,6 +244,71 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
     TransferResult { freqs, magnitude_db, phase_deg, coherence, re, im, delay_samples, delay_ms }
 }
 
+/// Inverse FFT of a complex H(ω) (in `re`, `im` parallel arrays from a
+/// `TransferResult`) into a time-domain impulse response h(t).
+///
+/// Returns `Vec<f32>` of length `(re.len() - 1) * 2`. For the
+/// `h1_estimate_core` Welch path, that's `nperseg = sr` samples = 1 s
+/// of IR — plenty of visual range for typical room / DUT responses.
+///
+/// h(t) is centred via `fftshift`-style rotation so the dominant peak
+/// (DC bin energy + linear-phase pre-roll) sits at `t = 0` in the
+/// middle of the array. Caller treats indices `[0, n/2)` as
+/// pre-causal taps, `[n/2, n)` as causal. Empty / mismatched / too-
+/// short inputs return `Vec::new()`.
+///
+/// `unified.md` Phase 4b. Daemon-side IFFT — UI gets a downsampled
+/// time-series and just plots it (no UI-side FFT plumbing needed).
+pub fn impulse_response_from_h(re: &[f64], im: &[f64]) -> Vec<f32> {
+    if re.is_empty() || re.len() != im.len() || re.len() < 2 {
+        return Vec::new();
+    }
+    let nfft = re.len();
+    let n_time = (nfft - 1) * 2;
+    let mut planner = RealFftPlanner::<f64>::new();
+    let ifft = planner.plan_fft_inverse(n_time);
+    let mut spectrum: Vec<Complex<f64>> = re
+        .iter()
+        .zip(im.iter())
+        .map(|(&r, &i)| Complex::new(r, i))
+        .collect();
+    // realfft inverse requires DC (bin 0) and Nyquist (bin n-1) to
+    // have zero imaginary part — they describe real-valued frequency
+    // components in any real-input → complex-output forward FFT, so
+    // their inverse must hold the same constraint. Welch H₁ from
+    // real signal pairs *should* give real values at these bins
+    // (real/real = real), but Welch averaging + float noise leaves
+    // tiny non-zero imaginary residue that realfft refuses. Zero
+    // them so the IFFT proceeds cleanly. The discarded residue is
+    // sub-1e-10 in normal operation and reflects numerical noise,
+    // not signal content.
+    if let Some(first) = spectrum.first_mut() {
+        first.im = 0.0;
+    }
+    if let Some(last) = spectrum.last_mut() {
+        last.im = 0.0;
+    }
+    let mut time = ifft.make_output_vec();
+    if ifft.process(&mut spectrum, &mut time).is_err() {
+        return Vec::new();
+    }
+    // Realfft inverse doesn't normalise — divide by n_time so the
+    // recovered impulse magnitude matches the H(ω) amplitudes.
+    let norm = n_time as f64;
+    // Center via fftshift-style swap so the user sees the IR peak at
+    // mid-cell instead of at the array edge (where pre-causal taps
+    // wrap around to indices near n_time-1 in the un-shifted output).
+    let half = n_time / 2;
+    let mut out = Vec::<f32>::with_capacity(n_time);
+    for k in 0..n_time {
+        // Source index: k = 0 → src n/2 (the t=0 IR peak); k = n-1 →
+        // src n/2 - 1 (the wraparound point).
+        let src = (k + half) % n_time;
+        out.push((time[src] / norm) as f32);
+    }
+    out
+}
+
 /// Number of capture seconds needed for `n_averages` Welch segments at `sr`.
 pub fn capture_duration(n_averages: usize, sr: u32) -> f64 {
     let nperseg  = sr as usize;
@@ -441,5 +506,51 @@ mod tests {
             "uncorrelated signals should have low coherence, got {:.4}",
             mean_coh
         );
+    }
+
+    /// Phase 4b round-trip: a flat-spectrum H(ω) (Re ≡ 1, Im ≡ 0)
+    /// represents an ideal unit-impulse system. The IFFT must recover
+    /// a time-domain h(t) with a single positive peak centred at the
+    /// middle of the array (after the centring shift) and ~zero
+    /// energy elsewhere.
+    #[test]
+    fn impulse_response_recovers_unit_impulse() {
+        // 4097 freq bins → 8192-sample IR (1 s at 8 kHz, etc.).
+        let nfft = 4097;
+        let re = vec![1.0; nfft];
+        let im = vec![0.0; nfft];
+        let ir = impulse_response_from_h(&re, &im);
+        assert_eq!(ir.len(), (nfft - 1) * 2);
+        let n = ir.len();
+        let mid = n / 2;
+        // The peak must be at the centre.
+        let (peak_idx, peak_val) = ir
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .unwrap();
+        assert_eq!(peak_idx, mid, "peak index {peak_idx}, expected {mid}");
+        assert!(*peak_val > 0.0, "peak value should be positive, got {peak_val}");
+        // Off-peak energy must be ~zero (Re=1 IFFT is a Dirac delta).
+        for (i, v) in ir.iter().enumerate() {
+            if i != mid {
+                assert!(
+                    v.abs() < 1e-3,
+                    "non-peak bin {i} = {v} (expected ~0)",
+                );
+            }
+        }
+    }
+
+    /// Empty / mismatched inputs are defensive returns of Vec::new(),
+    /// not panics — the daemon emits IR sidecar frames every tick and
+    /// must not crash on edge cases (empty re/im on cold start, etc.).
+    #[test]
+    fn impulse_response_empty_inputs_yield_empty() {
+        assert!(impulse_response_from_h(&[], &[]).is_empty());
+        assert!(impulse_response_from_h(&[1.0], &[]).is_empty());
+        assert!(impulse_response_from_h(&[1.0, 2.0], &[0.0]).is_empty());
+        // Single-bin input is too short to IFFT meaningfully.
+        assert!(impulse_response_from_h(&[1.0], &[0.0]).is_empty());
     }
 }

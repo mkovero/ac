@@ -324,6 +324,26 @@ pub struct ScopeFrame {
     pub n_channels: Option<u32>,
 }
 
+/// `visualize/ir` wire frame — daemon-side IFFT of H₁(ω) into a
+/// time-domain h(t) array. Centred (`t = 0` at the middle of
+/// `samples`); `t_origin_ms` is negative and `dt_ms` is the per-
+/// sample stride. `unified.md` Phase 4b.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IrFrame {
+    pub samples: Vec<f32>,
+    pub sr: u32,
+    pub dt_ms: f64,
+    pub t_origin_ms: f64,
+    pub ref_channel: u32,
+    pub meas_channel: u32,
+    #[serde(default)]
+    pub stride: u32,
+    #[serde(default)]
+    pub delay_samples: i64,
+    #[serde(default)]
+    pub delay_ms: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     Grid,
@@ -393,6 +413,14 @@ pub enum ViewMode {
     /// boundary). Same auto-pair convention as BodeMag. Phase 4 of
     /// unified.md.
     Nyquist,
+    /// Impulse response h(t) — daemon-side IFFT of the H₁(ω) estimate
+    /// shipped as a `visualize/ir` sidecar to `transfer_stream`. Time
+    /// on x (centred so t = 0 is mid-cell), amplitude on y with
+    /// auto-gain. Same auto-pair convention as Nyquist / Bode. For
+    /// calibrated measurement-grade IR use the Tier 1 sweep path
+    /// instead — this view is the live-bench Tier 2 visualisation.
+    /// Phase 4b of unified.md.
+    Ir,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

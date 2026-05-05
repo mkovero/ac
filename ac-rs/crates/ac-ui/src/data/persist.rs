@@ -155,6 +155,7 @@ pub fn view_mode_token(view: ViewMode) -> &'static str {
         ViewMode::BodePhase     => "bode_phase",
         ViewMode::GroupDelay    => "group_delay",
         ViewMode::Nyquist       => "nyquist",
+        ViewMode::Ir            => "ir",
     }
 }
 
@@ -175,6 +176,7 @@ pub fn view_mode_from_token(token: &str) -> Option<ViewMode> {
         "bode_phase"     => ViewMode::BodePhase,
         "group_delay"    => ViewMode::GroupDelay,
         "nyquist"        => ViewMode::Nyquist,
+        "ir"             => ViewMode::Ir,
         _ => return None,
     })
 }
@@ -256,6 +258,7 @@ mod tests {
             ViewMode::SpectrumEmber, ViewMode::Goniometer,
             ViewMode::IoTransfer, ViewMode::BodeMag, ViewMode::Coherence,
             ViewMode::BodePhase, ViewMode::GroupDelay, ViewMode::Nyquist,
+            ViewMode::Ir,
         ];
         for v in cases {
             let tok = view_mode_token(v);

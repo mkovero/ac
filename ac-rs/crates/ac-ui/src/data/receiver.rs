@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore};
+use super::store::{IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore};
 use super::types::{
-    CwtFrame, LoudnessReadout, ScopeFrame, SpectrumFrame, SweepDone, SweepPoint, TransferFrame,
-    TransferPair,
+    CwtFrame, IrFrame, LoudnessReadout, ScopeFrame, SpectrumFrame, SweepDone, SweepPoint,
+    TransferFrame, TransferPair,
 };
 
 pub struct ReceiverStatus {
@@ -57,6 +57,7 @@ pub fn spawn(
     sweep: SweepStore,
     loudness: LoudnessStore,
     scope: ScopeStore,
+    ir: IrStore,
     wake: Option<EventLoopProxy<()>>,
 ) -> ReceiverHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -395,6 +396,28 @@ pub fn spawn(
                             }
                             Err(e) => {
                                 log::warn!("measurement/loudness parse failed: {e}");
+                            }
+                        }
+                        continue;
+                    }
+                    if type_tag.as_deref() == Some("visualize/ir") {
+                        // unified.md Phase 4b: daemon-side IFFT of the
+                        // current H₁ shipped as a sidecar to
+                        // transfer_stream. Stored per TransferPair
+                        // (meas, ref) so multi-pair sessions see
+                        // independent IRs; UI's IR view dispatch arm
+                        // looks up by the pair resolved from
+                        // active+1.
+                        match serde_json::from_str::<IrFrame>(body) {
+                            Ok(ir_f) => {
+                                ir.write(ir_f);
+                                status_c.connected.store(true, Ordering::Relaxed);
+                                let ns = start.elapsed().as_nanos() as u64;
+                                status_c.last_frame_ns.store(ns, Ordering::Relaxed);
+                                notify();
+                            }
+                            Err(e) => {
+                                log::warn!("visualize/ir parse failed: {e}");
                             }
                         }
                         continue;

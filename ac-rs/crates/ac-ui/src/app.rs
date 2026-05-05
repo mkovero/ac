@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
 };
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
@@ -134,6 +134,7 @@ pub struct AppInit {
     pub sweep_store: SweepStore,
     pub loudness_store: LoudnessStore,
     pub scope_store: ScopeStore,
+    pub ir_store: IrStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -202,6 +203,10 @@ pub struct App {
     /// `visualize/scope` frames; consumed by the Goniometer /
     /// PhaseScope3D dispatch arms (`unified.md` Phase 0b).
     pub(super) scope_store: Option<ScopeStore>,
+    /// Per-pair impulse response populated by the receiver from
+    /// `visualize/ir` frames; consumed by the IR view dispatch arm
+    /// (`unified.md` Phase 4b).
+    pub(super) ir_store: Option<IrStore>,
     /// Computed each render frame at the Goniometer dispatch arm;
     /// read by the overlay so the caption surfaces "ch X + Y" vs
     /// "synthetic — no stereo" vs "synthetic — daemon not streaming
@@ -508,6 +513,7 @@ impl App {
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
                 | ViewMode::Nyquist
+                | ViewMode::Ir
         ) {
             LayoutMode::Single
         } else {
@@ -534,6 +540,7 @@ impl App {
             sweep_selected_idx: None,
             loudness_store: None,
             scope_store: None,
+            ir_store: None,
             gonio_real_audio_state: crate::data::types::StereoStatus::NoAudio,
             monitor_spectrum_active: false,
             monitor_channels,
@@ -1045,7 +1052,7 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
+        ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -1059,6 +1066,7 @@ mod loop_tests {
             sweep_store: SweepStore::new(),
             loudness_store: LoudnessStore::new(),
             scope_store: ScopeStore::new(),
+            ir_store: IrStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

@@ -1542,6 +1542,46 @@ the dB correction subtracted; (re, im) are scaled by `10^(−curve_db/20)`
 so `arg(H)` is unchanged. Older subscribers that ignore `re` / `im`
 keep working — the fields are pure additions.
 
+#### `visualize/ir` sidecar (Phase 4b)
+
+Emitted alongside each `transfer_stream` frame for the same pair on
+the same tick — daemon-side IFFT of the full-resolution H₁(ω) into
+the time domain. Separate frame so subscribers that only want H(ω)
+don't pay the per-tick IR bandwidth, and so the IR view can be
+toggled on/off in the UI without re-issuing the transfer command.
+
+```json
+// topic: data
+{
+  "type":          "visualize/ir",
+  "cmd":           "transfer_stream",
+  "samples":       [<float>, ...],   // h(t) downsampled to ≤2000 samples
+  "sr":            <int>,            // capture sample rate
+  "stride":        <int>,            // downsample factor (ir_full / samples)
+  "dt_ms":         <float>,          // ms per output sample (1000/sr * stride)
+  "t_origin_ms":   <float>,          // negative — t=0 sits at samples.len()/2
+  "ref_channel":   <int>,
+  "meas_channel":  <int>,
+  "delay_samples": <int>,
+  "delay_ms":      <float>
+}
+```
+
+**Time origin.** `samples` is `fftshift`-centred so the dominant IR
+peak sits at the middle of the array. The first sample's time is
+`t_origin_ms` (negative); each subsequent sample is `dt_ms` later. Tap
+`k` is at `t_origin_ms + k * dt_ms` ms. Pre-causal taps in the lower
+half of the array are normal output of a delay-compensated H₁
+estimate — they capture phase wrap and pre-ringing of bandlimited
+filters, not actual non-causality.
+
+**No mic-curve correction.** The IR is computed from the raw
+ac-core `TransferResult.re` / `.im` (full resolution), which is NOT
+mic-curve-corrected — only the downsampled re/im in the
+`transfer_stream` frame is. For visualisation-only Tier 2 use this is
+acceptable; if a calibrated IR is wanted, run the Tier 1 sweep
+measurement instead.
+
 **DATA** — terminal after `stop`:
 ```json
 // topic: done

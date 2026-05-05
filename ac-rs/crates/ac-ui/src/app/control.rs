@@ -76,6 +76,8 @@ impl App {
         self.loudness_store = Some(loudness_store.clone());
         let scope_store = init.scope_store.clone();
         self.scope_store = Some(scope_store.clone());
+        let ir_store = init.ir_store.clone();
+        self.ir_store = Some(ir_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -98,6 +100,7 @@ impl App {
                     sweep_store,
                     loudness_store,
                     scope_store,
+                    ir_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));

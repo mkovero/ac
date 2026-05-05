@@ -37,6 +37,7 @@ pub fn draw_grid(
             | ViewMode::BodePhase
             | ViewMode::GroupDelay
             | ViewMode::Nyquist
+            | ViewMode::Ir
     ) {
         return;
     }
@@ -144,7 +145,8 @@ pub fn draw_grid(
         | ViewMode::Coherence
         | ViewMode::BodePhase
         | ViewMode::GroupDelay
-        | ViewMode::Nyquist => {
+        | ViewMode::Nyquist
+        | ViewMode::Ir => {
             // Ember-substrate views paint their own field on pure black —
             // skip the spectrum/waterfall axis grid. Unreachable here
             // because of the early return at the top of the function, but

@@ -404,6 +404,13 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 None => "nyquist (ember) │ no transfer pair (need active+1 in monitor set)"
                     .to_string(),
             },
+            ViewMode::Ir => match input.bode_pair {
+                Some(p) => format!(
+                    "ir (ember) │ meas ch {} → ref ch {}  │  t=0 mid-cell",
+                    p.meas, p.ref_ch,
+                ),
+                None => "ir (ember) │ no transfer pair (need active+1 in monitor set)".to_string(),
+            },
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),

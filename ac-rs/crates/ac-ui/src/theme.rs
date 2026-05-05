@@ -78,7 +78,8 @@ pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f
         | ViewMode::Goniometer
         | ViewMode::IoTransfer
         | ViewMode::Coherence
-        | ViewMode::Nyquist => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
+        | ViewMode::Nyquist
+        | ViewMode::Ir => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
         // Bode magnitude is a transfer-function ratio centred near
         // 0 dB (unity gain). The wide spectrum default (-120..0) would
         // pin unity to the top edge — wrong frame for distortion /

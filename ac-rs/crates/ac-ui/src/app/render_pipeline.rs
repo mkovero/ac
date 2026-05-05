@@ -111,7 +111,8 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
-                | ViewMode::Nyquist,
+                | ViewMode::Nyquist
+                | ViewMode::Ir,
         )
         .then(|| self.ensure_transfer_pair_for_active())
         .flatten();
@@ -569,7 +570,8 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
-                | ViewMode::Nyquist => {}
+                | ViewMode::Nyquist
+                | ViewMode::Ir => {}
             }
         }
 
@@ -755,7 +757,8 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
-                | ViewMode::Nyquist => {
+                | ViewMode::Nyquist
+                | ViewMode::Ir => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
                     // channel's spectrum frame for SpectrumEmber, synthetic
@@ -781,7 +784,8 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
-                | ViewMode::Nyquist => {}
+                | ViewMode::Nyquist
+                | ViewMode::Ir => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -1195,6 +1199,7 @@ impl App {
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
                 | ViewMode::Nyquist
+                | ViewMode::Ir
         ) {
             let now = Instant::now();
             let dt = self
@@ -1479,6 +1484,49 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
+                ViewMode::Ir => {
+                    // Phase 4b: pull the latest impulse response for the
+                    // active+1 transfer pair and plot h(t). Uses the
+                    // shared `ember_stereo_peak` auto-gain (Goniometer/
+                    // IoTransfer/Nyquist share — they're never
+                    // simultaneously visible) so the dominant IR peak
+                    // sits at ~0.4 of cell height.
+                    let polyline = bode_pair
+                        .and_then(|p| {
+                            self.ir_store
+                                .as_ref()
+                                .and_then(|s| s.read(p))
+                        })
+                        .map(|frame| {
+                            let frame_peak = frame
+                                .samples
+                                .iter()
+                                .map(|s| s.abs())
+                                .fold(0.0_f32, f32::max);
+                            let tau_s = 0.5;
+                            let decay = (-dt / tau_s).exp();
+                            self.ember_stereo_peak = self
+                                .ember_stereo_peak
+                                .max(frame_peak)
+                                * decay
+                                + frame_peak * (1.0 - decay);
+                            if self.ember_stereo_peak < 0.001 {
+                                self.ember_stereo_peak = 0.001;
+                            }
+                            let amp = (0.4 / self.ember_stereo_peak.max(0.02))
+                                .clamp(0.5, 50.0);
+                            build_ir_polyline(&frame, amp)
+                        })
+                        .unwrap_or_default();
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1514,7 +1562,8 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
-                | ViewMode::Nyquist => ember.draw(&mut pass),
+                | ViewMode::Nyquist
+                | ViewMode::Ir => ember.draw(&mut pass),
             }
         }
 
@@ -2312,6 +2361,53 @@ fn build_nyquist_polyline(
             prev = None;
             continue;
         }
+        if let Some(p) = prev {
+            pairs.push(p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
+    }
+    pairs
+}
+
+/// `IrFrame` → impulse-response polyline. x = time (mapped from each
+/// sample's array index through the frame's `dt_ms` / `t_origin_ms`
+/// metadata into the substrate's [0, 1] cell range), y = amplitude
+/// (auto-gain `amp` factor at the dispatch site, centred at 0.5).
+/// `unified.md` Phase 4b.
+///
+/// Faint reference baseline drawn at y = 0.5 so the user can see
+/// asymmetric / DC-biased IRs at a glance. Empty `samples` (cold
+/// start) yields an empty polyline.
+fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32; 2]> {
+    let n = frame.samples.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    // Reference baseline: 16-segment line at y = 0.5 across the cell.
+    // Drawn first; the substrate's per-deposit additive accumulation
+    // means the IR trace overlaying it will dominate any pixel they
+    // share, but the baseline stays visible in flat regions.
+    let mut pairs = Vec::with_capacity(32 + n * 2);
+    let mut prev_base: Option<[f32; 2]> = None;
+    for k in 0..=16 {
+        let cur = [k as f32 / 16.0, 0.5];
+        if let Some(p) = prev_base {
+            pairs.push(p);
+            pairs.push(cur);
+        }
+        prev_base = Some(cur);
+    }
+    let denom = (n - 1) as f32;
+    let mut prev: Option<[f32; 2]> = None;
+    for (i, &s) in frame.samples.iter().enumerate() {
+        if !s.is_finite() {
+            prev = None;
+            continue;
+        }
+        let x = i as f32 / denom;
+        let y = (0.5 + 0.45 * amp * s).clamp(0.0, 1.0);
+        let cur = [x, y];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -3273,6 +3369,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- Phase 4b IR builder tests ----
+
+    fn ir_frame(samples: Vec<f32>) -> crate::data::types::IrFrame {
+        crate::data::types::IrFrame {
+            samples,
+            sr: 48_000,
+            dt_ms: 1.0 / 48.0,
+            t_origin_ms: -10.0,
+            ref_channel: 1,
+            meas_channel: 0,
+            stride: 1,
+            delay_samples: 0,
+            delay_ms: 0.0,
+        }
+    }
+
+    /// Empty IR frame (cold start) → empty polyline (no panic).
+    #[test]
+    fn ir_empty_samples_yields_empty_polyline() {
+        let pairs = build_ir_polyline(&ir_frame(vec![]), 1.0);
+        assert!(pairs.is_empty());
+    }
+
+    /// Single-sample IR is too short to draw — returns empty.
+    #[test]
+    fn ir_too_short_yields_empty_polyline() {
+        let pairs = build_ir_polyline(&ir_frame(vec![1.0]), 1.0);
+        assert!(pairs.is_empty());
+    }
+
+    /// Flat-zero IR: trace coincides with the y=0.5 baseline.
+    #[test]
+    fn ir_flat_zero_traces_at_baseline() {
+        let pairs = build_ir_polyline(&ir_frame(vec![0.0; 256]), 1.0);
+        assert!(!pairs.is_empty());
+        for [_, y] in &pairs {
+            assert!(
+                (y - 0.5).abs() < 1e-5,
+                "expected y ≈ 0.5 (baseline); got {y}",
+            );
+        }
+    }
+
+    /// Substrate-box invariant: all vertices stay in [0,1]² even
+    /// when amp tries to push the trace outside the cell (build_ir
+    /// clamps to keep the substrate render path well-behaved).
+    #[test]
+    fn ir_pairs_stay_in_unit_box() {
+        let samples: Vec<f32> = (0..256)
+            .map(|i| ((i as f32 * 0.1).sin()))
+            .collect();
+        // Deliberately oversized amp — clamps should still hold.
+        let pairs = build_ir_polyline(&ir_frame(samples), 100.0);
+        assert!(!pairs.is_empty());
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    /// Centred unit-impulse: positive peak at the array midpoint
+    /// projects to (x ≈ 0.5, y > 0.5). Verifies the dispatch arm's
+    /// auto-gain → builder mapping puts the Dirac peak in the right
+    /// place visually.
+    #[test]
+    fn ir_centred_impulse_peak_at_mid_cell() {
+        let mut samples = vec![0.0_f32; 257];
+        let mid = samples.len() / 2;
+        samples[mid] = 1.0; // unit impulse at centre
+        let pairs = build_ir_polyline(&ir_frame(samples), 0.4);
+        assert!(!pairs.is_empty());
+        // Find the vertex with the highest y — that's the impulse
+        // peak. It should be at roughly mid-cell on x and noticeably
+        // above the baseline on y.
+        let (peak_x, peak_y) = pairs
+            .iter()
+            .max_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
+            .map(|p| (p[0], p[1]))
+            .unwrap();
+        assert!(
+            (peak_x - 0.5).abs() < 0.01,
+            "impulse peak x = {peak_x}, expected ≈ 0.5",
+        );
+        assert!(
+            peak_y > 0.6,
+            "impulse peak y = {peak_y}, expected noticeably above baseline 0.5",
+        );
     }
 
     /// Bins where (re, im) project off-cell at the given amp must

@@ -884,6 +884,59 @@ fn transfer_stream_default_level_ok() {
     let _ = c.wait_for_topic("done", Duration::from_secs(5));
 }
 
+#[test]
+fn transfer_stream_emits_ir_sidecar() {
+    // unified.md Phase 4b: transfer_stream worker emits a
+    // visualize/ir frame alongside the transfer_stream frame for
+    // the same pair on the same tick. Daemon-side IFFT of H₁(ω)
+    // into a centred time-domain h(t) downsampled to ≤2000 samples.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+        "drive":        true,
+        "level_dbfs":   -12.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut got_ir = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data"
+                && v["type"].as_str() == Some("visualize/ir") => {
+                for key in ["samples", "sr", "dt_ms", "t_origin_ms",
+                            "ref_channel", "meas_channel"] {
+                    assert!(v.get(key).is_some(), "ir frame missing {key}: {v}");
+                }
+                let samples = v["samples"].as_array().unwrap();
+                assert!(!samples.is_empty(), "ir samples must be non-empty");
+                assert!(
+                    samples.len() <= 2000,
+                    "ir samples capped at 2000; got {}",
+                    samples.len(),
+                );
+                let t_origin = v["t_origin_ms"].as_f64().unwrap();
+                assert!(
+                    t_origin <= 0.0,
+                    "t_origin_ms should be ≤ 0 (centred IR); got {t_origin}",
+                );
+                got_ir = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_ir, "never saw a visualize/ir sidecar frame");
+
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
 // ---------------------------------------------------------------------------
 // server_enable / server_disable — toggle listen_mode between local and
 // public and check the reported bind_addr. #52.

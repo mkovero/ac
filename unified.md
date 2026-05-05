@@ -1009,6 +1009,27 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   TransferResult in place (single struct, no separate
   ComplexTransferResult type, no plumbing duplication).
 
+- `(2026-05-05) Phase 4b — IR view (impulse response).` —
+  Daemon-side IFFT of the full-resolution `H₁(ω)` from
+  `TransferResult` (NOT the downsampled wire re/im — IFFT needs
+  the raw `nperseg/2 + 1 = sr/2 + 1` bins to recover h(t)
+  correctly), shipped as a new `visualize/ir` sidecar to
+  `transfer_stream`. UI gets a centred (`fftshift`-style) time-
+  domain h(t) downsampled to ≤ 2000 samples for wire economy plus
+  metadata (`dt_ms`, `t_origin_ms`, `stride`) so the view can
+  label the time axis. Per-pair `IrStore` mirrors `LoudnessStore`'s
+  shape but keyed by `TransferPair` since IR is per-(meas, ref).
+  Builder `build_ir_polyline` drops a faint y=0.5 baseline first
+  (visible in flat regions of the IR), then the trace; auto-gain
+  shares the existing `ember_stereo_peak` (Goniometer / IoTransfer
+  / Nyquist all share — never simultaneously visible). Reference
+  IR vs Tier 1: this is Tier 2 visualisation only — no mic-curve
+  correction, no calibration. For measurement-grade IR use the
+  Tier 1 sweep path. New `unwrap_phase_deg` co-resident defensive
+  bin-0 / bin-Nyquist imaginary-part zeroing in
+  `impulse_response_from_h` handles the float-noise residue
+  realfft inverse refuses.
+
 - `(2026-05-05) Phase 6 — UI state persistence.` — v1 persists
   the small set of user-tunable knobs that change per-session
   (`view_mode`, `ember_intensity_scale`, `ember_tau_p_scale`,
@@ -1131,6 +1152,30 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     criterion) left to the user — needs JACK + at least 2
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
+
+- `(2026-05-05) — Phase 4b IR view + ac-core IFFT helper.` —
+  ac-core `impulse_response_from_h(re, im)` does the
+  `realfft::plan_fft_inverse` + fftshift; daemon's transfer worker
+  emits a `visualize/ir` sidecar (~2000 sample h(t) +
+  dt_ms / t_origin_ms / stride) per pair per tick alongside the
+  existing `transfer_stream`. UI: new IrFrame + IrStore (per
+  TransferPair, mirrors LoudnessStore), receiver branch,
+  ViewMode::Ir, build_ir_polyline (baseline + trace + auto-gain
+  sharing the ember_stereo_peak with Nyquist/Gonio/IoTransfer).
+  Tests: 4 new ac-core IFFT tests (round-trip recovers Dirac
+  from flat H, defensive empty-input guard), 1 new daemon
+  integration test (IR sidecar shape + cap + centred t_origin),
+  5 new UI builder tests (empty / too-short / flat-zero /
+  substrate-box / centred-impulse-peak-at-mid-cell). 645
+  workspace passing.
+  W-cycle: scope → spectrum (ember) → goniometer → iotransfer →
+  bode mag → coherence → bode phase → group delay → nyquist →
+  ir → matrix. Ten ember slots; only pole-zero (Phase 5) remains
+  from §8's substrate views.
+  Visual: `ac-ui --view ir --channels 0,1`. Linear pass-through
+  → tight peak at mid-cell. Long room reverb tail → energy
+  decays from t=0 to the right. Pre-ringing (bandlimited
+  filters) → energy in the left half (pre-causal taps).
 
 - `(2026-05-05) — Phase 6 UI state persistence.` — Survives
   restarts. New `data/persist.rs` module (UiState struct,
@@ -1259,7 +1304,7 @@ for strip-chart), `H` is complex transfer function, `f` is freq.
 | BodePhase     | (log f, φ)                       | TransferFrame         |
 | GroupDelay    | (log f, −dφ/dω)                  | TransferFrame         |
 | Nyquist       | (Re H, Im H)                     | TransferFrame (re/im) |
-| IR            | (t, IFFT(H))                     | TransferFrame (Phase 4b) |
+| IR            | (t, IFFT(H))                     | IrFrame (Phase 4b)    |
 | Pole-zero     | (Re p, Im p)                     | rational fit of H (Phase 5) |
 
 Every row uses the same renderer. The whole instrument is "pick a

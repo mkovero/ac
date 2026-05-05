@@ -256,7 +256,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // read-only inside the per-pair closure; JSON is built on the
             // worker thread and published back in original pair order.
             let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
-            let messages: Vec<Value> = pairs
+            // Each pair can contribute multiple wire messages (the
+            // transfer_stream frame + a Phase 4b visualize/ir sidecar
+            // computed from the same H₁ result). flat_map flattens to
+            // one Vec<Value> per filter_map; overall Vec<Vec<Value>>
+            // is then chained into the per-message send loop below.
+            let messages: Vec<Vec<Value>> = pairs
                 .par_iter()
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
@@ -317,7 +322,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     }
                     let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
 
-                    Some(json!({
+                    let transfer_msg = json!({
                         "type":           "transfer_stream",
                         "cmd":            "transfer_stream",
                         "freqs":          freqs,
@@ -332,11 +337,69 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         "meas_channel":   meas_ch,
                         "sr":             sr,
                         "mic_correction": mc_tag,
-                    }))
+                    });
+                    // Phase 4b: IR sidecar from full-resolution
+                    // complex H (NOT the downsampled re/im above —
+                    // the IFFT needs the raw nperseg/2+1 bins to
+                    // recover h(t) correctly). Time-domain output is
+                    // 1 s long at sr (matches the 1 Hz Welch
+                    // resolution); downsample to ≤2000 samples for
+                    // wire economy by stride-picking. Mic-curve
+                    // correction is intentionally NOT applied to the
+                    // IR — the downsampled re/im version already
+                    // would have it, but the full-resolution H here
+                    // does not (mic-curve correction in the curve_opt
+                    // branch above only touches the downsampled mag /
+                    // re / im). For the visualization-only Tier 2 IR
+                    // view this is acceptable; if a Tier-1 calibrated
+                    // IR is wanted, that path goes through the sweep
+                    // measurement, not transfer_stream.
+                    let h_full_re = &result.re;
+                    let h_full_im = &result.im;
+                    let ir_full = ac_core::visualize::transfer::impulse_response_from_h(
+                        h_full_re, h_full_im,
+                    );
+                    let ir_msg = if ir_full.is_empty() {
+                        None
+                    } else {
+                        const IR_MAX_SAMPLES: usize = 2000;
+                        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
+                        let ir_ds: Vec<f32> = ir_full
+                            .iter()
+                            .step_by(stride)
+                            .copied()
+                            .collect();
+                        // t_origin_ms = -mid_ms because
+                        // impulse_response_from_h centres the IR
+                        // peak at the middle of the array (t=0 in
+                        // the user's mental model).
+                        let dt_ms = 1000.0 / sr as f64 * stride as f64;
+                        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
+                        Some(json!({
+                            "type":         "visualize/ir",
+                            "cmd":          "transfer_stream",
+                            "samples":      ir_ds,
+                            "sr":           sr,
+                            "stride":       stride,
+                            "dt_ms":        dt_ms,
+                            "t_origin_ms":  t_origin_ms,
+                            "ref_channel":  ref_ch,
+                            "meas_channel": meas_ch,
+                            "delay_samples": result.delay_samples,
+                            "delay_ms":     result.delay_ms,
+                        }))
+                    };
+                    let mut out = vec![transfer_msg];
+                    if let Some(m) = ir_msg {
+                        out.push(m);
+                    }
+                    Some(out)
                 })
                 .collect();
-            for msg in messages {
-                send_pub(&pub_tx, "data", &msg);
+            for batch in messages {
+                for msg in batch {
+                    send_pub(&pub_tx, "data", &msg);
+                }
             }
         }
 

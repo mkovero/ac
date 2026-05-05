@@ -11,7 +11,7 @@ use app::{
     App, AppInit, SourceKind, CONTINUOUS_REPAINT_INTERVAL_DEFAULT, MAX_FPS_MAX, MAX_FPS_MIN,
 };
 use data::store::{
-    ChannelStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
 };
 use data::types::{SweepKind, ViewMode};
 
@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
     let sweep_store = SweepStore::new();
     let loudness_store = LoudnessStore::new();
     let scope_store = ScopeStore::new();
+    let ir_store = IrStore::new();
 
     let source_kind = if args.synthetic {
         SourceKind::Synthetic
@@ -74,6 +75,7 @@ fn main() -> anyhow::Result<()> {
         sweep_store,
         loudness_store,
         scope_store,
+        ir_store,
         source_kind,
         output_dir: args.output_dir.clone(),
         endpoint: args.connect.clone(),
@@ -161,8 +163,9 @@ fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
         "bode_phase" | "bode-phase" | "bodephase" | "phase" => Ok(ViewMode::BodePhase),
         "group_delay" | "group-delay" | "groupdelay" | "gd" => Ok(ViewMode::GroupDelay),
         "nyquist" | "nyq" => Ok(ViewMode::Nyquist),
+        "ir" | "impulse" | "impulse_response" => Ok(ViewMode::Ir),
         other => anyhow::bail!(
-            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist, got {other}",
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist|ir, got {other}",
         ),
     }
 }
@@ -340,7 +343,7 @@ Options:\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
   --no-persist         Don't read/write ~/.config/ac/ui.json this session\n  \
-  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist|ir [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -412,6 +415,9 @@ mod view_mode_tests {
             ("gd",               ViewMode::GroupDelay),
             ("nyquist",          ViewMode::Nyquist),
             ("nyq",              ViewMode::Nyquist),
+            ("ir",               ViewMode::Ir),
+            ("impulse",          ViewMode::Ir),
+            ("impulse_response", ViewMode::Ir),
         ];
         for (s, want) in cases {
             assert_eq!(parse_view_mode(s).unwrap(), want, "input {s:?}");

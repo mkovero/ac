@@ -5,8 +5,8 @@ use triple_buffer::{triple_buffer, Input, Output};
 use std::collections::{HashMap, VecDeque};
 
 use super::types::{
-    DisplayConfig, DisplayFrame, FrameMeta, LoudnessReadout, ScopeFrame, SpectrumFrame, SweepDone,
-    SweepPoint, TransferFrame, TransferPair,
+    DisplayConfig, DisplayFrame, FrameMeta, IrFrame, LoudnessReadout, ScopeFrame, SpectrumFrame,
+    SweepDone, SweepPoint, TransferFrame, TransferPair,
 };
 
 struct ChannelSlot {
@@ -334,6 +334,41 @@ impl LoudnessStore {
 
     pub fn read(&self, channel: u32) -> Option<LoudnessReadout> {
         self.inner.lock().ok().and_then(|g| g.get(&channel).copied())
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.clear();
+        }
+    }
+}
+
+/// Latest impulse response per transfer pair. Written by the receiver
+/// on each `visualize/ir` frame; read by the IR view dispatch arm
+/// each redraw. `unified.md` Phase 4b. Keyed by `TransferPair`
+/// (meas, ref) so multi-pair sessions see independent IRs.
+#[derive(Clone, Default)]
+pub struct IrStore {
+    inner: Arc<Mutex<HashMap<TransferPair, IrFrame>>>,
+}
+
+impl IrStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn write(&self, frame: IrFrame) {
+        let pair = TransferPair {
+            meas: frame.meas_channel,
+            ref_ch: frame.ref_channel,
+        };
+        if let Ok(mut g) = self.inner.lock() {
+            g.insert(pair, frame);
+        }
+    }
+
+    pub fn read(&self, pair: TransferPair) -> Option<IrFrame> {
+        self.inner.lock().ok().and_then(|g| g.get(&pair).cloned())
     }
 
     pub fn clear(&self) {
