@@ -462,6 +462,7 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
+                | ViewMode::Nyquist
         ) {
             LayoutMode::Single
         } else {

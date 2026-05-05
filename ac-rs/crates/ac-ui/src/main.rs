@@ -150,8 +150,9 @@ fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
         "coherence" | "coh" => Ok(ViewMode::Coherence),
         "bode_phase" | "bode-phase" | "bodephase" | "phase" => Ok(ViewMode::BodePhase),
         "group_delay" | "group-delay" | "groupdelay" | "gd" => Ok(ViewMode::GroupDelay),
+        "nyquist" | "nyq" => Ok(ViewMode::Nyquist),
         other => anyhow::bail!(
-            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay, got {other}",
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist, got {other}",
         ),
     }
 }
@@ -322,7 +323,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
-  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay|nyquist [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -392,6 +393,8 @@ mod view_mode_tests {
             ("group-delay",      ViewMode::GroupDelay),
             ("groupdelay",       ViewMode::GroupDelay),
             ("gd",               ViewMode::GroupDelay),
+            ("nyquist",          ViewMode::Nyquist),
+            ("nyq",              ViewMode::Nyquist),
         ];
         for (s, want) in cases {
             assert_eq!(parse_view_mode(s).unwrap(), want, "input {s:?}");
@@ -400,11 +403,15 @@ mod view_mode_tests {
 
     #[test]
     fn unknown_view_errors_helpfully() {
-        let err = parse_view_mode("nyquist").unwrap_err().to_string();
-        assert!(err.contains("nyquist"), "error mentions input: {err}");
+        // Use a definitely-not-real view name (not just an
+        // un-implemented Phase view name, which keeps becoming
+        // valid as the plan rolls forward).
+        let err = parse_view_mode("polezero").unwrap_err().to_string();
+        assert!(err.contains("polezero"), "error mentions input: {err}");
         assert!(
-            err.contains("goniometer") && err.contains("iotransfer") && err.contains("bode_mag"),
-            "error lists Phase 1 view names: {err}"
+            err.contains("goniometer") && err.contains("iotransfer")
+                && err.contains("bode_mag") && err.contains("nyquist"),
+            "error lists current view names: {err}"
         );
     }
 }

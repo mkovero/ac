@@ -104,7 +104,8 @@ impl App {
             ViewMode::BodeMag
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
-                | ViewMode::GroupDelay,
+                | ViewMode::GroupDelay
+                | ViewMode::Nyquist,
         )
         .then(|| self.ensure_transfer_pair_for_active())
         .flatten();
@@ -561,7 +562,8 @@ impl App {
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
-                | ViewMode::GroupDelay => {}
+                | ViewMode::GroupDelay
+                | ViewMode::Nyquist => {}
             }
         }
 
@@ -746,7 +748,8 @@ impl App {
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
-                | ViewMode::GroupDelay => {
+                | ViewMode::GroupDelay
+                | ViewMode::Nyquist => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
                     // channel's spectrum frame for SpectrumEmber, synthetic
@@ -771,7 +774,8 @@ impl App {
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
-                | ViewMode::GroupDelay => {}
+                | ViewMode::GroupDelay
+                | ViewMode::Nyquist => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -1184,6 +1188,7 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
+                | ViewMode::Nyquist
         ) {
             let now = Instant::now();
             let dt = self
@@ -1429,6 +1434,45 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
+                ViewMode::Nyquist => {
+                    // Read the latest TransferFrame for the resolved
+                    // pair; auto-scale the (Re, Im) locus so the
+                    // largest |H| sits at ~0.85 of cell radius. The
+                    // auto-gain peak tracker (`ember_stereo_peak`,
+                    // shared with Goniometer / IoTransfer — they
+                    // aren't simultaneously visible) decays with
+                    // τ = 0.5 s so DUT changes settle smoothly.
+                    let polyline = bode_pair
+                        .and_then(|p| self.virtual_channels.store_for(p).and_then(|s| s.read()))
+                        .map(|frame| {
+                            let frame_peak = frame.re.iter().zip(frame.im.iter())
+                                .map(|(r, i)| (r * r + i * i).sqrt())
+                                .fold(0.0_f32, f32::max);
+                            // Same exponential decay as update_stereo_peak.
+                            let tau_s = 0.5;
+                            let decay = (-dt / tau_s).exp();
+                            self.ember_stereo_peak = self
+                                .ember_stereo_peak
+                                .max(frame_peak)
+                                * decay
+                                + frame_peak * (1.0 - decay);
+                            if self.ember_stereo_peak < 0.001 {
+                                self.ember_stereo_peak = 0.001;
+                            }
+                            let amp = (0.85 / self.ember_stereo_peak.max(0.02))
+                                .clamp(0.5, 50.0);
+                            build_nyquist_polyline(&frame, amp)
+                        })
+                        .unwrap_or_default();
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1463,7 +1507,8 @@ impl App {
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
-                | ViewMode::GroupDelay => ember.draw(&mut pass),
+                | ViewMode::GroupDelay
+                | ViewMode::Nyquist => ember.draw(&mut pass),
             }
         }
 
@@ -2194,6 +2239,75 @@ fn build_groupdelay_polyline(
         let cur = [x, y];
         if let Some(prev_p) = prev {
             pairs.push(prev_p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
+    }
+    pairs
+}
+
+/// `TransferFrame` → Nyquist locus polyline. Plot (Re H, Im H) as a
+/// connected curve in the complex plane, parameterised by frequency.
+/// `amp` is the auto-gain factor computed at the dispatch site so
+/// the largest |H| sits at ~0.85 of cell radius regardless of DUT
+/// gain. The curve is centred at (0.5, 0.5) — origin = no signal,
+/// unit circle (drawn via the helper below) = |H| = 1 boundary.
+///
+/// Skips bins where re/im aren't finite or the magnitude is below a
+/// "show nothing" floor (1e-6). When the daemon is from before
+/// Phase 3 (re/im fields empty) returns an empty polyline. Phase 4
+/// of unified.md.
+fn build_nyquist_polyline(
+    frame: &crate::data::types::TransferFrame,
+    amp: f32,
+) -> Vec<[f32; 2]> {
+    if frame.re.is_empty() || frame.re.len() != frame.im.len() {
+        return Vec::new();
+    }
+    // Reference unit circle deposited at low intensity (4× lower
+    // count than the trace itself, but still much rarer per pixel
+    // than the moving curve, so the relative brightness reads as a
+    // faint guide rather than competing with the signal trace).
+    // 64-vertex polygon ≈ 0.5° per segment — visually smooth.
+    let mut pairs = Vec::with_capacity(frame.re.len() * 2 + 128);
+    let unit_r = 0.45 * amp.min(1.0); // unit circle visible only when DUT < gain ≈ 1
+    if unit_r > 0.01 {
+        let n_circ = 64;
+        let mut prev_circ: Option<[f32; 2]> = None;
+        for k in 0..=n_circ {
+            let t = (k as f32 / n_circ as f32) * std::f32::consts::TAU;
+            let cur = [0.5 + unit_r * t.cos(), 0.5 + unit_r * t.sin()];
+            if let Some(p) = prev_circ {
+                pairs.push(p);
+                pairs.push(cur);
+            }
+            prev_circ = Some(cur);
+        }
+    }
+    let scale = 0.45 * amp;
+    let mut prev: Option<[f32; 2]> = None;
+    for (r, i) in frame.re.iter().zip(frame.im.iter()) {
+        if !r.is_finite() || !i.is_finite() {
+            prev = None;
+            continue;
+        }
+        let mag = (r * r + i * i).sqrt();
+        if mag < 1e-6 {
+            prev = None;
+            continue;
+        }
+        let cur = [0.5 + scale * *r, 0.5 + scale * *i];
+        // Clip to substrate viewport — bins where the auto-gain
+        // hasn't yet caught up with a sudden DUT gain spike would
+        // otherwise render at clamp boundaries and fragment the
+        // trace (better to drop those bins than draw a misleading
+        // edge artefact).
+        if !(0.0..=1.0).contains(&cur[0]) || !(0.0..=1.0).contains(&cur[1]) {
+            prev = None;
+            continue;
+        }
+        if let Some(p) = prev {
+            pairs.push(p);
             pairs.push(cur);
         }
         prev = Some(cur);
@@ -3056,5 +3170,121 @@ mod tests {
         let f = transfer_frame_with_phase(vec![], vec![]);
         let v = view(20.0, 24_000.0);
         assert!(build_groupdelay_polyline(&f, &v).is_empty());
+    }
+
+    // ---- Phase 4 Nyquist tests ----
+
+    fn transfer_frame_with_re_im(
+        freqs: Vec<f32>,
+        re: Vec<f32>,
+        im: Vec<f32>,
+    ) -> crate::data::types::TransferFrame {
+        crate::data::types::TransferFrame {
+            freqs,
+            magnitude_db: vec![],
+            phase_deg: vec![],
+            coherence: vec![],
+            re,
+            im,
+            delay_samples: 0,
+            delay_ms: 0.0,
+            meas_channel: 0,
+            ref_channel: 1,
+            sr: 48_000,
+        }
+    }
+
+    /// Empty re/im (legacy daemon, no Phase 3 fields) → empty
+    /// polyline (no panic).
+    #[test]
+    fn nyquist_empty_re_im_yields_empty_polyline() {
+        let f = transfer_frame_with_re_im(vec![100.0, 200.0], vec![], vec![]);
+        assert!(build_nyquist_polyline(&f, 1.0).is_empty());
+    }
+
+    /// Mismatched re/im lengths defensively yield empty (the daemon
+    /// guarantees they're parallel; this is just a safety net).
+    #[test]
+    fn nyquist_mismatched_re_im_yields_empty() {
+        let f = transfer_frame_with_re_im(vec![100.0, 200.0], vec![1.0, 0.5], vec![0.0]);
+        assert!(build_nyquist_polyline(&f, 1.0).is_empty());
+    }
+
+    /// Unity-gain real DUT (re ≈ 1, im ≈ 0) at amp = 1.0 places
+    /// the trace on the +x ray at y = 0.5, x ≈ 0.5 + 0.45 = 0.95.
+    /// All emitted vertices should sit on (0.95, 0.5) within
+    /// float tolerance.
+    #[test]
+    fn nyquist_unity_real_lands_on_positive_x_ray() {
+        let n = 200;
+        let re = vec![1.0; n];
+        let im = vec![0.0; n];
+        let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
+        let f = transfer_frame_with_re_im(freqs, re, im);
+        let pairs = build_nyquist_polyline(&f, 1.0);
+        assert!(!pairs.is_empty(), "expected non-empty Nyquist polyline");
+        // Find the trace vertices (skip the unit-circle reference,
+        // which is the first ~128 vertices). Any trace vertex sits
+        // at (0.95, 0.5) for re=1, im=0 with amp=1.
+        let trace_pairs: Vec<&[f32; 2]> = pairs
+            .iter()
+            .filter(|p| (p[0] - 0.95).abs() < 1e-3 && (p[1] - 0.5).abs() < 1e-3)
+            .collect();
+        assert!(
+            !trace_pairs.is_empty(),
+            "expected vertices at (0.95, 0.5); got pairs: {:?}",
+            &pairs[..pairs.len().min(8)],
+        );
+    }
+
+    /// Quarter-circle test: re/im = (cos(θ), sin(θ)) for θ in
+    /// [0, π/2] should trace a quarter unit circle in the upper-
+    /// right quadrant. Verify by checking that all trace vertices
+    /// satisfy ((x-0.5)² + (y-0.5)²) ≈ 0.45² with x ≥ 0.5,
+    /// y ≥ 0.5 (using amp = 1.0 → unit-circle scale = 0.45).
+    #[test]
+    fn nyquist_unit_quarter_circle_traces_arc() {
+        let n = 100;
+        let re: Vec<f32> = (0..n)
+            .map(|i| (i as f32 / (n - 1) as f32 * std::f32::consts::FRAC_PI_2).cos())
+            .collect();
+        let im: Vec<f32> = (0..n)
+            .map(|i| (i as f32 / (n - 1) as f32 * std::f32::consts::FRAC_PI_2).sin())
+            .collect();
+        let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
+        let f = transfer_frame_with_re_im(freqs, re, im);
+        let pairs = build_nyquist_polyline(&f, 1.0);
+        assert!(!pairs.is_empty());
+        // The unit-circle reference draws vertices in all 4 quadrants
+        // — to isolate the trace, look for vertices in the upper-
+        // right quadrant only.
+        for [x, y] in &pairs {
+            if *x >= 0.5 && *y >= 0.5 {
+                let r2 = (x - 0.5).powi(2) + (y - 0.5).powi(2);
+                assert!(
+                    (r2 - 0.45_f32.powi(2)).abs() < 1e-3,
+                    "upper-right vertex ({x}, {y}) not on radius 0.45",
+                );
+            }
+        }
+    }
+
+    /// Bins where (re, im) project off-cell at the given amp must
+    /// be skipped (no clamping artefacts at the substrate edge).
+    #[test]
+    fn nyquist_off_cell_bins_skipped() {
+        // re = 10 with amp = 1 → x = 0.5 + 4.5 = 5.0 (off-cell).
+        // im = 0. All these bins should be skipped.
+        let n = 50;
+        let re = vec![10.0; n];
+        let im = vec![0.0; n];
+        let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
+        let f = transfer_frame_with_re_im(freqs, re, im);
+        let pairs = build_nyquist_polyline(&f, 1.0);
+        // Only the unit-circle reference should be present.
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
     }
 }

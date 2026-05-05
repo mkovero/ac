@@ -1009,6 +1009,23 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   TransferResult in place (single struct, no separate
   ComplexTransferResult type, no plumbing duplication).
 
+- `(2026-05-05) Phase 4 — Nyquist locus on the substrate.` —
+  Plot (Re H, Im H) parametrically as a curve in the complex
+  plane, parameterised by frequency. Consumes the re/im fields
+  from Phase 3 directly. Auto-gain (shared with Goniometer /
+  IoTransfer's `ember_stereo_peak`) scales the curve so the
+  largest |H| sits at ~0.85 of cell radius; a faint 64-vertex
+  unit-circle reference is deposited at low intensity so the
+  user has a |H| = 1 boundary to read against. Off-cell vertices
+  are skipped (no clamp artefacts at substrate edges when DUT
+  gain spikes faster than auto-gain can decay). Same auto-pair
+  convention as the Bode views (active = meas, active+1 = ref);
+  caption shows "nyquist (ember) │ meas ch X → ref ch Y │
+  unit circle = |H|=1". IR view (Phase 4b) deferred — meaningful
+  IR-via-IFFT needs higher bin density than the current 2000-bin
+  downsample; will land alongside an "extended bins" toggle on
+  the daemon worker.
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -1091,6 +1108,28 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     criterion) left to the user — needs JACK + at least 2
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
+
+- `(2026-05-05) — Phase 4 Nyquist locus on the substrate.` —
+  First view to consume Phase 3's re/im fields. Parametric (Re,
+  Im) curve in the complex plane with auto-gain (shared with
+  Goniometer/IoTransfer's stereo peak — single auto-gain knob
+  the user can clear via Z) and a faint unit-circle reference at
+  4× lower deposit density. Off-cell bins skipped to avoid
+  clamp-edge artefacts. 5 new tests: empty re/im guard,
+  mismatched-length defensive empty, unity-real lands on +x ray,
+  unit quarter-circle traces arc at radius 0.45, off-cell bins
+  skipped. unknown_view_errors_helpfully test probe changed from
+  "nyquist" → "polezero" (was becoming a moving target as Phases
+  rolled forward). 624 workspace tests passing.
+  W-cycle: scope → spectrum (ember) → goniometer → iotransfer →
+  bode mag → coherence → bode phase → group delay → nyquist →
+  matrix. Nine ember slots; only IR (Phase 4b) and pole-zero
+  (Phase 5) remain from §8's substrate views.
+  Visual: `ac-ui --view nyquist --channels 0,1`, route a known
+  test signal through your DUT (ref ch 0, DUT out ch 1). Linear
+  pass-through DUT: trace concentrates near (1, 0) (re=1, im=0).
+  Resonant DUT: full Nyquist loop encircling origin. Phase
+  inversion: trace flips to (-1, 0) region.
 
 - `(2026-05-05) — Phase 3 complex H plumbing.` — TransferResult
   in ac-core now carries re/im parallel to mag/phase, computed
@@ -1182,9 +1221,9 @@ for strip-chart), `H` is complex transfer function, `f` is freq.
 | Coherence     | (log f, γ²)                      | TransferFrame         |
 | BodePhase     | (log f, φ)                       | TransferFrame         |
 | GroupDelay    | (log f, −dφ/dω)                  | TransferFrame         |
-| Nyquist       | (Re H, Im H)                     | ComplexTransferFrame  |
-| IR            | (t, IFFT(H))                     | ComplexTransferFrame  |
-| Pole-zero     | (Re p, Im p)                     | rational fit of H     |
+| Nyquist       | (Re H, Im H)                     | TransferFrame (re/im) |
+| IR            | (t, IFFT(H))                     | TransferFrame (Phase 4b) |
+| Pole-zero     | (Re p, Im p)                     | rational fit of H (Phase 5) |
 
 Every row uses the same renderer. The whole instrument is "pick a
 row, draw."

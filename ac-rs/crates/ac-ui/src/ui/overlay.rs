@@ -396,6 +396,14 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ViewMode::GroupDelay => format_transfer_status_line(
                 "group delay", input.bode_pair, view.db_min, view.db_max,
             ),
+            ViewMode::Nyquist => match input.bode_pair {
+                Some(p) => format!(
+                    "nyquist (ember) │ meas ch {} → ref ch {}  │  unit circle = |H|=1",
+                    p.meas, p.ref_ch,
+                ),
+                None => "nyquist (ember) │ no transfer pair (need active+1 in monitor set)"
+                    .to_string(),
+            },
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),

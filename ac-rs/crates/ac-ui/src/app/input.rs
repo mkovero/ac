@@ -33,6 +33,7 @@ enum WSlot {
     Coherence,
     BodePhase,
     GroupDelay,
+    Nyquist,
 }
 
 #[derive(Clone)]
@@ -266,6 +267,12 @@ impl App {
                 // let the standard spectrum-style scroll-zoom path
                 // handle it (plain = both axes; Shift = freq only;
                 // Ctrl = y only). Falls through.
+            }
+            ViewMode::Nyquist => {
+                // Nyquist axes are Re(H) / Im(H) — neither maps onto
+                // the cell freq/dB axes the standard scroll path
+                // works on. Auto-gain handles scale; swallow scroll.
+                return;
             }
             _ => {}
         }
@@ -747,6 +754,7 @@ impl App {
                 | ViewMode::Coherence
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
+                | ViewMode::Nyquist
         )
     }
 
@@ -766,6 +774,7 @@ impl App {
             (LayoutMode::Single, ViewMode::Coherence,     _)         => Some(WSlot::Coherence),
             (LayoutMode::Single, ViewMode::BodePhase,     _)         => Some(WSlot::BodePhase),
             (LayoutMode::Single, ViewMode::GroupDelay,    _)         => Some(WSlot::GroupDelay),
+            (LayoutMode::Single, ViewMode::Nyquist,       _)         => Some(WSlot::Nyquist),
             _ => None,
         }
     }
@@ -989,7 +998,8 @@ impl App {
                     Some(WSlot::BodeMag)       => WSlot::Coherence,
                     Some(WSlot::Coherence)     => WSlot::BodePhase,
                     Some(WSlot::BodePhase)     => WSlot::GroupDelay,
-                    Some(WSlot::GroupDelay)    => WSlot::Matrix,
+                    Some(WSlot::GroupDelay)    => WSlot::Nyquist,
+                    Some(WSlot::Nyquist)       => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -1007,6 +1017,7 @@ impl App {
                     WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft",        "view: coherence (ember)"),
                     WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft",        "view: bode phase (ember)"),
                     WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft",        "view: group delay (ember)"),
+                    WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft",        "view: nyquist (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

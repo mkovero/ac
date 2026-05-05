@@ -386,6 +386,13 @@ pub enum ViewMode {
     /// underlying smooth phase wrapped through ±180°. Same auto-
     /// pair convention as BodeMag. Phase 2.5 of unified.md.
     GroupDelay,
+    /// Nyquist locus — parametric (Re H, Im H) curve in the complex
+    /// plane, parameterised by frequency. Consumes the re/im fields
+    /// added in Phase 3. Auto-gain scales the curve to fit the cell;
+    /// a faint unit circle is drawn for visual reference (gain = 1
+    /// boundary). Same auto-pair convention as BodeMag. Phase 4 of
+    /// unified.md.
+    Nyquist,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
