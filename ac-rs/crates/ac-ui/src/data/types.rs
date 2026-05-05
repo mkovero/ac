@@ -367,6 +367,16 @@ pub enum ViewMode {
     /// dimensionless [0, 1] — visually obvious where the FRF is
     /// trustworthy (γ² ≈ 1) vs unreliable (γ² < 0.8). Phase 2.
     Coherence,
+    /// Bode phase φ(f) on the ember substrate. Wrapped to [-180°,
+    /// +180°] (same convention as the daemon's TransferFrame).
+    /// Same auto-pair convention as BodeMag. Phase 2.5 of unified.md.
+    BodePhase,
+    /// Group delay τ_g(f) = −dφ/dω in milliseconds. Computed from a
+    /// finite-difference derivative of the *unwrapped* phase array
+    /// — wrapped phase would produce ±360°/Δf spikes wherever the
+    /// underlying smooth phase wrapped through ±180°. Same auto-
+    /// pair convention as BodeMag. Phase 2.5 of unified.md.
+    GroupDelay,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions

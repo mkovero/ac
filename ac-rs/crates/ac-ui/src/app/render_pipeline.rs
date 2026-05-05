@@ -101,7 +101,10 @@ impl App {
         // that spans the rest of redraw.
         let bode_pair: Option<crate::data::types::TransferPair> = matches!(
             self.config.view_mode,
-            ViewMode::BodeMag | ViewMode::Coherence,
+            ViewMode::BodeMag
+                | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay,
         )
         .then(|| self.ensure_transfer_pair_for_active())
         .flatten();
@@ -556,7 +559,9 @@ impl App {
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
-                | ViewMode::Coherence => {}
+                | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay => {}
             }
         }
 
@@ -739,7 +744,9 @@ impl App {
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
-                | ViewMode::Coherence => {
+                | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay => {
                     // Ember-substrate views consume polylines built later in
                     // this method (synthetic sine for Scope, the active
                     // channel's spectrum frame for SpectrumEmber, synthetic
@@ -762,7 +769,9 @@ impl App {
             | ViewMode::Goniometer
             | ViewMode::IoTransfer
                 | ViewMode::BodeMag
-                | ViewMode::Coherence => {}
+                | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
@@ -1173,6 +1182,8 @@ impl App {
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay
         ) {
             let now = Instant::now();
             let dt = self
@@ -1378,6 +1389,46 @@ impl App {
                         &polyline, 0.0, dt,
                     );
                 }
+                ViewMode::BodePhase => {
+                    let active = self.config.active_channel;
+                    let view = self.cell_views.get(active).copied().unwrap_or_default();
+                    let polyline = bode_pair
+                        .and_then(|p| {
+                            self.virtual_channels
+                                .store_for(p)
+                                .and_then(|s| s.read())
+                                .map(|f| build_bodephase_polyline(&f, &view))
+                        })
+                        .unwrap_or_default();
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
+                ViewMode::GroupDelay => {
+                    let active = self.config.active_channel;
+                    let view = self.cell_views.get(active).copied().unwrap_or_default();
+                    let polyline = bode_pair
+                        .and_then(|p| {
+                            self.virtual_channels
+                                .store_for(p)
+                                .and_then(|s| s.read())
+                                .map(|f| build_groupdelay_polyline(&f, &view))
+                        })
+                        .unwrap_or_default();
+                    ember.set_tau_p(4.0 * self.ember_tau_p_scale);
+                    ember.set_intensity(0.005 * self.ember_intensity_scale);
+                    ember.set_tone(0.6, 1.5);
+                    ember.advance(
+                        &ctx.device, &ctx.queue, &mut encoder,
+                        [0.0, 0.0, 1.0, 1.0],
+                        &polyline, 0.0, dt,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1410,7 +1461,9 @@ impl App {
                 | ViewMode::Goniometer
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
-                | ViewMode::Coherence => ember.draw(&mut pass),
+                | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay => ember.draw(&mut pass),
             }
         }
 
@@ -1979,6 +2032,168 @@ fn build_coherence_polyline(
         let cur = [x, y];
         if let Some(p) = prev {
             pairs.push(p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
+    }
+    pairs
+}
+
+/// Phase unwrap (degrees). Removes ±360° jumps that the daemon's
+/// wrapped-to-[-180, 180] phase introduces wherever the underlying
+/// smooth phase wrapped through ±180°. Used by GroupDelay so the
+/// finite-difference derivative doesn't see ±360°/Δf spikes; can be
+/// reused if BodePhase ever grows an "unwrap" toggle.
+fn unwrap_phase_deg(phase: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(phase.len());
+    for (i, &p) in phase.iter().enumerate() {
+        if i == 0 {
+            out.push(p);
+            continue;
+        }
+        let prev_unwrapped = out[i - 1];
+        let prev_orig = phase[i - 1];
+        let mut delta = p - prev_orig;
+        while delta > 180.0 {
+            delta -= 360.0;
+        }
+        while delta < -180.0 {
+            delta += 360.0;
+        }
+        out.push(prev_unwrapped + delta);
+    }
+    out
+}
+
+/// `TransferFrame` → Bode-phase single-trace LineList. Wrapped
+/// phase (the daemon's TransferFrame is already in [-180, +180])
+/// mapped through the cell's db_min/db_max window — for BodePhase
+/// the theme defaults that window to (-180, +180) so phase paints
+/// at its natural scale. Phase 2.5 of unified.md.
+///
+/// Wraps deliberately stay in the polyline (no break at ±180): the
+/// substrate fade makes the discontinuities visually mild, and
+/// breaking at every wrap would fragment the trace into useless
+/// pieces. Users wanting unwrapped phase look at GroupDelay (which
+/// derives from unwrapped internally) or wait for an `unwrap` toggle
+/// in a future revision.
+fn build_bodephase_polyline(
+    frame: &crate::data::types::TransferFrame,
+    view: &CellView,
+) -> Vec<[f32; 2]> {
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
+    let span_f = (log_max - log_min).max(1e-6);
+    let span_y = (view.db_max - view.db_min).max(1e-3);
+    let n_cols = EMBER_SPECTRUM_COLS;
+    // Aggregate by *first valid value* per column (no max/min — phase
+    // is signed and doesn't have a meaningful "peak" or "floor").
+    let mut col_phase: Vec<Option<f32>> = vec![None; n_cols];
+    let n = frame.freqs.len().min(frame.phase_deg.len());
+    for i in 0..n {
+        let f = frame.freqs[i];
+        let p = frame.phase_deg[i];
+        if !f.is_finite() || f < view.freq_min || f > view.freq_max
+            || !p.is_finite() {
+            continue;
+        }
+        let xn = (f.max(1.0).log10() - log_min) / span_f;
+        if !(0.0..=1.0).contains(&xn) {
+            continue;
+        }
+        let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+        col_phase[col].get_or_insert(p);
+    }
+    let mut pairs = Vec::with_capacity(n_cols * 2);
+    let mut prev: Option<[f32; 2]> = None;
+    for col in 0..n_cols {
+        let Some(p) = col_phase[col] else {
+            prev = None;
+            continue;
+        };
+        let x = (col as f32 + 0.5) / n_cols as f32;
+        let n_y = ((p - view.db_min) / span_y).clamp(0.0, 1.0);
+        let y = 0.05 + 0.9 * n_y;
+        let cur = [x, y];
+        if let Some(prev_p) = prev {
+            pairs.push(prev_p);
+            pairs.push(cur);
+        }
+        prev = Some(cur);
+    }
+    pairs
+}
+
+/// `TransferFrame` → group delay τ_g(f) = −dφ/dω in milliseconds,
+/// computed from a forward-difference derivative of the *unwrapped*
+/// phase array. Wrapped phase would produce ±360°/Δf spikes wherever
+/// the underlying smooth phase wrapped through ±180°.
+///
+/// Conversion: τ_g[ms] = −(1000 / 360) · Δφ_deg / Δf_hz. Y range is
+/// the cell's db_min/db_max window (theme defaults to -5..+20 ms,
+/// which covers most realistic audio DUTs). Phase 2.5.
+fn build_groupdelay_polyline(
+    frame: &crate::data::types::TransferFrame,
+    view: &CellView,
+) -> Vec<[f32; 2]> {
+    if frame.freqs.len() < 2 || frame.phase_deg.len() < 2 {
+        return Vec::new();
+    }
+    let n = frame.freqs.len().min(frame.phase_deg.len());
+    let unwrapped = unwrap_phase_deg(&frame.phase_deg[..n]);
+    // Forward-difference τ_g per bin gap. Place each value at the
+    // midpoint frequency between consecutive bins so the curve
+    // doesn't visually lag.
+    let mut deriv: Vec<(f32, f32)> = Vec::with_capacity(n.saturating_sub(1));
+    for i in 0..(n - 1) {
+        let f0 = frame.freqs[i];
+        let f1 = frame.freqs[i + 1];
+        let df = f1 - f0;
+        if !f0.is_finite() || !f1.is_finite() || df.abs() < 1e-6 {
+            continue;
+        }
+        let dphi = unwrapped[i + 1] - unwrapped[i];
+        let tau_g_ms = -(1000.0 / 360.0) * dphi / df;
+        let f_mid = 0.5 * (f0 + f1);
+        deriv.push((f_mid, tau_g_ms));
+    }
+    if deriv.is_empty() {
+        return Vec::new();
+    }
+    let log_min = view.freq_min.max(1.0).log10();
+    let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
+    let span_f = (log_max - log_min).max(1e-6);
+    let span_y = (view.db_max - view.db_min).max(1e-3);
+    let n_cols = EMBER_SPECTRUM_COLS;
+    // Aggregate by *median-style first-valid* per column (group delay
+    // is signed; max would cherry-pick the largest spike, biasing
+    // visual interpretation). First-valid is good enough at the
+    // typical bin density.
+    let mut col_val: Vec<Option<f32>> = vec![None; n_cols];
+    for (f, t) in &deriv {
+        if !f.is_finite() || !t.is_finite() || *f < view.freq_min || *f > view.freq_max {
+            continue;
+        }
+        let xn = (f.max(1.0).log10() - log_min) / span_f;
+        if !(0.0..=1.0).contains(&xn) {
+            continue;
+        }
+        let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+        col_val[col].get_or_insert(*t);
+    }
+    let mut pairs = Vec::with_capacity(n_cols * 2);
+    let mut prev: Option<[f32; 2]> = None;
+    for col in 0..n_cols {
+        let Some(t) = col_val[col] else {
+            prev = None;
+            continue;
+        };
+        let x = (col as f32 + 0.5) / n_cols as f32;
+        let n_y = ((t - view.db_min) / span_y).clamp(0.0, 1.0);
+        let y = 0.05 + 0.9 * n_y;
+        let cur = [x, y];
+        if let Some(prev_p) = prev {
+            pairs.push(prev_p);
             pairs.push(cur);
         }
         prev = Some(cur);
@@ -2685,5 +2900,157 @@ mod tests {
     fn coherence_empty_frame_yields_empty_polyline() {
         let f = transfer_frame_lin_log_db(vec![], vec![], vec![]);
         assert!(build_coherence_polyline(&f).is_empty());
+    }
+
+    // ---- Phase 2.5 BodePhase + GroupDelay tests ----
+
+    /// Phase unwrap removes ±360° jumps. Constant +1°/sample
+    /// underlying phase that wrapped to a sawtooth at ±180° must
+    /// unwrap into a strictly-monotonic linear ramp.
+    #[test]
+    fn unwrap_phase_recovers_linear_ramp() {
+        // 720 samples of "true phase = i degrees" wrapped to ±180.
+        let wrapped: Vec<f32> = (0..720)
+            .map(|i| {
+                let mut p = i as f32;
+                while p > 180.0 {
+                    p -= 360.0;
+                }
+                p
+            })
+            .collect();
+        let unwrapped = unwrap_phase_deg(&wrapped);
+        // Each step should be +1.0° (within float epsilon).
+        for i in 1..unwrapped.len() {
+            let d = unwrapped[i] - unwrapped[i - 1];
+            assert!(
+                (d - 1.0).abs() < 1e-3,
+                "expected +1° step at i={i}; got Δ={d}",
+            );
+        }
+        // Endpoints: 0° at start, +719° at end.
+        assert!(unwrapped[0].abs() < 1e-4);
+        assert!((unwrapped[719] - 719.0).abs() < 1e-2);
+    }
+
+    /// Phase unwrap on a noisy walk that briefly oscillates around
+    /// ±180° must still produce a continuous output (no spurious
+    /// 360° jumps from in-band noise).
+    #[test]
+    fn unwrap_phase_handles_jitter_near_wrap() {
+        // Sequence: 178, -179, 179, -179, 179 — really +178, +181, +179,
+        // +181, +179 = drifting around 180° both directions. Unwrap
+        // should follow the smaller continuation in each case.
+        let wrapped = vec![178.0_f32, -179.0, 179.0, -179.0, 179.0];
+        let unwrapped = unwrap_phase_deg(&wrapped);
+        for i in 1..unwrapped.len() {
+            let d = (unwrapped[i] - unwrapped[i - 1]).abs();
+            assert!(d <= 5.0, "phase step at i={i} should be small; got {d}");
+        }
+    }
+
+    /// BodePhase polyline stays in [0,1]² for typical input.
+    #[test]
+    fn bodephase_pairs_stay_in_unit_box() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let phase: Vec<f32> = (0..freqs.len())
+            .map(|i| ((i as f32 * 1.5) % 360.0) - 180.0)
+            .collect();
+        let f = transfer_frame_with_phase(freqs, phase);
+        let v = CellView {
+            freq_min: 20.0,
+            freq_max: 24_000.0,
+            db_min: -180.0,
+            db_max: 180.0,
+            ..CellView::default()
+        };
+        let pairs = build_bodephase_polyline(&f, &v);
+        assert!(!pairs.is_empty());
+        for [x, y] in &pairs {
+            assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
+            assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    /// GroupDelay sign: a *positive* phase slope (phase increases
+    /// with frequency, e.g. +1°/Hz) corresponds to *negative* group
+    /// delay. Confirms the τ_g = -dφ/dω sign.
+    #[test]
+    fn groupdelay_sign_matches_phase_slope() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        // Phase = +0.001°/Hz over the full band — small enough that
+        // the unwrap stays trivial. Positive dφ/df → negative τ_g.
+        let phase: Vec<f32> = freqs.iter().map(|&f| 0.001 * (f - 20.0)).collect();
+        let frame = transfer_frame_with_phase(freqs, phase);
+        let v = CellView {
+            freq_min: 20.0,
+            freq_max: 24_000.0,
+            db_min: -10.0,
+            db_max: 10.0,
+            ..CellView::default()
+        };
+        let pairs = build_groupdelay_polyline(&frame, &v);
+        assert!(!pairs.is_empty());
+        // y < 0.5 means τ_g < midpoint (= 0 ms in this window) — i.e.
+        // negative group delay, as expected from positive phase slope.
+        for [_, y] in &pairs {
+            assert!(
+                *y < 0.55,
+                "positive phase slope should give negative τ_g; y = {y}",
+            );
+        }
+    }
+
+    /// GroupDelay on flat zero phase → zero delay → mid-cell.
+    #[test]
+    fn groupdelay_flat_phase_traces_mid_cell() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let phase = vec![0.0; freqs.len()];
+        let frame = transfer_frame_with_phase(freqs, phase);
+        let v = CellView {
+            freq_min: 20.0,
+            freq_max: 24_000.0,
+            db_min: -10.0,
+            db_max: 10.0,
+            ..CellView::default()
+        };
+        let pairs = build_groupdelay_polyline(&frame, &v);
+        assert!(!pairs.is_empty());
+        for [_, y] in &pairs {
+            // 0 ms in (-10, +10) window → y = 0.5.
+            assert!((y - 0.5).abs() < 1e-4, "expected y ≈ 0.5; got {y}");
+        }
+    }
+
+    fn transfer_frame_with_phase(
+        freqs: Vec<f32>,
+        phase_deg: Vec<f32>,
+    ) -> crate::data::types::TransferFrame {
+        crate::data::types::TransferFrame {
+            freqs,
+            magnitude_db: vec![],
+            phase_deg,
+            coherence: vec![],
+            delay_samples: 0,
+            delay_ms: 0.0,
+            meas_channel: 0,
+            ref_channel: 1,
+            sr: 48_000,
+        }
+    }
+
+    /// Empty-frame guards — no panic on cold start.
+    #[test]
+    fn bodephase_empty_frame_yields_empty_polyline() {
+        let f = transfer_frame_with_phase(vec![], vec![]);
+        let v = view(20.0, 24_000.0);
+        assert!(build_bodephase_polyline(&f, &v).is_empty());
+    }
+
+    #[test]
+    fn groupdelay_empty_frame_yields_empty_polyline() {
+        let f = transfer_frame_with_phase(vec![], vec![]);
+        let v = view(20.0, 24_000.0);
+        assert!(build_groupdelay_polyline(&f, &v).is_empty());
     }
 }

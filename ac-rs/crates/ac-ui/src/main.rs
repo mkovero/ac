@@ -148,8 +148,10 @@ fn parse_view_mode(s: &str) -> anyhow::Result<ViewMode> {
         "iotransfer" | "io_transfer" | "io-transfer" => Ok(ViewMode::IoTransfer),
         "bode_mag" | "bode-mag" | "bodemag" | "bode" => Ok(ViewMode::BodeMag),
         "coherence" | "coh" => Ok(ViewMode::Coherence),
+        "bode_phase" | "bode-phase" | "bodephase" | "phase" => Ok(ViewMode::BodePhase),
+        "group_delay" | "group-delay" | "groupdelay" | "gd" => Ok(ViewMode::GroupDelay),
         other => anyhow::bail!(
-            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence, got {other}",
+            "--view: expected spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay, got {other}",
         ),
     }
 }
@@ -320,7 +322,7 @@ Options:\n  \
   --rate <hz>          Synthetic update rate [default: 10]\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
-  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence [default: spectrum]\n  \
+  --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer|iotransfer|bode_mag|coherence|bode_phase|group_delay [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \
                        (env: AC_UI_PRESENT_MODE) — try `mailbox` if NVIDIA + Vulkan pegs CPU at vsync\n  \
@@ -382,6 +384,14 @@ mod view_mode_tests {
             ("bode",             ViewMode::BodeMag),
             ("coherence",        ViewMode::Coherence),
             ("coh",              ViewMode::Coherence),
+            ("bode_phase",       ViewMode::BodePhase),
+            ("bode-phase",       ViewMode::BodePhase),
+            ("bodephase",        ViewMode::BodePhase),
+            ("phase",            ViewMode::BodePhase),
+            ("group_delay",      ViewMode::GroupDelay),
+            ("group-delay",      ViewMode::GroupDelay),
+            ("groupdelay",       ViewMode::GroupDelay),
+            ("gd",               ViewMode::GroupDelay),
         ];
         for (s, want) in cases {
             assert_eq!(parse_view_mode(s).unwrap(), want, "input {s:?}");

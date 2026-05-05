@@ -390,6 +390,12 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             ViewMode::Coherence => format_transfer_status_line(
                 "coherence", input.bode_pair, 0.0, 1.0,
             ),
+            ViewMode::BodePhase => format_transfer_status_line(
+                "bode phase", input.bode_pair, view.db_min, view.db_max,
+            ),
+            ViewMode::GroupDelay => format_transfer_status_line(
+                "group delay", input.bode_pair, view.db_min, view.db_max,
+            ),
         };
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),

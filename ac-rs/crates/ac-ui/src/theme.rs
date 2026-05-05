@@ -84,6 +84,13 @@ pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f
         // EQ-tweak work where the user wants to see ±N dB excursions
         // around 0. 80 dB span centred at 0 puts unity at mid-cell.
         ViewMode::BodeMag => (-40.0, 40.0),
+        // Bode phase: wrapped phase domain is [-180°, +180°].
+        ViewMode::BodePhase => (-180.0, 180.0),
+        // Group delay in *milliseconds*. Audio-typical range is well
+        // under ±20 ms; (-5, 20) covers most realistic DUTs (small
+        // negative for digital chains, larger positive for crossovers
+        // / room responses). Tunable via `[`/`]` and `+`/`-`.
+        ViewMode::GroupDelay => (-5.0, 20.0),
         ViewMode::Waterfall => (DEFAULT_COLORMAP_DB_MIN, DEFAULT_COLORMAP_DB_MAX),
     }
 }

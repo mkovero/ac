@@ -460,6 +460,8 @@ impl App {
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay
         ) {
             LayoutMode::Single
         } else {

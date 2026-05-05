@@ -31,6 +31,8 @@ enum WSlot {
     IoTransfer,
     BodeMag,
     Coherence,
+    BodePhase,
+    GroupDelay,
 }
 
 #[derive(Clone)]
@@ -259,11 +261,11 @@ impl App {
                 // user input. Swallow scroll.
                 return;
             }
-            ViewMode::BodeMag => {
-                // BodeMag has both freq (x) and dB (y) axes — let the
-                // standard spectrum-style scroll-zoom path handle it
-                // (plain = both axes; Shift = freq only; Ctrl =
-                // dB only). Falls through.
+            ViewMode::BodeMag | ViewMode::BodePhase | ViewMode::GroupDelay => {
+                // These views have both freq (x) and signed-y axes —
+                // let the standard spectrum-style scroll-zoom path
+                // handle it (plain = both axes; Shift = freq only;
+                // Ctrl = y only). Falls through.
             }
             _ => {}
         }
@@ -743,6 +745,8 @@ impl App {
                 | ViewMode::IoTransfer
                 | ViewMode::BodeMag
                 | ViewMode::Coherence
+                | ViewMode::BodePhase
+                | ViewMode::GroupDelay
         )
     }
 
@@ -760,6 +764,8 @@ impl App {
             (LayoutMode::Single, ViewMode::IoTransfer,    _)         => Some(WSlot::IoTransfer),
             (LayoutMode::Single, ViewMode::BodeMag,       _)         => Some(WSlot::BodeMag),
             (LayoutMode::Single, ViewMode::Coherence,     _)         => Some(WSlot::Coherence),
+            (LayoutMode::Single, ViewMode::BodePhase,     _)         => Some(WSlot::BodePhase),
+            (LayoutMode::Single, ViewMode::GroupDelay,    _)         => Some(WSlot::GroupDelay),
             _ => None,
         }
     }
@@ -981,7 +987,9 @@ impl App {
                     Some(WSlot::Goniometer)    => WSlot::IoTransfer,
                     Some(WSlot::IoTransfer)    => WSlot::BodeMag,
                     Some(WSlot::BodeMag)       => WSlot::Coherence,
-                    Some(WSlot::Coherence)     => WSlot::Matrix,
+                    Some(WSlot::Coherence)     => WSlot::BodePhase,
+                    Some(WSlot::BodePhase)     => WSlot::GroupDelay,
+                    Some(WSlot::GroupDelay)    => WSlot::Matrix,
                     None                       => WSlot::Matrix,
                 };
                 let (layout, view_mode, mode, label) = match next {
@@ -997,6 +1005,8 @@ impl App {
                     WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft",        "view: iotransfer (ember)"),
                     WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft",        "view: bode mag (ember)"),
                     WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft",        "view: coherence (ember)"),
+                    WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft",        "view: bode phase (ember)"),
+                    WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft",        "view: group delay (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

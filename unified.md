@@ -975,6 +975,22 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   lands at mid-cell — typical Bode work centres around 0 dB,
   not the spectrum default of (-120, 0).
 
+- `(2026-05-05) Phase 2.5 — BodePhase + GroupDelay on the
+  substrate.` — Round out Phase 2's frequency-domain set with the
+  remaining pair from `unified.md` §6. Same `transfer_stream`
+  data, same auto-pair convention. BodePhase: wrapped phase in
+  [-180°, +180°] (matches the daemon's TransferFrame; no unwrap
+  applied at view time so the trace stays on a familiar axis).
+  GroupDelay: τ_g = -dφ/dω in milliseconds, computed from a
+  forward-difference derivative of the *unwrapped* phase. New
+  `unwrap_phase_deg` helper handles the ±360° jumps the daemon's
+  wrapped phase introduces (without unwrap, finite-difference
+  produces ±360°/Δf spikes). Default y windows: (-180, +180)
+  for phase (natural range), (-5, +20) ms for group delay
+  (covers most realistic audio DUTs; tunable via [/]). Phase
+  aggregation: first-valid-per-column (signed quantity, no
+  meaningful "peak" or "floor" to bias toward).
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -1058,6 +1074,21 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
 
+- `(2026-05-05) — Phase 2.5 BodePhase + GroupDelay on the
+  substrate.` — Rounds out the Bode quartet (mag/phase + coherence
+  + group delay), all on the existing `transfer_stream` data.
+  Adds `unwrap_phase_deg` helper for jump-free derivatives
+  (group delay needs unwrapped phase), defaults to wrapped
+  phase for the Bode-phase view (matches what every other tool
+  shows). 7 new tests: unwrap-recovers-linear-ramp,
+  unwrap-handles-jitter-near-wrap, BodePhase substrate-box
+  invariant, GroupDelay sign vs. positive phase slope,
+  GroupDelay flat-phase-traces-mid-cell, and 2 empty-frame
+  guards. 177 ac-ui tests passing (+7).
+  W-cycle: scope → spectrum (ember) → goniometer → iotransfer
+  → bode mag → coherence → bode phase → group delay → matrix.
+  Eight ember slots covering the entire Phase 2 plan from §8.
+
 - `(2026-05-05) — Phase 2 frequency-domain views: BodeMag +
   Coherence on the substrate.` — Both consume the existing
   `transfer_stream` wire frame (no new daemon work). Auto-pair
@@ -1115,8 +1146,8 @@ for strip-chart), `H` is complex transfer function, `f` is freq.
 | IoTransfer    | (ref, dut_out)                   | scope pair (ref, dut+1) |
 | BodeMag       | (log f, mag_db)                  | TransferFrame         |
 | Coherence     | (log f, γ²)                      | TransferFrame         |
-| Bode phase    | (log f, φ)                       | TransferFrame (Phase 2.5) |
-| Group delay   | (log f, −dφ/dω)                  | TransferFrame (Phase 2.5) |
+| BodePhase     | (log f, φ)                       | TransferFrame         |
+| GroupDelay    | (log f, −dφ/dω)                  | TransferFrame         |
 | Nyquist       | (Re H, Im H)                     | ComplexTransferFrame  |
 | IR            | (t, IFFT(H))                     | ComplexTransferFrame  |
 | Pole-zero     | (Re p, Im p)                     | rational fit of H     |
