@@ -809,8 +809,48 @@ fn transfer_stream_emits_data_and_done() {
             Some((t, v)) if t == "data"
                 && v["type"].as_str() == Some("transfer_stream") => {
                 for key in ["freqs", "magnitude_db", "phase_deg", "coherence",
-                            "delay_samples", "delay_ms"] {
+                            "re", "im", "delay_samples", "delay_ms"] {
                     assert!(v.get(key).is_some(), "frame missing {key}: {v}");
+                }
+                // unified.md Phase 3: re/im consistency — every bin
+                // must satisfy |H| ≈ √(re² + im²) and arg(H) ≈
+                // atan2(im, re), since all four are derived from the
+                // same H₁ complex value.
+                let mag_db = v["magnitude_db"].as_array().unwrap();
+                let phase_deg = v["phase_deg"].as_array().unwrap();
+                let re = v["re"].as_array().unwrap();
+                let im = v["im"].as_array().unwrap();
+                assert_eq!(mag_db.len(), re.len(), "re must match mag length");
+                assert_eq!(mag_db.len(), im.len(), "im must match mag length");
+                for i in 0..mag_db.len() {
+                    let m_db = mag_db[i].as_f64().unwrap();
+                    let p_deg = phase_deg[i].as_f64().unwrap();
+                    let r = re[i].as_f64().unwrap();
+                    let im_v = im[i].as_f64().unwrap();
+                    let mag_lin_from_re_im = (r * r + im_v * im_v).sqrt();
+                    let mag_lin_from_db = 10.0_f64.powf(m_db / 20.0);
+                    // 0.01 relative tolerance: handles f32 → f64
+                    // round-trips through serde_json + the
+                    // h1.norm().max(1e-6) floor at very small |H|.
+                    let denom = mag_lin_from_db.max(1e-6);
+                    let rel_err = (mag_lin_from_re_im - mag_lin_from_db).abs() / denom;
+                    assert!(
+                        rel_err < 0.01,
+                        "bin {i}: |H| from re/im = {mag_lin_from_re_im} vs from dB = {mag_lin_from_db}",
+                    );
+                    // Phase: skip when |H| is at the floor (atan2 of
+                    // tiny re/im is meaningless / numerical noise).
+                    if mag_lin_from_db > 1e-4 {
+                        let p_from_re_im = im_v.atan2(r).to_degrees();
+                        let mut diff = (p_from_re_im - p_deg).abs();
+                        if diff > 180.0 {
+                            diff = 360.0 - diff;
+                        }
+                        assert!(
+                            diff < 1.0,
+                            "bin {i}: phase from re/im = {p_from_re_im}° vs frame = {p_deg}°",
+                        );
+                    }
                 }
                 got_frame = true;
                 break;

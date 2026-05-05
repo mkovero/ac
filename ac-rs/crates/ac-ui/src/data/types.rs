@@ -181,6 +181,15 @@ pub struct TransferFrame {
     pub magnitude_db:  Vec<f32>,
     pub phase_deg:     Vec<f32>,
     pub coherence:     Vec<f32>,
+    /// Complex H(ω) — real part. `unified.md` Phase 3. `serde(default)`
+    /// for backward compatibility — older daemon builds without the
+    /// field still produce parseable frames; views that consume re/im
+    /// (Nyquist, IR) check for `!is_empty()` before drawing.
+    #[serde(default)]
+    pub re: Vec<f32>,
+    /// Complex H(ω) — imaginary part. Parallel to `re`.
+    #[serde(default)]
+    pub im: Vec<f32>,
     pub delay_samples: i64,
     pub delay_ms:      f32,
     pub meas_channel:  u32,

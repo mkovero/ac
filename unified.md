@@ -694,12 +694,14 @@ rewrite.
 
 Each is tagged with the section(s) it gates.
 
-- **OQ1 [§3, §4, §6]** — Should `TransferResult` be extended in
-  place with `complex: Vec<Complex<f64>>`, or should there be a
-  separate `ComplexTransferResult` returned by a new entry point
-  (`h1_estimate_complex`)? In-place extension is simpler but
-  affects every consumer of `TransferResult`. Separate type is
-  cleaner but duplicates plumbing.
+- **OQ1 [§3, §4, §6]** — `[RESOLVED 2026-05-05 — see §10]`
+  TransferResult extended in place with `re: Vec<f64>` + `im:
+  Vec<f64>` (rather than a separate `ComplexTransferResult` type).
+  Existing consumers untouched (added fields are pure additions);
+  re/im are computed inside the existing H₁ loop from the same
+  complex value as mag/phase, so all four representations stay
+  consistent. Wire-frame extension is similarly additive, so old
+  subscribers ignoring re/im keep working.
 
 - **OQ2 [§4]** — Cursor sync: in-process only (current
   recommendation), or via a new ZMQ topic `view/cursor` for
@@ -991,6 +993,22 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   aggregation: first-valid-per-column (signed quantity, no
   meaningful "peak" or "floor" to bias toward).
 
+- `(2026-05-05) Phase 3 — complex H plumbing.` — `TransferResult`
+  in `ac-core/visualize/transfer.rs` gains `re: Vec<f64>` and
+  `im: Vec<f64>` parallel to magnitude_db / phase_deg, computed
+  inside the existing H₁ loop from the same complex value so all
+  four representations are mutually consistent (round-trip:
+  `|H| = √(re² + im²)`, `arg(H) = atan2(im, re)`). Daemon's
+  transfer_stream worker downsamples re/im in lockstep with the
+  existing fields; mic-curve correction extends to (re, im) by
+  scaling by `10^(-curve_db/20)` (preserves arg(H) while shrinking
+  |H| consistently with the dB correction). Wire frame is
+  backwards-compatible: `re` / `im` are pure additions and the
+  ac-ui `TransferFrame` defaults them to empty when older daemons
+  omit them. Resolves §9 OQ1 — option chosen: extend
+  TransferResult in place (single struct, no separate
+  ComplexTransferResult type, no plumbing duplication).
+
 ---
 
 ## 11. [STATUS] Progress log
@@ -1073,6 +1091,22 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
     criterion) left to the user — needs JACK + at least 2
     channels in the monitor set: `ac-ui --view goniometer
     --channels 0,1`.
+
+- `(2026-05-05) — Phase 3 complex H plumbing.` — TransferResult
+  in ac-core now carries re/im parallel to mag/phase, computed
+  from the same H₁ in the existing Welch loop (single struct, no
+  duplicated entry point — resolves §9 OQ1). Daemon's
+  transfer_stream worker downsamples re/im in lockstep + applies
+  the mic-curve correction multiplicatively to (re, im) to keep
+  arg(H) untouched while the dB correction shrinks |H|. Wire
+  frame extension is back-compatible (legacy subscribers ignore
+  the new fields). Tests: `unity_loopback_re_im_consistent` in
+  ac-core (round-trip mag/phase ↔ re/im consistency, unity-gain
+  Re ≈ 1 + Im ≈ 0); `transfer_stream_emits_data_and_done`
+  extended to assert re/im presence and bin-by-bin
+  `|H| ≈ √(re² + im²)` consistency. 619 workspace tests passing.
+  Invisible to the UI in this commit — Phase 4 (Nyquist) lands
+  next and consumes these fields directly.
 
 - `(2026-05-05) — Phase 2.5 BodePhase + GroupDelay on the
   substrate.` — Rounds out the Bode quartet (mag/phase + coherence

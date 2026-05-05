@@ -216,11 +216,25 @@ fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame 
         coh.push(c + (rng.next_f32() - 0.5) * 0.01);
     }
 
+    // Phase 3: derive re/im from the synthesised mag/phase so the
+    // four representations stay mutually consistent (same invariant
+    // the daemon enforces by computing all from the same H₁).
+    let re: Vec<f32> = mag.iter().zip(phase.iter()).map(|(&m_db, &p_deg)| {
+        let mag_lin = 10.0_f32.powf(m_db / 20.0);
+        mag_lin * p_deg.to_radians().cos()
+    }).collect();
+    let im: Vec<f32> = mag.iter().zip(phase.iter()).map(|(&m_db, &p_deg)| {
+        let mag_lin = 10.0_f32.powf(m_db / 20.0);
+        mag_lin * p_deg.to_radians().sin()
+    }).collect();
+
     TransferFrame {
         freqs: freqs.to_vec(),
         magnitude_db: mag,
         phase_deg: phase,
         coherence: coh,
+        re,
+        im,
         delay_samples: delay_samples_f.round() as i64,
         delay_ms: delay_samples_f * 1000.0 / sr,
         meas_channel: meas,

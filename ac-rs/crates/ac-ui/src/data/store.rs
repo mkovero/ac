@@ -439,6 +439,8 @@ mod tests {
             magnitude_db: vec![-1.0, -2.0],
             phase_deg: vec![0.0, 10.0],
             coherence: vec![0.95, 0.90],
+            re: vec![],
+            im: vec![],
             delay_samples: 0,
             delay_ms: 0.0,
             meas_channel: meas,

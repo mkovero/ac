@@ -18,6 +18,14 @@ pub struct TransferResult {
     pub magnitude_db:  Vec<f64>,
     pub phase_deg:     Vec<f64>,
     pub coherence:     Vec<f64>,
+    /// Complex H(ω) — real part. Parallel to `freqs`. `unified.md`
+    /// Phase 3 — needed by Tier 2 views that consume H directly
+    /// (Nyquist locus, IR via IFFT, group-delay-from-complex).
+    /// Existing magnitude_db / phase_deg are derived from this same
+    /// h1 complex value so the three views are guaranteed consistent.
+    pub re:            Vec<f64>,
+    /// Complex H(ω) — imaginary part. Parallel to `re`.
+    pub im:            Vec<f64>,
     pub delay_samples: i64,
     pub delay_ms:      f64,
 }
@@ -209,15 +217,21 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
         g * Complex::new(phase.cos(), phase.sin())
     }).collect();
 
-    // H1 = Gxy_comp / Gxx
+    // H1 = Gxy_comp / Gxx — preserve the complex value so re/im are
+    // consistent with magnitude_db / phase_deg (all three derived
+    // from the same h1).
     let mut magnitude_db = vec![0.0f64; nfft];
     let mut phase_deg    = vec![0.0f64; nfft];
+    let mut re           = vec![0.0f64; nfft];
+    let mut im           = vec![0.0f64; nfft];
     for k in 0..nfft {
         let gxx_safe = gxx[k].max(1e-30);
         let h1       = gxy_comp[k] / gxx_safe;
         let mag      = h1.norm().max(1e-6); // floor at −120 dB
         magnitude_db[k] = 20.0 * mag.log10();
         phase_deg[k]    = h1.arg().to_degrees();
+        re[k]           = h1.re;
+        im[k]           = h1.im;
     }
 
     // Coherence = |Gxy|² / (Gxx × Gyy)
@@ -227,7 +241,7 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
         coh.clamp(0.0, 1.0)
     }).collect();
 
-    TransferResult { freqs, magnitude_db, phase_deg, coherence, delay_samples, delay_ms }
+    TransferResult { freqs, magnitude_db, phase_deg, coherence, re, im, delay_samples, delay_ms }
 }
 
 /// Number of capture seconds needed for `n_averages` Welch segments at `sr`.
@@ -289,6 +303,38 @@ mod tests {
             assert!(
                 r.coherence[k] > 0.999,
                 "bin {k}: coh {:.4}", r.coherence[k]
+            );
+        }
+    }
+
+    /// unified.md Phase 3: re/im are populated parallel to mag/phase
+    /// and consistent with them. Unity loopback should give Re ≈ 1,
+    /// Im ≈ 0 (within Welch noise) at every bin in the audio band.
+    #[test]
+    fn unity_loopback_re_im_consistent() {
+        let sig = white_noise(N, 0.5, 42);
+        let r = h1_estimate(&sig, &sig, SR);
+
+        assert_eq!(r.re.len(), r.magnitude_db.len(), "re len mismatch");
+        assert_eq!(r.im.len(), r.magnitude_db.len(), "im len mismatch");
+        for k in 20..=20_000 {
+            // Round-trip check: |H| from re/im matches |H| from db.
+            let mag_lin_re_im = (r.re[k].powi(2) + r.im[k].powi(2)).sqrt();
+            let mag_lin_db    = 10.0_f64.powf(r.magnitude_db[k] / 20.0);
+            assert_relative_eq!(mag_lin_re_im, mag_lin_db, epsilon = 1e-9);
+            // Phase round-trip: atan2(im, re) matches phase_deg.
+            let p_re_im = r.im[k].atan2(r.re[k]).to_degrees();
+            assert_relative_eq!(p_re_im, r.phase_deg[k], epsilon = 1e-9);
+        }
+        // Unity-gain expectation: Re ≈ 1, Im ≈ 0 in the audio band.
+        for k in 200..=2_000 {
+            assert!(
+                (r.re[k] - 1.0).abs() < 0.05,
+                "bin {k}: Re {:.4} (expected ≈ 1)", r.re[k]
+            );
+            assert!(
+                r.im[k].abs() < 0.05,
+                "bin {k}: Im {:.4} (expected ≈ 0)", r.im[k]
             );
         }
     }

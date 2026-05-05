@@ -286,14 +286,33 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         .collect::<Vec<_>>();
                     let phase = indices.iter().map(|&i| result.phase_deg[i]).collect::<Vec<_>>();
                     let coh   = indices.iter().map(|&i| result.coherence[i]).collect::<Vec<_>>();
+                    // unified.md Phase 3: complex H downsampled in
+                    // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
+                    // group-delay-from-complex) get H(ω) directly
+                    // without re-deriving from mag/phase. Same `indices`
+                    // → guaranteed consistent with mag/phase/coherence.
+                    let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
+                    let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
 
                     // Mic-curve correction (#101) on the measurement leg
                     // only — the reference leg was guarded above. H1's
                     // dB magnitude has the mic over-read embedded; subtract
                     // the curve at each downsampled bin to recover truth.
+                    // Same correction applied multiplicatively to (re, im)
+                    // — the curve is magnitude-only (no phase change), so
+                    // scaling both re and im by 10^(-curve_db/20)
+                    // preserves arg(H) while shrinking |H| consistently.
                     if mc_enabled {
                         if let Some(curve) = curve_opt.as_ref() {
                             mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
+                            for ((r, i), &f) in
+                                re.iter_mut().zip(im.iter_mut()).zip(freqs.iter())
+                            {
+                                let corr_db = curve.correction_at(f as f32) as f64;
+                                let scale = 10.0_f64.powf(-corr_db / 20.0);
+                                *r *= scale;
+                                *i *= scale;
+                            }
                         }
                     }
                     let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
@@ -305,6 +324,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         "magnitude_db":   mag,
                         "phase_deg":      phase,
                         "coherence":      coh,
+                        "re":             re,
+                        "im":             im,
                         "delay_samples":  result.delay_samples,
                         "delay_ms":       result.delay_ms,
                         "ref_channel":    ref_ch,

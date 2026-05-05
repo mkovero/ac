@@ -1520,6 +1520,8 @@ legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
   "magnitude_db":  [<float>, ...],
   "phase_deg":     [<float>, ...],
   "coherence":     [<float>, ...],
+  "re":            [<float>, ...],     // unified.md Phase 3: complex H, real part
+  "im":            [<float>, ...],     // complex H, imaginary part
   "delay_samples": <int>,
   "delay_ms":      <float>,
   "meas_channel":  <int>,
@@ -1527,6 +1529,18 @@ legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
   "sr":            <int>
 }
 ```
+
+**Complex H consistency.** `re` and `im` carry H₁(ω) directly so Tier 2
+views can render Nyquist locus, IFFT-based impulse response, and
+group-delay-from-complex without re-deriving from `magnitude_db` /
+`phase_deg`. All four representations (`mag`, `phase`, `re`, `im`) are
+computed from the same `H₁ = G_xy_comp / G_xx` complex value and are
+guaranteed mutually consistent: `magnitude_db = 20·log10(√(re² + im²))`
+and `phase_deg = atan2(im, re)·180/π`. Mic-curve correction (when
+enabled on the meas channel) is applied to all four — magnitude has
+the dB correction subtracted; (re, im) are scaled by `10^(−curve_db/20)`
+so `arg(H)` is unchanged. Older subscribers that ignore `re` / `im`
+keep working — the fields are pure additions.
 
 **DATA** — terminal after `stop`:
 ```json
