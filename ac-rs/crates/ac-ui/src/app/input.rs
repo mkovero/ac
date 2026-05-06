@@ -447,7 +447,11 @@ impl App {
                 let log_min = view.freq_min.max(1.0).log10();
                 let log_max = view.freq_max.max(log_min.exp().max(10.0)).log10();
                 let anchor = log_min + nx * (log_max - log_min);
-                let new_span = ((log_max - log_min) * factor).clamp(0.15, data_span);
+                // Min span 0.01 decades (≈ 2.3 % bandwidth, e.g. ~23 Hz
+                // wide at 1 kHz) — was 0.15 (≈ 41 % bandwidth) which
+                // capped the zoom after just a few scroll ticks. Tight
+                // enough now to resolve individual spectral peaks.
+                let new_span = ((log_max - log_min) * factor).clamp(0.01, data_span);
                 let mut new_min = anchor - nx * new_span;
                 let mut new_max = new_min + new_span;
                 if new_min < data_log_min {
@@ -465,7 +469,9 @@ impl App {
                 let db_min = view.db_min;
                 let db_max = view.db_max;
                 let anchor = db_min + ny * (db_max - db_min);
-                let new_span = ((db_max - db_min) * factor).clamp(10.0, 240.0);
+                // Min span 2 dB (was 10) so zooming a peak/notch
+                // actually reaches sub-dB resolution.
+                let new_span = ((db_max - db_min) * factor).clamp(2.0, 240.0);
                 let new_min = (anchor - ny * new_span).max(-240.0);
                 let new_max = (new_min + new_span).min(20.0);
                 view.db_min = new_min;
