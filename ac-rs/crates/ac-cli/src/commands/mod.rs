@@ -4,6 +4,7 @@ pub mod dmm;
 pub mod generate;
 pub mod gpio;
 pub mod monitor;
+pub mod monitor_tui;
 pub mod plot;
 pub mod probe;
 pub mod report;

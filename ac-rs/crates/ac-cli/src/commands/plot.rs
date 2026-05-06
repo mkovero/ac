@@ -205,15 +205,9 @@ impl LaunchKind {
     }
 }
 
-pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
-    let bin = crate::spawn::find_binary("ac-ui");
-    let bin = match bin {
-        Some(p) => p,
-        None => {
-            eprintln!("  warning: ac-ui not found, skipping UI launch");
-            return;
-        }
-    };
+/// Build the `ac-ui` argv from a `LaunchKind` plus the connection /
+/// session bits read from `Config`.
+fn build_ui_args(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) -> Vec<String> {
     let host = cfg.server_host.as_deref().unwrap_or("127.0.0.1");
     let mut args = vec![
         "--connect".to_string(),
@@ -235,11 +229,57 @@ pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channel
         args.push("--output-dir".to_string());
         args.push(d.to_string_lossy().into_owned());
     }
-    std::process::Command::new(bin)
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .ok();
+    args
+}
+
+pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
+    let bin = crate::spawn::find_binary("ac-ui");
+
+    match (kind, bin) {
+        // Monitor blocks: we wait on `ac-ui` so the shell prompt doesn't
+        // come back until the user closes it. Exit code 71 (`EX_OSERR`,
+        // RC-6) or a missing binary triggers the TUI fallback so a
+        // headless / GPU-less host still gets a useful display.
+        (LaunchKind::Monitor, Some(bin)) => {
+            let args = build_ui_args(kind, cfg, channels);
+            let status = std::process::Command::new(bin)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+            let code = status.as_ref().ok().and_then(|s| s.code());
+            if matches!(code, Some(71)) {
+                eprintln!("  ac-ui exited 71 (no GPU adapter); falling back to TUI monitor");
+                run_tui_fallback(cfg, channels);
+            }
+        }
+        (LaunchKind::Monitor, None) => {
+            eprintln!("  warning: ac-ui not found, falling back to TUI monitor");
+            run_tui_fallback(cfg, channels);
+        }
+        // Sweep variants stay spawn-and-forget. The CLI still streams its
+        // own CSV-style output, so the user sees results regardless of
+        // whether the UI starts. RC-5 already moved this past `check_ack`.
+        (LaunchKind::SweepFreq | LaunchKind::SweepLevel, Some(bin)) => {
+            let args = build_ui_args(kind, cfg, channels);
+            std::process::Command::new(bin)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .ok();
+        }
+        (LaunchKind::SweepFreq | LaunchKind::SweepLevel, None) => {
+            eprintln!("  warning: ac-ui not found, skipping UI launch");
+        }
+    }
+}
+
+fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
+    let chs: Vec<u32> = channels.map(|s| s.to_vec()).unwrap_or_default();
+    if let Err(e) = super::monitor_tui::run(cfg, &chs) {
+        eprintln!("  monitor: tui error: {e}");
+    }
 }
