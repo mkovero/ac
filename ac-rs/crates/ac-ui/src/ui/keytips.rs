@@ -79,10 +79,12 @@ fn chip(key: &'static str, label: impl Into<String>) -> KeytipChip {
     }
 }
 
-/// Universal chips appended to every view's strip. `H help`, `Esc quit`,
-/// `S screenshot` are always available regardless of the view.
+/// Universal chips appended to every view's strip. `G matrix`, `H help`,
+/// `S screenshot`, `Esc quit` are always available regardless of view.
+/// `G` snaps to the Spectrum+Grid overview for picking a channel.
 fn universal_chips() -> Vec<KeytipChip> {
     vec![
+        chip("G", "matrix"),
         chip("H", "help"),
         chip("S", "screenshot"),
         chip("Esc", "quit"),
@@ -207,8 +209,8 @@ mod tests {
         }
     }
 
-    /// Every default view in the W-cycle returns at least the ABC of
-    /// universal chips (H/S/Esc) plus its own. None must be empty.
+    /// Every default view in the W-cycle returns at least the universal
+    /// chips (G/H/S/Esc) plus its own. None must be empty.
     #[test]
     fn every_view_returns_chips() {
         let views = [
@@ -219,8 +221,9 @@ mod tests {
         ];
         for v in views {
             let chips = keytips_for(&base_state(v));
-            assert!(chips.len() >= 4, "view {v:?} produced too few chips: {chips:?}");
+            assert!(chips.len() >= 5, "view {v:?} produced too few chips: {chips:?}");
             // Universal chips must always be present.
+            assert!(chips.iter().any(|c| c.key == "G"));
             assert!(chips.iter().any(|c| c.key == "H"));
             assert!(chips.iter().any(|c| c.key == "Esc"));
         }

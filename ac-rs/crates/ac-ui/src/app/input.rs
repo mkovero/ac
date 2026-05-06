@@ -817,6 +817,36 @@ impl App {
                 self.show_timing = !self.show_timing;
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
+            // Snap to the matrix overview (Spectrum + Grid) from any view.
+            // Pair with left-click on a cell to pick a different channel:
+            // matrix → click → Single on that channel → W cycles ember
+            // views from there. Always available; no-op when already in
+            // matrix view so trackpad bumps don't stomp cell axes.
+            KeyCode::KeyG => {
+                let prev_view = self.config.view_mode;
+                let already_matrix = matches!(prev_view, ViewMode::Spectrum)
+                    && matches!(self.config.layout, LayoutMode::Grid);
+                if already_matrix {
+                    return;
+                }
+                if self.analysis_mode != "fft" && !self.send_set_analysis_mode("fft") {
+                    // Daemon refused FFT — stay put so a retry is meaningful.
+                    return;
+                }
+                self.config.view_mode = ViewMode::Spectrum;
+                self.config.layout = LayoutMode::Grid;
+                let prev_default = crate::theme::default_db_window_for_view(prev_view);
+                let next_default = crate::theme::default_db_window_for_view(ViewMode::Spectrum);
+                if prev_default != next_default {
+                    for view in self.cell_views.iter_mut() {
+                        view.db_min = next_default.0;
+                        view.db_max = next_default.1;
+                    }
+                }
+                self.reset_peak_holds();
+                self.notify("view: matrix");
+                self.mark_ui_dirty();
+            }
             // Cycle the waterfall colormap palette. `;` advances; Ctrl+`;`
             // cycles backward. Only meaningful in Waterfall view — in other
             // views, notify so the user knows the key was seen.
