@@ -82,14 +82,14 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `W` | Cycle ember views. With a registered transfer pair (Space-select MEAS + REF, then `T`): SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber (9 slots). Without a pair: only SpectrumEmber — pressing W on it notifies "register a transfer pair (T) to unlock more views". Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
+| `W` | Cycle ember views. With a registered transfer pair (`C`-select MEAS + REF, then `T`): SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber (9 slots). Without a pair: only SpectrumEmber — pressing W on it notifies "register a transfer pair (T) to unlock more views". Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
 | `G` | Snap to matrix overview (Spectrum + Grid) from any view — left-click a cell to zoom into Single+Spectrum on that channel; W cycles ember views from there. |
-| `C` | Compare selected channels in one rect (needs ≥ 1 Space-selected channel) |
+| `C` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
+| `Shift+C` | Compare selected channels in one rect (needs ≥ 1 selection from `C`) |
 | Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |
 | `F` | Toggle fullscreen |
 | `D` | Toggle timing overlay |
 | `Tab` / `Shift+Tab` | Next/prev channel or grid page |
-| `Space` | Toggle channel selection |
 | `Left` / `Right` | FFT monitor tick interval ±1 ms (clamped 1–1000 ms, FFT mode only) |
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |
