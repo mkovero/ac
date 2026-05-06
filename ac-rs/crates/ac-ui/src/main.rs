@@ -97,6 +97,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(report) = app.benchmark_report() {
         println!("{report}");
     }
+    // wgpu init failed (no adapter, broken driver, headless container).
+    // Exit with EX_OSERR so the CLI side can detect and fall back to the
+    // TUI monitor (RC-7). Done after `run_app` returns so the event-loop
+    // shutdown path runs cleanly.
+    if app.gpu_init_failed {
+        std::process::exit(71);
+    }
     Ok(())
 }
 

@@ -404,6 +404,11 @@ pub struct App {
     /// scrolling on an axisless view. Throttle window 2 s so a continuous
     /// trackpad gesture doesn't keep re-firing the chip.
     pub(super) last_axisless_scroll_notify: Option<Instant>,
+    /// Set when `init_graphics` couldn't get a wgpu adapter / device
+    /// (headless host, broken driver, missing Vulkan/GL). The event
+    /// loop unwinds cleanly and `main` then exits with status 71
+    /// (`EX_OSERR`) so the CLI side can detect and fall back to TUI mode.
+    pub(crate) gpu_init_failed: bool,
     timing_stats: TimingStats,
     show_timing: bool,
     benchmark_secs: Option<f64>,
@@ -631,6 +636,7 @@ impl App {
             cursor_pos: None,
             drag: None,
             last_axisless_scroll_notify: None,
+            gpu_init_failed: false,
             timing_stats: TimingStats::new(),
             show_timing,
             benchmark_secs,
@@ -745,11 +751,21 @@ impl App {
         }
     }
 
-    fn init_graphics(&mut self, window: Arc<Window>) {
-        let ctx = pollster::block_on(RenderContext::new(
+    /// Initialise the wgpu render context and per-view renderers. Returns
+    /// `Err` only on real GPU-init failures (no adapter, surface
+    /// configuration rejected, etc.); the caller treats that as a fatal,
+    /// exit-code-71 condition rather than panicking. Most callers should
+    /// just let the error bubble through `resumed`.
+    fn init_graphics(&mut self, window: Arc<Window>) -> Result<(), String> {
+        let ctx = match pollster::block_on(RenderContext::new(
             window.clone(),
             self.requested_present_mode,
-        )).expect("wgpu init");
+        )) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(format!("failed to initialize wgpu adapter: {e}"));
+            }
+        };
         let format = ctx.surface_format();
         let spectrum = SpectrumRenderer::new(&ctx.device, format);
         let waterfall = WaterfallRenderer::new(&ctx.device, &ctx.queue, format);
@@ -771,6 +787,7 @@ impl App {
         if let Some(true) = self.pending_fullscreen.take() {
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
         }
+        Ok(())
     }
 
     fn notify(&mut self, msg: &str) {
@@ -881,7 +898,12 @@ impl ApplicationHandler for App {
             .with_title("ac-ui — spectrum")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(elwt.create_window(attrs).expect("window create"));
-        self.init_graphics(window);
+        if let Err(e) = self.init_graphics(window) {
+            log::error!("{e}");
+            self.gpu_init_failed = true;
+            elwt.exit();
+            return;
+        }
         self.start_data_source();
     }
 
