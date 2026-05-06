@@ -879,17 +879,40 @@ impl App {
                 // the cycle — landing on one of them and pressing W
                 // jumps to SpectrumEmber so the cycle stays
                 // deterministic.
-                let next = match self.current_w_slot() {
-                    Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                    Some(WSlot::Goniometer)    => WSlot::IoTransfer,
-                    Some(WSlot::IoTransfer)    => WSlot::BodeMag,
-                    Some(WSlot::BodeMag)       => WSlot::Coherence,
-                    Some(WSlot::Coherence)     => WSlot::BodePhase,
-                    Some(WSlot::BodePhase)     => WSlot::GroupDelay,
-                    Some(WSlot::GroupDelay)    => WSlot::Nyquist,
-                    Some(WSlot::Nyquist)       => WSlot::Ir,
-                    Some(WSlot::Ir)            => WSlot::SpectrumEmber,
-                    None                       => WSlot::SpectrumEmber,
+                //
+                // Gated cycle: every slot beyond `SpectrumEmber` paints
+                // a transfer-pair view (trajectory: Goniometer /
+                // IoTransfer share `bode_pair`-resolved stereo audio;
+                // transfer-derived: Bode-*, Coherence, GroupDelay,
+                // Nyquist, Ir need the daemon's H1 estimate). Without a
+                // registered pair they all fall back to a synthetic
+                // carrier or empty trace — more confusing than useful.
+                // So we collapse the cycle to just SpectrumEmber when no
+                // pair is resolvable, and surface the Space + T workflow
+                // as a notification when the user presses W expecting
+                // more.
+                let pair_available = self.resolve_transfer_pair_for_active().is_some();
+                let next = if pair_available {
+                    match self.current_w_slot() {
+                        Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
+                        Some(WSlot::Goniometer)    => WSlot::IoTransfer,
+                        Some(WSlot::IoTransfer)    => WSlot::BodeMag,
+                        Some(WSlot::BodeMag)       => WSlot::Coherence,
+                        Some(WSlot::Coherence)     => WSlot::BodePhase,
+                        Some(WSlot::BodePhase)     => WSlot::GroupDelay,
+                        Some(WSlot::GroupDelay)    => WSlot::Nyquist,
+                        Some(WSlot::Nyquist)       => WSlot::Ir,
+                        Some(WSlot::Ir)            => WSlot::SpectrumEmber,
+                        None                       => WSlot::SpectrumEmber,
+                    }
+                } else if matches!(self.current_w_slot(), Some(WSlot::SpectrumEmber)) {
+                    self.notify("register a transfer pair (T) to unlock more views");
+                    return;
+                } else {
+                    // Coming from a transfer view whose pair was just
+                    // unregistered (or `--view <transfer>` startup
+                    // without a pair) — drop to the only useful slot.
+                    WSlot::SpectrumEmber
                 };
                 let (layout, view_mode, mode, label) = match next {
                     WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),

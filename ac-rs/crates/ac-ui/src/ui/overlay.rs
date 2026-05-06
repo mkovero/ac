@@ -233,7 +233,7 @@ const HELP_LINES: &[&str] = &[
     "S              screenshot",
     "F              fullscreen",
     "D              timing overlay",
-    "W              cycle ember view",
+    "W              cycle ember view (full 9 slots once T-pair registered)",
     "G              matrix overview (pick channel by click)",
     "Enter          freeze",
     "Space          toggle channel select",
