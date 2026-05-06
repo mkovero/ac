@@ -99,13 +99,15 @@ impl App {
             }
             self.notify(&err);
         }
-        // Transfer views (BodeMag/Coherence/BodePhase/GroupDelay/Nyquist/IR)
-        // render whichever TransferPair `resolve_transfer_pair_for_active`
-        // selects. Pair registration is handled by `T` (Space-select MEAS
-        // + REF, then T) — entering a transfer view no longer auto-creates
-        // a pair, since the active+1 heuristic doesn't generalise past
-        // two-channel setups. When no pair is registered the overlay
-        // caption hints at the Space+T workflow.
+        // All views that consume a *pair* of channels — Bode/Coherence/
+        // Phase/GroupDelay/Nyquist/IR (transfer-derived) plus Goniometer/
+        // IoTransfer (trajectory) — resolve which `TransferPair` to use
+        // here. Pair registration is handled by `T` (Space-select MEAS +
+        // REF, then T); the resolver picks the active virtual channel's
+        // pair, falling back to the first registered pair when active
+        // sits on a real channel. `None` triggers each view's "no pair
+        // registered" fallback (synthetic carrier for trajectory views,
+        // empty polyline + Space+T caption for transfer views).
         let bode_pair: Option<crate::data::types::TransferPair> = matches!(
             self.config.view_mode,
             ViewMode::BodeMag
@@ -113,7 +115,9 @@ impl App {
                 | ViewMode::BodePhase
                 | ViewMode::GroupDelay
                 | ViewMode::Nyquist
-                | ViewMode::Ir,
+                | ViewMode::Ir
+                | ViewMode::Goniometer
+                | ViewMode::IoTransfer,
         )
         .then(|| self.resolve_transfer_pair_for_active())
         .flatten();
@@ -1279,8 +1283,7 @@ impl App {
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let want = ((dt * sr) as usize).clamp(64, 4096);
                     let (status, real_pair) = resolve_stereo_pair(
-                        self.config.active_channel,
-                        self.monitor_channels.as_deref(),
+                        bode_pair,
                         self.scope_store.as_ref(),
                         want,
                     );
@@ -1329,8 +1332,7 @@ impl App {
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let want = ((dt * sr) as usize).clamp(64, 4096);
                     let (status, real_pair) = resolve_stereo_pair(
-                        self.config.active_channel,
-                        self.monitor_channels.as_deref(),
+                        bode_pair,
                         self.scope_store.as_ref(),
                         want,
                     );
@@ -2496,27 +2498,31 @@ fn update_stereo_peak(peak: &mut f32, l: &[f32], r: &[f32], dt: f32) {
     }
 }
 
-/// Look up `(active_channel, active_channel + 1)` in the scope store
-/// and decide whether the Goniometer can render real audio.
+/// Resolve the (L, R) stereo pair for a trajectory view (Goniometer,
+/// IoTransfer) from a registered `TransferPair`. The pair carries
+/// `meas` and `ref_ch`; we map them to (L = ref_ch, R = meas) so:
+/// - **IoTransfer**: matches its existing convention (X = ref input,
+///   Y = DUT output), since the user wires REF → DUT and registers
+///   the pair via Space-select MEAS first, REF last → T.
+/// - **Goniometer**: stereo phase scope, no semantic asymmetry —
+///   any consistent labelling reads correctly. We follow IoTransfer's
+///   ordering for uniformity: L = ref_ch, R = meas.
 ///
-/// `active_slot` is the UI slot index (`config.active_channel`); the
-/// physical capture id is `monitor_channels[active_slot]`. The R
-/// candidate is the *physical* id immediately after L, regardless of
-/// what slot (or no slot) it occupies in the UI grid — the user
-/// requested a stereo pair by launching `--channels N,N+1`.
+/// `pair = None` (no T-registered pair) → `(NoTransferPair, None)`.
+/// The caller falls back to the synthetic carrier and the overlay
+/// caption hints at the Space + T workflow.
 ///
 /// Returns:
-/// - `(Real { l, r }, Some((l_samples, r_samples)))` when both channels
-///   have recent matching scope frames.
-/// - `(NoSecondChannel { l }, None)` when L is in the monitor set but
-///   the +1 physical id is not.
-/// - `(NotStreamingYet { l, r }, None)` when both are in the set but
-///   no recent scope frames.
-/// - `(NoAudio, None)` when there's no scope store or the active slot
-///   has no resolved physical id (e.g. synthetic mode).
+/// - `(Real { l, r }, Some((l_samples, r_samples)))` when both
+///   channels have recent matching scope frames.
+/// - `(NoTransferPair, None)` when no pair is registered.
+/// - `(NotStreamingYet { l, r }, None)` when a pair is registered
+///   but scope frames haven't arrived yet (cold start, or daemon
+///   stopped streaming).
+/// - `(NoAudio, None)` when there's no scope store at all
+///   (synthetic / pre-connect).
 fn resolve_stereo_pair(
-    active_slot: usize,
-    monitor_channels: Option<&[u32]>,
+    pair: Option<crate::data::types::TransferPair>,
     scope_store: Option<&crate::data::store::ScopeStore>,
     want_samples: usize,
 ) -> (
@@ -2528,20 +2534,12 @@ fn resolve_stereo_pair(
         Some(s) => s,
         None => return (StereoStatus::NoAudio, None),
     };
-    let phys_l = match monitor_channels.and_then(|cs| cs.get(active_slot).copied()) {
+    let p = match pair {
         Some(p) => p,
-        None => return (StereoStatus::NoAudio, None),
+        None => return (StereoStatus::NoTransferPair, None),
     };
-    let phys_r = match phys_l.checked_add(1) {
-        Some(p) => p,
-        None => return (StereoStatus::NoSecondChannel { l: phys_l }, None),
-    };
-    let in_monitor = monitor_channels
-        .map(|cs| cs.contains(&phys_r))
-        .unwrap_or(false);
-    if !in_monitor {
-        return (StereoStatus::NoSecondChannel { l: phys_l }, None);
-    }
+    let phys_l = p.ref_ch;
+    let phys_r = p.meas;
     let max_age = std::time::Duration::from_millis(250);
     match (
         store.read_recent(phys_l, want_samples, max_age),
@@ -3722,5 +3720,92 @@ mod tests {
         for w in &trace_weights {
             assert!(*w < 1e-6, "γ²=0 trace weight should be ~0, got {w}");
         }
+    }
+
+    // ---- resolve_stereo_pair (TransferPair-driven) ----
+
+    fn scope_frame(channel: u32, frame_idx: u64, samples: Vec<f32>) -> crate::data::types::ScopeFrame {
+        crate::data::types::ScopeFrame {
+            channel,
+            sr: 48_000,
+            frame_idx,
+            samples,
+            n_channels: Some(2),
+        }
+    }
+
+    /// No scope store at all (synthetic / pre-connect) → NoAudio,
+    /// regardless of whether a pair is supplied.
+    #[test]
+    fn stereo_pair_no_scope_store_yields_no_audio() {
+        use crate::data::types::{StereoStatus, TransferPair};
+        let pair = Some(TransferPair { meas: 0, ref_ch: 1 });
+        let (status, samples) = resolve_stereo_pair(pair, None, 64);
+        assert_eq!(status, StereoStatus::NoAudio);
+        assert!(samples.is_none());
+    }
+
+    /// Scope store present but no TransferPair registered → the new
+    /// NoTransferPair variant fires (overlay caption hints at Space+T).
+    #[test]
+    fn stereo_pair_no_pair_yields_no_transfer_pair() {
+        use crate::data::types::StereoStatus;
+        let store = crate::data::store::ScopeStore::new();
+        let (status, samples) = resolve_stereo_pair(None, Some(&store), 64);
+        assert_eq!(status, StereoStatus::NoTransferPair);
+        assert!(samples.is_none());
+    }
+
+    /// Pair registered but the daemon hasn't started streaming scope
+    /// frames yet → NotStreamingYet carrying the (l, r) physical ids
+    /// the user picked, so the caption can still tell them which
+    /// channels are being waited on.
+    #[test]
+    fn stereo_pair_registered_but_no_frames_yields_not_streaming_yet() {
+        use crate::data::types::{StereoStatus, TransferPair};
+        let store = crate::data::store::ScopeStore::new();
+        let pair = Some(TransferPair { meas: 5, ref_ch: 3 });
+        let (status, samples) = resolve_stereo_pair(pair, Some(&store), 64);
+        // l = ref_ch, r = meas (matches the IoTransfer convention
+        // and the resolver's docstring).
+        assert_eq!(status, StereoStatus::NotStreamingYet { l: 3, r: 5 });
+        assert!(samples.is_none());
+    }
+
+    /// Pair registered + matching scope frames present on both
+    /// channels → Real { l = ref_ch, r = meas } and the sample
+    /// vectors come back in (l_samples, r_samples) order.
+    #[test]
+    fn stereo_pair_matching_frames_yield_real() {
+        use crate::data::types::{StereoStatus, TransferPair};
+        let store = crate::data::store::ScopeStore::new();
+        let n = 128;
+        let l_samples: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01).collect();
+        let r_samples: Vec<f32> = (0..n).map(|i| (i as f32) * -0.01).collect();
+        // Same frame_idx so the pairing check (`abs_diff <= 1`) passes.
+        store.write(scope_frame(3, 100, l_samples.clone()));
+        store.write(scope_frame(5, 100, r_samples.clone()));
+        let pair = Some(TransferPair { meas: 5, ref_ch: 3 });
+        let (status, samples) = resolve_stereo_pair(pair, Some(&store), n);
+        assert_eq!(status, StereoStatus::Real { l: 3, r: 5 });
+        let (sl, sr_buf) = samples.expect("expected matched scope samples");
+        assert_eq!(sl, l_samples);
+        assert_eq!(sr_buf, r_samples);
+    }
+
+    /// Pair registered, frames present on L only (R hasn't arrived
+    /// yet) → NotStreamingYet, not Real.
+    #[test]
+    fn stereo_pair_partial_frames_yield_not_streaming_yet() {
+        use crate::data::types::{StereoStatus, TransferPair};
+        let store = crate::data::store::ScopeStore::new();
+        let n = 128;
+        let l_samples: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01).collect();
+        store.write(scope_frame(3, 100, l_samples));
+        // No write to channel 5.
+        let pair = Some(TransferPair { meas: 5, ref_ch: 3 });
+        let (status, samples) = resolve_stereo_pair(pair, Some(&store), n);
+        assert_eq!(status, StereoStatus::NotStreamingYet { l: 3, r: 5 });
+        assert!(samples.is_none());
     }
 }

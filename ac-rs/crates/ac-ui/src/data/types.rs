@@ -294,10 +294,11 @@ impl From<&SpectrumFrame> for FrameMeta {
 pub enum StereoStatus {
     /// Real wire-fed audio for both channels of a stereo pair.
     Real { l: u32, r: u32 },
-    /// `active_channel` is in the monitor set but `+1` isn't.
-    NoSecondChannel { l: u32 },
-    /// Both channels are in the set but no recent scope frames have
-    /// arrived yet (cold start, or the daemon stopped streaming).
+    /// No `TransferPair` is registered yet. Caption hints at the
+    /// `Space + T` workflow (select MEAS + REF, then T to register).
+    NoTransferPair,
+    /// A pair is registered but no recent scope frames have arrived
+    /// yet (cold start, or the daemon stopped streaming).
     NotStreamingYet { l: u32, r: u32 },
     /// No daemon source — synthetic mode or pre-connect.
     NoAudio,

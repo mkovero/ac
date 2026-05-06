@@ -129,10 +129,8 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
         StereoStatus::Real { l, r } => {
             format!("{view_label} (ember) │ ch {l} + {r}")
         }
-
-        StereoStatus::NoSecondChannel { l } => format!(
-            "{view_label} (ember) │ synthetic — no stereo (ch {} not present)",
-            l + 1
+        StereoStatus::NoTransferPair => format!(
+            "{view_label} (ember) │ synthetic — Space-select L + R, then T",
         ),
         StereoStatus::NotStreamingYet { l, r } => format!(
             "{view_label} (ember) │ synthetic — daemon not streaming scope yet (ch {l}+{r})"
@@ -151,10 +149,9 @@ fn format_iotransfer_status_line(status: StereoStatus) -> String {
         StereoStatus::Real { l, r } => {
             format!("iotransfer (ember) │ ref ch {l} → dut ch {r}")
         }
-        StereoStatus::NoSecondChannel { l } => format!(
-            "iotransfer (ember) │ synthetic — no DUT pair (ch {} not present)",
-            l + 1
-        ),
+        StereoStatus::NoTransferPair => {
+            "iotransfer (ember) │ synthetic — Space-select REF + DUT, then T".to_string()
+        }
         StereoStatus::NotStreamingYet { l, r } => format!(
             "iotransfer (ember) │ synthetic — daemon not streaming scope yet (ref ch {l} → dut ch {r})"
         ),

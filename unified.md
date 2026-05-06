@@ -1094,6 +1094,27 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
 
 Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
 
+- `(2026-05-06) — Goniometer + IoTransfer move to TransferPair
+  selection.` — The two trajectory views were the last holdouts on
+  the active+1 stereo convention. Now they go through the same
+  `resolve_transfer_pair_for_active` resolver as Bode/Nyquist/IR;
+  the resolved pair feeds a refactored
+  `resolve_stereo_pair(pair, scope_store, want)` that maps
+  `(meas, ref_ch)` → `(L = ref_ch, R = meas)` (matches IoTransfer's
+  X/Y convention; Goniometer is symmetric so the labelling is
+  arbitrary but stays uniform). Pair registration via Space + T
+  exactly as for transfer views — Tab cycles between registered
+  pairs once on a virtual cell.
+  StereoStatus enum: `NoSecondChannel { l }` (active+1 not in
+  monitor set) → `NoTransferPair` (no T-registered pair). Captions:
+  Goniometer "synthetic — Space-select L + R, then T"; IoTransfer
+  "synthetic — Space-select REF + DUT, then T". Synthetic carrier
+  fallback unchanged — first-launch users still see the rotating
+  ellipse without having to register anything.
+  +5 tests covering the new resolver: NoAudio/NoTransferPair/
+  NotStreamingYet/Real/partial-frames. 658 → 663 workspace
+  passing.
+
 - `(2026-05-06) — Explicit transfer-pair selection for Bode/
   Coherence/Nyquist/IR.` — Drop the active+1 auto-register that
   fired whenever the user entered a transfer view. Replaced by a
