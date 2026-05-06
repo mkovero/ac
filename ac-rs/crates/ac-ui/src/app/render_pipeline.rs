@@ -1110,7 +1110,6 @@ impl App {
                 min_hold: min_hold_enabled_snap,
                 coherence_k: coherence_k_snap,
                 goniometer_ms: goniometer_ms_snap,
-                layout: config_snap.layout,
             };
             let keytips = crate::ui::keytips::keytips_for(&keytip_state);
             overlay::draw(

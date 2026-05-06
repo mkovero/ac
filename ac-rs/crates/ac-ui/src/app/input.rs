@@ -65,18 +65,6 @@ pub(super) fn decide_zoom_axes(view: ViewMode, shift: bool, ctrl: bool) -> (bool
     }
 }
 
-/// Whether `view` paints independent per-channel content that makes
-/// sense in a multi-cell `Grid` layout. Trajectory and transfer views
-/// (Goniometer / IoTransfer / Bode-* / Coherence / GroupDelay /
-/// Nyquist / Ir) are inherently pair-based — a "grid of transfer
-/// pairs" would be its own feature, so they stay Single-only.
-pub(super) fn supports_grid(view: ViewMode) -> bool {
-    matches!(
-        view,
-        ViewMode::Spectrum | ViewMode::Waterfall | ViewMode::SpectrumEmber
-    )
-}
-
 /// User-facing short label for a view, used in the "no zoom on <view>"
 /// chip. Matches the keytip-strip naming from RC-8.
 pub(super) fn view_label(view: ViewMode) -> &'static str {
@@ -829,34 +817,6 @@ impl App {
                 self.show_timing = !self.show_timing;
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
-            // RC-12: toggle Grid ↔ Single on the current view. Only the
-            // per-channel views (Spectrum / Waterfall / SpectrumEmber)
-            // support Grid; the trajectory and transfer views are pair-
-            // based and stay Single. The choice is remembered in
-            // `preferred_layout` so a subsequent W cycle through ember
-            // views and back lands the user in their chosen layout.
-            KeyCode::KeyG => {
-                if !supports_grid(self.config.view_mode) {
-                    self.notify(&format!(
-                        "grid not available for {}",
-                        view_label(self.config.view_mode),
-                    ));
-                    return;
-                }
-                let next = if matches!(self.config.layout, LayoutMode::Grid) {
-                    LayoutMode::Single
-                } else {
-                    LayoutMode::Grid
-                };
-                self.preferred_layout = next;
-                self.config.layout = next;
-                self.notify(if matches!(next, LayoutMode::Grid) {
-                    "layout: grid"
-                } else {
-                    "layout: single"
-                });
-                self.mark_ui_dirty();
-            }
             // Cycle the waterfall colormap palette. `;` advances; Ctrl+`;`
             // cycles backward. Only meaningful in Waterfall view — in other
             // views, notify so the user knows the key was seen.
@@ -918,15 +878,7 @@ impl App {
                     return;
                 }
                 let prev_view = self.config.view_mode;
-                // Honour the user's preferred Grid/Single choice (RC-12)
-                // when landing on a grid-capable view; otherwise force
-                // Single — trajectory/transfer views are pair-based and
-                // don't have a meaningful per-cell extension.
-                self.config.layout = if supports_grid(view_mode) {
-                    self.preferred_layout
-                } else {
-                    layout
-                };
+                self.config.layout = layout;
                 self.config.view_mode = view_mode;
                 if matches!(view_mode, ViewMode::Waterfall) {
                     for init in &mut self.waterfall_inited {
