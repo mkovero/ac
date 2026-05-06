@@ -366,6 +366,24 @@ impl App {
             return;
         }
 
+        // SpectrumEmber image-zoom: scroll magnifies the rendered ember
+        // pixels around the cursor instead of touching freq/dB windows.
+        // The data range stays put (gain unchanged) — what zooms is the
+        // visual. Per-cell `zoom` accumulates; `(zoom_x, zoom_y)` snaps
+        // to the cursor on every tick so the point under the cursor
+        // stays put. Ctrl+R / right-click reset returns zoom to 1.
+        if matches!(self.config.view_mode, ViewMode::SpectrumEmber) {
+            // factor < 1 means scroll-up (zoom in). zoom *= 1/factor.
+            for &idx in &targets {
+                if let Some(view) = self.cell_views.get_mut(idx) {
+                    view.zoom = (view.zoom / factor).clamp(1.0, 32.0);
+                    view.zoom_x = nx;
+                    view.zoom_y = ny;
+                }
+            }
+            return;
+        }
+
         // Axisless trajectory views — Goniometer (Re/Im trace), IoTransfer
         // (in/out scatter), Coherence (γ² fixed [0,1]), Nyquist (Re/Im(H)),
         // Ir (auto-gained polyline). None of these map onto the cell

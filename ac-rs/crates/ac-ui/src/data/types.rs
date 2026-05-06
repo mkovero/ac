@@ -443,6 +443,17 @@ pub struct CellView {
     /// ticks. Time-axis labels read this value for smooth interpolation
     /// between tick positions.
     pub rows_visible_f: f32,
+    /// Image-zoom factor for ember substrate views (SpectrumEmber).
+    /// 1.0 = no magnification; >1 = pixel-zoom around `(zoom_x, zoom_y)`.
+    /// Applied at polyline deposit time so the freq/dB windows stay put
+    /// (gain unchanged); what zooms is the rendered ember pixels.
+    pub zoom: f32,
+    /// Cell-local anchor for image zoom in [0, 1]. Set to the cursor's
+    /// nx at the time of the scroll so the point under the cursor stays
+    /// put as zoom changes. Default 0.5 = cell centre.
+    pub zoom_x: f32,
+    /// Cell-local anchor for image zoom in [0, 1]. See `zoom_x`.
+    pub zoom_y: f32,
 }
 
 impl Default for CellView {
@@ -454,6 +465,9 @@ impl Default for CellView {
             db_max:   crate::theme::DEFAULT_DB_MAX,
             rows_visible: crate::render::waterfall::ROWS_PER_CHANNEL,
             rows_visible_f: crate::render::waterfall::ROWS_PER_CHANNEL as f32,
+            zoom: 1.0,
+            zoom_x: 0.5,
+            zoom_y: 0.5,
         }
     }
 }

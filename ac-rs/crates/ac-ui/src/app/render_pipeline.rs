@@ -1313,11 +1313,38 @@ impl App {
                                 if let Some(frame) = frame_opt {
                                     let local = build_spectrum_polyline(frame, &view);
                                     combined.reserve(local.len());
-                                    for [x, y, w] in local.iter() {
+                                    let zx = view.zoom_x;
+                                    let zy = view.zoom_y;
+                                    let zf = view.zoom.max(1e-3);
+                                    // Image zoom around the cursor anchor. At
+                                    // zf=1 this is identity. For zf>1 points
+                                    // are spread out around (zx, zy); pairs
+                                    // entirely outside [0,1] are skipped so
+                                    // zoomed content doesn't bleed into
+                                    // neighbouring cells.
+                                    for chunk in local.chunks_exact(2) {
+                                        let a = &chunk[0];
+                                        let b = &chunk[1];
+                                        let ax = zx + (a[0] - zx) * zf;
+                                        let ay = zy + (a[1] - zy) * zf;
+                                        let bx = zx + (b[0] - zx) * zf;
+                                        let by = zy + (b[1] - zy) * zf;
+                                        let in_bounds = |x: f32, y: f32| {
+                                            (0.0..=1.0).contains(&x)
+                                                && (0.0..=1.0).contains(&y)
+                                        };
+                                        if !in_bounds(ax, ay) && !in_bounds(bx, by) {
+                                            continue;
+                                        }
                                         combined.push([
-                                            cell.x + x * cell.w,
-                                            1.0 - cell.y - y * cell.h,
-                                            *w,
+                                            cell.x + ax * cell.w,
+                                            1.0 - cell.y - ay * cell.h,
+                                            a[2],
+                                        ]);
+                                        combined.push([
+                                            cell.x + bx * cell.w,
+                                            1.0 - cell.y - by * cell.h,
+                                            b[2],
                                         ]);
                                     }
                                 } else {
@@ -1353,12 +1380,39 @@ impl App {
                                 .get(active)
                                 .copied()
                                 .unwrap_or_default();
-                            frames
+                            // Single-mode image zoom: same per-cell
+                            // (zoom, zoom_x, zoom_y) state as Grid.
+                            // Polyline coords in cell-local [0,1] map
+                            // to canvas full-screen [0,1], so zoom
+                            // around the cursor anchor.
+                            let zx = view.zoom_x;
+                            let zy = view.zoom_y;
+                            let zf = view.zoom.max(1e-3);
+                            let raw = frames
                                 .get(active)
                                 .and_then(|f| f.as_ref())
                                 .filter(|f| !f.spectrum.is_empty())
                                 .map(|f| build_spectrum_polyline(f, &view))
-                                .unwrap_or_default()
+                                .unwrap_or_default();
+                            let mut transformed: Vec<[f32; 3]> = Vec::with_capacity(raw.len());
+                            for chunk in raw.chunks_exact(2) {
+                                let a = &chunk[0];
+                                let b = &chunk[1];
+                                let ax = zx + (a[0] - zx) * zf;
+                                let ay = zy + (a[1] - zy) * zf;
+                                let bx = zx + (b[0] - zx) * zf;
+                                let by = zy + (b[1] - zy) * zf;
+                                let in_bounds = |x: f32, y: f32| {
+                                    (0.0..=1.0).contains(&x)
+                                        && (0.0..=1.0).contains(&y)
+                                };
+                                if !in_bounds(ax, ay) && !in_bounds(bx, by) {
+                                    continue;
+                                }
+                                transformed.push([ax, ay, a[2]]);
+                                transformed.push([bx, by, b[2]]);
+                            }
+                            transformed
                         };
                     // tau_p 1.2 s — short enough that an old peak's
                     // afterglow is gone in ~3 s, fast enough to keep up
