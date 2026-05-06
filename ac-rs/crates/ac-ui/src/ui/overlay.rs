@@ -107,11 +107,10 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
-    /// Phase 2 BodeMag / Coherence: the transfer pair the dispatch
-    /// arm resolved (if any). `None` means no pair was registrable
-    /// (active+1 isn't in the monitor set or no monitor channels).
-    /// Surfaced in the status caption so the user knows whether
-    /// they're looking at real data or "no data yet".
+    /// Transfer-derived views (BodeMag/Coherence/BodePhase/GroupDelay/
+    /// Nyquist/IR): the registered pair the dispatch arm resolved for
+    /// the current `active_channel`. `None` means no pair is
+    /// registered yet — the caption hints at the Space+T workflow.
     pub bode_pair: Option<TransferPair>,
     /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
@@ -167,9 +166,9 @@ fn format_iotransfer_status_line(status: StereoStatus) -> String {
 
 /// Format the BodeMag / Coherence status line. `view_label` is the
 /// short view name; `pair` carries the meas+ref channel ids the
-/// dispatch arm resolved (None when the user's active+1 isn't in the
-/// monitor set). y range is appended for at-a-glance scale: dB window
-/// for Bode, [0,1] for coherence.
+/// dispatch arm resolved (None when no transfer pair is registered).
+/// y range is appended for at-a-glance scale: dB window for Bode,
+/// [0,1] for coherence.
 fn format_transfer_status_line(
     view_label: &str,
     pair: Option<TransferPair>,
@@ -182,7 +181,7 @@ fn format_transfer_status_line(
             p.meas, p.ref_ch, y_min, y_max,
         ),
         None => format!(
-            "{view_label} (ember) │ no transfer pair (need active+1 in monitor set)",
+            "{view_label} (ember) │ no transfer pair — Space-select MEAS + REF, then T",
         ),
     }
 }
@@ -401,7 +400,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     "nyquist (ember) │ meas ch {} → ref ch {}  │  unit circle = |H|=1",
                     p.meas, p.ref_ch,
                 ),
-                None => "nyquist (ember) │ no transfer pair (need active+1 in monitor set)"
+                None => "nyquist (ember) │ no transfer pair — Space-select MEAS + REF, then T"
                     .to_string(),
             },
             ViewMode::Ir => match input.bode_pair {
@@ -409,7 +408,8 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     "ir (ember) │ meas ch {} → ref ch {}  │  t=0 mid-cell",
                     p.meas, p.ref_ch,
                 ),
-                None => "ir (ember) │ no transfer pair (need active+1 in monitor set)".to_string(),
+                None => "ir (ember) │ no transfer pair — Space-select MEAS + REF, then T"
+                    .to_string(),
             },
         };
         painter.text(

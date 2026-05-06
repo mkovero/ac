@@ -1094,6 +1094,33 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
 
 Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
 
+- `(2026-05-06) — Explicit transfer-pair selection for Bode/
+  Coherence/Nyquist/IR.` — Drop the active+1 auto-register that
+  fired whenever the user entered a transfer view. Replaced by a
+  read-only resolver that reads `virtual_channels.pairs()` and
+  the current `active_channel`:
+  - No pair registered → `None` (overlay shows "no transfer
+    pair — Space-select MEAS + REF, then T").
+  - `active >= n_real` (Tab'd onto a virtual channel slot) →
+    `pairs[active - n_real]`. Tab now cycles which pair the
+    transfer view is rendering — the natural multichannel UX.
+  - `active < n_real` (real channel) → `pairs[0]`. Lets W →
+    BodeMag show *something* without forcing the user to Tab
+    onto a virtual cell first.
+  Pair registration stays on `T` (Space-select MEAS + REF, then
+  T): the active+1 heuristic only worked for two-channel mic
+  setups and was creating unwanted virtual channels for users
+  with more than two inputs. `ensure_transfer_pair_for_active`
+  removed; `resolve_transfer_pair_for_active` is read-only
+  (`&self`), so the render hot path no longer needs to thread
+  through `&mut self` to look up which pair to draw. Resolver
+  factored into a free `resolve_transfer_pair(pairs, active,
+  n_real)` so the resolution rule can be tested without
+  standing up an App. 5 new tests covering empty / virtual-slot
+  / real-channel-fallback / past-the-end / no-real-channels
+  cases. Overlay captions updated for all six transfer views.
+  653 → 658 workspace passing.
+
 - `(2026-05-06) — Coherence-weighted ember deposition.` — Soft
   per-vertex confidence weighting via γ²^k. Vertex format
   `[f32; 2] → [f32; 3]` (x, y, w); deposit shader multiplies

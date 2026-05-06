@@ -99,12 +99,13 @@ impl App {
             }
             self.notify(&err);
         }
-        // Phase 2: BodeMag / Coherence need a transfer pair registered for
-        // the daemon to produce TransferFrames. Resolve it BEFORE the
-        // render_ctx mutable borrow below — `ensure_transfer_pair_for_active`
-        // takes &mut self (it can call `restart_transfer_stream` and
-        // `notify`), which would conflict with the render_ctx partial borrow
-        // that spans the rest of redraw.
+        // Transfer views (BodeMag/Coherence/BodePhase/GroupDelay/Nyquist/IR)
+        // render whichever TransferPair `resolve_transfer_pair_for_active`
+        // selects. Pair registration is handled by `T` (Space-select MEAS
+        // + REF, then T) — entering a transfer view no longer auto-creates
+        // a pair, since the active+1 heuristic doesn't generalise past
+        // two-channel setups. When no pair is registered the overlay
+        // caption hints at the Space+T workflow.
         let bode_pair: Option<crate::data::types::TransferPair> = matches!(
             self.config.view_mode,
             ViewMode::BodeMag
@@ -114,7 +115,7 @@ impl App {
                 | ViewMode::Nyquist
                 | ViewMode::Ir,
         )
-        .then(|| self.ensure_transfer_pair_for_active())
+        .then(|| self.resolve_transfer_pair_for_active())
         .flatten();
         let ctx = match self.render_ctx.as_mut() {
             Some(c) => c,
