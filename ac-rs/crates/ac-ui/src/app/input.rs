@@ -2,6 +2,8 @@
 //! `impl App` here and are dispatched from the parent `app.rs` ApplicationHandler
 //! (window_event / about_to_wait).
 
+use std::time::{Duration, Instant};
+
 use winit::dpi::PhysicalPosition;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
@@ -35,6 +37,54 @@ enum WSlot {
     GroupDelay,
     Nyquist,
     Ir,
+}
+
+/// §2 binding scroll-zoom rules. Pure decision function so the per-view
+/// modifier mapping is unit-testable without spinning up `App`. Returns
+/// `(zoom_freq, zoom_y, zoom_time)` — `zoom_y` means dB on spectrum-family
+/// views, ignored on waterfall (where the time axis is the second knob).
+///
+/// - Spectrum / Bode / Phase / GroupDelay: plain = both axes, Shift = freq,
+///   Ctrl = y (dB or signed-y).
+/// - Waterfall: plain = freq + time, Shift = freq, Ctrl = time.
+///
+/// Ctrl+Shift is intercepted earlier as the dB-window pan, so this helper
+/// is only called for the (none) / Shift / Ctrl combos.
+pub(super) fn decide_zoom_axes(view: ViewMode, shift: bool, ctrl: bool) -> (bool, bool, bool) {
+    if matches!(view, ViewMode::Waterfall) {
+        match (shift, ctrl) {
+            (false, false) => (true, false, true),
+            (true, false) => (true, false, false),
+            (false, true) => (false, false, true),
+            (true, true) => (false, false, false),
+        }
+    } else {
+        match (shift, ctrl) {
+            (false, false) => (true, true, false),
+            (true, false) => (true, false, false),
+            (false, true) => (false, true, false),
+            (true, true) => (false, false, false),
+        }
+    }
+}
+
+/// User-facing short label for a view, used in the "no zoom on <view>"
+/// chip. Matches the keytip-strip naming from RC-8.
+pub(super) fn view_label(view: ViewMode) -> &'static str {
+    match view {
+        ViewMode::Spectrum => "spectrum",
+        ViewMode::Waterfall => "waterfall",
+        ViewMode::Scope => "scope",
+        ViewMode::SpectrumEmber => "spectrum",
+        ViewMode::Goniometer => "goniometer",
+        ViewMode::IoTransfer => "io-transfer",
+        ViewMode::BodeMag => "bode-mag",
+        ViewMode::Coherence => "coherence",
+        ViewMode::BodePhase => "bode-phase",
+        ViewMode::GroupDelay => "group-delay",
+        ViewMode::Nyquist => "nyquist",
+        ViewMode::Ir => "ir",
+    }
 }
 
 #[derive(Clone)]
@@ -193,68 +243,52 @@ impl App {
         let factor = 0.85_f32.powf(scroll_y);
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
-        let waterfall = matches!(self.config.view_mode, ViewMode::Waterfall);
 
-        // Scope: scroll = y-amplitude (vertical gain), Ctrl+Scroll =
-        // strip-chart window (time per width). The renderer-side cell_view
-        // freq/dB axes don't apply here — there's no calibrated dBFS or
-        // freq axis on the scope, so we route both knobs to the synthetic-
-        // generator parameters that *do* mean something visually.
+        // Scope: plain scroll = strip-chart window (time per width),
+        // Ctrl+scroll = y-amplitude (vertical gain). Cell freq/dB axes
+        // don't apply on the scope, so we route to the synthetic-generator
+        // parameters that mean something visually. Order is consistent
+        // with the §2 binding: plain = primary axis, Ctrl = secondary.
         if matches!(self.config.view_mode, ViewMode::Scope) {
             if ctrl {
-                let new_w = (self.ember_scope_window_s * factor).clamp(0.005, 2.0);
-                self.ember_scope_window_s = new_w;
-                self.notify(&format!("scope window: {:.0} ms", new_w * 1000.0));
-            } else {
                 let new_g = (self.ember_scope_y_gain * factor).clamp(0.02, 0.5);
                 self.ember_scope_y_gain = new_g;
                 self.notify(&format!("scope y-gain: {:.2}", new_g));
+            } else {
+                let new_w = (self.ember_scope_window_s * factor).clamp(0.005, 2.0);
+                self.ember_scope_window_s = new_w;
+                self.notify(&format!("scope window: {:.0} ms", new_w * 1000.0));
             }
             return;
         }
 
-        // Trajectory views (unified.md Phase 1) — per-view scroll mappings.
-        // The cell freq/dB axes don't apply to these substrate views, so
-        // scroll routes to the view's own meaningful knob.
-        match self.config.view_mode {
-            ViewMode::Goniometer => {
-                // M/S↔raw rotation lives on the `R` key (no modifier).
-                // Trackpads emit dozens of scroll deltas per physical
-                // gesture, so a binary scroll-toggle flipped on every
-                // micro-event and looked broken; the keyboard variant
-                // is one keypress = one toggle. Swallow scroll here so
-                // it doesn't fall through to spectrum-style freq/dB zoom
-                // on the Goniometer cell (which has neither axis).
-                return;
+        // Axisless trajectory views — Goniometer (Re/Im trace), IoTransfer
+        // (in/out scatter), Coherence (γ² fixed [0,1]), Nyquist (Re/Im(H)),
+        // Ir (auto-gained polyline). None of these map onto the cell
+        // freq/dB axes, so scroll has no meaningful target. Emit a one-shot
+        // throttled notification so the user knows the gesture was seen
+        // rather than silently swallowed. Throttle 2 s — a continuous
+        // trackpad scroll over the cell shouldn't keep re-firing.
+        if matches!(
+            self.config.view_mode,
+            ViewMode::Goniometer
+                | ViewMode::IoTransfer
+                | ViewMode::Coherence
+                | ViewMode::Nyquist
+                | ViewMode::Ir
+        ) {
+            let now = Instant::now();
+            let recent = self
+                .last_axisless_scroll_notify
+                .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_secs(2));
+            if !recent {
+                self.notify(&format!(
+                    "no zoom on {}",
+                    view_label(self.config.view_mode)
+                ));
+                self.last_axisless_scroll_notify = Some(now);
             }
-            ViewMode::IoTransfer => {
-                // No axes on the IoTransfer cell — swallow scroll so it
-                // doesn't fall through to spectrum-style freq/dB zoom.
-                // (Future: Ctrl+scroll could pan the auto-gain target
-                // if the user wants finer control over how much of the
-                // cell the trace fills.)
-                return;
-            }
-            ViewMode::Coherence => {
-                // Coherence y is fixed [0, 1] and the builder uses a
-                // hardcoded full-band x range — neither axis takes
-                // user input. Swallow scroll.
-                return;
-            }
-            ViewMode::BodeMag | ViewMode::BodePhase | ViewMode::GroupDelay => {
-                // These views have both freq (x) and signed-y axes —
-                // let the standard spectrum-style scroll-zoom path
-                // handle it (plain = both axes; Shift = freq only;
-                // Ctrl = y only). Falls through.
-            }
-            ViewMode::Nyquist | ViewMode::Ir => {
-                // Nyquist axes are Re(H) / Im(H); IR axes are time /
-                // amplitude. Neither maps onto the cell freq/dB axes
-                // the standard scroll path works on. Auto-gain
-                // handles scale; swallow scroll.
-                return;
-            }
-            _ => {}
+            return;
         }
 
         // Ctrl+Shift+Scroll — "gain knob": pan the dB window up/down without
@@ -293,15 +327,12 @@ impl App {
         let data_log_max = self.data_freq_ceiling.max(theme::DEFAULT_FREQ_MAX).log10();
         let data_ceiling = 10_f32.powf(data_log_max);
         let data_span = (data_log_max - data_log_min).max(0.001);
-        // In waterfall mode: plain scroll = freq, Ctrl+scroll = time (rows
-        // shown). Shift+Scroll is reserved for palette cycling (handled above,
-        // already returned). Gain zoom moved to `[` / `]` / `+` / `-`.
-        // Spectrum mode: plain scroll zooms both axes, Shift = freq only.
-        let (zoom_freq, zoom_db, zoom_time) = if waterfall {
-            (!ctrl, false, ctrl)
-        } else {
-            (!shift, !ctrl, false)
-        };
+        // §2 binding rules: plain = both axes, Shift = freq only, Ctrl = Y
+        // only (dB on spectrum-family, time-rows on waterfall). Pulled out
+        // into a pure helper so the per-view modifier mapping is unit-
+        // testable without mocking the full App state.
+        let (zoom_freq, zoom_db, zoom_time) =
+            decide_zoom_axes(self.config.view_mode, shift, ctrl);
 
         for idx in targets {
             let view = match self.cell_views.get_mut(idx) {
@@ -1116,5 +1147,64 @@ impl App {
             }
         }
         self.notify(&format!("db min {}", last));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_zoom_axes, view_label};
+    use crate::data::types::ViewMode;
+
+    /// Spectrum-family modifier matrix from §2: plain = both axes, Shift =
+    /// freq, Ctrl = dB. Locks the public binding so future refactors of
+    /// `apply_zoom` can't silently drift.
+    #[test]
+    fn spectrum_family_modifiers_match_binding_rules() {
+        for view in [
+            ViewMode::Spectrum,
+            ViewMode::SpectrumEmber,
+            ViewMode::BodeMag,
+            ViewMode::BodePhase,
+            ViewMode::GroupDelay,
+        ] {
+            assert_eq!(decide_zoom_axes(view, false, false), (true, true, false));
+            assert_eq!(decide_zoom_axes(view, true, false), (true, false, false));
+            assert_eq!(decide_zoom_axes(view, false, true), (false, true, false));
+        }
+    }
+
+    /// Waterfall: plain = freq + time, Shift = freq only, Ctrl = time only.
+    /// dB is the colormap range — Ctrl+Shift+Scroll pans it elsewhere, this
+    /// helper never returns dB-axis zoom for waterfall.
+    #[test]
+    fn waterfall_modifiers_match_binding_rules() {
+        let v = ViewMode::Waterfall;
+        assert_eq!(decide_zoom_axes(v, false, false), (true, false, true));
+        assert_eq!(decide_zoom_axes(v, true, false), (true, false, false));
+        assert_eq!(decide_zoom_axes(v, false, true), (false, false, true));
+    }
+
+    /// `view_label` covers every ViewMode variant — exhaustive coverage
+    /// check by exercising each variant. If a new variant is added without
+    /// updating view_label, this test fails to compile or returns "" for
+    /// the missing arm.
+    #[test]
+    fn view_label_is_exhaustive_and_nonempty() {
+        for view in [
+            ViewMode::Spectrum,
+            ViewMode::Waterfall,
+            ViewMode::Scope,
+            ViewMode::SpectrumEmber,
+            ViewMode::Goniometer,
+            ViewMode::IoTransfer,
+            ViewMode::BodeMag,
+            ViewMode::Coherence,
+            ViewMode::BodePhase,
+            ViewMode::GroupDelay,
+            ViewMode::Nyquist,
+            ViewMode::Ir,
+        ] {
+            assert!(!view_label(view).is_empty(), "empty label for {view:?}");
+        }
     }
 }

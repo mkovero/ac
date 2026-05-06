@@ -404,6 +404,10 @@ pub struct App {
     last_render: Instant,
     cursor_pos: Option<PhysicalPosition<f64>>,
     drag: Option<input::DragState>,
+    /// Last time we emitted a "no zoom on <view>" notification while
+    /// scrolling on an axisless view. Throttle window 2 s so a continuous
+    /// trackpad gesture doesn't keep re-firing the chip.
+    pub(super) last_axisless_scroll_notify: Option<Instant>,
     timing_stats: TimingStats,
     show_timing: bool,
     benchmark_secs: Option<f64>,
@@ -631,6 +635,7 @@ impl App {
             last_render: Instant::now(),
             cursor_pos: None,
             drag: None,
+            last_axisless_scroll_notify: None,
             timing_stats: TimingStats::new(),
             show_timing,
             benchmark_secs,
