@@ -104,7 +104,7 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
                 format!("peak:{} min:{}", on_off(state.peak_hold), on_off(state.min_hold)),
             ),
             chip(",/.", "ember"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Waterfall => vec![
             chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
@@ -112,62 +112,62 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
             chip("↑↓", "FFT N"),
             chip("←→", "interval"),
             chip(";", "palette"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Scope => vec![
             chip(",/.", "intensity"),
             chip("Sh+,/.", "τ_p"),
             chip("Z", "clear"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Goniometer => vec![
             chip("R", if state.goniometer_ms { "M/S:on" } else { "M/S:off" }),
             chip(",/.", "ember"),
             chip("Z", "clear"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::IoTransfer => vec![
             chip(",/.", "ember"),
             chip("Z", "clear"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::BodeMag => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
             chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
             chip("Z", "clear"),
             chip("T", "transfer"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::BodePhase => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
             chip("T", "transfer"),
             chip("Z", "clear"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Coherence => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
             chip("T", "transfer"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::GroupDelay => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
             chip("T", "transfer"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Nyquist => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
             chip("T", "transfer"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Ir => vec![
             chip("T", "transfer"),
             chip("Z", "clear"),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
         ViewMode::Spectrum => vec![
             chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
             chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
-            chip("W", "view"),
+            chip("Tab", "view"),
         ],
     };
     chips.extend(universal_chips());
@@ -262,8 +262,8 @@ mod tests {
     fn format_strip_joins_with_separator() {
         let chips = keytips_for(&base_state(ViewMode::Nyquist));
         let line = format_strip(&chips);
-        // K, T, W, H, S, Esc all present at minimum.
-        for needle in ["K ", "T ", "W ", "H ", "S ", "Esc "] {
+        // K, T, Tab, G, H, S, Esc all present at minimum.
+        for needle in ["K ", "T ", "Tab ", "G ", "H ", "S ", "Esc "] {
             assert!(line.contains(needle), "missing {needle:?} in {line:?}");
         }
         // Separator appears N-1 times in N chips.

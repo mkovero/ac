@@ -111,7 +111,7 @@ pub struct OverlayInput<'a> {
     /// Transfer-derived views (BodeMag/Coherence/BodePhase/GroupDelay/
     /// Nyquist/IR): the registered pair the dispatch arm resolved for
     /// the current `active_channel`. `None` means no pair is
-    /// registered yet — the caption hints at the Space+T workflow.
+    /// registered yet — the caption hints at the C+T workflow.
     pub bode_pair: Option<TransferPair>,
     /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
@@ -136,7 +136,7 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
             format!("{view_label} (ember) │ ch {l} + {r}")
         }
         StereoStatus::NoTransferPair => format!(
-            "{view_label} (ember) │ synthetic — Space-select L + R, then T",
+            "{view_label} (ember) │ synthetic — C-select L + R, then T",
         ),
         StereoStatus::NotStreamingYet { l, r } => format!(
             "{view_label} (ember) │ synthetic — daemon not streaming scope yet (ch {l}+{r})"
@@ -156,7 +156,7 @@ fn format_iotransfer_status_line(status: StereoStatus) -> String {
             format!("iotransfer (ember) │ ref ch {l} → dut ch {r}")
         }
         StereoStatus::NoTransferPair => {
-            "iotransfer (ember) │ synthetic — Space-select REF + DUT, then T".to_string()
+            "iotransfer (ember) │ synthetic — C-select REF + DUT, then T".to_string()
         }
         StereoStatus::NotStreamingYet { l, r } => format!(
             "iotransfer (ember) │ synthetic — daemon not streaming scope yet (ref ch {l} → dut ch {r})"
@@ -184,7 +184,7 @@ fn format_transfer_status_line(
             p.meas, p.ref_ch, y_min, y_max,
         ),
         None => format!(
-            "{view_label} (ember) │ no transfer pair — Space-select MEAS + REF, then T",
+            "{view_label} (ember) │ no transfer pair — C-select MEAS + REF, then T",
         ),
     }
 }
@@ -233,13 +233,13 @@ const HELP_LINES: &[&str] = &[
     "S              screenshot",
     "F              fullscreen",
     "D              timing overlay",
-    "W              cycle ember view (full 9 slots once T-pair registered)",
+    "Tab / Shift+Tab cycle ember view (full 9 slots once T-pair registered) / page in Grid",
     "G              matrix overview (pick channel by click)",
     "Enter          freeze",
-    "Space          toggle channel select",
+    "C              toggle channel select (hovered cell)",
     "Tab / Sh+Tab   next / prev channel",
     "T              add virtual transfer",
-    "C              compare selected",
+    "Shift+C        compare selected channels",
     "Ctrl+R         reset all views",
     "",
     "Spectrum / Waterfall",
@@ -398,7 +398,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     "nyquist (ember) │ meas ch {} → ref ch {}  │  unit circle = |H|=1",
                     p.meas, p.ref_ch,
                 ),
-                None => "nyquist (ember) │ no transfer pair — Space-select MEAS + REF, then T"
+                None => "nyquist (ember) │ no transfer pair — C-select MEAS + REF, then T"
                     .to_string(),
             },
             ViewMode::Ir => match input.bode_pair {
@@ -406,7 +406,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     "ir (ember) │ meas ch {} → ref ch {}  │  t=0 mid-cell",
                     p.meas, p.ref_ch,
                 ),
-                None => "ir (ember) │ no transfer pair — Space-select MEAS + REF, then T"
+                None => "ir (ember) │ no transfer pair — C-select MEAS + REF, then T"
                     .to_string(),
             },
         };
@@ -595,7 +595,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             painter.text(
                 screen.center(),
                 Align2::CENTER_CENTER,
-                "compare mode — press Space to select channels",
+                "compare mode — press C over a cell to select channels",
                 FontId::monospace(theme::READOUT_PX),
                 text_color,
             );

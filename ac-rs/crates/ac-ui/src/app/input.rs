@@ -140,14 +140,88 @@ impl App {
         }
     }
 
-    /// Clear the live Space-selection. Called by `T` and `C` after they
-    /// "consume" the selection, so the user can start a fresh workflow
-    /// without the previous set lingering as cell-border highlights.
+    /// Clear the live channel selection. Called by `T` and `Shift+C`
+    /// after they "consume" the selection, so the user can start a
+    /// fresh workflow without the previous set lingering as cell-
+    /// border highlights.
     fn clear_selection(&mut self) {
         for s in self.selected.iter_mut() {
             *s = false;
         }
         self.selection_order.clear();
+    }
+
+    /// Step through the 9 ember-substrate views forward (or backward).
+    /// Pair-gated: without a registered transfer pair, the cycle
+    /// collapses to just `SpectrumEmber` and pressing Tab on it surfaces
+    /// the unlock hint. Shared by Tab / Shift+Tab.
+    fn cycle_ember_view(&mut self, forward: bool) {
+        let pair_available = self.resolve_transfer_pair_for_active().is_some();
+        let next = if pair_available {
+            if forward {
+                match self.current_w_slot() {
+                    Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
+                    Some(WSlot::Goniometer)    => WSlot::IoTransfer,
+                    Some(WSlot::IoTransfer)    => WSlot::BodeMag,
+                    Some(WSlot::BodeMag)       => WSlot::Coherence,
+                    Some(WSlot::Coherence)     => WSlot::BodePhase,
+                    Some(WSlot::BodePhase)     => WSlot::GroupDelay,
+                    Some(WSlot::GroupDelay)    => WSlot::Nyquist,
+                    Some(WSlot::Nyquist)       => WSlot::Ir,
+                    Some(WSlot::Ir)            => WSlot::SpectrumEmber,
+                    None                       => WSlot::SpectrumEmber,
+                }
+            } else {
+                match self.current_w_slot() {
+                    Some(WSlot::SpectrumEmber) => WSlot::Ir,
+                    Some(WSlot::Goniometer)    => WSlot::SpectrumEmber,
+                    Some(WSlot::IoTransfer)    => WSlot::Goniometer,
+                    Some(WSlot::BodeMag)       => WSlot::IoTransfer,
+                    Some(WSlot::Coherence)     => WSlot::BodeMag,
+                    Some(WSlot::BodePhase)     => WSlot::Coherence,
+                    Some(WSlot::GroupDelay)    => WSlot::BodePhase,
+                    Some(WSlot::Nyquist)       => WSlot::GroupDelay,
+                    Some(WSlot::Ir)            => WSlot::Nyquist,
+                    None                       => WSlot::SpectrumEmber,
+                }
+            }
+        } else if matches!(self.current_w_slot(), Some(WSlot::SpectrumEmber)) {
+            self.notify("register a transfer pair (T) to unlock more views");
+            return;
+        } else {
+            // Coming from a transfer view whose pair was just
+            // unregistered (or `--view <transfer>` startup without a
+            // pair) — drop to the only useful slot.
+            WSlot::SpectrumEmber
+        };
+        let (layout, view_mode, mode, label) = match next {
+            WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),
+            WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft", "view: goniometer (ember)"),
+            WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft", "view: iotransfer (ember)"),
+            WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft", "view: bode mag (ember)"),
+            WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft", "view: coherence (ember)"),
+            WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft", "view: bode phase (ember)"),
+            WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft", "view: group delay (ember)"),
+            WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft", "view: nyquist (ember)"),
+            WSlot::Ir            => (LayoutMode::Single, ViewMode::Ir,            "fft", "view: ir (ember)"),
+        };
+        if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
+            return;
+        }
+        let prev_view = self.config.view_mode;
+        self.config.layout = layout;
+        self.config.view_mode = view_mode;
+        let prev_default = crate::theme::default_db_window_for_view(prev_view);
+        let next_default = crate::theme::default_db_window_for_view(view_mode);
+        if prev_default != next_default {
+            for view in self.cell_views.iter_mut() {
+                view.db_min = next_default.0;
+                view.db_max = next_default.1;
+            }
+        }
+        self.reset_peak_holds();
+        self.notify(label);
+        self.mark_ui_dirty();
     }
 
     /// Identify the cell the cursor is in. Returns `(channel, nx, ny, w_px, h_px)`
@@ -736,26 +810,27 @@ impl App {
                 self.send_time_integration();
                 self.notify(self.time_integration.label());
             }
-            KeyCode::Space => {
-                self.toggle_selection();
-            }
             KeyCode::KeyH => {
                 self.show_help = !self.show_help;
             }
             KeyCode::KeyS => {
                 self.pending_screenshot = true;
             }
-            KeyCode::KeyC => {
-                // Jump into Compare on selected channels. Nothing selected →
-                // no-op so an accidental press doesn't swap the user out of
-                // their current view into an empty Compare grid.
+            // C toggles the channel selection at the hovered cell.
+            // Builds the set used by Shift+C (compare) and T (transfer
+            // pair). Left-click + Tab cover single-channel navigation,
+            // so Space is no longer needed for this.
+            KeyCode::KeyC if !self.modifiers.shift_key() => {
+                self.toggle_selection();
+            }
+            // Shift+C — enter Compare on the selected channels. Empty
+            // selection → no-op so an accidental press doesn't swap the
+            // user out of their current view into an empty Compare grid.
+            KeyCode::KeyC if self.modifiers.shift_key() => {
                 if !self.selected.iter().any(|s| *s) {
-                    self.notify("C: select ≥ 1 channel first (Space over cell)");
+                    self.notify("Shift+C: select ≥ 1 channel first (C over cell)");
                     return;
                 }
-                // Snapshot the current selection as the locked-in Compare set
-                // and clear the live selection so the workflow resets — a
-                // follow-up Space-build for T or another C starts fresh.
                 self.compare_set = self.selected.clone();
                 self.clear_selection();
                 self.config.layout = LayoutMode::Compare;
@@ -770,7 +845,7 @@ impl App {
             }
             KeyCode::KeyT => {
                 if self.selection_order.len() < 2 {
-                    self.notify("T: select ≥ 2 channels first (last = REF)");
+                    self.notify("T: select ≥ 2 channels first (C over cell; last = REF)");
                     return;
                 }
                 let meas = self.selection_order[0] as u32;
@@ -917,101 +992,8 @@ impl App {
                     self.needs_redraw = true;
                 }
             }
-            KeyCode::KeyW => {
-                // RC-4 (plan §1): W cycles the 9 ember-substrate views in
-                // a fixed order. Hidden views (Spectrum / Waterfall /
-                // Scope) are reachable via `--view <name>` but not via
-                // the cycle — landing on one of them and pressing W
-                // jumps to SpectrumEmber so the cycle stays
-                // deterministic.
-                //
-                // Gated cycle: every slot beyond `SpectrumEmber` paints
-                // a transfer-pair view (trajectory: Goniometer /
-                // IoTransfer share `bode_pair`-resolved stereo audio;
-                // transfer-derived: Bode-*, Coherence, GroupDelay,
-                // Nyquist, Ir need the daemon's H1 estimate). Without a
-                // registered pair they all fall back to a synthetic
-                // carrier or empty trace — more confusing than useful.
-                // So we collapse the cycle to just SpectrumEmber when no
-                // pair is resolvable, and surface the Space + T workflow
-                // as a notification when the user presses W expecting
-                // more.
-                let pair_available = self.resolve_transfer_pair_for_active().is_some();
-                let next = if pair_available {
-                    match self.current_w_slot() {
-                        Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                        Some(WSlot::Goniometer)    => WSlot::IoTransfer,
-                        Some(WSlot::IoTransfer)    => WSlot::BodeMag,
-                        Some(WSlot::BodeMag)       => WSlot::Coherence,
-                        Some(WSlot::Coherence)     => WSlot::BodePhase,
-                        Some(WSlot::BodePhase)     => WSlot::GroupDelay,
-                        Some(WSlot::GroupDelay)    => WSlot::Nyquist,
-                        Some(WSlot::Nyquist)       => WSlot::Ir,
-                        Some(WSlot::Ir)            => WSlot::SpectrumEmber,
-                        None                       => WSlot::SpectrumEmber,
-                    }
-                } else if matches!(self.current_w_slot(), Some(WSlot::SpectrumEmber)) {
-                    self.notify("register a transfer pair (T) to unlock more views");
-                    return;
-                } else {
-                    // Coming from a transfer view whose pair was just
-                    // unregistered (or `--view <transfer>` startup
-                    // without a pair) — drop to the only useful slot.
-                    WSlot::SpectrumEmber
-                };
-                let (layout, view_mode, mode, label) = match next {
-                    WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),
-                    WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft", "view: goniometer (ember)"),
-                    WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft", "view: iotransfer (ember)"),
-                    WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft", "view: bode mag (ember)"),
-                    WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft", "view: coherence (ember)"),
-                    WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft", "view: bode phase (ember)"),
-                    WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft", "view: group delay (ember)"),
-                    WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft", "view: nyquist (ember)"),
-                    WSlot::Ir            => (LayoutMode::Single, ViewMode::Ir,            "fft", "view: ir (ember)"),
-                };
-                if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
-                    // Daemon refused the analysis-mode change — stay put so
-                    // the next W press keeps meaning "advance".
-                    return;
-                }
-                let prev_view = self.config.view_mode;
-                self.config.layout = layout;
-                self.config.view_mode = view_mode;
-                if matches!(view_mode, ViewMode::Waterfall) {
-                    for init in &mut self.waterfall_inited {
-                        *init = false;
-                    }
-                    // Wipe the history texture so old rows from the
-                    // previous analysis source (e.g. FFT) don't bleed
-                    // into the new view (e.g. CWT). Each W press into
-                    // a Waterfall sub-mode starts with a clean slate
-                    // tied to the measurement at hand.
-                    if let (Some(ctx), Some(wf)) =
-                        (self.render_ctx.as_ref(), self.waterfall.as_mut())
-                    {
-                        wf.clear_history(&ctx.queue);
-                    }
-                }
-                // Apply the per-view default dB window when the view
-                // family actually changes (line-plot ↔ colormap), so
-                // cycling W lands on a sane gain instead of the user
-                // re-tweaking every time. Keep the cell's current
-                // window when staying within the same family — they
-                // share the same default and the user may have
-                // adjusted intentionally.
-                let prev_default = crate::theme::default_db_window_for_view(prev_view);
-                let next_default = crate::theme::default_db_window_for_view(view_mode);
-                if prev_default != next_default {
-                    for view in self.cell_views.iter_mut() {
-                        view.db_min = next_default.0;
-                        view.db_max = next_default.1;
-                    }
-                }
-                self.reset_peak_holds();
-                self.notify(label);
-                self.mark_ui_dirty();
-            }
+            // W is gone — Tab takes over the ember-cycle (see KeyCode::Tab
+            // arm below). The cycle body lives in `cycle_ember_view`.
             KeyCode::ArrowUp if self.modifiers.shift_key() && self.analysis_mode == "cwt" => {
                 self.cwt_sigma = (self.cwt_sigma + 1.0).min(24.0);
                 self.send_cwt_params();
@@ -1140,34 +1122,27 @@ impl App {
             KeyCode::Tab => {
                 let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
                 let n_virt = self.virtual_channels.len();
-                // Virtual transfer channels participate in Tab cycling so the
-                // user can drop into Single / Compare for any `transfer{n}`
-                // without first having to re-select the pair.
                 let n = (n_real + n_virt).max(1);
-                // In Grid layout Tab pages through the grid (when more than
-                // one page exists). Other layouts still cycle the active
-                // channel for Single / overlay channel-of-interest.
+                let forward = !self.modifiers.shift_key();
+                // Grid layout: Tab pages through the grid when there's
+                // more than one page. Single page → fall through to the
+                // ember-cycle below so Tab still does *something* useful.
                 if matches!(self.config.layout, LayoutMode::Grid) {
                     let (_, _, _, pages) = layout::grid_dims(n, self.grid_params());
                     if pages > 1 {
-                        let delta = if self.modifiers.shift_key() {
-                            pages - 1
-                        } else {
-                            1
-                        };
+                        let delta = if forward { 1 } else { pages - 1 };
                         self.grid_page = (self.grid_page + delta) % pages;
                         self.notify(&format!("page {}/{}", self.grid_page + 1, pages));
                         return;
                     }
                 }
-                let delta = if self.modifiers.shift_key() { n - 1 } else { 1 };
-                self.config.active_channel = (self.config.active_channel + delta) % n;
-                let label = if self.config.active_channel < n_real {
-                    format!("CH{}", self.config.active_channel)
-                } else {
-                    format!("transfer{}", self.config.active_channel - n_real)
-                };
-                self.notify(&label);
+                // Non-Grid (and single-page Grid): Tab cycles the ember
+                // view forward, Shift+Tab back. Pair-gated; collapses to
+                // SpectrumEmber + unlock hint when no transfer pair is
+                // resolvable. Channel-cycling moved off Tab — left-click
+                // on a Grid cell handles channel pickup, and `C` builds
+                // the multi-channel selection used by Shift+C / T.
+                self.cycle_ember_view(forward);
             }
             _ => {}
         }

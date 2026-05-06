@@ -361,20 +361,19 @@ Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
   s / f / d        screenshot / fullscreen / timing overlay\n  \
   Enter            freeze\n  \
-  w / g            cycle ember view (9 slots) / matrix overview\n  \
-  c / t            compare selected / add virtual transfer\n  \
+  Tab / Sh+Tab     cycle ember view forward / back (page in Grid)\n  \
+  g                matrix overview (pick channel by click)\n  \
+  c / Shift+C / t  toggle select / compare / add virtual transfer\n  \
   p / m            peak / min hold\n  \
   o / Shift+O      smoothing / CWT 1/N-oct aggregation\n  \
   a / i / Shift+I  weighting / time integration / Leq reset\n  \
   Shift+L          reset BS.1770 loudness\n  \
-  Space            toggle channel selection\n  \
   ;                cycle waterfall palette\n  \
   ← / →            FFT monitor interval (Shift = CWT scales)\n  \
   ↑ / ↓            FFT N ladder (Shift = CWT sigma)\n  \
   r / k            goniometer M/S / coherence γ²-weight\n  \
   ,/. / Sh+,/.     ember intensity / τ_p\n  \
-  Ctrl+R           reset all views and grid sizing\n  \
-  Tab / Shift+Tab  next / prev channel\n\n\
+  Ctrl+R           reset all views and grid sizing\n\n\
 Mouse:\n  \
   Scroll           zoom (Shift=freq, Ctrl=Y)\n  \
   Ctrl+Sh+Scroll   pan dB window (gain trim)\n  \
