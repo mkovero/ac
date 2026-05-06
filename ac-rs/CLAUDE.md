@@ -89,8 +89,6 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `D` | Toggle timing overlay |
 | `Tab` / `Shift+Tab` | Next/prev channel or grid page |
 | `Space` | Toggle channel selection |
-| `[` / `]` | Shift dB floor ±5 |
-| `+` / `-` | Adjust dB span |
 | `Left` / `Right` | FFT monitor tick interval ±1 ms (clamped 1–1000 ms, FFT mode only) |
 | `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
 | `Ctrl+R` | Reset all views |

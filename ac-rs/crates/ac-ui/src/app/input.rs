@@ -771,12 +771,6 @@ impl App {
                 // need to mark dirty.
                 self.mark_ui_dirty();
             }
-            KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.adjust_hovered_db_span(-20.0);
-            }
-            KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.adjust_hovered_db_span(20.0);
-            }
             // Ember-substrate live tuning. Geometric ×1.25 step so a few
             // presses span the order of magnitude that separates extremes.
             // Bare , / .  → deposit intensity (brightness).
@@ -982,12 +976,6 @@ impl App {
                     self.monitor_fft_n, self.monitor_interval_ms
                 ));
             }
-            KeyCode::BracketLeft => {
-                self.shift_hovered_db_floor(-5.0);
-            }
-            KeyCode::BracketRight => {
-                self.shift_hovered_db_floor(5.0);
-            }
             // unified.md Phase 0b — Goniometer-only `R` toggles M/S vs raw
             // L/R rotation. MUST come before the unguarded `KeyR` arm
             // below so the more-specific match wins; the existing Ctrl+R
@@ -1097,25 +1085,6 @@ impl App {
         }
     }
 
-    fn adjust_hovered_db_span(&mut self, delta: f32) {
-        for idx in self.key_targets() {
-            if let Some(view) = self.cell_views.get_mut(idx) {
-                let span = (view.db_max - view.db_min + delta).clamp(20.0, 240.0);
-                view.db_min = (view.db_max - span).max(-240.0);
-            }
-        }
-    }
-
-    fn shift_hovered_db_floor(&mut self, delta: f32) {
-        let mut last = 0.0_f32;
-        for idx in self.key_targets() {
-            if let Some(view) = self.cell_views.get_mut(idx) {
-                view.db_min = (view.db_min + delta).clamp(-240.0, view.db_max - 10.0);
-                last = view.db_min;
-            }
-        }
-        self.notify(&format!("db min {}", last));
-    }
 }
 
 #[cfg(test)]
