@@ -19,15 +19,12 @@ use super::helpers::{
 };
 use super::App;
 
+/// Slots in the canonical W-cycle. Limited to the 9 ember-substrate views
+/// (RC-4, plan §1) — the legacy Spectrum / Waterfall / Scope views are
+/// still reachable via `--view` but no longer cycle, so they are *not*
+/// represented here.
 #[derive(Copy, Clone, PartialEq)]
 enum WSlot {
-    Matrix,
-    Single,
-    Waterfall,
-    Cwt,
-    Cqt,
-    Reassigned,
-    Scope,
     SpectrumEmber,
     Goniometer,
     IoTransfer,
@@ -600,25 +597,28 @@ impl App {
         )
     }
 
+    /// Map the current view state onto its W-cycle slot. Hidden views
+    /// (`Spectrum`, `Waterfall`, `Scope`) and non-Single layouts return
+    /// `None` — the W-cycle treats `None` as "jump to SpectrumEmber" so
+    /// landing is deterministic even if the user opened the UI via
+    /// `--view waterfall` or similar.
     fn current_w_slot(&self) -> Option<WSlot> {
-        match (self.config.layout, self.config.view_mode, self.analysis_mode.as_str()) {
-            (LayoutMode::Grid,   ViewMode::Spectrum,   _)     => Some(WSlot::Matrix),
-            (LayoutMode::Single, ViewMode::Spectrum,   _)     => Some(WSlot::Single),
-            (LayoutMode::Single, ViewMode::Waterfall, "fft")        => Some(WSlot::Waterfall),
-            (LayoutMode::Single, ViewMode::Waterfall, "cwt")        => Some(WSlot::Cwt),
-            (LayoutMode::Single, ViewMode::Waterfall, "cqt")        => Some(WSlot::Cqt),
-            (LayoutMode::Single, ViewMode::Waterfall, "reassigned") => Some(WSlot::Reassigned),
-            (LayoutMode::Single, ViewMode::Scope,         _)         => Some(WSlot::Scope),
-            (LayoutMode::Single, ViewMode::SpectrumEmber, _)         => Some(WSlot::SpectrumEmber),
-            (LayoutMode::Single, ViewMode::Goniometer,    _)         => Some(WSlot::Goniometer),
-            (LayoutMode::Single, ViewMode::IoTransfer,    _)         => Some(WSlot::IoTransfer),
-            (LayoutMode::Single, ViewMode::BodeMag,       _)         => Some(WSlot::BodeMag),
-            (LayoutMode::Single, ViewMode::Coherence,     _)         => Some(WSlot::Coherence),
-            (LayoutMode::Single, ViewMode::BodePhase,     _)         => Some(WSlot::BodePhase),
-            (LayoutMode::Single, ViewMode::GroupDelay,    _)         => Some(WSlot::GroupDelay),
-            (LayoutMode::Single, ViewMode::Nyquist,       _)         => Some(WSlot::Nyquist),
-            (LayoutMode::Single, ViewMode::Ir,            _)         => Some(WSlot::Ir),
-            _ => None,
+        if !matches!(self.config.layout, LayoutMode::Single) {
+            return None;
+        }
+        match self.config.view_mode {
+            ViewMode::SpectrumEmber => Some(WSlot::SpectrumEmber),
+            ViewMode::Goniometer    => Some(WSlot::Goniometer),
+            ViewMode::IoTransfer    => Some(WSlot::IoTransfer),
+            ViewMode::BodeMag       => Some(WSlot::BodeMag),
+            ViewMode::Coherence     => Some(WSlot::Coherence),
+            ViewMode::BodePhase     => Some(WSlot::BodePhase),
+            ViewMode::GroupDelay    => Some(WSlot::GroupDelay),
+            ViewMode::Nyquist       => Some(WSlot::Nyquist),
+            ViewMode::Ir            => Some(WSlot::Ir),
+            ViewMode::Spectrum
+            | ViewMode::Waterfall
+            | ViewMode::Scope => None,
         }
     }
 
@@ -849,23 +849,13 @@ impl App {
                 }
             }
             KeyCode::KeyW => {
-                // W cycles the six canonical views:
-                //   Matrix (Grid, spectrum)       → many channels at a glance
-                //   Single (spectrum)             → one channel, FFT
-                //   Waterfall (Single, FFT)       → one channel, time × freq (FFT)
-                //   CWT (Single, Morlet)          → one channel, time × freq (CWT)
-                //   CQT (Single, constant-Q)      → one channel, time × freq (CQT)
-                //   Reassigned (Single, AF-STFT)  → one channel, time × freq (reassigned)
-                // Non-cycled layouts (Compare / Transfer / Sweep) jump back to
-                // Matrix so the key always advances deterministically.
+                // RC-4 (plan §1): W cycles the 9 ember-substrate views in
+                // a fixed order. Hidden views (Spectrum / Waterfall /
+                // Scope) are reachable via `--view <name>` but not via
+                // the cycle — landing on one of them and pressing W
+                // jumps to SpectrumEmber so the cycle stays
+                // deterministic.
                 let next = match self.current_w_slot() {
-                    Some(WSlot::Matrix)        => WSlot::Single,
-                    Some(WSlot::Single)        => WSlot::Waterfall,
-                    Some(WSlot::Waterfall)     => WSlot::Cwt,
-                    Some(WSlot::Cwt)           => WSlot::Cqt,
-                    Some(WSlot::Cqt)           => WSlot::Reassigned,
-                    Some(WSlot::Reassigned)    => WSlot::Scope,
-                    Some(WSlot::Scope)         => WSlot::SpectrumEmber,
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
                     Some(WSlot::Goniometer)    => WSlot::IoTransfer,
                     Some(WSlot::IoTransfer)    => WSlot::BodeMag,
@@ -874,26 +864,19 @@ impl App {
                     Some(WSlot::BodePhase)     => WSlot::GroupDelay,
                     Some(WSlot::GroupDelay)    => WSlot::Nyquist,
                     Some(WSlot::Nyquist)       => WSlot::Ir,
-                    Some(WSlot::Ir)            => WSlot::Matrix,
-                    None                       => WSlot::Matrix,
+                    Some(WSlot::Ir)            => WSlot::SpectrumEmber,
+                    None                       => WSlot::SpectrumEmber,
                 };
                 let (layout, view_mode, mode, label) = match next {
-                    WSlot::Matrix        => (LayoutMode::Grid,   ViewMode::Spectrum,      "fft",        "view: matrix"),
-                    WSlot::Single        => (LayoutMode::Single, ViewMode::Spectrum,      "fft",        "view: single"),
-                    WSlot::Waterfall     => (LayoutMode::Single, ViewMode::Waterfall,     "fft",        "view: waterfall (fft)"),
-                    WSlot::Cwt           => (LayoutMode::Single, ViewMode::Waterfall,     "cwt",        "view: waterfall (cwt)"),
-                    WSlot::Cqt           => (LayoutMode::Single, ViewMode::Waterfall,     "cqt",        "view: waterfall (cqt)"),
-                    WSlot::Reassigned    => (LayoutMode::Single, ViewMode::Waterfall,     "reassigned", "view: waterfall (reassigned)"),
-                    WSlot::Scope         => (LayoutMode::Single, ViewMode::Scope,         "fft",        "view: scope (ember)"),
-                    WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft",        "view: spectrum (ember)"),
-                    WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft",        "view: goniometer (ember)"),
-                    WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft",        "view: iotransfer (ember)"),
-                    WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft",        "view: bode mag (ember)"),
-                    WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft",        "view: coherence (ember)"),
-                    WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft",        "view: bode phase (ember)"),
-                    WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft",        "view: group delay (ember)"),
-                    WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft",        "view: nyquist (ember)"),
-                    WSlot::Ir            => (LayoutMode::Single, ViewMode::Ir,            "fft",        "view: ir (ember)"),
+                    WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),
+                    WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft", "view: goniometer (ember)"),
+                    WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft", "view: iotransfer (ember)"),
+                    WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft", "view: bode mag (ember)"),
+                    WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft", "view: coherence (ember)"),
+                    WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft", "view: bode phase (ember)"),
+                    WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft", "view: group delay (ember)"),
+                    WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft", "view: nyquist (ember)"),
+                    WSlot::Ir            => (LayoutMode::Single, ViewMode::Ir,            "fft", "view: ir (ember)"),
                 };
                 if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
                     // Daemon refused the analysis-mode change — stay put so

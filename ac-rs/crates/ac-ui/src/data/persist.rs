@@ -196,6 +196,25 @@ pub fn view_mode_from_token(token: &str) -> Option<ViewMode> {
     })
 }
 
+/// Like [`view_mode_from_token`] but substitutes the hidden views
+/// (`Spectrum`, `Waterfall`, `Scope`) with `SpectrumEmber` so they no
+/// longer block on a W-cycle landing. Logs once per call when migration
+/// fires. The on-disk token is *not* rewritten — a later save will
+/// only overwrite it when the user actively changes the view, so a
+/// revert of RC-4 doesn't lose the persisted preference.
+pub fn view_mode_for_default_cycle(token: &str) -> Option<ViewMode> {
+    let parsed = view_mode_from_token(token)?;
+    Some(match parsed {
+        ViewMode::Spectrum | ViewMode::Waterfall | ViewMode::Scope => {
+            log::info!(
+                "persisted view '{token}' is no longer in the default cycle, using SpectrumEmber",
+            );
+            ViewMode::SpectrumEmber
+        }
+        other => other,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +326,34 @@ mod tests {
     fn unknown_view_token_returns_none() {
         assert_eq!(view_mode_from_token("polezero"), None);
         assert_eq!(view_mode_from_token(""), None);
+    }
+
+    /// RC-4 plan §1: persisted hidden views (Spectrum / Waterfall /
+    /// Scope) load as SpectrumEmber via the default-cycle helper, while
+    /// the raw token-parser still honours them so `--view spectrum` and
+    /// friends keep working.
+    #[test]
+    fn hidden_views_migrate_to_spectrum_ember_in_default_cycle() {
+        for hidden in ["spectrum", "waterfall", "scope"] {
+            assert_eq!(
+                view_mode_for_default_cycle(hidden),
+                Some(ViewMode::SpectrumEmber),
+                "hidden token '{hidden}' should migrate"
+            );
+            // The raw parser is the contract for `--view` and should
+            // still resolve to the original variant.
+            assert!(
+                matches!(
+                    view_mode_from_token(hidden),
+                    Some(ViewMode::Spectrum | ViewMode::Waterfall | ViewMode::Scope)
+                ),
+                "raw token '{hidden}' must still parse"
+            );
+        }
+        // Ember views pass through unchanged.
+        assert_eq!(
+            view_mode_for_default_cycle("nyquist"),
+            Some(ViewMode::Nyquist),
+        );
     }
 }

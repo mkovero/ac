@@ -507,7 +507,7 @@ impl App {
             persisted
                 .view_mode
                 .as_deref()
-                .and_then(crate::data::persist::view_mode_from_token)
+                .and_then(crate::data::persist::view_mode_for_default_cycle)
                 .unwrap_or(init.initial_view)
         };
         let resolved_intensity = persisted.ember_intensity_scale;

@@ -82,7 +82,7 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `W` | Cycle view: matrix (grid+spectrum) → single → waterfall (FFT) → waterfall (CWT) → waterfall (CQT) → waterfall (reassigned) |
+| `W` | Cycle 9 ember views: SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber. Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
 | `C` | Compare selected channels in one rect (needs ≥ 1 Space-selected channel) |
 | Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |
 | `F` | Toggle fullscreen |
