@@ -359,33 +359,26 @@ Options:\n  \
   -h, --help           Show this help\n\n\
 Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
-  Enter            toggle freeze\n  \
-  s                save screenshot + CSV\n  \
-  w                cycle view (matrix/single/waterfall-fft/waterfall-cwt)\n  \
-  c                compare selected channels\n  \
-  t                add virtual transfer (first selected = MEAS, last = REF)\n  \
-  p / m            toggle peak / min hold (spectrum)\n  \
-  o / Shift+O      1/N-oct smoothing / CWT 1/N-oct aggregation\n  \
-  a / i            cycle weighting (A/C/Z) / time integration (fast/slow/Leq)\n  \
-  Shift+I          reset Leq accumulators\n  \
+  s / f / d        screenshot / fullscreen / timing overlay\n  \
+  Enter            freeze\n  \
+  w                cycle ember view (9 slots)\n  \
+  c / t            compare selected / add virtual transfer\n  \
+  p / m            peak / min hold\n  \
+  o / Shift+O      smoothing / CWT 1/N-oct aggregation\n  \
+  a / i / Shift+I  weighting / time integration / Leq reset\n  \
   Shift+L          reset BS.1770 loudness\n  \
-  Space            toggle channel selection at cursor\n  \
-  d                toggle timing overlay\n  \
-  f                toggle fullscreen\n  \
-  h                toggle help overlay\n  \
-  +/-              adjust dB span\n  \
-  [/]              shift dB floor ±5\n  \
-  ← / →            FFT monitor interval / Shift for CWT scales\n  \
-  ↑ / ↓            FFT N ladder / Shift for CWT sigma\n  \
+  Space            toggle channel selection\n  \
+  ;                cycle waterfall palette\n  \
+  ← / →            FFT monitor interval (Shift = CWT scales)\n  \
+  ↑ / ↓            FFT N ladder (Shift = CWT sigma)\n  \
+  r / k            goniometer M/S / coherence γ²-weight\n  \
+  ,/. / Sh+,/.     ember intensity / τ_p\n  \
   Ctrl+R           reset all views and grid sizing\n  \
-  Tab / Shift+Tab  next / prev grid page or channel\n\n\
+  Tab / Shift+Tab  next / prev channel\n\n\
 Mouse:\n  \
-  Scroll (cell)    zoom both axes\n  \
-  Scroll (bg)      resize grid cells (grid layout only)\n  \
-  Shift+Scroll     cycle waterfall palette (waterfall)\n  \
-  Ctrl+Scroll      zoom freq (spectrum) / zoom time (waterfall)\n  \
-  Left-click       zoom in: swap to Single on clicked cell (matrix)\n  \
-  Left-drag        pan\n  \
+  Scroll           zoom (Shift=freq, Ctrl=Y)\n  \
+  Ctrl+Sh+Scroll   pan dB window (gain trim)\n  \
+  Drag             pan freq/dB\n  \
   Right-click      reset hovered cell\n"
     );
 }
