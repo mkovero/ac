@@ -390,12 +390,17 @@ impl App {
             None => return,
         };
         let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
-        if clicked >= n_real {
-            return;
-        }
         self.config.active_channel = clicked;
         self.config.layout = LayoutMode::Single;
-        self.notify(&format!("zoom: CH{clicked}"));
+        if clicked >= n_real {
+            // Virtual transfer cell — index it relative to the start of
+            // the virtual range so the notification matches the
+            // "transferN" naming used elsewhere.
+            let v_idx = clicked - n_real;
+            self.notify(&format!("zoom: transfer{v_idx}"));
+        } else {
+            self.notify(&format!("zoom: CH{clicked}"));
+        }
     }
 
     pub(super) fn begin_drag(&mut self) {
