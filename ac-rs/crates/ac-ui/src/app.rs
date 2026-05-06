@@ -404,7 +404,6 @@ pub struct App {
     last_render: Instant,
     cursor_pos: Option<PhysicalPosition<f64>>,
     drag: Option<input::DragState>,
-    box_zoom: Option<input::BoxZoomState>,
     timing_stats: TimingStats,
     show_timing: bool,
     benchmark_secs: Option<f64>,
@@ -632,7 +631,6 @@ impl App {
             last_render: Instant::now(),
             cursor_pos: None,
             drag: None,
-            box_zoom: None,
             timing_stats: TimingStats::new(),
             show_timing,
             benchmark_secs,
@@ -824,7 +822,7 @@ impl App {
             .last_data_arrival
             .is_some_and(|t| now.saturating_duration_since(t) < DATA_LIVELINESS_WINDOW);
         let hold_active = self.peak_hold_enabled || self.min_hold_enabled;
-        let cursor_pinned = self.drag.is_some() || self.box_zoom.is_some();
+        let cursor_pinned = self.drag.is_some();
         let continuous = self.notification.is_some()
             || self.benchmark_secs.is_some()
             || data_recent
@@ -938,10 +936,6 @@ impl ApplicationHandler for App {
                 if self.drag.is_some() {
                     self.update_drag(position);
                 }
-                if self.box_zoom.is_some() {
-                    self.update_box_zoom(position);
-                    self.needs_redraw = true;
-                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -958,18 +952,11 @@ impl ApplicationHandler for App {
                 self.end_drag();
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Right,
-                ..
-            } => {
-                self.begin_box_zoom();
-            }
-            WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Right,
                 ..
             } => {
-                self.end_box_zoom();
+                self.reset_hovered_view();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
@@ -1397,13 +1384,12 @@ mod loop_tests {
         assert_eq!(app.loop_directive(past), LoopDirective::Idle);
     }
 
-    /// An active drag or box-zoom keeps the loop continuous so the rubber
-    /// band / pan preview tracks vsync even if the user holds the cursor
-    /// still mid-gesture. Releasing the mouse must drop the loop back to
-    /// idle.
+    /// An active drag keeps the loop continuous so the pan preview tracks
+    /// vsync even if the user holds the cursor still mid-gesture. Releasing
+    /// the mouse must drop the loop back to idle.
     #[test]
-    fn drag_or_box_zoom_keeps_continuous() {
-        use crate::app::input::{BoxZoomState, DragState};
+    fn drag_keeps_continuous() {
+        use crate::app::input::DragState;
         use winit::dpi::PhysicalPosition;
 
         let mut app = fresh_app();
@@ -1422,29 +1408,8 @@ mod loop_tests {
         });
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
 
-        // Advance past the deadline before flipping to box-zoom — otherwise
-        // the strict rate-limiter coalesces the second paint into the
-        // already-scheduled tick.
         let past = t0 + app.continuous_interval + Duration::from_millis(10);
         app.drag = None;
-        app.box_zoom = Some(BoxZoomState {
-            start: PhysicalPosition::new(0.0, 0.0),
-            current: PhysicalPosition::new(0.0, 0.0),
-            targets: Vec::new(),
-            cell_left_px: 0.0,
-            cell_top_px: 0.0,
-            cell_w_px: 1.0,
-            cell_h_px: 1.0,
-            start_log_min: 0.0,
-            start_log_max: 0.0,
-            start_db_min: 0.0,
-            start_db_max: 0.0,
-            start_rows_f: 0.0,
-            waterfall: false,
-        });
-        assert_eq!(app.loop_directive(past), LoopDirective::RedrawContinuous);
-
-        app.box_zoom = None;
         let _ = app.loop_directive(past);
         assert_eq!(app.loop_directive(past), LoopDirective::Idle);
     }

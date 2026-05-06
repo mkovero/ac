@@ -110,7 +110,6 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 | `Shift+Scroll` | Cycle waterfall palette (inferno → magma, Waterfall only) |
 | `Ctrl+Shift+Scroll` | Pan dB window ±2 dB/tick — analog gain trim (floor and ceiling shift together) |
 | Drag | Pan freq/dB axes |
-| Right-drag | Box zoom — rubber-band a freq/dB (spectrum) or freq/time (waterfall/CWT) region to fill the cell |
-| Right-click | Reset hovered cell view (no drag; drag triggers box zoom) |
+| Right-click | Reset hovered cell view |
 
 For the full backlog see <https://github.com/mkovero/ac/issues?q=is%3Aopen+label%3Abacklog>.
