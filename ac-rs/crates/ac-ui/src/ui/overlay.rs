@@ -234,6 +234,7 @@ const HELP_LINES: &[&str] = &[
     "F              fullscreen",
     "D              timing overlay",
     "W              cycle ember view",
+    "G              grid ↔ single (per-channel views)",
     "Enter          freeze",
     "Space          toggle channel select",
     "Tab / Sh+Tab   next / prev channel",

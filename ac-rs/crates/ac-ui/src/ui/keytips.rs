@@ -12,7 +12,7 @@
 //! - the painter side (in `overlay.rs`) just lays them out.
 
 use crate::app::{BandWeighting, TimeIntegrationMode};
-use crate::data::types::ViewMode;
+use crate::data::types::{LayoutMode, ViewMode};
 
 /// One keytip on the bottom strip. `key` is the bare keystroke (e.g.
 /// `"A"`, `","/"."`); `label` is the contextual descriptor including
@@ -37,6 +37,10 @@ pub struct KeytipState {
     pub min_hold: bool,
     pub coherence_k: f32,
     pub goniometer_ms: bool,
+    /// Current cell layout — drives the `G layout:grid|single` chip
+    /// shown on grid-capable views (Spectrum / Waterfall /
+    /// SpectrumEmber). Other views omit the chip.
+    pub layout: LayoutMode,
 }
 
 fn weighting_label(w: BandWeighting) -> &'static str {
@@ -79,6 +83,16 @@ fn chip(key: &'static str, label: impl Into<String>) -> KeytipChip {
     }
 }
 
+fn layout_chip(layout: LayoutMode) -> KeytipChip {
+    chip(
+        "G",
+        match layout {
+            LayoutMode::Grid => "layout:grid",
+            _ => "layout:single",
+        },
+    )
+}
+
 /// Universal chips appended to every view's strip. `H help`, `Esc quit`,
 /// `S screenshot` are always available regardless of the view.
 fn universal_chips() -> Vec<KeytipChip> {
@@ -102,6 +116,7 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
                 format!("peak:{} min:{}", on_off(state.peak_hold), on_off(state.min_hold)),
             ),
             chip(",/.", "ember"),
+            layout_chip(state.layout),
             chip("W", "view"),
         ],
         ViewMode::Waterfall => vec![
@@ -110,6 +125,7 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
             chip("↑↓", "FFT N"),
             chip("←→", "interval"),
             chip(";", "palette"),
+            layout_chip(state.layout),
             chip("W", "view"),
         ],
         ViewMode::Scope => vec![
@@ -165,6 +181,7 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
         ViewMode::Spectrum => vec![
             chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
             chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
+            layout_chip(state.layout),
             chip("W", "view"),
         ],
     };
@@ -204,6 +221,7 @@ mod tests {
             min_hold: false,
             coherence_k: 2.0,
             goniometer_ms: true,
+            layout: LayoutMode::Single,
         }
     }
 
@@ -251,6 +269,36 @@ mod tests {
         let chips = keytips_for(&s);
         let o = chips.iter().find(|c| c.key == "O").expect("O chip");
         assert!(o.label.contains("off"));
+    }
+
+    /// RC-12: grid-capable views surface a `G layout:...` chip that
+    /// reflects the current LayoutMode. Pair-based views (Goniometer,
+    /// Bode, etc.) must NOT carry the chip — Grid is meaningless for
+    /// them and the chip would invite a no-op press.
+    #[test]
+    fn g_chip_only_appears_on_grid_capable_views() {
+        let mut s = base_state(ViewMode::SpectrumEmber);
+        s.layout = LayoutMode::Grid;
+        let chips = keytips_for(&s);
+        let g = chips.iter().find(|c| c.key == "G").expect("G chip on SpectrumEmber");
+        assert!(g.label.contains("grid"), "expected grid label, got {:?}", g.label);
+
+        s.layout = LayoutMode::Single;
+        let chips = keytips_for(&s);
+        let g = chips.iter().find(|c| c.key == "G").expect("G chip on SpectrumEmber");
+        assert!(g.label.contains("single"));
+
+        // Trajectory / transfer views never carry the chip.
+        for v in [
+            ViewMode::Goniometer, ViewMode::IoTransfer, ViewMode::BodeMag,
+            ViewMode::Coherence, ViewMode::Nyquist, ViewMode::Ir,
+        ] {
+            let chips = keytips_for(&base_state(v));
+            assert!(
+                !chips.iter().any(|c| c.key == "G"),
+                "view {v:?} unexpectedly carries G chip",
+            );
+        }
     }
 
     /// `format_strip` joins chips with the ` · ` separator and never

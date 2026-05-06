@@ -404,6 +404,11 @@ pub struct App {
     /// scrolling on an axisless view. Throttle window 2 s so a continuous
     /// trackpad gesture doesn't keep re-firing the chip.
     pub(super) last_axisless_scroll_notify: Option<Instant>,
+    /// User-preferred layout for grid-capable views (Spectrum / Waterfall
+    /// / SpectrumEmber). Toggled by `G`; reapplied when the W-cycle
+    /// lands on a grid-capable view so the choice survives view changes.
+    /// Trajectory / transfer views ignore this — they force Single.
+    pub(super) preferred_layout: LayoutMode,
     /// Set when `init_graphics` couldn't get a wgpu adapter / device
     /// (headless host, broken driver, missing Vulkan/GL). The event
     /// loop unwinds cleanly and `main` then exits with status 71
@@ -636,6 +641,14 @@ impl App {
             cursor_pos: None,
             drag: None,
             last_axisless_scroll_notify: None,
+            // Seed from the initial layout so Spectrum/Waterfall users
+            // start in Grid and ember users start in Single (matching
+            // pre-RC-12 behaviour). G then toggles freely from there.
+            preferred_layout: if matches!(layout, LayoutMode::Grid) {
+                LayoutMode::Grid
+            } else {
+                LayoutMode::Single
+            },
             gpu_init_failed: false,
             timing_stats: TimingStats::new(),
             show_timing,

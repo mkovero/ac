@@ -361,7 +361,7 @@ Keys (full list in-app: press h):\n  \
   Esc/q            quit\n  \
   s / f / d        screenshot / fullscreen / timing overlay\n  \
   Enter            freeze\n  \
-  w                cycle ember view (9 slots)\n  \
+  w / g            cycle ember view / grid↔single (per-channel views)\n  \
   c / t            compare selected / add virtual transfer\n  \
   p / m            peak / min hold\n  \
   o / Shift+O      smoothing / CWT 1/N-oct aggregation\n  \
