@@ -1270,6 +1270,18 @@ impl App {
                     // applied earlier in this method.
                     let polyline: Vec<[f32; 3]> =
                         if matches!(self.config.layout, LayoutMode::Grid) {
+                            // Cell-edge inset for the empty-cell border:
+                            // 2 % of cell size keeps the rectangle off
+                            // the layout's gap line so adjacent empty
+                            // cells don't visually merge.
+                            const EDGE_INSET: f32 = 0.02;
+                            // Faint constant-amplitude weight for empty
+                            // cells. Decay (τ_p = 1.2 s) and ember
+                            // intensity (~0.003) balance: a steady
+                            // deposit at w=0.35 settles into a dim
+                            // outline, dimmer than active envelopes
+                            // which carry w=1.0 with peaks > 0.5 amp.
+                            const EMPTY_W: f32 = 0.35;
                             let mut combined = Vec::new();
                             for cell in &cells {
                                 // Skip virtual transfer cells — their
@@ -1283,15 +1295,10 @@ impl App {
                                     .get(cell.channel)
                                     .copied()
                                     .unwrap_or_default();
-                                let frame = match frames
+                                let frame_opt = frames
                                     .get(cell.channel)
                                     .and_then(|f| f.as_ref())
-                                {
-                                    Some(f) if !f.spectrum.is_empty() => f,
-                                    _ => continue,
-                                };
-                                let local = build_spectrum_polyline(frame, &view);
-                                combined.reserve(local.len());
+                                    .filter(|f| !f.spectrum.is_empty());
                                 // The ember substrate inverts y between
                                 // deposit and display: deposit y=0 ends
                                 // up at the top of the screen, y=1 at
@@ -1303,11 +1310,38 @@ impl App {
                                 // symmetric, but per-cell positions on
                                 // the canvas need the flip applied so
                                 // top-row cells display at screen top.
-                                for [x, y, w] in local.iter() {
-                                    combined.push([
-                                        cell.x + x * cell.w,
-                                        1.0 - cell.y - y * cell.h,
-                                        *w,
+                                if let Some(frame) = frame_opt {
+                                    let local = build_spectrum_polyline(frame, &view);
+                                    combined.reserve(local.len());
+                                    for [x, y, w] in local.iter() {
+                                        combined.push([
+                                            cell.x + x * cell.w,
+                                            1.0 - cell.y - y * cell.h,
+                                            *w,
+                                        ]);
+                                    }
+                                } else {
+                                    // No data yet for this channel —
+                                    // deposit a thin rectangular outline
+                                    // along the cell's edges so the
+                                    // hitbox has a visible counterpart.
+                                    // Eight vertices form a LineList of
+                                    // four segments (one per edge).
+                                    let inset_x = cell.w * EDGE_INSET;
+                                    let inset_y = cell.h * EDGE_INSET;
+                                    let x0 = cell.x + inset_x;
+                                    let x1 = cell.x + cell.w - inset_x;
+                                    let y0 = 1.0 - cell.y - inset_y;
+                                    let y1 = 1.0 - cell.y - cell.h + inset_y;
+                                    let bl = [x0, y0, EMPTY_W];
+                                    let br = [x1, y0, EMPTY_W];
+                                    let tr = [x1, y1, EMPTY_W];
+                                    let tl = [x0, y1, EMPTY_W];
+                                    combined.extend_from_slice(&[
+                                        bl, br,
+                                        br, tr,
+                                        tr, tl,
+                                        tl, bl,
                                     ]);
                                 }
                             }
