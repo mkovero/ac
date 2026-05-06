@@ -363,7 +363,8 @@ Keys (full list in-app: press h):\n  \
   Enter            freeze\n  \
   Tab / Sh+Tab     cycle ember view forward / back (page in Grid)\n  \
   g                matrix overview (pick channel by click)\n  \
-  c / Shift+C / t  toggle select / compare / add virtual transfer\n  \
+  c / Space        toggle channel select (hovered cell)\n  \
+  Shift+C / t      compare selected / add virtual transfer\n  \
   p / m            peak / min hold\n  \
   o / Shift+O      smoothing / CWT 1/N-oct aggregation\n  \
   a / i / Shift+I  weighting / time integration / Leq reset\n  \

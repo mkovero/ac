@@ -151,13 +151,25 @@ impl App {
         self.selection_order.clear();
     }
 
-    /// Step through the 9 ember-substrate views forward (or backward).
-    /// Pair-gated: without a registered transfer pair, the cycle
-    /// collapses to just `SpectrumEmber` and pressing Tab on it surfaces
-    /// the unlock hint. Shared by Tab / Shift+Tab.
+    /// Step through the ember-substrate views forward (or backward).
+    /// The cycle is *active-channel-typed*:
+    ///
+    /// - Active on a real input channel → only `SpectrumEmber` makes
+    ///   sense. The 8 other views all paint a transfer / stereo pair,
+    ///   which would silently swap the user away from the channel they
+    ///   explicitly picked. Tab on a real channel stays on
+    ///   SpectrumEmber and surfaces the matrix→click-virtual-cell
+    ///   workflow hint.
+    /// - Active on a virtual transfer channel → full 9-slot cycle.
+    ///   Each transfer / trajectory view paints the pair behind that
+    ///   virtual channel via `resolve_transfer_pair_for_active`.
+    ///
+    /// Shared by Tab / Shift+Tab.
     fn cycle_ember_view(&mut self, forward: bool) {
-        let pair_available = self.resolve_transfer_pair_for_active().is_some();
-        let next = if pair_available {
+        let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+        let on_virtual = self.config.active_channel >= n_real
+            && (self.config.active_channel - n_real) < self.virtual_channels.len();
+        let next = if on_virtual {
             if forward {
                 match self.current_w_slot() {
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
@@ -186,12 +198,14 @@ impl App {
                 }
             }
         } else if matches!(self.current_w_slot(), Some(WSlot::SpectrumEmber)) {
-            self.notify("register a transfer pair (T) to unlock more views");
+            // Already on the only sensible view for a real channel.
+            // Hint at the discovery path: G → click a transfer cell.
+            self.notify("on real channel — G → click a transfer cell for more views");
             return;
         } else {
-            // Coming from a transfer view whose pair was just
-            // unregistered (or `--view <transfer>` startup without a
-            // pair) — drop to the only useful slot.
+            // On a real channel but currently displaying a transfer
+            // view (probably arrived via `--view <transfer>` startup or
+            // the active channel was just reset). Drop to SpectrumEmber.
             WSlot::SpectrumEmber
         };
         let (layout, view_mode, mode, label) = match next {
@@ -816,11 +830,14 @@ impl App {
             KeyCode::KeyS => {
                 self.pending_screenshot = true;
             }
-            // C toggles the channel selection at the hovered cell.
-            // Builds the set used by Shift+C (compare) and T (transfer
-            // pair). Left-click + Tab cover single-channel navigation,
-            // so Space is no longer needed for this.
+            // C and Space both toggle the channel selection at the
+            // hovered cell. Builds the set used by Shift+C (compare)
+            // and T (transfer pair). C is the documented binding; Space
+            // is kept as a muscle-memory alias.
             KeyCode::KeyC if !self.modifiers.shift_key() => {
+                self.toggle_selection();
+            }
+            KeyCode::Space => {
                 self.toggle_selection();
             }
             // Shift+C — enter Compare on the selected channels. Empty

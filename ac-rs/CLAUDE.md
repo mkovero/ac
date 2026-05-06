@@ -82,9 +82,9 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle ember views forward / backward. With a registered transfer pair (`C`-select MEAS + REF, then `T`): SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber (9 slots). Without a pair: only SpectrumEmber — pressing Tab on it notifies "register a transfer pair (T) to unlock more views". In Grid layout with multiple pages, Tab pages instead of cycling. Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
+| `Tab` / `Shift+Tab` | Cycle ember views forward / backward. **On a real input channel**: only SpectrumEmber — pressing Tab on it surfaces the matrix → click-virtual-cell discovery hint, since the other 8 views all paint a transfer/stereo pair and would jump away from the picked channel. **On a virtual transfer channel**: full 9-slot cycle (SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber). In Grid layout with multiple pages, Tab pages instead of cycling. Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
 | `G` | Snap to matrix overview (Spectrum + Grid) from any view — left-click a cell to zoom into Single+Spectrum on that channel; W cycles ember views from there. |
-| `C` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
+| `C` / `Space` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
 | `Shift+C` | Compare selected channels in one rect (needs ≥ 1 selection from `C`) |
 | Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |
 | `F` | Toggle fullscreen |
