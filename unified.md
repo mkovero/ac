@@ -1094,6 +1094,31 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
 
 Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
 
+- `(2026-05-06) — Bridge empty log columns in transfer-view
+  polylines.` — Pre-existing bug, surfaced by side-by-side
+  inspection: BodeMag/BodePhase/GroupDelay/Coherence appeared
+  to "ignore" everything below ~1 kHz. Cause was an axis
+  mismatch — the daemon downsamples transfer frames to 2000
+  *linear-spaced* bins (~12 Hz/bin at sr=48 kHz), but the
+  polyline builder aggregates into 512 *log-spaced* columns,
+  so columns at low freq are wider in Hz than the bin spacing.
+  Result: most leftmost columns get no bin, the builder reset
+  `prev = None` on every empty column, and the polyline broke
+  apart into invisible single-vertex fragments.
+  Fix is one-liner per builder: skip empty columns *without*
+  resetting `prev`, so the trace bridges the gap (one segment
+  spanning the empty range — geometrically a straight line
+  in (log f, dB) space, which is exactly what a Bode plot
+  draws anyway). The intentional "below dB floor → break
+  polyline" behaviour in the legacy spectrum builder is
+  unaffected; that filter happens before col-aggregation.
+  Tests had been masking this because `dense_freqs` (the
+  shared test helper) generates *log-spaced* bins, where
+  every column gets coverage. Added `linear_daemon_freqs(n,
+  sr)` and two regression tests asserting the leftmost
+  emitted vertex sits at xn < 0.10 (~30 Hz, well below the
+  1 kHz cutoff the user observed). 663 → 665 workspace.
+
 - `(2026-05-06) — Goniometer + IoTransfer move to TransferPair
   selection.` — The two trajectory views were the last holdouts on
   the active+1 stereo convention. Now they go through the same

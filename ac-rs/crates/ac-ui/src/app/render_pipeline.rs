@@ -2091,7 +2091,17 @@ fn build_bodemag_polyline(
     for col in 0..n_cols {
         let mag = col_max[col];
         if !mag.is_finite() {
-            prev = None;
+            // Empty column on a log axis — daemon emits linear-
+            // spaced bins (every ~12 Hz at sr=48 kHz), but the
+            // log-spaced columns at low freq are *wider in Hz*
+            // than the bin spacing, so most columns below ~1 kHz
+            // get no bin at all. Skip without resetting prev so
+            // the polyline bridges the gap; visually the trace
+            // becomes a single segment between the bins that
+            // actually landed in cols, which is the right Bode
+            // reading. (This intentionally differs from the
+            // spectrum builder, which DOES break on dB-floor
+            // misses — that's an actual "no signal here" gate.)
             continue;
         }
         let x = (col as f32 + 0.5) / n_cols as f32;
@@ -2150,7 +2160,9 @@ fn build_coherence_polyline(
     for col in 0..n_cols {
         let c = col_min[col];
         if !c.is_finite() {
-            prev = None;
+            // See BodeMag for why we skip without breaking — empty
+            // columns at low freq are an axis-mismatch artifact, not
+            // a "no data here" signal.
             continue;
         }
         let x = (col as f32 + 0.5) / n_cols as f32;
@@ -2242,7 +2254,7 @@ fn build_bodephase_polyline(
     let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
         let Some((p, c)) = col_phase[col] else {
-            prev = None;
+            // See BodeMag for why we skip without breaking.
             continue;
         };
         let x = (col as f32 + 0.5) / n_cols as f32;
@@ -2328,7 +2340,7 @@ fn build_groupdelay_polyline(
     let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
         let Some((t, c)) = col_val[col] else {
-            prev = None;
+            // See BodeMag for why we skip without breaking.
             continue;
         };
         let x = (col as f32 + 0.5) / n_cols as f32;
@@ -3071,13 +3083,10 @@ mod tests {
         }
     }
 
-    /// Generate a realistic-density log-spaced test frame matching
-    /// what the daemon emits (~2000 bins downsampled from the full
-    /// FFT). Test fixtures need this density so `build_bodemag_polyline`
-    /// (which bins into 512 log-spaced columns) gets multiple bins
-    /// per column and produces a continuous polyline; sparser
-    /// fixtures break the trace into single-column fragments that
-    /// emit no pairs.
+    /// Generate `n` log-spaced frequencies. Convenient for tests
+    /// where every column gets at least one bin; doesn't model the
+    /// daemon's actual downsampling (which is *linear*-spaced —
+    /// `linear_daemon_freqs` below mirrors that).
     fn dense_freqs(n: usize, f_min: f32, f_max: f32) -> Vec<f32> {
         let log_min = f_min.log10();
         let log_max = f_max.log10();
@@ -3086,6 +3095,20 @@ mod tests {
                 let t = i as f32 / (n - 1).max(1) as f32;
                 10.0_f32.powf(log_min + t * (log_max - log_min))
             })
+            .collect()
+    }
+
+    /// Linear-spaced frequencies modelling the daemon's transfer
+    /// downsampling: `n` bins evenly spaced from 0 to Nyquist
+    /// (every ~12 Hz at sr=48 kHz with n=2000). On a *log* x-axis
+    /// these bins are dense at high freq and sparse at low freq —
+    /// many low-freq columns of `EMBER_SPECTRUM_COLS` get no bin
+    /// at all. The polyline builder must bridge those empty
+    /// columns rather than break the trace.
+    fn linear_daemon_freqs(n: usize, sr_hz: f32) -> Vec<f32> {
+        let nyquist = sr_hz * 0.5;
+        (0..n)
+            .map(|i| (i as f32) * nyquist / ((n - 1).max(1) as f32))
             .collect()
     }
 
@@ -3791,6 +3814,70 @@ mod tests {
         let (sl, sr_buf) = samples.expect("expected matched scope samples");
         assert_eq!(sl, l_samples);
         assert_eq!(sr_buf, r_samples);
+    }
+
+    /// Regression: with the daemon's linear-spaced bins, log-axis
+    /// columns at low freq are wider than the bin spacing, so most
+    /// of the leftmost columns get no bin at all. The previous
+    /// builder broke the polyline on every empty column, leaving
+    /// the cell's left half visually empty — exactly the
+    /// "<1 kHz is ignored" symptom from real captures. After the
+    /// fix, the builder skips empty columns *without* resetting
+    /// `prev`, so the trace bridges the gap and reaches into the
+    /// low-freq region.
+    #[test]
+    fn bodemag_low_freq_not_dropped_with_linear_daemon_bins() {
+        // 2000 linear-spaced bins from 0..24 kHz (matches
+        // ac-daemon's transfer_stream downsample at sr = 48 kHz).
+        let freqs = linear_daemon_freqs(2000, 48_000.0);
+        let mags = vec![0.0_f32; freqs.len()]; // flat unity-gain
+        let f = transfer_frame_lin_log_db(freqs, mags, vec![]);
+        let v = view(20.0, 24_000.0);
+        let pairs = build_bodemag_polyline(&f, &v, 0.0);
+        // The leftmost column the builder emits should sit at low
+        // freq: `xn ≈ 0.05` corresponds to ~30 Hz, well below the
+        // 1 kHz threshold the user observed pre-fix.
+        let leftmost_x = pairs
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            leftmost_x < 0.10,
+            "expected polyline to reach into low-freq cols (xn < 0.10); \
+             got leftmost xn = {leftmost_x} (bug: empty cols broke the trace)",
+        );
+    }
+
+    /// Same regression check for Coherence, BodePhase, GroupDelay —
+    /// they share the column-aggregation pattern that broke at low
+    /// freq. Bundled into one test since the assertion is identical
+    /// (leftmost xn must reach into the low-freq band).
+    #[test]
+    fn coherence_phase_groupdelay_low_freq_not_dropped() {
+        let freqs = linear_daemon_freqs(2000, 48_000.0);
+        let coh = vec![0.9_f32; freqs.len()];
+        let phase = vec![0.0_f32; freqs.len()];
+        let f_coh = transfer_frame_lin_log_db(freqs.clone(), vec![], coh);
+        let f_ph = transfer_frame_with_phase(freqs.clone(), phase.clone());
+        let f_gd = transfer_frame_with_phase(freqs, phase);
+        let v = CellView {
+            freq_min: 20.0,
+            freq_max: 24_000.0,
+            db_min: -10.0,
+            db_max: 10.0,
+            ..CellView::default()
+        };
+        for (label, pairs) in [
+            ("coherence", build_coherence_polyline(&f_coh)),
+            ("bodephase", build_bodephase_polyline(&f_ph, &v, 0.0)),
+            ("groupdelay", build_groupdelay_polyline(&f_gd, &v, 0.0)),
+        ] {
+            let leftmost_x = pairs.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            assert!(
+                leftmost_x < 0.10,
+                "{label}: expected leftmost xn < 0.10, got {leftmost_x}",
+            );
+        }
     }
 
     /// Pair registered, frames present on L only (R hasn't arrived
