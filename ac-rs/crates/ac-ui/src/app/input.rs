@@ -191,46 +191,6 @@ impl App {
     }
 
     pub(super) fn apply_zoom(&mut self, scroll_y: f32) {
-        // Shift+Scroll cycles the waterfall colormap palette (inferno → magma
-        // → inferno). Used to live on Alt+Scroll, but Alt is
-        // consumed by the window manager (meta) on common Linux desktops and
-        // fights the UI. Gain zoom lost the Shift+Scroll binding — use
-        // `[`/`]` (shift dB floor) and `+`/`-` (adjust dB span) instead.
-        // Spectrum mode ignores the cycle — palette only affects the LUT.
-        if self.modifiers.shift_key()
-            && !self.modifiers.control_key()
-            && matches!(self.config.view_mode, ViewMode::Waterfall)
-            && scroll_y != 0.0
-        {
-            self.palette_scroll_accum += scroll_y;
-            let steps = self.palette_scroll_accum.trunc() as i32;
-            if steps != 0 {
-                self.palette_scroll_accum -= steps as f32;
-                let new_idx = self.waterfall.as_mut().map(|wf| {
-                    let n = crate::render::waterfall::N_PALETTES as i32;
-                    let cur = wf.active_palette() as i32;
-                    let next = ((cur + steps).rem_euclid(n)) as u32;
-                    wf.set_palette(next);
-                    next as usize
-                });
-                if let Some(idx) = new_idx {
-                    let name = crate::render::waterfall::PALETTE_NAMES
-                        .get(idx)
-                        .copied()
-                        .unwrap_or("?");
-                    self.notify(&format!("palette: {name}"));
-                    self.needs_redraw = true;
-                }
-            }
-            return;
-        }
-        // Shift released (or not held) — drop any leftover fractional scroll so
-        // the next Shift+Scroll session starts from zero instead of firing on
-        // the first tick.
-        if !self.modifiers.shift_key() && self.palette_scroll_accum != 0.0 {
-            self.palette_scroll_accum = 0.0;
-        }
-
         let pos = match self.cursor_pos {
             Some(p) => p,
             None => return,
@@ -862,6 +822,31 @@ impl App {
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
+            }
+            // Cycle the waterfall colormap palette. `;` advances; Ctrl+`;`
+            // cycles backward. Only meaningful in Waterfall view — in other
+            // views, notify so the user knows the key was seen.
+            KeyCode::Semicolon => {
+                if !matches!(self.config.view_mode, ViewMode::Waterfall) {
+                    self.notify("palette: only in waterfall view");
+                    return;
+                }
+                let step: i32 = if self.modifiers.control_key() { -1 } else { 1 };
+                let new_idx = self.waterfall.as_mut().map(|wf| {
+                    let n = crate::render::waterfall::N_PALETTES as i32;
+                    let cur = wf.active_palette() as i32;
+                    let next = ((cur + step).rem_euclid(n)) as u32;
+                    wf.set_palette(next);
+                    next as usize
+                });
+                if let Some(idx) = new_idx {
+                    let name = crate::render::waterfall::PALETTE_NAMES
+                        .get(idx)
+                        .copied()
+                        .unwrap_or("?");
+                    self.notify(&format!("palette: {name}"));
+                    self.needs_redraw = true;
+                }
             }
             KeyCode::KeyW => {
                 // W cycles the six canonical views:
