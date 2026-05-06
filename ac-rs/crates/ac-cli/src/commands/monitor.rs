@@ -37,7 +37,7 @@ pub fn run(
     };
     let channels = resolve_channels_or_default(channels, cfg, "ac monitor");
 
-    super::plot::launch_ui("spectrum", cfg, Some(&channels));
+    super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
 }
 
 /// `ac monitor cwt` — pre-step: switch the server analysis mode to
@@ -61,7 +61,7 @@ pub fn run_cwt(
     );
     super::check_ack(ack, "set_analysis_mode cwt");
 
-    super::plot::launch_ui("spectrum", cfg, Some(&channels));
+    super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
 }
 
 /// `ac monitor cqt` — symmetric to `run_cwt`. Switches the server
@@ -83,7 +83,7 @@ pub fn run_cqt(
     );
     super::check_ack(ack, "set_analysis_mode cqt");
 
-    super::plot::launch_ui("spectrum", cfg, Some(&channels));
+    super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
 }
 
 /// `ac monitor reassigned` — symmetric to `run_cwt`/`run_cqt`. Switches
@@ -105,6 +105,6 @@ pub fn run_reassigned(
     );
     super::check_ack(ack, "set_analysis_mode reassigned");
 
-    super::plot::launch_ui("spectrum", cfg, Some(&channels));
+    super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
 }
 

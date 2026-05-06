@@ -38,10 +38,6 @@ pub fn run(
     );
     io::print_freq_header(have_cal);
 
-    if show_plot {
-        launch_ui("sweep_frequency", cfg, None);
-    }
-
     let mut cmd_json = serde_json::json!({
         "cmd": "plot",
         "start_hz": start_hz,
@@ -58,6 +54,13 @@ pub fn run(
         ack.get("in_port").and_then(|v| v.as_str()),
     ) {
         println!("  Output: {out}  \u{2192}  Input: {inp}");
+    }
+
+    // Spawn the UI only after the daemon ACKed the request — otherwise a
+    // refused command (busy daemon, invalid args) flashes a window that
+    // immediately disconnects.
+    if show_plot {
+        launch_ui(LaunchKind::SweepFreq, cfg, None);
     }
 
     let results = collect_sweep(client, "plot");
@@ -99,10 +102,6 @@ pub fn run_level(
     );
     io::print_freq_header(have_cal);
 
-    if show_plot {
-        launch_ui("sweep_level", cfg, None);
-    }
-
     let ack = check_ack(
         client.send_cmd(
             &serde_json::json!({
@@ -121,6 +120,10 @@ pub fn run_level(
         ack.get("in_port").and_then(|v| v.as_str()),
     ) {
         println!("  Output: {out}  \u{2192}  Input: {inp}");
+    }
+
+    if show_plot {
+        launch_ui(LaunchKind::SweepLevel, cfg, None);
     }
 
     let results = collect_sweep(client, "plot_level");
@@ -176,7 +179,33 @@ fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::confi
     io::save_csv(results, &path);
 }
 
-pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
+/// What `launch_ui` should configure the UI for. Replaces the previous
+/// stringly-typed `mode` argument so callers can't pass an unrecognised
+/// string and silently end up on the wrong screen.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LaunchKind {
+    /// Frequency sweep view (paired with `ac plot ... show`).
+    SweepFreq,
+    /// Level sweep view (paired with `ac plot level ... show`).
+    SweepLevel,
+    /// Live monitor view — the UI sends `monitor_spectrum` on its own
+    /// once it connects, so no daemon-side preamble is needed here.
+    Monitor,
+}
+
+impl LaunchKind {
+    /// Value passed via `--mode` to `ac-ui`. `Monitor` is the implicit
+    /// default and skips the flag entirely.
+    fn mode_arg(self) -> Option<&'static str> {
+        match self {
+            LaunchKind::SweepFreq => Some("sweep_frequency"),
+            LaunchKind::SweepLevel => Some("sweep_level"),
+            LaunchKind::Monitor => None,
+        }
+    }
+}
+
+pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
     let bin = crate::spawn::find_binary("ac-ui");
     let bin = match bin {
         Some(p) => p,
@@ -192,7 +221,7 @@ pub(crate) fn launch_ui(mode: &str, cfg: &ac_core::config::Config, channels: Opt
         "--ctrl".to_string(),
         format!("tcp://{host}:5556"),
     ];
-    if mode != "spectrum" {
+    if let Some(mode) = kind.mode_arg() {
         args.push("--mode".to_string());
         args.push(mode.to_string());
     }
