@@ -1178,6 +1178,32 @@ impl App {
                 self.ember_stereo_peak = 0.5;
                 self.notify("ember: cleared");
             }
+            // Coherence-weighting sharpness cycle for transfer-derived
+            // ember views. `K` advances {off, k=1, k=2, k=4}: each step
+            // makes the weighting more punishing (γ²^k → tiny for low
+            // γ²). Default lands on k=2 — moderate dim of low-coherence
+            // fuzz without over-extinguishing borderline bins. Coherence
+            // and IR views ignore this knob (would self-extinguish or
+            // have no per-sample γ²).
+            KeyCode::KeyK
+                if !self.modifiers.control_key()
+                    && !self.modifiers.shift_key()
+                    && self.is_ember_view() =>
+            {
+                let next = match self.ember_coherence_k {
+                    k if k <= 0.0    => 1.0,
+                    k if k < 1.5     => 2.0,
+                    k if k < 3.0     => 4.0,
+                    _                => 0.0,
+                };
+                self.ember_coherence_k = next;
+                if next <= 0.0 {
+                    self.notify("ember coherence weight: off");
+                } else {
+                    self.notify(&format!("ember coherence weight: γ²^{:.0}", next));
+                }
+                self.mark_ui_dirty();
+            }
             KeyCode::Tab => {
                 let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
                 let n_virt = self.virtual_channels.len();

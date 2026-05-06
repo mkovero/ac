@@ -1369,7 +1369,7 @@ impl App {
                             self.virtual_channels
                                 .store_for(p)
                                 .and_then(|s| s.read())
-                                .map(|f| build_bodemag_polyline(&f, &view))
+                                .map(|f| build_bodemag_polyline(&f, &view, self.ember_coherence_k))
                         })
                         .unwrap_or_default();
                     // Long τ_p (~4 s) so successive measurements
@@ -1413,7 +1413,7 @@ impl App {
                             self.virtual_channels
                                 .store_for(p)
                                 .and_then(|s| s.read())
-                                .map(|f| build_bodephase_polyline(&f, &view))
+                                .map(|f| build_bodephase_polyline(&f, &view, self.ember_coherence_k))
                         })
                         .unwrap_or_default();
                     ember.set_tau_p(4.0 * self.ember_tau_p_scale);
@@ -1433,7 +1433,7 @@ impl App {
                             self.virtual_channels
                                 .store_for(p)
                                 .and_then(|s| s.read())
-                                .map(|f| build_groupdelay_polyline(&f, &view))
+                                .map(|f| build_groupdelay_polyline(&f, &view, self.ember_coherence_k))
                         })
                         .unwrap_or_default();
                     ember.set_tau_p(4.0 * self.ember_tau_p_scale);
@@ -1472,7 +1472,7 @@ impl App {
                             }
                             let amp = (0.85 / self.ember_stereo_peak.max(0.02))
                                 .clamp(0.5, 50.0);
-                            build_nyquist_polyline(&frame, amp)
+                            build_nyquist_polyline(&frame, amp, self.ember_coherence_k)
                         })
                         .unwrap_or_default();
                     ember.set_tau_p(4.0 * self.ember_tau_p_scale);
@@ -1927,7 +1927,7 @@ fn build_scope_polyline(
     window_s:     f32,
     y_gain:       f32,
     dt:           f32,
-) -> (Vec<[f32; 2]>, f32) {
+) -> (Vec<[f32; 3]>, f32) {
     let scroll_dx = (dt / window_s.max(1e-3)).clamp(0.0, 1.0);
     let n = ((dt * sample_rate) as usize).min(8000);
     let mut pairs = Vec::with_capacity(n.saturating_sub(1) * 2);
@@ -1935,14 +1935,14 @@ fn build_scope_polyline(
     let phase_step = two_pi * sine_freq_hz / sample_rate;
     let denom = (n.saturating_sub(1)).max(1) as f32;
     let amp = y_gain.clamp(0.01, 0.5);
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for i in 0..n {
         let s = sine_phase.sin();
         *sine_phase = (*sine_phase + phase_step) % two_pi;
         let frac = i as f32 / denom;
         let x = (1.0 - scroll_dx) + frac * scroll_dx;
         let y = 0.5 + amp * s;
-        let cur = [x, y];
+        let cur = [x, y, 1.0];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -1950,6 +1950,21 @@ fn build_scope_polyline(
         prev = Some(cur);
     }
     (pairs, scroll_dx)
+}
+
+/// Confidence-weight helper for coherence-aware ember views. Returns
+/// `γ²^k` clamped to `[0, 1]`, with `k == 0` short-circuiting to 1.0
+/// (weighting disabled — every bin deposits at full intensity). NaN /
+/// negative coherence falls through to 0.0 so spurious bins don't
+/// brighten unexpectedly.
+fn coherence_weight(coherence: f32, k: f32) -> f32 {
+    if !(k > 0.0) {
+        return 1.0;
+    }
+    if !coherence.is_finite() {
+        return 0.0;
+    }
+    coherence.clamp(0.0, 1.0).powf(k)
 }
 
 /// Number of x-axis columns the spectrum is aggregated into before
@@ -1975,7 +1990,7 @@ const EMBER_SPECTRUM_COLS: usize = 512;
 fn build_spectrum_polyline(
     frame: &crate::data::types::DisplayFrame,
     view: &CellView,
-) -> Vec<[f32; 2]> {
+) -> Vec<[f32; 3]> {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
     let span_f = (log_max - log_min).max(1e-6);
@@ -2001,7 +2016,7 @@ fn build_spectrum_polyline(
     }
 
     let mut pairs = Vec::with_capacity(n_cols * 4);
-    let mut prev: Option<([f32; 2], [f32; 2])> = None;
+    let mut prev: Option<([f32; 3], [f32; 3])> = None;
     for col in 0..n_cols {
         let mag = col_max[col];
         if !mag.is_finite() {
@@ -2011,8 +2026,8 @@ fn build_spectrum_polyline(
         let x = (col as f32 + 0.5) / n_cols as f32;
         let n_mag = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
         let amp = 0.45 * n_mag;
-        let top = [x, 0.5 + amp];
-        let bot = [x, 0.5 - amp];
+        let top = [x, 0.5 + amp, 1.0];
+        let bot = [x, 0.5 - amp, 1.0];
         if let Some((prev_top, prev_bot)) = prev {
             pairs.push(prev_top);
             pairs.push(top);
@@ -2037,14 +2052,20 @@ fn build_spectrum_polyline(
 fn build_bodemag_polyline(
     frame: &crate::data::types::TransferFrame,
     view: &CellView,
-) -> Vec<[f32; 2]> {
+    coherence_k: f32,
+) -> Vec<[f32; 3]> {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
     let span_f = (log_max - log_min).max(1e-6);
     let span_db = (view.db_max - view.db_min).max(1e-3);
     let n_cols = EMBER_SPECTRUM_COLS;
+    // Track per-column max value plus the coherence of the bin that won
+    // — that bin's γ² is what we trust for this column. NEG_INFINITY
+    // marks "no valid bin yet".
     let mut col_max: Vec<f32> = vec![f32::NEG_INFINITY; n_cols];
+    let mut col_coh: Vec<f32> = vec![1.0; n_cols];
     let n = frame.freqs.len().min(frame.magnitude_db.len());
+    let coh = &frame.coherence;
     for i in 0..n {
         let f = frame.freqs[i];
         let mag = frame.magnitude_db[i];
@@ -2059,10 +2080,11 @@ fn build_bodemag_polyline(
         let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
         if mag > col_max[col] {
             col_max[col] = mag;
+            col_coh[col] = coh.get(i).copied().unwrap_or(1.0);
         }
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
         let mag = col_max[col];
         if !mag.is_finite() {
@@ -2075,7 +2097,8 @@ fn build_bodemag_polyline(
         // against the cell border.
         let n_db = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
         let y = 0.05 + 0.9 * n_db;
-        let cur = [x, y];
+        let w = coherence_weight(col_coh[col], coherence_k);
+        let cur = [x, y, w];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -2093,7 +2116,7 @@ fn build_bodemag_polyline(
 /// which prioritises peaks. Phase 2 of unified.md.
 fn build_coherence_polyline(
     frame: &crate::data::types::TransferFrame,
-) -> Vec<[f32; 2]> {
+) -> Vec<[f32; 3]> {
     // Coherence views always span the full audio band — no cell
     // freq-window dependence (γ² is dimensionless and useful across
     // the whole band regardless of where the user has zoomed the dB
@@ -2120,7 +2143,7 @@ fn build_coherence_polyline(
         }
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
         let c = col_min[col];
         if !c.is_finite() {
@@ -2129,7 +2152,10 @@ fn build_coherence_polyline(
         }
         let x = (col as f32 + 0.5) / n_cols as f32;
         let y = 0.05 + 0.9 * c.clamp(0.0, 1.0);
-        let cur = [x, y];
+        // Coherence view itself never gates on coherence (would be
+        // circular — bins where γ² is what we want to *see* would
+        // self-extinguish). Always full weight.
+        let cur = [x, y, 1.0];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -2180,7 +2206,8 @@ fn unwrap_phase_deg(phase: &[f32]) -> Vec<f32> {
 fn build_bodephase_polyline(
     frame: &crate::data::types::TransferFrame,
     view: &CellView,
-) -> Vec<[f32; 2]> {
+    coherence_k: f32,
+) -> Vec<[f32; 3]> {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
     let span_f = (log_max - log_min).max(1e-6);
@@ -2188,8 +2215,11 @@ fn build_bodephase_polyline(
     let n_cols = EMBER_SPECTRUM_COLS;
     // Aggregate by *first valid value* per column (no max/min — phase
     // is signed and doesn't have a meaningful "peak" or "floor").
-    let mut col_phase: Vec<Option<f32>> = vec![None; n_cols];
+    // Carry the bin's coherence alongside so downstream weighting can
+    // dim noisy phase regions.
+    let mut col_phase: Vec<Option<(f32, f32)>> = vec![None; n_cols];
     let n = frame.freqs.len().min(frame.phase_deg.len());
+    let coh = &frame.coherence;
     for i in 0..n {
         let f = frame.freqs[i];
         let p = frame.phase_deg[i];
@@ -2202,19 +2232,21 @@ fn build_bodephase_polyline(
             continue;
         }
         let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
-        col_phase[col].get_or_insert(p);
+        let c = coh.get(i).copied().unwrap_or(1.0);
+        col_phase[col].get_or_insert((p, c));
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
-        let Some(p) = col_phase[col] else {
+        let Some((p, c)) = col_phase[col] else {
             prev = None;
             continue;
         };
         let x = (col as f32 + 0.5) / n_cols as f32;
         let n_y = ((p - view.db_min) / span_y).clamp(0.0, 1.0);
         let y = 0.05 + 0.9 * n_y;
-        let cur = [x, y];
+        let w = coherence_weight(c, coherence_k);
+        let cur = [x, y, w];
         if let Some(prev_p) = prev {
             pairs.push(prev_p);
             pairs.push(cur);
@@ -2235,16 +2267,21 @@ fn build_bodephase_polyline(
 fn build_groupdelay_polyline(
     frame: &crate::data::types::TransferFrame,
     view: &CellView,
-) -> Vec<[f32; 2]> {
+    coherence_k: f32,
+) -> Vec<[f32; 3]> {
     if frame.freqs.len() < 2 || frame.phase_deg.len() < 2 {
         return Vec::new();
     }
     let n = frame.freqs.len().min(frame.phase_deg.len());
     let unwrapped = unwrap_phase_deg(&frame.phase_deg[..n]);
+    let coh = &frame.coherence;
     // Forward-difference τ_g per bin gap. Place each value at the
     // midpoint frequency between consecutive bins so the curve
-    // doesn't visually lag.
-    let mut deriv: Vec<(f32, f32)> = Vec::with_capacity(n.saturating_sub(1));
+    // doesn't visually lag. Coherence per derivative point is the
+    // *minimum* of the two contributing bins — group delay only
+    // becomes trustworthy when *both* phase samples it depends on
+    // are coherent.
+    let mut deriv: Vec<(f32, f32, f32)> = Vec::with_capacity(n.saturating_sub(1));
     for i in 0..(n - 1) {
         let f0 = frame.freqs[i];
         let f1 = frame.freqs[i + 1];
@@ -2255,7 +2292,10 @@ fn build_groupdelay_polyline(
         let dphi = unwrapped[i + 1] - unwrapped[i];
         let tau_g_ms = -(1000.0 / 360.0) * dphi / df;
         let f_mid = 0.5 * (f0 + f1);
-        deriv.push((f_mid, tau_g_ms));
+        let c0 = coh.get(i).copied().unwrap_or(1.0);
+        let c1 = coh.get(i + 1).copied().unwrap_or(1.0);
+        let c_pair = c0.min(c1);
+        deriv.push((f_mid, tau_g_ms, c_pair));
     }
     if deriv.is_empty() {
         return Vec::new();
@@ -2269,8 +2309,8 @@ fn build_groupdelay_polyline(
     // is signed; max would cherry-pick the largest spike, biasing
     // visual interpretation). First-valid is good enough at the
     // typical bin density.
-    let mut col_val: Vec<Option<f32>> = vec![None; n_cols];
-    for (f, t) in &deriv {
+    let mut col_val: Vec<Option<(f32, f32)>> = vec![None; n_cols];
+    for (f, t, c) in &deriv {
         if !f.is_finite() || !t.is_finite() || *f < view.freq_min || *f > view.freq_max {
             continue;
         }
@@ -2279,19 +2319,20 @@ fn build_groupdelay_polyline(
             continue;
         }
         let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
-        col_val[col].get_or_insert(*t);
+        col_val[col].get_or_insert((*t, *c));
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for col in 0..n_cols {
-        let Some(t) = col_val[col] else {
+        let Some((t, c)) = col_val[col] else {
             prev = None;
             continue;
         };
         let x = (col as f32 + 0.5) / n_cols as f32;
         let n_y = ((t - view.db_min) / span_y).clamp(0.0, 1.0);
         let y = 0.05 + 0.9 * n_y;
-        let cur = [x, y];
+        let w = coherence_weight(c, coherence_k);
+        let cur = [x, y, w];
         if let Some(prev_p) = prev {
             pairs.push(prev_p);
             pairs.push(cur);
@@ -2315,7 +2356,8 @@ fn build_groupdelay_polyline(
 fn build_nyquist_polyline(
     frame: &crate::data::types::TransferFrame,
     amp: f32,
-) -> Vec<[f32; 2]> {
+    coherence_k: f32,
+) -> Vec<[f32; 3]> {
     if frame.re.is_empty() || frame.re.len() != frame.im.len() {
         return Vec::new();
     }
@@ -2323,15 +2365,17 @@ fn build_nyquist_polyline(
     // count than the trace itself, but still much rarer per pixel
     // than the moving curve, so the relative brightness reads as a
     // faint guide rather than competing with the signal trace).
-    // 64-vertex polygon ≈ 0.5° per segment — visually smooth.
+    // 64-vertex polygon ≈ 0.5° per segment — visually smooth. The
+    // reference always carries weight 1.0 — coherence weighting
+    // applies to the *measurement* trace, not the static guide.
     let mut pairs = Vec::with_capacity(frame.re.len() * 2 + 128);
     let unit_r = 0.45 * amp.min(1.0); // unit circle visible only when DUT < gain ≈ 1
     if unit_r > 0.01 {
         let n_circ = 64;
-        let mut prev_circ: Option<[f32; 2]> = None;
+        let mut prev_circ: Option<[f32; 3]> = None;
         for k in 0..=n_circ {
             let t = (k as f32 / n_circ as f32) * std::f32::consts::TAU;
-            let cur = [0.5 + unit_r * t.cos(), 0.5 + unit_r * t.sin()];
+            let cur = [0.5 + unit_r * t.cos(), 0.5 + unit_r * t.sin(), 1.0];
             if let Some(p) = prev_circ {
                 pairs.push(p);
                 pairs.push(cur);
@@ -2340,8 +2384,9 @@ fn build_nyquist_polyline(
         }
     }
     let scale = 0.45 * amp;
-    let mut prev: Option<[f32; 2]> = None;
-    for (r, i) in frame.re.iter().zip(frame.im.iter()) {
+    let coh = &frame.coherence;
+    let mut prev: Option<[f32; 3]> = None;
+    for (idx, (r, i)) in frame.re.iter().zip(frame.im.iter()).enumerate() {
         if !r.is_finite() || !i.is_finite() {
             prev = None;
             continue;
@@ -2351,16 +2396,20 @@ fn build_nyquist_polyline(
             prev = None;
             continue;
         }
-        let cur = [0.5 + scale * *r, 0.5 + scale * *i];
+        let x = 0.5 + scale * *r;
+        let y = 0.5 + scale * *i;
         // Clip to substrate viewport — bins where the auto-gain
         // hasn't yet caught up with a sudden DUT gain spike would
         // otherwise render at clamp boundaries and fragment the
         // trace (better to drop those bins than draw a misleading
         // edge artefact).
-        if !(0.0..=1.0).contains(&cur[0]) || !(0.0..=1.0).contains(&cur[1]) {
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
             prev = None;
             continue;
         }
+        let c = coh.get(idx).copied().unwrap_or(1.0);
+        let w = coherence_weight(c, coherence_k);
+        let cur = [x, y, w];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -2379,7 +2428,7 @@ fn build_nyquist_polyline(
 /// Faint reference baseline drawn at y = 0.5 so the user can see
 /// asymmetric / DC-biased IRs at a glance. Empty `samples` (cold
 /// start) yields an empty polyline.
-fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32; 2]> {
+fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32; 3]> {
     let n = frame.samples.len();
     if n < 2 {
         return Vec::new();
@@ -2387,11 +2436,14 @@ fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32;
     // Reference baseline: 16-segment line at y = 0.5 across the cell.
     // Drawn first; the substrate's per-deposit additive accumulation
     // means the IR trace overlaying it will dominate any pixel they
-    // share, but the baseline stays visible in flat regions.
+    // share, but the baseline stays visible in flat regions. IR is
+    // an IFFT of complex H, not a per-sample frequency-domain
+    // estimator, so per-sample γ² doesn't apply — every vertex
+    // deposits at full weight.
     let mut pairs = Vec::with_capacity(32 + n * 2);
-    let mut prev_base: Option<[f32; 2]> = None;
+    let mut prev_base: Option<[f32; 3]> = None;
     for k in 0..=16 {
-        let cur = [k as f32 / 16.0, 0.5];
+        let cur = [k as f32 / 16.0, 0.5, 1.0];
         if let Some(p) = prev_base {
             pairs.push(p);
             pairs.push(cur);
@@ -2399,7 +2451,7 @@ fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32;
         prev_base = Some(cur);
     }
     let denom = (n - 1) as f32;
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for (i, &s) in frame.samples.iter().enumerate() {
         if !s.is_finite() {
             prev = None;
@@ -2407,7 +2459,7 @@ fn build_ir_polyline(frame: &crate::data::types::IrFrame, amp: f32) -> Vec<[f32;
         }
         let x = i as f32 / denom;
         let y = (0.5 + 0.45 * amp * s).clamp(0.0, 1.0);
-        let cur = [x, y];
+        let cur = [x, y, 1.0];
         if let Some(p) = prev {
             pairs.push(p);
             pairs.push(cur);
@@ -2527,21 +2579,21 @@ fn build_goniometer_polyline(
     amp: f32,
     dt: f32,
     real: Option<(&[f32], &[f32])>,
-) -> Vec<[f32; 2]> {
+) -> Vec<[f32; 3]> {
     let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
-    let project = |l: f32, r: f32| -> [f32; 2] {
+    let project = |l: f32, r: f32| -> [f32; 3] {
         let (px, py) = if rotation_ms {
             ((l - r) * inv_sqrt2, (l + r) * inv_sqrt2)
         } else {
             (l, r)
         };
-        [0.5 + 0.45 * px, 0.5 + 0.45 * py]
+        [0.5 + 0.45 * px, 0.5 + 0.45 * py, 1.0]
     };
 
     if let Some((ls, rs)) = real {
         if !ls.is_empty() && ls.len() == rs.len() {
             let mut pairs = Vec::with_capacity(ls.len().saturating_sub(1) * 2);
-            let mut prev: Option<[f32; 2]> = None;
+            let mut prev: Option<[f32; 3]> = None;
             for (l, r) in ls.iter().zip(rs.iter()) {
                 let cur = project(amp * *l, amp * *r);
                 if let Some(p) = prev {
@@ -2562,7 +2614,7 @@ fn build_goniometer_polyline(
     let two_pi = std::f32::consts::TAU;
     let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
     let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for _ in 0..n {
         let l = amp * carrier_phase.sin();
         let r = amp * (*carrier_phase + *phase_offset).sin();
@@ -2599,17 +2651,17 @@ fn build_iotransfer_polyline(
     amp: f32,
     dt: f32,
     real: Option<(&[f32], &[f32])>,
-) -> Vec<[f32; 2]> {
-    let project = |x: f32, y: f32| -> [f32; 2] {
+) -> Vec<[f32; 3]> {
+    let project = |x: f32, y: f32| -> [f32; 3] {
         // Raw X/Y — no rotation. x = ref input, y = DUT output.
         // Perfect linear DUT puts the trace on the y=x diagonal.
-        [0.5 + 0.45 * x, 0.5 + 0.45 * y]
+        [0.5 + 0.45 * x, 0.5 + 0.45 * y, 1.0]
     };
 
     if let Some((ls, rs)) = real {
         if !ls.is_empty() && ls.len() == rs.len() {
             let mut pairs = Vec::with_capacity(ls.len().saturating_sub(1) * 2);
-            let mut prev: Option<[f32; 2]> = None;
+            let mut prev: Option<[f32; 3]> = None;
             for (l, r) in ls.iter().zip(rs.iter()) {
                 let cur = project(amp * *l, amp * *r);
                 if let Some(p) = prev {
@@ -2630,7 +2682,7 @@ fn build_iotransfer_polyline(
     let two_pi = std::f32::consts::TAU;
     let step_carrier = two_pi * EMBER_GONIO_FREQ / sample_rate;
     let step_offset = two_pi * EMBER_GONIO_PHASE_DRIFT_HZ / sample_rate;
-    let mut prev: Option<[f32; 2]> = None;
+    let mut prev: Option<[f32; 3]> = None;
     for _ in 0..n {
         let l = amp * carrier_phase.sin();
         let r = amp * (*carrier_phase + *phase_offset).sin();
@@ -2797,7 +2849,7 @@ mod tests {
         // pair count is always even and every emitted vertex must sit
         // inside the substrate viewport.
         assert!(pairs.len() % 2 == 0, "LineList vertices must be even");
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -2833,7 +2885,7 @@ mod tests {
         let pairs = build_goniometer_polyline(
             &mut pl, &mut pr, 48_000.0, false, EMBER_GONIO_AMP, 0.05, None,
         );
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -2855,7 +2907,7 @@ mod tests {
             Some((&l, &r)),
         );
         assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
-        for [x, _] in &pairs {
+        for [x, _, _] in &pairs {
             assert!(
                 (x - 0.5).abs() < 1e-5,
                 "L=R should project x ≈ 0.5, got {x}",
@@ -2923,7 +2975,7 @@ mod tests {
             Some((&l, &r)),
         );
         assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!(
                 (x - y).abs() < 1e-5,
                 "y=x diagonal expected; got ({x}, {y})",
@@ -2950,7 +3002,7 @@ mod tests {
         // (i.e. x > 0.5 + 0.45*0.5 = 0.725) and verify y is pinned
         // at 0.725 ± float tolerance.
         let mut saw_flat_top = false;
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             if *x > 0.725 + 1e-4 {
                 assert!(
                     (y - 0.725).abs() < 1e-4,
@@ -2973,7 +3025,7 @@ mod tests {
             None,
         );
         assert!(!pairs.is_empty(), "synthetic fallback should produce pairs");
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -3046,9 +3098,9 @@ mod tests {
         let mags: Vec<f32> = freqs.iter().map(|&f| 10.0 * (f / 1000.0).log10()).collect();
         let f = transfer_frame_lin_log_db(freqs, mags, vec![]);
         let v = view(20.0, 24_000.0);
-        let pairs = build_bodemag_polyline(&f, &v);
+        let pairs = build_bodemag_polyline(&f, &v, 0.0);
         assert!(!pairs.is_empty(), "expected non-empty polyline");
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -3070,9 +3122,9 @@ mod tests {
             db_max: 40.0,
             ..CellView::default()
         };
-        let pairs = build_bodemag_polyline(&f, &v);
+        let pairs = build_bodemag_polyline(&f, &v, 0.0);
         assert!(!pairs.is_empty(), "expected non-empty polyline");
-        for [_, y] in &pairs {
+        for [_, y, _] in &pairs {
             assert!(
                 (y - 0.5).abs() < 1e-4,
                 "0 dB should map to y = 0.5 in a (-40, 40) window; got {y}",
@@ -3100,7 +3152,7 @@ mod tests {
         let f = transfer_frame_lin_log_db(freqs, vec![], coh);
         let pairs = build_coherence_polyline(&f);
         assert!(!pairs.is_empty(), "expected non-empty polyline");
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -3111,7 +3163,7 @@ mod tests {
     fn bodemag_empty_frame_yields_empty_polyline() {
         let f = transfer_frame_lin_log_db(vec![], vec![], vec![]);
         let v = view(20.0, 24_000.0);
-        assert!(build_bodemag_polyline(&f, &v).is_empty());
+        assert!(build_bodemag_polyline(&f, &v, 0.0).is_empty());
     }
 
     #[test]
@@ -3182,9 +3234,9 @@ mod tests {
             db_max: 180.0,
             ..CellView::default()
         };
-        let pairs = build_bodephase_polyline(&f, &v);
+        let pairs = build_bodephase_polyline(&f, &v, 0.0);
         assert!(!pairs.is_empty());
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -3207,11 +3259,11 @@ mod tests {
             db_max: 10.0,
             ..CellView::default()
         };
-        let pairs = build_groupdelay_polyline(&frame, &v);
+        let pairs = build_groupdelay_polyline(&frame, &v, 0.0);
         assert!(!pairs.is_empty());
         // y < 0.5 means τ_g < midpoint (= 0 ms in this window) — i.e.
         // negative group delay, as expected from positive phase slope.
-        for [_, y] in &pairs {
+        for [_, y, _] in &pairs {
             assert!(
                 *y < 0.55,
                 "positive phase slope should give negative τ_g; y = {y}",
@@ -3232,9 +3284,9 @@ mod tests {
             db_max: 10.0,
             ..CellView::default()
         };
-        let pairs = build_groupdelay_polyline(&frame, &v);
+        let pairs = build_groupdelay_polyline(&frame, &v, 0.0);
         assert!(!pairs.is_empty());
-        for [_, y] in &pairs {
+        for [_, y, _] in &pairs {
             // 0 ms in (-10, +10) window → y = 0.5.
             assert!((y - 0.5).abs() < 1e-4, "expected y ≈ 0.5; got {y}");
         }
@@ -3264,14 +3316,14 @@ mod tests {
     fn bodephase_empty_frame_yields_empty_polyline() {
         let f = transfer_frame_with_phase(vec![], vec![]);
         let v = view(20.0, 24_000.0);
-        assert!(build_bodephase_polyline(&f, &v).is_empty());
+        assert!(build_bodephase_polyline(&f, &v, 0.0).is_empty());
     }
 
     #[test]
     fn groupdelay_empty_frame_yields_empty_polyline() {
         let f = transfer_frame_with_phase(vec![], vec![]);
         let v = view(20.0, 24_000.0);
-        assert!(build_groupdelay_polyline(&f, &v).is_empty());
+        assert!(build_groupdelay_polyline(&f, &v, 0.0).is_empty());
     }
 
     // ---- Phase 4 Nyquist tests ----
@@ -3301,7 +3353,7 @@ mod tests {
     #[test]
     fn nyquist_empty_re_im_yields_empty_polyline() {
         let f = transfer_frame_with_re_im(vec![100.0, 200.0], vec![], vec![]);
-        assert!(build_nyquist_polyline(&f, 1.0).is_empty());
+        assert!(build_nyquist_polyline(&f, 1.0, 0.0).is_empty());
     }
 
     /// Mismatched re/im lengths defensively yield empty (the daemon
@@ -3309,7 +3361,7 @@ mod tests {
     #[test]
     fn nyquist_mismatched_re_im_yields_empty() {
         let f = transfer_frame_with_re_im(vec![100.0, 200.0], vec![1.0, 0.5], vec![0.0]);
-        assert!(build_nyquist_polyline(&f, 1.0).is_empty());
+        assert!(build_nyquist_polyline(&f, 1.0, 0.0).is_empty());
     }
 
     /// Unity-gain real DUT (re ≈ 1, im ≈ 0) at amp = 1.0 places
@@ -3323,12 +3375,12 @@ mod tests {
         let im = vec![0.0; n];
         let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
         let f = transfer_frame_with_re_im(freqs, re, im);
-        let pairs = build_nyquist_polyline(&f, 1.0);
+        let pairs = build_nyquist_polyline(&f, 1.0, 0.0);
         assert!(!pairs.is_empty(), "expected non-empty Nyquist polyline");
         // Find the trace vertices (skip the unit-circle reference,
         // which is the first ~128 vertices). Any trace vertex sits
         // at (0.95, 0.5) for re=1, im=0 with amp=1.
-        let trace_pairs: Vec<&[f32; 2]> = pairs
+        let trace_pairs: Vec<&[f32; 3]> = pairs
             .iter()
             .filter(|p| (p[0] - 0.95).abs() < 1e-3 && (p[1] - 0.5).abs() < 1e-3)
             .collect();
@@ -3355,12 +3407,12 @@ mod tests {
             .collect();
         let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
         let f = transfer_frame_with_re_im(freqs, re, im);
-        let pairs = build_nyquist_polyline(&f, 1.0);
+        let pairs = build_nyquist_polyline(&f, 1.0, 0.0);
         assert!(!pairs.is_empty());
         // The unit-circle reference draws vertices in all 4 quadrants
         // — to isolate the trace, look for vertices in the upper-
         // right quadrant only.
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             if *x >= 0.5 && *y >= 0.5 {
                 let r2 = (x - 0.5).powi(2) + (y - 0.5).powi(2);
                 assert!(
@@ -3406,7 +3458,7 @@ mod tests {
     fn ir_flat_zero_traces_at_baseline() {
         let pairs = build_ir_polyline(&ir_frame(vec![0.0; 256]), 1.0);
         assert!(!pairs.is_empty());
-        for [_, y] in &pairs {
+        for [_, y, _] in &pairs {
             assert!(
                 (y - 0.5).abs() < 1e-5,
                 "expected y ≈ 0.5 (baseline); got {y}",
@@ -3425,7 +3477,7 @@ mod tests {
         // Deliberately oversized amp — clamps should still hold.
         let pairs = build_ir_polyline(&ir_frame(samples), 100.0);
         assert!(!pairs.is_empty());
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
         }
@@ -3471,11 +3523,203 @@ mod tests {
         let im = vec![0.0; n];
         let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
         let f = transfer_frame_with_re_im(freqs, re, im);
-        let pairs = build_nyquist_polyline(&f, 1.0);
+        let pairs = build_nyquist_polyline(&f, 1.0, 0.0);
         // Only the unit-circle reference should be present.
-        for [x, y] in &pairs {
+        for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
+        }
+    }
+
+    // ---- Coherence-weighting tests ----
+
+    /// `coherence_weight` core: k=0 short-circuits to 1.0 (off);
+    /// k>0 returns γ²^k clamped to [0, 1]. Non-finite γ² → 0.0
+    /// (defensive — corrupt frames don't brighten unexpectedly).
+    #[test]
+    fn coherence_weight_basic_table() {
+        // k=0: any γ² → 1.0 (weighting disabled).
+        assert_eq!(coherence_weight(0.0, 0.0), 1.0);
+        assert_eq!(coherence_weight(0.5, 0.0), 1.0);
+        assert_eq!(coherence_weight(1.0, 0.0), 1.0);
+        assert_eq!(coherence_weight(f32::NAN, 0.0), 1.0);
+        // k=1: γ² → γ² (linear pass-through).
+        assert!((coherence_weight(0.0, 1.0) - 0.0).abs() < 1e-6);
+        assert!((coherence_weight(0.5, 1.0) - 0.5).abs() < 1e-6);
+        assert!((coherence_weight(1.0, 1.0) - 1.0).abs() < 1e-6);
+        // k=2: γ² → γ²·γ² (canonical default).
+        assert!((coherence_weight(0.5, 2.0) - 0.25).abs() < 1e-6);
+        assert!((coherence_weight(1.0, 2.0) - 1.0).abs() < 1e-6);
+        // k=4: aggressive — γ²=0.5 → 0.0625.
+        assert!((coherence_weight(0.5, 4.0) - 0.0625).abs() < 1e-6);
+        // Non-finite coherence → 0 (don't deposit corrupt bins).
+        assert_eq!(coherence_weight(f32::NAN, 2.0), 0.0);
+        assert_eq!(coherence_weight(f32::INFINITY, 2.0), 0.0);
+        // Out-of-range γ² clamps to [0, 1] before exponentiation.
+        assert!((coherence_weight(1.5, 2.0) - 1.0).abs() < 1e-6);
+        assert!((coherence_weight(-0.3, 2.0) - 0.0).abs() < 1e-6);
+    }
+
+    /// BodeMag with k=2: vertices in a high-coherence column carry
+    /// weight ≈ 1.0; vertices in a low-coherence column carry
+    /// weight ≈ γ²^2. Verifies the per-column coherence is being
+    /// retained and propagated to the polyline weight.
+    #[test]
+    fn bodemag_weights_track_per_bin_coherence() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let mags = vec![0.0_f32; freqs.len()];
+        // Coherence sweep: low (0.2) below 1 kHz, high (0.95) above.
+        // Both halves get the same magnitude so the column-max bin
+        // is the coherence we expect to read out.
+        let coh: Vec<f32> = freqs
+            .iter()
+            .map(|&f| if f < 1000.0 { 0.2 } else { 0.95 })
+            .collect();
+        let f = transfer_frame_lin_log_db(freqs, mags, coh);
+        let v = view(20.0, 24_000.0);
+        let pairs = build_bodemag_polyline(&f, &v, 2.0);
+        assert!(!pairs.is_empty());
+        // Sample the leftmost (low-coherence) and rightmost
+        // (high-coherence) vertices and confirm their weights.
+        let first = pairs.first().unwrap();
+        let last = pairs.last().unwrap();
+        // Low-γ² half: weight ≈ 0.2² = 0.04.
+        assert!(
+            (first[2] - 0.04).abs() < 1e-3,
+            "low-γ² weight should be ≈ 0.04, got {}",
+            first[2],
+        );
+        // High-γ² half: weight ≈ 0.95² ≈ 0.9025.
+        assert!(
+            (last[2] - 0.9025).abs() < 1e-3,
+            "high-γ² weight should be ≈ 0.9025, got {}",
+            last[2],
+        );
+    }
+
+    /// BodeMag with k=0 (off): every vertex carries weight 1.0
+    /// regardless of underlying coherence — the weighting path is
+    /// fully bypassed.
+    #[test]
+    fn bodemag_k_zero_disables_weighting() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let mags = vec![0.0_f32; freqs.len()];
+        let coh = vec![0.05_f32; freqs.len()]; // very low γ²
+        let f = transfer_frame_lin_log_db(freqs, mags, coh);
+        let v = view(20.0, 24_000.0);
+        let pairs = build_bodemag_polyline(&f, &v, 0.0);
+        assert!(!pairs.is_empty());
+        for [_, _, w] in &pairs {
+            assert!((w - 1.0).abs() < 1e-6, "k=0 must yield w=1, got {w}");
+        }
+    }
+
+    /// Coherence view ignores the weighting knob entirely — gating
+    /// γ² on γ² would be circular. Every vertex keeps weight 1.0
+    /// even when the underlying γ² is at the floor.
+    #[test]
+    fn coherence_view_never_weights() {
+        let freqs = dense_freqs(2000, 20.0, 24_000.0);
+        let coh = vec![0.05_f32; freqs.len()];
+        let f = transfer_frame_lin_log_db(freqs, vec![], coh);
+        let pairs = build_coherence_polyline(&f);
+        assert!(!pairs.is_empty());
+        for [_, _, w] in &pairs {
+            assert!((w - 1.0).abs() < 1e-6, "coherence view must not weight, got {w}");
+        }
+    }
+
+    /// IR view: every vertex (baseline + trace) carries weight 1.0.
+    /// IR is an IFFT of complex H — there's no per-sample γ² to
+    /// gate against, so the knob doesn't apply here.
+    #[test]
+    fn ir_view_never_weights() {
+        let pairs = build_ir_polyline(&ir_frame(vec![1.0, 0.5, -0.3, 0.1, 0.0]), 0.4);
+        assert!(!pairs.is_empty());
+        for [_, _, w] in &pairs {
+            assert!((w - 1.0).abs() < 1e-6, "IR view must not weight, got {w}");
+        }
+    }
+
+    /// Nyquist with k=2: per-bin coherence drives per-vertex weight.
+    /// Constant unity-real DUT with coherence ramp 0 → 1 should map
+    /// to weight ramp 0 → 1 (k=2 squares it but the endpoints stay).
+    #[test]
+    fn nyquist_weights_track_per_bin_coherence() {
+        let n = 100;
+        let re = vec![1.0_f32; n];
+        let im = vec![0.0_f32; n];
+        let coh: Vec<f32> = (0..n).map(|i| i as f32 / (n - 1) as f32).collect();
+        let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
+        let mut f = transfer_frame_with_re_im(freqs, re, im);
+        f.coherence = coh;
+        let pairs = build_nyquist_polyline(&f, 1.0, 2.0);
+        assert!(!pairs.is_empty());
+        // Trace vertices land on (0.95, 0.5); reference unit-circle
+        // vertices are scattered. Filter to trace vertices and
+        // confirm their weights span from ~0 (low-γ² end) to ~1
+        // (high-γ² end).
+        let trace_weights: Vec<f32> = pairs
+            .iter()
+            .filter(|p| (p[0] - 0.95).abs() < 1e-3 && (p[1] - 0.5).abs() < 1e-3)
+            .map(|p| p[2])
+            .collect();
+        assert!(!trace_weights.is_empty());
+        let min_w = trace_weights.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_w = trace_weights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_w < 0.05, "low-γ² trace weight should be near 0, got {min_w}");
+        assert!(max_w > 0.95, "high-γ² trace weight should be near 1, got {max_w}");
+    }
+
+    /// Nyquist unit-circle reference always carries weight 1.0 —
+    /// the static guide must remain visible regardless of how the
+    /// measurement trace is being weighted. Trace placed at
+    /// re=0.5, im=0 (radius 0.1125 from centre at amp=0.5) so it
+    /// doesn't collide with the reference arc (radius 0.225).
+    #[test]
+    fn nyquist_unit_circle_reference_always_full_weight() {
+        let n = 50;
+        let re = vec![0.5_f32; n];
+        let im = vec![0.0_f32; n];
+        let coh = vec![0.0_f32; n]; // all bins low γ²
+        let freqs: Vec<f32> = (0..n).map(|i| 100.0 + i as f32 * 100.0).collect();
+        let mut f = transfer_frame_with_re_im(freqs, re, im);
+        f.coherence = coh;
+        let pairs = build_nyquist_polyline(&f, 0.5, 4.0);
+        assert!(!pairs.is_empty());
+        // The unit-circle reference traces an arc of radius 0.225
+        // (0.45 · amp = 0.45 · 0.5) around (0.5, 0.5). At least
+        // some such vertices must be present at full weight.
+        let circle_full: Vec<f32> = pairs
+            .iter()
+            .filter(|p| {
+                let dx = p[0] - 0.5;
+                let dy = p[1] - 0.5;
+                let r = (dx * dx + dy * dy).sqrt();
+                (r - 0.225).abs() < 1e-3
+            })
+            .map(|p| p[2])
+            .collect();
+        assert!(!circle_full.is_empty(), "expected unit-circle vertices");
+        for w in &circle_full {
+            assert!((w - 1.0).abs() < 1e-6, "circle ref weight must be 1, got {w}");
+        }
+        // And confirm the trace weights are at the floor (γ²=0,
+        // k=4 → 0) — this is the contrast that makes the
+        // reference-always-bright invariant matter visually.
+        let trace_weights: Vec<f32> = pairs
+            .iter()
+            .filter(|p| {
+                let dx = p[0] - 0.5;
+                let dy = p[1] - 0.5;
+                let r = (dx * dx + dy * dy).sqrt();
+                (r - 0.1125).abs() < 1e-3
+            })
+            .map(|p| p[2])
+            .collect();
+        assert!(!trace_weights.is_empty(), "expected trace vertices");
+        for w in &trace_weights {
+            assert!(*w < 1e-6, "γ²=0 trace weight should be ~0, got {w}");
         }
     }
 }

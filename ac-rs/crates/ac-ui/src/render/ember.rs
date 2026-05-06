@@ -245,15 +245,25 @@ impl EmberRenderer {
             cache: None,
         });
 
-        let point_attr = wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Float32x2,
-            offset: 0,
-            shader_location: 0,
-        };
+        // Vertex format: (x, y, w) — xy in cell-local [0,1], w is the per-vertex
+        // confidence weight (γ²^k for coherence-aware transfer views, 1.0 for
+        // views without a per-bin confidence signal).
+        let point_attrs = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 8,
+                shader_location: 1,
+            },
+        ];
         let point_layout = [wgpu::VertexBufferLayout {
-            array_stride: 8,
+            array_stride: 12,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: std::slice::from_ref(&point_attr),
+            attributes: &point_attrs,
         }];
 
         let deposit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -351,7 +361,7 @@ impl EmberRenderer {
 
         let point_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ember points"),
-            size:  (POINT_CAPACITY * 8) as u64,
+            size:  (POINT_CAPACITY * 12) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -414,9 +424,13 @@ impl EmberRenderer {
     /// `viewport` selects where `draw()` will land on the surface (in
     /// surface-normalised [0,1] coords; `(x,y)` = bottom-left, `(w,h)` = size).
     /// `line_pairs` is a flat LineList: every two consecutive vertices form
-    /// one line segment. The caller controls connectivity — emit a pair for
-    /// every connected segment, omit pairs where the polyline should break
-    /// (e.g. spectrum bins below the dB floor).
+    /// one line segment. Each vertex is `[x, y, w]` where `w ∈ [0, 1]` is
+    /// the per-vertex confidence weight applied multiplicatively to the
+    /// global intensity (γ²^k for coherence-aware transfer views, 1.0 for
+    /// views without a per-bin confidence signal). The caller controls
+    /// connectivity — emit a pair for every connected segment, omit pairs
+    /// where the polyline should break (e.g. spectrum bins below the dB
+    /// floor).
     /// `scroll_dx_norm` ∈ [0,1] shifts the existing substrate leftward by
     /// that fraction of its width before depositing — pass 0.0 for a static
     /// view (e.g. spectrum), `dt / window_s` for a strip-chart scope.
@@ -426,7 +440,7 @@ impl EmberRenderer {
         queue:  &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         viewport: [f32; 4],
-        line_pairs: &[[f32; 2]],
+        line_pairs: &[[f32; 3]],
         scroll_dx_norm: f32,
         dt: f32,
     ) {

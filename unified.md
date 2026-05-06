@@ -1070,11 +1070,66 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
   downsample; will land alongside an "extended bins" toggle on
   the daemon worker.
 
+- `(2026-05-06) Per-vertex coherence weighting for transfer
+  views.` — Resolves the "fuzzy spiky sun" problem first observed
+  on Nyquist with stereo mics on uncorrelated music: γ² is near
+  zero across most bins in that scenario, so H is meaningless
+  but the substrate dutifully accumulates a noise-dominated
+  scatter into a saturated core with random radial spikes. The
+  fix: each polyline vertex now carries a per-bin confidence
+  weight `w = γ²^k` (clamped to [0,1]); deposit shader multiplies
+  the global intensity by `w`. Bright = trustworthy, dim = noisy
+  — no more equal-weight rendering of garbage and signal. Soft
+  weighting rather than a hard threshold so there's no
+  discontinuity to tune and the substrate's natural decay
+  finishes the job. Applies to BodeMag, BodePhase, GroupDelay,
+  Nyquist; Coherence view excluded (gating γ² on γ² is
+  circular), IR view excluded (no per-sample γ² — IFFT collapses
+  the bin axis). Static reference geometry (Nyquist unit
+  circle, IR baseline) always weight = 1.0.
+
 ---
 
 ## 11. [STATUS] Progress log
 
 Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
+
+- `(2026-05-06) — Coherence-weighted ember deposition.` — Soft
+  per-vertex confidence weighting via γ²^k. Vertex format
+  `[f32; 2] → [f32; 3]` (x, y, w); deposit shader multiplies
+  intensity by per-vertex weight. New `coherence_weight(γ², k)`
+  helper short-circuits to 1.0 when k=0 (off) and clamps γ² to
+  [0,1] before exponentiation; non-finite γ² → 0 (defensive).
+  Per-builder coherence handling:
+  - **BodeMag**: column-aggregator now tracks the γ² of the bin
+    that won the max (parallel to the value).
+  - **BodePhase**: same parallel tracking through the
+    first-valid aggregator.
+  - **GroupDelay**: per-derivative coherence is `min(γ²[i],
+    γ²[i+1])` — the derivative is only as trustworthy as its
+    weakest input phase.
+  - **Nyquist**: per-bin γ² direct; unit-circle reference
+    always w = 1.0.
+  - **Coherence** + **IR**: w = 1.0 always (no meaningful γ²
+    to gate against).
+  - **Scope / SpectrumEmber / Goniometer / IoTransfer**:
+    w = 1.0 always (no per-bin coherence in their data).
+  New App field `ember_coherence_k` (default 2.0); persisted in
+  ui.json (additive serde default — old configs migrate
+  silently); `K` keybind cycles {0, 1, 2, 4} with notify
+  feedback. 8 new tests: `coherence_weight` truth table,
+  BodeMag weights track γ², BodeMag k=0 disables weighting,
+  Coherence/IR views never weight, Nyquist weights track γ²,
+  Nyquist unit-circle reference always full weight, persist
+  round-trip for k, missing-field migration default. 645 →
+  653 workspace tests passing (+8 ac-ui).
+  Visual: open Nyquist view with two-mic music input. Before:
+  saturated white core + radial spike haze (everything equal-
+  weight). After (default k=2): trace concentrates on
+  high-coherence bins (typically room modes, narrow tonal
+  features); low-γ² bins fade to invisibility through the
+  weighted deposition + substrate decay. Press `K` to cycle
+  off/k=1/k=2/k=4 and watch the noise floor lift or drop.
 
 - `(2026-04-30) Initial draft of unified.md.` — Document created,
   current state inventoried against ac-rs codebase, view catalog

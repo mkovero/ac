@@ -327,6 +327,15 @@ pub struct App {
     /// adjust geometrically. Lower = faster fade (more transient feel);
     /// higher = longer trails (more diff-friendly). Default 1.0.
     pub(super) ember_tau_p_scale: f32,
+    /// Coherence-weighting sharpness for transfer-derived ember views
+    /// (BodeMag, BodePhase, GroupDelay, Nyquist). Per-bin deposit
+    /// intensity is multiplied by `γ²^k` so noisy bins glow dim and
+    /// trustworthy bins glow bright. `K` cycles {0, 1, 2, 4}; 0 disables
+    /// weighting (every bin at full intensity). Coherence and IR views
+    /// are always rendered at k=0 — Coherence would self-extinguish,
+    /// IR has no per-sample γ². Default 2.0 (moderate dimming of low-γ²
+    /// fuzz; full-trust bins still bright).
+    pub(super) ember_coherence_k: f32,
     /// Running peak of the (L, R) real-audio source for the
     /// Goniometer / PhaseScope3D auto-gain. Updated at dispatch from
     /// each frame's max(|L|, |R|) and decayed slowly so transient
@@ -505,6 +514,7 @@ impl App {
         let resolved_intensity = persisted.ember_intensity_scale;
         let resolved_tau_p = persisted.ember_tau_p_scale;
         let resolved_gonio_rotation = persisted.ember_gonio_rotation_ms;
+        let resolved_coherence_k = persisted.ember_coherence_k;
         // Capture the persisted fullscreen flag for init_graphics to
         // apply once the window exists (winit doesn't allow setting
         // fullscreen before creation).
@@ -589,6 +599,7 @@ impl App {
             ember_gonio_rotation_ms: resolved_gonio_rotation,
             ember_intensity_scale: resolved_intensity,
             ember_tau_p_scale: resolved_tau_p,
+            ember_coherence_k: resolved_coherence_k,
             ember_stereo_peak: 0.5,
             egui_ctx: egui::Context::default(),
             egui_state: None,
@@ -664,6 +675,7 @@ impl App {
             ember_intensity_scale:   self.ember_intensity_scale,
             ember_tau_p_scale:       self.ember_tau_p_scale,
             ember_gonio_rotation_ms: self.ember_gonio_rotation_ms,
+            ember_coherence_k:       self.ember_coherence_k,
             fullscreen,
         }
     }
