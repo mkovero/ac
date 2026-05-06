@@ -19,13 +19,21 @@ use super::helpers::{
 };
 use super::App;
 
-/// Slots in the canonical W-cycle. Limited to the 9 ember-substrate views
-/// (RC-4, plan §1) — the legacy Spectrum / Waterfall / Scope views are
-/// still reachable via `--view` but no longer cycle, so they are *not*
-/// represented here.
+/// Slots in the Tab cycle. The cycle is *active-channel-typed*:
+///
+/// - On a real input channel: `SpectrumEmber` → `Waterfall` (FFT) →
+///   `Cwt` (Morlet waterfall) → `SpectrumEmber`. CQT / Reassigned
+///   waterfalls remain reachable only via `--view waterfall` plus a
+///   manual `set_analysis_mode` — kept off the cycle to keep it short.
+/// - On a virtual transfer channel: the 9 ember pair-derived slots
+///   (`SpectrumEmber` + the 8 transfer / trajectory views).
 #[derive(Copy, Clone, PartialEq)]
 enum WSlot {
     SpectrumEmber,
+    /// Waterfall view, FFT analysis mode. Real channels only.
+    Waterfall,
+    /// Waterfall view, Morlet CWT analysis mode. Real channels only.
+    Cwt,
     Goniometer,
     IoTransfer,
     BodeMag,
@@ -151,19 +159,21 @@ impl App {
         self.selection_order.clear();
     }
 
-    /// Step through the ember-substrate views forward (or backward).
-    /// The cycle is *active-channel-typed*:
+    /// Step through the Tab views forward (or backward). The cycle is
+    /// *active-channel-typed*:
     ///
-    /// - Active on a real input channel → only `SpectrumEmber` makes
-    ///   sense. The 8 other views all paint a transfer / stereo pair,
-    ///   which would silently swap the user away from the channel they
-    ///   explicitly picked. Tab on a real channel stays on
-    ///   SpectrumEmber and surfaces the matrix→click-virtual-cell
-    ///   workflow hint.
-    /// - Active on a virtual transfer channel → full 9-slot cycle.
-    ///   Each transfer / trajectory view paints the pair behind that
-    ///   virtual channel via `resolve_transfer_pair_for_active`.
+    /// - Active on a real input channel → 3-slot cycle: SpectrumEmber
+    ///   → Waterfall (FFT) → Cwt (Morlet waterfall) → SpectrumEmber.
+    ///   The trajectory / transfer views are excluded here — they all
+    ///   paint a stereo or transfer pair, which would silently swap the
+    ///   user away from the channel they explicitly picked.
+    /// - Active on a virtual transfer channel → 9-slot cycle of the
+    ///   ember pair-derived views. Each transfer / trajectory view
+    ///   paints the pair behind that virtual channel via
+    ///   `resolve_transfer_pair_for_active`.
     ///
+    /// CQT and Reassigned waterfall sub-modes stay reachable only via
+    /// `--view waterfall --mode <mode>` to keep the cycle short.
     /// Shared by Tab / Shift+Tab.
     fn cycle_ember_view(&mut self, forward: bool) {
         let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
@@ -181,6 +191,8 @@ impl App {
                     Some(WSlot::GroupDelay)    => WSlot::Nyquist,
                     Some(WSlot::Nyquist)       => WSlot::Ir,
                     Some(WSlot::Ir)            => WSlot::SpectrumEmber,
+                    Some(WSlot::Waterfall) | Some(WSlot::Cwt)
+                                               => WSlot::SpectrumEmber,
                     None                       => WSlot::SpectrumEmber,
                 }
             } else {
@@ -194,22 +206,33 @@ impl App {
                     Some(WSlot::GroupDelay)    => WSlot::BodePhase,
                     Some(WSlot::Nyquist)       => WSlot::GroupDelay,
                     Some(WSlot::Ir)            => WSlot::Nyquist,
+                    Some(WSlot::Waterfall) | Some(WSlot::Cwt)
+                                               => WSlot::SpectrumEmber,
                     None                       => WSlot::SpectrumEmber,
                 }
             }
-        } else if matches!(self.current_w_slot(), Some(WSlot::SpectrumEmber)) {
-            // Already on the only sensible view for a real channel.
-            // Hint at the discovery path: G → click a transfer cell.
-            self.notify("on real channel — G → click a transfer cell for more views");
-            return;
+        } else if forward {
+            match self.current_w_slot() {
+                Some(WSlot::SpectrumEmber) => WSlot::Waterfall,
+                Some(WSlot::Waterfall)     => WSlot::Cwt,
+                Some(WSlot::Cwt)           => WSlot::SpectrumEmber,
+                // Coming from a transfer view whose pair was just
+                // unregistered (or `--view <transfer>` startup without
+                // a pair) — drop to SpectrumEmber.
+                _                          => WSlot::SpectrumEmber,
+            }
         } else {
-            // On a real channel but currently displaying a transfer
-            // view (probably arrived via `--view <transfer>` startup or
-            // the active channel was just reset). Drop to SpectrumEmber.
-            WSlot::SpectrumEmber
+            match self.current_w_slot() {
+                Some(WSlot::SpectrumEmber) => WSlot::Cwt,
+                Some(WSlot::Waterfall)     => WSlot::SpectrumEmber,
+                Some(WSlot::Cwt)           => WSlot::Waterfall,
+                _                          => WSlot::SpectrumEmber,
+            }
         };
         let (layout, view_mode, mode, label) = match next {
             WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),
+            WSlot::Waterfall     => (LayoutMode::Single, ViewMode::Waterfall,     "fft", "view: waterfall (fft)"),
+            WSlot::Cwt           => (LayoutMode::Single, ViewMode::Waterfall,     "cwt", "view: waterfall (cwt)"),
             WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft", "view: goniometer (ember)"),
             WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft", "view: iotransfer (ember)"),
             WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft", "view: bode mag (ember)"),
@@ -225,6 +248,20 @@ impl App {
         let prev_view = self.config.view_mode;
         self.config.layout = layout;
         self.config.view_mode = view_mode;
+        // Entering Waterfall view (FFT or CWT): wipe the history texture
+        // so old rows from the previous analysis source don't bleed
+        // into the new one (the waterfall renderer accumulates rows
+        // over time; switching FFT ↔ CWT changes the bin axis).
+        if matches!(view_mode, ViewMode::Waterfall) {
+            for init in &mut self.waterfall_inited {
+                *init = false;
+            }
+            if let (Some(ctx), Some(wf)) =
+                (self.render_ctx.as_ref(), self.waterfall.as_mut())
+            {
+                wf.clear_history(&ctx.queue);
+            }
+        }
         let prev_default = crate::theme::default_db_window_for_view(prev_view);
         let next_default = crate::theme::default_db_window_for_view(view_mode);
         if prev_default != next_default {
@@ -712,17 +749,23 @@ impl App {
         )
     }
 
-    /// Map the current view state onto its W-cycle slot. Hidden views
-    /// (`Spectrum`, `Waterfall`, `Scope`) and non-Single layouts return
-    /// `None` — the W-cycle treats `None` as "jump to SpectrumEmber" so
+    /// Map the current view state onto its Tab-cycle slot. Hidden /
+    /// out-of-cycle views (`Spectrum`, `Scope`, plus the CQT and
+    /// Reassigned waterfall sub-modes) and non-Single layouts return
+    /// `None` — the cycle treats `None` as "jump to SpectrumEmber" so
     /// landing is deterministic even if the user opened the UI via
-    /// `--view waterfall` or similar.
+    /// `--view waterfall --mode reassigned` or similar.
     fn current_w_slot(&self) -> Option<WSlot> {
         if !matches!(self.config.layout, LayoutMode::Single) {
             return None;
         }
         match self.config.view_mode {
             ViewMode::SpectrumEmber => Some(WSlot::SpectrumEmber),
+            ViewMode::Waterfall => match self.analysis_mode.as_str() {
+                "fft" => Some(WSlot::Waterfall),
+                "cwt" => Some(WSlot::Cwt),
+                _     => None,
+            },
             ViewMode::Goniometer    => Some(WSlot::Goniometer),
             ViewMode::IoTransfer    => Some(WSlot::IoTransfer),
             ViewMode::BodeMag       => Some(WSlot::BodeMag),
@@ -732,7 +775,6 @@ impl App {
             ViewMode::Nyquist       => Some(WSlot::Nyquist),
             ViewMode::Ir            => Some(WSlot::Ir),
             ViewMode::Spectrum
-            | ViewMode::Waterfall
             | ViewMode::Scope => None,
         }
     }
@@ -954,14 +996,16 @@ impl App {
                 self.show_timing = !self.show_timing;
                 self.notify(if self.show_timing { "timing on" } else { "timing off" });
             }
-            // Snap to the matrix overview (Spectrum + Grid) from any view.
-            // Pair with left-click on a cell to pick a different channel:
-            // matrix → click → Single on that channel → W cycles ember
-            // views from there. Always available; no-op when already in
-            // matrix view so trackpad bumps don't stomp cell axes.
+            // Snap to the ember matrix overview (SpectrumEmber + Grid)
+            // from any view. The legacy Spectrum + Grid line plot is
+            // reachable only via `--view spectrum` for empirical work
+            // on the legacy renderer. Pair with left-click on a cell to
+            // pick a channel: matrix → click → Single+SpectrumEmber on
+            // that channel → Tab cycles SpectrumEmber → Waterfall (FFT)
+            // → Waterfall (CWT) from there.
             KeyCode::KeyG => {
                 let prev_view = self.config.view_mode;
-                let already_matrix = matches!(prev_view, ViewMode::Spectrum)
+                let already_matrix = matches!(prev_view, ViewMode::SpectrumEmber)
                     && matches!(self.config.layout, LayoutMode::Grid);
                 if already_matrix {
                     return;
@@ -970,10 +1014,10 @@ impl App {
                     // Daemon refused FFT — stay put so a retry is meaningful.
                     return;
                 }
-                self.config.view_mode = ViewMode::Spectrum;
+                self.config.view_mode = ViewMode::SpectrumEmber;
                 self.config.layout = LayoutMode::Grid;
                 let prev_default = crate::theme::default_db_window_for_view(prev_view);
-                let next_default = crate::theme::default_db_window_for_view(ViewMode::Spectrum);
+                let next_default = crate::theme::default_db_window_for_view(ViewMode::SpectrumEmber);
                 if prev_default != next_default {
                     for view in self.cell_views.iter_mut() {
                         view.db_min = next_default.0;

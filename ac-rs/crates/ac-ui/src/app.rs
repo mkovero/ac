@@ -529,8 +529,18 @@ impl App {
         // apply once the window exists (winit doesn't allow setting
         // fullscreen before creation).
         let pending_fullscreen = if persisted.fullscreen { Some(true) } else { None };
+        // Layout picks: sweep is forced; Spectrum / Waterfall (legacy
+        // line + colormap) → Grid (per-channel matrix); other ember
+        // views → Single (one cell). SpectrumEmber is a special case:
+        // explicit `--view spectrum_ember` means the user wants a
+        // single ember channel (Single), but the default landing
+        // (no `--view`) is the ember matrix (Grid+SpectrumEmber).
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
+        } else if matches!(resolved_view, ViewMode::SpectrumEmber)
+            && !init.initial_view_via_cli
+        {
+            LayoutMode::Grid
         } else if matches!(
             resolved_view,
             ViewMode::Scope

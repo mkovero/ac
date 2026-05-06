@@ -216,7 +216,11 @@ impl Args {
             rate: 10.0,
             output_dir: default_output_dir(),
             benchmark: None,
-            view: ViewMode::Spectrum,
+            // Default landing is the ember matrix (SpectrumEmber +
+            // Grid; `app.rs` picks the Grid layout for SpectrumEmber
+            // when no `--view` was passed). Legacy Spectrum + Grid is
+            // still reachable via `--view spectrum`.
+            view: ViewMode::SpectrumEmber,
             view_set_via_cli: false,
             no_persist: false,
             mode: None,
@@ -362,7 +366,7 @@ Keys (full list in-app: press h):\n  \
   s / f / d        screenshot / fullscreen / timing overlay\n  \
   Enter            freeze\n  \
   Tab / Sh+Tab     cycle ember view forward / back (page in Grid)\n  \
-  g                matrix overview (pick channel by click)\n  \
+  g                ember matrix overview (pick channel by click)\n  \
   c / Space        toggle channel select (hovered cell)\n  \
   Shift+C / t      compare selected / add virtual transfer\n  \
   p / m            peak / min hold\n  \

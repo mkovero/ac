@@ -82,8 +82,8 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle ember views forward / backward. **On a real input channel**: only SpectrumEmber — pressing Tab on it surfaces the matrix → click-virtual-cell discovery hint, since the other 8 views all paint a transfer/stereo pair and would jump away from the picked channel. **On a virtual transfer channel**: full 9-slot cycle (SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber). In Grid layout with multiple pages, Tab pages instead of cycling. Hidden views (Spectrum / Waterfall / Scope) reachable via `--view <name>` only. |
-| `G` | Snap to matrix overview (Spectrum + Grid) from any view — left-click a cell to zoom into Single+Spectrum on that channel; W cycles ember views from there. |
+| `Tab` / `Shift+Tab` | Cycle views forward / backward. **On a real input channel**: 3-slot cycle SpectrumEmber → Waterfall (FFT) → Waterfall (CWT) → SpectrumEmber. CQT and Reassigned waterfalls reachable only via `--view waterfall --mode <mode>`. **On a virtual transfer channel**: 9-slot cycle of the ember pair-derived views (SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber). In Grid layout with multiple pages, Tab pages instead of cycling. Hidden views (Spectrum, Scope) reachable via `--view <name>` only. |
+| `G` | Snap to the ember matrix (SpectrumEmber + Grid) from any view — also the default landing for `ac monitor`. Left-click a cell to zoom into Single+SpectrumEmber on that channel; Tab cycles SpectrumEmber → Waterfall → CWT from there. Legacy Spectrum + Grid line-plot matrix is reachable only via `--view spectrum`. |
 | `C` / `Space` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
 | `Shift+C` | Compare selected channels in one rect (needs ≥ 1 selection from `C`) |
 | Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |

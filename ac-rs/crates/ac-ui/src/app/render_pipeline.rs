@@ -1253,25 +1253,74 @@ impl App {
                     );
                 }
                 ViewMode::SpectrumEmber => {
-                    let active = self.config.active_channel;
-                    let view = self.cell_views.get(active).copied().unwrap_or_default();
-                    // Read from the local `frames` copy, not self.last_frames
-                    // — by this point in redraw it carries the daemon's
-                    // weighting / time integration AND the UI-side
-                    // fractional-octave smoothing applied at line 188 above.
-                    // self.last_frames is the un-smoothed source.
-                    let polyline = frames
-                        .get(active)
-                        .and_then(|f| f.as_ref())
-                        .filter(|f| !f.spectrum.is_empty())
-                        .map(|f| build_spectrum_polyline(f, &view))
-                        .unwrap_or_default();
+                    // Single layout (default): paint the active channel
+                    // across the full canvas. Grid layout: paint every
+                    // visible cell's channel into its own sub-rect by
+                    // transforming each per-cell polyline from cell-
+                    // local [0,1] to canvas-space [cell.x..cell.x+w] /
+                    // [cell.y..cell.y+h], then concatenate. One
+                    // `ember.advance` covers the whole grid in a single
+                    // decay+deposit pass — multiple advance calls would
+                    // each decay the substrate and over-fade.
+                    //
+                    // Read from the local `frames` copy, not
+                    // `self.last_frames` — by this point in redraw it
+                    // carries the daemon's weighting / time integration
+                    // AND the UI-side fractional-octave smoothing
+                    // applied earlier in this method.
+                    let polyline: Vec<[f32; 3]> =
+                        if matches!(self.config.layout, LayoutMode::Grid) {
+                            let mut combined = Vec::new();
+                            for cell in &cells {
+                                // Skip virtual transfer cells — their
+                                // ember rendering is pair-keyed, not
+                                // per-channel-spectrum.
+                                if cell.channel >= n_real {
+                                    continue;
+                                }
+                                let view = self
+                                    .cell_views
+                                    .get(cell.channel)
+                                    .copied()
+                                    .unwrap_or_default();
+                                let frame = match frames
+                                    .get(cell.channel)
+                                    .and_then(|f| f.as_ref())
+                                {
+                                    Some(f) if !f.spectrum.is_empty() => f,
+                                    _ => continue,
+                                };
+                                let local = build_spectrum_polyline(frame, &view);
+                                combined.reserve(local.len());
+                                for [x, y, w] in local.iter() {
+                                    combined.push([
+                                        cell.x + x * cell.w,
+                                        cell.y + y * cell.h,
+                                        *w,
+                                    ]);
+                                }
+                            }
+                            combined
+                        } else {
+                            let active = self.config.active_channel;
+                            let view = self
+                                .cell_views
+                                .get(active)
+                                .copied()
+                                .unwrap_or_default();
+                            frames
+                                .get(active)
+                                .and_then(|f| f.as_ref())
+                                .filter(|f| !f.spectrum.is_empty())
+                                .map(|f| build_spectrum_polyline(f, &view))
+                                .unwrap_or_default()
+                        };
                     // tau_p 1.2 s — short enough that an old peak's
                     // afterglow is gone in ~3 s, fast enough to keep up
-                    // with sweeping or moving sources. The mirrored-envelope
-                    // polyline doubles the per-frame deposit count vs a
-                    // single trace, so intensity already nets out about
-                    // right at 0.003.
+                    // with sweeping or moving sources. The mirrored-
+                    // envelope polyline doubles the per-frame deposit
+                    // count vs a single trace, so intensity already
+                    // nets out about right at 0.003.
                     ember.set_tau_p(1.2 * self.ember_tau_p_scale);
                     ember.set_intensity(0.003 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
