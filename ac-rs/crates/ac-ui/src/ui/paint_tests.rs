@@ -134,6 +134,7 @@ fn overlay_shows_cursor_readout_when_hovering() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -183,6 +184,7 @@ fn overlay_hides_footer_when_not_hovering() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -230,6 +232,7 @@ fn overlay_shows_dbspl_when_spl_calibrated() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -272,6 +275,7 @@ fn overlay_shows_dbu_when_calibrated() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -312,6 +316,7 @@ fn overlay_shows_clip_when_clipping() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -348,6 +353,7 @@ fn overlay_no_clip_when_not_clipping() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -387,6 +393,7 @@ fn overlay_shows_frozen() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -424,6 +431,7 @@ fn overlay_shows_connected() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -459,6 +467,7 @@ fn overlay_shows_disconnected() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -505,6 +514,7 @@ fn overlay_shows_hover_db_readout() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -548,6 +558,7 @@ fn overlay_shows_notification() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -586,6 +597,7 @@ fn overlay_shows_sample_rate() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -628,6 +640,7 @@ fn overlay_shows_time_fast_tag() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -665,6 +678,7 @@ fn overlay_shows_band_weighting_tag() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -710,6 +724,7 @@ fn overlay_shows_loudness_strip_with_r128_pass() {
         }),
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -761,6 +776,7 @@ fn overlay_r128_fail_tag_when_far_off_target() {
         }),
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);
@@ -805,6 +821,7 @@ fn overlay_shows_leq_duration() {
         loudness: None,
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
+        keytips: &[],
     };
 
     let texts = run_overlay(input);

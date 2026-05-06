@@ -805,10 +805,19 @@ impl App {
         let selected_snap = self.selected.clone();
         let virtual_pairs_snap = self.virtual_render_pairs.clone();
         let peak_hold_enabled_snap = self.peak_hold_enabled;
+        let min_hold_enabled_snap = self.min_hold_enabled;
         let active_palette_snap = waterfall.active_palette();
         let smoothing_snap = self.smoothing_frac;
         let ioct_bpo_snap = self.ioct_bpo;
         let band_weighting_snap = self.band_weighting.overlay_tag();
+        // Plain-enum snapshots for the bottom keytip strip (RC-8). The
+        // overlay-tag forms above are display-only; the enum versions
+        // feed `keytips_for` so chip labels can show "off" / "A" /
+        // "fast" etc. without re-deriving them from a string.
+        let band_weighting_enum_snap = self.band_weighting;
+        let time_integ_enum_snap = self.time_integration;
+        let coherence_k_snap = self.ember_coherence_k;
+        let goniometer_ms_snap = self.ember_gonio_rotation_ms;
         // Pull the loudness readout for the currently active channel.
         // Hover-targeted focus is a future refinement — the active
         // channel is the one the UI is already centred on.
@@ -1088,6 +1097,21 @@ impl App {
                     }
                 }
             }
+            // Bottom keytip strip — RC-8. Built per-frame off the
+            // snapshot so the chip state suffix (e.g. `weighting:Z`,
+            // `smooth:1/6`) reflects the current view without coupling
+            // the overlay layer to App.
+            let keytip_state = crate::ui::keytips::KeytipState {
+                view: config_snap.view_mode,
+                band_weighting: band_weighting_enum_snap,
+                time_integ: time_integ_enum_snap,
+                smoothing_frac: smoothing_snap,
+                peak_hold: peak_hold_enabled_snap,
+                min_hold: min_hold_enabled_snap,
+                coherence_k: coherence_k_snap,
+                goniometer_ms: goniometer_ms_snap,
+            };
+            let keytips = crate::ui::keytips::keytips_for(&keytip_state);
             overlay::draw(
                 ui_ctx,
                 OverlayInput {
@@ -1113,6 +1137,7 @@ impl App {
                     loudness: loudness_snap,
                     gonio_state: gonio_state_snap,
                     bode_pair: bode_pair_snap,
+                    keytips: &keytips,
                 },
             );
         });

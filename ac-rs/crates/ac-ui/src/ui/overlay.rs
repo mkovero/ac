@@ -8,6 +8,7 @@ use crate::data::types::{
 use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
 use crate::ui::fmt::format_hz;
+use crate::ui::keytips::KeytipChip;
 use crate::ui::stats::StatsSnapshot;
 
 #[derive(Clone)]
@@ -118,6 +119,11 @@ pub struct OverlayInput<'a> {
     /// Computed at the dispatch site each render frame; defaults to
     /// `NoAudio` for non-trajectory views.
     pub gonio_state: StereoStatus,
+    /// Bottom keytip strip — RC-8, plan §4. The 3–6 contextual chips
+    /// for the current view plus the universal `H help / S screenshot
+    /// / Esc quit`. Built by `crate::ui::keytips::keytips_for` against
+    /// the live state snapshot at render-pipeline time.
+    pub keytips: &'a [KeytipChip],
 }
 
 /// Format the goniometer status line. `view_label` is the short view
@@ -513,8 +519,14 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     frame.meta.dbu_offset_db,
                     frame.meta.spl_offset_db,
                 );
+                // Hover sits one line above the keytip strip (RC-8).
+                // The strip owns `bottom - 6`, so hover lifts up by
+                // STATUS_PX + 4 px breathing room.
                 painter.text(
-                    Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+                    Pos2::new(
+                        screen.left() + 8.0,
+                        screen.bottom() - 6.0 - theme::STATUS_PX - 4.0,
+                    ),
                     Align2::LEFT_BOTTOM,
                     text,
                     FontId::monospace(theme::READOUT_PX),
@@ -522,6 +534,21 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 );
             }
         }
+    }
+
+    // Bottom keytip strip — RC-8, plan §4. Painted before the connected
+    // indicator so the right-aligned indicator overlays the strip's tail
+    // (the strip is left-aligned, indicator is right-aligned, no overlap
+    // in practice unless the strip is unusually long).
+    if !input.keytips.is_empty() {
+        let line = crate::ui::keytips::format_strip(input.keytips);
+        painter.text(
+            Pos2::new(screen.left() + 8.0, screen.bottom() - 6.0),
+            Align2::LEFT_BOTTOM,
+            line,
+            FontId::monospace(theme::STATUS_PX),
+            text_color,
+        );
     }
 
     let conn_label = if input.connected {
