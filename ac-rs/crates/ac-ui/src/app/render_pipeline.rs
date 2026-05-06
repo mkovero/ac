@@ -1292,10 +1292,21 @@ impl App {
                                 };
                                 let local = build_spectrum_polyline(frame, &view);
                                 combined.reserve(local.len());
+                                // The ember substrate inverts y between
+                                // deposit and display: deposit y=0 ends
+                                // up at the top of the screen, y=1 at
+                                // the bottom (NDC + wgpu viewport
+                                // convention; verified by tracing the
+                                // deposit / display shaders). Single-
+                                // cell rendering doesn't notice because
+                                // the mirror envelope is vertically
+                                // symmetric, but per-cell positions on
+                                // the canvas need the flip applied so
+                                // top-row cells display at screen top.
                                 for [x, y, w] in local.iter() {
                                     combined.push([
                                         cell.x + x * cell.w,
-                                        cell.y + y * cell.h,
+                                        1.0 - cell.y - y * cell.h,
                                         *w,
                                     ]);
                                 }
