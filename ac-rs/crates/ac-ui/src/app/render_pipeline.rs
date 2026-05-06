@@ -210,11 +210,20 @@ impl App {
         // knows the visible set; reuse it for both gating and the
         // upload-building loop further down. (#111)
         let n_channels = frames.len();
+        // Inlined to dodge a borrow conflict with the mutable `ctx`
+        // already held — calling `self.layout_selection()` here would
+        // need `&self`, but `ctx` already pins `&mut self.render_ctx`.
+        // Direct field access lets NLL split the borrow per field.
+        let layout_sel: &[bool] = if matches!(self.config.layout, LayoutMode::Compare) {
+            &self.compare_set
+        } else {
+            &self.selected
+        };
         let cells = layout::compute(
             self.config.layout,
             n_channels,
             self.config.active_channel,
-            &self.selected,
+            layout_sel,
             grid_params_snap,
         );
         let visible_channels: std::collections::HashSet<usize> =

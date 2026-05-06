@@ -128,6 +128,28 @@ impl App {
         ));
     }
 
+    /// Source-of-truth selection slice fed to `layout::compute`. In
+    /// Compare layout the snapshot taken at C-press is authoritative —
+    /// the live `selected` is reset by C / T so the workflow can start
+    /// fresh, but Compare needs to keep painting the locked-in set.
+    pub(super) fn layout_selection(&self) -> &[bool] {
+        if matches!(self.config.layout, LayoutMode::Compare) {
+            &self.compare_set
+        } else {
+            &self.selected
+        }
+    }
+
+    /// Clear the live Space-selection. Called by `T` and `C` after they
+    /// "consume" the selection, so the user can start a fresh workflow
+    /// without the previous set lingering as cell-border highlights.
+    fn clear_selection(&mut self) {
+        for s in self.selected.iter_mut() {
+            *s = false;
+        }
+        self.selection_order.clear();
+    }
+
     /// Identify the cell the cursor is in. Returns `(channel, nx, ny, w_px, h_px)`
     /// where `(nx, ny)` are normalized cell-local coords (y up) and `channel` is
     /// the cell's primary channel. In Overlay mode every cell shares the same
@@ -148,7 +170,7 @@ impl App {
             self.config.layout,
             n,
             self.config.active_channel,
-            &self.selected,
+            self.layout_selection(),
             self.grid_params(),
         );
         for c in &cells {
@@ -726,6 +748,11 @@ impl App {
                     self.notify("C: select ≥ 1 channel first (Space over cell)");
                     return;
                 }
+                // Snapshot the current selection as the locked-in Compare set
+                // and clear the live selection so the workflow resets — a
+                // follow-up Space-build for T or another C starts fresh.
+                self.compare_set = self.selected.clone();
+                self.clear_selection();
                 self.config.layout = LayoutMode::Compare;
                 self.notify("layout: compare");
             }
@@ -744,18 +771,31 @@ impl App {
                 let meas = self.selection_order[0] as u32;
                 let ref_ch = *self.selection_order.last().unwrap() as u32;
                 let pair = TransferPair { meas, ref_ch };
-                if self.virtual_channels.remove(pair) {
+                let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+                let added = if self.virtual_channels.remove(pair) {
                     self.notify(&format!(
                         "T: removed transfer (CH{meas}←CH{ref_ch})"
                     ));
+                    false
                 } else {
                     self.virtual_channels.add(pair);
                     let idx = self.virtual_channels.len().saturating_sub(1);
                     self.notify(&format!(
                         "T: added transfer{idx} (CH{meas}←CH{ref_ch})"
                     ));
-                }
+                    true
+                };
                 self.restart_transfer_stream();
+                // Reset the live selection so a follow-up T/C starts fresh.
+                self.clear_selection();
+                // On add, jump to the new virtual transfer channel — that's
+                // what the user just expressed intent to look at — so the
+                // W cycle's pair-gated views immediately have a meaningful
+                // active context.
+                if added {
+                    let new_virtual_idx = n_real + self.virtual_channels.len() - 1;
+                    self.config.active_channel = new_virtual_idx;
+                }
             }
             KeyCode::KeyF => {
                 if let Some(ctx) = self.render_ctx.as_ref() {

@@ -258,6 +258,12 @@ pub struct App {
     config: DisplayConfig,
     cell_views: Vec<CellView>,
     selected: Vec<bool>,
+    /// Snapshot of `selected` taken when `C` switched into Compare layout.
+    /// Compare reads this set, freed from the live Space-selection state,
+    /// so the workflow can reset after a "consume" gesture (T to register
+    /// a transfer, C to lock a Compare set) without the old set lingering
+    /// visually or sneaking into the next T/C press. Empty outside Compare.
+    pub(super) compare_set: Vec<bool>,
     show_help: bool,
     /// Grid layout sizing. `cell_size = None` = auto (sqrt layout, one page);
     /// scrolling outside cells switches to manual mode. `page` is capped to
@@ -582,6 +588,7 @@ impl App {
             config,
             cell_views: Vec::new(),
             selected: Vec::new(),
+            compare_set: Vec::new(),
             show_help: false,
             grid_cell_size: None,
             grid_page: 0,
