@@ -736,30 +736,26 @@ impl App {
                 self.send_time_integration();
                 self.notify(self.time_integration.label());
             }
+            KeyCode::Space => {
+                self.toggle_selection();
+            }
             KeyCode::KeyH => {
                 self.show_help = !self.show_help;
             }
             KeyCode::KeyS => {
                 self.pending_screenshot = true;
             }
-            // Selection toggle moved off Space — left-click + Tab cover
-            // single-channel navigation, so Space had been doing double
-            // duty. Now `C` builds the selection set used by Shift+C
-            // (compare) and `T` (transfer pair). Hovered cell only.
-            KeyCode::KeyC if !self.modifiers.shift_key() => {
-                self.toggle_selection();
-            }
-            // Shift+C — enter Compare on the selected channels. Empty
-            // selection → no-op so an accidental press doesn't swap the
-            // user out of their current view into an empty Compare grid.
-            KeyCode::KeyC if self.modifiers.shift_key() => {
+            KeyCode::KeyC => {
+                // Jump into Compare on selected channels. Nothing selected →
+                // no-op so an accidental press doesn't swap the user out of
+                // their current view into an empty Compare grid.
                 if !self.selected.iter().any(|s| *s) {
-                    self.notify("Shift+C: select ≥ 1 channel first (C over cell)");
+                    self.notify("C: select ≥ 1 channel first (Space over cell)");
                     return;
                 }
                 // Snapshot the current selection as the locked-in Compare set
                 // and clear the live selection so the workflow resets — a
-                // follow-up C-build for T or another Shift+C starts fresh.
+                // follow-up Space-build for T or another C starts fresh.
                 self.compare_set = self.selected.clone();
                 self.clear_selection();
                 self.config.layout = LayoutMode::Compare;
@@ -774,7 +770,7 @@ impl App {
             }
             KeyCode::KeyT => {
                 if self.selection_order.len() < 2 {
-                    self.notify("T: select ≥ 2 channels first (C over cell; last = REF)");
+                    self.notify("T: select ≥ 2 channels first (last = REF)");
                     return;
                 }
                 let meas = self.selection_order[0] as u32;
