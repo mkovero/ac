@@ -38,9 +38,20 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn spawn() -> Self {
+    fn spawn() -> Self { Self::spawn_with_config(None) }
+
+    /// Spawn with a pre-seeded `~/.config/ac/config.json`. Useful when the
+    /// daemon's behaviour at startup depends on persisted state — e.g., the
+    /// sticky `*_port` keys whose interaction with `setup` is the regression
+    /// guard for `setup_channel_clears_sticky_port`.
+    fn spawn_with_config(config: Option<Value>) -> Self {
         let (ctrl, data) = alloc_ports();
         let home = alloc_home();
+        if let Some(cfg) = config {
+            let path = home.join(".config").join("ac").join("config.json");
+            fs::write(&path, serde_json::to_vec_pretty(&cfg).unwrap())
+                .expect("write seeded config.json");
+        }
         let bin = env!("CARGO_BIN_EXE_ac-daemon");
         let child = Command::new(bin)
             .env("HOME", &home)
@@ -242,6 +253,56 @@ fn generate_no_channels_falls_back_to_configured_default() {
     assert_eq!(ports.len(), 1, "default-channel generate should give one port");
 
     let _ = c.call(json!({"cmd":"stop"}));
+}
+
+#[test]
+fn setup_channel_clears_sticky_port() {
+    // A stale sticky port in config.json — left over from a prior session,
+    // a manual edit, or the older Python era — used to silently override
+    // any subsequent `ac setup output|input|reference N`. `resolve_output`
+    // and friends prefer the sticky string over the channel-index lookup,
+    // so the configured channel got effectively muted (audio routed to
+    // whatever the stale name pointed at, often nothing). Setting a new
+    // channel must invalidate the stale override.
+    let d = Daemon::spawn_with_config(Some(json!({
+        "output_channel":    7,
+        "output_port":       "system:playback_99",
+        "input_channel":     7,
+        "input_port":        "system:capture_99",
+        "reference_channel": 7,
+        "reference_port":    "system:capture_99",
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"setup","update":{
+        "output_channel":    0,
+        "input_channel":     0,
+        "reference_channel": 0,
+    }}));
+    assert_eq!(r["ok"], json!(true));
+    let cfg = &r["config"];
+    assert!(cfg["output_port"].is_null(),
+        "setup output_channel must clear sticky output_port (got {:?})", cfg["output_port"]);
+    assert!(cfg["input_port"].is_null(),
+        "setup input_channel must clear sticky input_port (got {:?})", cfg["input_port"]);
+    assert!(cfg["reference_port"].is_null(),
+        "setup reference_channel must clear sticky reference_port (got {:?})", cfg["reference_port"]);
+}
+
+#[test]
+fn setup_clearing_reference_channel_clears_reference_port() {
+    // The `reference_channel: null` branch (the way the user disables
+    // the H1 reference channel) must also clear the sticky.
+    let d = Daemon::spawn_with_config(Some(json!({
+        "reference_channel": 3,
+        "reference_port":    "system:capture_99",
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"setup","update":{ "reference_channel": null }}));
+    assert_eq!(r["ok"], json!(true));
+    assert!(r["config"]["reference_channel"].is_null());
+    assert!(r["config"]["reference_port"].is_null());
 }
 
 #[test]

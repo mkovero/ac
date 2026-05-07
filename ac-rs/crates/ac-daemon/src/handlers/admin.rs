@@ -92,17 +92,26 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
 
     let mut cfg = state.cfg.lock().unwrap();
 
+    // Explicit channel selection invalidates any prior sticky port override.
+    // Without this, a stale `*_port` in config.json silently overrides the
+    // new channel and routes audio to (or from) the wrong place.
+    // `tests/it_loopback_ir.rs` seeds sticky ports directly into config.json
+    // and never calls `setup`, so it's unaffected.
     if let Some(v) = update.get("output_channel").and_then(Value::as_u64) {
         cfg.output_channel = v as u32;
+        cfg.output_port = None;
     }
     if let Some(v) = update.get("input_channel").and_then(Value::as_u64) {
         cfg.input_channel = v as u32;
+        cfg.input_port = None;
     }
     if let Some(v) = update.get("reference_channel") {
         if v.is_null() {
             cfg.reference_channel = None;
+            cfg.reference_port = None;
         } else if let Some(n) = v.as_u64() {
             cfg.reference_channel = Some(n as u32);
+            cfg.reference_port = None;
         }
     }
     if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {
