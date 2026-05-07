@@ -1033,6 +1033,117 @@ impl App {
                     time_axis,
                     cell_spl_off,
                 );
+                // Channel-identity affordances for ember views, which
+                // otherwise paint every cell in the same thermal palette.
+                // 2 px frame accent at the top edge in the cell's
+                // desaturated channel hue, plus a top-left `CHn` /
+                // `transferN` label. Pair views (Goniometer / IoTransfer
+                // / Bode-* / Coherence / GroupDelay / Nyquist / Ir)
+                // render two halves: ref on the left, DUT (`meas`) on
+                // the right. Skipped for non-ember views — they get
+                // their identity from `draw_grid`'s axis labels.
+                let is_ember_view = matches!(
+                    config_snap.view_mode,
+                    ViewMode::SpectrumEmber
+                        | ViewMode::Scope
+                        | ViewMode::Goniometer
+                        | ViewMode::IoTransfer
+                        | ViewMode::BodeMag
+                        | ViewMode::Coherence
+                        | ViewMode::BodePhase
+                        | ViewMode::GroupDelay
+                        | ViewMode::Nyquist
+                        | ViewMode::Ir
+                );
+                if is_ember_view {
+                    let is_pair_view = matches!(
+                        config_snap.view_mode,
+                        ViewMode::Goniometer
+                            | ViewMode::IoTransfer
+                            | ViewMode::BodeMag
+                            | ViewMode::Coherence
+                            | ViewMode::BodePhase
+                            | ViewMode::GroupDelay
+                            | ViewMode::Nyquist
+                            | ViewMode::Ir
+                    );
+                    let accent_h = 2.0;
+                    let make_color = |idx: usize| {
+                        let c = theme::desaturated_channel_color(idx);
+                        egui::Color32::from_rgba_unmultiplied(
+                            (c[0] * 255.0) as u8,
+                            (c[1] * 255.0) as u8,
+                            (c[2] * 255.0) as u8,
+                            (c[3] * 220.0) as u8,
+                        )
+                    };
+                    let top = rect.top();
+                    let left = rect.left();
+                    let right = rect.right();
+                    if is_pair_view {
+                        if let Some(pair) = bode_pair_snap {
+                            let mid = 0.5 * (left + right);
+                            let bar_left = egui::Rect::from_min_max(
+                                egui::pos2(left, top),
+                                egui::pos2(mid, top + accent_h),
+                            );
+                            let bar_right = egui::Rect::from_min_max(
+                                egui::pos2(mid, top),
+                                egui::pos2(right, top + accent_h),
+                            );
+                            painter.rect_filled(
+                                bar_left,
+                                egui::CornerRadius::ZERO,
+                                make_color(pair.ref_ch as usize),
+                            );
+                            painter.rect_filled(
+                                bar_right,
+                                egui::CornerRadius::ZERO,
+                                make_color(pair.meas as usize),
+                            );
+                        } else {
+                            // No pair registered yet — single accent in
+                            // the cell's own channel hue so the cell is
+                            // still visually identifiable.
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(left, top),
+                                egui::pos2(right, top + accent_h),
+                            );
+                            painter.rect_filled(
+                                bar,
+                                egui::CornerRadius::ZERO,
+                                make_color(cell.channel),
+                            );
+                        }
+                    } else {
+                        let bar = egui::Rect::from_min_max(
+                            egui::pos2(left, top),
+                            egui::pos2(right, top + accent_h),
+                        );
+                        painter.rect_filled(
+                            bar,
+                            egui::CornerRadius::ZERO,
+                            make_color(cell.channel),
+                        );
+                    }
+                    // Per-cell label, top-left, low-contrast grey, 10 px
+                    // inset. Real channels read `CHn`; virtual transfer
+                    // cells read `transferN`. Reuses the existing
+                    // `channel_label` helper so the convention stays
+                    // shared with the hover readout.
+                    let label = crate::ui::overlay::channel_label(
+                        cell.channel,
+                        n_real_snap,
+                        &virtual_pairs_snap,
+                    );
+                    painter.text(
+                        egui::pos2(left + 10.0, top + 10.0),
+                        egui::Align2::LEFT_TOP,
+                        label,
+                        egui::FontId::monospace(theme::STATUS_PX),
+                        egui::Color32::from_rgba_unmultiplied(170, 170, 170, 200),
+                    );
+                }
                 let is_selected = selected_snap
                     .get(cell.channel)
                     .copied()
@@ -1316,6 +1427,17 @@ impl App {
                                     let zx = view.zoom_x;
                                     let zy = view.zoom_y;
                                     let zf = view.zoom.max(1e-3);
+                                    // Focus emphasis: focused cell renders
+                                    // at full deposit weight; non-focus
+                                    // cells at 0.85× so the steady-state
+                                    // luminance reads as "dimmer / fading"
+                                    // without touching `ember.advance`'s
+                                    // single-substrate τ_p.
+                                    let focus_w = if cell.channel == self.config.active_channel {
+                                        1.0
+                                    } else {
+                                        0.85
+                                    };
                                     // Image zoom around the cursor anchor. At
                                     // zf=1 this is identity. For zf>1 points
                                     // are spread out around (zx, zy); pairs
@@ -1339,12 +1461,12 @@ impl App {
                                         combined.push([
                                             cell.x + ax * cell.w,
                                             1.0 - cell.y - ay * cell.h,
-                                            a[2],
+                                            a[2] * focus_w,
                                         ]);
                                         combined.push([
                                             cell.x + bx * cell.w,
                                             1.0 - cell.y - by * cell.h,
-                                            b[2],
+                                            b[2] * focus_w,
                                         ]);
                                     }
                                 } else {

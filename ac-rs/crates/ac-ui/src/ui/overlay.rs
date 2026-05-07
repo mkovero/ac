@@ -296,9 +296,16 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             .get(display_ch)
             .copied()
             .unwrap_or_default();
+        // Repoint top-right channel readout to the hovered cell when
+        // the cursor is over one. The old `display_ch` was always the
+        // active-channel for Single and `0` for Grid, which lied about
+        // identity any time the user wasn't on cell 0. Cell-local
+        // labels handle the identity-at-rest case; this line follows
+        // the cursor when present.
+        let status_ch = input.hover.as_ref().map(|h| h.channel).unwrap_or(display_ch);
         let top_right = super::fmt::top_right_status(
             sr,
-            &channel_label(display_ch, input.n_real, input.virtual_pairs),
+            &channel_label(status_ch, input.n_real, input.virtual_pairs),
         );
         painter.text(
             Pos2::new(screen.right() - 8.0, screen.top() + 6.0),

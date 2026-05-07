@@ -47,6 +47,22 @@ pub fn channel_color(idx: usize) -> [f32; 4] {
     ]
 }
 
+/// Desaturated channel hue for cell-frame accents: 50/50 mix of the
+/// channel's `channel_color` with mid-grey. The accent reads as a
+/// "channel-tinted hairline" rather than as a competing trace colour,
+/// which is critical when ember substrate views render every channel
+/// in the same thermal palette. Same hue source as `channel_color`
+/// so RC-8's keytip pill strip can reuse this directly.
+pub fn desaturated_channel_color(idx: usize) -> [f32; 4] {
+    let c = channel_color(idx);
+    [
+        0.5 * c[0] + 0.5 * 0.5,
+        0.5 * c[1] + 0.5 * 0.5,
+        0.5 * c[2] + 0.5 * 0.5,
+        c[3],
+    ]
+}
+
 pub const GRID_LABEL_PX: f32 = 13.0;
 pub const STATUS_PX: f32 = 14.0;
 pub const READOUT_PX: f32 = 15.0;
