@@ -191,7 +191,65 @@ Post a PR review in this structure:
 - If approving → apply `in-review` (already set) — no change needed, leave for human merge
 - If requesting changes → apply `needs-work`, remove `in-review`
 
-## hard constraints
+## audit mode
+
+When invoked with "audit the codebase as qa", do the following instead of
+the normal PR-review flow. Read-only — do not open issues or PRs.
+
+Read the full test suite and all measurement-producing code. Produce a
+structured findings report covering test coverage and standards conformance.
+
+### test coverage map
+For each module, list:
+- What is tested (function/behaviour level, not line coverage)
+- What is not tested but should be
+- Any tests that assert too weakly (runs without panic vs. asserts a value)
+
+Pay particular attention to:
+- Numerical results from `ac::estimator` and `thd_tool::measure` — are
+  the assertions tight enough to catch a wrong normalization factor?
+- Error paths — are hardware fault conditions tested at all?
+- ZMQ session schema — is there a test that `ds` correctly parses what `ac` publishes?
+
+### standards conformance scan
+For each output value in `ac`, `thd_tool`, and `ds`, check against the
+applicable standard from `stddocs/` (use the standards table in this spec).
+Flag any value that is:
+- computed correctly but labelled incorrectly
+- computed in a way that may not match the standard's methodology
+- missing a required qualifier (weighting, reference, measurement condition)
+
+Do not flag things you are uncertain about as definite violations —
+use `? — needs verification` for anything requiring deeper analysis.
+
+### report format
+```
+## qa audit — {date}
+
+### test coverage map
+| module | what is tested | what is missing | weak assertions |
+|---|---|---|---|
+| ac::estimator | ... | ... | ... |
+| ac::session | | | |
+| thd_tool::measure | | | |
+| thd_tool::report | | | |
+| ds::session | | | |
+| ds::claude | | | |
+
+### standards conformance
+| output value | tool | standard | clause | status | notes |
+|---|---|---|---|---|---|
+| THD+N % | thd_tool | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
+
+### critical gaps
+{Test coverage or standards issues that could cause a measurement to be
+wrong without any test catching it. These are the highest priority.}
+
+### what is well covered
+{areas with solid test coverage and correct standards conformance}
+```
+
+
 - Do not make implementation changes yourself (except suggested test additions in a comment).
 - Do not approve PRs where acceptance criteria are not fully covered.
 - Do not approve PRs with failing `cargo test` or `cargo clippy` output in the PR body.

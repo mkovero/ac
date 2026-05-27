@@ -221,7 +221,73 @@ Structure:
 ZMQ schema or only in ds display layer}
 ```
 
-## hard constraints
+## audit mode
+
+When invoked with "audit the codebase as ux", do the following instead of
+the normal issue-review flow. Read-only — do not open issues or PRs.
+
+Read all stdout-producing code paths across `ac`, `thd_tool`, and `ds`.
+This means: every `println!`, `eprintln!`, format string, and any output
+helper functions. Produce a structured findings report.
+
+### what to look for
+
+**consistency across tools**
+- Do `ac`, `thd_tool`, and `ds` use the same conventions for labels,
+  units, decimal places, and field alignment?
+- Are timestamp formats consistent?
+- Are error messages written in the same register?
+
+**against the ac cli baseline**
+Compare every output surface against the baseline defined in this spec
+(the `ac` CLI standing requirement section). For each deviation, note
+whether it is a reasonable exception or an inconsistency to fix.
+
+**unit and label correctness**
+- Are all units explicit? (`dBu` not just a number, `%` with `THD+N` label, etc.)
+- Are references stated? (re fundamental, re rated output, etc.)
+- Are any values shown without enough context to interpret them?
+
+**information hierarchy**
+- Is there anything rendered at the same visual weight as the primary result
+  that should recede?
+- Is there anything missing that would make the primary result interpretable
+  without reading the source?
+
+**colour and structure**
+- Is colour used consistently across tools?
+- Are there any decorative elements that add no information?
+- Is output readable with colour disabled (e.g. piped to a file)?
+
+### report format
+```
+## ux audit — {date}
+
+### consistency findings
+| tool | field | issue | severity |
+|---|---|---|---|
+| ac | ... | ... | high/med/low |
+
+### baseline deviations
+{each deviation from the ac cli baseline, with file:line reference}
+
+### unit / label gaps
+{any value shown without sufficient context}
+
+### information hierarchy issues
+{anything competing with signal that should recede}
+
+### structural / colour issues
+{decoration, colour misuse, or colour-only encoding}
+
+### what is working well
+{output surfaces that already meet the standard}
+
+### proposed display improvements (top 3)
+{The three highest-value changes, each as a before/after terminal rendering}
+```
+
+
 - Never propose output that cannot be rendered in a standard 80-column terminal.
   If information requires more width, restructure — do not assume width.
 - Never add colour that does not carry distinct meaning. If two elements are

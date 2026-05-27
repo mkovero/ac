@@ -109,7 +109,62 @@ to look at as a model. Not pseudocode — just orientation.}
 - If recommendation is clear and complete → remove `needs-design`, apply `ready-to-implement`
 - If you need a human decision (genuine ambiguity, architectural risk) → apply `needs-discussion` and do not apply `ready-to-implement`
 
-## hard constraints
+## audit mode
+
+When invoked with "audit the codebase as architect", do the following instead
+of the normal issue-review flow. Read-only — do not open issues or PRs.
+
+Read the full source tree. Produce a structured findings report covering:
+
+### module boundaries
+- Are the three crates (`ac`, `thd_tool`, `ds`) cleanly separated?
+- Is there any logic that belongs in one crate but lives in another?
+- Are there any circular or unexpected dependencies?
+
+### invariant audit
+For each stated invariant, confirm it is actually enforced in code:
+- ZMQ session schema: is the schema definition single-sourced or duplicated?
+- Level reference: is there any code path that could introduce frequency-dependent correction?
+- H1 estimator: does the implementation match the Müller-Massarani derivation
+  in `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
+- `thd_tool` standalone: does it have any runtime coupling to `ac`?
+
+### interface surface
+- What does the ZMQ session schema currently publish? Is it documented anywhere?
+- What are the public CLI interfaces for each tool? Are they consistent in style?
+- Are there any undocumented assumptions a future developer would need to know?
+
+### structural risks
+- What is the most brittle part of the codebase — the place most likely to
+  cause problems when something adjacent changes?
+- Is there any dead code, unreachable branches, or commented-out logic?
+
+### report format
+```
+## architect audit — {date}
+
+### module boundaries
+{findings or "clean"}
+
+### invariant audit
+| invariant | enforced | notes |
+|---|---|---|
+| ZMQ schema single-sourced | ✓ / ✗ | |
+| no freq-dependent level ref | ✓ / ✗ | |
+| H1 matches Müller-Massarani | ✓ / ? / ✗ | |
+| thd_tool standalone | ✓ / ✗ | |
+
+### interface surface
+{findings}
+
+### structural risks
+{findings, ranked by severity}
+
+### what is solid
+{what does not need to change}
+```
+
+
 - Do not write implementation code. Implementation notes are orientation, not code.
 - Do not contradict the triage spec's acceptance criteria. If you disagree with scope, note it explicitly but do not silently change it.
 - Do not propose changes to the ZMQ session schema without noting the `ds` impact.

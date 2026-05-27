@@ -12,6 +12,7 @@ what it must produce, and its hard constraints.
 | `ux.md` | UX design — output format, display, information hierarchy | issue labeled `needs-ux` or any PR touching output formatting |
 | `developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
+| `audit.md` | audit coordinator — orchestrates full codebase audit | manual invocation |
 
 ## invocation
 
@@ -19,8 +20,11 @@ what it must produce, and its hard constraints.
 Pass the agent file as context alongside the issue or PR:
 
 ```bash
-# triage a new issue
-claude --context .agents/triage.md \
+# full audit (run specialists in sequence, then coordinator)
+claude "audit the codebase as architect" --context .agents/architect.md > audit/architect-raw.md
+claude "audit the codebase as ux"        --context .agents/ux.md        > audit/ux-raw.md
+claude "audit the codebase as qa"        --context .agents/qa.md        > audit/qa-raw.md
+claude "You are the audit coordinator. Read .agents/audit.md then read audit/architect-raw.md, audit/ux-raw.md, and audit/qa-raw.md and produce the consolidated audit report."
   "triage issue #42: https://github.com/mkovero/measuring/issues/42"
 
 # implement a ready issue
