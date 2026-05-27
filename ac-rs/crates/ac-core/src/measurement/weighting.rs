@@ -314,7 +314,7 @@ mod tests {
         // 8 kHz → ±(2.1, 3.1) dB (use the tighter 2.1 for pass), 16 kHz →
         // +3.5/-17 dB (skip — tolerance unbounded below).
         let f = WeightingFilter::new(Weighting::A, FS).unwrap();
-        for &(fr, tol) in &[(31.0_f64, 1.5), (1000.0, 0.7), (4000.0, 1.6), (8000.0, 2.1)] {
+        for &(fr, tol) in &[(31.5_f64, 1.5), (1000.0, 0.7), (4000.0, 1.6), (8000.0, 2.1)] {
             let got = f.magnitude_db(fr);
             let expected = a_reference_db(fr);
             assert!(
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn c_weighting_matches_standard_within_class1_tolerance() {
         let f = WeightingFilter::new(Weighting::C, FS).unwrap();
-        for &(fr, tol) in &[(31.0_f64, 1.5), (1000.0, 0.7), (4000.0, 1.6), (8000.0, 2.1)] {
+        for &(fr, tol) in &[(31.5_f64, 1.5), (1000.0, 0.7), (4000.0, 1.6), (8000.0, 2.1)] {
             let got = f.magnitude_db(fr);
             let expected = c_reference_db(fr);
             assert!(

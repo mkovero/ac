@@ -306,9 +306,19 @@ mod tests {
 
     #[test]
     fn wrong_fundamental_returns_error_or_high_thd() {
+        // Signal is a pure 1 kHz tone, but we tell `analyze` the fundamental
+        // is 2 kHz. The 2 kHz bin holds no real tone, so either the
+        // fundamental-energy guard trips (Err) or the THD ratio blows up.
         let samples = pure_sine(1_000.0, 0.5, SR, SR as usize);
-        let result = analyze(&samples, SR, 2_000.0, 10);
-        let _ = result;
+        // An `Err` (fundamental-energy guard tripped) is an acceptable
+        // outcome; if it does return Ok, the THD ratio must be blown out.
+        if let Ok(r) = analyze(&samples, SR, 2_000.0, 10) {
+            assert!(
+                r.thd_pct > 10.0,
+                "wrong fundamental should yield high THD, got {:.4}%",
+                r.thd_pct
+            );
+        }
     }
 
     #[test]
