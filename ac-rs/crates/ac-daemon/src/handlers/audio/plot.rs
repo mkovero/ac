@@ -22,10 +22,6 @@ use super::super::{
 };
 use crate::handlers::mic;
 
-fn now_iso8601_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
     let start_hz   = cmd.get("start_hz")  .and_then(Value::as_f64).unwrap_or(20.0);
@@ -132,7 +128,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         eng.set_silence();
         eng.stop();
 
-        let timestamp = now_iso8601_utc();
+        let timestamp = ac_core::shared::time::now_utc_iso8601();
         // Snapshot the processing-chain state at report-build time so a
         // re-loaded report tells the reader what was active during this
         // capture (#105). `mic_correction_applied` reads true exactly

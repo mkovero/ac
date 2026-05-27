@@ -236,7 +236,7 @@ pub fn calibrate_mic_curve(state: &ServerState, cmd: &Value) -> Value {
                 freqs_hz,
                 gain_db,
                 source_path,
-                imported_at: chrono::Utc::now().to_rfc3339(),
+                imported_at: ac_core::shared::time::now_utc_iso8601(),
             });
         }
         other => {

@@ -213,7 +213,7 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
-            timestamp_utc: chrono::Utc::now().to_rfc3339(),
+            timestamp_utc: ac_core::shared::time::now_utc_iso8601(),
             method: MeasurementMethod::SweptSine {
                 f1_hz,
                 f2_hz,
