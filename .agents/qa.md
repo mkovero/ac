@@ -13,12 +13,14 @@ it is a bug.
 ## repo context
 
 ### what correctness means in this codebase
-- `ac` implements a two-channel H1 estimator (Müller-Massarani). Transfer function
-  estimates must be numerically stable and unbiased given the windowing assumptions.
-- `thd_tool` produces THD figures. Results should be within expected dynamic range
-  for the device under test. Gross outliers (e.g. THD > 10% for a known-good amp)
+- `ac-core` has two transfer-function paths: a live Welch H1 estimator
+  (`visualize/transfer.rs`: `Gxy/Gxx`, Hann window, 50 % overlap, coherence) and
+  a Farina exponential-sweep IR deconvolution (`measurement/sweep.rs`). Estimates
+  must be numerically stable and unbiased given the windowing assumptions.
+- THD (`measurement/thd.rs`) figures should be within expected dynamic range for
+  the device under test. Gross outliers (e.g. THD > 10% for a known-good amp)
   indicate a measurement error in the code.
-- Level reference in `ac` is a scalar dBu offset. Any change that makes it
+- The dBu/level reference is a scalar offset (`shared/`). Any change that makes it
   frequency-dependent is a regression.
 
 ### build and test
@@ -44,7 +46,7 @@ or display units. Do not rely on memory — consult the document.
 | IEC 61260-1:2014 | `stddocs/IEC-61260-1-2014.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
 | IEC 61672-1:2013 | `stddocs/IEC-61672-1-2013.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
 | ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
-| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
+| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LKFS), true-peak |
 
 ### reference reading (non-normative)
 
@@ -55,11 +57,11 @@ Consult them when the standard text is ambiguous or when checking numerical resu
 |---|---|---|
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
-| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac/src/estimator.rs` |
+| Farina 2000 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | Exponential-sweep IR + distortion deconvolution — primary reference for `ac-core/src/measurement/sweep.rs` |
 
 ### how to use them during review
 
-**AES-17** is the primary normative reference for `thd_tool`. When reviewing, read the
+**AES-17** is the primary normative reference for THD (`ac-core/src/measurement/thd.rs`). When reviewing, read the
 relevant clause — do not rely on paraphrase. Check:
 - THD+N residual is computed after fundamental removal, not as ratio to total RMS
 - Measurement bandwidth is explicitly stated or matches the standard default
@@ -89,8 +91,9 @@ digital I/O, sampling, or dithering, use the 2020 document.
 - Weighting curve identified in output if not unweighted
 
 **ITU-R BS.1770-5** applies if integrated loudness or true-peak values appear. Check:
-- Integrated loudness expressed as `LUFS` (not `LKFS` — both are used in the wild
-  but LUFS is the current preferred term per BS.1770-5 §3)
+- Integrated loudness expressed as `LKFS` — the unit BS.1770-5 actually
+  prescribes (the code uses LKFS). `LUFS` is the EBU/R128 synonym seen in the
+  wild; do not "correct" the code's LKFS to LUFS.
 - True-peak expressed as `dBTP`, not `dBFS`
 - Gating behaviour (absolute and relative gates) matches §2.7 if implemented
 
@@ -203,12 +206,13 @@ For each module, list:
 - Any tests that assert too weakly (runs without panic vs. asserts a value)
 
 Pay particular attention to:
-- Numerical results from `ac::estimator` and `thd_tool::measure` — are
-  the assertions tight enough to catch a wrong normalization factor?
+- Numerical results from `visualize::transfer` (Welch H1), `measurement::sweep`
+  (Farina IR), and `measurement::thd` — are the assertions tight enough to catch
+  a wrong normalization factor?
 - Error paths — are hardware fault conditions tested at all?
 
 ### standards conformance scan
-For each output value in `ac` and `thd_tool`, check against the
+For each output value in `ac-core` (measurement + visualize), check against the
 applicable standard from `stddocs/` (use the standards table in this spec).
 Flag any value that is:
 - computed correctly but labelled incorrectly
@@ -225,15 +229,15 @@ use `? — needs verification` for anything requiring deeper analysis.
 ### test coverage map
 | module | what is tested | what is missing | weak assertions |
 |---|---|---|---|
-| ac::estimator | ... | ... | ... |
-| ac::session | | | |
-| thd_tool::measure | | | |
-| thd_tool::report | | | |
+| visualize::transfer (Welch H1) | ... | ... | ... |
+| measurement::sweep (Farina IR) | | | |
+| measurement::thd | | | |
+| measurement::loudness | | | |
 
 ### standards conformance
-| output value | tool | standard | clause | status | notes |
+| output value | module | standard | clause | status | notes |
 |---|---|---|---|---|---|
-| THD+N % | thd_tool | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
+| THD+N % | measurement::thd | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
 
 ### critical gaps
 {Test coverage or standards issues that could cause a measurement to be
