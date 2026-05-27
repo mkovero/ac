@@ -335,11 +335,18 @@ mod tests {
             .collect()
     }
 
-    /// Class 1 tolerance lower bound on attenuation at the ±1-band
-    /// neighbour (dB). Derived from IEC 61260-1:2014 Table 2: the relative
-    /// frequency for the ±1-band neighbour falls in the high-stopband
-    /// region with minimum attenuation ≥ 17.5 dB regardless of bpo.
-    fn class1_neighbour_min_atten_db(_bpo: usize) -> f64 {
+    /// Conservative lower bound (dB) on the attenuation the filterbank must
+    /// reach at the ±1-band neighbour. Used as a regression floor.
+    ///
+    /// IEC 61260-1:2014 §5.10 specifies the relative-attenuation acceptance
+    /// limits as a function of f/fm (Table 1 for octave bands, Annex F
+    /// Table F.1 for one-third-octave bands). Those limits permit *less*
+    /// rejection at the immediate neighbour as the bands narrow, and the
+    /// standard tabulates only the 1/1- and 1/3-octave cases. Rather than
+    /// extrapolate a per-bpo limit, this is a single fixed floor that the
+    /// implementation clears for every supported bpo — a deliberately
+    /// bpo-independent regression bound, not the full per-band IEC mask.
+    fn class1_neighbour_min_atten_db() -> f64 {
         17.5
     }
 
@@ -454,7 +461,7 @@ mod tests {
             let duration_s = duration_for_bpo(bpo);
             let n = (duration_s * SR as f64) as usize;
             let amp = 1.0; // 0 dBFS (peak = full scale)
-            let min_atten = class1_neighbour_min_atten_db(bpo);
+            let min_atten = class1_neighbour_min_atten_db();
 
             // Pick an interior band.
             let interior = centres.len() / 2;
@@ -566,8 +573,8 @@ mod tests {
 
     #[test]
     fn class1_mask_at_1khz() {
-        // IEC 61260-1:2014 §5.4 Table 2: the 1/3-octave Class 1 band
-        // response must lie within a symmetric tolerance window. At the
+        // IEC 61260-1:2014 §5.10 (Annex F Table F.1): the 1/3-octave Class 1
+        // band response must lie within a symmetric tolerance window. At the
         // ±(1/(8·bpo))-octave offsets near the passband we allow
         // ±0.3 dB / −∞ dB (the lower bound is generous); we assert the
         // upper bound − that the filter is not unexpectedly hot − which
