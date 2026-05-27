@@ -33,16 +33,9 @@ thd_tool/src/
   main.rs       — entrypoint
   measure.rs    — THD measurement
   report.rs     — output formatting
-
-ds/src/
-  main.rs       — CLI
-  session.rs    — ZMQ sub, reads ac session
-  claude.rs     — Claude API client
 ```
 
 ### key invariants — do not break these
-- `ac::session` ZMQ schema is consumed by `ds`. If you must change it, ensure `ds`
-  is updated in the same PR and note this in the PR body.
 - `ac::level` is a scalar dBu offset only. There is no frequency-dependent
   correction curve. Do not add one.
 - `ac::estimator` implements the Müller-Massarani H1 approach. Changes to

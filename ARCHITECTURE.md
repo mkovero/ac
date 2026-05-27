@@ -259,7 +259,7 @@ independent of the absolute reference).
 
 All Tier 1 commands produce a `MeasurementReport` on completion. This
 type is the archival product — the thing you commit to a project
-directory, attach to an email, or feed to `ds/` for AI diagnostics.
+directory or attach to an email.
 
 ```rust
 pub struct MeasurementReport {

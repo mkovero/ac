@@ -18,8 +18,6 @@ it is a bug.
 - `thd_tool` produces THD figures. Results should be within expected dynamic range
   for the device under test. Gross outliers (e.g. THD > 10% for a known-good amp)
   indicate a measurement error in the code.
-- `ds` is a CLI consumer of `ac` session state. Correctness here means: correct
-  parsing of ZMQ messages, correct display of session data, correct Claude API usage.
 - Level reference in `ac` is a scalar dBu offset. Any change that makes it
   frequency-dependent is a regression.
 
@@ -131,7 +129,6 @@ Check for:
 - **correctness** — does the implementation do what the spec says?
 - **numerical correctness** — for estimator/measurement code: are window sizes,
   normalization factors, and array indices correct?
-- **ZMQ schema** — if session.rs in `ac` changed, does `ds/src/session.rs` match?
 - **error handling** — are Results propagated, not silently unwrapped?
 - **test coverage** — are the new code paths exercised by tests?
 - **scope discipline** — did the developer touch files outside the spec? If yes, flag it.
@@ -209,10 +206,9 @@ Pay particular attention to:
 - Numerical results from `ac::estimator` and `thd_tool::measure` — are
   the assertions tight enough to catch a wrong normalization factor?
 - Error paths — are hardware fault conditions tested at all?
-- ZMQ session schema — is there a test that `ds` correctly parses what `ac` publishes?
 
 ### standards conformance scan
-For each output value in `ac`, `thd_tool`, and `ds`, check against the
+For each output value in `ac` and `thd_tool`, check against the
 applicable standard from `stddocs/` (use the standards table in this spec).
 Flag any value that is:
 - computed correctly but labelled incorrectly
@@ -233,8 +229,6 @@ use `? — needs verification` for anything requiring deeper analysis.
 | ac::session | | | |
 | thd_tool::measure | | | |
 | thd_tool::report | | | |
-| ds::session | | | |
-| ds::claude | | | |
 
 ### standards conformance
 | output value | tool | standard | clause | status | notes |

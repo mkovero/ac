@@ -1,13 +1,11 @@
 // ~/.config/ac/config.json
 //
-// Created and managed by `ac` commands — ds only reads it.
+// Created and managed by `ac` commands.
 // This file does not exist until you run your first ac command.
 //
 // From scratch:
 //   ac setup output 11 input 0      # creates config.json with device/channel settings
 //   ac new my-amp                   # sets "session" key, creates session directory
-//
-// After that, `ds` picks up the active session automatically.
 //
 {
   // Audio device index (from `ac devices`)
@@ -24,7 +22,7 @@
   // Audio backend: "jack", "sounddevice", or null (auto-detect)
   "backend": null,
 
-  // Active session name — this is the only key ds reads
+  // Active session name
   // Set by: ac new <name>, ac use <name>
   // Cleared by: ac rm <name> (if it was the active one)
   "session": "my-amp",
