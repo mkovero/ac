@@ -1,6 +1,6 @@
 # .agents/
 
-Agent specs for the `measuring` repo. Each file defines a role, its inputs,
+Agent specs for the `ac` repo. Each file defines a role, its inputs,
 what it must produce, and its hard constraints.
 
 ## agents
@@ -25,7 +25,7 @@ claude "audit the codebase as architect" --context .agents/architect.md > audit/
 claude "audit the codebase as ux"        --context .agents/ux.md        > audit/ux-raw.md
 claude "audit the codebase as qa"        --context .agents/qa.md        > audit/qa-raw.md
 claude "You are the audit coordinator. Read .agents/audit.md then read audit/architect-raw.md, audit/ux-raw.md, and audit/qa-raw.md and produce the consolidated audit report."
-  "triage issue #42: https://github.com/mkovero/measuring/issues/42"
+  "triage issue #42: https://github.com/mkovero/ac/issues/42"
 
 # implement a ready issue
 claude --context .agents/developer.md \
@@ -33,7 +33,7 @@ claude --context .agents/developer.md \
 
 # review an open PR
 claude --context .agents/qa.md \
-  "review PR #43: https://github.com/mkovero/measuring/pull/43"
+  "review PR #43: https://github.com/mkovero/ac/pull/43"
 ```
 
 Claude Code needs the GitHub MCP server connected for issue/PR read-write:
