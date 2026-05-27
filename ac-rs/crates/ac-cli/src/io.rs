@@ -157,7 +157,7 @@ pub fn output_dir(cfg: &ac_core::config::Config) -> std::path::PathBuf {
 }
 
 pub fn timestamp() -> String {
-    chrono::Local::now().format("%Y%m%d_%H%M%S").to_string()
+    ac_core::shared::time::now_utc_filename_stamp()
 }
 
 pub fn print_freq_header(have_cal: bool) {

@@ -162,7 +162,7 @@ pub fn parse_mic_curve(text: &str, source_path: Option<String>) -> Result<MicRes
         freqs_hz:    freqs,
         gain_db:     gains,
         source_path,
-        imported_at: chrono::Utc::now().to_rfc3339(),
+        imported_at: crate::shared::time::now_utc_iso8601(),
     })
 }
 

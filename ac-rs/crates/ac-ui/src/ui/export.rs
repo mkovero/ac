@@ -24,7 +24,7 @@ pub fn spawn_save(req: ScreenshotRequest) {
 
 fn save(req: ScreenshotRequest) -> anyhow::Result<()> {
     std::fs::create_dir_all(&req.output_dir)?;
-    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let stamp = ac_core::shared::time::now_utc_filename_stamp();
     let prefix = if req.transfer.is_some() { "transfer" } else { "spectrum" };
     let png_path = req.output_dir.join(format!("{prefix}_{stamp}.png"));
     let csv_path = req.output_dir.join(format!("{prefix}_{stamp}.csv"));
@@ -84,7 +84,7 @@ fn write_csv(path: &std::path::Path, frames: &[Option<DisplayFrame>]) -> anyhow:
     // numpy.loadtxt with default settings). Records the cal layers and
     // processing-context that were active at capture time so a re-load
     // years later can interpret the dB values correctly. See #100.
-    let stamp = chrono::Utc::now().to_rfc3339();
+    let stamp = ac_core::shared::time::now_utc_iso8601();
     writeln!(f, "# ac monitor export — {stamp}")?;
     if let Some(first) = active.first() {
         writeln!(f, "# sample_rate_hz: {}", first.meta.sr)?;
