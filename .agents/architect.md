@@ -12,29 +12,36 @@ deeply and your job is to make the design decision explicit, not to implement it
 ## repo context
 
 ### module map
+Four-crate Rust workspace under `ac-rs/crates/`; `ARCHITECTURE.md` is
+authoritative.
 ```
-ac/
-  src/
-    main.rs         — entrypoint, ZMQ server setup
-    estimator.rs    — H1 two-channel estimator (Müller-Massarani)
-    session.rs      — session state, exposed via ZMQ pub socket
-    level.rs        — scalar dBu level reference (active)
-    signal.rs       — signal generation and capture
-
-thd_tool/
-  src/
-    main.rs         — entrypoint
-    measure.rs      — THD floor measurement logic
-    report.rs       — result formatting
+ac-core/   — pure DSP library, no binary
+  measurement/  Tier 1 reference: thd.rs (IEC 60268-3), filterbank.rs
+                (IEC 61260-1), weighting.rs (IEC 61672-1), noise.rs (AES17),
+                loudness.rs (BS.1770-5 LKFS), sweep.rs (Farina log-sweep IR),
+                report.rs (HTML/PDF)
+  visualize/    Tier 2 live analysis: transfer.rs (live Welch H1), spectrum,
+                CWT/CQT/reassigned STFT, fractional-octave, time integration
+  shared/       calibration (voltage/SPL/mic-curve), conversions,
+                reference_levels, generator, config, time
+ac-daemon/ — binary `ac-daemon`: ZMQ REP+PUB server, audio I/O
+             (JACK/CPAL/fake), worker management; thin shell over ac-core
+ac-cli/    — binary `ac`: positional parser, ZMQ REQ/SUB, CSV export
+ac-ui/     — binary `ac-ui`: wgpu/egui spectrum/waterfall/transfer views
 ```
 
 ### key invariants
-- The H1 estimator uses a Müller-Massarani windowed cross-correlation approach.
-  Changes to estimator internals must preserve the mathematical correctness of the
-  transfer function estimate.
-- Level reference is a scalar dBu offset — there is no frequency-dependent
-  correction curve (that code was removed; do not reintroduce it).
-- `thd_tool` is standalone. It does not share state with `ac` at runtime.
+- Two transfer-function paths use different math; changes to either must
+  preserve its mathematical correctness:
+  - **Live**: Welch H1 (`ac-core/src/visualize/transfer.rs`) — `Gxy/Gxx`,
+    Hann window, 50 % overlap, with coherence.
+  - **Sweep**: Farina exponential-sweep deconvolution
+    (`ac-core/src/measurement/sweep.rs`, Farina 2000).
+  There is no "Müller-Massarani" estimator in this codebase.
+- The dBu/level reference is a scalar offset (`ac-core/src/shared/`) — there is
+  no frequency-dependent correction curve on it; do not reintroduce one.
+- THD lives in `ac-core/src/measurement/thd.rs`; there is no separate
+  `thd_tool` crate.
 
 ## inputs you will receive
 - The issue body and triage spec comment
@@ -109,17 +116,19 @@ of the normal issue-review flow. Read-only — do not open issues or PRs.
 Read the full source tree. Produce a structured findings report covering:
 
 ### module boundaries
-- Are the two crates (`ac`, `thd_tool`) cleanly separated?
+- Are the four crates (`ac-core`, `ac-daemon`, `ac-ui`, `ac-cli`) cleanly
+  separated — is `ac-core` free of I/O, with the binaries as thin shells?
 - Is there any logic that belongs in one crate but lives in another?
 - Are there any circular or unexpected dependencies?
 
 ### invariant audit
 For each stated invariant, confirm it is actually enforced in code:
-- ZMQ session schema: is the schema definition single-sourced or duplicated?
+- ZMQ frame/session schema: is the schema definition single-sourced or duplicated?
 - Level reference: is there any code path that could introduce frequency-dependent correction?
-- H1 estimator: does the implementation match the Müller-Massarani derivation
-  in `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
-- `thd_tool` standalone: does it have any runtime coupling to `ac`?
+- Live transfer: does `visualize/transfer.rs` implement Welch H1 (`Gxy/Gxx`,
+  Hann, 50 % overlap, coherence)?
+- Sweep IR: does `measurement/sweep.rs` implement Farina exponential-sweep
+  deconvolution per `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
 
 ### interface surface
 - What does the ZMQ session schema currently publish? Is it documented anywhere?
@@ -143,8 +152,8 @@ For each stated invariant, confirm it is actually enforced in code:
 |---|---|---|
 | ZMQ schema single-sourced | ✓ / ✗ | |
 | no freq-dependent level ref | ✓ / ✗ | |
-| H1 matches Müller-Massarani | ✓ / ? / ✗ | |
-| thd_tool standalone | ✓ / ✗ | |
+| live transfer is Welch H1 | ✓ / ? / ✗ | |
+| sweep IR is Farina deconvolution | ✓ / ? / ✗ | |
 
 ### interface surface
 {findings}

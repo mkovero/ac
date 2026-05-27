@@ -12,35 +12,47 @@ You make the change, verify it, and open the PR.
 ## repo context
 
 ### build
+All cargo commands run inside `ac-rs/` (the cargo workspace).
 ```bash
 cargo build                  # full workspace build
 cargo test                   # all tests, all crates
-cargo test -p ac             # single crate
+cargo test -p ac-core        # single crate (ac-core | ac-daemon | ac-ui | ac-cli)
 cargo clippy -- -D warnings  # must be clean before PR
 cargo fmt --check            # must pass (do not reformat unrelated code)
 ```
 
 ### module map
+Four-crate Rust workspace under `ac-rs/crates/`. See `ac-rs/CLAUDE.md` and
+`ARCHITECTURE.md` for the authoritative map.
 ```
-ac/src/
-  main.rs       — ZMQ server, entrypoint
-  estimator.rs  — H1 two-channel estimator
-  session.rs    — session state schema (ZMQ pub)
-  level.rs      — dBu scalar reference
-  signal.rs     — signal gen and capture
-
-thd_tool/src/
-  main.rs       — entrypoint
-  measure.rs    — THD measurement
-  report.rs     — output formatting
+ac-core/   — pure library, no binary. The DSP lives here:
+  measurement/   Tier 1 reference: thd.rs, filterbank.rs, weighting.rs,
+                 noise.rs, loudness.rs, sweep.rs (Farina log-sweep IR), report.rs
+  visualize/     Tier 2 live analysis: transfer.rs (live Welch H1), spectrum,
+                 CWT/CQT/reassigned, fractional-octave, time integration
+  shared/        calibration (voltage/SPL/mic-curve), conversions,
+                 reference_levels, generator, config, time
+ac-daemon/ — binary `ac-daemon`. ZMQ REP+PUB server, audio I/O (JACK/CPAL/fake),
+             worker mgmt. Thin shell over ac-core. (src/handlers/, src/audio/)
+ac-cli/    — binary `ac`. Positional CLI parser, ZMQ REQ/SUB, CSV export.
+ac-ui/     — binary `ac-ui`. wgpu/egui GPU spectrum/waterfall/transfer views.
 ```
 
 ### key invariants — do not break these
-- `ac::level` is a scalar dBu offset only. There is no frequency-dependent
-  correction curve. Do not add one.
-- `ac::estimator` implements the Müller-Massarani H1 approach. Changes to
-  estimator math require architect sign-off (`design-approved` label).
-- `thd_tool` is standalone — no runtime coupling to `ac`.
+- The dBu/level reference is a scalar offset only (`ac-core/src/shared/`,
+  calibration + conversions). There is no frequency-dependent correction curve
+  on the dBu reference. Do not add one.
+- Two transfer-function paths, different math — changes to either require
+  architect sign-off (`design-approved` label):
+  - **Live**: Welch H1 in `ac-core/src/visualize/transfer.rs` — `Gxy/Gxx`,
+    Hann window, 50 % overlap, with coherence.
+  - **Sweep**: Farina exponential-sweep deconvolution in
+    `ac-core/src/measurement/sweep.rs` (Farina 2000). There is no
+    "Müller-Massarani" estimator in this codebase.
+- THD lives in `ac-core/src/measurement/thd.rs` (IEC 60268-3). There is no
+  separate `thd_tool` crate.
+- Loudness is LKFS per ITU-R BS.1770-5 (`ac-core/src/measurement/loudness.rs`),
+  not "LUFS".
 
 ## inputs you will receive
 - Issue number, title, URL
