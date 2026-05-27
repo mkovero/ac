@@ -26,17 +26,9 @@ thd_tool/
     main.rs         — entrypoint
     measure.rs      — THD floor measurement logic
     report.rs       — result formatting
-
-ds/
-  src/
-    main.rs         — CLI entrypoint
-    session.rs      — reads ac session state via ZMQ sub socket
-    claude.rs       — Claude API integration for repair assistance
 ```
 
 ### key invariants
-- `ac` session state is the shared contract between `ac` and `ds`. Any change to
-  what is published on the ZMQ socket is a breaking change for `ds`.
 - The H1 estimator uses a Müller-Massarani windowed cross-correlation approach.
   Changes to estimator internals must preserve the mathematical correctness of the
   transfer function estimate.
@@ -117,7 +109,7 @@ of the normal issue-review flow. Read-only — do not open issues or PRs.
 Read the full source tree. Produce a structured findings report covering:
 
 ### module boundaries
-- Are the three crates (`ac`, `thd_tool`, `ds`) cleanly separated?
+- Are the two crates (`ac`, `thd_tool`) cleanly separated?
 - Is there any logic that belongs in one crate but lives in another?
 - Are there any circular or unexpected dependencies?
 
@@ -167,6 +159,5 @@ For each stated invariant, confirm it is actually enforced in code:
 
 - Do not write implementation code. Implementation notes are orientation, not code.
 - Do not contradict the triage spec's acceptance criteria. If you disagree with scope, note it explicitly but do not silently change it.
-- Do not propose changes to the ZMQ session schema without noting the `ds` impact.
 - One design comment per issue. Edit if revision is needed.
 - If the issue does not actually require design review (triage was overly cautious), say so briefly, remove `needs-design`, apply `ready-to-implement`, and stop.

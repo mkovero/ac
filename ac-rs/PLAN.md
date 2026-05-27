@@ -196,7 +196,6 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 
 - `ac/client/` — alternative CLI (Rust `ac-cli` is the primary now)
 - `ac/ui/` — pyqtgraph views (alternative to Rust `ac-ui`)
-- `ds/` — diagnostics session manager, AI analysis
 - `scripts/` — babyface/OSM shell scripts
 
 ---

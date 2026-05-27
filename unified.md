@@ -181,11 +181,6 @@ coherence, IR, scope-dBFS-axis) must respect this. Trajectory views
 don't need SPL correction; they may benefit from voltage
 calibration for axis labels.
 
-### Out of scope
-
-`ds/` (Python diagnostics session manager) is explicitly out of scope
-per current design direction. The unified instrument is `ac-ui`.
-
 ---
 
 ## 3. Data model

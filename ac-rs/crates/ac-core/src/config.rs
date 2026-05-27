@@ -54,7 +54,7 @@ pub struct Config {
 
     pub gpio_port: Option<String>,
 
-    /// Active session name (read by `ds`).
+    /// Active session name.
     pub session: Option<String>,
 
     /// Force audio backend: `"jack"`, `"sounddevice"`, or `None` for auto.

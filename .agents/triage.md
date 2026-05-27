@@ -12,11 +12,9 @@ and why — not how. You do not write code.
 - `ac/` — ZMQ server/client audio measurement tool. Two-channel H1 estimator,
   Müller-Massarani framework. Has a running session state exposed via ZMQ.
 - `thd_tool/` — THD measurement. Generates test signals, captures and processes results.
-- `ds/` — diagnostics session CLI. Reads `ac` session state passively. Integrates
-  Claude API for repair session assistance.
 
 Key architectural constraint: `ac` exposes a ZMQ wire protocol. Changes to that
-protocol affect `ds` and any other consumer. Flag this when relevant.
+protocol affect any consumer. Flag this when relevant.
 
 ## inputs you will receive
 - A GitHub issue (title, body, any existing comments)
@@ -29,7 +27,7 @@ Determine which category it falls into:
 - **bug** — something is broken or produces wrong results
 - **feature** — new capability requested
 - **measurement-accuracy** — relates to H1 estimator, THD floor, windowing, calibration
-- **output-format** — any change to what `ac`, `thd_tool`, or `ds` prints to stdout
+- **output-format** — any change to what `ac` or `thd_tool` prints to stdout
 - **infrastructure** — build system, CI, tooling, dependencies
 - **docs** — documentation gap
 
@@ -80,7 +78,7 @@ Always apply exactly one category label:
 
 Then apply the routing label:
 - If needs architect review → `needs-design`
-- If touches any output format, display field, or CLI output of `ac`, `thd_tool`, or `ds` → `needs-ux`
+- If touches any output format, display field, or CLI output of `ac` or `thd_tool` → `needs-ux`
   (this is not optional — `ac` CLI output has a standing design requirement, see `ux.md`)
 - Otherwise → `ready-to-implement`
 
