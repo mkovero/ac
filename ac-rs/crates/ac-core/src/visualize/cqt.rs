@@ -49,9 +49,7 @@ thread_local! {
 #[cfg(target_arch = "x86_64")]
 fn avx2_fma_available() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
-    })
+    *CACHED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
 
 /// Default bins per octave. 24 = quarter-tones, fine enough for visual
@@ -91,7 +89,10 @@ pub fn min_supported_f(buf_len: usize, sample_rate: u32, bpo: u32) -> f32 {
 /// Geometric (log₂) frequency grid: `f_k = f_min · 2^(k/B)` up to the last
 /// `f_k ≤ f_max`.
 pub fn log_freqs(f_min: f32, f_max: f32, bpo: u32) -> Vec<f32> {
-    assert!(f_min > 0.0 && f_max > f_min, "invalid range {f_min}..{f_max}");
+    assert!(
+        f_min > 0.0 && f_max > f_min,
+        "invalid range {f_min}..{f_max}"
+    );
     assert!(bpo >= 1);
     let step = (2.0_f64).powf(1.0 / bpo as f64);
     let mut out = Vec::new();
@@ -105,11 +106,11 @@ pub fn log_freqs(f_min: f32, f_max: f32, bpo: u32) -> Vec<f32> {
 
 /// Precomputed kernel bank — one Hann-windowed complex exponential per bin.
 pub struct CqtKernels {
-    pub bpo:         u32,
-    pub q:           f64,
+    pub bpo: u32,
+    pub q: f64,
     pub sample_rate: u32,
-    pub freqs:       Vec<f32>,
-    kernels:         Vec<Kernel>,
+    pub freqs: Vec<f32>,
+    kernels: Vec<Kernel>,
 }
 
 struct Kernel {
@@ -124,7 +125,9 @@ struct Kernel {
 }
 
 impl CqtKernels {
-    pub fn n_bins(&self) -> usize { self.freqs.len() }
+    pub fn n_bins(&self) -> usize {
+        self.freqs.len()
+    }
     pub fn max_kernel_len(&self) -> usize {
         self.kernels.iter().map(|k| k.n).max().unwrap_or(0)
     }
@@ -137,47 +140,51 @@ impl CqtKernels {
 /// sub-Q penalty (resolution slightly worse than constant-Q at the low
 /// end); the alternative — emitting NaN — would leave a hole in the
 /// spectrum, which is worse for visualisation.
-pub fn build_kernels(
-    freqs: &[f32],
-    sample_rate: u32,
-    bpo: u32,
-    max_n: usize,
-) -> CqtKernels {
+pub fn build_kernels(freqs: &[f32], sample_rate: u32, bpo: u32, max_n: usize) -> CqtKernels {
     assert!(sample_rate > 0);
     assert!(max_n >= 16, "max_n must be ≥ 16, got {max_n}");
     let q = cqt_q(bpo);
     let sr = sample_rate as f64;
 
-    let kernels = freqs.iter().map(|&f| {
-        let f = f as f64;
-        let ideal = (q * sr / f).round() as usize;
-        let n = ideal.clamp(16, max_n);
+    let kernels = freqs
+        .iter()
+        .map(|&f| {
+            let f = f as f64;
+            let ideal = (q * sr / f).round() as usize;
+            let n = ideal.clamp(16, max_n);
 
-        // Hann window over n samples.
-        let mut wsum = 0.0;
-        let mut win = vec![0.0_f64; n];
-        for (i, w) in win.iter_mut().enumerate() {
-            *w = 0.5 - 0.5 * ((2.0 * PI * i as f64) / (n as f64 - 1.0)).cos();
-            wsum += *w;
-        }
-        // Normalise so a unit cosine at f produces |X| = 1.
-        let scale = 2.0 / wsum;
+            // Hann window over n samples.
+            let mut wsum = 0.0;
+            let mut win = vec![0.0_f64; n];
+            for (i, w) in win.iter_mut().enumerate() {
+                *w = 0.5 - 0.5 * ((2.0 * PI * i as f64) / (n as f64 - 1.0)).cos();
+                wsum += *w;
+            }
+            // Normalise so a unit cosine at f produces |X| = 1.
+            let scale = 2.0 / wsum;
 
-        // Conjugate kernel: e^{-j 2π f i / sr}, windowed and scaled. Split
-        // into two `Vec<f64>`s so the AVX inner loop streams each
-        // independently.
-        let omega = 2.0 * PI * f / sr;
-        let mut re = Vec::with_capacity(n);
-        let mut im = Vec::with_capacity(n);
-        for (i, &w) in win.iter().enumerate() {
-            let phase = -omega * i as f64;
-            re.push(w * scale * phase.cos());
-            im.push(w * scale * phase.sin());
-        }
-        Kernel { re, im, n }
-    }).collect();
+            // Conjugate kernel: e^{-j 2π f i / sr}, windowed and scaled. Split
+            // into two `Vec<f64>`s so the AVX inner loop streams each
+            // independently.
+            let omega = 2.0 * PI * f / sr;
+            let mut re = Vec::with_capacity(n);
+            let mut im = Vec::with_capacity(n);
+            for (i, &w) in win.iter().enumerate() {
+                let phase = -omega * i as f64;
+                re.push(w * scale * phase.cos());
+                im.push(w * scale * phase.sin());
+            }
+            Kernel { re, im, n }
+        })
+        .collect();
 
-    CqtKernels { bpo, q, sample_rate, freqs: freqs.to_vec(), kernels }
+    CqtKernels {
+        bpo,
+        q,
+        sample_rate,
+        freqs: freqs.to_vec(),
+        kernels,
+    }
 }
 
 // --- MAC inner loop ---------------------------------------------------------
@@ -209,17 +216,17 @@ unsafe fn mac_avx2_fma(x: &[f64], k_re: &[f64], k_im: &[f64], n: usize) -> (f64,
     let mut acc_im = _mm256_setzero_pd();
     for c in 0..chunks {
         let off = c * 4;
-        let xv  = _mm256_loadu_pd(x.as_ptr().add(off));
+        let xv = _mm256_loadu_pd(x.as_ptr().add(off));
         let krv = _mm256_loadu_pd(k_re.as_ptr().add(off));
         let kiv = _mm256_loadu_pd(k_im.as_ptr().add(off));
-        acc_re  = _mm256_fmadd_pd(xv, krv, acc_re);
-        acc_im  = _mm256_fmadd_pd(xv, kiv, acc_im);
+        acc_re = _mm256_fmadd_pd(xv, krv, acc_re);
+        acc_im = _mm256_fmadd_pd(xv, kiv, acc_im);
     }
     let hsum = |v: __m256d| -> f64 {
         let lo = _mm256_castpd256_pd128(v);
         let hi = _mm256_extractf128_pd::<1>(v);
-        let s  = _mm_add_pd(lo, hi);
-        let s  = _mm_hadd_pd(s, s);
+        let s = _mm_add_pd(lo, hi);
+        let s = _mm_hadd_pd(s, s);
         _mm_cvtsd_f64(s)
     };
     let mut re = hsum(acc_re);
@@ -284,7 +291,7 @@ pub fn cqt_into(buf: &[f32], kernels: &CqtKernels, mags_out: &mut Vec<f32>) {
             let (re, im) = mac_dispatch(&x[off..off + k.n], &k.re, &k.im, k.n);
             let mag2 = re * re + im * im;
             let db = if mag2 > 1e-24 {
-                10.0 * mag2.log10()                          // 10·log10(|x|²) = 20·log10(|x|)
+                10.0 * mag2.log10() // 10·log10(|x|²) = 20·log10(|x|)
             } else {
                 -240.0
             };
@@ -306,7 +313,9 @@ mod tests {
 
     fn cosine(amp: f32, freq: f32, n: usize, sr: u32) -> Vec<f32> {
         let two_pi = 2.0 * std::f32::consts::PI;
-        (0..n).map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos()).collect()
+        (0..n)
+            .map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos())
+            .collect()
     }
 
     #[test]
@@ -335,15 +344,16 @@ mod tests {
         let bpo = 24;
         let f0 = 1000.0_f32;
         let freqs = vec![f0];
-        let buf_len = 8192;                                   // > Q·sr/f0 ≈ 1639
+        let buf_len = 8192; // > Q·sr/f0 ≈ 1639
         let kernels = build_kernels(&freqs, sr, bpo, buf_len);
         let buf = cosine(0.5, f0, buf_len, sr);
         let mags = cqt(&buf, &kernels);
-        let expected = 20.0 * 0.5_f32.log10();                // -6.02 dBFS
+        let expected = 20.0 * 0.5_f32.log10(); // -6.02 dBFS
         assert!(
             (mags[0] - expected).abs() < 0.5,
             "got {} dBFS, expected ≈ {} dBFS",
-            mags[0], expected
+            mags[0],
+            expected
         );
     }
 
@@ -365,9 +375,14 @@ mod tests {
         for &test_f in &[200.0_f32, 1000.0, 5000.0] {
             // Snap test_f to the nearest grid bin so we measure the kernel,
             // not the leakage between adjacent kernels.
-            let (idx, _) = freqs.iter().enumerate()
+            let (idx, _) = freqs
+                .iter()
+                .enumerate()
                 .min_by(|a, b| {
-                    (a.1 - test_f).abs().partial_cmp(&(b.1 - test_f).abs()).unwrap()
+                    (a.1 - test_f)
+                        .abs()
+                        .partial_cmp(&(b.1 - test_f).abs())
+                        .unwrap()
                 })
                 .unwrap();
             let f_grid = freqs[idx];
@@ -376,7 +391,8 @@ mod tests {
             assert!(
                 (mags[idx] - expected).abs() < 0.6,
                 "bin {idx} (f={f_grid}) got {} dBFS, expected ≈ {}",
-                mags[idx], expected
+                mags[idx],
+                expected
             );
         }
     }
@@ -396,7 +412,9 @@ mod tests {
         for &probe_f in &[150.0_f32, 750.0, 3500.0] {
             let buf = cosine(0.5, probe_f, buf_len, sr);
             let mags = cqt(&buf, &kernels);
-            let (peak_idx, _) = mags.iter().enumerate()
+            let (peak_idx, _) = mags
+                .iter()
+                .enumerate()
                 .filter(|(_, &m)| m.is_finite())
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
                 .unwrap();
@@ -414,7 +432,7 @@ mod tests {
     fn min_supported_f_round_trip() {
         let sr = 48_000;
         let bpo = 24;
-        let buf_len = 7200;                                   // 0.15 s
+        let buf_len = 7200; // 0.15 s
         let f_min = min_supported_f(buf_len, sr, bpo);
         // Build kernels at exactly f_min and ensure the lowest one fits.
         let freqs = vec![f_min, f_min * 2.0];

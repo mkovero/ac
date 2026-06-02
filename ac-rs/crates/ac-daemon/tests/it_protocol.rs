@@ -31,14 +31,16 @@ fn alloc_home() -> PathBuf {
 }
 
 struct Daemon {
-    child:     Child,
+    child: Child,
     ctrl_port: u16,
     data_port: u16,
-    home:      PathBuf,
+    home: PathBuf,
 }
 
 impl Daemon {
-    fn spawn() -> Self { Self::spawn_with_config(None) }
+    fn spawn() -> Self {
+        Self::spawn_with_config(None)
+    }
 
     /// Spawn with a pre-seeded `~/.config/ac/config.json`. Useful when the
     /// daemon's behaviour at startup depends on persisted state — e.g., the
@@ -58,8 +60,10 @@ impl Daemon {
             .args([
                 "--fake-audio",
                 "--local",
-                "--ctrl-port", &ctrl.to_string(),
-                "--data-port", &data.to_string(),
+                "--ctrl-port",
+                &ctrl.to_string(),
+                "--data-port",
+                &data.to_string(),
             ])
             .spawn()
             .expect("spawn ac-daemon");
@@ -67,21 +71,38 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(3);
         let ctx = zmq::Context::new();
         loop {
-            if Instant::now() > deadline { panic!("daemon never came up"); }
+            if Instant::now() > deadline {
+                panic!("daemon never came up");
+            }
             thread::sleep(Duration::from_millis(50));
             let s = ctx.socket(zmq::REQ).unwrap();
             s.set_linger(0).ok();
             s.set_rcvtimeo(300).ok();
             s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() { continue; }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() { continue; }
-            if let Ok(_msg) = s.recv_bytes(0) { break; }
+            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
+                continue;
+            }
+            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
+                continue;
+            }
+            if let Ok(_msg) = s.recv_bytes(0) {
+                break;
+            }
         }
-        Self { child, ctrl_port: ctrl, data_port: data, home }
+        Self {
+            child,
+            ctrl_port: ctrl,
+            data_port: data,
+            home,
+        }
     }
 
-    fn ctrl_endpoint(&self) -> String { format!("tcp://127.0.0.1:{}", self.ctrl_port) }
-    fn data_endpoint(&self) -> String { format!("tcp://127.0.0.1:{}", self.data_port) }
+    fn ctrl_endpoint(&self) -> String {
+        format!("tcp://127.0.0.1:{}", self.ctrl_port)
+    }
+    fn data_endpoint(&self) -> String {
+        format!("tcp://127.0.0.1:{}", self.data_port)
+    }
 }
 
 impl Drop for Daemon {
@@ -94,8 +115,8 @@ impl Drop for Daemon {
 
 struct Client {
     _ctx: zmq::Context,
-    req:  zmq::Socket,
-    sub:  zmq::Socket,
+    req: zmq::Socket,
+    sub: zmq::Socket,
 }
 
 impl Client {
@@ -115,7 +136,11 @@ impl Client {
 
         // Allow a tick for the SUB to latch before returning.
         thread::sleep(Duration::from_millis(100));
-        Self { _ctx: ctx, req, sub }
+        Self {
+            _ctx: ctx,
+            req,
+            sub,
+        }
     }
 
     fn call(&self, cmd: Value) -> Value {
@@ -130,7 +155,7 @@ impl Client {
     fn recv_pub(&self, timeout_ms: i32) -> Option<(String, Value)> {
         self.sub.set_rcvtimeo(timeout_ms).ok();
         let bytes = match self.sub.recv_bytes(0) {
-            Ok(b)  => b,
+            Ok(b) => b,
             Err(_) => return None,
         };
         let split = bytes.iter().position(|&b| b == b' ')?;
@@ -144,11 +169,13 @@ impl Client {
     fn wait_for_topic(&self, want: &str, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match self.recv_pub(remaining.max(1)) {
                 Some((t, v)) if t == want => return Some(v),
                 Some(_) => continue,
-                None    => return None,
+                None => return None,
             }
         }
         None
@@ -182,8 +209,8 @@ fn devices_lists_ports() {
     let c = Client::new(&d);
     let r = c.call(json!({"cmd":"devices"}));
     assert_eq!(r["ok"], json!(true));
-    assert!(r["playback"].as_array().unwrap().len() > 0);
-    assert!(r["capture"].as_array().unwrap().len() > 0);
+    assert!(!r["playback"].as_array().unwrap().is_empty());
+    assert!(!r["capture"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -200,7 +227,8 @@ fn generate_stop_emits_done_frame() {
 
     // Stop should emit a "done" frame on the PUB channel.
     let _ = c.call(json!({"cmd":"stop"}));
-    let done = c.wait_for_topic("done", Duration::from_secs(3))
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(3))
         .expect("no done frame after stop");
     assert_eq!(done["cmd"], json!("generate"));
 }
@@ -226,14 +254,21 @@ fn generate_routes_all_channels_in_request() {
     assert_eq!(r["ok"], json!(true), "generate ack: {r}");
     let ports = r["out_ports"].as_array().expect("out_ports array");
     assert_eq!(
-        ports.len(), chans.len(),
-        "expected {} ports for channels {:?}, got {:?}", chans.len(), chans, ports,
+        ports.len(),
+        chans.len(),
+        "expected {} ports for channels {:?}, got {:?}",
+        chans.len(),
+        chans,
+        ports,
     );
     // Each port name must be unique — otherwise the daemon collapsed
     // distinct channel indices to the sticky default.
-    let names: std::collections::HashSet<&str> =
-        ports.iter().filter_map(|v| v.as_str()).collect();
-    assert_eq!(names.len(), ports.len(), "duplicate port in out_ports: {ports:?}");
+    let names: std::collections::HashSet<&str> = ports.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(
+        names.len(),
+        ports.len(),
+        "duplicate port in out_ports: {ports:?}"
+    );
 
     let _ = c.call(json!({"cmd":"stop"}));
 }
@@ -250,7 +285,11 @@ fn generate_no_channels_falls_back_to_configured_default() {
     let r = c.call(json!({"cmd": "generate", "freq_hz": 1000.0, "level_dbfs": -20.0}));
     assert_eq!(r["ok"], json!(true));
     let ports = r["out_ports"].as_array().expect("out_ports array");
-    assert_eq!(ports.len(), 1, "default-channel generate should give one port");
+    assert_eq!(
+        ports.len(),
+        1,
+        "default-channel generate should give one port"
+    );
 
     let _ = c.call(json!({"cmd":"stop"}));
 }
@@ -281,12 +320,21 @@ fn setup_channel_clears_sticky_port() {
     }}));
     assert_eq!(r["ok"], json!(true));
     let cfg = &r["config"];
-    assert!(cfg["output_port"].is_null(),
-        "setup output_channel must clear sticky output_port (got {:?})", cfg["output_port"]);
-    assert!(cfg["input_port"].is_null(),
-        "setup input_channel must clear sticky input_port (got {:?})", cfg["input_port"]);
-    assert!(cfg["reference_port"].is_null(),
-        "setup reference_channel must clear sticky reference_port (got {:?})", cfg["reference_port"]);
+    assert!(
+        cfg["output_port"].is_null(),
+        "setup output_channel must clear sticky output_port (got {:?})",
+        cfg["output_port"]
+    );
+    assert!(
+        cfg["input_port"].is_null(),
+        "setup input_channel must clear sticky input_port (got {:?})",
+        cfg["input_port"]
+    );
+    assert!(
+        cfg["reference_port"].is_null(),
+        "setup reference_channel must clear sticky reference_port (got {:?})",
+        cfg["reference_port"]
+    );
 }
 
 #[test]
@@ -328,7 +376,8 @@ fn sweep_frequency_publishes_done() {
         "duration": 0.3,
     }));
     assert_eq!(r["ok"], json!(true));
-    let done = c.wait_for_topic("done", Duration::from_secs(5))
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(5))
         .expect("sweep_frequency never finished");
     assert_eq!(done["cmd"], json!("sweep_frequency"));
 }
@@ -379,7 +428,8 @@ fn set_monitor_params_live_updates_running_worker() {
     assert_eq!(r["fft_n"], json!(16384));
 
     let _ = c.call(json!({"cmd":"stop"}));
-    let done = c.wait_for_topic("done", Duration::from_secs(3))
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(3))
         .expect("no done frame after stop");
     assert_eq!(done["cmd"], json!("monitor_spectrum"));
 }
@@ -418,10 +468,20 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut accepted = 0;
     while Instant::now() < deadline {
-        let Some((topic, payload)) = c.recv_pub(2_000) else { break };
-        if topic != "data" { continue; }
-        if payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum") { continue; }
-        if payload.get("spectrum").and_then(Value::as_array).map_or(true, |a| a.is_empty()) {
+        let Some((topic, payload)) = c.recv_pub(2_000) else {
+            break;
+        };
+        if topic != "data" {
+            continue;
+        }
+        if payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum") {
+            continue;
+        }
+        if payload
+            .get("spectrum")
+            .and_then(Value::as_array)
+            .is_none_or(|a| a.is_empty())
+        {
             continue;
         }
         accepted += 1;
@@ -434,15 +494,23 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
     let frame = frame.expect("no usable spectrum frame within 5 s");
 
     // ── 1. Wire schema: cal offsets are null when no cal is loaded ──
-    assert!(frame.get("dbu_offset_db").map_or(true, |v| v.is_null()),
-        "dbu_offset_db must be null without cal: {frame}");
-    assert!(frame.get("spl_offset_db").map_or(true, |v| v.is_null()),
-        "spl_offset_db must be null without cal: {frame}");
-    assert!(frame.get("in_dbu").map_or(true, |v| v.is_null()),
-        "in_dbu must be null without cal: {frame}");
+    assert!(
+        frame.get("dbu_offset_db").is_none_or(|v| v.is_null()),
+        "dbu_offset_db must be null without cal: {frame}"
+    );
+    assert!(
+        frame.get("spl_offset_db").is_none_or(|v| v.is_null()),
+        "spl_offset_db must be null without cal: {frame}"
+    );
+    assert!(
+        frame.get("in_dbu").is_none_or(|v| v.is_null()),
+        "in_dbu must be null without cal: {frame}"
+    );
 
     // ── 2. fundamental_dbfs ≈ -20 dBFS (with up to ~1.5 dB Hann scallop) ──
-    let fund_dbfs = frame["fundamental_dbfs"].as_f64().expect("fundamental_dbfs");
+    let fund_dbfs = frame["fundamental_dbfs"]
+        .as_f64()
+        .expect("fundamental_dbfs");
     assert!(
         (fund_dbfs - (-20.0)).abs() < 1.5,
         "fundamental_dbfs = {fund_dbfs:.3} dBFS, want ~-20.0 (raw bin, scallop ≤1.42 dB)",
@@ -459,7 +527,7 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
     let peaks = frame["peaks"].as_array().expect("peaks array");
     assert!(!peaks.is_empty(), "expected at least one detected peak");
     let p0 = peaks[0].as_array().expect("peak entry [freq, db]");
-    let p0_hz   = p0[0].as_f64().expect("peak freq");
+    let p0_hz = p0[0].as_f64().expect("peak freq");
     let p0_dbfs = p0[1].as_f64().expect("peak dbfs");
     assert!(
         (p0_hz - 1000.0).abs() < 1.0,
@@ -515,11 +583,21 @@ fn monitor_spectrum_emits_scope_frames() {
         std::collections::HashMap::new();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
-        if remaining <= 0 { break; }
-        let Some((topic, payload)) = c.recv_pub(remaining.max(1)) else { break };
-        if topic != "data" { continue; }
-        if payload.get("type").and_then(Value::as_str) != Some("visualize/scope") { continue; }
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        if remaining <= 0 {
+            break;
+        }
+        let Some((topic, payload)) = c.recv_pub(remaining.max(1)) else {
+            break;
+        };
+        if topic != "data" {
+            continue;
+        }
+        if payload.get("type").and_then(Value::as_str) != Some("visualize/scope") {
+            continue;
+        }
         let frame_idx = payload["frame_idx"].as_u64().expect("frame_idx u64");
         frames_by_idx.entry(frame_idx).or_default().push(payload);
     }
@@ -604,7 +682,7 @@ fn calibrate_prompt_reply_cycle() {
                 break;
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     assert!(saw_done, "calibrate cycle never completed");
@@ -626,7 +704,8 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     assert_eq!(r["ok"], json!(true));
 
     // Step 1 prompt → reply with a known DAC reading.
-    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
         .expect("step 1 prompt");
     let user_out_vrms = 2.095_f64;
     let _ = c.call(json!({"cmd": "cal_reply", "vrms": user_out_vrms}));
@@ -634,12 +713,18 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     // Step 2 prompt — fake backend loops the played tone back, so the
     // captured input level matches the played `ref_dbfs - 3.01` (RMS
     // vs peak), and the handler should flag `loopback: true`.
-    let p2 = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+    let p2 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
         .expect("step 2 prompt");
-    assert_eq!(p2["loopback"], json!(true), "expected loopback flag in step 2: {p2}");
+    assert_eq!(
+        p2["loopback"],
+        json!(true),
+        "expected loopback flag in step 2: {p2}"
+    );
     let _ = c.call(json!({"cmd": "cal_reply", "vrms": user_out_vrms}));
 
-    let done = c.wait_for_topic("cal_done", Duration::from_secs(5))
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
         .expect("cal_done frame");
 
     // ref_dbfs = -10 → out_scale = 10^(10/20) ≈ 3.16228.
@@ -682,16 +767,23 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     let mut got_report = false;
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && !(got_ir && got_report) {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "measurement/impulse_response" => {
                 let ir = v["data"]["linear_ir"].as_array().expect("linear_ir array");
                 assert_eq!(ir.len(), 1024, "window_len respected");
                 // Find the max-absolute sample index.
-                let (peak_idx, peak_val) = ir.iter().enumerate().fold((0usize, 0.0f64), |acc, (i, x)| {
-                    let mag = x.as_f64().unwrap_or(0.0).abs();
-                    if mag > acc.1 { (i, mag) } else { acc }
-                });
+                let (peak_idx, peak_val) =
+                    ir.iter().enumerate().fold((0usize, 0.0f64), |acc, (i, x)| {
+                        let mag = x.as_f64().unwrap_or(0.0).abs();
+                        if mag > acc.1 {
+                            (i, mag)
+                        } else {
+                            acc
+                        }
+                    });
                 let centre = ir.len() / 2;
                 // Fake backend delays by 32 samples; the linear-IR gate is
                 // centred on the sweep endpoint, which after normalisation
@@ -865,12 +957,21 @@ fn transfer_stream_emits_data_and_done() {
     let mut got_frame = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data"
-                && v["type"].as_str() == Some("transfer_stream") => {
-                for key in ["freqs", "magnitude_db", "phase_deg", "coherence",
-                            "re", "im", "delay_samples", "delay_ms"] {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                for key in [
+                    "freqs",
+                    "magnitude_db",
+                    "phase_deg",
+                    "coherence",
+                    "re",
+                    "im",
+                    "delay_samples",
+                    "delay_ms",
+                ] {
                     assert!(v.get(key).is_some(), "frame missing {key}: {v}");
                 }
                 // unified.md Phase 3: re/im consistency — every bin
@@ -923,7 +1024,8 @@ fn transfer_stream_emits_data_and_done() {
     assert!(got_frame, "never saw a transfer_stream data frame");
 
     let _ = c.call(json!({"cmd": "stop"}));
-    let done = c.wait_for_topic("done", Duration::from_secs(5))
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(5))
         .expect("no done frame after stop");
     assert_eq!(done["cmd"], json!("transfer_stream"));
 }
@@ -965,12 +1067,19 @@ fn transfer_stream_emits_ir_sidecar() {
     let mut got_ir = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data"
-                && v["type"].as_str() == Some("visualize/ir") => {
-                for key in ["samples", "sr", "dt_ms", "t_origin_ms",
-                            "ref_channel", "meas_channel"] {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("visualize/ir") => {
+                for key in [
+                    "samples",
+                    "sr",
+                    "dt_ms",
+                    "t_origin_ms",
+                    "ref_channel",
+                    "meas_channel",
+                ] {
                     assert!(v.get(key).is_some(), "ir frame missing {key}: {v}");
                 }
                 let samples = v["samples"].as_array().unwrap();
@@ -1059,7 +1168,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     let start_hz = 200.0;
-    let stop_hz  = 4_000.0;
+    let stop_hz = 4_000.0;
     let r = c.call(json!({
         "cmd":        "plot",
         "start_hz":   start_hz,
@@ -1071,24 +1180,34 @@ fn plot_with_bpo_emits_spectrum_bands() {
     }));
     assert_eq!(r["ok"], json!(true));
 
-    let mut got_frame  = false;
+    let mut got_frame = false;
     let mut got_report = false;
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline && !(got_frame && got_report) {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "measurement/spectrum_bands" => {
                 assert_eq!(v["bpo"], json!(3));
                 assert_eq!(v["class"], json!("Class 1"));
                 let centres = v["centres_hz"].as_array().expect("centres_hz array");
-                let levels  = v["levels_dbfs"].as_array().expect("levels_dbfs array");
+                let levels = v["levels_dbfs"].as_array().expect("levels_dbfs array");
                 assert_eq!(centres.len(), levels.len());
                 assert!(!centres.is_empty(), "filterbank produced no bands");
                 // Peak band must land near the 1 kHz loopback tone.
-                let (peak_idx, _) = levels.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |acc, (i, x)| {
-                    let v = x.as_f64().unwrap_or(f64::NEG_INFINITY);
-                    if v > acc.1 { (i, v) } else { acc }
-                });
+                let (peak_idx, _) =
+                    levels
+                        .iter()
+                        .enumerate()
+                        .fold((0usize, f64::NEG_INFINITY), |acc, (i, x)| {
+                            let v = x.as_f64().unwrap_or(f64::NEG_INFINITY);
+                            if v > acc.1 {
+                                (i, v)
+                            } else {
+                                acc
+                            }
+                        });
                 let peak_fc = centres[peak_idx].as_f64().unwrap();
                 assert!(
                     (start_hz / 2.0..=stop_hz * 2.0).contains(&peak_fc),
@@ -1109,8 +1228,11 @@ fn plot_with_bpo_emits_spectrum_bands() {
             None => break,
         }
     }
-    assert!(got_frame,  "never saw measurement/spectrum_bands frame");
-    assert!(got_report, "never saw measurement/report with spectrum_bands data");
+    assert!(got_frame, "never saw measurement/spectrum_bands frame");
+    assert!(
+        got_report,
+        "never saw measurement/report with spectrum_bands data"
+    );
 }
 
 #[test]
@@ -1126,9 +1248,13 @@ fn plot_frames_carry_processing_context_envelope() {
     // Set up SPL cal.
     let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
     assert_eq!(r["ok"], json!(true));
-    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3)).expect("cal_prompt");
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("cal_prompt");
     let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
-    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5)).expect("cal_done");
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
 
     // Attach a synthetic 24-point mic-curve.
     let mut freqs = Vec::new();
@@ -1138,7 +1264,7 @@ fn plot_frames_carry_processing_context_envelope() {
     for i in 0..24 {
         let t = i as f64 / 23.0;
         freqs.push((log_min + t * (log_max - log_min)).exp());
-        gains.push(2.0 * t);                                    // ramp 0..2 dB
+        gains.push(2.0 * t); // ramp 0..2 dB
     }
     let r = c.call(json!({
         "cmd":           "calibrate_mic_curve",
@@ -1164,39 +1290,48 @@ fn plot_frames_carry_processing_context_envelope() {
     let mut report_frame: Option<Value> = None;
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline && !(point_frame.is_some() && report_frame.is_some()) {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "data" => {
                 if v["type"] == json!("measurement/frequency_response/point")
                     && point_frame.is_none()
                 {
                     point_frame = Some(v);
-                } else if v["type"] == json!("measurement/report")
-                    && report_frame.is_none()
-                {
+                } else if v["type"] == json!("measurement/report") && report_frame.is_none() {
                     report_frame = Some(v);
                 }
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     let pf = point_frame.expect("missing per-point frame");
     let rf = report_frame.expect("missing measurement/report");
 
     // Envelope keys present on the per-point frame (#98).
-    assert_eq!(pf["mic_correction"],   json!("on"));
-    assert!(pf["spl_offset_db"].is_f64(), "spl_offset_db not f64: {pf:?}");
-    assert_eq!(pf["weighting"],        json!("off"));
+    assert_eq!(pf["mic_correction"], json!("on"));
+    assert!(
+        pf["spl_offset_db"].is_f64(),
+        "spl_offset_db not f64: {pf:?}"
+    );
+    assert_eq!(pf["weighting"], json!("off"));
     assert_eq!(pf["time_integration"], json!("off"));
-    assert!(pf.get("smoothing_bpo").is_some(), "smoothing_bpo key missing");
+    assert!(
+        pf.get("smoothing_bpo").is_some(),
+        "smoothing_bpo key missing"
+    );
 
     // CalibrationSnapshot in the report carries SPL + mic_response (#94 →
     // populated here per #97).
-    let cal = rf["report"]["calibration"].as_object()
+    let cal = rf["report"]["calibration"]
+        .as_object()
         .expect("calibration block missing");
     assert!(cal["mic_sensitivity_dbfs_at_94db_spl"].is_f64(), "{cal:?}");
-    let mr = cal["mic_response"].as_object().expect("mic_response missing");
+    let mr = cal["mic_response"]
+        .as_object()
+        .expect("mic_response missing");
     assert_eq!(mr["n_points"], json!(24));
     assert!(mr["imported_at"].is_string());
 }
@@ -1231,8 +1366,11 @@ fn server_idle_timeout_auto_disables_public_bind() {
     // Reconnect on localhost and verify the daemon reverted to local.
     let c2 = Client::new(&d);
     let s = c2.call(json!({"cmd": "status"}));
-    assert_eq!(s["listen_mode"], json!("local"),
-        "idle timeout did not auto-disable public bind: {s}");
+    assert_eq!(
+        s["listen_mode"],
+        json!("local"),
+        "idle timeout did not auto-disable public bind: {s}"
+    );
 }
 
 #[test]
@@ -1254,22 +1392,28 @@ fn monitor_cqt_emits_visualize_cqt_frame() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut frame: Option<Value> = None;
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "data" && v["type"] == json!("visualize/cqt") => {
                 frame = Some(v);
                 break;
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     let _ = c.call(json!({"cmd": "stop"}));
     let frame = frame.expect("no visualize/cqt frame within 5 s");
 
-    let mags  = frame["magnitudes"].as_array().expect("magnitudes array");
+    let mags = frame["magnitudes"].as_array().expect("magnitudes array");
     let freqs = frame["frequencies"].as_array().expect("frequencies array");
-    assert_eq!(mags.len(), freqs.len(), "magnitudes/frequencies length mismatch");
+    assert_eq!(
+        mags.len(),
+        freqs.len(),
+        "magnitudes/frequencies length mismatch"
+    );
     assert!(!mags.is_empty(), "empty cqt column");
     // Geometric spacing: f[k+1] / f[k] should be constant (= 2^(1/bpo)).
     let f0 = freqs[0].as_f64().unwrap();
@@ -1301,26 +1445,39 @@ fn monitor_reassigned_emits_visualize_reassigned_frame() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut frame: Option<Value> = None;
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "data" && v["type"] == json!("visualize/reassigned") => {
                 frame = Some(v);
                 break;
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     let _ = c.call(json!({"cmd": "stop"}));
     let frame = frame.expect("no visualize/reassigned frame within 5 s");
 
-    let mags  = frame["magnitudes"].as_array().expect("magnitudes array");
+    let mags = frame["magnitudes"].as_array().expect("magnitudes array");
     let freqs = frame["frequencies"].as_array().expect("frequencies array");
-    assert_eq!(mags.len(), freqs.len(), "magnitudes/frequencies length mismatch");
-    assert!(mags.len() >= 256, "reassigned column suspiciously short: {}", mags.len());
+    assert_eq!(
+        mags.len(),
+        freqs.len(),
+        "magnitudes/frequencies length mismatch"
+    );
+    assert!(
+        mags.len() >= 256,
+        "reassigned column suspiciously short: {}",
+        mags.len()
+    );
     let f0 = freqs[0].as_f64().unwrap();
     let f_last = freqs[freqs.len() - 1].as_f64().unwrap();
-    assert!(f_last > f0 * 100.0, "freqs span less than 2 decades: {f0}..{f_last}");
+    assert!(
+        f_last > f0 * 100.0,
+        "freqs span less than 2 decades: {f0}..{f_last}"
+    );
 }
 
 #[test]
@@ -1347,14 +1504,16 @@ fn calibrate_spl_records_capture_dbfs() {
     assert_eq!(r["ok"], json!(true), "calibrate_spl ack: {r}");
 
     // Wait for the prompt, then release the worker.
-    let prompt = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+    let prompt = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
         .expect("no cal_prompt within 3 s");
     assert_eq!(prompt["kind"], json!("spl"), "prompt kind: {prompt}");
 
     let r = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
     assert_eq!(r["ok"], json!(true));
 
-    let done = c.wait_for_topic("cal_done", Duration::from_secs(5))
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
         .expect("no cal_done within 5 s");
     let dbfs = done["mic_sensitivity_dbfs_at_94db_spl"]
         .as_f64()
@@ -1383,10 +1542,12 @@ fn get_and_list_calibrations_return_all_three_layers() {
         "capture_s": 0.1,
     }));
     assert_eq!(r["ok"], json!(true));
-    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3))
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
         .expect("cal_prompt");
     let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
-    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5))
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
         .expect("cal_done");
 
     // Mic-curve — synthetic 24-point curve.
@@ -1413,8 +1574,10 @@ fn get_and_list_calibrations_return_all_three_layers() {
     let r = c.call(json!({"cmd": "get_calibration", "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
     assert_eq!(r["found"], json!(true));
-    assert!(r["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
-        "missing or wrong-typed mic_sensitivity_dbfs_at_94db_spl in: {r}");
+    assert!(
+        r["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
+        "missing or wrong-typed mic_sensitivity_dbfs_at_94db_spl in: {r}"
+    );
     let mr = r["mic_response"].as_object().expect("mic_response object");
     assert_eq!(mr["freqs_hz"].as_array().unwrap().len(), 24);
     assert_eq!(mr["gain_db"].as_array().unwrap().len(), 24);
@@ -1425,12 +1588,18 @@ fn get_and_list_calibrations_return_all_three_layers() {
     let r = c.call(json!({"cmd": "list_calibrations"}));
     assert_eq!(r["ok"], json!(true));
     let cals = r["calibrations"].as_array().expect("calibrations array");
-    let entry = cals.iter().find(|e| e["key"].as_str() == Some("out0_in0"))
+    let entry = cals
+        .iter()
+        .find(|e| e["key"].as_str() == Some("out0_in0"))
         .expect("out0_in0 entry not in list");
-    assert!(entry["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
-        "list_calibrations entry missing mic_sensitivity field: {entry}");
-    assert!(entry["mic_response"].is_object(),
-        "list_calibrations entry missing mic_response: {entry}");
+    assert!(
+        entry["mic_sensitivity_dbfs_at_94db_spl"].is_f64(),
+        "list_calibrations entry missing mic_sensitivity field: {entry}"
+    );
+    assert!(
+        entry["mic_response"].is_object(),
+        "list_calibrations entry missing mic_response: {entry}"
+    );
 }
 
 #[test]
@@ -1513,7 +1682,10 @@ fn calibrate_mic_curve_set_then_clear() {
         "gain_db":       [0.0, 0.5, 1.0],
     }));
     assert_eq!(r["ok"], json!(false));
-    assert!(r["error"].as_str().unwrap_or("").contains("too sparse"), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or("").contains("too sparse"),
+        "{r}"
+    );
 
     // Clear.
     let r = c.call(json!({
@@ -1549,23 +1721,28 @@ fn loudness_lkfs_drops_by_curve_db_when_mic_correction_on() {
         let deadline = Instant::now() + Duration::from_millis(dur_ms);
         let mut last: Option<Value> = None;
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match c.recv_pub(remaining.max(1)) {
                 Some((t, v))
-                    if t == "data" && v["type"] == json!("measurement/loudness")
+                    if t == "data"
+                        && v["type"] == json!("measurement/loudness")
                         && v["momentary_lkfs"].is_f64() =>
                 {
                     last = Some(v);
                 }
                 Some(_) => continue,
-                None    => break,
+                None => break,
             }
         }
         let _ = c.call(json!({"cmd": "stop"}));
         // Drain trailing frames.
         let drain = Instant::now() + Duration::from_millis(300);
         while Instant::now() < drain {
-            if c.recv_pub(50).is_none() { break; }
+            if c.recv_pub(50).is_none() {
+                break;
+            }
         }
         last.expect("no measurement/loudness frame with momentary_lkfs in window")
     }
@@ -1576,8 +1753,11 @@ fn loudness_lkfs_drops_by_curve_db_when_mic_correction_on() {
     // Baseline — no curve loaded.
     let baseline = last_loudness(&c, 1500);
     let baseline_lkfs = baseline["momentary_lkfs"].as_f64().unwrap();
-    assert_eq!(baseline["mic_correction"], json!("none"),
-        "baseline tag must be 'none': {baseline}");
+    assert_eq!(
+        baseline["mic_correction"],
+        json!("none"),
+        "baseline tag must be 'none': {baseline}"
+    );
 
     // Load a flat +3 dB mic-curve.
     let mut freqs = Vec::new();
@@ -1604,8 +1784,11 @@ fn loudness_lkfs_drops_by_curve_db_when_mic_correction_on() {
     // With curve loaded → FIR runs before K-weighting → LKFS drops.
     let corrected = last_loudness(&c, 1500);
     let corrected_lkfs = corrected["momentary_lkfs"].as_f64().unwrap();
-    assert_eq!(corrected["mic_correction"], json!("on"),
-        "corrected tag must be 'on': {corrected}");
+    assert_eq!(
+        corrected["mic_correction"],
+        json!("on"),
+        "corrected tag must be 'on': {corrected}"
+    );
 
     let delta = baseline_lkfs - corrected_lkfs;
     assert!(
@@ -1615,7 +1798,7 @@ fn loudness_lkfs_drops_by_curve_db_when_mic_correction_on() {
     );
     // True-peak shifts the same way (FIR runs before the 4× polyphase
     // oversampler that produces dBTP).
-    let baseline_tp  = baseline["true_peak_dbtp"].as_f64().unwrap_or(f64::NAN);
+    let baseline_tp = baseline["true_peak_dbtp"].as_f64().unwrap_or(f64::NAN);
     let corrected_tp = corrected["true_peak_dbtp"].as_f64().unwrap_or(f64::NAN);
     if baseline_tp.is_finite() && corrected_tp.is_finite() {
         let tp_delta = baseline_tp - corrected_tp;
@@ -1640,21 +1823,28 @@ fn loudness_unchanged_when_mic_correction_toggled_off() {
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut last: Option<Value> = None;
         while Instant::now() < deadline {
-            let r = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let r = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match c.recv_pub(r.max(1)) {
                 Some((t, v))
-                    if t == "data" && v["type"] == json!("measurement/loudness")
+                    if t == "data"
+                        && v["type"] == json!("measurement/loudness")
                         && v["momentary_lkfs"].is_f64() =>
                 {
                     last = Some(v);
                 }
                 Some(_) => continue,
-                None    => break,
+                None => break,
             }
         }
         let _ = c.call(json!({"cmd": "stop"}));
         let drain = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < drain { if c.recv_pub(50).is_none() { break; } }
+        while Instant::now() < drain {
+            if c.recv_pub(50).is_none() {
+                break;
+            }
+        }
         last.expect("no baseline loudness frame")
     };
     let baseline_lkfs = baseline["momentary_lkfs"].as_f64().unwrap();
@@ -1688,24 +1878,30 @@ fn loudness_unchanged_when_mic_correction_toggled_off() {
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut last: Option<Value> = None;
         while Instant::now() < deadline {
-            let r = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let r = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match c.recv_pub(r.max(1)) {
                 Some((t, v))
-                    if t == "data" && v["type"] == json!("measurement/loudness")
+                    if t == "data"
+                        && v["type"] == json!("measurement/loudness")
                         && v["momentary_lkfs"].is_f64() =>
                 {
                     last = Some(v);
                 }
                 Some(_) => continue,
-                None    => break,
+                None => break,
             }
         }
         let _ = c.call(json!({"cmd": "stop"}));
         last.expect("no off-mode loudness frame")
     };
     let off_lkfs = off["momentary_lkfs"].as_f64().unwrap();
-    assert_eq!(off["mic_correction"], json!("off"),
-        "tag must be 'off' when toggle disables FIR: {off}");
+    assert_eq!(
+        off["mic_correction"],
+        json!("off"),
+        "tag must be 'off' when toggle disables FIR: {off}"
+    );
     let delta = (baseline_lkfs - off_lkfs).abs();
     assert!(
         delta < 0.3,
@@ -1746,6 +1942,9 @@ fn server_idle_timeout_disabled_keeps_public_bind() {
     thread::sleep(Duration::from_millis(200));
     let c2 = Client::new(&d);
     let s = c2.call(json!({"cmd": "status"}));
-    assert_eq!(s["listen_mode"], json!("public"),
-        "disabled timeout still auto-disabled public bind: {s}");
+    assert_eq!(
+        s["listen_mode"],
+        json!("public"),
+        "disabled timeout still auto-disabled public bind: {s}"
+    );
 }

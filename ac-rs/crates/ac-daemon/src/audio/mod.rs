@@ -87,11 +87,15 @@ pub trait AudioEngine: Send + 'static {
 
     /// Reconnect the measurement input port without restarting the engine.
     /// Default no-op (used by fake engine; JACK backend overrides).
-    fn reconnect_input(&mut self, _port: &str) -> Result<()> { Ok(()) }
+    fn reconnect_input(&mut self, _port: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Connect a reference input port (second capture channel for transfer / DUT tests).
     /// Default no-op.
-    fn add_ref_input(&mut self, _port: &str) -> Result<()> { Ok(()) }
+    fn add_ref_input(&mut self, _port: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Discard buffered capture samples.
     /// Default no-op.
@@ -99,7 +103,9 @@ pub trait AudioEngine: Send + 'static {
 
     /// Connect our output to an additional destination port.
     /// Default no-op.
-    fn connect_output(&mut self, _port: &str) -> Result<()> { Ok(()) }
+    fn connect_output(&mut self, _port: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Disconnect our output from a destination port.
     /// Default no-op.
@@ -119,10 +125,14 @@ pub trait AudioEngine: Send + 'static {
     /// these should return `false` so handlers that depend on routing
     /// (`probe`, `transfer`, `test_hardware`, `test_dut`) can refuse up-front
     /// instead of producing silently-wrong measurements.
-    fn supports_routing(&self) -> bool { false }
+    fn supports_routing(&self) -> bool {
+        false
+    }
 
     /// Human-readable backend name for error messages.
-    fn backend_name(&self) -> &'static str { "unknown" }
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.

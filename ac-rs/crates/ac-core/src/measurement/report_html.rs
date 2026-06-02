@@ -13,8 +13,7 @@ use std::fmt::Write as _;
 
 use crate::measurement::report::{
     CalibrationSnapshot, FrequencyResponsePoint, MeasurementData, MeasurementMethod,
-    ProcessingChain,
-    MeasurementReport,
+    MeasurementReport, ProcessingChain,
 };
 
 const CSS: &str = r#"
@@ -65,11 +64,7 @@ pub fn render_html(report: &MeasurementReport) -> String {
 fn write_header(out: &mut String, r: &MeasurementReport) {
     let _ = writeln!(out, "<h1>ac MeasurementReport</h1>");
     let _ = writeln!(out, "<dl class=\"meta\">");
-    let _ = writeln!(
-        out,
-        "<dt>schema</dt><dd>v{}</dd>",
-        r.schema_version
-    );
+    let _ = writeln!(out, "<dt>schema</dt><dd>v{}</dd>", r.schema_version);
     let _ = writeln!(
         out,
         "<dt>ac version</dt><dd>{}</dd>",
@@ -103,7 +98,12 @@ fn write_method(out: &mut String, r: &MeasurementReport) {
                 );
             }
         }
-        MeasurementMethod::SweptSine { f1_hz, f2_hz, duration_s, standard } => {
+        MeasurementMethod::SweptSine {
+            f1_hz,
+            f2_hz,
+            duration_s,
+            standard,
+        } => {
             let _ = writeln!(
                 out,
                 "<dt>kind</dt><dd>swept_sine ({:.1} Hz → {:.1} Hz, {:.3} s)</dd>",
@@ -147,11 +147,7 @@ fn write_stimulus(out: &mut String, r: &MeasurementReport) {
         "<dt>level</dt><dd>{:.2} dBFS</dd>",
         r.stimulus.level_dbfs
     );
-    let _ = writeln!(
-        out,
-        "<dt>points</dt><dd>{}</dd>",
-        r.stimulus.n_points
-    );
+    let _ = writeln!(out, "<dt>points</dt><dd>{}</dd>", r.stimulus.n_points);
     let _ = writeln!(out, "</dl>");
 }
 
@@ -164,18 +160,10 @@ fn write_calibration(out: &mut String, c: &CalibrationSnapshot) {
         c.output_channel, c.input_channel
     );
     if let Some(v) = c.vrms_at_0dbfs_out {
-        let _ = writeln!(
-            out,
-            "<dt>V<sub>RMS</sub>@0dBFS out</dt><dd>{:.6} V</dd>",
-            v
-        );
+        let _ = writeln!(out, "<dt>V<sub>RMS</sub>@0dBFS out</dt><dd>{:.6} V</dd>", v);
     }
     if let Some(v) = c.vrms_at_0dbfs_in {
-        let _ = writeln!(
-            out,
-            "<dt>V<sub>RMS</sub>@0dBFS in</dt><dd>{:.6} V</dd>",
-            v
-        );
+        let _ = writeln!(out, "<dt>V<sub>RMS</sub>@0dBFS in</dt><dd>{:.6} V</dd>", v);
     }
     let _ = writeln!(
         out,
@@ -201,10 +189,15 @@ fn write_calibration(out: &mut String, c: &CalibrationSnapshot) {
             out,
             "<dt>mic response</dt>\
              <dd>{} ({} points, imported {})</dd>",
-            html_escape(path), mic.n_points, html_escape(&mic.imported_at),
+            html_escape(path),
+            mic.n_points,
+            html_escape(&mic.imported_at),
         );
     } else {
-        let _ = writeln!(out, "<dt>mic response</dt><dd>not loaded (uncorrected)</dd>");
+        let _ = writeln!(
+            out,
+            "<dt>mic response</dt><dd>not loaded (uncorrected)</dd>"
+        );
     }
     let _ = writeln!(out, "</dl>");
 }
@@ -247,7 +240,11 @@ fn write_processing_chain(out: &mut String, chain: &ProcessingChain) {
     let _ = writeln!(
         out,
         "<dt>mic correction</dt><dd>{}</dd>",
-        if chain.mic_correction_applied { "applied" } else { "not applied" },
+        if chain.mic_correction_applied {
+            "applied"
+        } else {
+            "not applied"
+        },
     );
     let _ = writeln!(out, "</dl>");
 }
@@ -399,15 +396,19 @@ fn render_frequency_response_svg(points: &[FrequencyResponsePoint]) -> String {
     let pad_t = 20.0_f64;
     let pad_b = 40.0_f64;
 
-    let f_min = points.iter().map(|p| p.freq_hz).fold(f64::INFINITY, f64::min);
+    let f_min = points
+        .iter()
+        .map(|p| p.freq_hz)
+        .fold(f64::INFINITY, f64::min);
     let f_max = points
         .iter()
         .map(|p| p.freq_hz)
         .fold(f64::NEG_INFINITY, f64::max);
-    let (db_min_raw, db_max_raw) = points.iter().fold(
-        (f64::INFINITY, f64::NEG_INFINITY),
-        |(lo, hi), p| (lo.min(p.fundamental_dbfs), hi.max(p.fundamental_dbfs)),
-    );
+    let (db_min_raw, db_max_raw) = points
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p.fundamental_dbfs), hi.max(p.fundamental_dbfs))
+        });
     // Pad the dB range so the trace isn't flush with the border.
     let mut db_min = db_min_raw.floor() - 1.0;
     let mut db_max = db_max_raw.ceil() + 1.0;
@@ -489,7 +490,13 @@ fn render_frequency_response_svg(points: &[FrequencyResponsePoint]) -> String {
     let mut d = String::new();
     for (i, p) in points.iter().enumerate() {
         let prefix = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{}{:.2} {:.2} ", prefix, x(p.freq_hz), y(p.fundamental_dbfs));
+        let _ = write!(
+            d,
+            "{}{:.2} {:.2} ",
+            prefix,
+            x(p.freq_hz),
+            y(p.fundamental_dbfs)
+        );
     }
     let _ = writeln!(s, "<path class=\"trace\" d=\"{}\" />", d);
 
@@ -632,7 +639,7 @@ mod tests {
         assert!(html.contains("freq (Hz)"));
         // Table rows: verify a data point appears.
         assert!(html.contains("1000.00")); // 1 kHz freq
-        // Clipping flag surfaces.
+                                           // Clipping flag surfaces.
         assert!(html.contains("clip"));
     }
 
@@ -672,9 +679,14 @@ mod tests {
         // summary instead of a key/value table — keeps simple reports
         // tidy.
         let html = render_html(&sample_fr_report());
-        assert!(html.contains("<h2>Processing</h2>"), "section heading missing");
-        assert!(html.contains("raw — no smoothing"),
-            "default-chain summary missing: {html}");
+        assert!(
+            html.contains("<h2>Processing</h2>"),
+            "section heading missing"
+        );
+        assert!(
+            html.contains("raw — no smoothing"),
+            "default-chain summary missing: {html}"
+        );
     }
 
     #[test]
@@ -682,20 +694,28 @@ mod tests {
         use crate::measurement::report::ProcessingChain;
         let mut r = sample_fr_report();
         r.processing_chain = ProcessingChain {
-            weighting:              "a".into(),
-            smoothing_bpo:          Some(6),
-            time_integration:       "fast".into(),
+            weighting: "a".into(),
+            smoothing_bpo: Some(6),
+            time_integration: "fast".into(),
             mic_correction_applied: true,
         };
         let html = render_html(&r);
-        assert!(html.contains("<dt>weighting</dt><dd>a</dd>"),
-            "weighting row missing: {html}");
-        assert!(html.contains("<dt>smoothing</dt><dd>1/6 octave</dd>"),
-            "smoothing row missing: {html}");
-        assert!(html.contains("<dt>time integration</dt><dd>fast</dd>"),
-            "time-integration row missing: {html}");
-        assert!(html.contains("<dt>mic correction</dt><dd>applied</dd>"),
-            "mic correction row missing: {html}");
+        assert!(
+            html.contains("<dt>weighting</dt><dd>a</dd>"),
+            "weighting row missing: {html}"
+        );
+        assert!(
+            html.contains("<dt>smoothing</dt><dd>1/6 octave</dd>"),
+            "smoothing row missing: {html}"
+        );
+        assert!(
+            html.contains("<dt>time integration</dt><dd>fast</dd>"),
+            "time-integration row missing: {html}"
+        );
+        assert!(
+            html.contains("<dt>mic correction</dt><dd>applied</dd>"),
+            "mic correction row missing: {html}"
+        );
     }
 
     #[test]
@@ -703,30 +723,42 @@ mod tests {
         use crate::measurement::report::{CalibrationSnapshot, MicResponseRef};
         let mut r = sample_fr_report();
         r.calibration = Some(CalibrationSnapshot {
-            output_channel:    0,
-            input_channel:     0,
+            output_channel: 0,
+            input_channel: 0,
             vrms_at_0dbfs_out: Some(1.0),
-            vrms_at_0dbfs_in:  Some(0.5),
-            ref_freq_hz:       1000.0,
-            ref_level_dbfs:    -10.0,
+            vrms_at_0dbfs_in: Some(0.5),
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: Some(-32.0),
             mic_response: Some(MicResponseRef {
-                n_points:    157,
+                n_points: 157,
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
         });
         let html = render_html(&r);
         // Voltage cal still rendered.
-        assert!(html.contains("V<sub>RMS</sub>@0dBFS in"), "voltage missing: {html}");
+        assert!(
+            html.contains("V<sub>RMS</sub>@0dBFS in"),
+            "voltage missing: {html}"
+        );
         // SPL pistonphone reference + computed offset (94 - (-32) = 126).
         assert!(html.contains("94 dB SPL"), "SPL ref label missing: {html}");
-        assert!(html.contains("-32.00 dBFS"), "captured dBFS missing: {html}");
-        assert!(html.contains("+126.00 dB"), "offset missing or wrong: {html}");
+        assert!(
+            html.contains("-32.00 dBFS"),
+            "captured dBFS missing: {html}"
+        );
+        assert!(
+            html.contains("+126.00 dB"),
+            "offset missing or wrong: {html}"
+        );
         // Mic-curve provenance.
         assert!(html.contains("/tmp/umik.frd"), "curve path missing: {html}");
         assert!(html.contains("157 points"), "n_points missing: {html}");
-        assert!(html.contains("2026-04-15T12:00:00Z"), "imported_at missing: {html}");
+        assert!(
+            html.contains("2026-04-15T12:00:00Z"),
+            "imported_at missing: {html}"
+        );
     }
 
     #[test]
@@ -734,18 +766,18 @@ mod tests {
         use crate::measurement::report::CalibrationSnapshot;
         let mut r = sample_fr_report();
         r.calibration = Some(CalibrationSnapshot {
-            output_channel:    0,
-            input_channel:     0,
+            output_channel: 0,
+            input_channel: 0,
             vrms_at_0dbfs_out: None,
-            vrms_at_0dbfs_in:  None,
-            ref_freq_hz:       1000.0,
-            ref_level_dbfs:    -10.0,
+            vrms_at_0dbfs_in: None,
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
         });
         let html = render_html(&r);
         assert!(html.contains("not calibrated"), "SPL stub missing: {html}");
-        assert!(html.contains("uncorrected"),    "mic stub missing: {html}");
+        assert!(html.contains("uncorrected"), "mic stub missing: {html}");
     }
 
     #[test]

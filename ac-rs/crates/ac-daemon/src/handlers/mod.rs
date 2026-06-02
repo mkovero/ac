@@ -17,8 +17,8 @@ use std::thread;
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::Calibration;
 use ac_core::config::Config;
+use ac_core::shared::calibration::Calibration;
 
 use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
@@ -35,14 +35,13 @@ mod transfer;
 
 pub use admin::{
     devices, dmm_read, get_analysis_mode, get_band_weighting, get_calibration,
-    get_time_integration, list_calibrations, quit, reset_leq, reset_loudness,
-    server_connections,
-    server_disable, server_enable, set_analysis_mode, set_band_weighting,
-    set_ioct_bpo, set_monitor_params, set_time_integration, setup, status, stop,
+    get_time_integration, list_calibrations, quit, reset_leq, reset_loudness, server_connections,
+    server_disable, server_enable, set_analysis_mode, set_band_weighting, set_ioct_bpo,
+    set_monitor_params, set_time_integration, setup, status, stop,
 };
 pub use audio::{
-    generate, generate_pink, monitor_spectrum, plot, plot_level,
-    sweep_frequency, sweep_ir, sweep_level,
+    generate, generate_pink, monitor_spectrum, plot, plot_level, sweep_frequency, sweep_ir,
+    sweep_level,
 };
 pub use calibrate::{
     cal_reply, calibrate, calibrate_mic_curve, calibrate_spl, set_mic_correction_enabled,
@@ -58,10 +57,7 @@ pub use transfer::{probe, transfer_stream};
 
 /// Check the busy guard and return Err string if a conflict exists.
 pub(super) fn check_busy(state: &ServerState, new_cmd: &str) -> Option<String> {
-    let new_group = match cmd_group(new_cmd) {
-        Some(g) => g,
-        None    => return None, // non-audio command, always allowed
-    };
+    let new_group = cmd_group(new_cmd)?;
 
     let workers = state.workers.lock().unwrap();
     if workers.is_empty() {
@@ -108,7 +104,10 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let t = thread::spawn(move || f(stop2));
-    WorkerHandle { stop_flag: stop, thread: Some(t) }
+    WorkerHandle {
+        stop_flag: stop,
+        thread: Some(t),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +143,7 @@ pub(super) fn cached_capture_ports(state: &ServerState) -> Vec<String> {
 pub(super) fn refresh_port_cache(state: &ServerState) {
     let eng = make_engine(state.fake_audio);
     *state.playback_ports_cache.lock().unwrap() = Some(eng.playback_ports());
-    *state.capture_ports_cache .lock().unwrap() = Some(eng.capture_ports());
+    *state.capture_ports_cache.lock().unwrap() = Some(eng.capture_ports());
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +157,10 @@ pub(super) fn resolve_output(cfg: &Config, state: &ServerState) -> String {
     }
     let ports = cached_playback_ports(state);
     let ch = cfg.output_channel as usize;
-    ports.get(ch).cloned().unwrap_or_else(|| "system:playback_1".to_string())
+    ports
+        .get(ch)
+        .cloned()
+        .unwrap_or_else(|| "system:playback_1".to_string())
 }
 
 /// Resolve a specific output channel index to a playback port. Used when
@@ -196,7 +198,10 @@ pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> String {
     }
     let ports = cached_capture_ports(state);
     let ch = cfg.input_channel as usize;
-    ports.get(ch).cloned().unwrap_or_else(|| "system:capture_1".to_string())
+    ports
+        .get(ch)
+        .cloned()
+        .unwrap_or_else(|| "system:capture_1".to_string())
 }
 
 pub(super) fn resolve_ref_input(cfg: &Config, state: &ServerState) -> Option<String> {
@@ -234,8 +239,8 @@ pub(super) fn send_pub(tx: &crossbeam_channel::Sender<Vec<u8>>, topic: &str, fra
 
 pub(super) fn log_freq_points(start: f64, stop: f64, ppd: usize) -> Vec<f64> {
     let n_decades = (stop / start).log10();
-    let n_points  = (n_decades * ppd as f64).round() as usize;
-    let n_points  = n_points.max(2);
+    let n_points = (n_decades * ppd as f64).round() as usize;
+    let n_points = n_points.max(2);
     let mut freqs: Vec<f64> = (0..n_points)
         .map(|i| start * (stop / start).powf(i as f64 / (n_points - 1) as f64))
         .collect();
@@ -244,8 +249,12 @@ pub(super) fn log_freq_points(start: f64, stop: f64, ppd: usize) -> Vec<f64> {
 }
 
 pub(super) fn linspace(start: f64, stop: f64, n: usize) -> Vec<f64> {
-    if n <= 1 { return vec![start]; }
-    (0..n).map(|i| start + (stop - start) * i as f64 / (n - 1) as f64).collect()
+    if n <= 1 {
+        return vec![start];
+    }
+    (0..n)
+        .map(|i| start + (stop - start) * i as f64 / (n - 1) as f64)
+        .collect()
 }
 
 pub(super) fn downsample(spec: &[f64], freqs: &[f64], max_pts: usize) -> (Vec<f64>, Vec<f64>) {
@@ -278,15 +287,15 @@ pub(super) fn snapshot_from_cal(
 ) -> Option<ac_core::measurement::report::CalibrationSnapshot> {
     use ac_core::measurement::report::{CalibrationSnapshot, MicResponseRef};
     cal.map(|c| CalibrationSnapshot {
-        output_channel:    c.output_channel,
-        input_channel:     c.input_channel,
+        output_channel: c.output_channel,
+        input_channel: c.input_channel,
         vrms_at_0dbfs_out: c.vrms_at_0dbfs_out,
-        vrms_at_0dbfs_in:  c.vrms_at_0dbfs_in,
-        ref_freq_hz:       c.ref_freq,
-        ref_level_dbfs:    c.ref_dbfs,
+        vrms_at_0dbfs_in: c.vrms_at_0dbfs_in,
+        ref_freq_hz: c.ref_freq,
+        ref_level_dbfs: c.ref_dbfs,
         mic_sensitivity_dbfs_at_94db_spl: c.mic_sensitivity_dbfs_at_94db_spl,
         mic_response: c.mic_response.as_ref().map(|r| MicResponseRef {
-            n_points:    r.freqs_hz.len(),
+            n_points: r.freqs_hz.len(),
             source_path: r.source_path.clone(),
             imported_at: r.imported_at.clone(),
         }),
@@ -298,21 +307,21 @@ pub(super) fn snapshot_from_cal(
 /// state was active when the measurement was taken — same envelope
 /// Tier 2 frames already carry. See #98.
 pub(super) struct Tier1Ctx<'a> {
-    pub mic_correction:   &'a str,         // "on" | "off" | "none"
-    pub spl_offset_db:    Option<f64>,
-    pub weighting:        &'a str,         // "off" | "a" | "c" | "z"
-    pub time_integration: &'a str,         // "off" | "fast" | "slow" | "leq"
-    pub smoothing_bpo:    Option<u32>,     // reserved; daemon doesn't smooth today
+    pub mic_correction: &'a str, // "on" | "off" | "none"
+    pub spl_offset_db: Option<f64>,
+    pub weighting: &'a str,         // "off" | "a" | "c" | "z"
+    pub time_integration: &'a str,  // "off" | "fast" | "slow" | "leq"
+    pub smoothing_bpo: Option<u32>, // reserved; daemon doesn't smooth today
 }
 
 impl Default for Tier1Ctx<'_> {
     fn default() -> Self {
         Self {
-            mic_correction:   "none",
-            spl_offset_db:    None,
-            weighting:        "off",
+            mic_correction: "none",
+            spl_offset_db: None,
+            weighting: "off",
             time_integration: "off",
-            smoothing_bpo:    None,
+            smoothing_bpo: None,
         }
     }
 }
@@ -327,10 +336,10 @@ pub(super) fn sweep_point_frame(
     ctx: &Tier1Ctx<'_>,
 ) -> Value {
     let out_vrms = cal.and_then(|c| c.out_vrms(level_dbfs));
-    let in_vrms  = cal.and_then(|c| c.in_vrms(r.linear_rms));
-    let in_dbu   = in_vrms .map(ac_core::shared::conversions::vrms_to_dbu);
-    let out_dbu  = out_vrms.map(ac_core::shared::conversions::vrms_to_dbu);
-    let gain_db  = in_dbu.zip(out_dbu).map(|(i, o)| i - o);
+    let in_vrms = cal.and_then(|c| c.in_vrms(r.linear_rms));
+    let in_dbu = in_vrms.map(ac_core::shared::conversions::vrms_to_dbu);
+    let out_dbu = out_vrms.map(ac_core::shared::conversions::vrms_to_dbu);
+    let gain_db = in_dbu.zip(out_dbu).map(|(i, o)| i - o);
 
     let (spec_ds, freqs_ds) = if r.spectrum.len() > 1 {
         downsample(&r.spectrum[1..], &r.freqs[1..], 1000)
@@ -338,7 +347,9 @@ pub(super) fn sweep_point_frame(
         (r.spectrum.clone(), r.freqs.clone())
     };
 
-    let harmonic_levels: Vec<Value> = r.harmonic_levels.iter()
+    let harmonic_levels: Vec<Value> = r
+        .harmonic_levels
+        .iter()
         .map(|&(hz, amp)| json!([hz, amp]))
         .collect();
 
@@ -395,7 +406,8 @@ pub(super) fn read_dmm_vrms(host: &str, n: usize) -> Option<f64> {
         let mut stream = TcpStream::connect_timeout(
             &format!("{host}:5025").parse().ok()?,
             std::time::Duration::from_secs(2),
-        ).ok()?;
+        )
+        .ok()?;
         stream.write_all(b"MEAS:VOLT:AC?\n").ok()?;
         let mut buf = [0u8; 64];
         let bytes = stream.read(&mut buf).ok()?;
@@ -405,20 +417,30 @@ pub(super) fn read_dmm_vrms(host: &str, n: usize) -> Option<f64> {
             count += 1;
         }
     }
-    if count > 0 { Some(sum / count as f64) } else { None }
+    if count > 0 {
+        Some(sum / count as f64)
+    } else {
+        None
+    }
 }
 
 /// Poll a cal_reply channel until a value arrives, stop flag fires, or timeout.
 pub(super) fn wait_cal_reply(
-    rx:           &crossbeam_channel::Receiver<Option<f64>>,
-    stop:         &Arc<AtomicBool>,
+    rx: &crossbeam_channel::Receiver<Option<f64>>,
+    stop: &Arc<AtomicBool>,
     timeout_secs: u64,
 ) -> Option<f64> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if stop.load(Ordering::Relaxed) { return None; }
-        if std::time::Instant::now() > deadline { return None; }
-        if let Ok(v) = rx.try_recv() { return v; }
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        if let Ok(v) = rx.try_recv() {
+            return v;
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
@@ -428,15 +450,20 @@ pub(super) fn wait_cal_reply(
 // ---------------------------------------------------------------------------
 
 pub(super) struct TestResult {
-    pub name:      String,
-    pub pass:      bool,
-    pub detail:    String,
+    pub name: String,
+    pub pass: bool,
+    pub detail: String,
     pub tolerance: String,
 }
 
 impl TestResult {
     pub(super) fn new(name: &str, pass: bool, detail: String, tolerance: &str) -> Self {
-        Self { name: name.to_string(), pass, detail, tolerance: tolerance.to_string() }
+        Self {
+            name: name.to_string(),
+            pass,
+            detail,
+            tolerance: tolerance.to_string(),
+        }
     }
 }
 
@@ -480,7 +507,7 @@ pub(super) fn cal_dbu_str(dbfs: f64, cal: Option<&Calibration>, use_output: bool
     };
     if let Some(ref_vrms) = vrms_ref {
         let vrms = ref_vrms * 10f64.powf(dbfs / 20.0);
-        let dbu  = ac_core::shared::conversions::vrms_to_dbu(vrms);
+        let dbu = ac_core::shared::conversions::vrms_to_dbu(vrms);
         format!("{dbu:+.1} dBu")
     } else {
         format!("{dbfs:.1} dBFS")
@@ -496,18 +523,22 @@ pub(super) fn cal_out_dbu_str(dbfs: f64, cal: Option<&Calibration>) -> String {
 // ---------------------------------------------------------------------------
 
 pub(super) fn std_dev(vals: &[f64]) -> f64 {
-    if vals.len() < 2 { return 0.0; }
+    if vals.len() < 2 {
+        return 0.0;
+    }
     let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-    let var  = vals.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+    let var = vals.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
     var.sqrt()
 }
 
 pub(super) fn median(vals: &[f64]) -> f64 {
-    if vals.is_empty() { return 0.0; }
+    if vals.is_empty() {
+        return 0.0;
+    }
     let mut sorted = vals.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

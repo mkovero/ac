@@ -96,19 +96,35 @@ fn universal_chips() -> Vec<KeytipChip> {
 pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
     let mut chips: Vec<KeytipChip> = match state.view {
         ViewMode::SpectrumEmber => vec![
-            chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
+            chip(
+                "A",
+                format!("weighting:{}", weighting_label(state.band_weighting)),
+            ),
             chip("I", format!("avg:{}", time_label(state.time_integ))),
-            chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
+            chip(
+                "O",
+                format!("smooth:{}", smooth_label(state.smoothing_frac)),
+            ),
             chip(
                 "P/M",
-                format!("peak:{} min:{}", on_off(state.peak_hold), on_off(state.min_hold)),
+                format!(
+                    "peak:{} min:{}",
+                    on_off(state.peak_hold),
+                    on_off(state.min_hold)
+                ),
             ),
             chip(",/.", "ember"),
             chip("Tab", "view"),
         ],
         ViewMode::Waterfall => vec![
-            chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
-            chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
+            chip(
+                "A",
+                format!("weighting:{}", weighting_label(state.band_weighting)),
+            ),
+            chip(
+                "O",
+                format!("smooth:{}", smooth_label(state.smoothing_frac)),
+            ),
             chip("↑↓", "FFT N"),
             chip("←→", "interval"),
             chip(";", "palette"),
@@ -121,7 +137,14 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
             chip("Tab", "view"),
         ],
         ViewMode::Goniometer => vec![
-            chip("R", if state.goniometer_ms { "M/S:on" } else { "M/S:off" }),
+            chip(
+                "R",
+                if state.goniometer_ms {
+                    "M/S:on"
+                } else {
+                    "M/S:off"
+                },
+            ),
             chip(",/.", "ember"),
             chip("Z", "clear"),
             chip("Tab", "view"),
@@ -133,7 +156,10 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
         ],
         ViewMode::BodeMag => vec![
             chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
+            chip(
+                "O",
+                format!("smooth:{}", smooth_label(state.smoothing_frac)),
+            ),
             chip("Z", "clear"),
             chip("T", "transfer"),
             chip("Tab", "view"),
@@ -165,8 +191,14 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
             chip("Tab", "view"),
         ],
         ViewMode::Spectrum => vec![
-            chip("A", format!("weighting:{}", weighting_label(state.band_weighting))),
-            chip("O", format!("smooth:{}", smooth_label(state.smoothing_frac))),
+            chip(
+                "A",
+                format!("weighting:{}", weighting_label(state.band_weighting)),
+            ),
+            chip(
+                "O",
+                format!("smooth:{}", smooth_label(state.smoothing_frac)),
+            ),
             chip("Tab", "view"),
         ],
     };
@@ -214,14 +246,25 @@ mod tests {
     #[test]
     fn every_view_returns_chips() {
         let views = [
-            ViewMode::SpectrumEmber, ViewMode::Goniometer, ViewMode::IoTransfer,
-            ViewMode::BodeMag, ViewMode::Coherence, ViewMode::BodePhase,
-            ViewMode::GroupDelay, ViewMode::Nyquist, ViewMode::Ir,
-            ViewMode::Waterfall, ViewMode::Scope, ViewMode::Spectrum,
+            ViewMode::SpectrumEmber,
+            ViewMode::Goniometer,
+            ViewMode::IoTransfer,
+            ViewMode::BodeMag,
+            ViewMode::Coherence,
+            ViewMode::BodePhase,
+            ViewMode::GroupDelay,
+            ViewMode::Nyquist,
+            ViewMode::Ir,
+            ViewMode::Waterfall,
+            ViewMode::Scope,
+            ViewMode::Spectrum,
         ];
         for v in views {
             let chips = keytips_for(&base_state(v));
-            assert!(chips.len() >= 5, "view {v:?} produced too few chips: {chips:?}");
+            assert!(
+                chips.len() >= 5,
+                "view {v:?} produced too few chips: {chips:?}"
+            );
             // Universal chips must always be present.
             assert!(chips.iter().any(|c| c.key == "G"));
             assert!(chips.iter().any(|c| c.key == "H"));

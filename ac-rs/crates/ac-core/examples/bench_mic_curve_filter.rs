@@ -22,7 +22,7 @@ fn main() {
     let block_samples: usize = std::env::var("AC_BENCH_BLOCK")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2400);                              // ~50 ms @ 48 kHz
+        .unwrap_or(2400); // ~50 ms @ 48 kHz
     let iters: usize = std::env::var("AC_BENCH_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -47,6 +47,10 @@ fn main() {
     let realtime_factor = block_seconds * 1000.0 / per_block_ms;
     println!(
         "n_taps={} block={} samples ({:.1} ms audio) avg={:.3} ms/block ({:.0}× realtime)",
-        DEFAULT_N_TAPS, block_samples, block_seconds * 1000.0, per_block_ms, realtime_factor,
+        DEFAULT_N_TAPS,
+        block_samples,
+        block_seconds * 1000.0,
+        per_block_ms,
+        realtime_factor,
     );
 }

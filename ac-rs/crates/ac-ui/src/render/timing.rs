@@ -9,32 +9,32 @@ use std::sync::Arc;
 
 pub const SLOTS: u32 = 4;
 pub const SPECTRUM_BEGIN: u32 = 0;
-pub const SPECTRUM_END:   u32 = 1;
-pub const EGUI_BEGIN:     u32 = 2;
-pub const EGUI_END:       u32 = 3;
+pub const SPECTRUM_END: u32 = 1;
+pub const EGUI_BEGIN: u32 = 2;
+pub const EGUI_END: u32 = 3;
 
 const READBACK_BYTES: u64 = (SLOTS as u64) * 8;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PassTimings {
     pub spectrum_ms: f32,
-    pub egui_ms:     f32,
-    pub gpu_ms:      f32,
+    pub egui_ms: f32,
+    pub gpu_ms: f32,
 }
 
 pub struct GpuTiming {
     pub query_set: wgpu::QuerySet,
-    resolve_buf:   wgpu::Buffer,
-    readbacks:     [wgpu::Buffer; 2],
-    state:         [Slot; 2],
-    write_idx:     usize,
-    period_ns:     f32,
-    last:          PassTimings,
+    resolve_buf: wgpu::Buffer,
+    readbacks: [wgpu::Buffer; 2],
+    state: [Slot; 2],
+    write_idx: usize,
+    period_ns: f32,
+    last: PassTimings,
 }
 
 struct Slot {
     in_flight: bool,
-    ready:     Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
 }
 
 impl GpuTiming {
@@ -50,19 +50,30 @@ impl GpuTiming {
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let make_readback = |label| device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: READBACK_BYTES,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let make_readback = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: READBACK_BYTES,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
         Self {
             query_set,
             resolve_buf,
-            readbacks: [make_readback("ac-ui timing readback 0"), make_readback("ac-ui timing readback 1")],
+            readbacks: [
+                make_readback("ac-ui timing readback 0"),
+                make_readback("ac-ui timing readback 1"),
+            ],
             state: [
-                Slot { in_flight: false, ready: Arc::new(AtomicBool::new(false)) },
-                Slot { in_flight: false, ready: Arc::new(AtomicBool::new(false)) },
+                Slot {
+                    in_flight: false,
+                    ready: Arc::new(AtomicBool::new(false)),
+                },
+                Slot {
+                    in_flight: false,
+                    ready: Arc::new(AtomicBool::new(false)),
+                },
             ],
             write_idx: 0,
             period_ns: queue.get_timestamp_period(),
@@ -74,7 +85,7 @@ impl GpuTiming {
         wgpu::RenderPassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: Some(SPECTRUM_BEGIN),
-            end_of_pass_write_index:       Some(SPECTRUM_END),
+            end_of_pass_write_index: Some(SPECTRUM_END),
         }
     }
 
@@ -82,7 +93,7 @@ impl GpuTiming {
         wgpu::RenderPassTimestampWrites {
             query_set: &self.query_set,
             beginning_of_pass_write_index: Some(EGUI_BEGIN),
-            end_of_pass_write_index:       Some(EGUI_END),
+            end_of_pass_write_index: Some(EGUI_END),
         }
     }
 
@@ -116,9 +127,13 @@ impl GpuTiming {
         if !self.state[idx].in_flight {
             self.state[idx].in_flight = true;
             let ready = self.state[idx].ready.clone();
-            self.readbacks[idx].slice(..).map_async(wgpu::MapMode::Read, move |res| {
-                if res.is_ok() { ready.store(true, Ordering::Release); }
-            });
+            self.readbacks[idx]
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |res| {
+                    if res.is_ok() {
+                        ready.store(true, Ordering::Release);
+                    }
+                });
         }
         self.write_idx ^= 1;
     }
@@ -127,7 +142,9 @@ impl GpuTiming {
     /// Call once per frame after `device.poll(Maintain::Poll)`.
     pub fn poll(&mut self) {
         for idx in 0..2 {
-            if !self.state[idx].ready.swap(false, Ordering::Acquire) { continue; }
+            if !self.state[idx].ready.swap(false, Ordering::Acquire) {
+                continue;
+            }
             let buf = &self.readbacks[idx];
             let mut ts = [0u64; SLOTS as usize];
             {
@@ -140,14 +157,24 @@ impl GpuTiming {
             self.state[idx].in_flight = false;
 
             let to_ms = |a: u64, b: u64| -> f32 {
-                if b <= a { 0.0 } else { (b - a) as f32 * self.period_ns / 1_000_000.0 }
+                if b <= a {
+                    0.0
+                } else {
+                    (b - a) as f32 * self.period_ns / 1_000_000.0
+                }
             };
             let spectrum = to_ms(ts[SPECTRUM_BEGIN as usize], ts[SPECTRUM_END as usize]);
-            let egui     = to_ms(ts[EGUI_BEGIN     as usize], ts[EGUI_END     as usize]);
-            let gpu_total = to_ms(ts[SPECTRUM_BEGIN as usize], ts[EGUI_END    as usize]);
-            self.last = PassTimings { spectrum_ms: spectrum, egui_ms: egui, gpu_ms: gpu_total };
+            let egui = to_ms(ts[EGUI_BEGIN as usize], ts[EGUI_END as usize]);
+            let gpu_total = to_ms(ts[SPECTRUM_BEGIN as usize], ts[EGUI_END as usize]);
+            self.last = PassTimings {
+                spectrum_ms: spectrum,
+                egui_ms: egui,
+                gpu_ms: gpu_total,
+            };
         }
     }
 
-    pub fn last(&self) -> PassTimings { self.last }
+    pub fn last(&self) -> PassTimings {
+        self.last
+    }
 }

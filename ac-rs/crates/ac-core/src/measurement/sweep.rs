@@ -407,7 +407,10 @@ mod tests {
             .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
             .unwrap()
             .0;
-        assert_eq!(peak_idx, 64, "expected peak at window centre, got {peak_idx}");
+        assert_eq!(
+            peak_idx, 64,
+            "expected peak at window centre, got {peak_idx}"
+        );
     }
 
     #[test]

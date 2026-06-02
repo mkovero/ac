@@ -32,8 +32,7 @@ fn main() {
         }
         let e = t0.elapsed();
         let per_ms = e.as_secs_f64() * 1000.0 / iters as f64;
-        let (centres, _) =
-            cwt_to_fractional_octave(&col, &freqs, bpo, DEFAULT_F_MIN, f_max);
+        let (centres, _) = cwt_to_fractional_octave(&col, &freqs, bpo, DEFAULT_F_MIN, f_max);
         println!(
             "bpo={:>2} bands={:>3} scales={} avg={:.4} ms/call",
             bpo,

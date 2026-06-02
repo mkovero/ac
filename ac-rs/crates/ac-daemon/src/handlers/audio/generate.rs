@@ -7,9 +7,7 @@ use serde_json::{json, Value};
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{
-    busy_guard, resolve_output, resolve_output_by_channel, send_pub, spawn_worker,
-};
+use super::super::{busy_guard, resolve_output, resolve_output_by_channel, send_pub, spawn_worker};
 
 /// Resolve the `channels` field in a generate command into playback ports.
 /// Empty / missing → `[resolve_output(cfg)]` (the sticky default). Useful
@@ -30,7 +28,11 @@ fn resolve_channels(
     let channels: Vec<u32> = cmd
         .get("channels")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|u| u as u32)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|u| u as u32))
+                .collect()
+        })
         .unwrap_or_default();
     if channels.is_empty() {
         return Ok(vec![resolve_output(cfg, state)]);
@@ -45,23 +47,30 @@ fn resolve_channels(
 
 pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate");
-    let freq_hz    = cmd.get("freq_hz")   .and_then(Value::as_f64).unwrap_or(1000.0);
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
-    let cfg        = state.cfg.lock().unwrap().clone();
+    let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-10.0);
+    let cfg = state.cfg.lock().unwrap().clone();
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
 
-    let pub_tx   = state.pub_tx.clone();
-    let fake     = state.fake_audio;
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
     let ports_for_worker = out_ports.clone();
 
     let worker = spawn_worker(state, "generate", move |stop| {
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&ports_for_worker, None) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"generate","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"generate","message":format!("{e}")}),
+            );
             return;
         }
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
@@ -84,8 +93,11 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate_pink");
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
-    let cfg        = state.cfg.lock().unwrap().clone();
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-10.0);
+    let cfg = state.cfg.lock().unwrap().clone();
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
@@ -93,13 +105,17 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
     let ports_for_worker = out_ports.clone();
 
     let worker = spawn_worker(state, "generate_pink", move |stop| {
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&ports_for_worker, None) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"generate_pink","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"generate_pink","message":format!("{e}")}),
+            );
             return;
         }
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);

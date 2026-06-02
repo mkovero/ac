@@ -1,27 +1,28 @@
 use crate::data::types::SweepPoint;
-use crate::ui::overlay::HoverReadout;
 
 /// Broadband statistics summarising a live spectrum for the monitor
 /// bottom-left readout. Derived directly from the displayed dB-magnitude
 /// array — no assumption that the signal is a single tone, so THD numbers
 /// (which require a known fundamental) are deliberately omitted.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct BroadbandStats {
     /// Peak bin value in dBFS.
-    pub peak_db:  f32,
+    pub peak_db: f32,
     /// Frequency of the peak bin.
-    pub peak_hz:  f32,
+    pub peak_hz: f32,
     /// 10th-percentile of all finite bins — an estimate of the noise floor
     /// that's robust to a handful of bright peaks.
     pub floor_db: f32,
     /// `peak_db - floor_db` — dynamic range of the visible spectrum. A
     /// clean tone reads 80+ dB; broadband noise reads 20–30 dB.
-    pub span_db:  f32,
+    pub span_db: f32,
 }
 
 /// Compute peak / floor / span from a dB-magnitude spectrum and its frequency
 /// grid. Returns `None` for empty inputs or all-NaN spectra. Operates on the
 /// post-smoothing values so the readout matches what's visually on screen.
+#[allow(dead_code)]
 pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats> {
     let n = spectrum.len().min(freqs.len());
     if n == 0 {
@@ -30,6 +31,7 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
     let mut peak_db = f32::NEG_INFINITY;
     let mut peak_idx = 0usize;
     let mut finite: Vec<f32> = Vec::with_capacity(n);
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         let v = spectrum[i];
         if !v.is_finite() {
@@ -74,10 +76,11 @@ pub fn broadband_stats(spectrum: &[f32], freqs: &[f32]) -> Option<BroadbandStats
 /// `span_db` stays in dB (it's a difference) but its label drops `FS` to
 /// match. Both calibrations compose: a fully-cal'd channel shows dB SPL
 /// peak/floor *and* dBu/dBV.
+#[allow(dead_code)]
 pub fn spectrum_readout(
-    stats:          &BroadbandStats,
-    in_dbu:         Option<f32>,
-    spl_offset_db:  Option<f32>,
+    stats: &BroadbandStats,
+    in_dbu: Option<f32>,
+    spl_offset_db: Option<f32>,
     mic_correction: Option<&str>,
 ) -> String {
     let cal = in_dbu
@@ -87,7 +90,7 @@ pub fn spectrum_readout(
         })
         .unwrap_or_default();
     let mic = match mic_correction {
-        Some("on")  => "  [mic-corrected]",
+        Some("on") => "  [mic-corrected]",
         Some("off") => "  [mic-cal off]",
         _ => "",
     };
@@ -157,7 +160,7 @@ pub fn tier_badge(
             ac_core::visualize::reassigned::DEFAULT_N,
             ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS,
         ),
-        other => format!("{other}"),
+        other => other.to_string(),
     }
 }
 
@@ -171,7 +174,12 @@ pub fn peak_header(channel: usize) -> String {
 /// "  1.  220.0 Hz  -12.3 dB". `rank` is 1-based; layout matches the 6-slot
 /// corner budget (header + up to 5 rows).
 pub fn peak_rank_line(rank: usize, f_hz: f32, amp_db: f32) -> String {
-    format!("  {}. {:>9}  {:+.1} dB", rank, format_freq_compact(f_hz), amp_db)
+    format!(
+        "  {}. {:>9}  {:+.1} dB",
+        rank,
+        format_freq_compact(f_hz),
+        amp_db
+    )
 }
 
 /// Compact frequency formatter used by the peak overlay. Threshold-picked
@@ -233,12 +241,12 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
 /// - `Thd(v)` / `Gain(v)`: Sweep cursor panels. Show their value with
 ///   the cursor freq.
 pub fn cursor_readout(
-    cursor_freq_hz:     f32,
-    readout:            &crate::ui::overlay::HoverReadout,
+    cursor_freq_hz: f32,
+    readout: &crate::ui::overlay::HoverReadout,
     sampled_db_at_freq: Option<f32>,
-    peaks:              &[[f32; 2]],
-    dbu_offset_db:      Option<f32>,
-    spl_offset_db:      Option<f32>,
+    peaks: &[[f32; 2]],
+    dbu_offset_db: Option<f32>,
+    spl_offset_db: Option<f32>,
 ) -> String {
     use crate::ui::overlay::HoverReadout;
     match *readout {
@@ -257,28 +265,23 @@ pub fn cursor_readout(
             }
             let (freq, db, snapped) = match best {
                 Some((f, d)) => (f, d, true),
-                None         => (cursor_freq_hz, cursor_db_at_bin, false),
+                None => (cursor_freq_hz, cursor_db_at_bin, false),
             };
             let snap_tag = if snapped { "  ▲" } else { "" };
 
             if let Some(off) = spl_offset_db {
-                format!(
-                    "{} {:>6.1} dB SPL{}",
-                    format_hz(freq),
-                    db + off,
-                    snap_tag,
-                )
+                format!("{} {:>6.1} dB SPL{}", format_hz(freq), db + off, snap_tag,)
             } else if let Some(off) = dbu_offset_db {
                 let dbu = db + off;
                 format!(
                     "{} {:+6.2} dBFS  {:+6.2} dBu{}",
-                    format_hz(freq), db, dbu, snap_tag,
+                    format_hz(freq),
+                    db,
+                    dbu,
+                    snap_tag,
                 )
             } else {
-                format!(
-                    "{} {:+6.2} dBFS{}",
-                    format_hz(freq), db, snap_tag,
-                )
+                format!("{} {:+6.2} dBFS{}", format_hz(freq), db, snap_tag,)
             }
         }
         HoverReadout::TimeAgo(s) => {
@@ -293,34 +296,28 @@ pub fn cursor_readout(
                     if let Some(off) = spl_offset_db {
                         format!(
                             "{} {:>6.1} dB SPL  t-{}",
-                            format_hz(cursor_freq_hz), db + off, age,
+                            format_hz(cursor_freq_hz),
+                            db + off,
+                            age,
                         )
                     } else if let Some(off) = dbu_offset_db {
                         let dbu = db + off;
                         format!(
                             "{} {:+6.2} dBFS  {:+6.2} dBu  t-{}",
-                            format_hz(cursor_freq_hz), db, dbu, age,
+                            format_hz(cursor_freq_hz),
+                            db,
+                            dbu,
+                            age,
                         )
                     } else {
-                        format!(
-                            "{} {:+6.2} dBFS  t-{}",
-                            format_hz(cursor_freq_hz), db, age,
-                        )
+                        format!("{} {:+6.2} dBFS  t-{}", format_hz(cursor_freq_hz), db, age,)
                     }
                 }
                 None => format!("{}  t-{}", format_hz(cursor_freq_hz), age),
             }
         }
-        HoverReadout::Thd(v) => format!(
-            "{}  THD {:.4}%",
-            format_hz(cursor_freq_hz),
-            v,
-        ),
-        HoverReadout::Gain(v) => format!(
-            "{}  {:+.2} dB",
-            format_hz(cursor_freq_hz),
-            v,
-        ),
+        HoverReadout::Thd(v) => format!("{}  THD {:.4}%", format_hz(cursor_freq_hz), v,),
+        HoverReadout::Gain(v) => format!("{}  {:+.2} dB", format_hz(cursor_freq_hz), v,),
     }
 }
 
@@ -342,7 +339,7 @@ pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f3
     } else {
         let lo = freqs[idx - 1].max(f32::MIN_POSITIVE);
         let hi = freqs[idx].max(f32::MIN_POSITIVE);
-        let t  = target_hz.max(f32::MIN_POSITIVE);
+        let t = target_hz.max(f32::MIN_POSITIVE);
         if (t.ln() - lo.ln()).abs() < (t.ln() - hi.ln()).abs() {
             idx - 1
         } else {
@@ -350,7 +347,11 @@ pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f3
         }
     };
     let v = spectrum[pick];
-    if v.is_finite() { Some(v) } else { None }
+    if v.is_finite() {
+        Some(v)
+    } else {
+        None
+    }
 }
 
 /// Hover crosshair readout label.
@@ -398,14 +399,16 @@ pub const R128_TOLERANCE_LOOSE_LU: f64 = 2.0;
 /// stays anchored on the raw integrated LKFS value because the
 /// `-23 LKFS` target is independent of the absolute reference — the
 /// delta is meaningful in either calibration state.
-pub fn loudness_readout_lines(l: &crate::data::types::LoudnessReadout) -> Vec<crate::ui::overlay::LoudnessLine> {
+pub fn loudness_readout_lines(
+    l: &crate::data::types::LoudnessReadout,
+) -> Vec<crate::ui::overlay::LoudnessLine> {
     use crate::ui::overlay::{LoudnessLine, LoudnessTint};
     let off = l.spl_offset_db;
     let fmt_val = |v: Option<f64>| -> String {
         match v {
             Some(x) if x.is_finite() => match off {
-                Some(o) => format!("{:6.1}", x + o),                // SPL → unsigned
-                None    => format!("{:+6.1}", x),                   // LKFS → signed
+                Some(o) => format!("{:6.1}", x + o), // SPL → unsigned
+                None => format!("{:+6.1}", x),       // LKFS → signed
             },
             _ => "  —  ".into(),
         }
@@ -417,22 +420,28 @@ pub fn loudness_readout_lines(l: &crate::data::types::LoudnessReadout) -> Vec<cr
     let i = fmt_val(l.integrated_lkfs);
     let line1 = match off {
         Some(_) => format!("Mk{m} Sk{s} Ik{i} dB SPL  LRA{lra:4.1}"),
-        None    => format!("M{m} S{s} I{i} LRA{lra:4.1}"),
+        None => format!("M{m} S{s} I{i} LRA{lra:4.1}"),
     };
-    out.push(LoudnessLine { text: line1, tint: LoudnessTint::Default });
+    out.push(LoudnessLine {
+        text: line1,
+        tint: LoudnessTint::Default,
+    });
     let tp = match l.true_peak_dbtp {
         Some(v) if v.is_finite() => match off {
             Some(o) => format!("{:5.1}", v + o),
-            None    => format!("{:+5.1}", v),
+            None => format!("{:+5.1}", v),
         },
         _ => "  —".into(),
     };
     let dur = l.gated_duration_s;
     let line2 = match off {
         Some(_) => format!("Lpk(K) {tp} dB SPL   gated {dur:.1}s"),
-        None    => format!("dBTP {tp}   gated {dur:.1}s"),
+        None => format!("dBTP {tp}   gated {dur:.1}s"),
     };
-    out.push(LoudnessLine { text: line2, tint: LoudnessTint::Default });
+    out.push(LoudnessLine {
+        text: line2,
+        tint: LoudnessTint::Default,
+    });
     // R128 pass/warn/fail badge on the integrated value. Only emit once
     // integrated is defined — pre-gate silence stays quiet. The target
     // (`-23 LKFS`) is independent of SPL calibration, so this branch
@@ -469,6 +478,7 @@ pub fn format_hz(hz: f32) -> String {
 mod tests {
     use super::*;
     use crate::data::types::SweepPoint;
+    use crate::ui::overlay::HoverReadout;
 
     fn test_sweep_point(freq: f32, thd: f32, thdn: f32) -> SweepPoint {
         SweepPoint {
@@ -493,7 +503,9 @@ mod tests {
     fn mk_spec(peak_idx: usize, peak: f32, floor: f32, n: usize) -> (Vec<f32>, Vec<f32>) {
         let mut spec = vec![floor; n];
         spec[peak_idx] = peak;
-        let freqs: Vec<f32> = (0..n).map(|i| i as f32 * 24_000.0 / (n - 1) as f32).collect();
+        let freqs: Vec<f32> = (0..n)
+            .map(|i| i as f32 * 24_000.0 / (n - 1) as f32)
+            .collect();
         (spec, freqs)
     }
 
@@ -609,9 +621,9 @@ mod tests {
         };
         let s = spectrum_readout(&stats, None, Some(126.0), None);
         assert!(s.contains("123.0 dB SPL"), "want SPL peak in: {s}");
-        assert!(s.contains("30.0 dB SPL"),  "want SPL floor in: {s}");
-        assert!(!s.contains("dBFS"),        "must not show dBFS: {s}");
-        assert!(s.contains("93.0 dB"),      "span unchanged: {s}");
+        assert!(s.contains("30.0 dB SPL"), "want SPL floor in: {s}");
+        assert!(!s.contains("dBFS"), "must not show dBFS: {s}");
+        assert!(s.contains("93.0 dB"), "span unchanged: {s}");
     }
 
     #[test]
@@ -638,12 +650,27 @@ mod tests {
         // cursor footer — it's a fixed -2.2 dB constant offset from
         // dBu, so showing it crowds the readout with redundant info.
         // No "cursor" prefix either — context makes it obvious.
-        let s = cursor_readout(1000.0, &HoverReadout::Db(-10.0), None, &[], Some(10.17), None);
-        assert!(!s.starts_with("cursor"), "should not start with literal 'cursor': {s}");
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::Db(-10.0),
+            None,
+            &[],
+            Some(10.17),
+            None,
+        );
+        assert!(
+            !s.starts_with("cursor"),
+            "should not start with literal 'cursor': {s}"
+        );
         assert!(s.contains("-10.00 dBFS"), "want dBFS: {s}");
-        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
-            "want dBu near +0.17: {s}");
-        assert!(!s.contains("dBV"), "dBV must not appear in cursor footer: {s}");
+        assert!(
+            s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu near +0.17: {s}"
+        );
+        assert!(
+            !s.contains("dBV"),
+            "dBV must not appear in cursor footer: {s}"
+        );
         assert!(!s.contains("▲"), "no peaks supplied -> no snap marker: {s}");
     }
 
@@ -691,14 +718,7 @@ mod tests {
     fn cursor_readout_waterfall_without_sample_falls_back_to_freq_age() {
         // Brand-new channel before any FFT row arrived: the latest
         // spectrum is empty, so we just show freq + age.
-        let s = cursor_readout(
-            1000.0,
-            &HoverReadout::TimeAgo(1.234),
-            None,
-            &[],
-            None,
-            None,
-        );
+        let s = cursor_readout(1000.0, &HoverReadout::TimeAgo(1.234), None, &[], None, None);
         assert!(s.contains("kHz"));
         assert!(s.contains("t-"));
         assert!(!s.contains("dBFS"));
@@ -717,8 +737,10 @@ mod tests {
             None,
         );
         assert!(s.contains("-10.00 dBFS"));
-        assert!(s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
-            "want dBu derived from sampled dBFS + offset: {s}");
+        assert!(
+            s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu derived from sampled dBFS + offset: {s}"
+        );
         assert!(s.contains("t-"));
     }
 
@@ -726,9 +748,19 @@ mod tests {
     fn cursor_readout_spl_offset_overrides_dbu_offset() {
         // Pistonphone-cal'd channels are acoustic; rendering dBu would
         // be misleading. SPL takes precedence when both offsets are present.
-        let s = cursor_readout(1000.0, &HoverReadout::Db(-32.0), None, &[], Some(10.17), Some(126.0));
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::Db(-32.0),
+            None,
+            &[],
+            Some(10.17),
+            Some(126.0),
+        );
         assert!(s.contains("dB SPL"), "want SPL: {s}");
-        assert!(!s.contains("dBu"), "should not show dBu when SPL active: {s}");
+        assert!(
+            !s.contains("dBu"),
+            "should not show dBu when SPL active: {s}"
+        );
     }
 
     #[test]
@@ -737,12 +769,24 @@ mod tests {
         // 800 Hz should pick column 1 (1000 Hz, log-distance 0.097)
         // not column 0 (100 Hz, log-distance 0.903). At 200 Hz it
         // should pick column 0.
-        let freqs    = vec![100.0_f32, 1000.0, 10_000.0, 24_000.0];
-        let spectrum = vec![-80.0_f32, -10.0,    -90.0,     -120.0];
-        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 800.0),  Some(-10.0));
-        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 200.0),  Some(-80.0));
-        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 50.0),   Some(-80.0));
-        assert_eq!(sample_spectrum_db_at_freq(&spectrum, &freqs, 30000.0),Some(-120.0));
+        let freqs = vec![100.0_f32, 1000.0, 10_000.0, 24_000.0];
+        let spectrum = vec![-80.0_f32, -10.0, -90.0, -120.0];
+        assert_eq!(
+            sample_spectrum_db_at_freq(&spectrum, &freqs, 800.0),
+            Some(-10.0)
+        );
+        assert_eq!(
+            sample_spectrum_db_at_freq(&spectrum, &freqs, 200.0),
+            Some(-80.0)
+        );
+        assert_eq!(
+            sample_spectrum_db_at_freq(&spectrum, &freqs, 50.0),
+            Some(-80.0)
+        );
+        assert_eq!(
+            sample_spectrum_db_at_freq(&spectrum, &freqs, 30000.0),
+            Some(-120.0)
+        );
         assert_eq!(sample_spectrum_db_at_freq(&[], &freqs, 1000.0), None);
     }
 
@@ -821,7 +865,10 @@ mod tests {
 
     #[test]
     fn tier_badge_fft() {
-        assert_eq!(tier_badge("fft", 16384, 12.0, 512, 0.0), "FFT · N=16384 · Hann");
+        assert_eq!(
+            tier_badge("fft", 16384, 12.0, 512, 0.0),
+            "FFT · N=16384 · Hann"
+        );
     }
 
     #[test]
@@ -1021,12 +1068,25 @@ mod tests {
     #[test]
     fn loudness_lines_are_lkfs_when_uncalibrated() {
         let lines = loudness_readout_lines(&dummy_readout());
-        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
-        assert!(joined.contains("M -23.0") || joined.contains("M-23.0"), "{joined}");
+        let joined = lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("M -23.0") || joined.contains("M-23.0"),
+            "{joined}"
+        );
         assert!(joined.contains("dBTP"), "{joined}");
         assert!(joined.contains("LRA"), "{joined}");
-        assert!(!joined.contains("SPL"), "must not show SPL when uncalibrated: {joined}");
-        assert!(!joined.contains("Mk"),  "Mk only appears in SPL mode: {joined}");
+        assert!(
+            !joined.contains("SPL"),
+            "must not show SPL when uncalibrated: {joined}"
+        );
+        assert!(
+            !joined.contains("Mk"),
+            "Mk only appears in SPL mode: {joined}"
+        );
     }
 
     #[test]
@@ -1036,14 +1096,27 @@ mod tests {
         let mut r = dummy_readout();
         r.spl_offset_db = Some(97.0);
         let lines = loudness_readout_lines(&r);
-        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
-        assert!(joined.contains("Mk"),    "K-suffix marker missing: {joined}");
-        assert!(joined.contains("Sk"),    "Sk-suffix marker missing: {joined}");
-        assert!(joined.contains("Ik"),    "Ik-suffix marker missing: {joined}");
-        assert!(joined.contains("dB SPL"),"dB SPL unit missing: {joined}");
-        assert!(joined.contains("74.0"),  "integrated at 74 dB SPL missing: {joined}");
-        assert!(joined.contains("Lpk(K)"),"true-peak label missing: {joined}");
-        assert!(joined.contains("96.0"),  "true peak at 96 dB SPL missing: {joined}");
+        let joined = lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(joined.contains("Mk"), "K-suffix marker missing: {joined}");
+        assert!(joined.contains("Sk"), "Sk-suffix marker missing: {joined}");
+        assert!(joined.contains("Ik"), "Ik-suffix marker missing: {joined}");
+        assert!(joined.contains("dB SPL"), "dB SPL unit missing: {joined}");
+        assert!(
+            joined.contains("74.0"),
+            "integrated at 74 dB SPL missing: {joined}"
+        );
+        assert!(
+            joined.contains("Lpk(K)"),
+            "true-peak label missing: {joined}"
+        );
+        assert!(
+            joined.contains("96.0"),
+            "true peak at 96 dB SPL missing: {joined}"
+        );
         // Old labels must not appear in SPL mode.
         assert!(!joined.contains("dBTP"), "dBTP must be replaced: {joined}");
     }
@@ -1053,7 +1126,10 @@ mod tests {
     #[test]
     fn spectrum_readout_shows_mic_corrected_when_on() {
         let stats = BroadbandStats {
-            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
         };
         let s = spectrum_readout(&stats, None, None, Some("on"));
         assert!(s.contains("[mic-corrected]"), "expected mic tag in: {s}");
@@ -1062,7 +1138,10 @@ mod tests {
     #[test]
     fn spectrum_readout_shows_off_when_loaded_but_disabled() {
         let stats = BroadbandStats {
-            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
         };
         let s = spectrum_readout(&stats, None, None, Some("off"));
         assert!(s.contains("[mic-cal off]"), "expected off tag in: {s}");
@@ -1071,19 +1150,31 @@ mod tests {
     #[test]
     fn spectrum_readout_no_mic_tag_when_no_curve() {
         let stats = BroadbandStats {
-            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
         };
         let s_none = spectrum_readout(&stats, None, None, None);
         let s_str = spectrum_readout(&stats, None, None, Some("none"));
-        assert!(!s_none.contains("mic-"), "no mic tag without curve: {s_none}");
-        assert!(!s_str.contains("mic-"),  "no mic tag for explicit \"none\": {s_str}");
+        assert!(
+            !s_none.contains("mic-"),
+            "no mic tag without curve: {s_none}"
+        );
+        assert!(
+            !s_str.contains("mic-"),
+            "no mic tag for explicit \"none\": {s_str}"
+        );
     }
 
     #[test]
     fn spectrum_readout_mic_tag_composes_with_spl() {
         // Both calibrations active: peak in dB SPL with mic-corrected suffix.
         let stats = BroadbandStats {
-            peak_db: -3.0, peak_hz: 1000.0, floor_db: -96.0, span_db: 93.0,
+            peak_db: -3.0,
+            peak_hz: 1000.0,
+            floor_db: -96.0,
+            span_db: 93.0,
         };
         let s = spectrum_readout(&stats, None, Some(97.0), Some("on"));
         assert!(s.contains("dB SPL"), "{s}");
@@ -1098,8 +1189,18 @@ mod tests {
         r.integrated_lkfs = Some(-23.0);
         r.spl_offset_db = Some(97.0);
         let lines = loudness_readout_lines(&r);
-        let joined = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" | ");
-        assert!(joined.contains("R128 PASS"), "PASS still expected at integrated=-23: {joined}");
-        assert!(joined.contains("Δ +0.0 LU"), "delta still measured against -23 LKFS: {joined}");
+        let joined = lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("R128 PASS"),
+            "PASS still expected at integrated=-23: {joined}"
+        );
+        assert!(
+            joined.contains("Δ +0.0 LU"),
+            "delta still measured against -23 LKFS: {joined}"
+        );
     }
 }

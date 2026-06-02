@@ -13,8 +13,7 @@ pub fn dispatch(cmd: &CommandKind, _cfg: &ac_core::config::Config) {
 
 fn session_base() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".local/share/ac/sessions")
+    std::path::PathBuf::from(home).join(".local/share/ac/sessions")
 }
 
 fn session_dir(name: &str) -> std::path::PathBuf {
@@ -36,9 +35,7 @@ fn new_session(name: &str) {
 
 fn list_sessions() {
     let base = session_base();
-    let active = ac_core::config::load(None)
-        .ok()
-        .and_then(|c| c.session);
+    let active = ac_core::config::load(None).ok().and_then(|c| c.session);
     if !base.exists() {
         println!("  No sessions.");
         return;
@@ -47,7 +44,7 @@ fn list_sessions() {
         .ok()
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter(|e| e.file_type().ok().map_or(false, |ft| ft.is_dir()))
+                .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect()
         })

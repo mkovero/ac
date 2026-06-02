@@ -13,6 +13,7 @@ pub struct WaterfallTimeAxis {
     pub rows_visible: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_grid(
     painter: &Painter,
     rect: Rect,
@@ -324,7 +325,9 @@ mod tests {
     #[test]
     fn freq_ticks_log_contains_decade_markers() {
         let ticks = freq_ticks(20.0, 20000.0);
-        for &f in &[20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0] {
+        for &f in &[
+            20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0,
+        ] {
             assert!(ticks.contains(&f), "missing {f}");
         }
     }

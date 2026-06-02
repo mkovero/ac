@@ -14,7 +14,8 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore,
+    VirtualChannelStore,
 };
 use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, SpectrumFrame, SweepKind, TransferFrame,
@@ -28,9 +29,9 @@ use crate::theme;
 use crate::ui::layout::GridParams;
 use crate::ui::stats::TimingStats;
 
+mod control;
 mod helpers;
 mod input;
-mod control;
 mod render_pipeline;
 
 pub use helpers::*;
@@ -63,36 +64,36 @@ impl BandWeighting {
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::A,
-            Self::A   => Self::C,
-            Self::C   => Self::Z,
-            Self::Z   => Self::Off,
+            Self::A => Self::C,
+            Self::C => Self::Z,
+            Self::Z => Self::Off,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::A   => "a",
-            Self::C   => "c",
-            Self::Z   => "z",
+            Self::A => "a",
+            Self::C => "c",
+            Self::Z => "z",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "weighting: off",
-            Self::A   => "weighting: A",
-            Self::C   => "weighting: C",
-            Self::Z   => "weighting: Z",
+            Self::A => "weighting: A",
+            Self::C => "weighting: C",
+            Self::Z => "weighting: Z",
         }
     }
 
     pub fn overlay_tag(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
-            Self::A   => Some("A"),
-            Self::C   => Some("C"),
-            Self::Z   => Some("Z"),
+            Self::A => Some("A"),
+            Self::C => Some("C"),
+            Self::Z => Some("Z"),
         }
     }
 }
@@ -100,28 +101,28 @@ impl BandWeighting {
 impl TimeIntegrationMode {
     pub fn next(self) -> Self {
         match self {
-            Self::Off  => Self::Fast,
+            Self::Off => Self::Fast,
             Self::Fast => Self::Slow,
             Self::Slow => Self::Leq,
-            Self::Leq  => Self::Off,
+            Self::Leq => Self::Off,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Off  => "off",
+            Self::Off => "off",
             Self::Fast => "fast",
             Self::Slow => "slow",
-            Self::Leq  => "leq",
+            Self::Leq => "leq",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Off  => "time: off",
+            Self::Off => "time: off",
             Self::Fast => "time: fast (125 ms)",
             Self::Slow => "time: slow (1 s)",
-            Self::Leq  => "time: Leq",
+            Self::Leq => "time: Leq",
         }
     }
 }
@@ -528,7 +529,11 @@ impl App {
         // Capture the persisted fullscreen flag for init_graphics to
         // apply once the window exists (winit doesn't allow setting
         // fullscreen before creation).
-        let pending_fullscreen = if persisted.fullscreen { Some(true) } else { None };
+        let pending_fullscreen = if persisted.fullscreen {
+            Some(true)
+        } else {
+            None
+        };
         // Layout picks: sweep is forced; Spectrum / Waterfall (legacy
         // line + colormap) → Grid (per-channel matrix); other ember
         // views → Single (one cell). SpectrumEmber is a special case:
@@ -537,9 +542,7 @@ impl App {
         // (no `--view`) is the ember matrix (Grid+SpectrumEmber).
         let layout = if sweep_kind.is_some() {
             LayoutMode::Sweep
-        } else if matches!(resolved_view, ViewMode::SpectrumEmber)
-            && !init.initial_view_via_cli
-        {
+        } else if matches!(resolved_view, ViewMode::SpectrumEmber) && !init.initial_view_via_cli {
             LayoutMode::Grid
         } else if matches!(
             resolved_view,
@@ -689,14 +692,14 @@ impl App {
             .map(|c| c.window.fullscreen().is_some())
             .unwrap_or(false);
         crate::data::persist::UiState {
-            schema_version:          crate::data::persist::SCHEMA_VERSION,
-            view_mode:               Some(
+            schema_version: crate::data::persist::SCHEMA_VERSION,
+            view_mode: Some(
                 crate::data::persist::view_mode_token(self.config.view_mode).to_string(),
             ),
-            ember_intensity_scale:   self.ember_intensity_scale,
-            ember_tau_p_scale:       self.ember_tau_p_scale,
+            ember_intensity_scale: self.ember_intensity_scale,
+            ember_tau_p_scale: self.ember_tau_p_scale,
             ember_gonio_rotation_ms: self.ember_gonio_rotation_ms,
-            ember_coherence_k:       self.ember_coherence_k,
+            ember_coherence_k: self.ember_coherence_k,
             fullscreen,
         }
     }
@@ -716,7 +719,9 @@ impl App {
         if self.disable_persist {
             return;
         }
-        let Some(t0) = self.ui_dirty_since else { return };
+        let Some(t0) = self.ui_dirty_since else {
+            return;
+        };
         if t0.elapsed() < Duration::from_millis(500) {
             return;
         }
@@ -739,7 +744,9 @@ impl App {
             return;
         }
         let started = self.benchmark_started.unwrap();
-        if started.elapsed().as_secs_f64() < secs { return; }
+        if started.elapsed().as_secs_f64() < secs {
+            return;
+        }
 
         let snap = self.timing_stats.snapshot();
         let gpu = snap.gpu;
@@ -764,7 +771,7 @@ impl App {
     fn grid_params(&self) -> GridParams {
         GridParams {
             cell_size: self.grid_cell_size,
-            page:      self.grid_page,
+            page: self.grid_page,
         }
     }
 
@@ -790,8 +797,14 @@ impl App {
         let egui_renderer = egui_wgpu::Renderer::new(&ctx.device, format, None, 1, false);
         self.egui_ctx.set_visuals(render_pipeline::dark_visuals());
         let viewport_id = self.egui_ctx.viewport_id();
-        let egui_state =
-            egui_winit::State::new(self.egui_ctx.clone(), viewport_id, &window, None, None, None);
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            viewport_id,
+            &window,
+            None,
+            None,
+            None,
+        );
         self.render_ctx = Some(ctx);
         self.spectrum = Some(spectrum);
         self.waterfall = Some(waterfall);
@@ -877,7 +890,7 @@ impl App {
             // still drops out of `continuous` and pays nothing.
             let rate_ok = self
                 .last_continuous_paint_at
-                .map_or(true, |t| now.saturating_duration_since(t) >= self.continuous_interval);
+                .is_none_or(|t| now.saturating_duration_since(t) >= self.continuous_interval);
             if rate_ok {
                 self.last_continuous_paint_at = Some(now);
                 self.last_painted_frame_ns = current_ns;
@@ -924,16 +937,13 @@ impl ApplicationHandler for App {
         self.start_data_source();
     }
 
-    fn window_event(
-        &mut self,
-        elwt: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, elwt: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Any user interaction needs a redraw.
         match &event {
             WindowEvent::RedrawRequested | WindowEvent::Destroyed => {}
-            _ => { self.needs_redraw = true; }
+            _ => {
+                self.needs_redraw = true;
+            }
         }
 
         // Tab / Shift+Tab are our channel-cycle keys; egui's default focus
@@ -1005,10 +1015,7 @@ impl ApplicationHandler for App {
                 if scroll != 0.0 {
                     // Scrolling inside a cell zooms that cell. Scrolling on
                     // the bare background in Grid layout resizes the cells.
-                    let over_cell = self
-                        .cursor_pos
-                        .and_then(|p| self.cell_at(p))
-                        .is_some();
+                    let over_cell = self.cursor_pos.and_then(|p| self.cell_at(p)).is_some();
                     if over_cell {
                         self.apply_zoom(scroll);
                     } else if matches!(self.config.layout, LayoutMode::Grid) {
@@ -1064,9 +1071,9 @@ impl ApplicationHandler for App {
                 if let Some(t) = self.last_continuous_paint_at {
                     let next_eligible = t + self.continuous_interval;
                     if next_eligible > now {
-                        elwt.set_control_flow(
-                            winit::event_loop::ControlFlow::WaitUntil(next_eligible),
-                        );
+                        elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                            next_eligible,
+                        ));
                         return;
                     }
                 }
@@ -1101,7 +1108,6 @@ impl ApplicationHandler for App {
     }
 }
 
-
 #[cfg(test)]
 mod loop_tests {
     //! State-machine tests for `App::loop_directive`. They exercise the
@@ -1116,7 +1122,8 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
+        ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore,
+        VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -1188,7 +1195,10 @@ mod loop_tests {
             LoopDirective::Idle,
             "notification expired: loop must go idle (regression guard)",
         );
-        assert!(app.notification.is_none(), "notification field leaked past TTL");
+        assert!(
+            app.notification.is_none(),
+            "notification field leaked past TTL"
+        );
     }
 
     /// Benchmark mode drives continuous repaints for its whole duration;
@@ -1232,9 +1242,9 @@ mod loop_tests {
         let mut app = fresh_app();
         let t0 = Instant::now();
         let _ = app.loop_directive(t0); // drain the initial paint
-        // Simulate a producer wake plus a time-driven animation, so the
-        // skip-when-unchanged gate fires `paint` even without new data
-        // (the test scaffolding can't easily inject `last_frame_ns`).
+                                        // Simulate a producer wake plus a time-driven animation, so the
+                                        // skip-when-unchanged gate fires `paint` even without new data
+                                        // (the test scaffolding can't easily inject `last_frame_ns`).
         app.last_data_arrival = Some(t0);
         app.peak_hold_enabled = true;
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
@@ -1303,9 +1313,9 @@ mod loop_tests {
         let t0 = Instant::now();
         let _ = app.loop_directive(t0);
         app.last_data_arrival = Some(t0);
-        app.peak_hold_enabled = true;  // animating, so the inside-window
-                                       // tick paints rather than skipping.
-        // Inside the window: continuous.
+        app.peak_hold_enabled = true; // animating, so the inside-window
+                                      // tick paints rather than skipping.
+                                      // Inside the window: continuous.
         assert_eq!(app.loop_directive(t0), LoopDirective::RedrawContinuous);
         // Stop the animation too — outside the liveness window with no
         // animation and no input, the loop must reach `Idle`.
@@ -1487,7 +1497,9 @@ mod loop_tests {
                  #108 regression: something added request_redraw to Idle path",
             );
         }
-        assert!(!app.needs_redraw, "needs_redraw must stay false across idle ticks");
+        assert!(
+            !app.needs_redraw,
+            "needs_redraw must stay false across idle ticks"
+        );
     }
 }
-

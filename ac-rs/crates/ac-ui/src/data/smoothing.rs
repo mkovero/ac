@@ -41,9 +41,7 @@ impl OctaveWindows {
     /// scalar compares. Freq grid is deterministic per (N, sr) so the last
     /// frequency is a good proxy for "same grid".
     pub fn matches(&self, n_frac: u32, n_bins: usize, last_freq: f32) -> bool {
-        self.n_frac == n_frac
-            && self.n_bins == n_bins
-            && (self.last_freq - last_freq).abs() < 1e-3
+        self.n_frac == n_frac && self.n_bins == n_bins && (self.last_freq - last_freq).abs() < 1e-3
     }
 
     /// Build window indices for every bin given the frequency grid. Windows
@@ -157,7 +155,9 @@ mod tests {
     use super::*;
 
     fn linear_freqs(n: usize, sr: f32) -> Vec<f32> {
-        (0..n).map(|i| i as f32 * sr / (2.0 * (n - 1) as f32)).collect()
+        (0..n)
+            .map(|i| i as f32 * sr / (2.0 * (n - 1) as f32))
+            .collect()
     }
 
     #[test]
@@ -226,7 +226,9 @@ mod tests {
             "smoothed peak {:.2} dBFS is below the {:.2} dBFS theoretical \
              power-mean loss for {} bins in window — smoother is pulling \
              the peak toward the floor again",
-            out[spike_idx], -theoretical_loss_db, n_in_window,
+            out[spike_idx],
+            -theoretical_loss_db,
+            n_in_window,
         );
         assert!(
             out[spike_idx] > -50.0,

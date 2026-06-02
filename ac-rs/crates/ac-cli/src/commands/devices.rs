@@ -1,5 +1,5 @@
-use crate::client::AcClient;
 use super::check_ack;
+use crate::client::AcClient;
 
 pub fn run(client: &mut AcClient) {
     let ack = check_ack(
@@ -41,9 +41,7 @@ pub fn run(client: &mut AcClient) {
         match sticky {
             None => String::new(),
             Some(s) => {
-                let found = ports
-                    .iter()
-                    .position(|v| v.as_str() == Some(s));
+                let found = ports.iter().position(|v| v.as_str() == Some(s));
                 match found {
                     Some(idx) if idx != ch => format!("  (reordered: now ch {idx})"),
                     None => "  (sticky port not found)".to_string(),

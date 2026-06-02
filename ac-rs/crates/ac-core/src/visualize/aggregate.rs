@@ -20,6 +20,9 @@ pub const DEFAULT_WIRE_COLUMNS: usize = 4096;
 ///
 /// `f32::NEG_INFINITY`-filled vec is returned for degenerate input
 /// (`spectrum_db.len() < 2` or `n_columns == 0` is handled too).
+// Negated `>` comparisons are intentional NaN-aware guards: `!(f_min > 0.0)`
+// is true for NaN, zero, and negative inputs, all of which must short-circuit.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn spectrum_to_columns(
     spectrum_db: &[f32],
     sr: f32,
@@ -87,6 +90,8 @@ pub fn spectrum_to_columns(
 /// frequency representation suitable for ZMQ publish. Returns `(magnitudes,
 /// frequencies)` both as `Vec<f64>`, log-spaced between `f_min` and `f_max`.
 /// Frequencies are per-column centres so axis labels align with the data.
+// Negated `>` comparisons are intentional NaN-aware guards (see above).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn spectrum_to_columns_wire(
     spectrum_db: &[f64],
     sr: f64,
@@ -129,18 +134,14 @@ mod tests {
         let in_band: Vec<usize> = (0..cols.len())
             .filter(|&i| {
                 let f = col_freq(i);
-                f >= 20.0 && f <= 200.0
+                (20.0..=200.0).contains(&f)
             })
             .collect();
         assert!(!in_band.is_empty(), "expected columns inside 20-200 Hz");
         for w in in_band.windows(3) {
             let (a, b, c) = (cols[w[0]], cols[w[1]], cols[w[2]]);
             let zigzag = a < -120.0 && b > -100.0 && c < -120.0;
-            assert!(
-                !zigzag,
-                "zigzag at columns {:?}: {} {} {}",
-                w, a, b, c
-            );
+            assert!(!zigzag, "zigzag at columns {:?}: {} {} {}", w, a, b, c);
         }
     }
 
@@ -156,7 +157,13 @@ mod tests {
         for (i, &v) in cols.iter().enumerate() {
             let f = col_freq(i);
             if (f - 10_000.0).abs() > 2_000.0 {
-                assert!(v <= -150.0, "column {} at {:.0} Hz leaked energy: {} dB", i, f, v);
+                assert!(
+                    v <= -150.0,
+                    "column {} at {:.0} Hz leaked energy: {} dB",
+                    i,
+                    f,
+                    v
+                );
             }
         }
     }
@@ -179,7 +186,7 @@ mod tests {
         let window: Vec<(usize, f32)> = (0..cols.len())
             .filter(|&i| {
                 let f = col_freq(i);
-                f >= 80.0 && f <= 130.0
+                (80.0..=130.0).contains(&f)
             })
             .map(|i| (i, cols[i]))
             .collect();
@@ -198,10 +205,12 @@ mod tests {
             "expected two distinct local maxima in 80-130 Hz, got {:?}",
             maxima
         );
-        let gap = maxima
-            .windows(2)
-            .any(|p| p[1].0 > p[0].0 + 2);
-        assert!(gap, "maxima are adjacent, no dip between them: {:?}", maxima);
+        let gap = maxima.windows(2).any(|p| p[1].0 > p[0].0 + 2);
+        assert!(
+            gap,
+            "maxima are adjacent, no dip between them: {:?}",
+            maxima
+        );
     }
 
     #[test]

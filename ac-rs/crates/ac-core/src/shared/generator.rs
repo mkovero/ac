@@ -118,7 +118,11 @@ mod tests {
     #[test]
     fn dbfs_to_amplitude_unity() {
         assert_relative_eq!(dbfs_to_amplitude(0.0), 1.0, epsilon = 1e-12);
-        assert_relative_eq!(dbfs_to_amplitude(-6.0), 10.0_f64.powf(-0.3), epsilon = 1e-10);
+        assert_relative_eq!(
+            dbfs_to_amplitude(-6.0),
+            10.0_f64.powf(-0.3),
+            epsilon = 1e-10
+        );
     }
 
     #[test]
@@ -132,8 +136,10 @@ mod tests {
         // RMS should be ≈ amplitude / √2 (within 10% — random noise)
         let rms = (buf.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / buf.len() as f64).sqrt();
         let expected = amp / std::f64::consts::SQRT_2;
-        assert!((rms - expected).abs() / expected < 0.1,
-            "pink noise RMS {rms:.4} too far from {expected:.4}");
+        assert!(
+            (rms - expected).abs() / expected < 0.1,
+            "pink noise RMS {rms:.4} too far from {expected:.4}"
+        );
     }
 
     #[test]
@@ -143,7 +149,10 @@ mod tests {
         // We just check nothing has gone catastrophically wrong (e.g. no NaNs,
         // and peaks are within a physically plausible range).
         let buf = generate_pink_noise(0.5, 48_000);
-        assert!(buf.iter().all(|x| x.is_finite()), "pink noise contains NaN/inf");
+        assert!(
+            buf.iter().all(|x| x.is_finite()),
+            "pink noise contains NaN/inf"
+        );
         let peak = buf.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
         assert!(peak < 10.0, "pink noise peak {peak} is implausibly large");
     }

@@ -9,14 +9,26 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
     // Absent or a channel/numeric-looking token → default FFT spectrum
     // (preserves `ac monitor 0-3 20hz 20khz 0.1s`).
     let mode = match args.first() {
-        Some(a) if a.eq_ignore_ascii_case("spectrum") => { args.remove(0); "spectrum" }
-        Some(a) if a.eq_ignore_ascii_case("cwt")      => { args.remove(0); "cwt" }
-        Some(a) if a.eq_ignore_ascii_case("cqt")      => { args.remove(0); "cqt" }
-        Some(a) if a.eq_ignore_ascii_case("reassigned") => { args.remove(0); "reassigned" }
+        Some(a) if a.eq_ignore_ascii_case("spectrum") => {
+            args.remove(0);
+            "spectrum"
+        }
+        Some(a) if a.eq_ignore_ascii_case("cwt") => {
+            args.remove(0);
+            "cwt"
+        }
+        Some(a) if a.eq_ignore_ascii_case("cqt") => {
+            args.remove(0);
+            "cqt"
+        }
+        Some(a) if a.eq_ignore_ascii_case("reassigned") => {
+            args.remove(0);
+            "reassigned"
+        }
         _ => "spectrum",
     };
 
-    let channels = if args.first().map_or(false, |a| is_channel_spec(a)) {
+    let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
         Some(parse_channels(&args.remove(0))?)
     } else {
         None
@@ -33,10 +45,30 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
         .unwrap_or(0.1);
     check_empty(&tokens)?;
     let cmd = match mode {
-        "cwt"        => CommandKind::MonitorCwt        { start_freq, end_freq, interval, channels },
-        "cqt"        => CommandKind::MonitorCqt        { start_freq, end_freq, interval, channels },
-        "reassigned" => CommandKind::MonitorReassigned { start_freq, end_freq, interval, channels },
-        _            => CommandKind::Monitor           { start_freq, end_freq, interval, channels },
+        "cwt" => CommandKind::MonitorCwt {
+            start_freq,
+            end_freq,
+            interval,
+            channels,
+        },
+        "cqt" => CommandKind::MonitorCqt {
+            start_freq,
+            end_freq,
+            interval,
+            channels,
+        },
+        "reassigned" => CommandKind::MonitorReassigned {
+            start_freq,
+            end_freq,
+            interval,
+            channels,
+        },
+        _ => CommandKind::Monitor {
+            start_freq,
+            end_freq,
+            interval,
+            channels,
+        },
     };
     Ok(ParsedCommand { cmd, show_plot })
 }
@@ -53,7 +85,12 @@ mod tests {
     fn test_monitor() {
         let p = parse(&args("monitor")).unwrap();
         match p.cmd {
-            CommandKind::Monitor { start_freq, end_freq, interval, .. } => {
+            CommandKind::Monitor {
+                start_freq,
+                end_freq,
+                interval,
+                ..
+            } => {
                 assert!((start_freq - 20.0).abs() < 1e-9);
                 assert!((end_freq - 20000.0).abs() < 1e-9);
                 assert!((interval - 0.1).abs() < 1e-9);

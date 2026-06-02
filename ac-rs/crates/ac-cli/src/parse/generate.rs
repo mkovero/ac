@@ -2,7 +2,10 @@
 
 use super::*;
 
-pub(super) fn parse_generate(args: &mut Vec<String>, show_plot: bool) -> Result<ParsedCommand, String> {
+pub(super) fn parse_generate(
+    args: &mut Vec<String>,
+    show_plot: bool,
+) -> Result<ParsedCommand, String> {
     if args.is_empty() {
         return Err("generate needs a noun: sine | pink".into());
     }
@@ -10,7 +13,7 @@ pub(super) fn parse_generate(args: &mut Vec<String>, show_plot: bool) -> Result<
 
     match noun.as_str() {
         "sine" => {
-            let channels = if args.first().map_or(false, |a| is_channel_spec(a)) {
+            let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
                 Some(args.remove(0))
             } else {
                 None
@@ -31,7 +34,7 @@ pub(super) fn parse_generate(args: &mut Vec<String>, show_plot: bool) -> Result<
             })
         }
         "pink" => {
-            let channels = if args.first().map_or(false, |a| is_channel_spec(a)) {
+            let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
                 Some(args.remove(0))
             } else {
                 None
@@ -40,16 +43,11 @@ pub(super) fn parse_generate(args: &mut Vec<String>, show_plot: bool) -> Result<
             let level = pull(&mut tokens, TokenKind::Level).map(|v| v.as_level());
             check_empty(&tokens)?;
             Ok(ParsedCommand {
-                cmd: CommandKind::GeneratePink {
-                    level,
-                    channels,
-                },
+                cmd: CommandKind::GeneratePink { level, channels },
                 show_plot,
             })
         }
-        other => Err(format!(
-            "unknown generate noun: {other:?}  (sine | pink)"
-        )),
+        other => Err(format!("unknown generate noun: {other:?}  (sine | pink)")),
     }
 }
 
@@ -65,7 +63,11 @@ mod tests {
     fn test_generate_sine() {
         let p = parse(&args("g si 0dbu 1khz")).unwrap();
         match p.cmd {
-            CommandKind::GenerateSine { level, freq, channels } => {
+            CommandKind::GenerateSine {
+                level,
+                freq,
+                channels,
+            } => {
                 assert!(matches!(level, Some(LevelSpec::Dbu(v)) if v.abs() < 1e-9));
                 assert!((freq - 1000.0).abs() < 1e-9);
                 assert!(channels.is_none());

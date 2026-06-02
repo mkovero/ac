@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
+use super::{check_ack, get_cal, level_to_dbfs};
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
-use super::{check_ack, get_cal, level_to_dbfs};
 
 pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     let (level, out_ch, in_ch) = match cmd {
@@ -182,15 +182,20 @@ pub fn run_show(client: &mut AcClient) {
 /// `cal_done` frame and is what later `dbfs → dB SPL` conversions use.
 pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
     let (out_ch, in_ch) = match cmd {
-        CommandKind::CalibrateSpl { output_channel, input_channel } => {
-            (output_channel, input_channel)
-        }
+        CommandKind::CalibrateSpl {
+            output_channel,
+            input_channel,
+        } => (output_channel, input_channel),
         _ => unreachable!(),
     };
 
     let mut cmd_json = serde_json::json!({"cmd": "calibrate_spl"});
-    if let Some(ch) = out_ch { cmd_json["output_channel"] = (*ch).into(); }
-    if let Some(ch) = in_ch  { cmd_json["input_channel"]  = (*ch).into(); }
+    if let Some(ch) = out_ch {
+        cmd_json["output_channel"] = (*ch).into();
+    }
+    if let Some(ch) = in_ch {
+        cmd_json["input_channel"] = (*ch).into();
+    }
 
     check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate_spl");
     println!("  SPL calibration started.");
@@ -224,7 +229,7 @@ pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
                 None,
             );
         } else if topic == "cal_done" {
-            let key  = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+            let key = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
             let dbfs = data
                 .get("mic_sensitivity_dbfs_at_94db_spl")
                 .and_then(|v| v.as_f64());
@@ -240,7 +245,10 @@ pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
             println!();
             return;
         } else if topic == "error" {
-            let msg = data.get("message").and_then(|v| v.as_str()).unwrap_or("error");
+            let msg = data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("error");
             eprintln!("  error: {msg}");
             return;
         }
@@ -253,9 +261,11 @@ pub fn run_spl(cmd: &CommandKind, client: &mut AcClient) {
 /// stored curve.
 pub fn run_mic_curve(cmd: &CommandKind, client: &mut AcClient) {
     let (path, out_ch, in_ch) = match cmd {
-        CommandKind::CalibrateMicCurve { path, output_channel, input_channel } => {
-            (path.clone(), output_channel, input_channel)
-        }
+        CommandKind::CalibrateMicCurve {
+            path,
+            output_channel,
+            input_channel,
+        } => (path.clone(), output_channel, input_channel),
         _ => unreachable!(),
     };
 
@@ -269,9 +279,8 @@ pub fn run_mic_curve(cmd: &CommandKind, client: &mut AcClient) {
                     std::process::exit(1);
                 }
             };
-            let curve = match ac_core::shared::calibration::parse_mic_curve(
-                &text, Some(p.clone()),
-            ) {
+            let curve = match ac_core::shared::calibration::parse_mic_curve(&text, Some(p.clone()))
+            {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("  error: parsing {p}: {e}");
@@ -287,12 +296,19 @@ pub fn run_mic_curve(cmd: &CommandKind, client: &mut AcClient) {
             })
         }
     };
-    if let Some(ch) = out_ch { cmd_json["output_channel"] = (*ch).into(); }
-    if let Some(ch) = in_ch  { cmd_json["input_channel"]  = (*ch).into(); }
+    if let Some(ch) = out_ch {
+        cmd_json["output_channel"] = (*ch).into();
+    }
+    if let Some(ch) = in_ch {
+        cmd_json["input_channel"] = (*ch).into();
+    }
 
-    let ack = check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate_mic_curve");
+    let ack = check_ack(
+        client.send_cmd(&cmd_json, Some(5000)),
+        "calibrate_mic_curve",
+    );
     let key = ack.get("key").and_then(|v| v.as_str()).unwrap_or("?");
-    let n   = ack.get("loaded").and_then(|v| v.as_u64()).unwrap_or(0);
+    let n = ack.get("loaded").and_then(|v| v.as_u64()).unwrap_or(0);
     if n == 0 {
         println!("  Mic curve cleared on [{key}].");
     } else {

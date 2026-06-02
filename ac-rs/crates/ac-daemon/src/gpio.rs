@@ -20,10 +20,10 @@ use serde_json::{json, Value};
 // Pin assignments
 // ---------------------------------------------------------------------------
 
-const INPUT_PINS:  &[u8] = &[2, 3, 20, 21];
+const INPUT_PINS: &[u8] = &[2, 3, 20, 21];
 const OUTPUT_PINS: &[u8] = &[13, 14, 15];
 
-const PIN_STOP:     u8 = 2;
+const PIN_STOP: u8 = 2;
 const PIN_GEN_SINE: u8 = 3;
 const PIN_GEN_PINK: u8 = 20;
 const PIN_LED_SINE: u8 = 11;
@@ -31,9 +31,9 @@ const PIN_LED_PINK: u8 = 10;
 const PIN_LED_BUSY: u8 = 13;
 
 const CMD_SET_OUTPUT: u8 = 1;
-const CMD_SET_MODE:   u8 = 2;
-const MODE_INPUT:     u8 = 0;   // INPUT with pullup
-const MODE_OUTPUT:    u8 = 1;
+const CMD_SET_MODE: u8 = 2;
+const MODE_INPUT: u8 = 0; // INPUT with pullup
+const MODE_OUTPUT: u8 = 1;
 
 // ---------------------------------------------------------------------------
 // Event type
@@ -94,7 +94,11 @@ fn run(serial_path: &str, ctrl_port: u16, data_port: u16) -> anyhow::Result<()> 
     // Fetch initial config for startup diagnostic; event_processor refreshes
     // the level on every button press anyway.
     let out_channel = fetch_output_channel(&mut req);
-    eprintln!("gpio: level={:.2} dBFS  out_ch={}", resolve_level(&mut req), out_channel);
+    eprintln!(
+        "gpio: level={:.2} dBFS  out_ch={}",
+        resolve_level(&mut req),
+        out_channel
+    );
 
     let (ev_tx, ev_rx): (Sender<GpioEvent>, Receiver<GpioEvent>) = bounded(128);
 
@@ -140,10 +144,14 @@ fn parse_frames(buf: &mut Vec<u8>) -> Vec<(u8, u8)> {
             buf.clear();
             break;
         };
-        if start > 0 { buf.drain(..start); }
-        if buf.len() < 5 { break; }
+        if start > 0 {
+            buf.drain(..start);
+        }
+        if buf.len() < 5 {
+            break;
+        }
 
-        let pin   = buf[1];
+        let pin = buf[1];
         let value = buf[2];
         buf.drain(..5);
         events.push((pin, value));
@@ -180,23 +188,27 @@ fn serial_reader(mut port: Box<dyn serialport::SerialPort>, tx: Sender<GpioEvent
 // ---------------------------------------------------------------------------
 
 fn sub_watcher(sub: zmq::Socket, tx: Sender<GpioEvent>) {
-    loop {
-        let bytes = match sub.recv_bytes(0) {
-            Ok(b)  => b,
-            Err(_) => break,
-        };
+    while let Ok(bytes) = sub.recv_bytes(0) {
         let space = match bytes.iter().position(|&b| b == b' ') {
             Some(i) => i,
-            None    => continue,
+            None => continue,
         };
-        let topic = std::str::from_utf8(&bytes[..space]).unwrap_or("").to_string();
-        if topic != "done" && topic != "error" { continue; }
+        let topic = std::str::from_utf8(&bytes[..space])
+            .unwrap_or("")
+            .to_string();
+        if topic != "done" && topic != "error" {
+            continue;
+        }
 
         let frame: Value = match serde_json::from_slice(&bytes[space + 1..]) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(_) => continue,
         };
-        let cmd = frame.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
+        let cmd = frame
+            .get("cmd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let _ = tx.try_send(GpioEvent::WorkerDone(cmd));
     }
 }
@@ -206,9 +218,9 @@ fn sub_watcher(sub: zmq::Socket, tx: Sender<GpioEvent>) {
 // ---------------------------------------------------------------------------
 
 fn event_processor(
-    rx:          Receiver<GpioEvent>,
-    mut req:     ReqClient,
-    write_port:  Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    rx: Receiver<GpioEvent>,
+    mut req: ReqClient,
+    write_port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     out_channel: u32,
 ) {
     let mut sine_active = false;
@@ -217,22 +229,28 @@ fn event_processor(
 
     loop {
         let ev = match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(_) => continue,
         };
 
         match ev {
             GpioEvent::WorkerDone(cmd) => {
                 match cmd.as_str() {
-                    "generate"      => { sine_active = false; }
-                    "generate_pink" => { pink_active = false; }
+                    "generate" => {
+                        sine_active = false;
+                    }
+                    "generate_pink" => {
+                        pink_active = false;
+                    }
                     _ => {}
                 }
                 update_leds(&write_port, sine_active, pink_active);
             }
 
             GpioEvent::Button(pin, value) => {
-                if value != 0 { continue; } // active-low; ignore release
+                if value != 0 {
+                    continue;
+                } // active-low; ignore release
 
                 match pin {
                     p if p == PIN_STOP => {
@@ -243,52 +261,48 @@ fn event_processor(
                         update_leds(&write_port, false, false);
                     }
 
-                    p if p == PIN_GEN_SINE => {
-                        if !sine_active {
-                            if pink_active {
-                                eprintln!("gpio: stopping pink before sine");
-                                req.call(json!({"cmd": "stop", "name": "generate_pink"}));
-                                pink_active = false;
-                            }
-                            level = resolve_level(&mut req);
-                            eprintln!("gpio: SINE @ {level:.2} dBFS ch {out_channel}");
-                            sine_active = true;
-                            update_leds(&write_port, true, false);
-                            let ack = req.call(json!({
-                                "cmd":        "generate",
-                                "freq_hz":    1000.0,
-                                "level_dbfs": level,
-                                "channels":   [out_channel],
-                            }));
-                            if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                                eprintln!("gpio: generate failed: {ack}");
-                                sine_active = false;
-                                update_leds(&write_port, false, pink_active);
-                            }
+                    p if p == PIN_GEN_SINE && !sine_active => {
+                        if pink_active {
+                            eprintln!("gpio: stopping pink before sine");
+                            req.call(json!({"cmd": "stop", "name": "generate_pink"}));
+                            pink_active = false;
+                        }
+                        level = resolve_level(&mut req);
+                        eprintln!("gpio: SINE @ {level:.2} dBFS ch {out_channel}");
+                        sine_active = true;
+                        update_leds(&write_port, true, false);
+                        let ack = req.call(json!({
+                            "cmd":        "generate",
+                            "freq_hz":    1000.0,
+                            "level_dbfs": level,
+                            "channels":   [out_channel],
+                        }));
+                        if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                            eprintln!("gpio: generate failed: {ack}");
+                            sine_active = false;
+                            update_leds(&write_port, false, pink_active);
                         }
                     }
 
-                    p if p == PIN_GEN_PINK => {
-                        if !pink_active {
-                            if sine_active {
-                                eprintln!("gpio: stopping sine before pink");
-                                req.call(json!({"cmd": "stop", "name": "generate"}));
-                                sine_active = false;
-                            }
-                            level = resolve_level(&mut req);
-                            eprintln!("gpio: PINK @ {level:.2} dBFS ch {out_channel}");
-                            pink_active = true;
-                            update_leds(&write_port, false, true);
-                            let ack = req.call(json!({
-                                "cmd":        "generate_pink",
-                                "level_dbfs": level,
-                                "channels":   [out_channel],
-                            }));
-                            if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                                eprintln!("gpio: generate_pink failed: {ack}");
-                                pink_active = false;
-                                update_leds(&write_port, sine_active, false);
-                            }
+                    p if p == PIN_GEN_PINK && !pink_active => {
+                        if sine_active {
+                            eprintln!("gpio: stopping sine before pink");
+                            req.call(json!({"cmd": "stop", "name": "generate"}));
+                            sine_active = false;
+                        }
+                        level = resolve_level(&mut req);
+                        eprintln!("gpio: PINK @ {level:.2} dBFS ch {out_channel}");
+                        pink_active = true;
+                        update_leds(&write_port, false, true);
+                        let ack = req.call(json!({
+                            "cmd":        "generate_pink",
+                            "level_dbfs": level,
+                            "channels":   [out_channel],
+                        }));
+                        if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                            eprintln!("gpio: generate_pink failed: {ack}");
+                            pink_active = false;
+                            update_leds(&write_port, sine_active, false);
                         }
                     }
 
@@ -305,15 +319,19 @@ fn event_processor(
 // ---------------------------------------------------------------------------
 
 struct ReqClient {
-    ctx:      zmq::Context,
+    ctx: zmq::Context,
     endpoint: String,
-    sock:     zmq::Socket,
+    sock: zmq::Socket,
 }
 
 impl ReqClient {
     fn new(ctx: zmq::Context, endpoint: String) -> anyhow::Result<Self> {
         let sock = Self::connect(&ctx, &endpoint)?;
-        Ok(Self { ctx, endpoint, sock })
+        Ok(Self {
+            ctx,
+            endpoint,
+            sock,
+        })
     }
 
     fn connect(ctx: &zmq::Context, endpoint: &str) -> anyhow::Result<zmq::Socket> {
@@ -327,15 +345,18 @@ impl ReqClient {
 
     fn reset(&mut self) {
         match Self::connect(&self.ctx, &self.endpoint) {
-            Ok(s)  => self.sock = s,
+            Ok(s) => self.sock = s,
             Err(e) => eprintln!("gpio: REQ reconnect failed: {e}"),
         }
     }
 
     fn call(&mut self, cmd: Value) -> Value {
         let bytes = match serde_json::to_vec(&cmd) {
-            Ok(b)  => b,
-            Err(e) => { eprintln!("gpio: json encode: {e}"); return json!({"ok": false}); }
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("gpio: json encode: {e}");
+                return json!({"ok": false});
+            }
         };
         if self.sock.send(bytes, 0).is_err() {
             eprintln!("gpio: REQ send failed — resetting socket");
@@ -344,7 +365,7 @@ impl ReqClient {
         }
         match self.sock.recv_bytes(0) {
             Ok(reply) => serde_json::from_slice(&reply).unwrap_or(json!({"ok": false})),
-            Err(_)    => {
+            Err(_) => {
                 eprintln!("gpio: REQ recv timeout — resetting socket");
                 self.reset();
                 json!({"ok": false})

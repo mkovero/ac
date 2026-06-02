@@ -84,9 +84,7 @@ const C_NORM_DB: f64 = 0.062;
 fn a_weighting_db(f: f64) -> f64 {
     let f2 = f * f;
     let num = F4 * F4 * f2 * f2;
-    let den = (f2 + F1 * F1)
-        * ((f2 + F2 * F2) * (f2 + F3 * F3)).sqrt()
-        * (f2 + F4 * F4);
+    let den = (f2 + F1 * F1) * ((f2 + F2 * F2) * (f2 + F3 * F3)).sqrt() * (f2 + F4 * F4);
     20.0 * (num / den).log10() + A_NORM_DB
 }
 

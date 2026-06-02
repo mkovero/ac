@@ -50,10 +50,10 @@ fn alloc_home() -> PathBuf {
 }
 
 struct Daemon {
-    child:     Child,
+    child: Child,
     ctrl_port: u16,
     data_port: u16,
-    home:      PathBuf,
+    home: PathBuf,
 }
 
 impl Daemon {
@@ -64,26 +64,42 @@ impl Daemon {
         let child = Command::new(bin)
             .env("HOME", &home)
             .args([
-                "--fake-audio", "--local",
-                "--ctrl-port", &ctrl.to_string(),
-                "--data-port", &data.to_string(),
+                "--fake-audio",
+                "--local",
+                "--ctrl-port",
+                &ctrl.to_string(),
+                "--data-port",
+                &data.to_string(),
             ])
             .spawn()
             .expect("spawn ac-daemon");
         let deadline = Instant::now() + Duration::from_secs(3);
         let ctx = zmq::Context::new();
         loop {
-            if Instant::now() > deadline { panic!("daemon never came up"); }
+            if Instant::now() > deadline {
+                panic!("daemon never came up");
+            }
             thread::sleep(Duration::from_millis(50));
             let s = ctx.socket(zmq::REQ).unwrap();
             s.set_linger(0).ok();
             s.set_rcvtimeo(300).ok();
             s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() { continue; }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() { continue; }
-            if s.recv_bytes(0).is_ok() { break; }
+            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
+                continue;
+            }
+            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
+                continue;
+            }
+            if s.recv_bytes(0).is_ok() {
+                break;
+            }
         }
-        Self { child, ctrl_port: ctrl, data_port: data, home }
+        Self {
+            child,
+            ctrl_port: ctrl,
+            data_port: data,
+            home,
+        }
     }
 }
 
@@ -97,8 +113,8 @@ impl Drop for Daemon {
 
 struct Client {
     _ctx: zmq::Context,
-    req:  zmq::Socket,
-    sub:  zmq::Socket,
+    req: zmq::Socket,
+    sub: zmq::Socket,
 }
 
 impl Client {
@@ -108,14 +124,20 @@ impl Client {
         req.set_linger(0).unwrap();
         req.set_rcvtimeo(5_000).unwrap();
         req.set_sndtimeo(5_000).unwrap();
-        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port)).unwrap();
+        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port))
+            .unwrap();
         let sub = ctx.socket(zmq::SUB).unwrap();
         sub.set_linger(0).unwrap();
         sub.set_rcvtimeo(8_000).unwrap();
         sub.set_subscribe(b"").unwrap();
-        sub.connect(&format!("tcp://127.0.0.1:{}", d.data_port)).unwrap();
+        sub.connect(&format!("tcp://127.0.0.1:{}", d.data_port))
+            .unwrap();
         thread::sleep(Duration::from_millis(100));
-        Self { _ctx: ctx, req, sub }
+        Self {
+            _ctx: ctx,
+            req,
+            sub,
+        }
     }
 
     fn call(&self, cmd: Value) -> Value {
@@ -130,17 +152,22 @@ impl Client {
         let split = bytes.iter().position(|&b| b == b' ')?;
         let topic = String::from_utf8(bytes[..split].to_vec()).ok()?;
         let payload = &bytes[split + 1..];
-        Some((topic, serde_json::from_slice(payload).unwrap_or(Value::Null)))
+        Some((
+            topic,
+            serde_json::from_slice(payload).unwrap_or(Value::Null),
+        ))
     }
 
     fn wait_for_topic(&self, want: &str, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match self.recv_pub(remaining.max(1)) {
                 Some((t, v)) if t == want => return Some(v),
                 Some(_) => continue,
-                None    => return None,
+                None => return None,
             }
         }
         None
@@ -170,10 +197,10 @@ fn synthetic_curve_flat(peak_db: f64) -> (Vec<f64>, Vec<f64>) {
 /// frame whose `type` matches `expected_type`, then `stop`. Returns
 /// the frame payload — caller asserts envelope / amplitude.
 fn capture_one_monitor_frame(
-    c:             &Client,
-    mode:          &str,
+    c: &Client,
+    mode: &str,
     expected_type: &str,
-    timeout_secs:  u64,
+    timeout_secs: u64,
 ) -> Value {
     let r = c.call(json!({"cmd": "set_analysis_mode", "mode": mode}));
     assert_eq!(r["ok"], json!(true), "set_analysis_mode {mode}: {r}");
@@ -183,28 +210,33 @@ fn capture_one_monitor_frame(
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut frame: Option<Value> = None;
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v)) if t == "data" && v["type"] == json!(expected_type) => {
                 frame = Some(v);
                 break;
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     let _ = c.call(json!({"cmd": "stop"}));
     // Drain the inevitable trailing frames so the next caller starts clean.
     let drain_deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < drain_deadline {
-        if c.recv_pub(50).is_none() { break; }
+        if c.recv_pub(50).is_none() {
+            break;
+        }
     }
     frame.unwrap_or_else(|| panic!("no {expected_type} frame within {timeout_secs} s"))
 }
 
 fn assert_envelope(frame: &Value, expected_mc: &str, expect_spl: bool, label: &str) {
     assert_eq!(
-        frame["mic_correction"], json!(expected_mc),
+        frame["mic_correction"],
+        json!(expected_mc),
         "[{label}] wrong mic_correction tag: {frame}"
     );
     if expect_spl {
@@ -234,7 +266,9 @@ fn capture_plot_point(c: &Client, freq_hz: f64) -> Value {
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut frame: Option<Value> = None;
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
             Some((t, v))
                 if t == "data" && v["type"] == json!("measurement/frequency_response/point") =>
@@ -243,7 +277,7 @@ fn capture_plot_point(c: &Client, freq_hz: f64) -> Value {
                 break;
             }
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     // Drain to `done`.
@@ -252,7 +286,7 @@ fn capture_plot_point(c: &Client, freq_hz: f64) -> Value {
         match c.recv_pub(50) {
             Some((t, _)) if t == "done" => break,
             Some(_) => continue,
-            None    => break,
+            None => break,
         }
     }
     frame.expect("no frequency_response/point frame")
@@ -272,9 +306,9 @@ fn parity_envelope_present_on_all_paths_uncalibrated() {
 
     // Tier 2: each mode.
     let cases = [
-        ("fft",        "visualize/spectrum",   3),
-        ("cwt",        "visualize/cwt",        3),
-        ("cqt",        "visualize/cqt",        5),                  // 1 s ring
+        ("fft", "visualize/spectrum", 3),
+        ("cwt", "visualize/cwt", 3),
+        ("cqt", "visualize/cqt", 5), // 1 s ring
         ("reassigned", "visualize/reassigned", 3),
     ];
     for (mode, ty, secs) in cases {
@@ -294,9 +328,13 @@ fn parity_envelope_consistent_with_spl_and_mic_cal() {
     // SPL cal — fake captures −20 dBFS, so spl_offset_db = 94 - (−20) = 114.
     let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
     assert_eq!(r["ok"], json!(true));
-    let _ = c.wait_for_topic("cal_prompt", Duration::from_secs(3)).expect("cal_prompt");
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("cal_prompt");
     let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
-    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5)).expect("cal_done");
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
 
     let (freqs, gains) = synthetic_curve_flat(3.0);
     let r = c.call(json!({
@@ -314,7 +352,9 @@ fn parity_envelope_consistent_with_spl_and_mic_cal() {
     // Tier 1.
     let pf = capture_plot_point(&c, 1000.0);
     assert_envelope(&pf, "on", true, "plot");
-    let plot_offset = pf["spl_offset_db"].as_f64().expect("plot spl_offset_db f64");
+    let plot_offset = pf["spl_offset_db"]
+        .as_f64()
+        .expect("plot spl_offset_db f64");
     assert!(
         (plot_offset - 114.0).abs() < 5.0,
         "plot spl_offset_db = {plot_offset}, expected ≈ 114"
@@ -322,15 +362,16 @@ fn parity_envelope_consistent_with_spl_and_mic_cal() {
 
     // Tier 2.
     let cases = [
-        ("fft",        "visualize/spectrum",   3),
-        ("cwt",        "visualize/cwt",        3),
-        ("cqt",        "visualize/cqt",        5),
+        ("fft", "visualize/spectrum", 3),
+        ("cwt", "visualize/cwt", 3),
+        ("cqt", "visualize/cqt", 5),
         ("reassigned", "visualize/reassigned", 3),
     ];
     for (mode, ty, secs) in cases {
         let f = capture_one_monitor_frame(&c, mode, ty, secs);
         assert_envelope(&f, "on", true, mode);
-        let off = f["spl_offset_db"].as_f64()
+        let off = f["spl_offset_db"]
+            .as_f64()
             .unwrap_or_else(|| panic!("{mode} spl_offset_db not f64: {f}"));
         // All paths read the same cal entry → same offset.
         assert!(
@@ -366,9 +407,9 @@ fn parity_envelope_off_when_mic_correction_disabled() {
     assert_envelope(&pf, "off", false, "plot");
 
     let cases = [
-        ("fft",        "visualize/spectrum",   3),
-        ("cwt",        "visualize/cwt",        3),
-        ("cqt",        "visualize/cqt",        5),
+        ("fft", "visualize/spectrum", 3),
+        ("cwt", "visualize/cwt", 3),
+        ("cqt", "visualize/cqt", 5),
         ("reassigned", "visualize/reassigned", 3),
     ];
     for (mode, ty, secs) in cases {

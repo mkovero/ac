@@ -9,7 +9,6 @@ pub const TEXT: [u8; 3] = [0xC8, 0xA0, 0x70];
 pub const CLIP_LED: [u8; 3] = [0xFF, 0x3A, 0x1C];
 pub const SELECT_BORDER: [u8; 3] = [0xFF, 0xC8, 0x3A];
 
-
 pub const CHANNEL_COLORS: [[f32; 4]; 10] = [
     rgb(0xFF, 0xC8, 0x3A), // bright gold
     rgb(0xFF, 0x6A, 0x00), // hot orange
@@ -24,12 +23,7 @@ pub const CHANNEL_COLORS: [[f32; 4]; 10] = [
 ];
 
 const fn rgb(r: u8, g: u8, b: u8) -> [f32; 4] {
-    [
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        1.0,
-    ]
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
 }
 
 pub fn channel_color(idx: usize) -> [f32; 4] {
@@ -72,7 +66,7 @@ pub const READOUT_PX: f32 = 15.0;
 /// in one shot, peaks aren't packed at the top edge. Colormap views
 /// override this — see `default_db_window_for_view`.
 pub const DEFAULT_DB_MIN: f32 = -120.0;
-pub const DEFAULT_DB_MAX: f32 =    0.0;
+pub const DEFAULT_DB_MAX: f32 = 0.0;
 
 /// Default colormap dB window for **Waterfall / CWT / CQT / Reassigned**.
 /// 80 dB span centred where bench signals actually sit (typical capture
@@ -128,11 +122,15 @@ mod tests {
         // visible at the same time.
         for v in [ViewMode::Spectrum, ViewMode::SpectrumEmber, ViewMode::Scope] {
             let (lo, hi) = default_db_window_for_view(v);
-            assert!((hi - lo) >= 100.0,
+            assert!(
+                (hi - lo) >= 100.0,
                 "{v:?} expected ≥100 dB span for a line-plot default, got {}",
-                hi - lo);
-            assert!(hi >= -10.0,
-                "{v:?} top should reach near 0 dBFS so peaks aren't clipped, got {hi}");
+                hi - lo
+            );
+            assert!(
+                hi >= -10.0,
+                "{v:?} top should reach near 0 dBFS so peaks aren't clipped, got {hi}"
+            );
         }
     }
 
@@ -148,8 +146,10 @@ mod tests {
         );
         // Top should not sit at 0 dBFS — bench signals rarely exceed
         // -10 dBFS, and stretching the colormap that high wastes shades.
-        assert!(hi <= -5.0,
-            "Waterfall colormap top {hi} dBFS sets the brightest shade above typical signal levels");
+        assert!(
+            hi <= -5.0,
+            "Waterfall colormap top {hi} dBFS sets the brightest shade above typical signal levels"
+        );
     }
 
     #[test]
@@ -158,9 +158,11 @@ mod tests {
         // to decide whether to overwrite the cell window. If the two
         // families resolved to the same pair, the auto-reset would
         // be silently inert.
-        let line   = default_db_window_for_view(ViewMode::Spectrum);
+        let line = default_db_window_for_view(ViewMode::Spectrum);
         let colour = default_db_window_for_view(ViewMode::Waterfall);
-        assert_ne!(line, colour,
-            "line-plot and colormap defaults must differ for the auto-reset to fire");
+        assert_ne!(
+            line, colour,
+            "line-plot and colormap defaults must differ for the auto-reset to fire"
+        );
     }
 }

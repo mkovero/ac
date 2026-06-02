@@ -104,14 +104,8 @@ pub fn draw_phase_subplot(
 fn draw_phase_axis(painter: &Painter, rect: Rect, label_color: Color32) {
     // Reference lines at 0°, ±90°, ±180° plus a tick label on the right
     // edge. Kept subtle so they don't compete with the trace itself.
-    let zero_stroke = Stroke::new(
-        1.0,
-        Color32::from_rgba_unmultiplied(160, 200, 210, 45),
-    );
-    let tick_stroke = Stroke::new(
-        1.0,
-        Color32::from_rgba_unmultiplied(180, 180, 180, 24),
-    );
+    let zero_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(160, 200, 210, 45));
+    let tick_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(180, 180, 180, 24));
 
     for (deg, t) in [
         (180.0f32, 0.0f32),

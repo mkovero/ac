@@ -24,41 +24,51 @@ use crate::handlers::mic;
 
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
-    let start_hz   = cmd.get("start_hz")  .and_then(Value::as_f64).unwrap_or(20.0);
-    let stop_hz    = cmd.get("stop_hz")   .and_then(Value::as_f64).unwrap_or(20_000.0);
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
-    let ppd        = cmd.get("ppd")       .and_then(Value::as_u64).unwrap_or(10) as usize;
-    let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
-    let bpo        = cmd.get("bpo")       .and_then(Value::as_u64).map(|v| v as usize);
-    let cfg        = state.cfg.lock().unwrap().clone();
+    let start_hz = cmd.get("start_hz").and_then(Value::as_f64).unwrap_or(20.0);
+    let stop_hz = cmd
+        .get("stop_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(20_000.0);
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-10.0);
+    let ppd = cmd.get("ppd").and_then(Value::as_u64).unwrap_or(10) as usize;
+    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
+    let cfg = state.cfg.lock().unwrap().clone();
 
     let out_port = resolve_output(&cfg, state);
-    let in_port  = resolve_input(&cfg, state);
+    let in_port = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
-    let in_port_reply  = in_port.clone();
+    let in_port_reply = in_port.clone();
 
-    let pub_tx   = state.pub_tx.clone();
-    let fake     = state.fake_audio;
-    let out_ch   = cfg.output_channel;
-    let in_ch    = cfg.input_channel;
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
+    let out_ch = cfg.output_channel;
+    let in_ch = cfg.input_channel;
     // Processing-context shared state — same Arc clones the monitor
     // worker uses so #97 + #98 wire the same envelope onto Tier 1.
-    let mic_corr_enabled         = state.mic_correction_enabled.clone();
-    let band_weighting_shared    = state.band_weighting.clone();
-    let time_integration_shared  = state.time_integration_mode.clone();
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    let band_weighting_shared = state.band_weighting.clone();
+    let time_integration_shared = state.time_integration_mode.clone();
 
     let report_dir = cfg.report_dir.clone();
 
     let worker = spawn_worker(state, "plot", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
-        let spl_offset    = cal.as_ref().and_then(Calibration::spl_offset_db);
+        let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"plot","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"plot","message":format!("{e}")}),
+            );
             return;
         }
         let sr = eng.sample_rate();
@@ -68,14 +78,20 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mut points: Vec<FrequencyResponsePoint> = Vec::with_capacity(freqs.len());
         let mut concat_capture: Vec<f32> = Vec::new();
         for freq in &freqs {
-            if stop.load(Ordering::Relaxed) { break; }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             let dur = f64::max(duration, 3.0 / freq);
             eng.set_tone(*freq, amplitude);
             let _ = eng.capture_block(0.1);
             let samples = match eng.capture_block(dur) {
                 Ok(s) => s,
                 Err(e) => {
-                    send_pub(&pub_tx, "error", &json!({"cmd":"plot","message":format!("{e}")}));
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({"cmd":"plot","message":format!("{e}")}),
+                    );
                     return;
                 }
             };
@@ -95,26 +111,32 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     }
                     let mc_tag = mic::mic_correction_tag(mic_curve_opt.is_some(), mc_enabled);
                     let weighting = band_weighting_shared.lock().unwrap().clone();
-                    let time_int  = time_integration_shared.lock().unwrap().clone();
+                    let time_int = time_integration_shared.lock().unwrap().clone();
                     let ctx = Tier1Ctx {
-                        mic_correction:   mc_tag,
-                        spl_offset_db:    spl_offset,
-                        weighting:        &weighting,
+                        mic_correction: mc_tag,
+                        spl_offset_db: spl_offset,
+                        weighting: &weighting,
                         time_integration: &time_int,
-                        smoothing_bpo:    None,
+                        smoothing_bpo: None,
                     };
                     points.push(FrequencyResponsePoint {
-                        freq_hz:          *freq,
+                        freq_hz: *freq,
                         fundamental_dbfs: r.fundamental_dbfs,
-                        thd_pct:          r.thd_pct,
-                        thdn_pct:         r.thdn_pct,
+                        thd_pct: r.thd_pct,
+                        thdn_pct: r.thdn_pct,
                         noise_floor_dbfs: r.noise_floor_dbfs,
-                        linear_rms:       r.linear_rms,
-                        clipping:         r.clipping,
-                        ac_coupled:       r.ac_coupled,
+                        linear_rms: r.linear_rms,
+                        clipping: r.clipping,
+                        ac_coupled: r.ac_coupled,
                     });
                     let frame = sweep_point_frame(
-                        &r, cal.as_ref(), n, "plot", level_dbfs, Some(*freq), &ctx,
+                        &r,
+                        cal.as_ref(),
+                        n,
+                        "plot",
+                        level_dbfs,
+                        Some(*freq),
+                        &ctx,
                     );
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
@@ -134,53 +156,60 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         // capture (#105). `mic_correction_applied` reads true exactly
         // when the per-point loop above ran `apply_mic_curve_to_analysis`
         // — the same predicate as the wire frame's `mic_correction` tag.
-        let mc_applied = mic_curve_opt.is_some()
-            && mic_corr_enabled.load(Ordering::Relaxed);
+        let mc_applied = mic_curve_opt.is_some() && mic_corr_enabled.load(Ordering::Relaxed);
         let chain = ProcessingChain {
-            weighting:              band_weighting_shared.lock().unwrap().clone(),
-            smoothing_bpo:          None,
-            time_integration:       time_integration_shared.lock().unwrap().clone(),
+            weighting: band_weighting_shared.lock().unwrap().clone(),
+            smoothing_bpo: None,
+            time_integration: time_integration_shared.lock().unwrap().clone(),
             mic_correction_applied: mc_applied,
         };
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
-            ac_version:     env!("CARGO_PKG_VERSION").to_string(),
-            timestamp_utc:  timestamp.clone(),
+            ac_version: env!("CARGO_PKG_VERSION").to_string(),
+            timestamp_utc: timestamp.clone(),
             method: MeasurementMethod::SteppedSine {
                 n_points: n,
                 standard: Some(thd::citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,
-                f_start_hz:     start_hz,
-                f_stop_hz:      stop_hz,
+                f_start_hz: start_hz,
+                f_stop_hz: stop_hz,
                 level_dbfs,
-                n_points:       n,
+                n_points: n,
             },
             integration: IntegrationParams {
                 duration_s: duration,
-                window:     "hann".into(),
+                window: "hann".into(),
             },
             calibration: snapshot_from_cal(cal.as_ref()),
-            data:        MeasurementData::FrequencyResponse { points },
-            notes:       None,
+            data: MeasurementData::FrequencyResponse { points },
+            notes: None,
             processing_chain: chain.clone(),
         };
 
-        send_pub(&pub_tx, "data", &json!({
-            "type":     "measurement/frequency_response/complete",
-            "cmd":      "plot",
-            "n_points": n,
-            "xruns":    xruns,
-        }));
+        send_pub(
+            &pub_tx,
+            "data",
+            &json!({
+                "type":     "measurement/frequency_response/complete",
+                "cmd":      "plot",
+                "n_points": n,
+                "xruns":    xruns,
+            }),
+        );
 
         match serde_json::to_value(&report) {
             Ok(report_json) => {
-                send_pub(&pub_tx, "data", &json!({
-                    "type":   "measurement/report",
-                    "cmd":    "plot",
-                    "report": report_json,
-                }));
+                send_pub(
+                    &pub_tx,
+                    "data",
+                    &json!({
+                        "type":   "measurement/report",
+                        "cmd":    "plot",
+                        "report": report_json,
+                    }),
+                );
             }
             Err(e) => eprintln!("plot: report serialization error: {e}"),
         }
@@ -210,7 +239,11 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             );
         }
 
-        send_pub(&pub_tx, "done", &json!({"cmd":"plot","n_points":n,"xruns":xruns}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"plot","n_points":n,"xruns":xruns}),
+        );
     });
 
     {
@@ -222,35 +255,42 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_level");
-    let freq_hz    = cmd.get("freq_hz")   .and_then(Value::as_f64).unwrap_or(1000.0);
-    let start_dbfs = cmd.get("start_dbfs").and_then(Value::as_f64).unwrap_or(-40.0);
-    let stop_dbfs  = cmd.get("stop_dbfs") .and_then(Value::as_f64).unwrap_or(0.0);
-    let steps      = cmd.get("steps")     .and_then(Value::as_u64).unwrap_or(26) as usize;
-    let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
-    let cfg        = state.cfg.lock().unwrap().clone();
+    let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
+    let start_dbfs = cmd
+        .get("start_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-40.0);
+    let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
+    let steps = cmd.get("steps").and_then(Value::as_u64).unwrap_or(26) as usize;
+    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let cfg = state.cfg.lock().unwrap().clone();
 
     let out_port = resolve_output(&cfg, state);
-    let in_port  = resolve_input(&cfg, state);
+    let in_port = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
-    let in_port_reply  = in_port.clone();
+    let in_port_reply = in_port.clone();
 
-    let pub_tx   = state.pub_tx.clone();
-    let fake     = state.fake_audio;
-    let out_ch   = cfg.output_channel;
-    let in_ch    = cfg.input_channel;
-    let mic_corr_enabled        = state.mic_correction_enabled.clone();
-    let band_weighting_shared   = state.band_weighting.clone();
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
+    let out_ch = cfg.output_channel;
+    let in_ch = cfg.input_channel;
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
+    let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
-        let spl_offset    = cal.as_ref().and_then(Calibration::spl_offset_db);
+        let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"plot_level","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"plot_level","message":format!("{e}")}),
+            );
             return;
         }
         let sr = eng.sample_rate();
@@ -258,14 +298,20 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let mut n = 0usize;
         let mut xruns = 0u32;
         for &level_dbfs in &levels {
-            if stop.load(Ordering::Relaxed) { break; }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
             eng.set_tone(freq_hz, amplitude);
             let _ = eng.capture_block(0.1);
             let samples = match eng.capture_block(duration) {
                 Ok(s) => s,
                 Err(e) => {
-                    send_pub(&pub_tx, "error", &json!({"cmd":"plot_level","message":format!("{e}")}));
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({"cmd":"plot_level","message":format!("{e}")}),
+                    );
                     return;
                 }
             };
@@ -281,16 +327,22 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     }
                     let mc_tag = mic::mic_correction_tag(mic_curve_opt.is_some(), mc_enabled);
                     let weighting = band_weighting_shared.lock().unwrap().clone();
-                    let time_int  = time_integration_shared.lock().unwrap().clone();
+                    let time_int = time_integration_shared.lock().unwrap().clone();
                     let ctx = Tier1Ctx {
-                        mic_correction:   mc_tag,
-                        spl_offset_db:    spl_offset,
-                        weighting:        &weighting,
+                        mic_correction: mc_tag,
+                        spl_offset_db: spl_offset,
+                        weighting: &weighting,
                         time_integration: &time_int,
-                        smoothing_bpo:    None,
+                        smoothing_bpo: None,
                     };
                     let frame = sweep_point_frame(
-                        &r, cal.as_ref(), n, "plot_level", level_dbfs, Some(freq_hz), &ctx,
+                        &r,
+                        cal.as_ref(),
+                        n,
+                        "plot_level",
+                        level_dbfs,
+                        Some(freq_hz),
+                        &ctx,
                     );
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
@@ -300,7 +352,11 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"plot_level","n_points":n,"xruns":xruns}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"plot_level","n_points":n,"xruns":xruns}),
+        );
     });
 
     {
@@ -343,38 +399,42 @@ fn emit_spectrum_bands(
     let levels = fb.process(samples);
     let centres: Vec<f64> = fb.centres_hz().to_vec();
 
-    send_pub(pub_tx, "measurement/spectrum_bands", &json!({
-        "cmd":         "plot",
-        "bpo":         bpo,
-        "class":       fb.class().label(),
-        "centres_hz":  centres.clone(),
-        "levels_dbfs": levels.clone(),
-    }));
+    send_pub(
+        pub_tx,
+        "measurement/spectrum_bands",
+        &json!({
+            "cmd":         "plot",
+            "bpo":         bpo,
+            "class":       fb.class().label(),
+            "centres_hz":  centres.clone(),
+            "levels_dbfs": levels.clone(),
+        }),
+    );
 
     let bands_report = MeasurementReport {
         schema_version: SCHEMA_VERSION,
-        ac_version:     env!("CARGO_PKG_VERSION").to_string(),
-        timestamp_utc:  timestamp.to_string(),
+        ac_version: env!("CARGO_PKG_VERSION").to_string(),
+        timestamp_utc: timestamp.to_string(),
         method: MeasurementMethod::SteppedSine {
             n_points: centres.len(),
             standard: Some(Filterbank::citation()),
         },
         stimulus: StimulusParams {
             sample_rate_hz: sr,
-            f_start_hz:     start_hz,
-            f_stop_hz:      stop_hz,
+            f_start_hz: start_hz,
+            f_stop_hz: stop_hz,
             level_dbfs,
-            n_points:       centres.len(),
+            n_points: centres.len(),
         },
         integration: IntegrationParams {
             duration_s: duration,
-            window:     "butterworth-bp".into(),
+            window: "butterworth-bp".into(),
         },
         calibration: snapshot_from_cal(cal),
         data: MeasurementData::SpectrumBands {
-            bpo:         bpo as u32,
-            class:       fb.class().label().to_string(),
-            centres_hz:  centres,
+            bpo: bpo as u32,
+            class: fb.class().label().to_string(),
+            centres_hz: centres,
             levels_dbfs: levels,
         },
         notes: None,
@@ -383,10 +443,14 @@ fn emit_spectrum_bands(
 
     match serde_json::to_value(&bands_report) {
         Ok(report_json) => {
-            send_pub(pub_tx, "measurement/report", &json!({
-                "cmd":    "plot",
-                "report": report_json,
-            }));
+            send_pub(
+                pub_tx,
+                "measurement/report",
+                &json!({
+                    "cmd":    "plot",
+                    "report": report_json,
+                }),
+            );
         }
         Err(e) => eprintln!("plot: bands report serialization error: {e}"),
     }

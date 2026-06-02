@@ -30,17 +30,20 @@ pub fn binary_mtime() -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let fake_audio  = args.iter().any(|a| a == "--fake-audio");
-    let local_only  = args.iter().any(|a| a == "--local");
-    let ctrl_port: u16 = args.windows(2)
+    let fake_audio = args.iter().any(|a| a == "--fake-audio");
+    let local_only = args.iter().any(|a| a == "--local");
+    let ctrl_port: u16 = args
+        .windows(2)
         .find(|w| w[0] == "--ctrl-port")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(5556);
-    let data_port: u16 = args.windows(2)
+    let data_port: u16 = args
+        .windows(2)
         .find(|w| w[0] == "--data-port")
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(5557);
-    let gpio_port: Option<String> = args.windows(2)
+    let gpio_port: Option<String> = args
+        .windows(2)
         .find(|w| w[0] == "--gpio")
         .map(|w| w[1].clone());
 
