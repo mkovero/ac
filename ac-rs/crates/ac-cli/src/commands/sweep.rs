@@ -1,6 +1,6 @@
+use super::{check_ack, get_cal, level_to_dbfs};
 use crate::client::AcClient;
 use crate::parse::CommandKind;
-use super::{check_ack, get_cal, level_to_dbfs};
 
 pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
     let (start, stop, freq, duration) = match cmd {
@@ -44,15 +44,18 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
 
 pub fn run_ir(cmd: &CommandKind, client: &mut AcClient) {
     let (f1, f2, duration, level) = match cmd {
-        CommandKind::SweepIr { f1, f2, duration, level } => (*f1, *f2, *duration, level),
+        CommandKind::SweepIr {
+            f1,
+            f2,
+            duration,
+            level,
+        } => (*f1, *f2, *duration, level),
         _ => unreachable!(),
     };
     let cal = get_cal(client);
     let level_db = level_to_dbfs(level, cal.as_ref());
 
-    println!(
-        "\n  IR sweep: {f1:.0} \u{2192} {f2:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s"
-    );
+    println!("\n  IR sweep: {f1:.0} \u{2192} {f2:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s");
 
     let ack = check_ack(
         client.send_cmd(

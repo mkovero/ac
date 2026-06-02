@@ -68,9 +68,9 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
 pub fn devices(state: &ServerState) -> Value {
     // `devices` is the documented hardware rescan trigger — always refresh.
     refresh_port_cache(state);
-    let cfg      = state.cfg.lock().unwrap().clone();
+    let cfg = state.cfg.lock().unwrap().clone();
     let playback = cached_playback_ports(state);
-    let capture  = cached_capture_ports(state);
+    let capture = cached_capture_ports(state);
     json!({
         "ok":                true,
         "playback":          playback,
@@ -87,7 +87,7 @@ pub fn devices(state: &ServerState) -> Value {
 pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     let update = match cmd.get("update") {
         Some(u) => u,
-        None    => return json!({"ok": false, "error": "missing 'update' field"}),
+        None => return json!({"ok": false, "error": "missing 'update' field"}),
     };
 
     let mut cfg = state.cfg.lock().unwrap();
@@ -135,7 +135,7 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
-    if let Err(e) = ac_core::config::save(&*cfg, None) {
+    if let Err(e) = ac_core::config::save(&cfg, None) {
         eprintln!("setup: save failed: {e}");
     }
     json!({"ok": true, "config": cfg_value})
@@ -143,10 +143,12 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
     let cfg = state.cfg.lock().unwrap();
-    let out_ch = cmd.get("output_channel")
+    let out_ch = cmd
+        .get("output_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch = cmd.get("input_channel")
+    let in_ch = cmd
+        .get("input_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.input_channel as u64) as u32;
     drop(cfg);
@@ -171,13 +173,18 @@ pub fn list_calibrations(_state: &ServerState) -> Value {
     match Calibration::load_all(None) {
         Err(e) => json!({"ok": false, "error": format!("{e}")}),
         Ok(cals) => {
-            let list: Vec<Value> = cals.iter().map(|c| json!({
-                "key":                               c.key(),
-                "vrms_at_0dbfs_out":                 c.vrms_at_0dbfs_out,
-                "vrms_at_0dbfs_in":                  c.vrms_at_0dbfs_in,
-                "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
-                "mic_response":                      c.mic_response,
-            })).collect();
+            let list: Vec<Value> = cals
+                .iter()
+                .map(|c| {
+                    json!({
+                        "key":                               c.key(),
+                        "vrms_at_0dbfs_out":                 c.vrms_at_0dbfs_out,
+                        "vrms_at_0dbfs_in":                  c.vrms_at_0dbfs_in,
+                        "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
+                        "mic_response":                      c.mic_response,
+                    })
+                })
+                .collect();
             json!({"ok": true, "calibrations": list})
         }
     }
@@ -187,13 +194,15 @@ pub fn dmm_read(state: &ServerState) -> Value {
     let cfg = state.cfg.lock().unwrap();
     let host = match &cfg.dmm_host {
         Some(h) => h.clone(),
-        None => return json!({"ok": false,
-                    "error": "no DMM configured on server — run: ac setup dmm <host>"}),
+        None => {
+            return json!({"ok": false,
+                    "error": "no DMM configured on server — run: ac setup dmm <host>"})
+        }
     };
     drop(cfg);
     match read_dmm_vrms(&host, 3) {
         Some(v) => json!({"ok": true, "vrms": v, "idn": null}),
-        None    => json!({"ok": false, "error": format!("DMM at {host} did not respond")}),
+        None => json!({"ok": false, "error": format!("DMM at {host} did not respond")}),
     }
 }
 
@@ -250,13 +259,15 @@ pub fn get_analysis_mode(state: &ServerState) -> Value {
 pub fn set_ioct_bpo(state: &ServerState, cmd: &Value) -> Value {
     let bpo = match cmd.get("bpo").and_then(Value::as_u64) {
         Some(v) => v as u32,
-        None    => return json!({"ok": false, "error": "missing 'bpo' field"}),
+        None => return json!({"ok": false, "error": "missing 'bpo' field"}),
     };
     let new = match bpo {
         0 => None,
         1 | 3 | 6 | 12 | 24 => Some(bpo),
-        _ => return json!({"ok": false,
-            "error": format!("invalid bpo {bpo}: expected 0, 1, 3, 6, 12, or 24")}),
+        _ => {
+            return json!({"ok": false,
+            "error": format!("invalid bpo {bpo}: expected 0, 1, 3, 6, 12, or 24")})
+        }
     };
     *state.ioct_bpo.lock().unwrap() = new;
     json!({"ok": true, "bpo": bpo})
@@ -277,8 +288,10 @@ pub fn set_band_weighting(state: &ServerState, cmd: &Value) -> Value {
     };
     match mode.as_str() {
         "off" | "a" | "c" | "z" => {}
-        other => return json!({"ok": false,
-            "error": format!("invalid mode {other:?}: expected off, a, c, or z")}),
+        other => {
+            return json!({"ok": false,
+            "error": format!("invalid mode {other:?}: expected off, a, c, or z")})
+        }
     }
     *state.band_weighting.lock().unwrap() = mode.clone();
     json!({"ok": true, "mode": mode})
@@ -302,14 +315,18 @@ pub fn set_time_integration(state: &ServerState, cmd: &Value) -> Value {
     };
     match mode.as_str() {
         "off" | "fast" | "slow" | "leq" => {}
-        other => return json!({"ok": false,
-            "error": format!("invalid mode {other:?}: expected off, fast, slow, or leq")}),
+        other => {
+            return json!({"ok": false,
+            "error": format!("invalid mode {other:?}: expected off, fast, slow, or leq")})
+        }
     }
     *state.time_integration_mode.lock().unwrap() = mode.clone();
     // Entering leq from any other mode starts a fresh accumulation;
     // the worker checks the reset flag on its next tick.
     if mode == "leq" {
-        state.leq_reset_request.store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .leq_reset_request
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     json!({"ok": true, "mode": mode})
 }
@@ -324,7 +341,9 @@ pub fn get_time_integration(state: &ServerState) -> Value {
 /// their own. Safe to call when no monitor is active; the flag is held
 /// until a worker consumes it.
 pub fn reset_leq(state: &ServerState) -> Value {
-    state.leq_reset_request.store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .leq_reset_request
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     json!({"ok": true})
 }
 
@@ -352,7 +371,7 @@ pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
         }
     }
     if let Some(n) = req_fft_n {
-        if !n.is_power_of_two() || n < 256 || n > 131_072 {
+        if !n.is_power_of_two() || !(256..=131_072).contains(&n) {
             return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
         }
     }
@@ -361,8 +380,12 @@ pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
     if !mp.active {
         return json!({"ok": false, "error": "no active monitor"});
     }
-    if let Some(i) = req_interval { mp.interval = i; }
-    if let Some(n) = req_fft_n    { mp.fft_n = n; }
+    if let Some(i) = req_interval {
+        mp.interval = i;
+    }
+    if let Some(n) = req_fft_n {
+        mp.fft_n = n;
+    }
     json!({"ok": true, "interval": mp.interval, "fft_n": mp.fft_n})
 }
 

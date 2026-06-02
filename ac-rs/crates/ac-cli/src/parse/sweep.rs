@@ -2,7 +2,10 @@
 
 use super::*;
 
-pub(super) fn parse_sweep(args: &mut Vec<String>, show_plot: bool) -> Result<ParsedCommand, String> {
+pub(super) fn parse_sweep(
+    args: &mut Vec<String>,
+    show_plot: bool,
+) -> Result<ParsedCommand, String> {
     if args.is_empty() {
         return Err("sweep needs a noun: level | frequency".into());
     }
@@ -55,15 +58,26 @@ pub(super) fn parse_sweep(args: &mut Vec<String>, show_plot: bool) -> Result<Par
             })
         }
         "ir" => {
-            let f1 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64()).unwrap_or(20.0);
-            let f2 = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64()).unwrap_or(20_000.0);
-            let duration = pull(&mut tokens, TokenKind::Time).map(|v| v.as_f64()).unwrap_or(1.0);
+            let f1 = pull(&mut tokens, TokenKind::Freq)
+                .map(|v| v.as_f64())
+                .unwrap_or(20.0);
+            let f2 = pull(&mut tokens, TokenKind::Freq)
+                .map(|v| v.as_f64())
+                .unwrap_or(20_000.0);
+            let duration = pull(&mut tokens, TokenKind::Time)
+                .map(|v| v.as_f64())
+                .unwrap_or(1.0);
             let level = pull(&mut tokens, TokenKind::Level)
                 .map(|v| v.as_level())
                 .unwrap_or(LevelSpec::Dbfs(-6.0));
             check_empty(&tokens)?;
             Ok(ParsedCommand {
-                cmd: CommandKind::SweepIr { f1, f2, duration, level },
+                cmd: CommandKind::SweepIr {
+                    f1,
+                    f2,
+                    duration,
+                    level,
+                },
                 show_plot,
             })
         }
@@ -85,7 +99,9 @@ mod tests {
     fn test_sweep_level() {
         let p = parse(&args("sweep level -20dbu 6dbu 1khz")).unwrap();
         match p.cmd {
-            CommandKind::SweepLevel { start, stop, freq, .. } => {
+            CommandKind::SweepLevel {
+                start, stop, freq, ..
+            } => {
                 assert!(matches!(start, LevelSpec::Dbu(v) if (v - (-20.0)).abs() < 1e-9));
                 assert!(matches!(stop, LevelSpec::Dbu(v) if (v - 6.0).abs() < 1e-9));
                 assert!((freq - 1000.0).abs() < 1e-9);
@@ -98,7 +114,9 @@ mod tests {
     fn test_sweep_frequency_abbreviated() {
         let p = parse(&args("s f 20hz 20khz 0dbu")).unwrap();
         match p.cmd {
-            CommandKind::SweepFrequency { start, stop, level, .. } => {
+            CommandKind::SweepFrequency {
+                start, stop, level, ..
+            } => {
                 assert!((start.unwrap() - 20.0).abs() < 1e-9);
                 assert!((stop.unwrap() - 20000.0).abs() < 1e-9);
                 assert!(matches!(level, LevelSpec::Dbu(v) if v.abs() < 1e-9));
@@ -111,7 +129,12 @@ mod tests {
     fn test_sweep_defaults() {
         let p = parse(&args("sweep level")).unwrap();
         match p.cmd {
-            CommandKind::SweepLevel { start, stop, freq, duration } => {
+            CommandKind::SweepLevel {
+                start,
+                stop,
+                freq,
+                duration,
+            } => {
                 assert!(matches!(start, LevelSpec::Dbfs(v) if (v - (-40.0)).abs() < 1e-9));
                 assert!(matches!(stop, LevelSpec::Dbfs(v) if v.abs() < 1e-9));
                 assert!((freq - 1000.0).abs() < 1e-9);

@@ -1,4 +1,6 @@
-use ac_core::measurement::sweep::{deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams};
+use ac_core::measurement::sweep::{
+    deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
+};
 use std::time::Instant;
 
 fn main() {
@@ -9,9 +11,14 @@ fn main() {
         .unwrap_or(100);
 
     for &duration_s in &[1.0, 3.0, 10.0] {
-        let p = SweepParams { f1_hz: 20.0, f2_hz: 20_000.0, duration_s, sample_rate: sr };
+        let p = SweepParams {
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s,
+            sample_rate: sr,
+        };
         let sweep = log_sweep(&p).expect("log_sweep");
-        let inv   = inverse_sweep(&p).expect("inverse_sweep");
+        let inv = inverse_sweep(&p).expect("inverse_sweep");
 
         // log_sweep / inverse_sweep timing
         let t0 = Instant::now();
@@ -29,7 +36,7 @@ fn main() {
         // deconvolve_full timing — simulate a captured recording = sweep + tail.
         let tail = (0.5 * sr as f64) as usize;
         let mut captured: Vec<f32> = sweep.clone();
-        captured.extend(std::iter::repeat(0.0).take(tail));
+        captured.extend(std::iter::repeat_n(0.0, tail));
         let _ = deconvolve_full(&captured, &inv);
         let t0 = Instant::now();
         for _ in 0..iters {

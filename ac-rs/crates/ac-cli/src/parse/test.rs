@@ -19,7 +19,7 @@ pub(super) fn parse_test(args: &mut Vec<String>) -> Result<ParsedCommand, String
             })
         }
         "hardware" => {
-            let dmm = args.first().map_or(false, |a| expand(a) == "dmm");
+            let dmm = args.first().is_some_and(|a| expand(a) == "dmm");
             if dmm {
                 args.remove(0);
             }

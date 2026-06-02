@@ -1,7 +1,7 @@
-use crate::client::AcClient;
-use crate::parse::CommandKind;
 use super::{check_ack, get_cal, level_to_dbfs};
+use crate::client::AcClient;
 use crate::io;
+use crate::parse::CommandKind;
 
 pub fn run_software(client: &mut AcClient) {
     let ack = check_ack(
@@ -50,7 +50,9 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
+            if data.get("type").and_then(|v| v.as_str())
+                == Some("measurement/frequency_response/point")
+            {
                 io::print_freq_row(&data);
             }
         } else if topic == "done" {
@@ -72,11 +74,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
     }
 }
 
-pub fn run_dut(
-    cmd: &CommandKind,
-    cfg: &ac_core::config::Config,
-    client: &mut AcClient,
-) {
+pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let (compare, level) = match cmd {
         CommandKind::TestDut { compare, level } => (*compare, level),
         _ => unreachable!(),
@@ -108,7 +106,9 @@ pub fn run_dut(
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
+            if data.get("type").and_then(|v| v.as_str())
+                == Some("measurement/frequency_response/point")
+            {
                 io::print_freq_row(&data);
                 results.push(data);
             }

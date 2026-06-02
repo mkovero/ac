@@ -1,6 +1,6 @@
+use super::{check_ack, level_to_dbfs};
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
-use super::{check_ack, level_to_dbfs};
 
 pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
     let (level, freq, ch_spec) = match cmd {
@@ -126,10 +126,7 @@ fn resolve_channels(ch_spec: &Option<String>, client: &mut AcClient) -> Vec<u32>
     }
 }
 
-fn get_cal_for_channel(
-    client: &mut AcClient,
-    ch: u32,
-) -> Option<serde_json::Value> {
+fn get_cal_for_channel(client: &mut AcClient, ch: u32) -> Option<serde_json::Value> {
     let reply = client.send_cmd(
         &serde_json::json!({"cmd": "get_calibration", "output_channel": ch}),
         None,
@@ -150,7 +147,10 @@ fn print_channel_info(ch: u32, freq: Option<f64>, dbfs: f64, cal: &Option<serde_
     let (vrms_s, cal_tag) = if let Some(ref_vrms) = v_out {
         let vrms = ref_vrms * 10.0_f64.powf(dbfs / 20.0);
         let dbu = ac_core::shared::conversions::vrms_to_dbu(vrms);
-        (ac_core::shared::conversions::fmt_vrms(vrms), format!("{dbu:+.2} dBu"))
+        (
+            ac_core::shared::conversions::fmt_vrms(vrms),
+            format!("{dbu:+.2} dBu"),
+        )
     } else {
         ("  -".to_string(), format!("{dbfs:.1} dBFS (uncal)"))
     };
@@ -178,10 +178,8 @@ fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') => {
                         crossterm::terminal::disable_raw_mode().ok();
-                        client.send_cmd(
-                            &serde_json::json!({"cmd": "stop", "name": cmd_name}),
-                            None,
-                        );
+                        client
+                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
                         return Err("Stopped.".into());
                     }
                     KeyCode::Char('c')
@@ -190,10 +188,8 @@ fn wait_loop(client: &mut AcClient, cmd_name: &str) -> Result<(), String> {
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         crossterm::terminal::disable_raw_mode().ok();
-                        client.send_cmd(
-                            &serde_json::json!({"cmd": "stop", "name": cmd_name}),
-                            None,
-                        );
+                        client
+                            .send_cmd(&serde_json::json!({"cmd": "stop", "name": cmd_name}), None);
                         return Err("Stopped.".into());
                     }
                     _ => {}

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::shared::conversions::{dbfs_to_vrms, vrms_to_dbu, fmt_vrms, fmt_vpp};
+use crate::shared::conversions::{dbfs_to_vrms, fmt_vpp, fmt_vrms, vrms_to_dbu};
 
 /// Raw JSON representation stored in `cal.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,8 +44,8 @@ pub struct CalibrationEntry {
 /// magnitude to recover the truth: `corrected_dbfs = raw_dbfs - correction`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MicResponse {
-    pub freqs_hz:    Vec<f32>,
-    pub gain_db:     Vec<f32>,
+    pub freqs_hz: Vec<f32>,
+    pub gain_db: Vec<f32>,
     /// Original .frd / .txt path the curve was imported from. Informational
     /// only — never re-read at runtime; the curve data above is the source
     /// of truth.
@@ -84,14 +84,17 @@ impl MicResponse {
             return self.gain_db[last];
         }
         // Binary search for the bracketing pair.
-        let i = self.freqs_hz.partition_point(|&f| f <= freq_hz).saturating_sub(1);
+        let i = self
+            .freqs_hz
+            .partition_point(|&f| f <= freq_hz)
+            .saturating_sub(1);
         let f_lo = self.freqs_hz[i];
         let f_hi = self.freqs_hz[i + 1];
         let g_lo = self.gain_db[i];
         let g_hi = self.gain_db[i + 1];
         let log_lo = f_lo.ln();
         let log_hi = f_hi.ln();
-        let log_f  = freq_hz.ln();
+        let log_f = freq_hz.ln();
         let t = ((log_f - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0);
         g_lo + (g_hi - g_lo) * t
     }
@@ -108,7 +111,9 @@ pub fn parse_mic_curve(text: &str, source_path: Option<String>) -> Result<MicRes
     let mut gains = Vec::new();
     for (line_no, raw) in text.lines().enumerate() {
         let line = raw.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line.starts_with('*') || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
@@ -117,16 +122,17 @@ pub fn parse_mic_curve(text: &str, source_path: Option<String>) -> Result<MicRes
         let g_tok = cols.next();
         let (f_str, g_str) = match (f_tok, g_tok) {
             (Some(f), Some(g)) => (f, g),
-            _ => anyhow::bail!("line {}: expected `freq_hz gain_db [phase]`, got {raw:?}", line_no + 1),
+            _ => anyhow::bail!(
+                "line {}: expected `freq_hz gain_db [phase]`, got {raw:?}",
+                line_no + 1
+            ),
         };
-        let f: f32 = f_str.parse().map_err(|e| anyhow::anyhow!(
-            "line {}: failed to parse freq {f_str:?}: {e}",
-            line_no + 1
-        ))?;
-        let g: f32 = g_str.parse().map_err(|e| anyhow::anyhow!(
-            "line {}: failed to parse gain {g_str:?}: {e}",
-            line_no + 1
-        ))?;
+        let f: f32 = f_str.parse().map_err(|e| {
+            anyhow::anyhow!("line {}: failed to parse freq {f_str:?}: {e}", line_no + 1)
+        })?;
+        let g: f32 = g_str.parse().map_err(|e| {
+            anyhow::anyhow!("line {}: failed to parse gain {g_str:?}: {e}", line_no + 1)
+        })?;
         if !f.is_finite() || f <= 0.0 {
             anyhow::bail!("line {}: freq must be > 0 Hz, got {f}", line_no + 1);
         }
@@ -159,15 +165,19 @@ pub fn parse_mic_curve(text: &str, source_path: Option<String>) -> Result<MicRes
         );
     }
     Ok(MicResponse {
-        freqs_hz:    freqs,
-        gain_db:     gains,
+        freqs_hz: freqs,
+        gain_db: gains,
         source_path,
         imported_at: crate::shared::time::now_utc_iso8601(),
     })
 }
 
-fn default_ref_freq() -> f64 { 1000.0 }
-fn default_ref_dbfs() -> f64 { -10.0 }
+fn default_ref_freq() -> f64 {
+    1000.0
+}
+fn default_ref_dbfs() -> f64 {
+    -10.0
+}
 
 /// High-level calibration object with computed helpers.
 #[derive(Debug, Clone)]
@@ -207,8 +217,12 @@ impl Calibration {
         format!("out{}_in{}", self.output_channel, self.input_channel)
     }
 
-    pub fn output_ok(&self) -> bool { self.vrms_at_0dbfs_out.is_some() }
-    pub fn input_ok(&self)  -> bool { self.vrms_at_0dbfs_in.is_some() }
+    pub fn output_ok(&self) -> bool {
+        self.vrms_at_0dbfs_out.is_some()
+    }
+    pub fn input_ok(&self) -> bool {
+        self.vrms_at_0dbfs_in.is_some()
+    }
 
     /// Convert a dBFS output level to physical Vrms using calibration.
     pub fn out_vrms(&self, dbfs: f64) -> Option<f64> {
@@ -255,10 +269,11 @@ impl Calibration {
     /// Persist this calibration entry into the shared cal.json file.
     /// Existing entries for other channel pairs are preserved.
     pub fn save(&self, path: Option<&Path>) -> Result<()> {
-        let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
+        let path = path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_cal_path);
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
 
         let mut all: HashMap<String, CalibrationEntry> = if path.exists() {
@@ -269,21 +284,27 @@ impl Calibration {
             HashMap::new()
         };
 
-        all.insert(self.key(), CalibrationEntry {
-            output_channel: self.output_channel,
-            input_channel:  self.input_channel,
-            ref_freq:        self.ref_freq,
-            vrms_at_0dbfs_out: self.vrms_at_0dbfs_out,
-            vrms_at_0dbfs_in:  self.vrms_at_0dbfs_in,
-            ref_dbfs:        self.ref_dbfs,
-            mic_sensitivity_dbfs_at_94db_spl: self.mic_sensitivity_dbfs_at_94db_spl,
-            mic_response:    self.mic_response.clone(),
-        });
+        all.insert(
+            self.key(),
+            CalibrationEntry {
+                output_channel: self.output_channel,
+                input_channel: self.input_channel,
+                ref_freq: self.ref_freq,
+                vrms_at_0dbfs_out: self.vrms_at_0dbfs_out,
+                vrms_at_0dbfs_in: self.vrms_at_0dbfs_in,
+                ref_dbfs: self.ref_dbfs,
+                mic_sensitivity_dbfs_at_94db_spl: self.mic_sensitivity_dbfs_at_94db_spl,
+                mic_response: self.mic_response.clone(),
+            },
+        );
 
         let out = serde_json::to_string_pretty(&all)?;
-        std::fs::write(&path, out)
-            .with_context(|| format!("writing {}", path.display()))?;
-        eprintln!("  Calibration saved -> {}  (key: {})", path.display(), self.key());
+        std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+        eprintln!(
+            "  Calibration saved -> {}  (key: {})",
+            path.display(),
+            self.key()
+        );
         Ok(())
     }
 
@@ -294,48 +315,59 @@ impl Calibration {
         input_channel: u32,
         path: Option<&Path>,
     ) -> Result<Option<Self>> {
-        let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
+        let path = path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_cal_path);
         let all = read_all_entries(&path)?;
         let key = format!("out{}_in{}", output_channel, input_channel);
         Ok(all.get(&key).map(Calibration::from_entry))
     }
 
     /// Load the first calibration matching `output_channel`, any input.
-    pub fn load_output_only(
-        output_channel: u32,
-        path: Option<&Path>,
-    ) -> Result<Option<Self>> {
-        let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
+    pub fn load_output_only(output_channel: u32, path: Option<&Path>) -> Result<Option<Self>> {
+        let path = path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_cal_path);
         let all = read_all_entries(&path)?;
         let prefix = format!("out{}_in", output_channel);
         Ok(all
             .values()
-            .find(|e| {
-                format!("out{}_in{}", e.output_channel, e.input_channel)
-                    .starts_with(&prefix)
-            })
+            .find(|e| format!("out{}_in{}", e.output_channel, e.input_channel).starts_with(&prefix))
             .map(Calibration::from_entry))
     }
 
     /// Load all stored calibration entries.
     pub fn load_all(path: Option<&Path>) -> Result<Vec<Self>> {
-        let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_cal_path);
+        let path = path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_cal_path);
         let all = read_all_entries(&path)?;
         Ok(all.values().map(Calibration::from_entry).collect())
     }
 
     /// Print a human-readable calibration summary to stderr.
     pub fn summary(&self) {
-        eprintln!("\n  -- Calibration  [{}] ----------------------------------", self.key());
+        eprintln!(
+            "\n  -- Calibration  [{}] ----------------------------------",
+            self.key()
+        );
         if let Some(v) = self.vrms_at_0dbfs_out {
-            eprintln!("  Output: 0 dBFS = {}  =  {:+.2} dBu  =  {}",
-                fmt_vrms(v), vrms_to_dbu(v), fmt_vpp(v));
+            eprintln!(
+                "  Output: 0 dBFS = {}  =  {:+.2} dBu  =  {}",
+                fmt_vrms(v),
+                vrms_to_dbu(v),
+                fmt_vpp(v)
+            );
         } else {
             eprintln!("  Output: not calibrated");
         }
         if let Some(v) = self.vrms_at_0dbfs_in {
-            eprintln!("  Input:  0 dBFS = {}  =  {:+.2} dBu  =  {}",
-                fmt_vrms(v), vrms_to_dbu(v), fmt_vpp(v));
+            eprintln!(
+                "  Input:  0 dBFS = {}  =  {:+.2} dBu  =  {}",
+                fmt_vrms(v),
+                vrms_to_dbu(v),
+                fmt_vpp(v)
+            );
         } else {
             eprintln!("  Input:  not calibrated");
         }
@@ -344,14 +376,14 @@ impl Calibration {
 
     fn from_entry(e: &CalibrationEntry) -> Self {
         Self {
-            output_channel:                   e.output_channel,
-            input_channel:                    e.input_channel,
-            ref_freq:                         e.ref_freq,
-            vrms_at_0dbfs_out:                e.vrms_at_0dbfs_out,
-            vrms_at_0dbfs_in:                 e.vrms_at_0dbfs_in,
-            ref_dbfs:                         e.ref_dbfs,
+            output_channel: e.output_channel,
+            input_channel: e.input_channel,
+            ref_freq: e.ref_freq,
+            vrms_at_0dbfs_out: e.vrms_at_0dbfs_out,
+            vrms_at_0dbfs_in: e.vrms_at_0dbfs_in,
+            ref_dbfs: e.ref_dbfs,
             mic_sensitivity_dbfs_at_94db_spl: e.mic_sensitivity_dbfs_at_94db_spl,
-            mic_response:                     e.mic_response.clone(),
+            mic_response: e.mic_response.clone(),
         }
     }
 
@@ -359,11 +391,7 @@ impl Calibration {
     /// fresh one with defaults. Used by partial-update handlers (voltage
     /// cal + SPL cal write to disjoint fields and must not clobber each
     /// other's prior values).
-    pub fn load_or_new(
-        output_channel: u32,
-        input_channel: u32,
-        path: Option<&Path>,
-    ) -> Self {
+    pub fn load_or_new(output_channel: u32, input_channel: u32, path: Option<&Path>) -> Self {
         Self::load(output_channel, input_channel, path)
             .ok()
             .flatten()
@@ -378,15 +406,18 @@ impl Calibration {
 /// Default calibration file path: `~/.config/ac/cal.json`.
 pub fn default_cal_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("ac").join("cal.json")
+    PathBuf::from(home)
+        .join(".config")
+        .join("ac")
+        .join("cal.json")
 }
 
 fn read_all_entries(path: &Path) -> Result<HashMap<String, CalibrationEntry>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     // Silently ignore malformed files — return empty map.
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
@@ -402,12 +433,12 @@ mod tests {
 
         let mut cal = Calibration::new(0, 0);
         cal.vrms_at_0dbfs_out = Some(1.234);
-        cal.vrms_at_0dbfs_in  = Some(0.567);
+        cal.vrms_at_0dbfs_in = Some(0.567);
         cal.save(Some(&path)).unwrap();
 
         let loaded = Calibration::load(0, 0, Some(&path)).unwrap().unwrap();
         assert!((loaded.vrms_at_0dbfs_out.unwrap() - 1.234).abs() < 1e-10);
-        assert!((loaded.vrms_at_0dbfs_in.unwrap()  - 0.567).abs() < 1e-10);
+        assert!((loaded.vrms_at_0dbfs_in.unwrap() - 0.567).abs() < 1e-10);
     }
 
     #[test]
@@ -456,7 +487,10 @@ mod tests {
         let mut cal = Calibration::new(0, 0);
         cal.mic_sensitivity_dbfs_at_94db_spl = Some(-32.0);
         let dbspl = cal.dbfs_to_dbspl(-32.0).unwrap();
-        assert!((dbspl - 94.0).abs() < 0.5, "round-trip got {dbspl}, expected 94");
+        assert!(
+            (dbspl - 94.0).abs() < 0.5,
+            "round-trip got {dbspl}, expected 94"
+        );
 
         // Linear: every 1 dB louder dBFS → 1 dB louder SPL.
         let dbspl_quieter = cal.dbfs_to_dbspl(-50.0).unwrap();
@@ -492,7 +526,7 @@ mod tests {
 
         let mut cal = Calibration::new(2, 3);
         cal.vrms_at_0dbfs_out = Some(1.0);
-        cal.vrms_at_0dbfs_in  = Some(0.5);
+        cal.vrms_at_0dbfs_in = Some(0.5);
         cal.mic_sensitivity_dbfs_at_94db_spl = Some(-31.7);
         cal.save(Some(&path)).unwrap();
 
@@ -560,7 +594,7 @@ mod tests {
     #[test]
     fn parse_mic_curve_rejects_non_monotonic() {
         let mut text = dummy_curve_text(20);
-        text.push_str("50 0\n");                                // out-of-order
+        text.push_str("50 0\n"); // out-of-order
         let err = parse_mic_curve(&text, None).unwrap_err();
         assert!(err.to_string().contains("strictly"), "got {err}");
     }
@@ -588,7 +622,10 @@ mod tests {
         let r = parse_mic_curve(&dummy_curve_text(50), None).unwrap();
         let mid = (20.0_f32 * 20_000.0).sqrt();
         let g = r.correction_at(mid);
-        assert!((g - 2.0).abs() < 0.1, "got {g} dB at f={mid}, expected ≈ 2.0");
+        assert!(
+            (g - 2.0).abs() < 0.1,
+            "got {g} dB at f={mid}, expected ≈ 2.0"
+        );
     }
 
     #[test]
@@ -654,12 +691,12 @@ mod tests {
         // save; SPL field stays.
         let mut cal = Calibration::load_or_new(0, 1, Some(&path));
         cal.vrms_at_0dbfs_out = Some(1.234);
-        cal.vrms_at_0dbfs_in  = Some(0.567);
+        cal.vrms_at_0dbfs_in = Some(0.567);
         cal.save(Some(&path)).unwrap();
 
         let loaded = Calibration::load(0, 1, Some(&path)).unwrap().unwrap();
         assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-29.4));
-        assert_eq!(loaded.vrms_at_0dbfs_out,                Some(1.234));
-        assert_eq!(loaded.vrms_at_0dbfs_in,                 Some(0.567));
+        assert_eq!(loaded.vrms_at_0dbfs_out, Some(1.234));
+        assert_eq!(loaded.vrms_at_0dbfs_in, Some(0.567));
     }
 }

@@ -124,8 +124,7 @@ impl App {
         let factor = 1.15_f32.powf(scroll_y);
         let new_size = (current * factor).clamp(1.0 / 8.0, 1.0);
         self.grid_cell_size = Some(new_size);
-        let (cols, rows, _page_size, pages) =
-            layout::grid_dims(n, self.grid_params());
+        let (cols, rows, _page_size, pages) = layout::grid_dims(n, self.grid_params());
         self.grid_page = self.grid_page.min(pages.saturating_sub(1));
         self.notify(&format!(
             "grid {}×{} · page {}/{}",
@@ -183,64 +182,112 @@ impl App {
             if forward {
                 match self.current_w_slot() {
                     Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                    Some(WSlot::Goniometer)    => WSlot::IoTransfer,
-                    Some(WSlot::IoTransfer)    => WSlot::BodeMag,
-                    Some(WSlot::BodeMag)       => WSlot::Coherence,
-                    Some(WSlot::Coherence)     => WSlot::BodePhase,
-                    Some(WSlot::BodePhase)     => WSlot::GroupDelay,
-                    Some(WSlot::GroupDelay)    => WSlot::Nyquist,
-                    Some(WSlot::Nyquist)       => WSlot::Ir,
-                    Some(WSlot::Ir)            => WSlot::SpectrumEmber,
-                    Some(WSlot::Waterfall) | Some(WSlot::Cwt)
-                                               => WSlot::SpectrumEmber,
-                    None                       => WSlot::SpectrumEmber,
+                    Some(WSlot::Goniometer) => WSlot::IoTransfer,
+                    Some(WSlot::IoTransfer) => WSlot::BodeMag,
+                    Some(WSlot::BodeMag) => WSlot::Coherence,
+                    Some(WSlot::Coherence) => WSlot::BodePhase,
+                    Some(WSlot::BodePhase) => WSlot::GroupDelay,
+                    Some(WSlot::GroupDelay) => WSlot::Nyquist,
+                    Some(WSlot::Nyquist) => WSlot::Ir,
+                    Some(WSlot::Ir) => WSlot::SpectrumEmber,
+                    Some(WSlot::Waterfall) | Some(WSlot::Cwt) => WSlot::SpectrumEmber,
+                    None => WSlot::SpectrumEmber,
                 }
             } else {
                 match self.current_w_slot() {
                     Some(WSlot::SpectrumEmber) => WSlot::Ir,
-                    Some(WSlot::Goniometer)    => WSlot::SpectrumEmber,
-                    Some(WSlot::IoTransfer)    => WSlot::Goniometer,
-                    Some(WSlot::BodeMag)       => WSlot::IoTransfer,
-                    Some(WSlot::Coherence)     => WSlot::BodeMag,
-                    Some(WSlot::BodePhase)     => WSlot::Coherence,
-                    Some(WSlot::GroupDelay)    => WSlot::BodePhase,
-                    Some(WSlot::Nyquist)       => WSlot::GroupDelay,
-                    Some(WSlot::Ir)            => WSlot::Nyquist,
-                    Some(WSlot::Waterfall) | Some(WSlot::Cwt)
-                                               => WSlot::SpectrumEmber,
-                    None                       => WSlot::SpectrumEmber,
+                    Some(WSlot::Goniometer) => WSlot::SpectrumEmber,
+                    Some(WSlot::IoTransfer) => WSlot::Goniometer,
+                    Some(WSlot::BodeMag) => WSlot::IoTransfer,
+                    Some(WSlot::Coherence) => WSlot::BodeMag,
+                    Some(WSlot::BodePhase) => WSlot::Coherence,
+                    Some(WSlot::GroupDelay) => WSlot::BodePhase,
+                    Some(WSlot::Nyquist) => WSlot::GroupDelay,
+                    Some(WSlot::Ir) => WSlot::Nyquist,
+                    Some(WSlot::Waterfall) | Some(WSlot::Cwt) => WSlot::SpectrumEmber,
+                    None => WSlot::SpectrumEmber,
                 }
             }
         } else if forward {
             match self.current_w_slot() {
                 Some(WSlot::SpectrumEmber) => WSlot::Waterfall,
-                Some(WSlot::Waterfall)     => WSlot::Cwt,
-                Some(WSlot::Cwt)           => WSlot::SpectrumEmber,
+                Some(WSlot::Waterfall) => WSlot::Cwt,
+                Some(WSlot::Cwt) => WSlot::SpectrumEmber,
                 // Coming from a transfer view whose pair was just
                 // unregistered (or `--view <transfer>` startup without
                 // a pair) — drop to SpectrumEmber.
-                _                          => WSlot::SpectrumEmber,
+                _ => WSlot::SpectrumEmber,
             }
         } else {
             match self.current_w_slot() {
                 Some(WSlot::SpectrumEmber) => WSlot::Cwt,
-                Some(WSlot::Waterfall)     => WSlot::SpectrumEmber,
-                Some(WSlot::Cwt)           => WSlot::Waterfall,
-                _                          => WSlot::SpectrumEmber,
+                Some(WSlot::Waterfall) => WSlot::SpectrumEmber,
+                Some(WSlot::Cwt) => WSlot::Waterfall,
+                _ => WSlot::SpectrumEmber,
             }
         };
         let (layout, view_mode, mode, label) = match next {
-            WSlot::SpectrumEmber => (LayoutMode::Single, ViewMode::SpectrumEmber, "fft", "view: spectrum (ember)"),
-            WSlot::Waterfall     => (LayoutMode::Single, ViewMode::Waterfall,     "fft", "view: waterfall (fft)"),
-            WSlot::Cwt           => (LayoutMode::Single, ViewMode::Waterfall,     "cwt", "view: waterfall (cwt)"),
-            WSlot::Goniometer    => (LayoutMode::Single, ViewMode::Goniometer,    "fft", "view: goniometer (ember)"),
-            WSlot::IoTransfer    => (LayoutMode::Single, ViewMode::IoTransfer,    "fft", "view: iotransfer (ember)"),
-            WSlot::BodeMag       => (LayoutMode::Single, ViewMode::BodeMag,       "fft", "view: bode mag (ember)"),
-            WSlot::Coherence     => (LayoutMode::Single, ViewMode::Coherence,     "fft", "view: coherence (ember)"),
-            WSlot::BodePhase     => (LayoutMode::Single, ViewMode::BodePhase,     "fft", "view: bode phase (ember)"),
-            WSlot::GroupDelay    => (LayoutMode::Single, ViewMode::GroupDelay,    "fft", "view: group delay (ember)"),
-            WSlot::Nyquist       => (LayoutMode::Single, ViewMode::Nyquist,       "fft", "view: nyquist (ember)"),
-            WSlot::Ir            => (LayoutMode::Single, ViewMode::Ir,            "fft", "view: ir (ember)"),
+            WSlot::SpectrumEmber => (
+                LayoutMode::Single,
+                ViewMode::SpectrumEmber,
+                "fft",
+                "view: spectrum (ember)",
+            ),
+            WSlot::Waterfall => (
+                LayoutMode::Single,
+                ViewMode::Waterfall,
+                "fft",
+                "view: waterfall (fft)",
+            ),
+            WSlot::Cwt => (
+                LayoutMode::Single,
+                ViewMode::Waterfall,
+                "cwt",
+                "view: waterfall (cwt)",
+            ),
+            WSlot::Goniometer => (
+                LayoutMode::Single,
+                ViewMode::Goniometer,
+                "fft",
+                "view: goniometer (ember)",
+            ),
+            WSlot::IoTransfer => (
+                LayoutMode::Single,
+                ViewMode::IoTransfer,
+                "fft",
+                "view: iotransfer (ember)",
+            ),
+            WSlot::BodeMag => (
+                LayoutMode::Single,
+                ViewMode::BodeMag,
+                "fft",
+                "view: bode mag (ember)",
+            ),
+            WSlot::Coherence => (
+                LayoutMode::Single,
+                ViewMode::Coherence,
+                "fft",
+                "view: coherence (ember)",
+            ),
+            WSlot::BodePhase => (
+                LayoutMode::Single,
+                ViewMode::BodePhase,
+                "fft",
+                "view: bode phase (ember)",
+            ),
+            WSlot::GroupDelay => (
+                LayoutMode::Single,
+                ViewMode::GroupDelay,
+                "fft",
+                "view: group delay (ember)",
+            ),
+            WSlot::Nyquist => (
+                LayoutMode::Single,
+                ViewMode::Nyquist,
+                "fft",
+                "view: nyquist (ember)",
+            ),
+            WSlot::Ir => (LayoutMode::Single, ViewMode::Ir, "fft", "view: ir (ember)"),
         };
         if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
             return;
@@ -256,9 +303,7 @@ impl App {
             for init in &mut self.waterfall_inited {
                 *init = false;
             }
-            if let (Some(ctx), Some(wf)) =
-                (self.render_ctx.as_ref(), self.waterfall.as_mut())
-            {
+            if let (Some(ctx), Some(wf)) = (self.render_ctx.as_ref(), self.waterfall.as_mut()) {
                 wf.clear_history(&ctx.queue);
             }
         }
@@ -280,7 +325,10 @@ impl App {
     /// the cell's primary channel. In Overlay mode every cell shares the same
     /// rect so this returns the first hit; call [`targets_for_channel`] to
     /// resolve the full set of cell_views to mutate.
-    pub(super) fn cell_at(&self, pos: PhysicalPosition<f64>) -> Option<(usize, f32, f32, f32, f32)> {
+    pub(super) fn cell_at(
+        &self,
+        pos: PhysicalPosition<f64>,
+    ) -> Option<(usize, f32, f32, f32, f32)> {
         let ctx = self.render_ctx.as_ref()?;
         let w = ctx.config.width as f32;
         let h = ctx.config.height as f32;
@@ -404,10 +452,7 @@ impl App {
                 .last_axisless_scroll_notify
                 .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_secs(2));
             if !recent {
-                self.notify(&format!(
-                    "no zoom on {}",
-                    view_label(self.config.view_mode)
-                ));
+                self.notify(&format!("no zoom on {}", view_label(self.config.view_mode)));
                 self.last_axisless_scroll_notify = Some(now);
             }
             return;
@@ -453,8 +498,7 @@ impl App {
         // only (dB on spectrum-family, time-rows on waterfall). Pulled out
         // into a pure helper so the per-view modifier mapping is unit-
         // testable without mocking the full App state.
-        let (zoom_freq, zoom_db, zoom_time) =
-            decide_zoom_axes(self.config.view_mode, shift, ctrl);
+        let (zoom_freq, zoom_db, zoom_time) = decide_zoom_axes(self.config.view_mode, shift, ctrl);
 
         for idx in targets {
             let view = match self.cell_views.get_mut(idx) {
@@ -591,20 +635,15 @@ impl App {
             Some(k) => k,
             None => return,
         };
-        let cells = layout::compute(
-            self.config.layout,
-            1,
-            0,
-            &self.selected,
-            self.grid_params(),
-        );
+        let cells = layout::compute(self.config.layout, 1, 0, &self.selected, self.grid_params());
         let Some(cell) = cells.first() else { return };
         let ctx = self.render_ctx.as_ref().unwrap();
         let w = ctx.config.width as f32;
         let h = ctx.config.height as f32;
         let rect = layout::to_pixel_rect(cell, w, h);
         let cursor = egui::pos2(pos.x as f32, pos.y as f32);
-        if let Some(idx) = crate::render::sweep::nearest_point(rect, kind, &self.sweep_last, cursor) {
+        if let Some(idx) = crate::render::sweep::nearest_point(rect, kind, &self.sweep_last, cursor)
+        {
             self.sweep_selected_idx = Some(idx);
             self.needs_redraw = true;
         }
@@ -748,7 +787,11 @@ impl App {
         self.notify(&format!(
             "CH{} {} ({} selected)",
             target,
-            if now_selected { "selected" } else { "unselected" },
+            if now_selected {
+                "selected"
+            } else {
+                "unselected"
+            },
             count,
         ));
     }
@@ -788,18 +831,17 @@ impl App {
             ViewMode::Waterfall => match self.analysis_mode.as_str() {
                 "fft" => Some(WSlot::Waterfall),
                 "cwt" => Some(WSlot::Cwt),
-                _     => None,
+                _ => None,
             },
-            ViewMode::Goniometer    => Some(WSlot::Goniometer),
-            ViewMode::IoTransfer    => Some(WSlot::IoTransfer),
-            ViewMode::BodeMag       => Some(WSlot::BodeMag),
-            ViewMode::Coherence     => Some(WSlot::Coherence),
-            ViewMode::BodePhase     => Some(WSlot::BodePhase),
-            ViewMode::GroupDelay    => Some(WSlot::GroupDelay),
-            ViewMode::Nyquist       => Some(WSlot::Nyquist),
-            ViewMode::Ir            => Some(WSlot::Ir),
-            ViewMode::Spectrum
-            | ViewMode::Scope => None,
+            ViewMode::Goniometer => Some(WSlot::Goniometer),
+            ViewMode::IoTransfer => Some(WSlot::IoTransfer),
+            ViewMode::BodeMag => Some(WSlot::BodeMag),
+            ViewMode::Coherence => Some(WSlot::Coherence),
+            ViewMode::BodePhase => Some(WSlot::BodePhase),
+            ViewMode::GroupDelay => Some(WSlot::GroupDelay),
+            ViewMode::Nyquist => Some(WSlot::Nyquist),
+            ViewMode::Ir => Some(WSlot::Ir),
+            ViewMode::Spectrum | ViewMode::Scope => None,
         }
     }
 
@@ -936,16 +978,12 @@ impl App {
                 let pair = TransferPair { meas, ref_ch };
                 let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
                 let added = if self.virtual_channels.remove(pair) {
-                    self.notify(&format!(
-                        "T: removed transfer (CH{meas}←CH{ref_ch})"
-                    ));
+                    self.notify(&format!("T: removed transfer (CH{meas}←CH{ref_ch})"));
                     false
                 } else {
                     self.virtual_channels.add(pair);
                     let idx = self.virtual_channels.len().saturating_sub(1);
-                    self.notify(&format!(
-                        "T: added transfer{idx} (CH{meas}←CH{ref_ch})"
-                    ));
+                    self.notify(&format!("T: added transfer{idx} (CH{meas}←CH{ref_ch})"));
                     true
                 };
                 self.restart_transfer_stream();
@@ -982,12 +1020,8 @@ impl App {
             // IoTransfer); ignored elsewhere.
             KeyCode::Comma if self.is_ember_view() => {
                 if self.modifiers.shift_key() {
-                    self.ember_tau_p_scale =
-                        (self.ember_tau_p_scale / 1.25).clamp(0.1, 10.0);
-                    self.notify(&format!(
-                        "ember τ_p ×{:.2}",
-                        self.ember_tau_p_scale
-                    ));
+                    self.ember_tau_p_scale = (self.ember_tau_p_scale / 1.25).clamp(0.1, 10.0);
+                    self.notify(&format!("ember τ_p ×{:.2}", self.ember_tau_p_scale));
                 } else {
                     self.ember_intensity_scale =
                         (self.ember_intensity_scale / 1.25).clamp(0.05, 20.0);
@@ -1000,12 +1034,8 @@ impl App {
             }
             KeyCode::Period if self.is_ember_view() => {
                 if self.modifiers.shift_key() {
-                    self.ember_tau_p_scale =
-                        (self.ember_tau_p_scale * 1.25).clamp(0.1, 10.0);
-                    self.notify(&format!(
-                        "ember τ_p ×{:.2}",
-                        self.ember_tau_p_scale
-                    ));
+                    self.ember_tau_p_scale = (self.ember_tau_p_scale * 1.25).clamp(0.1, 10.0);
+                    self.notify(&format!("ember τ_p ×{:.2}", self.ember_tau_p_scale));
                 } else {
                     self.ember_intensity_scale =
                         (self.ember_intensity_scale * 1.25).clamp(0.05, 20.0);
@@ -1018,7 +1048,11 @@ impl App {
             }
             KeyCode::KeyD => {
                 self.show_timing = !self.show_timing;
-                self.notify(if self.show_timing { "timing on" } else { "timing off" });
+                self.notify(if self.show_timing {
+                    "timing on"
+                } else {
+                    "timing off"
+                });
             }
             // Snap to the ember matrix overview (SpectrumEmber + Grid)
             // from any view. The legacy Spectrum + Grid line plot is
@@ -1041,7 +1075,8 @@ impl App {
                 self.config.view_mode = ViewMode::SpectrumEmber;
                 self.config.layout = LayoutMode::Grid;
                 let prev_default = crate::theme::default_db_window_for_view(prev_view);
-                let next_default = crate::theme::default_db_window_for_view(ViewMode::SpectrumEmber);
+                let next_default =
+                    crate::theme::default_db_window_for_view(ViewMode::SpectrumEmber);
                 if prev_default != next_default {
                     for view in self.cell_views.iter_mut() {
                         view.db_min = next_default.0;
@@ -1099,25 +1134,21 @@ impl App {
                 self.send_cwt_params();
                 self.notify(&format!("cwt scales: {}", self.cwt_n_scales));
             }
-            KeyCode::ArrowLeft
-                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
-            {
-                self.monitor_interval_ms =
-                    (self.monitor_interval_ms + 1).clamp(MONITOR_INTERVAL_MIN_MS, MONITOR_INTERVAL_MAX_MS);
+            KeyCode::ArrowLeft if !self.modifiers.shift_key() && self.analysis_mode == "fft" => {
+                self.monitor_interval_ms = (self.monitor_interval_ms + 1)
+                    .clamp(MONITOR_INTERVAL_MIN_MS, MONITOR_INTERVAL_MAX_MS);
                 self.send_monitor_params();
                 self.notify(&format!("interval: {} ms", self.monitor_interval_ms));
             }
-            KeyCode::ArrowRight
-                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
-            {
-                self.monitor_interval_ms =
-                    self.monitor_interval_ms.saturating_sub(1).max(MONITOR_INTERVAL_MIN_MS);
+            KeyCode::ArrowRight if !self.modifiers.shift_key() && self.analysis_mode == "fft" => {
+                self.monitor_interval_ms = self
+                    .monitor_interval_ms
+                    .saturating_sub(1)
+                    .max(MONITOR_INTERVAL_MIN_MS);
                 self.send_monitor_params();
                 self.notify(&format!("interval: {} ms", self.monitor_interval_ms));
             }
-            KeyCode::ArrowUp
-                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
-            {
+            KeyCode::ArrowUp if !self.modifiers.shift_key() && self.analysis_mode == "fft" => {
                 self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, 1);
                 self.monitor_interval_ms =
                     auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
@@ -1128,9 +1159,7 @@ impl App {
                     self.monitor_fft_n, self.monitor_interval_ms
                 ));
             }
-            KeyCode::ArrowDown
-                if !self.modifiers.shift_key() && self.analysis_mode == "fft" =>
-            {
+            KeyCode::ArrowDown if !self.modifiers.shift_key() && self.analysis_mode == "fft" => {
                 self.monitor_fft_n = step_ladder(MONITOR_FFT_N_LADDER, self.monitor_fft_n, -1);
                 self.monitor_interval_ms =
                     auto_monitor_interval_ms(self.monitor_fft_n, self.current_sr());
@@ -1191,10 +1220,10 @@ impl App {
                     && self.is_ember_view() =>
             {
                 let next = match self.ember_coherence_k {
-                    k if k <= 0.0    => 1.0,
-                    k if k < 1.5     => 2.0,
-                    k if k < 3.0     => 4.0,
-                    _                => 0.0,
+                    k if k <= 0.0 => 1.0,
+                    k if k < 1.5 => 2.0,
+                    k if k < 3.0 => 4.0,
+                    _ => 0.0,
                 };
                 self.ember_coherence_k = next;
                 if next <= 0.0 {
@@ -1236,13 +1265,13 @@ impl App {
     /// Resolve the set of cell_views a non-mouse key interaction targets:
     /// hovered cell when the cursor is over one, otherwise every cell so the
     /// keybind still does *something* useful when the mouse is outside.
+    #[allow(dead_code)]
     fn key_targets(&self) -> Vec<usize> {
         match self.cursor_pos.and_then(|p| self.cell_at(p)) {
             Some((ch, _, _, _, _)) => self.targets_for_channel(ch),
             None => (0..self.cell_views.len()).collect(),
         }
     }
-
 }
 
 #[cfg(test)]

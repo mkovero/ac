@@ -158,13 +158,13 @@ pub struct FrameMeta {
 /// writing to the display triple-buffer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CwtFrame {
-    pub magnitudes:  Vec<f32>,
+    pub magnitudes: Vec<f32>,
     pub frequencies: Vec<f32>,
-    pub sr:          u32,
+    pub sr: u32,
     #[serde(default)]
-    pub channel:     Option<u32>,
+    pub channel: Option<u32>,
     #[serde(default)]
-    pub n_channels:  Option<u32>,
+    pub n_channels: Option<u32>,
     #[serde(default)]
     pub spl_offset_db: Option<f32>,
     #[serde(default)]
@@ -177,10 +177,10 @@ pub struct CwtFrame {
 /// happens daemon-side.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TransferFrame {
-    pub freqs:         Vec<f32>,
-    pub magnitude_db:  Vec<f32>,
-    pub phase_deg:     Vec<f32>,
-    pub coherence:     Vec<f32>,
+    pub freqs: Vec<f32>,
+    pub magnitude_db: Vec<f32>,
+    pub phase_deg: Vec<f32>,
+    pub coherence: Vec<f32>,
     /// Complex H(ω) — real part. `unified.md` Phase 3. `serde(default)`
     /// for backward compatibility — older daemon builds without the
     /// field still produce parseable frames; views that consume re/im
@@ -191,10 +191,10 @@ pub struct TransferFrame {
     #[serde(default)]
     pub im: Vec<f32>,
     pub delay_samples: i64,
-    pub delay_ms:      f32,
-    pub meas_channel:  u32,
-    pub ref_channel:   u32,
-    pub sr:            u32,
+    pub delay_ms: f32,
+    pub meas_channel: u32,
+    pub ref_channel: u32,
+    pub sr: u32,
 }
 
 /// Identifier for a virtual transfer channel: pair of real channel indices
@@ -290,7 +290,7 @@ impl From<&SpectrumFrame> for FrameMeta {
 /// and surfaced in the overlay caption. `unified.md` Phase 0b — lets
 /// the user tell at a glance whether the figure they're looking at is
 /// real audio or the synthetic fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StereoStatus {
     /// Real wire-fed audio for both channels of a stereo pair.
     Real { l: u32, r: u32 },
@@ -301,13 +301,8 @@ pub enum StereoStatus {
     /// yet (cold start, or the daemon stopped streaming).
     NotStreamingYet { l: u32, r: u32 },
     /// No daemon source — synthetic mode or pre-connect.
+    #[default]
     NoAudio,
-}
-
-impl Default for StereoStatus {
-    fn default() -> Self {
-        Self::NoAudio
-    }
 }
 
 /// `visualize/scope` wire frame — raw f32 audio samples for one channel
@@ -322,6 +317,7 @@ pub struct ScopeFrame {
     pub frame_idx: u64,
     pub samples: Vec<f32>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub n_channels: Option<u32>,
 }
 
@@ -330,6 +326,7 @@ pub struct ScopeFrame {
 /// `samples`); `t_origin_ms` is negative and `dt_ms` is the per-
 /// sample stride. `unified.md` Phase 4b.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct IrFrame {
     pub samples: Vec<f32>,
     pub sr: u32,
@@ -430,8 +427,8 @@ pub enum ViewMode {
 pub struct CellView {
     pub freq_min: f32,
     pub freq_max: f32,
-    pub db_min:   f32,
-    pub db_max:   f32,
+    pub db_min: f32,
+    pub db_max: f32,
     /// Waterfall-only: how many history rows from the newest one are stretched
     /// across the cell height. `ROWS_PER_CHANNEL` = show the whole ring (full
     /// time depth); smaller = zoom into the recent past. Ignored in Spectrum.
@@ -461,8 +458,8 @@ impl Default for CellView {
         Self {
             freq_min: crate::theme::DEFAULT_FREQ_MIN,
             freq_max: crate::theme::DEFAULT_FREQ_MAX,
-            db_min:   crate::theme::DEFAULT_DB_MIN,
-            db_max:   crate::theme::DEFAULT_DB_MAX,
+            db_min: crate::theme::DEFAULT_DB_MIN,
+            db_max: crate::theme::DEFAULT_DB_MAX,
             rows_visible: crate::render::waterfall::ROWS_PER_CHANNEL,
             rows_visible_f: crate::render::waterfall::ROWS_PER_CHANNEL as f32,
             zoom: 1.0,

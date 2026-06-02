@@ -94,7 +94,10 @@ impl SyntheticSource {
                     for (i, p) in pairs.iter().enumerate() {
                         let tf = synth_transfer(&transfer_freqs, p.meas, p.ref_ch, t);
                         virtual_channels.write(
-                            TransferPair { meas: p.meas, ref_ch: p.ref_ch },
+                            TransferPair {
+                                meas: p.meas,
+                                ref_ch: p.ref_ch,
+                            },
                             tf.clone(),
                         );
                         if i == 0 {
@@ -186,9 +189,7 @@ fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame 
     let q = 4.0;
     let f_lp = 15000.0;
 
-    let mut rng = XorShift::new(
-        0xA17E ^ meas ^ (refc << 8) ^ ((t * 10.0) as u32),
-    );
+    let mut rng = XorShift::new(0xA17E ^ meas ^ (refc << 8) ^ ((t * 10.0) as u32));
 
     for &f in freqs {
         // Resonance: 2nd-order bandpass bump, +3 dB peak at f_res.
@@ -219,14 +220,22 @@ fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame 
     // Phase 3: derive re/im from the synthesised mag/phase so the
     // four representations stay mutually consistent (same invariant
     // the daemon enforces by computing all from the same H₁).
-    let re: Vec<f32> = mag.iter().zip(phase.iter()).map(|(&m_db, &p_deg)| {
-        let mag_lin = 10.0_f32.powf(m_db / 20.0);
-        mag_lin * p_deg.to_radians().cos()
-    }).collect();
-    let im: Vec<f32> = mag.iter().zip(phase.iter()).map(|(&m_db, &p_deg)| {
-        let mag_lin = 10.0_f32.powf(m_db / 20.0);
-        mag_lin * p_deg.to_radians().sin()
-    }).collect();
+    let re: Vec<f32> = mag
+        .iter()
+        .zip(phase.iter())
+        .map(|(&m_db, &p_deg)| {
+            let mag_lin = 10.0_f32.powf(m_db / 20.0);
+            mag_lin * p_deg.to_radians().cos()
+        })
+        .collect();
+    let im: Vec<f32> = mag
+        .iter()
+        .zip(phase.iter())
+        .map(|(&m_db, &p_deg)| {
+            let mag_lin = 10.0_f32.powf(m_db / 20.0);
+            mag_lin * p_deg.to_radians().sin()
+        })
+        .collect();
 
     TransferFrame {
         freqs: freqs.to_vec(),
@@ -244,16 +253,16 @@ fn synth_transfer(freqs: &[f32], meas: u32, refc: u32, t: f32) -> TransferFrame 
 }
 
 fn find_peak(spectrum: &[f32]) -> (usize, f32) {
-    spectrum
-        .iter()
-        .enumerate()
-        .fold((0usize, -140.0_f32), |(bi, bv), (i, &v)| {
+    spectrum.iter().enumerate().fold(
+        (0usize, -140.0_f32),
+        |(bi, bv), (i, &v)| {
             if v > bv {
                 (i, v)
             } else {
                 (bi, bv)
             }
-        })
+        },
+    )
 }
 
 struct XorShift {

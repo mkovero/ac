@@ -1,5 +1,5 @@
-use crate::client::AcClient;
 use super::check_ack;
+use crate::client::AcClient;
 
 pub fn enable(client: &mut AcClient) {
     let ack = check_ack(

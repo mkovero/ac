@@ -1,7 +1,7 @@
+use super::{check_ack, get_cal, level_to_dbfs};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
-use super::{check_ack, get_cal, level_to_dbfs};
 
 pub fn run(
     cmd: &CommandKind,
@@ -148,7 +148,9 @@ fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value
         let (topic, data) = frame;
 
         if topic == "data" {
-            if data.get("type").and_then(|v| v.as_str()) == Some("measurement/frequency_response/point") {
+            if data.get("type").and_then(|v| v.as_str())
+                == Some("measurement/frequency_response/point")
+            {
                 io::print_freq_row(&data);
                 results.push(data);
             }
@@ -207,7 +209,11 @@ impl LaunchKind {
 
 /// Build the `ac-ui` argv from a `LaunchKind` plus the connection /
 /// session bits read from `Config`.
-fn build_ui_args(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) -> Vec<String> {
+fn build_ui_args(
+    kind: LaunchKind,
+    cfg: &ac_core::config::Config,
+    channels: Option<&[u32]>,
+) -> Vec<String> {
     let host = cfg.server_host.as_deref().unwrap_or("127.0.0.1");
     let mut args = vec![
         "--connect".to_string(),

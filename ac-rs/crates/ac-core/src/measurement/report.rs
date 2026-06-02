@@ -70,9 +70,9 @@ pub struct ProcessingChain {
 impl Default for ProcessingChain {
     fn default() -> Self {
         Self {
-            weighting:              "off".into(),
-            smoothing_bpo:          None,
-            time_integration:       "off".into(),
+            weighting: "off".into(),
+            smoothing_bpo: None,
+            time_integration: "off".into(),
             mic_correction_applied: false,
         }
     }
@@ -174,7 +174,7 @@ pub struct CalibrationSnapshot {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MicResponseRef {
     /// Number of `(freq, gain)` points in the curve at capture time.
-    pub n_points:    usize,
+    pub n_points: usize,
     /// Original `.frd` / `.txt` path the curve was imported from, when
     /// the user provided one. Informational only — the curve itself is
     /// in `cal.json`, not at this path.
@@ -325,8 +325,7 @@ impl MeasurementReport {
     pub fn write_to(&self, path: &Path) -> Result<()> {
         let json = self.to_json()?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         fs::write(path, json).with_context(|| format!("write {}", path.display()))
     }
@@ -661,14 +660,14 @@ mod tests {
     fn cal_snapshot_round_trips_spl_and_mic_response() {
         let snap = CalibrationSnapshot {
             output_channel: 0,
-            input_channel:  1,
+            input_channel: 1,
             vrms_at_0dbfs_out: Some(1.234),
-            vrms_at_0dbfs_in:  Some(0.567),
-            ref_freq_hz:     1000.0,
-            ref_level_dbfs:  -10.0,
+            vrms_at_0dbfs_in: Some(0.567),
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: Some(-31.7),
             mic_response: Some(MicResponseRef {
-                n_points:    157,
+                n_points: 157,
                 source_path: Some("/tmp/umik.frd".into()),
                 imported_at: "2026-04-15T12:00:00Z".into(),
             }),
@@ -685,17 +684,17 @@ mod tests {
         // happy.
         let snap = CalibrationSnapshot {
             output_channel: 0,
-            input_channel:  0,
+            input_channel: 0,
             vrms_at_0dbfs_out: None,
-            vrms_at_0dbfs_in:  Some(1.0),
-            ref_freq_hz:     1000.0,
-            ref_level_dbfs:  -10.0,
+            vrms_at_0dbfs_in: Some(1.0),
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
-        assert!(!json.contains("mic_response"),                     "{json}");
+        assert!(!json.contains("mic_response"), "{json}");
     }
 
     // ─── ProcessingChain (#105) ─────────────────────────────────────────
@@ -703,8 +702,8 @@ mod tests {
     #[test]
     fn processing_chain_default_is_all_off() {
         let p = ProcessingChain::default();
-        assert_eq!(p.weighting,        "off");
-        assert_eq!(p.smoothing_bpo,    None);
+        assert_eq!(p.weighting, "off");
+        assert_eq!(p.smoothing_bpo, None);
         assert_eq!(p.time_integration, "off");
         assert!(!p.mic_correction_applied);
     }
@@ -712,9 +711,9 @@ mod tests {
     #[test]
     fn processing_chain_round_trips() {
         let p = ProcessingChain {
-            weighting:              "a".into(),
-            smoothing_bpo:          Some(6),
-            time_integration:       "fast".into(),
+            weighting: "a".into(),
+            smoothing_bpo: Some(6),
+            time_integration: "fast".into(),
             mic_correction_applied: true,
         };
         let json = serde_json::to_string(&p).unwrap();
@@ -737,8 +736,8 @@ mod tests {
             "integration": {"duration_s":1.0,"window":"hann"},
             "data": {"kind":"frequency_response","points":[]}
         }"#;
-        let r: MeasurementReport = serde_json::from_str(legacy)
-            .expect("legacy v2 report must still decode");
+        let r: MeasurementReport =
+            serde_json::from_str(legacy).expect("legacy v2 report must still decode");
         assert_eq!(r.schema_version, 2);
         assert_eq!(r.processing_chain, ProcessingChain::default());
     }
@@ -766,8 +765,8 @@ mod tests {
             },
             "data": {"kind":"frequency_response","points":[]}
         }"#;
-        let r: MeasurementReport = serde_json::from_str(legacy)
-            .expect("legacy v1 report must still decode");
+        let r: MeasurementReport =
+            serde_json::from_str(legacy).expect("legacy v1 report must still decode");
         let cal = r.calibration.expect("calibration block present");
         assert!(cal.mic_sensitivity_dbfs_at_94db_spl.is_none());
         assert!(cal.mic_response.is_none());

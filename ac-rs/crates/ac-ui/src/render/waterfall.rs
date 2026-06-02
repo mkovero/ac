@@ -25,23 +25,23 @@ pub const LUT_WIDTH: u32 = 256;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct WaterfallCellMeta {
-    pub viewport:     [f32; 4],
-    pub db_min:       f32,
-    pub db_max:       f32,
+    pub viewport: [f32; 4],
+    pub db_min: f32,
+    pub db_max: f32,
     pub freq_log_min: f32,
     pub freq_log_max: f32,
-    pub n_bins:       u32,
-    pub n_rows:       u32,
-    pub write_row:    u32,
-    pub layer:        u32,
+    pub n_bins: u32,
+    pub n_rows: u32,
+    pub write_row: u32,
+    pub layer: u32,
     /// Frequency of bin 0 in Hz (what the frame's `freqs[0]` held).
-    pub freq_first:   f32,
+    pub freq_first: f32,
     /// Frequency of the last bin in Hz.
-    pub freq_last:    f32,
+    pub freq_last: f32,
     /// 1 if the frame's `freqs` are log-spaced (synthetic), 0 if linear (real
     /// FFT output). Selects the bin-remap function in the shader so scroll
     /// zoom works on both.
-    pub log_spaced:   u32,
+    pub log_spaced: u32,
     /// Number of newest rows stretched across the cell height. Fractional so
     /// continuous scroll zoom slides the content smoothly instead of snapping
     /// in single-row steps (which otherwise decouples the texture from the
@@ -58,15 +58,15 @@ pub struct WaterfallCellMeta {
 }
 
 pub struct CellUpload<'a> {
-    pub channel:  usize,
+    pub channel: usize,
     pub viewport: [f32; 4],
-    pub db_min:   f32,
-    pub db_max:   f32,
+    pub db_min: f32,
+    pub db_max: f32,
     pub freq_log_min: f32,
     pub freq_log_max: f32,
-    pub n_bins:   u32,
+    pub n_bins: u32,
     pub freq_first: f32,
-    pub freq_last:  f32,
+    pub freq_last: f32,
     pub log_spaced: bool,
     /// How many of the newest ring rows to stretch across the cell (time zoom).
     /// Fractional so scroll zoom is continuous; clamped into
@@ -75,36 +75,36 @@ pub struct CellUpload<'a> {
     /// Latest row to push into this channel's ring, if a fresh frame arrived
     /// since the previous redraw. `None` means re-use the existing texture
     /// contents (the ring keeps scrolling at the producer's rate, not ours).
-    pub new_row:  Option<&'a [f32]>,
+    pub new_row: Option<&'a [f32]>,
 }
 
 pub struct WaterfallRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
-    pipeline:          wgpu::RenderPipeline,
-    cells_buf:         wgpu::Buffer,
-    history_tex:       wgpu::Texture,
-    history_view:      wgpu::TextureView,
-    lut_view:          wgpu::TextureView,
-    bind_group:        wgpu::BindGroup,
-    cells_capacity:    usize,
-    history_bins:      u32,
-    history_layers:    u32,
-    write_row:         Vec<u32>,
-    active_cells:      u32,
-    active_palette:    u32,
+    pipeline: wgpu::RenderPipeline,
+    cells_buf: wgpu::Buffer,
+    history_tex: wgpu::Texture,
+    history_view: wgpu::TextureView,
+    lut_view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    cells_capacity: usize,
+    history_bins: u32,
+    history_layers: u32,
+    write_row: Vec<u32>,
+    active_cells: u32,
+    active_palette: u32,
     /// Persistent staging for `queue.write_texture` row-padding. Pre-#109
     /// the per-row branch where `row.len() != history_bins` did
     /// `vec![-200.0; history_bins]` on every upload — at 8 ch × 4096 bins
     /// × 30 fps that's a few MB/s of allocation thrash. Held across
     /// frames so only the inner `resize` does any heap work.
     row_padded: Vec<f32>,
-    metas:      Vec<WaterfallCellMeta>,
+    metas: Vec<WaterfallCellMeta>,
 }
 
 impl WaterfallRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("waterfall.wgsl"),
+            label: Some("waterfall.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/waterfall.wgsl").into()),
         });
 
@@ -241,7 +241,12 @@ impl WaterfallRenderer {
     /// see stale rows from the previous mode bleeding into the new
     /// view. Cheap: one texture write per layer, not in the hot path.
     pub fn clear_history(&mut self, queue: &wgpu::Queue) {
-        clear_history(queue, &self.history_tex, self.history_bins, self.history_layers);
+        clear_history(
+            queue,
+            &self.history_tex,
+            self.history_bins,
+            self.history_layers,
+        );
         for slot in self.write_row.iter_mut() {
             *slot = 0;
         }
@@ -311,7 +316,8 @@ impl WaterfallRenderer {
                         // Resize-to-fit: `resize` extends with the fill
                         // value the first time, no-ops once steady-state.
                         self.row_padded.clear();
-                        self.row_padded.resize(self.history_bins as usize, -200.0_f32);
+                        self.row_padded
+                            .resize(self.history_bins as usize, -200.0_f32);
                         self.row_padded[..n].copy_from_slice(&row[..n]);
                         &self.row_padded[..]
                     };
@@ -360,11 +366,9 @@ impl WaterfallRenderer {
                 write_row,
                 layer: u.channel as u32,
                 freq_first: u.freq_first,
-                freq_last:  u.freq_last,
+                freq_last: u.freq_last,
                 log_spaced: u.log_spaced as u32,
-                rows_visible: u
-                    .rows_visible
-                    .clamp(1.0, ROWS_PER_CHANNEL as f32),
+                rows_visible: u.rows_visible.clamp(1.0, ROWS_PER_CHANNEL as f32),
                 palette_row: self.active_palette,
                 _pad0: 0,
                 _pad1: 0,
@@ -407,7 +411,11 @@ fn clear_history(queue: &wgpu::Queue, tex: &wgpu::Texture, bins: u32, layers: u3
                 wgpu::TexelCopyTextureInfo {
                     texture: tex,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: row_idx, z: layer },
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: row_idx,
+                        z: layer,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 row_bytes,
@@ -416,7 +424,11 @@ fn clear_history(queue: &wgpu::Queue, tex: &wgpu::Texture, bins: u32, layers: u3
                     bytes_per_row: Some(bins * 4),
                     rows_per_image: Some(1),
                 },
-                wgpu::Extent3d { width: bins, height: 1, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: bins,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
             );
         }
     }
@@ -488,9 +500,18 @@ fn make_bind_group(
         label: Some("waterfall bg"),
         layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: cells.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(history) },
-            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(lut) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cells.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(history),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(lut),
+            },
         ],
     })
 }

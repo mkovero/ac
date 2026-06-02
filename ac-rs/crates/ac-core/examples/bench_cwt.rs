@@ -1,4 +1,6 @@
-use ac_core::visualize::cwt::{default_f_max, log_scales, morlet_cwt, DEFAULT_F_MIN, DEFAULT_SIGMA};
+use ac_core::visualize::cwt::{
+    default_f_max, log_scales, morlet_cwt, DEFAULT_F_MIN, DEFAULT_SIGMA,
+};
 use std::time::Instant;
 
 fn main() {

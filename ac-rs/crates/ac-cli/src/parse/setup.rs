@@ -25,9 +25,9 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
 
         match key {
             "output" | "input" | "reference" | "device" => {
-                let n: u32 = val.parse().map_err(|_| {
-                    format!("setup: {key:?} value must be an integer, got {val:?}")
-                })?;
+                let n: u32 = val
+                    .parse()
+                    .map_err(|_| format!("setup: {key:?} value must be an integer, got {val:?}"))?;
                 match key {
                     "output" => output = Some(n),
                     "input" => input = Some(n),
@@ -37,8 +37,9 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                 }
             }
             "dburef" | "dbu" => {
-                let lvl = parse_level(val)
-                    .map_err(|_| format!("setup dburef: expected voltage e.g. 775mv or 0.775v, got {val:?}"))?;
+                let lvl = parse_level(val).map_err(|_| {
+                    format!("setup dburef: expected voltage e.g. 775mv or 0.775v, got {val:?}")
+                })?;
                 match lvl {
                     LevelSpec::Vrms(v) => dbu_ref_vrms = Some(v),
                     _ => {
@@ -58,11 +59,9 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                 }
             }
             "range" => {
-                range_start = Some(
-                    parse_freq(val).map_err(|_| {
-                        format!("setup range: expected frequency for start, got {val:?}")
-                    })?,
-                );
+                range_start = Some(parse_freq(val).map_err(|_| {
+                    format!("setup range: expected frequency for start, got {val:?}")
+                })?);
                 if remaining.is_empty() {
                     return Err("setup range: needs two frequencies (start stop)".into());
                 }
@@ -72,9 +71,10 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                 })?);
             }
             "server-timeout" | "server-idle-timeout" => {
-                server_idle_timeout_secs = Some(parse_idle_duration(val).map_err(|e| {
-                    format!("setup {key}: {e} (got {val:?})")
-                })?);
+                server_idle_timeout_secs = Some(
+                    parse_idle_duration(val)
+                        .map_err(|e| format!("setup {key}: {e} (got {val:?})"))?,
+                );
             }
             _ => {
                 return Err(format!(
@@ -109,7 +109,10 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
 /// for a real duration.
 fn parse_idle_duration(s: &str) -> Result<Option<u64>, String> {
     let lower = s.to_lowercase();
-    if matches!(lower.as_str(), "off" | "none" | "disable" | "disabled" | "0") {
+    if matches!(
+        lower.as_str(),
+        "off" | "none" | "disable" | "disabled" | "0"
+    ) {
         return Ok(None);
     }
     let (num_str, multiplier): (&str, u64) = if let Some(n) = lower.strip_suffix('h') {
@@ -166,7 +169,11 @@ mod tests {
     fn test_setup_range() {
         let p = parse(&args("setup range 20hz 20khz")).unwrap();
         match p.cmd {
-            CommandKind::Setup { range_start, range_stop, .. } => {
+            CommandKind::Setup {
+                range_start,
+                range_stop,
+                ..
+            } => {
                 assert!((range_start.unwrap() - 20.0).abs() < 1e-9);
                 assert!((range_stop.unwrap() - 20000.0).abs() < 1e-9);
             }
@@ -188,7 +195,10 @@ mod tests {
     fn timeout_of(s: &str) -> Option<Option<u64>> {
         let p = parse(&args(s)).unwrap();
         match p.cmd {
-            CommandKind::Setup { server_idle_timeout_secs, .. } => server_idle_timeout_secs,
+            CommandKind::Setup {
+                server_idle_timeout_secs,
+                ..
+            } => server_idle_timeout_secs,
             other => panic!("expected Setup, got {other:?}"),
         }
     }
@@ -235,8 +245,15 @@ mod tests {
         let p = parse(&args("setup server-timeout 5m")).unwrap();
         match p.cmd {
             CommandKind::Setup {
-                output, input, reference, device,
-                dbu_ref_vrms, dmm_host, gpio_port, range_start, range_stop,
+                output,
+                input,
+                reference,
+                device,
+                dbu_ref_vrms,
+                dmm_host,
+                gpio_port,
+                range_start,
+                range_stop,
                 server_idle_timeout_secs,
             } => {
                 assert!(output.is_none() && input.is_none() && reference.is_none());

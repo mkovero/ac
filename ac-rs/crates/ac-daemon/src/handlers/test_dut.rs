@@ -13,9 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, median, resolve_input,
-    resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
-    spawn_worker, TestResult,
+    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, median, resolve_input, resolve_output,
+    resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
 
 pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
@@ -28,25 +27,28 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let compare_mode = cmd.get("compare").and_then(Value::as_bool).unwrap_or(false);
-    let level_dbfs   = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-20.0);
-    let out_port     = resolve_output(&cfg, state);
-    let in_port      = resolve_input(&cfg, state);
-    let ref_port     = match resolve_ref_input(&cfg, state) {
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-20.0);
+    let out_port = resolve_output(&cfg, state);
+    let in_port = resolve_input(&cfg, state);
+    let ref_port = match resolve_ref_input(&cfg, state) {
         Some(p) => p,
-        None    => in_port.clone(),
+        None => in_port.clone(),
     };
     let ref_out_port = resolve_ref_output(&cfg, state);
-    let out_ch       = cfg.output_channel;
-    let in_ch        = cfg.input_channel;
+    let out_ch = cfg.output_channel;
+    let in_ch = cfg.input_channel;
 
-    let pub_tx       = state.pub_tx.clone();
-    let fake         = state.fake_audio;
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
     let dut_reply_tx = state.dut_reply_tx.clone();
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
-    let out_port_r     = out_port.clone();
-    let in_port_r      = in_port.clone();
-    let ref_port_r     = ref_port.clone();
+    let out_port_r = out_port.clone();
+    let in_port_r = in_port.clone();
+    let ref_port_r = ref_port.clone();
     let ref_out_port_r = ref_out_port.clone();
 
     let worker = spawn_worker(state, "test_dut", move |stop| {
@@ -58,24 +60,34 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
 
         let mut eng = make_engine(fake);
         if !eng.supports_routing() {
-            send_pub(&pub_tx, "error", &json!({
-                "cmd":     "test_dut",
-                "message": format!("{} backend does not support port routing", eng.backend_name()),
-            }));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "test_dut",
+                    "message": format!("{} backend does not support port routing", eng.backend_name()),
+                }),
+            );
             return;
         }
         if let Err(e) = eng.start(&out_ports, Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"test_dut","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"test_dut","message":format!("{e}")}),
+            );
             return;
         }
         if let Err(e) = eng.add_ref_input(&ref_port) {
             eprintln!("test_dut: ref input {ref_port}: {e}");
         }
 
-        let sr  = eng.sample_rate();
+        let sr = eng.sample_rate();
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
-        let mic_curve_loaded = cal.as_ref()
-            .map(|c| c.mic_response.is_some()).unwrap_or(false);
+        let mic_curve_loaded = cal
+            .as_ref()
+            .map(|c| c.mic_response.is_some())
+            .unwrap_or(false);
         let spl_offset_db = cal.as_ref().and_then(Calibration::spl_offset_db);
         let mut tests_done = 0usize;
 
@@ -121,7 +133,10 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             emit!(dut_thd_vs_level(&mut *eng, sr, cal.as_ref()), "dut");
         }
         if !stop.load(Ordering::Relaxed) {
-            emit!(dut_freq_response(&mut *eng, level_dbfs, sr, cal.as_ref()), "dut");
+            emit!(
+                dut_freq_response(&mut *eng, level_dbfs, sr, cal.as_ref()),
+                "dut"
+            );
         }
         if !stop.load(Ordering::Relaxed) {
             emit!(dut_clipping_point(&mut *eng, sr, cal.as_ref()), "dut");
@@ -131,16 +146,26 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             let (tx, rx) = crossbeam_channel::bounded(1);
             *dut_reply_tx.lock().unwrap() = Some(tx);
 
-            send_pub(&pub_tx, "data", &json!({
-                "type": "dut_compare_prompt", "cmd": "test_dut",
-                "message": "Bypass DUT and press Enter",
-            }));
+            send_pub(
+                &pub_tx,
+                "data",
+                &json!({
+                    "type": "dut_compare_prompt", "cmd": "test_dut",
+                    "message": "Bypass DUT and press Enter",
+                }),
+            );
 
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
             loop {
-                if stop.load(Ordering::Relaxed) { break; }
-                if std::time::Instant::now() > deadline { break; }
-                if rx.try_recv().is_ok() { break; }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
+                if rx.try_recv().is_ok() {
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             *dut_reply_tx.lock().unwrap() = None;
@@ -156,7 +181,10 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                     emit!(dut_thd_vs_level(&mut *eng, sr, cal.as_ref()), "bypass");
                 }
                 if !stop.load(Ordering::Relaxed) {
-                    emit!(dut_freq_response(&mut *eng, level_dbfs, sr, cal.as_ref()), "bypass");
+                    emit!(
+                        dut_freq_response(&mut *eng, level_dbfs, sr, cal.as_ref()),
+                        "bypass"
+                    );
                 }
                 if !stop.load(Ordering::Relaxed) {
                     emit!(dut_clipping_point(&mut *eng, sr, cal.as_ref()), "bypass");
@@ -167,10 +195,14 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         eng.set_silence();
         eng.stop();
         let xruns = eng.xruns();
-        send_pub(&pub_tx, "done", &json!({
-            "cmd": "test_dut",
-            "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
-        }));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({
+                "cmd": "test_dut",
+                "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
+            }),
+        );
     });
 
     {
@@ -199,30 +231,49 @@ pub fn dut_reply(state: &ServerState) -> Value {
 fn dut_noise_floor(eng: &mut dyn AudioEngine, _sr: u32, cal: Option<&Calibration>) -> TestResult {
     eng.set_silence();
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let rms   = capture_rms(eng, 1.0);
-    let dbfs  = rms_to_dbfs(rms);
+    let rms = capture_rms(eng, 1.0);
+    let dbfs = rms_to_dbfs(rms);
     let label = cal_dbu_str(dbfs, cal, false);
     TestResult::new("Noise floor", true, label, "DUT output noise")
 }
 
-fn dut_gain(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: Option<&Calibration>) -> TestResult {
+fn dut_gain(
+    eng: &mut dyn AudioEngine,
+    level_dbfs: f64,
+    sr: u32,
+    cal: Option<&Calibration>,
+) -> TestResult {
     let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
     eng.set_tone(1000.0, amp);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let (meas, refch) = match eng.capture_stereo(1.0) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(e) => return TestResult::new("Gain", false, format!("capture failed: {e}"), ""),
     };
     let r_meas = match ac_core::measurement::thd::analyze(&meas, sr, 1000.0, 10) {
-        Ok(r)  => r,
-        Err(_) => return TestResult::new("Gain", false, "no signal at measurement input".to_string(), ""),
+        Ok(r) => r,
+        Err(_) => {
+            return TestResult::new(
+                "Gain",
+                false,
+                "no signal at measurement input".to_string(),
+                "",
+            )
+        }
     };
     let r_ref = match ac_core::measurement::thd::analyze(&refch, sr, 1000.0, 10) {
-        Ok(r)  => r,
-        Err(_) => return TestResult::new("Gain", false, "no signal at reference input".to_string(), ""),
+        Ok(r) => r,
+        Err(_) => {
+            return TestResult::new(
+                "Gain",
+                false,
+                "no signal at reference input".to_string(),
+                "",
+            )
+        }
     };
     let gain = r_meas.fundamental_dbfs - r_ref.fundamental_dbfs;
-    let ref_str  = cal_out_dbu_str(r_ref.fundamental_dbfs, cal);
+    let ref_str = cal_out_dbu_str(r_ref.fundamental_dbfs, cal);
     let meas_str = cal_dbu_str(r_meas.fundamental_dbfs, cal, false);
     TestResult::new(
         "Gain",
@@ -241,7 +292,7 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok((meas, refch)) = eng.capture_stereo(1.0) {
             let r_meas = ac_core::measurement::thd::analyze(&meas, sr, 1000.0, 10).ok();
-            let r_ref  = ac_core::measurement::thd::analyze(&refch, sr, 1000.0, 10).ok();
+            let r_ref = ac_core::measurement::thd::analyze(&refch, sr, 1000.0, 10).ok();
             if let (Some(rm), Some(rr)) = (r_meas, r_ref) {
                 let gain = rm.fundamental_dbfs - rr.fundamental_dbfs;
                 results.push((level, rm.thd_pct, rm.thdn_pct, gain));
@@ -249,13 +300,25 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
         }
     }
     if results.is_empty() {
-        return TestResult::new("THD vs level", false, "no valid measurements".to_string(), "");
+        return TestResult::new(
+            "THD vs level",
+            false,
+            "no valid measurements".to_string(),
+            "",
+        );
     }
-    let best_thd = results.iter().map(|&(_, t, _, _)| t).fold(f64::INFINITY, f64::min);
-    let parts = results.iter().map(|(l, t, _, g)| {
-        let drive = cal_out_dbu_str(*l, cal);
-        format!("{drive}:{t:.4}%/{g:+.1}dB")
-    }).collect::<Vec<_>>().join(", ");
+    let best_thd = results
+        .iter()
+        .map(|&(_, t, _, _)| t)
+        .fold(f64::INFINITY, f64::min);
+    let parts = results
+        .iter()
+        .map(|(l, t, _, g)| {
+            let drive = cal_out_dbu_str(*l, cal);
+            format!("{drive}:{t:.4}%/{g:+.1}dB")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     TestResult::new(
         "THD vs level",
         true,
@@ -264,28 +327,47 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
     )
 }
 
-fn dut_freq_response(eng: &mut dyn AudioEngine, level_dbfs: f64, sr: u32, cal: Option<&Calibration>) -> TestResult {
+fn dut_freq_response(
+    eng: &mut dyn AudioEngine,
+    level_dbfs: f64,
+    sr: u32,
+    cal: Option<&Calibration>,
+) -> TestResult {
     let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
     eng.set_pink(amp);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let (meas, refch) = match eng.capture_stereo(4.0) {
-        Ok(s)  => s,
-        Err(e) => return TestResult::new("Frequency response", false, format!("capture failed: {e}"), ""),
+        Ok(s) => s,
+        Err(e) => {
+            return TestResult::new(
+                "Frequency response",
+                false,
+                format!("capture failed: {e}"),
+                "",
+            )
+        }
     };
     eng.set_silence();
     let result = ac_core::visualize::transfer::h1_estimate(&refch, &meas, sr);
     let freqs = &result.freqs;
-    let mag   = &result.magnitude_db;
-    let coh   = &result.coherence;
+    let mag = &result.magnitude_db;
+    let coh = &result.coherence;
 
-    let band: Vec<usize> = (0..freqs.len()).filter(|&i| freqs[i] >= 50.0 && freqs[i] <= 20000.0).collect();
+    let band: Vec<usize> = (0..freqs.len())
+        .filter(|&i| freqs[i] >= 50.0 && freqs[i] <= 20000.0)
+        .collect();
     if band.is_empty() {
-        return TestResult::new("Frequency response", false, "no data in 50-20kHz".to_string(), "");
+        return TestResult::new(
+            "Frequency response",
+            false,
+            "no data in 50-20kHz".to_string(),
+            "",
+        );
     }
 
     let mag_band: Vec<f64> = band.iter().map(|&i| mag[i]).collect();
     let coh_band: Vec<f64> = band.iter().map(|&i| coh[i]).collect();
-    let ref_db  = median(&mag_band);
+    let ref_db = median(&mag_band);
     let dev_pos = mag_band.iter().copied().fold(f64::NEG_INFINITY, f64::max) - ref_db;
     let dev_neg = mag_band.iter().copied().fold(f64::INFINITY, f64::min) - ref_db;
     let avg_coh = coh_band.iter().sum::<f64>() / coh_band.len() as f64;
@@ -326,15 +408,32 @@ fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibrati
     match clip_level {
         Some(lv) => {
             let onset = cal_out_dbu_str(lv, cal);
-            let clean = last_clean.map(|l| cal_out_dbu_str(l, cal)).unwrap_or_else(|| "?".to_string());
-            TestResult::new("Clipping point", true, format!("onset at {onset} (last clean: {clean})"), "THD > 1% threshold")
+            let clean = last_clean
+                .map(|l| cal_out_dbu_str(l, cal))
+                .unwrap_or_else(|| "?".to_string());
+            TestResult::new(
+                "Clipping point",
+                true,
+                format!("onset at {onset} (last clean: {clean})"),
+                "THD > 1% threshold",
+            )
         }
         None => match last_clean {
             Some(lv) => {
                 let clean = cal_out_dbu_str(lv, cal);
-                TestResult::new("Clipping point", true, format!("clean through {clean} (no clipping detected)"), "THD > 1% threshold")
+                TestResult::new(
+                    "Clipping point",
+                    true,
+                    format!("clean through {clean} (no clipping detected)"),
+                    "THD > 1% threshold",
+                )
             }
-            None => TestResult::new("Clipping point", false, "no valid measurements".to_string(), ""),
+            None => TestResult::new(
+                "Clipping point",
+                false,
+                "no valid measurements".to_string(),
+                "",
+            ),
         },
     }
 }

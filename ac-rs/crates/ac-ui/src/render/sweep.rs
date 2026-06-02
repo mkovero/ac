@@ -197,10 +197,7 @@ pub fn draw(
             let px = x_to_pixel(sub.thd, kind, x_val);
             let cursor_stroke = Stroke::new(1.0, SELECT_COLOR);
             painter.line_segment(
-                [
-                    Pos2::new(px, rect.top()),
-                    Pos2::new(px, rect.bottom()),
-                ],
+                [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
                 cursor_stroke,
             );
 
@@ -265,7 +262,12 @@ fn draw_thd_chrome(painter: &Painter, rect: Rect, kind: SweepKind, label_color: 
         1.0,
         Color32::from_rgba_unmultiplied(255, 140, 80, (0.18 * 255.0) as u8),
     );
-    painter.rect_stroke(rect, egui::CornerRadius::same(0), frame_stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(0),
+        frame_stroke,
+        egui::StrokeKind::Inside,
+    );
 
     draw_x_grid(painter, rect, kind, stroke, label_color, false);
 
@@ -315,7 +317,12 @@ fn draw_gain_chrome(painter: &Painter, rect: Rect, kind: SweepKind, label_color:
         1.0,
         Color32::from_rgba_unmultiplied(255, 140, 80, (0.18 * 255.0) as u8),
     );
-    painter.rect_stroke(rect, egui::CornerRadius::same(0), frame_stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(0),
+        frame_stroke,
+        egui::StrokeKind::Inside,
+    );
 
     draw_x_grid(painter, rect, kind, stroke, label_color, true);
 
@@ -326,14 +333,14 @@ fn draw_gain_chrome(painter: &Painter, rect: Rect, kind: SweepKind, label_color:
         let t = (y - GAIN_MIN_DB) / y_span;
         let py = rect.bottom() - t * rect.height();
         let s = if (y.abs()) < 0.001 {
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 140, 80, (0.12 * 255.0) as u8))
+            Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(255, 140, 80, (0.12 * 255.0) as u8),
+            )
         } else {
             stroke
         };
-        painter.line_segment(
-            [Pos2::new(rect.left(), py), Pos2::new(rect.right(), py)],
-            s,
-        );
+        painter.line_segment([Pos2::new(rect.left(), py), Pos2::new(rect.right(), py)], s);
         painter.text(
             Pos2::new(rect.left() - 3.0, py),
             Align2::RIGHT_CENTER,
@@ -361,7 +368,12 @@ fn draw_spec_chrome(painter: &Painter, rect: Rect, label_color: Color32) {
         1.0,
         Color32::from_rgba_unmultiplied(255, 140, 80, (0.18 * 255.0) as u8),
     );
-    painter.rect_stroke(rect, egui::CornerRadius::same(0), frame_stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(0),
+        frame_stroke,
+        egui::StrokeKind::Inside,
+    );
 
     let log_min = 20.0_f32.log10();
     let log_max = 20000.0_f32.log10();
@@ -489,10 +501,14 @@ fn draw_thd_traces(painter: &Painter, rect: Rect, kind: SweepKind, state: &Sweep
     let mut thdn_pts = Vec::with_capacity(n);
 
     for pt in &state.points {
-        let px = x_to_pixel(rect, kind, match kind {
-            SweepKind::Frequency => pt.fundamental_hz,
-            SweepKind::Level => pt.out_dbu.unwrap_or(pt.drive_db),
-        });
+        let px = x_to_pixel(
+            rect,
+            kind,
+            match kind {
+                SweepKind::Frequency => pt.fundamental_hz,
+                SweepKind::Level => pt.out_dbu.unwrap_or(pt.drive_db),
+            },
+        );
 
         let thd_t = (pt.thd_pct.max(THD_MIN_PCT).log10() - log_min) / log_span;
         let thd_y = rect.bottom() - thd_t.clamp(0.0, 1.0) * rect.height();
@@ -540,10 +556,14 @@ fn draw_gain_trace(painter: &Painter, rect: Rect, kind: SweepKind, state: &Sweep
     let mut pts = Vec::with_capacity(n);
     for pt in &state.points {
         let Some(gain) = pt.gain_db else { continue };
-        let px = x_to_pixel(rect, kind, match kind {
-            SweepKind::Frequency => pt.fundamental_hz,
-            SweepKind::Level => pt.out_dbu.unwrap_or(pt.drive_db),
-        });
+        let px = x_to_pixel(
+            rect,
+            kind,
+            match kind {
+                SweepKind::Frequency => pt.fundamental_hz,
+                SweepKind::Level => pt.out_dbu.unwrap_or(pt.drive_db),
+            },
+        );
         let t = (gain - GAIN_MIN_DB) / y_span;
         let y = rect.bottom() - t.clamp(0.0, 1.0) * rect.height();
         pts.push(Pos2::new(px, y));
@@ -553,11 +573,7 @@ fn draw_gain_trace(painter: &Painter, rect: Rect, kind: SweepKind, state: &Sweep
     }
 }
 
-fn draw_spectrum_detail(
-    painter: &Painter,
-    rect: Rect,
-    pt: &crate::data::types::SweepPoint,
-) {
+fn draw_spectrum_detail(painter: &Painter, rect: Rect, pt: &crate::data::types::SweepPoint) {
     if pt.spectrum.is_empty() || pt.freqs.is_empty() {
         return;
     }

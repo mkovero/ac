@@ -70,15 +70,15 @@ fn pow_to_db(p: f64) -> f64 {
 /// state without re-allocating.
 #[derive(Debug, Clone)]
 pub struct EmaIntegrator {
-    pub tau_s:    f64,
+    pub tau_s: f64,
     /// Internal state: smoothed linear power per band. Public for tests.
-    state_pow:    Vec<f64>,
+    state_pow: Vec<f64>,
     /// `false` until the first [`update`]. Primes the state with the
     /// first input so callers don't see a spurious startup transient
     /// from the all-zeros initial condition.
     ///
     /// [`update`]: EmaIntegrator::update
-    primed:       bool,
+    primed: bool,
 }
 
 impl EmaIntegrator {
@@ -87,7 +87,7 @@ impl EmaIntegrator {
         Self {
             tau_s,
             state_pow: vec![0.0; n_bands],
-            primed:    false,
+            primed: false,
         }
     }
 
@@ -268,7 +268,8 @@ mod tests {
         assert!(
             f_now[0] < s_now[0] - 5.0,
             "fast ({:.2}) not sufficiently below slow ({:.2})",
-            f_now[0], s_now[0],
+            f_now[0],
+            s_now[0],
         );
     }
 

@@ -47,20 +47,20 @@ const REF_ADD_QUEUE_CAPACITY: usize = MAX_REF_INPUTS;
 
 struct SharedState {
     tone_buf: ArcSwap<Vec<f32>>,
-    silence:  AtomicBool,
-    xruns:    AtomicUsize,
+    silence: AtomicBool,
+    xruns: AtomicUsize,
     // Consumer (wait_ring) parks on its own thread handle; the RT process
     // callback does a `try_lock().unpark()` after pushing samples so the
     // waiter wakes within microseconds of data arriving instead of polling
     // on a 10 ms sleep.
-    waker:    Mutex<Option<Thread>>,
+    waker: Mutex<Option<Thread>>,
     // One-shot playback for `play_and_capture` (Farina IR stimulus). When
     // `one_shot_active` is set, the RT callback fills `out_buf` from
     // `one_shot_buf[one_shot_pos..]` and advances `one_shot_pos`, ignoring
     // the looping tone. When the buffer is exhausted it clears
     // `one_shot_active` and falls back to silence.
-    one_shot_buf:    ArcSwap<Vec<f32>>,
-    one_shot_pos:    AtomicUsize,
+    one_shot_buf: ArcSwap<Vec<f32>>,
+    one_shot_pos: AtomicUsize,
     one_shot_active: AtomicBool,
 }
 
@@ -74,23 +74,23 @@ struct RefAdd {
 }
 
 pub struct JackEngine {
-    sample_rate:    u32,
-    state:          Arc<SharedState>,
-    ring_cons:      Option<HeapCons<f32>>,
+    sample_rate: u32,
+    state: Arc<SharedState>,
+    ring_cons: Option<HeapCons<f32>>,
     /// One SPSC consumer per active ref input, in insertion order. Parallel
     /// to `ref_ports`. Grows as `add_ref_input` is called; the RT handler
     /// owns the matching producers and drains new ones via `ref_add_prod`.
-    ring_ref_cons:  Vec<HeapCons<f32>>,
-    _async_client:  Option<jack::AsyncClient<Notifications, Process>>,
-    output_ports:   Vec<String>,
-    input_port:     Option<String>,
+    ring_ref_cons: Vec<HeapCons<f32>>,
+    _async_client: Option<jack::AsyncClient<Notifications, Process>>,
+    output_ports: Vec<String>,
+    input_port: Option<String>,
     /// Active ref source ports in insertion order; parallel to
     /// `ring_ref_cons`. Unlike the old slot-based design, there are no
     /// `None` holes — ports are only appended, never re-slotted.
-    ref_ports:      Vec<String>,
+    ref_ports: Vec<String>,
     /// Main-side producer of the on-demand port hand-off queue. `None`
     /// between `stop()` and the next `start()`.
-    ref_add_prod:   Option<HeapProd<RefAdd>>,
+    ref_add_prod: Option<HeapProd<RefAdd>>,
 }
 
 impl JackEngine {
@@ -104,20 +104,20 @@ impl JackEngine {
             sample_rate: 48_000,
             state: Arc::new(SharedState {
                 tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
-                silence:  AtomicBool::new(true),
-                xruns:    AtomicUsize::new(0),
-                waker:    Mutex::new(None),
-                one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
-                one_shot_pos:    AtomicUsize::new(0),
+                silence: AtomicBool::new(true),
+                xruns: AtomicUsize::new(0),
+                waker: Mutex::new(None),
+                one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
+                one_shot_pos: AtomicUsize::new(0),
                 one_shot_active: AtomicBool::new(false),
             }),
-            ring_cons:     None,
+            ring_cons: None,
             ring_ref_cons: Vec::new(),
             _async_client: None,
-            output_ports:  Vec::new(),
-            input_port:    None,
-            ref_ports:     Vec::new(),
-            ref_add_prod:  None,
+            output_ports: Vec::new(),
+            input_port: None,
+            ref_ports: Vec::new(),
+            ref_add_prod: None,
         }
     }
 }
@@ -125,18 +125,18 @@ impl JackEngine {
 // -----------------------------------------------------------------------
 
 struct Process {
-    out_port:       jack::Port<AudioOut>,
-    in_port:        jack::Port<AudioIn>,
+    out_port: jack::Port<AudioOut>,
+    in_port: jack::Port<AudioIn>,
     /// Ref capture ports, grown on-demand from the `ref_add_cons` queue.
     /// Pre-allocated to `MAX_REF_INPUTS` so RT-side `push` never reallocates.
-    in_ref_ports:   Vec<jack::Port<AudioIn>>,
-    state:          Arc<SharedState>,
-    tone_pos:       usize,
-    ring_prod:      HeapProd<f32>,
+    in_ref_ports: Vec<jack::Port<AudioIn>>,
+    state: Arc<SharedState>,
+    tone_pos: usize,
+    ring_prod: HeapProd<f32>,
     /// Parallel to `in_ref_ports`, same pre-allocated capacity.
     ring_ref_prods: Vec<HeapProd<f32>>,
     /// Receives port hand-offs from the main thread; drained each period.
-    ref_add_cons:   HeapCons<RefAdd>,
+    ref_add_cons: HeapCons<RefAdd>,
 }
 
 /// Fill `out` from `tone`, wrapping at buffer boundary. Returns updated position.
@@ -145,7 +145,9 @@ fn fill_tone(out: &mut [f32], tone: &[f32], mut pos: usize) -> usize {
     for s in out.iter_mut() {
         *s = tone[pos];
         pos += 1;
-        if pos >= n { pos = 0; }
+        if pos >= n {
+            pos = 0;
+        }
     }
     pos
 }
@@ -168,7 +170,7 @@ fn fill_one_shot(out: &mut [f32], buf: &[f32], pos: usize) -> (usize, bool) {
 impl jack::ProcessHandler for Process {
     fn process(&mut self, _: &Client, scope: &ProcessScope) -> Control {
         let out_buf = self.out_port.as_mut_slice(scope);
-        let in_buf  = self.in_port.as_slice(scope);
+        let in_buf = self.in_port.as_slice(scope);
 
         if self.state.one_shot_active.load(Ordering::Acquire) {
             let buf = self.state.one_shot_buf.load();
@@ -210,7 +212,9 @@ impl jack::ProcessHandler for Process {
         // period (≤ ~3 ms at 128-frame quanta) will catch it, and park_timeout
         // bounds worst-case latency anyway.
         if let Ok(guard) = self.state.waker.try_lock() {
-            if let Some(t) = guard.as_ref() { t.unpark(); }
+            if let Some(t) = guard.as_ref() {
+                t.unpark();
+            }
         }
 
         Control::Continue
@@ -242,13 +246,17 @@ impl JackEngine {
 
         // Fast path: data may already be present.
         if let Some(ref c) = self.ring_cons {
-            if c.occupied_len() >= n { return Ok(()); }
+            if c.occupied_len() >= n {
+                return Ok(());
+            }
         }
 
         *self.state.waker.lock().unwrap() = Some(std::thread::current());
         let result = loop {
             if let Some(ref c) = self.ring_cons {
-                if c.occupied_len() >= n { break Ok(()); }
+                if c.occupied_len() >= n {
+                    break Ok(());
+                }
             }
             if Instant::now() > timeout {
                 break Err(anyhow::anyhow!("capture timeout after {duration:.1}s"));
@@ -262,16 +270,20 @@ impl JackEngine {
 
 impl AudioEngine for JackEngine {
     fn start(&mut self, output_ports: &[String], input_port: Option<&str>) -> Result<()> {
-        let (client, _status) = Client::new("ac-daemon", ClientOptions::NO_START_SERVER)
-            .context("JACK client")?;
+        let (client, _status) =
+            Client::new("ac-daemon", ClientOptions::NO_START_SERVER).context("JACK client")?;
 
         self.sample_rate = client.sample_rate() as u32;
 
-        let out_port = client.register_port("out", AudioOut::default()).context("register out")?;
-        let in_port  = client.register_port("in",  AudioIn::default()) .context("register in")?;
+        let out_port = client
+            .register_port("out", AudioOut)
+            .context("register out")?;
+        let in_port = client.register_port("in", AudioIn).context("register in")?;
 
         // Publish an initial silent 1-second tone buffer at the real sample rate.
-        self.state.tone_buf.store(Arc::new(vec![0.0f32; self.sample_rate as usize]));
+        self.state
+            .tone_buf
+            .store(Arc::new(vec![0.0f32; self.sample_rate as usize]));
         self.state.silence.store(true, Ordering::Relaxed);
 
         // Split SPSC rings: producer → RT callback, consumer → worker thread.
@@ -282,17 +294,18 @@ impl AudioEngine for JackEngine {
         // Pre-allocated slots for on-demand ref inputs. No ports are
         // registered up front; `add_ref_input` ships a (port, prod) pair
         // through `ref_add_*` and the RT handler appends to these Vecs.
-        let in_ref_ports:   Vec<jack::Port<AudioIn>> = Vec::with_capacity(MAX_REF_INPUTS);
-        let ring_ref_prods: Vec<HeapProd<f32>>       = Vec::with_capacity(MAX_REF_INPUTS);
+        let in_ref_ports: Vec<jack::Port<AudioIn>> = Vec::with_capacity(MAX_REF_INPUTS);
+        let ring_ref_prods: Vec<HeapProd<f32>> = Vec::with_capacity(MAX_REF_INPUTS);
         self.ring_ref_cons = Vec::with_capacity(MAX_REF_INPUTS);
-        self.ref_ports     = Vec::with_capacity(MAX_REF_INPUTS);
+        self.ref_ports = Vec::with_capacity(MAX_REF_INPUTS);
 
-        let (ref_add_prod, ref_add_cons) =
-            HeapRb::<RefAdd>::new(REF_ADD_QUEUE_CAPACITY).split();
+        let (ref_add_prod, ref_add_cons) = HeapRb::<RefAdd>::new(REF_ADD_QUEUE_CAPACITY).split();
         self.ref_add_prod = Some(ref_add_prod);
 
         let process = Process {
-            out_port, in_port, in_ref_ports,
+            out_port,
+            in_port,
+            in_ref_ports,
             state: self.state.clone(),
             tone_pos: 0,
             ring_prod,
@@ -300,35 +313,48 @@ impl AudioEngine for JackEngine {
             ref_add_cons,
         };
         let async_client = client
-            .activate_async(Notifications { state: self.state.clone() }, process)
+            .activate_async(
+                Notifications {
+                    state: self.state.clone(),
+                },
+                process,
+            )
             .context("JACK activate")?;
 
         let name = async_client.as_client().name().to_string();
         let out_name = name.clone() + ":out";
-        let in_name  = name.clone() + ":in";
+        let in_name = name.clone() + ":in";
 
         for dest in output_ports {
-            async_client.as_client().connect_ports_by_name(&out_name, dest).ok();
+            async_client
+                .as_client()
+                .connect_ports_by_name(&out_name, dest)
+                .ok();
         }
         if let Some(src) = input_port {
-            async_client.as_client().connect_ports_by_name(src, &in_name).ok();
+            async_client
+                .as_client()
+                .connect_ports_by_name(src, &in_name)
+                .ok();
             self.input_port = Some(src.to_string());
         }
 
-        self.output_ports  = output_ports.to_vec();
+        self.output_ports = output_ports.to_vec();
         self._async_client = Some(async_client);
         Ok(())
     }
 
     fn stop(&mut self) {
         self._async_client = None;
-        self.ring_cons     = None;
+        self.ring_cons = None;
         self.ring_ref_cons.clear();
         self.ref_ports.clear();
-        self.ref_add_prod  = None;
+        self.ref_add_prod = None;
     }
 
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
         let buf = generate_sine_1s(freq_hz, amplitude, self.sample_rate);
@@ -387,12 +413,16 @@ impl AudioEngine for JackEngine {
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
 
-        if let Some(ref mut c) = self.ring_cons { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons {
+            c.clear();
+        }
 
         self.wait_ring(n_needed, duration)?;
 
         let mut samples = vec![0.0f32; n_needed];
-        let got = self.ring_cons.as_mut()
+        let got = self
+            .ring_cons
+            .as_mut()
             .map(|c| c.pop_slice(&mut samples))
             .unwrap_or(0);
         samples.truncate(got);
@@ -401,7 +431,9 @@ impl AudioEngine for JackEngine {
 
     fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
         let mut samples = vec![0.0f32; max_samples];
-        let got = self.ring_cons.as_mut()
+        let got = self
+            .ring_cons
+            .as_mut()
             .map(|c| c.pop_slice(&mut samples))
             .unwrap_or(0);
         samples.truncate(got);
@@ -411,23 +443,33 @@ impl AudioEngine for JackEngine {
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
 
-        if let Some(ref mut c) = self.ring_cons { c.clear(); }
-        if let Some(c) = self.ring_ref_cons.get_mut(0) { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons {
+            c.clear();
+        }
+        if let Some(c) = self.ring_ref_cons.get_mut(0) {
+            c.clear();
+        }
 
         self.wait_ring(n_needed, duration)?;
 
         let mut meas = vec![0.0f32; n_needed];
-        let got_m = self.ring_cons.as_mut()
+        let got_m = self
+            .ring_cons
+            .as_mut()
             .map(|c| c.pop_slice(&mut meas))
             .unwrap_or(0);
         meas.truncate(got_m);
 
         let mut refch = vec![0.0f32; n_needed];
-        let got_r = self.ring_ref_cons.get_mut(0)
+        let got_r = self
+            .ring_ref_cons
+            .get_mut(0)
             .map(|c| c.pop_slice(&mut refch))
             .unwrap_or(0);
         // Pad if ref port was disconnected / silent.
-        for s in refch.iter_mut().skip(got_r) { *s = 0.0; }
+        for s in refch.iter_mut().skip(got_r) {
+            *s = 0.0;
+        }
 
         Ok((meas, refch))
     }
@@ -435,15 +477,21 @@ impl AudioEngine for JackEngine {
     fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
 
-        if let Some(ref mut c) = self.ring_cons { c.clear(); }
-        for c in self.ring_ref_cons.iter_mut() { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons {
+            c.clear();
+        }
+        for c in self.ring_ref_cons.iter_mut() {
+            c.clear();
+        }
 
         self.wait_ring(n_needed, duration)?;
 
         let mut out = Vec::with_capacity(1 + self.ring_ref_cons.len());
 
         let mut meas = vec![0.0f32; n_needed];
-        let got = self.ring_cons.as_mut()
+        let got = self
+            .ring_cons
+            .as_mut()
             .map(|c| c.pop_slice(&mut meas))
             .unwrap_or(0);
         meas.truncate(got);
@@ -452,7 +500,9 @@ impl AudioEngine for JackEngine {
         for c in self.ring_ref_cons.iter_mut() {
             let mut buf = vec![0.0f32; n_needed];
             let got = c.pop_slice(&mut buf);
-            for s in buf.iter_mut().skip(got) { *s = 0.0; }
+            for s in buf.iter_mut().skip(got) {
+                *s = 0.0;
+            }
             out.push(buf);
         }
         Ok(out)
@@ -464,16 +514,21 @@ impl AudioEngine for JackEngine {
             if let Some(ref old) = self.input_port {
                 ac.as_client().disconnect_ports_by_name(old, &in_name).ok();
             }
-            ac.as_client().connect_ports_by_name(port, &in_name)
+            ac.as_client()
+                .connect_ports_by_name(port, &in_name)
                 .context("reconnect_input")?;
-            if let Some(ref mut c) = self.ring_cons { c.clear(); }
+            if let Some(ref mut c) = self.ring_cons {
+                c.clear();
+            }
             self.input_port = Some(port.to_string());
         }
         Ok(())
     }
 
     fn add_ref_input(&mut self, port: &str) -> Result<()> {
-        let Some(ref ac) = self._async_client else { return Ok(()); };
+        let Some(ref ac) = self._async_client else {
+            return Ok(());
+        };
 
         // Idempotent: the transfer handler may register the same source port
         // twice when two pairs share a REF channel.
@@ -492,7 +547,9 @@ impl AudioEngine for JackEngine {
         // registration is supported (see jack::AsyncClient docs + upstream
         // `client_cback_calls_port_registered` test).
         let port_name = format!("in_ref_{idx}");
-        let new_port = ac.as_client().register_port(&port_name, AudioIn::default())
+        let new_port = ac
+            .as_client()
+            .register_port(&port_name, AudioIn)
             .with_context(|| format!("register {port_name}"))?;
         let full_name = ac.as_client().name().to_string() + ":" + &port_name;
 
@@ -501,7 +558,10 @@ impl AudioEngine for JackEngine {
         // queue = MAX_REF_INPUTS, so `try_push` cannot fail under the
         // enforced cap.
         let (prod, cons) = HeapRb::<f32>::new(REF_RING_CAPACITY).split();
-        let add = RefAdd { port: new_port, prod };
+        let add = RefAdd {
+            port: new_port,
+            prod,
+        };
         let Some(ref mut q) = self.ref_add_prod else {
             return Err(anyhow::anyhow!("add_ref_input before start()"));
         };
@@ -514,7 +574,8 @@ impl AudioEngine for JackEngine {
         // so a handful of samples between `connect` and `try_pop` may be
         // discarded — harmless compared to the pre-register approach that
         // polluted JACK's port list with 8 always-on phantom inputs.
-        ac.as_client().connect_ports_by_name(port, &full_name)
+        ac.as_client()
+            .connect_ports_by_name(port, &full_name)
             .with_context(|| format!("add_ref_input[{idx}] {port} -> {full_name}"))?;
 
         self.ring_ref_cons.push(cons);
@@ -523,14 +584,19 @@ impl AudioEngine for JackEngine {
     }
 
     fn flush_capture(&mut self) {
-        if let Some(ref mut c) = self.ring_cons { c.clear(); }
-        for c in self.ring_ref_cons.iter_mut() { c.clear(); }
+        if let Some(ref mut c) = self.ring_cons {
+            c.clear();
+        }
+        for c in self.ring_ref_cons.iter_mut() {
+            c.clear();
+        }
     }
 
     fn connect_output(&mut self, port: &str) -> Result<()> {
         if let Some(ref ac) = self._async_client {
             let out_name = ac.as_client().name().to_string() + ":out";
-            ac.as_client().connect_ports_by_name(&out_name, port)
+            ac.as_client()
+                .connect_ports_by_name(&out_name, port)
                 .context("connect_output")?;
             if !self.output_ports.contains(&port.to_string()) {
                 self.output_ports.push(port.to_string());
@@ -542,7 +608,9 @@ impl AudioEngine for JackEngine {
     fn disconnect_output(&mut self, port: &str) {
         if let Some(ref ac) = self._async_client {
             let out_name = ac.as_client().name().to_string() + ":out";
-            ac.as_client().disconnect_ports_by_name(&out_name, port).ok();
+            ac.as_client()
+                .disconnect_ports_by_name(&out_name, port)
+                .ok();
         }
         self.output_ports.retain(|p| p != port);
     }
@@ -551,8 +619,12 @@ impl AudioEngine for JackEngine {
         self.state.xruns.load(Ordering::Relaxed) as u32
     }
 
-    fn supports_routing(&self) -> bool { true }
-    fn backend_name(&self) -> &'static str { "jack" }
+    fn supports_routing(&self) -> bool {
+        true
+    }
+    fn backend_name(&self) -> &'static str {
+        "jack"
+    }
 
     fn playback_ports(&self) -> Vec<String> {
         // IS_INPUT | IS_PHYSICAL — JACK's `IS_INPUT` flag is "audio
@@ -563,7 +635,8 @@ impl AudioEngine for JackEngine {
         // jack on the soundcard", so PHYSICAL is the right filter.
         let flags = jack::PortFlags::IS_INPUT | jack::PortFlags::IS_PHYSICAL;
         if let Some(ref ac) = self._async_client {
-            ac.as_client().ports(None, Some("32 bit float mono audio"), flags)
+            ac.as_client()
+                .ports(None, Some("32 bit float mono audio"), flags)
         } else if let Ok((c, _)) = Client::new("ac-daemon-probe", ClientOptions::NO_START_SERVER) {
             c.ports(None, Some("32 bit float mono audio"), flags)
         } else {
@@ -577,7 +650,8 @@ impl AudioEngine for JackEngine {
         // bridge clients, etc.).
         let flags = jack::PortFlags::IS_OUTPUT | jack::PortFlags::IS_PHYSICAL;
         if let Some(ref ac) = self._async_client {
-            ac.as_client().ports(None, Some("32 bit float mono audio"), flags)
+            ac.as_client()
+                .ports(None, Some("32 bit float mono audio"), flags)
         } else if let Ok((c, _)) = Client::new("ac-daemon-probe", ClientOptions::NO_START_SERVER) {
             c.ports(None, Some("32 bit float mono audio"), flags)
         } else {
@@ -728,7 +802,7 @@ mod tests {
     fn stereo_ref_padding() {
         let n_needed = 100;
         let rb_meas = HeapRb::<f32>::new(256);
-        let rb_ref  = HeapRb::<f32>::new(256);
+        let rb_ref = HeapRb::<f32>::new(256);
         let (mut mp, mut mc) = rb_meas.split();
         let (mut rp, mut rc) = rb_ref.split();
 
@@ -744,7 +818,9 @@ mod tests {
 
         let mut refch = vec![0.0f32; n_needed];
         let got_r = rc.pop_slice(&mut refch);
-        for s in refch.iter_mut().skip(got_r) { *s = 0.0; }
+        for s in refch.iter_mut().skip(got_r) {
+            *s = 0.0;
+        }
 
         assert_eq!(meas.len(), n_needed);
         assert_eq!(refch.len(), n_needed);
@@ -760,11 +836,11 @@ mod tests {
     fn xrun_counter_increments() {
         let state = Arc::new(SharedState {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
-            silence:  AtomicBool::new(true),
-            xruns:    AtomicUsize::new(0),
-            waker:    Mutex::new(None),
-            one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
-            one_shot_pos:    AtomicUsize::new(0),
+            silence: AtomicBool::new(true),
+            xruns: AtomicUsize::new(0),
+            waker: Mutex::new(None),
+            one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
+            one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
         });
         assert_eq!(state.xruns.load(Ordering::Relaxed), 0);
@@ -779,11 +855,11 @@ mod tests {
     fn tone_buf_swap_is_visible() {
         let state = SharedState {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 4])),
-            silence:  AtomicBool::new(false),
-            xruns:    AtomicUsize::new(0),
-            waker:    Mutex::new(None),
-            one_shot_buf:    ArcSwap::new(Arc::new(Vec::new())),
-            one_shot_pos:    AtomicUsize::new(0),
+            silence: AtomicBool::new(false),
+            xruns: AtomicUsize::new(0),
+            waker: Mutex::new(None),
+            one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
+            one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0.0f32; 2];

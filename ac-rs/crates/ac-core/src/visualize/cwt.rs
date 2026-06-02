@@ -102,7 +102,9 @@ fn avx2_fma_available() -> bool {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn avx2_fma_available() -> bool { false }
+fn avx2_fma_available() -> bool {
+    false
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
@@ -122,10 +124,22 @@ unsafe fn mac_avx2_fma(spec_f64: *const f64, h_dup: &[f64], k_lo: usize) -> (f64
     let full = len & !15; // multiple of 16 f64s
     let mut i = 0;
     while i < full {
-        a0 = _mm256_fmadd_pd(_mm256_loadu_pd(spec.add(i)),      _mm256_loadu_pd(h.add(i)),      a0);
-        a1 = _mm256_fmadd_pd(_mm256_loadu_pd(spec.add(i + 4)),  _mm256_loadu_pd(h.add(i + 4)),  a1);
-        a2 = _mm256_fmadd_pd(_mm256_loadu_pd(spec.add(i + 8)),  _mm256_loadu_pd(h.add(i + 8)),  a2);
-        a3 = _mm256_fmadd_pd(_mm256_loadu_pd(spec.add(i + 12)), _mm256_loadu_pd(h.add(i + 12)), a3);
+        a0 = _mm256_fmadd_pd(_mm256_loadu_pd(spec.add(i)), _mm256_loadu_pd(h.add(i)), a0);
+        a1 = _mm256_fmadd_pd(
+            _mm256_loadu_pd(spec.add(i + 4)),
+            _mm256_loadu_pd(h.add(i + 4)),
+            a1,
+        );
+        a2 = _mm256_fmadd_pd(
+            _mm256_loadu_pd(spec.add(i + 8)),
+            _mm256_loadu_pd(h.add(i + 8)),
+            a2,
+        );
+        a3 = _mm256_fmadd_pd(
+            _mm256_loadu_pd(spec.add(i + 12)),
+            _mm256_loadu_pd(h.add(i + 12)),
+            a3,
+        );
         i += 16;
     }
     // Tail: h_dup is padded to mult-of-4, so this runs 0..=3 more iters.
@@ -159,16 +173,16 @@ unsafe fn mac_avx2_fma(_spec_f64: *const f64, _h_dup: &[f64], _k_lo: usize) -> (
 /// produced by `realfft`, so one AVX2 `vfmadd231pd` per four f64s processes
 /// two complex bins at a time without any shuffles or a split pass.
 struct CachedKernel {
-    k_lo:  usize,
+    k_lo: usize,
     h_dup: Vec<f64>,
 }
 
 #[derive(Default)]
 struct KernelCache {
-    n:         usize,
+    n: usize,
     sigma_bits: u32,
-    scales:    Vec<u32>, // f32::to_bits to dodge Eq on f32
-    kernels:   Vec<CachedKernel>,
+    scales: Vec<u32>, // f32::to_bits to dodge Eq on f32
+    kernels: Vec<CachedKernel>,
 }
 
 impl KernelCache {
@@ -176,7 +190,11 @@ impl KernelCache {
         self.n == n
             && self.sigma_bits == sigma.to_bits()
             && self.scales.len() == scales.len()
-            && self.scales.iter().zip(scales).all(|(a, b)| *a == b.to_bits())
+            && self
+                .scales
+                .iter()
+                .zip(scales)
+                .all(|(a, b)| *a == b.to_bits())
     }
 
     fn rebuild(&mut self, n: usize, sigma: f32, scales: &[f32]) {
@@ -193,7 +211,7 @@ impl KernelCache {
             .map(|&scale| {
                 let a = scale as f64;
                 let k_center = omega0 / (a * two_pi_over_n);
-                let k_width  = CUTOFF / (a * two_pi_over_n);
+                let k_width = CUTOFF / (a * two_pi_over_n);
                 let k_lo = ((k_center - k_width).floor() as isize).max(0) as usize;
                 let k_hi = ((k_center + k_width).ceil() as isize).min(half as isize) as usize;
                 // Fold the (-1)^k twiddle (single-point IFFT at t = N/2) into
@@ -206,7 +224,7 @@ impl KernelCache {
                     let arg = a * (two_pi_over_n * k as f64) - omega0;
                     let g = (-0.5 * arg * arg).exp();
                     let g = if k & 1 != 0 { -g } else { g };
-                    h_dup[2 * i]     = g;
+                    h_dup[2 * i] = g;
                     h_dup[2 * i + 1] = g;
                 }
                 CachedKernel { k_lo, h_dup }
@@ -313,12 +331,7 @@ pub fn log_scales(
 /// # Panics
 ///
 /// Panics if `samples.len() < 256` or `scales` is empty.
-pub fn morlet_cwt(
-    samples: &[f32],
-    sample_rate: u32,
-    scales: &[f32],
-    sigma: f32,
-) -> Vec<f32> {
+pub fn morlet_cwt(samples: &[f32], sample_rate: u32, scales: &[f32], sigma: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(scales.len());
     morlet_cwt_into(samples, sample_rate, scales, sigma, &mut out);
     out
@@ -364,48 +377,48 @@ pub fn morlet_cwt_into(
                 fft.process_with_scratch(&mut input, &mut spectrum, &mut scratch[..need_scratch])
                     .expect("realfft: input/output/scratch lengths match plan");
 
-            // (-1)^k twiddle is folded into each cached kernel's h_dup[], so
-            // we feed `spectrum` to the MAC loop unchanged.
-            // Log-domain: |mag|·inv_n·2 → 20·log10 = (re²+im²)·inv_n²·4 → 10·log10.
-            // Saves a `hypot` per scale.
-            let scale_const = 4.0 / (n as f64 * n as f64);
+                // (-1)^k twiddle is folded into each cached kernel's h_dup[], so
+                // we feed `spectrum` to the MAC loop unchanged.
+                // Log-domain: |mag|·inv_n·2 → 20·log10 = (re²+im²)·inv_n²·4 → 10·log10.
+                // Saves a `hypot` per scale.
+                let scale_const = 4.0 / (n as f64 * n as f64);
 
-            // AVX2 reads 4 f64s (= 2 complex bins) at a time and the kernel's
-            // last h_dup chunk may extend past the valid N/2+1 spectrum bins
-            // by up to one complex. Pad the scratch with one zero complex so
-            // the overread sees 0.0 × 0.0 = 0.0 and does not touch uninit mem.
-            spectrum.push(Complex::new(0.0, 0.0));
+                // AVX2 reads 4 f64s (= 2 complex bins) at a time and the kernel's
+                // last h_dup chunk may extend past the valid N/2+1 spectrum bins
+                // by up to one complex. Pad the scratch with one zero complex so
+                // the overread sees 0.0 × 0.0 = 0.0 and does not touch uninit mem.
+                spectrum.push(Complex::new(0.0, 0.0));
 
-            KERNEL_CACHE.with(|cell| {
-                let mut cache = cell.borrow_mut();
-                if !cache.matches(n, sigma, scales) {
-                    cache.rebuild(n, sigma, scales);
-                }
-                out.clear();
-                out.reserve(cache.kernels.len());
-                let spec_f64: *const f64 = spectrum.as_ptr() as *const f64;
-                // Serial — rayon was a loss here (see commit 33ba79b). Each
-                // kernel is a few dozen MACs and a full tick totals ~12k MACs
-                // (sub-millisecond). Waking the global rayon pool for that
-                // dwarfs the math with sched_yield/futex/epoch-pin cost. If
-                // the workload grows (n_scales ≫ 1024 or per-kernel width
-                // ≫ 500 bins), reintroduce a *dedicated* small pool — never
-                // the global one.
-                let use_avx2 = avx2_fma_available();
-                for kernel in &cache.kernels {
-                    let (re, im) = if use_avx2 {
-                        // SAFETY: avx2_fma_available returned true; pointers
-                        // come from live borrows of `spectrum` / kernel.h_dup;
-                        // h_dup.len() is a multiple of 4 and spectrum has the
-                        // trailing zero-complex pad asserted above.
-                        unsafe { mac_avx2_fma(spec_f64, &kernel.h_dup, kernel.k_lo) }
-                    } else {
-                        mac_scalar(&spectrum, &kernel.h_dup, kernel.k_lo)
-                    };
-                    let mag_sq = (re * re + im * im) * scale_const;
-                    out.push((10.0 * mag_sq.max(1e-24).log10()) as f32);
-                }
-            });
+                KERNEL_CACHE.with(|cell| {
+                    let mut cache = cell.borrow_mut();
+                    if !cache.matches(n, sigma, scales) {
+                        cache.rebuild(n, sigma, scales);
+                    }
+                    out.clear();
+                    out.reserve(cache.kernels.len());
+                    let spec_f64: *const f64 = spectrum.as_ptr() as *const f64;
+                    // Serial — rayon was a loss here (see commit 33ba79b). Each
+                    // kernel is a few dozen MACs and a full tick totals ~12k MACs
+                    // (sub-millisecond). Waking the global rayon pool for that
+                    // dwarfs the math with sched_yield/futex/epoch-pin cost. If
+                    // the workload grows (n_scales ≫ 1024 or per-kernel width
+                    // ≫ 500 bins), reintroduce a *dedicated* small pool — never
+                    // the global one.
+                    let use_avx2 = avx2_fma_available();
+                    for kernel in &cache.kernels {
+                        let (re, im) = if use_avx2 {
+                            // SAFETY: avx2_fma_available returned true; pointers
+                            // come from live borrows of `spectrum` / kernel.h_dup;
+                            // h_dup.len() is a multiple of 4 and spectrum has the
+                            // trailing zero-complex pad asserted above.
+                            unsafe { mac_avx2_fma(spec_f64, &kernel.h_dup, kernel.k_lo) }
+                        } else {
+                            mac_scalar(&spectrum, &kernel.h_dup, kernel.k_lo)
+                        };
+                        let mag_sq = (re * re + im * im) * scale_const;
+                        out.push((10.0 * mag_sq.max(1e-24).log10()) as f32);
+                    }
+                });
             });
         });
     });

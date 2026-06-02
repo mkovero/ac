@@ -27,14 +27,15 @@ const POINT_CAPACITY: usize = 32768;
 const LUT_WIDTH: u32 = 256;
 const LUT_PALETTES: u32 = 2;
 
+#[allow(dead_code)]
 pub const PALETTE_NAMES: &[&str] = &["blackbody", "warm"];
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct DecayU {
-    decay:     f32,
+    decay: f32,
     scroll_dx: f32,
-    _pad:      [f32; 2],
+    _pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -47,63 +48,63 @@ struct DepositU {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct DisplayU {
-    viewport:    [f32; 4],
-    gamma:       f32,
-    gain:        f32,
+    viewport: [f32; 4],
+    gamma: f32,
+    gain: f32,
     palette_row: u32,
-    _pad:        f32,
+    _pad: f32,
 }
 
 pub struct EmberRenderer {
-    decay_pipeline:   wgpu::RenderPipeline,
+    decay_pipeline: wgpu::RenderPipeline,
     deposit_pipeline: wgpu::RenderPipeline,
     display_pipeline: wgpu::RenderPipeline,
 
+    #[allow(dead_code)]
     front_tex: wgpu::Texture,
-    back_tex:  wgpu::Texture,
+    #[allow(dead_code)]
+    back_tex: wgpu::Texture,
     front_view: wgpu::TextureView,
-    back_view:  wgpu::TextureView,
+    back_view: wgpu::TextureView,
 
-    decay_bg_from_front:   wgpu::BindGroup,
-    decay_bg_from_back:    wgpu::BindGroup,
+    decay_bg_from_front: wgpu::BindGroup,
+    decay_bg_from_back: wgpu::BindGroup,
     display_bg_from_front: wgpu::BindGroup,
-    display_bg_from_back:  wgpu::BindGroup,
-    deposit_bg:            wgpu::BindGroup,
+    display_bg_from_back: wgpu::BindGroup,
+    deposit_bg: wgpu::BindGroup,
 
-    decay_uniform:   wgpu::Buffer,
+    decay_uniform: wgpu::Buffer,
     deposit_uniform: wgpu::Buffer,
     display_uniform: wgpu::Buffer,
 
     point_vbuf: wgpu::Buffer,
 
     front_is_latest: bool,
-    cleared:         bool,
+    cleared: bool,
 
-    tau_p:       f32,
-    intensity:   f32,
-    gamma:       f32,
-    gain:        f32,
+    tau_p: f32,
+    intensity: f32,
+    gamma: f32,
+    gain: f32,
     palette_row: u32,
-
-
 }
 
 impl EmberRenderer {
     pub fn new(
         device: &wgpu::Device,
-        queue:  &wgpu::Queue,
+        queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
         let decay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("ember_decay.wgsl"),
+            label: Some("ember_decay.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ember_decay.wgsl").into()),
         });
         let deposit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("ember_deposit.wgsl"),
+            label: Some("ember_deposit.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ember_deposit.wgsl").into()),
         });
         let display_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("ember_display.wgsl"),
+            label: Some("ember_display.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ember_display.wgsl").into()),
         });
 
@@ -208,7 +209,7 @@ impl EmberRenderer {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::One,
                     dst_factor: wgpu::BlendFactor::One,
-                    operation:  wgpu::BlendOperation::Add,
+                    operation: wgpu::BlendOperation::Add,
                 },
                 alpha: wgpu::BlendComponent::REPLACE,
             }),
@@ -321,35 +322,45 @@ impl EmberRenderer {
         });
 
         let (front_tex, front_view) = create_substrate_texture(device, "ember front");
-        let (back_tex,  back_view)  = create_substrate_texture(device, "ember back");
+        let (back_tex, back_view) = create_substrate_texture(device, "ember back");
 
         let lut_view = create_palette_lut(device, queue);
 
         let decay_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ember decay uniform"),
-            size:  std::mem::size_of::<DecayU>() as u64,
+            size: std::mem::size_of::<DecayU>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let deposit_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ember deposit uniform"),
-            size:  std::mem::size_of::<DepositU>() as u64,
+            size: std::mem::size_of::<DepositU>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let display_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ember display uniform"),
-            size:  std::mem::size_of::<DisplayU>() as u64,
+            size: std::mem::size_of::<DisplayU>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let decay_bg_from_front = make_decay_bg(device, &decay_bgl, &front_view, &decay_uniform);
-        let decay_bg_from_back  = make_decay_bg(device, &decay_bgl, &back_view,  &decay_uniform);
-        let display_bg_from_front =
-            make_display_bg(device, &display_bgl, &front_view, &lut_view, &display_uniform);
-        let display_bg_from_back  =
-            make_display_bg(device, &display_bgl, &back_view,  &lut_view, &display_uniform);
+        let decay_bg_from_back = make_decay_bg(device, &decay_bgl, &back_view, &decay_uniform);
+        let display_bg_from_front = make_display_bg(
+            device,
+            &display_bgl,
+            &front_view,
+            &lut_view,
+            &display_uniform,
+        );
+        let display_bg_from_back = make_display_bg(
+            device,
+            &display_bgl,
+            &back_view,
+            &lut_view,
+            &display_uniform,
+        );
         let deposit_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ember deposit bg"),
             layout: &deposit_bgl,
@@ -361,7 +372,7 @@ impl EmberRenderer {
 
         let point_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ember points"),
-            size:  (POINT_CAPACITY * 12) as u64,
+            size: (POINT_CAPACITY * 12) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -390,26 +401,34 @@ impl EmberRenderer {
             // scope feeding ~800 line pairs/frame into a thin band. For a
             // spectrum view (sparse static polyline, no scroll) bump tau_p
             // up via `set_tau_p` so successive measurements fade-blend.
-            tau_p:       0.6,
-            intensity:   0.002,
-            gamma:       0.6,
-            gain:        0.5,
+            tau_p: 0.6,
+            intensity: 0.002,
+            gamma: 0.6,
+            gain: 0.5,
             palette_row: 0,
         }
     }
 
-    pub fn set_tau_p(&mut self, tau_p: f32) { self.tau_p = tau_p.max(1e-3); }
-    pub fn set_intensity(&mut self, v: f32) { self.intensity = v.max(0.0); }
+    pub fn set_tau_p(&mut self, tau_p: f32) {
+        self.tau_p = tau_p.max(1e-3);
+    }
+    pub fn set_intensity(&mut self, v: f32) {
+        self.intensity = v.max(0.0);
+    }
     pub fn set_tone(&mut self, gamma: f32, gain: f32) {
         self.gamma = gamma.max(0.05);
-        self.gain  = gain.max(0.0);
+        self.gain = gain.max(0.0);
     }
 
+    #[allow(dead_code)]
     pub fn set_palette(&mut self, idx: u32) {
         self.palette_row = idx % LUT_PALETTES;
     }
 
-    pub fn active_palette(&self) -> u32 { self.palette_row }
+    #[allow(dead_code)]
+    pub fn active_palette(&self) -> u32 {
+        self.palette_row
+    }
 
     /// Wipe the substrate to black on the next `advance()` call. Used by
     /// the Z key to give the user a clean slate when they switch test
@@ -434,10 +453,11 @@ impl EmberRenderer {
     /// `scroll_dx_norm` ∈ [0,1] shifts the existing substrate leftward by
     /// that fraction of its width before depositing — pass 0.0 for a static
     /// view (e.g. spectrum), `dt / window_s` for a strip-chart scope.
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &mut self,
         device: &wgpu::Device,
-        queue:  &wgpu::Queue,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         viewport: [f32; 4],
         line_pairs: &[[f32; 3]],
@@ -457,22 +477,29 @@ impl EmberRenderer {
         queue.write_buffer(
             &self.decay_uniform,
             0,
-            bytemuck::bytes_of(&DecayU { decay, scroll_dx, _pad: [0.0; 2] }),
+            bytemuck::bytes_of(&DecayU {
+                decay,
+                scroll_dx,
+                _pad: [0.0; 2],
+            }),
         );
         queue.write_buffer(
             &self.deposit_uniform,
             0,
-            bytemuck::bytes_of(&DepositU { intensity: self.intensity, _pad: [0.0; 3] }),
+            bytemuck::bytes_of(&DepositU {
+                intensity: self.intensity,
+                _pad: [0.0; 3],
+            }),
         );
         queue.write_buffer(
             &self.display_uniform,
             0,
             bytemuck::bytes_of(&DisplayU {
                 viewport,
-                gamma:       self.gamma,
-                gain:        self.gain,
+                gamma: self.gamma,
+                gain: self.gain,
                 palette_row: self.palette_row,
-                _pad:        0.0,
+                _pad: 0.0,
             }),
         );
 
@@ -504,7 +531,7 @@ impl EmberRenderer {
                     view: dst_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load:  wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -525,7 +552,7 @@ impl EmberRenderer {
                     view: dst_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load:  wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -540,7 +567,7 @@ impl EmberRenderer {
         }
 
         self.front_is_latest = !self.front_is_latest;
-        let _ = device;  // not used yet — kept for symmetry with set_palette / future on-the-fly resize
+        let _ = device; // not used yet — kept for symmetry with set_palette / future on-the-fly resize
     }
 
     /// Render the latest substrate to the surface.
@@ -562,7 +589,11 @@ fn create_substrate_texture(
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: TEX_W, height: TEX_H, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: TEX_W,
+            height: TEX_H,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -581,7 +612,7 @@ fn clear_substrate(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView)
             view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load:  wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -601,8 +632,14 @@ fn make_decay_bg(
         label: Some("ember decay bg"),
         layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-            wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(src_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: uniform.as_entire_binding(),
+            },
         ],
     })
 }
@@ -618,9 +655,18 @@ fn make_display_bg(
         label: Some("ember display bg"),
         layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(lut_view) },
-            wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(src_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(lut_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniform.as_entire_binding(),
+            },
         ],
     })
 }
@@ -641,7 +687,7 @@ fn create_palette_lut(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Textu
         let temp_k = 1000.0 + t * 9000.0;
         let (r, g, b) = blackbody_rgb(temp_k);
         let off = i * 4;
-        data[off]     = (r * 255.0) as u8;
+        data[off] = (r * 255.0) as u8;
         data[off + 1] = (g * 255.0) as u8;
         data[off + 2] = (b * 255.0) as u8;
         data[off + 3] = 255;
@@ -671,7 +717,7 @@ fn create_palette_lut(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Textu
             }
         }
         let off = (LUT_WIDTH as usize + i) * 4;
-        data[off]     = (rgb[0] * 255.0) as u8;
+        data[off] = (rgb[0] * 255.0) as u8;
         data[off + 1] = (rgb[1] * 255.0) as u8;
         data[off + 2] = (rgb[2] * 255.0) as u8;
         data[off + 3] = 255;
@@ -722,10 +768,11 @@ fn blackbody_rgb(temp_k: f32) -> (f32, f32, f32) {
         (329.698_73 * (t - 60.0).powf(-0.133_205_1) / 255.0).clamp(0.0, 1.0)
     };
     let g = if t <= 66.0 {
-        (99.470_802 * t.ln() - 161.119_57) / 255.0
+        (99.470_8 * t.ln() - 161.119_57) / 255.0
     } else {
         288.122_2 * (t - 60.0).powf(-0.075_514_85) / 255.0
-    }.clamp(0.0, 1.0);
+    }
+    .clamp(0.0, 1.0);
     let b = if t >= 66.0 {
         1.0
     } else if t <= 19.0 {

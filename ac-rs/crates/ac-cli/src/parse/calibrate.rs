@@ -13,9 +13,9 @@ pub(super) fn parse_calibrate(args: &[String], show_plot: bool) -> Result<Parsed
         if (key == "output" || key == "input") && remaining.len() > 1 {
             remaining.remove(0);
             let val_str = remaining.remove(0);
-            let val: u32 = val_str
-                .parse()
-                .map_err(|_| format!("calibrate: {key:?} value must be an integer, got {val_str:?}"))?;
+            let val: u32 = val_str.parse().map_err(|_| {
+                format!("calibrate: {key:?} value must be an integer, got {val_str:?}")
+            })?;
             if key == "output" {
                 output_channel = Some(val);
             } else {
@@ -74,11 +74,18 @@ pub(super) fn parse_calibrate_mic_curve(args: &[String]) -> Result<ParsedCommand
                 input_channel = Some(val);
             }
         } else {
-            return Err(format!("calibrate mic-curve: unexpected token {:?}", remaining[0]));
+            return Err(format!(
+                "calibrate mic-curve: unexpected token {:?}",
+                remaining[0]
+            ));
         }
     }
     Ok(ParsedCommand {
-        cmd: CommandKind::CalibrateMicCurve { path, output_channel, input_channel },
+        cmd: CommandKind::CalibrateMicCurve {
+            path,
+            output_channel,
+            input_channel,
+        },
         show_plot: false,
     })
 }
@@ -105,7 +112,10 @@ pub(super) fn parse_calibrate_spl(args: &[String]) -> Result<ParsedCommand, Stri
                 input_channel = Some(val);
             }
         } else {
-            return Err(format!("calibrate spl: unexpected token {:?}", remaining[0]));
+            return Err(format!(
+                "calibrate spl: unexpected token {:?}",
+                remaining[0]
+            ));
         }
     }
 
@@ -130,7 +140,11 @@ mod tests {
     fn test_calibrate() {
         let p = parse(&args("calibrate")).unwrap();
         match p.cmd {
-            CommandKind::Calibrate { level, output_channel, input_channel } => {
+            CommandKind::Calibrate {
+                level,
+                output_channel,
+                input_channel,
+            } => {
                 assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-10.0)).abs() < 1e-9));
                 assert!(output_channel.is_none());
                 assert!(input_channel.is_none());
@@ -152,7 +166,11 @@ mod tests {
     fn test_calibrate_with_channels() {
         let p = parse(&args("calibrate output 3 input 1")).unwrap();
         match p.cmd {
-            CommandKind::Calibrate { output_channel, input_channel, .. } => {
+            CommandKind::Calibrate {
+                output_channel,
+                input_channel,
+                ..
+            } => {
                 assert_eq!(output_channel, Some(3));
                 assert_eq!(input_channel, Some(1));
             }
@@ -164,7 +182,10 @@ mod tests {
     fn test_calibrate_spl_default_channels() {
         let p = parse(&args("calibrate spl")).unwrap();
         match p.cmd {
-            CommandKind::CalibrateSpl { output_channel, input_channel } => {
+            CommandKind::CalibrateSpl {
+                output_channel,
+                input_channel,
+            } => {
                 assert!(output_channel.is_none());
                 assert!(input_channel.is_none());
             }
@@ -176,7 +197,10 @@ mod tests {
     fn test_calibrate_spl_with_channels() {
         let p = parse(&args("calibrate spl input 2 output 1")).unwrap();
         match p.cmd {
-            CommandKind::CalibrateSpl { output_channel, input_channel } => {
+            CommandKind::CalibrateSpl {
+                output_channel,
+                input_channel,
+            } => {
                 assert_eq!(output_channel, Some(1));
                 assert_eq!(input_channel, Some(2));
             }
@@ -194,7 +218,11 @@ mod tests {
     fn test_calibrate_mic_curve_path() {
         let p = parse(&args("calibrate mic-curve /tmp/foo.frd input 1")).unwrap();
         match p.cmd {
-            CommandKind::CalibrateMicCurve { path, output_channel, input_channel } => {
+            CommandKind::CalibrateMicCurve {
+                path,
+                output_channel,
+                input_channel,
+            } => {
                 assert_eq!(path, Some("/tmp/foo.frd".into()));
                 assert!(output_channel.is_none());
                 assert_eq!(input_channel, Some(1));
@@ -207,7 +235,11 @@ mod tests {
     fn test_calibrate_mic_curve_clear() {
         let p = parse(&args("cal mic-curve clear input 0")).unwrap();
         match p.cmd {
-            CommandKind::CalibrateMicCurve { path, input_channel, .. } => {
+            CommandKind::CalibrateMicCurve {
+                path,
+                input_channel,
+                ..
+            } => {
                 assert!(path.is_none());
                 assert_eq!(input_channel, Some(0));
             }

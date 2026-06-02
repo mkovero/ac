@@ -66,7 +66,10 @@ fn parse_level(s: &str) -> Result<LevelSpec, ()> {
         return rest.parse::<f64>().map(LevelSpec::Dbfs).map_err(|_| ());
     }
     if let Some(rest) = s.strip_suffix("mvrms").or_else(|| s.strip_suffix("mv")) {
-        return rest.parse::<f64>().map(|v| LevelSpec::Vrms(v / 1000.0)).map_err(|_| ());
+        return rest
+            .parse::<f64>()
+            .map(|v| LevelSpec::Vrms(v / 1000.0))
+            .map_err(|_| ());
     }
     if let Some(rest) = s.strip_suffix("vrms").or_else(|| s.strip_suffix('v')) {
         return rest.parse::<f64>().map(LevelSpec::Vrms).map_err(|_| ());
@@ -175,7 +178,10 @@ fn check_empty(tokens: &[Token]) -> Result<(), String> {
     } else {
         Err(format!(
             "unexpected token(s): {:?}",
-            tokens.iter().map(|(k, _)| format!("{k:?}")).collect::<Vec<_>>()
+            tokens
+                .iter()
+                .map(|(k, _)| format!("{k:?}"))
+                .collect::<Vec<_>>()
         ))
     }
 }
@@ -219,7 +225,7 @@ fn expand(word: &str) -> &str {
         _ => {
             // Return the original word — but we need 'static lifetime.
             // We leak here; it's fine for CLI arg parsing (called once).
-            return Box::leak(word.to_lowercase().into_boxed_str());
+            Box::leak(word.to_lowercase().into_boxed_str())
         }
     }
 }
@@ -256,8 +262,10 @@ pub fn parse_channels(token: &str) -> Result<Vec<u32>, String> {
 }
 
 fn is_channel_spec(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
-        && s.bytes().next().map_or(false, |b| b.is_ascii_digit())
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
+        && s.bytes().next().is_some_and(|b| b.is_ascii_digit())
 }
 
 // ---------------------------------------------------------------------------
@@ -320,24 +328,28 @@ pub enum CommandKind {
         freq: f64,
         steps: u32,
     },
+    #[allow(dead_code)]
     Monitor {
         start_freq: f64,
         end_freq: f64,
         interval: f64,
         channels: Option<Vec<u32>>,
     },
+    #[allow(dead_code)]
     MonitorCwt {
         start_freq: f64,
         end_freq: f64,
         interval: f64,
         channels: Option<Vec<u32>>,
     },
+    #[allow(dead_code)]
     MonitorCqt {
         start_freq: f64,
         end_freq: f64,
         interval: f64,
         channels: Option<Vec<u32>>,
     },
+    #[allow(dead_code)]
     MonitorReassigned {
         start_freq: f64,
         end_freq: f64,
@@ -364,7 +376,7 @@ pub enum CommandKind {
         input_channel: Option<u32>,
     },
     CalibrateMicCurve {
-        path: Option<String>,                        // None = clear
+        path: Option<String>, // None = clear
         output_channel: Option<u32>,
         input_channel: Option<u32>,
     },
@@ -434,7 +446,12 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
     }
 
     // "ac calibrate spl [input N] [output N]" — pistonphone-reference SPL cal.
-    if verb == "calibrate" && args.first().map(|a| a.eq_ignore_ascii_case("spl")).unwrap_or(false) {
+    if verb == "calibrate"
+        && args
+            .first()
+            .map(|a| a.eq_ignore_ascii_case("spl"))
+            .unwrap_or(false)
+    {
         let mut spl_args = args.clone();
         spl_args.remove(0);
         return calibrate::parse_calibrate_spl(&spl_args);
@@ -442,9 +459,10 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
 
     // "ac calibrate mic-curve <path|clear> [input N] [output N]"
     if verb == "calibrate"
-        && args.first().map(|a|
-            a.eq_ignore_ascii_case("mic-curve") || a.eq_ignore_ascii_case("miccurve"))
-        .unwrap_or(false)
+        && args
+            .first()
+            .map(|a| a.eq_ignore_ascii_case("mic-curve") || a.eq_ignore_ascii_case("miccurve"))
+            .unwrap_or(false)
     {
         let mut mc_args = args.clone();
         mc_args.remove(0);
@@ -546,7 +564,7 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
             })
         }
         "gpio" => {
-            let log = args.first().map_or(false, |a| a.eq_ignore_ascii_case("log"));
+            let log = args.first().is_some_and(|a| a.eq_ignore_ascii_case("log"));
             Ok(ParsedCommand {
                 cmd: CommandKind::Gpio { log },
                 show_plot: false,
@@ -558,9 +576,11 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
             }
             let format = match args.get(1).map(String::as_str) {
                 None | Some("html") => ReportFormat::Html,
-                Some("pdf")         => ReportFormat::Pdf,
+                Some("pdf") => ReportFormat::Pdf,
                 Some(other) => {
-                    return Err(format!("report: unknown format {other:?} (expected html or pdf)"));
+                    return Err(format!(
+                        "report: unknown format {other:?} (expected html or pdf)"
+                    ));
                 }
             };
             Ok(ParsedCommand {
@@ -695,46 +715,73 @@ mod tests {
 
     #[test]
     fn test_classify_freq() {
-        assert!(matches!(classify("20hz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 20.0).abs() < 1e-9));
-        assert!(matches!(classify("1khz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 1000.0).abs() < 1e-9));
-        assert!(matches!(classify("20000hz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 20000.0).abs() < 1e-9));
+        assert!(
+            matches!(classify("20hz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 20.0).abs() < 1e-9)
+        );
+        assert!(
+            matches!(classify("1khz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 1000.0).abs() < 1e-9)
+        );
+        assert!(
+            matches!(classify("20000hz"), Ok((TokenKind::Freq, TokenValue::Float(v))) if (v - 20000.0).abs() < 1e-9)
+        );
     }
 
     #[test]
     fn test_classify_level() {
         match classify("0dbu") {
-            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Dbu(v)))) => assert!((v - 0.0).abs() < 1e-9),
+            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Dbu(v)))) => {
+                assert!((v - 0.0).abs() < 1e-9)
+            }
             other => panic!("expected Dbu(0.0), got {other:?}"),
         }
         match classify("-12dbfs") {
-            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Dbfs(v)))) => assert!((v - (-12.0)).abs() < 1e-9),
+            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Dbfs(v)))) => {
+                assert!((v - (-12.0)).abs() < 1e-9)
+            }
             other => panic!("expected Dbfs(-12.0), got {other:?}"),
         }
         match classify("775mvrms") {
-            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Vrms(v)))) => assert!((v - 0.775).abs() < 1e-9),
+            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Vrms(v)))) => {
+                assert!((v - 0.775).abs() < 1e-9)
+            }
             other => panic!("expected Vrms(0.775), got {other:?}"),
         }
         match classify("1vrms") {
-            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Vrms(v)))) => assert!((v - 1.0).abs() < 1e-9),
+            Ok((TokenKind::Level, TokenValue::Level(LevelSpec::Vrms(v)))) => {
+                assert!((v - 1.0).abs() < 1e-9)
+            }
             other => panic!("expected Vrms(1.0), got {other:?}"),
         }
     }
 
     #[test]
     fn test_classify_time() {
-        assert!(matches!(classify("0.2s"), Ok((TokenKind::Time, TokenValue::Float(v))) if (v - 0.2).abs() < 1e-9));
-        assert!(matches!(classify("1s"), Ok((TokenKind::Time, TokenValue::Float(v))) if (v - 1.0).abs() < 1e-9));
+        assert!(
+            matches!(classify("0.2s"), Ok((TokenKind::Time, TokenValue::Float(v))) if (v - 0.2).abs() < 1e-9)
+        );
+        assert!(
+            matches!(classify("1s"), Ok((TokenKind::Time, TokenValue::Float(v))) if (v - 1.0).abs() < 1e-9)
+        );
     }
 
     #[test]
     fn test_classify_ppd() {
-        assert!(matches!(classify("10ppd"), Ok((TokenKind::Ppd, TokenValue::Int(10)))));
+        assert!(matches!(
+            classify("10ppd"),
+            Ok((TokenKind::Ppd, TokenValue::Int(10)))
+        ));
     }
 
     #[test]
     fn test_classify_steps() {
-        assert!(matches!(classify("26steps"), Ok((TokenKind::Steps, TokenValue::Int(26)))));
-        assert!(matches!(classify("1step"), Ok((TokenKind::Steps, TokenValue::Int(1)))));
+        assert!(matches!(
+            classify("26steps"),
+            Ok((TokenKind::Steps, TokenValue::Int(26)))
+        ));
+        assert!(matches!(
+            classify("1step"),
+            Ok((TokenKind::Steps, TokenValue::Int(1)))
+        ));
     }
 
     #[test]
@@ -863,5 +910,4 @@ mod tests {
             other => panic!("expected Vrms(0.245), got {other:?}"),
         }
     }
-
 }

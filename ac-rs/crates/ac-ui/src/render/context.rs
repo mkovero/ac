@@ -75,25 +75,25 @@ impl RenderContext {
         // are wgpu virtual modes that always resolve, so the fallback path
         // only fires for explicit `Mailbox` / `Immediate` / `FifoRelaxed`
         // requests on surfaces that don't expose them (#110).
-        let present_mode =
-            if caps.present_modes.contains(&requested_present_mode)
-                || matches!(
-                    requested_present_mode,
-                    wgpu::PresentMode::AutoVsync | wgpu::PresentMode::AutoNoVsync
-                )
-            {
-                requested_present_mode
-            } else {
-                let fallback = *caps
-                    .present_modes
-                    .first()
-                    .unwrap_or(&wgpu::PresentMode::Fifo);
-                log::warn!(
-                    "present mode {:?} not supported by surface (have {:?}); using {:?}",
-                    requested_present_mode, caps.present_modes, fallback,
-                );
-                fallback
-            };
+        let present_mode = if caps.present_modes.contains(&requested_present_mode)
+            || matches!(
+                requested_present_mode,
+                wgpu::PresentMode::AutoVsync | wgpu::PresentMode::AutoNoVsync
+            ) {
+            requested_present_mode
+        } else {
+            let fallback = *caps
+                .present_modes
+                .first()
+                .unwrap_or(&wgpu::PresentMode::Fifo);
+            log::warn!(
+                "present mode {:?} not supported by surface (have {:?}); using {:?}",
+                requested_present_mode,
+                caps.present_modes,
+                fallback,
+            );
+            fallback
+        };
         let info = adapter.get_info();
         log::info!(
             "wgpu: backend={:?} adapter={:?} driver={:?} driver_info={:?} present_mode={:?} max_latency=3",

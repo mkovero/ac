@@ -25,10 +25,7 @@ pub(super) fn parse_server(args: &[String]) -> Result<ParsedCommand, String> {
         "connections" => CommandKind::ServerConnections,
         _ => {
             if args.len() > 1 {
-                return Err(format!(
-                    "unexpected token(s) after host: {:?}",
-                    &args[1..]
-                ));
+                return Err(format!("unexpected token(s) after host: {:?}", &args[1..]));
             }
             CommandKind::ServerSetHost {
                 host: args[0].clone(),

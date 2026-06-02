@@ -7,9 +7,7 @@ use serde_json::{json, Value};
 use ac_core::measurement::loudness::LoudnessState;
 use ac_core::shared::calibration::Calibration;
 use ac_core::shared::mic_curve_filter::{MicCurveFir, DEFAULT_N_TAPS};
-use ac_core::visualize::time_integration::{
-    EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S,
-};
+use ac_core::visualize::time_integration::{EmaIntegrator, LeqIntegrator, TAU_FAST_S, TAU_SLOW_S};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::audio::make_engine;
@@ -111,10 +109,10 @@ fn emit_scope_frame(
 /// brief discontinuity (one FIR-length of stale history); document'd
 /// in the wire frame's `mic_correction` field flipping `"on"` → `"off"`.
 fn push_loudness_with_optional_fir(
-    loudness:         &mut LoudnessState,
-    fir:              &mut Option<MicCurveFir>,
+    loudness: &mut LoudnessState,
+    fir: &mut Option<MicCurveFir>,
     mic_corr_enabled: bool,
-    samples:          &[f32],
+    samples: &[f32],
 ) {
     if let (true, Some(fir)) = (mic_corr_enabled, fir.as_mut()) {
         let mut filtered = samples.to_vec();
@@ -129,7 +127,11 @@ fn push_loudness_with_optional_fir(
 /// real number otherwise. Keeps the sidecar frame JSON-parseable; `-inf`
 /// would otherwise fail `serde_json`'s finite-value check.
 fn json_finite(v: f64) -> Value {
-    if v.is_finite() { json!(v) } else { Value::Null }
+    if v.is_finite() {
+        json!(v)
+    } else {
+        Value::Null
+    }
 }
 
 // mic-curve helpers live in `super::super::mic` (handlers/mic.rs) since
@@ -151,7 +153,7 @@ impl Integrator {
         match mode {
             "fast" => Some(Self::Ema(EmaIntegrator::new(TAU_FAST_S, n_bands))),
             "slow" => Some(Self::Ema(EmaIntegrator::new(TAU_SLOW_S, n_bands))),
-            "leq"  => Some(Self::Leq(LeqIntegrator::new(n_bands))),
+            "leq" => Some(Self::Leq(LeqIntegrator::new(n_bands))),
             _ => None,
         }
     }
@@ -192,8 +194,8 @@ impl Integrator {
 /// syscall and the PUB socket.)
 struct ReconnectState {
     consecutive_failures: u32,
-    first_failure_at:     Option<std::time::Instant>,
-    last_error_pub_at:    Option<std::time::Instant>,
+    first_failure_at: Option<std::time::Instant>,
+    last_error_pub_at: Option<std::time::Instant>,
 }
 
 const RECONNECT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(30);
@@ -203,15 +205,15 @@ impl ReconnectState {
     fn new() -> Self {
         Self {
             consecutive_failures: 0,
-            first_failure_at:     None,
-            last_error_pub_at:    None,
+            first_failure_at: None,
+            last_error_pub_at: None,
         }
     }
 
     fn note_success(&mut self) {
         self.consecutive_failures = 0;
-        self.first_failure_at     = None;
-        self.last_error_pub_at    = None;
+        self.first_failure_at = None;
+        self.last_error_pub_at = None;
     }
 
     fn note_failure(&mut self, now: std::time::Instant) {
@@ -228,7 +230,7 @@ impl ReconnectState {
             0 | 1 => 0,
             2..=4 => 100,
             5..=9 => 500,
-            _     => 1000,
+            _ => 1000,
         })
     }
 
@@ -258,31 +260,48 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
 
     let defaults = MonitorParams::default();
-    let interval = cmd.get("interval").and_then(Value::as_f64).unwrap_or(defaults.interval);
-    let fft_n = cmd.get("fft_n").and_then(Value::as_u64).unwrap_or(defaults.fft_n as u64) as u32;
+    let interval = cmd
+        .get("interval")
+        .and_then(Value::as_f64)
+        .unwrap_or(defaults.interval);
+    let fft_n = cmd
+        .get("fft_n")
+        .and_then(Value::as_u64)
+        .unwrap_or(defaults.fft_n as u64) as u32;
 
     if !(interval > 0.0 && interval <= 60.0) {
         return json!({"ok": false, "error": "interval must be > 0 and <= 60"});
     }
-    if !fft_n.is_power_of_two() || fft_n < 256 || fft_n > 131_072 {
+    if !fft_n.is_power_of_two() || !(256..=131_072).contains(&fft_n) {
         return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
     }
 
     {
         let mut mp = state.monitor_params.lock().unwrap();
-        *mp = MonitorParams { interval, fft_n, active: true };
+        *mp = MonitorParams {
+            interval,
+            fft_n,
+            active: true,
+        };
     }
     let monitor_params_shared = state.monitor_params.clone();
 
     let cfg = state.cfg.lock().unwrap().clone();
 
-    let channels: Vec<u32> = cmd.get("channels")
+    let channels: Vec<u32> = cmd
+        .get("channels")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_u64).map(|v| v as u32).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_u64)
+                .map(|v| v as u32)
+                .collect()
+        })
         .filter(|v: &Vec<u32>| !v.is_empty())
         .unwrap_or_else(|| vec![cfg.input_channel]);
 
-    let in_ports: Vec<String> = channels.iter()
+    let in_ports: Vec<String> = channels
+        .iter()
         .map(|&ch| {
             let mut cfg_override = cfg.clone();
             cfg_override.input_channel = ch;
@@ -293,7 +312,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let primary_in_port = in_ports.first().cloned().unwrap_or_default();
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
     let out_ch = cfg.output_channel;
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
@@ -309,23 +328,32 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let band_weighting_shared = state.band_weighting.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
-        let cals: Vec<Option<Calibration>> = channels_worker.iter()
+        let cals: Vec<Option<Calibration>> = channels_worker
+            .iter()
             .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
             .collect();
         // Per-channel SPL offset (= 94 - mic_sens_dbfs); `None` when the
         // channel hasn't been pistonphone-calibrated. Cached once at start
         // — re-running `calibrate_spl` requires a `monitor` restart, same
         // as voltage cal changes need today.
-        let spl_offsets: Vec<Option<f64>> =
-            cals.iter().map(|c| c.as_ref().and_then(Calibration::spl_offset_db)).collect();
+        let spl_offsets: Vec<Option<f64>> = cals
+            .iter()
+            .map(|c| c.as_ref().and_then(Calibration::spl_offset_db))
+            .collect();
         // Per-channel mic frequency-response curves (cloned out of `cals`
         // for cheap per-tick lookup). Same staleness caveat as above.
-        let mic_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> =
-            cals.iter().map(|c| c.as_ref().and_then(|c| c.mic_response.clone())).collect();
+        let mic_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> = cals
+            .iter()
+            .map(|c| c.as_ref().and_then(|c| c.mic_response.clone()))
+            .collect();
         let mut eng = make_engine(fake);
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"monitor_spectrum","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"monitor_spectrum","message":format!("{e}")}),
+            );
             return;
         }
         let sr = eng.sample_rate();
@@ -336,7 +364,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // mic-corrected acoustic level.
         let mut loudness_firs: Vec<Option<MicCurveFir>> = mic_curves
             .iter()
-            .map(|c| c.as_ref().map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS)))
+            .map(|c| {
+                c.as_ref()
+                    .map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS))
+            })
             .collect();
         let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
         let mut xruns_total = 0u32;
@@ -350,8 +381,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // #93: per-channel reconnect-failure state for the multi-channel
         // path. Single-channel never touches `eng.reconnect_input()` and
         // these slots stay zeroed.
-        let mut reconnect_states: Vec<ReconnectState> =
-            channels_worker.iter().map(|_| ReconnectState::new()).collect();
+        let mut reconnect_states: Vec<ReconnectState> = channels_worker
+            .iter()
+            .map(|_| ReconnectState::new())
+            .collect();
 
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
@@ -375,8 +408,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // Floor at 16 ms (display refresh) and ceil at 100 ms so a wild
         // user override doesn't break the sliding-ring assumption.
         let ring_cap = (sr as f64 * 0.15).ceil() as usize; // 0.15 s — enough for 20 Hz
-        let mut cwt_rings: Vec<std::collections::VecDeque<f32>> =
-            channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(ring_cap)).collect();
+        let mut cwt_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
+            .iter()
+            .map(|_| std::collections::VecDeque::with_capacity(ring_cap))
+            .collect();
         let mut cwt_log_counter = 0u32;
         // Reused across every CWT tick so morlet_cwt_into doesn't allocate
         // a fresh Vec each call (prev ~3.5% of CPU in madvise / allocator).
@@ -389,17 +424,17 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // worker's lifetime; live tunables can come later.
         let cqt_bpo = ac_core::visualize::cqt::DEFAULT_BPO;
         let cqt_ring_cap = sr as usize; // 1.0 s
-        // CQT tick paced from `monitor_params.interval` like CWT (#109).
-        let cqt_f_min = ac_core::visualize::cqt::DEFAULT_F_MIN
-            .max(ac_core::visualize::cqt::min_supported_f(cqt_ring_cap, sr, cqt_bpo));
+                                        // CQT tick paced from `monitor_params.interval` like CWT (#109).
+        let cqt_f_min = ac_core::visualize::cqt::DEFAULT_F_MIN.max(
+            ac_core::visualize::cqt::min_supported_f(cqt_ring_cap, sr, cqt_bpo),
+        );
         let cqt_freqs = ac_core::visualize::cqt::log_freqs(
             cqt_f_min,
             ac_core::visualize::cqt::default_f_max(sr),
             cqt_bpo,
         );
-        let cqt_kernels = ac_core::visualize::cqt::build_kernels(
-            &cqt_freqs, sr, cqt_bpo, cqt_ring_cap,
-        );
+        let cqt_kernels =
+            ac_core::visualize::cqt::build_kernels(&cqt_freqs, sr, cqt_bpo, cqt_ring_cap);
         let mut cqt_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
             .iter()
             .map(|_| std::collections::VecDeque::with_capacity(cqt_ring_cap))
@@ -413,11 +448,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // grid is log-spaced (so the existing waterfall renders it
         // unchanged), with more bins than the FFT length so reassignment
         // can split closely-spaced peaks the FFT would smear together.
-        let reass_n        = ac_core::visualize::reassigned::DEFAULT_N;
-        let reass_n_out    = ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS;
+        let reass_n = ac_core::visualize::reassigned::DEFAULT_N;
+        let reass_n_out = ac_core::visualize::reassigned::DEFAULT_N_OUT_BINS;
         // Reassigned tick paced from `monitor_params.interval` (#109).
-        let reass_kernels  = ac_core::visualize::reassigned::build_kernels(
-            reass_n, sr, reass_n_out,
+        let reass_kernels = ac_core::visualize::reassigned::build_kernels(
+            reass_n,
+            sr,
+            reass_n_out,
             ac_core::visualize::reassigned::DEFAULT_F_MIN,
             ac_core::visualize::reassigned::default_f_max(sr),
         );
@@ -435,8 +472,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // arrived since the last tick, appends them, trims to the current
         // FFT-N, and analyses the full ring.
         let single_channel = channels_worker.len() == 1;
-        let mut fft_rings: Vec<std::collections::VecDeque<f32>> =
-            channels_worker.iter().map(|_| std::collections::VecDeque::with_capacity(131_072)).collect();
+        let mut fft_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
+            .iter()
+            .map(|_| std::collections::VecDeque::with_capacity(131_072))
+            .collect();
 
         // Per-channel time-integration state for the `fractional_octave_leq`
         // sidecar frame. `None` until the first fractional_octave frame at
@@ -444,10 +483,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // change; Leq also reset on the `leq_reset_request` flag.
         let mut integrators: Vec<Option<Integrator>> =
             (0..channels_worker.len()).map(|_| None).collect();
-        let mut last_frac_ts: Vec<Option<std::time::Instant>> =
-            vec![None; channels_worker.len()];
-        let mut cur_ti_mode: String =
-            time_integration_shared.lock().unwrap().clone();
+        let mut last_frac_ts: Vec<Option<std::time::Instant>> = vec![None; channels_worker.len()];
+        let mut cur_ti_mode: String = time_integration_shared.lock().unwrap().clone();
 
         // Per-channel BS.1770-5 / R128 loudness state — one mono-weighted
         // LoudnessState per monitored channel. Emits a `measurement/loudness`
@@ -478,22 +515,28 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 (mp.interval, mp.fft_n)
             };
             let mode = analysis_mode.lock().unwrap().clone();
-            let is_cwt        = mode == "cwt";
-            let is_cqt        = mode == "cqt";
+            let is_cwt = mode == "cwt";
+            let is_cqt = mode == "cqt";
             let is_reassigned = mode == "reassigned";
 
             // Time-integration bookkeeping — run once per tick.
             let new_ti_mode = time_integration_shared.lock().unwrap().clone();
             if new_ti_mode != cur_ti_mode {
-                for slot in integrators.iter_mut() { *slot = None; }
-                for slot in last_frac_ts.iter_mut() { *slot = None; }
+                for slot in integrators.iter_mut() {
+                    *slot = None;
+                }
+                for slot in last_frac_ts.iter_mut() {
+                    *slot = None;
+                }
                 cur_ti_mode = new_ti_mode;
             }
             if leq_reset_shared.swap(false, Ordering::Relaxed) {
-                for slot in integrators.iter_mut() {
-                    if let Some(i) = slot { i.reset_if_leq(); }
+                for i in integrators.iter_mut().flatten() {
+                    i.reset_if_leq();
                 }
-                for slot in last_frac_ts.iter_mut() { *slot = None; }
+                for slot in last_frac_ts.iter_mut() {
+                    *slot = None;
+                }
             }
             if loudness_reset_shared.swap(false, Ordering::Relaxed) {
                 for l in loudness.iter_mut() {
@@ -521,7 +564,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             }
 
             for (idx, &channel) in channels_worker.iter().enumerate() {
-                if stop.load(Ordering::Relaxed) { break; }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 if channels_worker.len() > 1 {
                     if let Err(e) = eng.reconnect_input(&in_ports_worker[idx]) {
                         let now = std::time::Instant::now();
@@ -532,22 +577,30 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .first_failure_at
                                 .map(|t0| now.duration_since(t0).as_secs())
                                 .unwrap_or(0);
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!(
-                                    "ch{channel} gave up after {outage_s}s of reconnect failures: {e}",
-                                ),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!(
+                                        "ch{channel} gave up after {outage_s}s of reconnect failures: {e}",
+                                    ),
+                                }),
+                            );
                             return;
                         }
                         if st.should_emit_error(now) {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!(
-                                    "reconnect ch{channel} (failures: {}): {e}",
-                                    st.consecutive_failures,
-                                ),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!(
+                                        "reconnect ch{channel} (failures: {}): {e}",
+                                        st.consecutive_failures,
+                                    ),
+                                }),
+                            );
                         }
                         let backoff = st.backoff();
                         if !backoff.is_zero() {
@@ -568,10 +621,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     let samples = match eng.capture_block(cwt_tick) {
                         Ok(s) => s,
                         Err(e) => {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!("capture error on ch{channel}: {e}"),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!("capture error on ch{channel}: {e}"),
+                                }),
+                            );
                             return;
                         }
                     };
@@ -579,12 +636,20 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     // Feed the raw capture into the loudness meter before
                     // any downstream consumers touch it.
                     push_loudness_with_optional_fir(
-                        &mut loudness[idx], &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                        &mut loudness[idx],
+                        &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed),
+                        &samples,
                     );
                     emit_scope_frame(
-                        &pub_tx, channel, n_channels, sr, &samples,
-                        frame_idx, tick_ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &samples,
+                        frame_idx,
+                        tick_ts_ns,
+                        xruns_total,
                     );
                     let ring = &mut cwt_rings[idx];
                     ring.extend(samples.iter());
@@ -638,9 +703,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], mc_tag,
-                        ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &loudness[idx],
+                        spl_offsets[idx],
+                        mc_tag,
+                        ts_ns,
+                        xruns_total,
                     );
                     // Optional fractional-octave aggregation of the same
                     // CWT column: reuses `cwt_mags` / `cwt_freqs` — zero
@@ -663,7 +734,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         let weighting_curve = WeightingCurve::from_tag(&weighting_tag);
                         if let Some(curve) = weighting_curve {
                             if !matches!(curve, WeightingCurve::Z) {
-                                for (level, &fc) in band_levels.iter_mut().zip(band_centres.iter()) {
+                                for (level, &fc) in band_levels.iter_mut().zip(band_centres.iter())
+                                {
                                     *level += curve.db_offset(fc as f64) as f32;
                                 }
                             }
@@ -691,7 +763,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             // Re-init if the band count changed (e.g. live
                             // ioct_bpo toggle) or if this channel hasn't
                             // been primed yet.
-                            if slot.as_ref().map(|i| i.n_bands() != n_bands).unwrap_or(true) {
+                            if slot
+                                .as_ref()
+                                .map(|i| i.n_bands() != n_bands)
+                                .unwrap_or(true)
+                            {
                                 *slot = Integrator::for_mode(&cur_ti_mode, n_bands);
                                 last_frac_ts[idx] = None;
                             }
@@ -702,7 +778,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     .unwrap_or(cur_interval)
                                     .max(1e-6);
                                 last_frac_ts[idx] = Some(now);
-                                let levels_f64: Vec<f64> = band_levels.iter().map(|&v| v as f64).collect();
+                                let levels_f64: Vec<f64> =
+                                    band_levels.iter().map(|&v| v as f64).collect();
                                 let integrated = integ.update(&levels_f64, dt);
                                 let tau_s: Option<f64> = match cur_ti_mode.as_str() {
                                     "fast" => Some(TAU_FAST_S),
@@ -739,21 +816,33 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     let samples = match eng.capture_block(cqt_tick) {
                         Ok(s) => s,
                         Err(e) => {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!("capture error on ch{channel}: {e}"),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!("capture error on ch{channel}: {e}"),
+                                }),
+                            );
                             return;
                         }
                     };
                     xruns_total += eng.xruns();
                     push_loudness_with_optional_fir(
-                        &mut loudness[idx], &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                        &mut loudness[idx],
+                        &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed),
+                        &samples,
                     );
                     emit_scope_frame(
-                        &pub_tx, channel, n_channels, sr, &samples,
-                        frame_idx, tick_ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &samples,
+                        frame_idx,
+                        tick_ts_ns,
+                        xruns_total,
                     );
                     let ring = &mut cqt_rings[idx];
                     ring.extend(samples.iter());
@@ -807,9 +896,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], mc_tag,
-                        ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &loudness[idx],
+                        spl_offsets[idx],
+                        mc_tag,
+                        ts_ns,
+                        xruns_total,
                     );
                     continue;
                 }
@@ -818,21 +913,33 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     let samples = match eng.capture_block(reass_tick) {
                         Ok(s) => s,
                         Err(e) => {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!("capture error on ch{channel}: {e}"),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!("capture error on ch{channel}: {e}"),
+                                }),
+                            );
                             return;
                         }
                     };
                     xruns_total += eng.xruns();
                     push_loudness_with_optional_fir(
-                        &mut loudness[idx], &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed), &samples,
+                        &mut loudness[idx],
+                        &mut loudness_firs[idx],
+                        mic_corr_enabled.load(Ordering::Relaxed),
+                        &samples,
                     );
                     emit_scope_frame(
-                        &pub_tx, channel, n_channels, sr, &samples,
-                        frame_idx, tick_ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &samples,
+                        frame_idx,
+                        tick_ts_ns,
+                        xruns_total,
                     );
                     let ring = &mut reass_rings[idx];
                     ring.extend(samples.iter());
@@ -845,7 +952,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     let t0 = std::time::Instant::now();
                     let buf = ring.make_contiguous();
                     ac_core::visualize::reassigned::reassigned_into(
-                        buf, &reass_kernels, &mut reass_mags,
+                        buf,
+                        &reass_kernels,
+                        &mut reass_mags,
                     );
                     reass_log_counter += 1;
                     if reass_log_counter % 50 == 1 {
@@ -882,9 +991,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     });
                     send_pub(&pub_tx, "data", &frame);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], mc_tag,
-                        ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &loudness[idx],
+                        spl_offsets[idx],
+                        mc_tag,
+                        ts_ns,
+                        xruns_total,
                     );
                     continue;
                 }
@@ -897,18 +1012,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // clearing drain on JACK, falls back to capture_block
                 // elsewhere); multi-channel must use block capture because
                 // `reconnect_input` clears the ring on every switch.
-                let per_ch_budget = (cur_interval / channels_worker.len() as f64)
-                    .max(0.002);
-                let budget_samples = ((per_ch_budget * sr as f64) as usize)
-                    .clamp(128, cur_fft_n as usize);
+                let per_ch_budget = (cur_interval / channels_worker.len() as f64).max(0.002);
+                let budget_samples =
+                    ((per_ch_budget * sr as f64) as usize).clamp(128, cur_fft_n as usize);
                 let new = if single_channel {
                     match eng.capture_available(budget_samples) {
                         Ok(s) => s,
                         Err(e) => {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!("capture error on ch{channel}: {e}"),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!("capture error on ch{channel}: {e}"),
+                                }),
+                            );
                             return;
                         }
                     }
@@ -916,10 +1034,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     match eng.capture_block(budget_samples as f64 / sr as f64) {
                         Ok(s) => s,
                         Err(e) => {
-                            send_pub(&pub_tx, "error", &json!({
-                                "cmd":     "monitor_spectrum",
-                                "message": format!("capture error on ch{channel}: {e}"),
-                            }));
+                            send_pub(
+                                &pub_tx,
+                                "error",
+                                &json!({
+                                    "cmd":     "monitor_spectrum",
+                                    "message": format!("capture error on ch{channel}: {e}"),
+                                }),
+                            );
                             return;
                         }
                     }
@@ -928,12 +1050,20 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // Loudness runs on the raw capture, independent of the
                 // FFT-N sliding ring.
                 push_loudness_with_optional_fir(
-                    &mut loudness[idx], &mut loudness_firs[idx],
-                    mic_corr_enabled.load(Ordering::Relaxed), &new,
+                    &mut loudness[idx],
+                    &mut loudness_firs[idx],
+                    mic_corr_enabled.load(Ordering::Relaxed),
+                    &new,
                 );
                 emit_scope_frame(
-                    &pub_tx, channel, n_channels, sr, &new,
-                    frame_idx, tick_ts_ns, xruns_total,
+                    &pub_tx,
+                    channel,
+                    n_channels,
+                    sr,
+                    &new,
+                    frame_idx,
+                    tick_ts_ns,
+                    xruns_total,
                 );
                 let ring = &mut fft_rings[idx];
                 ring.extend(new.iter());
@@ -946,7 +1076,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 let samples = ring.make_contiguous();
 
                 {
-                    let analyze_result = ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
+                    let analyze_result =
+                        ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
                     let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
                     let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
                     let frame = match analyze_result {
@@ -962,8 +1093,10 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             // UI overlays this on hover readouts so any cursor
                             // position shows dBFS / dBu / dBV without a round-trip.
                             let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
-                                20.0 * (v / (std::f64::consts::SQRT_2
-                                    * ac_core::shared::conversions::get_dbu_ref())).log10()
+                                20.0 * (v
+                                    / (std::f64::consts::SQRT_2
+                                        * ac_core::shared::conversions::get_dbu_ref()))
+                                .log10()
                             });
                             // Parabolic-interpolated peaks on the linear FFT
                             // (before column aggregation), so the cursor can
@@ -976,21 +1109,22 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
                                 .collect();
                             let peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
-                                &r.spectrum, &raw_freqs, 64,
+                                &r.spectrum,
+                                &raw_freqs,
+                                64,
                                 r.fundamental_dbfs as f32 - 80.0,
                             );
-                            let peaks_json: Vec<serde_json::Value> = peaks
-                                .iter()
-                                .map(|p| json!([p.freq_hz, p.dbfs]))
-                                .collect();
+                            let peaks_json: Vec<serde_json::Value> =
+                                peaks.iter().map(|p| json!([p.freq_hz, p.dbfs])).collect();
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                &r.spectrum,
-                                sr_f,
-                                20.0,
-                                (sr_f / 2.0).max(21.0),
-                                ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                            );
+                            let (mut spec, freqs) =
+                                ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                                    &r.spectrum,
+                                    sr_f,
+                                    20.0,
+                                    (sr_f / 2.0).max(21.0),
+                                    ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+                                );
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
@@ -1020,18 +1154,22 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         Err(_) => {
                             let cal = cals[idx].as_ref();
                             let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
-                                20.0 * (v / (std::f64::consts::SQRT_2
-                                    * ac_core::shared::conversions::get_dbu_ref())).log10()
+                                20.0 * (v
+                                    / (std::f64::consts::SQRT_2
+                                        * ac_core::shared::conversions::get_dbu_ref()))
+                                .log10()
                             });
-                            let (spec, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
+                            let (spec, _) =
+                                ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                &spec,
-                                sr_f,
-                                20.0,
-                                (sr_f / 2.0).max(21.0),
-                                ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                            );
+                            let (mut spec, freqs) =
+                                ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                                    &spec,
+                                    sr_f,
+                                    20.0,
+                                    (sr_f / 2.0).max(21.0),
+                                    ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+                                );
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
@@ -1058,9 +1196,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         .map(|d| d.as_nanos() as u64)
                         .unwrap_or(0);
                     emit_loudness_frame(
-                        &pub_tx, channel, n_channels, sr,
-                        &loudness[idx], spl_offsets[idx], mc_tag,
-                        ts_ns, xruns_total,
+                        &pub_tx,
+                        channel,
+                        n_channels,
+                        sr,
+                        &loudness[idx],
+                        spl_offsets[idx],
+                        mc_tag,
+                        ts_ns,
+                        xruns_total,
                     );
                 }
             }
@@ -1070,9 +1214,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             if !is_cwt && !is_cqt && !is_reassigned {
                 let elapsed = tick_start.elapsed().as_secs_f64();
                 if elapsed < cur_interval {
-                    std::thread::sleep(std::time::Duration::from_secs_f64(
-                        cur_interval - elapsed,
-                    ));
+                    std::thread::sleep(std::time::Duration::from_secs_f64(cur_interval - elapsed));
                 }
             }
         }
@@ -1118,12 +1260,20 @@ mod reconnect_state_tests {
 
         st.note_failure(now);
         assert_eq!(st.backoff(), Duration::from_millis(500), "5th failure");
-        for _ in 0..4 { st.note_failure(now); }
+        for _ in 0..4 {
+            st.note_failure(now);
+        }
         assert_eq!(st.backoff(), Duration::from_millis(500), "9th failure");
 
         st.note_failure(now);
-        assert_eq!(st.backoff(), Duration::from_millis(1000), "10th failure caps at 1s");
-        for _ in 0..50 { st.note_failure(now); }
+        assert_eq!(
+            st.backoff(),
+            Duration::from_millis(1000),
+            "10th failure caps at 1s"
+        );
+        for _ in 0..50 {
+            st.note_failure(now);
+        }
         assert_eq!(st.backoff(), Duration::from_millis(1000), "stays capped");
     }
 
@@ -1131,7 +1281,9 @@ mod reconnect_state_tests {
     fn note_success_resets_state() {
         let mut st = ReconnectState::new();
         let now = Instant::now();
-        for _ in 0..7 { st.note_failure(now); }
+        for _ in 0..7 {
+            st.note_failure(now);
+        }
         let _ = st.should_emit_error(now);
         assert!(st.first_failure_at.is_some());
         assert!(st.last_error_pub_at.is_some());
@@ -1161,7 +1313,10 @@ mod reconnect_state_tests {
 
         let t_3 = t_2 + Duration::from_millis(900);
         st.note_failure(t_3);
-        assert!(!st.should_emit_error(t_3), "0.9 s after last emit: suppressed");
+        assert!(
+            !st.should_emit_error(t_3),
+            "0.9 s after last emit: suppressed"
+        );
     }
 
     #[test]

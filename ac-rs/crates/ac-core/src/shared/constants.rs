@@ -21,4 +21,4 @@ pub const DBU_REF_EXACT: f64 = 0.774_596_67;
 
 /// Octave frequency ratio, IEC 61260-1:2014 §5.2.1.
 /// G = 10^(3/10) ≈ 1.995262315...
-pub const G_OCTAVE: f64 = 1.995_262_314_968_880;
+pub const G_OCTAVE: f64 = 1.995_262_314_968_88;

@@ -27,10 +27,7 @@ fn resolve_channels_or_default(
     }
 }
 
-pub fn run(
-    cmd: &CommandKind,
-    cfg: &ac_core::config::Config,
-) {
+pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config) {
     let channels = match cmd {
         CommandKind::Monitor { channels, .. } => channels.clone(),
         _ => unreachable!(),
@@ -44,11 +41,7 @@ pub fn run(
 /// `cwt` via REQ/REP, then launch the existing monitor UI (which
 /// sends `monitor_spectrum` on its own). Matches the multi-step
 /// pattern in `commands/calibrate.rs`.
-pub fn run_cwt(
-    cmd: &CommandKind,
-    cfg: &ac_core::config::Config,
-    client: &mut AcClient,
-) {
+pub fn run_cwt(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let channels = match cmd {
         CommandKind::MonitorCwt { channels, .. } => channels.clone(),
         _ => unreachable!(),
@@ -66,11 +59,7 @@ pub fn run_cwt(
 
 /// `ac monitor cqt` — symmetric to `run_cwt`. Switches the server
 /// analysis mode to `cqt`, then launches the monitor UI.
-pub fn run_cqt(
-    cmd: &CommandKind,
-    cfg: &ac_core::config::Config,
-    client: &mut AcClient,
-) {
+pub fn run_cqt(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let channels = match cmd {
         CommandKind::MonitorCqt { channels, .. } => channels.clone(),
         _ => unreachable!(),
@@ -88,11 +77,7 @@ pub fn run_cqt(
 
 /// `ac monitor reassigned` — symmetric to `run_cwt`/`run_cqt`. Switches
 /// the server analysis mode to `reassigned`, then launches the monitor UI.
-pub fn run_reassigned(
-    cmd: &CommandKind,
-    cfg: &ac_core::config::Config,
-    client: &mut AcClient,
-) {
+pub fn run_reassigned(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let channels = match cmd {
         CommandKind::MonitorReassigned { channels, .. } => channels.clone(),
         _ => unreachable!(),
@@ -107,4 +92,3 @@ pub fn run_reassigned(
 
     super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
 }
-

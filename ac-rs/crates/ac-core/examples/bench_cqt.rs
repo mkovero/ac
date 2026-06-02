@@ -5,12 +5,12 @@ use std::time::Instant;
 
 fn main() {
     let sr = 48_000u32;
-    let buf_len = sr as usize;                                              // 1.0 s ring
+    let buf_len = sr as usize; // 1.0 s ring
     let samples: Vec<f32> = (0..buf_len).map(|i| (i as f32 * 0.01).sin()).collect();
     let f_min = DEFAULT_F_MIN.max(min_supported_f(buf_len, sr, DEFAULT_BPO));
     let freqs = log_freqs(f_min, default_f_max(sr), DEFAULT_BPO);
     let kernels = build_kernels(&freqs, sr, DEFAULT_BPO, buf_len);
-    let _ = cqt(&samples, &kernels);                                        // warm scratch
+    let _ = cqt(&samples, &kernels); // warm scratch
     let iters: usize = std::env::var("AC_BENCH_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())

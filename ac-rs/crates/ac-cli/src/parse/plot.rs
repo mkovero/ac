@@ -80,7 +80,13 @@ mod tests {
         let p = parse(&args("plot 20hz 20khz 0dbu 20ppd show")).unwrap();
         assert!(p.show_plot);
         match p.cmd {
-            CommandKind::Plot { start, stop, level, ppd, bpo } => {
+            CommandKind::Plot {
+                start,
+                stop,
+                level,
+                ppd,
+                bpo,
+            } => {
                 assert!((start.unwrap() - 20.0).abs() < 1e-9);
                 assert!((stop.unwrap() - 20000.0).abs() < 1e-9);
                 assert!(matches!(level, LevelSpec::Dbu(v) if v.abs() < 1e-9));
@@ -123,7 +129,12 @@ mod tests {
         let p = parse(&args("plot level -20dbu 6dbu 1khz 26steps show")).unwrap();
         assert!(p.show_plot);
         match p.cmd {
-            CommandKind::PlotLevel { start, stop, freq, steps } => {
+            CommandKind::PlotLevel {
+                start,
+                stop,
+                freq,
+                steps,
+            } => {
                 assert!(matches!(start, LevelSpec::Dbu(v) if (v - (-20.0)).abs() < 1e-9));
                 assert!(matches!(stop, LevelSpec::Dbu(v) if (v - 6.0).abs() < 1e-9));
                 assert!((freq - 1000.0).abs() < 1e-9);

@@ -7,39 +7,47 @@ use serde_json::{json, Value};
 
 use ac_core::measurement::report::{
     IntegrationParams, MeasurementData, MeasurementMethod, MeasurementReport, ProcessingChain,
-    SCHEMA_VERSION, StimulusParams,
+    StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
-    citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep, log_sweep,
-    SweepParams,
+    citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
 };
 use ac_core::shared::calibration::Calibration;
 
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker};
+use super::super::{
+    busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker,
+};
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_level");
-    let freq_hz    = match cmd.get("freq_hz").and_then(Value::as_f64) {
+    let freq_hz = match cmd.get("freq_hz").and_then(Value::as_f64) {
         Some(v) => v,
-        None    => return json!({"ok": false, "error": "missing freq_hz"}),
+        None => return json!({"ok": false, "error": "missing freq_hz"}),
     };
-    let start_dbfs = cmd.get("start_dbfs").and_then(Value::as_f64).unwrap_or(-20.0);
-    let stop_dbfs  = cmd.get("stop_dbfs") .and_then(Value::as_f64).unwrap_or(0.0);
-    let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
-    let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = resolve_output(&cfg, state);
+    let start_dbfs = cmd
+        .get("start_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-20.0);
+    let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
+    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_port = resolve_output(&cfg, state);
     let out_port_reply = out_port.clone();
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
 
     let worker = spawn_worker(state, "sweep_level", move |stop| {
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], None) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"sweep_level","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"sweep_level","message":format!("{e}")}),
+            );
             return;
         }
         let start_amp = ac_core::shared::generator::dbfs_to_amplitude(start_dbfs);
@@ -47,7 +55,9 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         let t0 = std::time::Instant::now();
         while !stop.load(Ordering::Relaxed) {
             let elapsed = t0.elapsed().as_secs_f64();
-            if elapsed >= duration { break; }
+            if elapsed >= duration {
+                break;
+            }
             let t = elapsed / duration;
             let db = start_dbfs + (stop_dbfs - start_dbfs) * t;
             eng.set_tone(freq_hz, ac_core::shared::generator::dbfs_to_amplitude(db));
@@ -67,29 +77,41 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_frequency");
-    let start_hz   = cmd.get("start_hz")  .and_then(Value::as_f64).unwrap_or(20.0);
-    let stop_hz    = cmd.get("stop_hz")   .and_then(Value::as_f64).unwrap_or(20_000.0);
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
-    let duration   = cmd.get("duration")  .and_then(Value::as_f64).unwrap_or(1.0);
-    let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = resolve_output(&cfg, state);
+    let start_hz = cmd.get("start_hz").and_then(Value::as_f64).unwrap_or(20.0);
+    let stop_hz = cmd
+        .get("stop_hz")
+        .and_then(Value::as_f64)
+        .unwrap_or(20_000.0);
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-10.0);
+    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_port = resolve_output(&cfg, state);
     let out_port_reply = out_port.clone();
-    let amplitude  = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
+    let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
 
     let worker = spawn_worker(state, "sweep_frequency", move |stop| {
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], None) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"sweep_frequency","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"sweep_frequency","message":format!("{e}")}),
+            );
             return;
         }
         eng.set_tone(start_hz, amplitude);
         let t0 = std::time::Instant::now();
         while !stop.load(Ordering::Relaxed) {
             let elapsed = t0.elapsed().as_secs_f64();
-            if elapsed >= duration { break; }
+            if elapsed >= duration {
+                break;
+            }
             let t = elapsed / duration;
             let freq = start_hz * (stop_hz / start_hz).powf(t);
             eng.set_tone(freq, amplitude);
@@ -119,23 +141,29 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
 /// CPAL buffer-playback is tracked as a follow-up. See ARCHITECTURE.md.
 pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_ir");
-    let f1_hz      = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
-    let f2_hz      = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
-    let duration   = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-6.0);
-    let tail_s     = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
+    let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
+    let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
+    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-6.0);
+    let tail_s = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
     let n_harmonics = cmd.get("n_harmonics").and_then(Value::as_u64).unwrap_or(5) as usize;
-    let window_len = cmd.get("window_len").and_then(Value::as_u64).unwrap_or(4096) as usize;
+    let window_len = cmd
+        .get("window_len")
+        .and_then(Value::as_u64)
+        .unwrap_or(4096) as usize;
 
-    let cfg        = state.cfg.lock().unwrap().clone();
-    let out_port   = resolve_output(&cfg, state);
-    let in_port    = resolve_input(&cfg, state);
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_port = resolve_output(&cfg, state);
+    let in_port = resolve_input(&cfg, state);
     let out_port_reply = out_port.clone();
-    let out_ch     = cfg.output_channel;
-    let in_ch      = cfg.input_channel;
+    let out_ch = cfg.output_channel;
+    let in_ch = cfg.input_channel;
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
 
     let worker = spawn_worker(state, "sweep_ir", move |_stop| {
         // Calibration snapshot — the IR itself is NOT yet mic-curve-
@@ -146,7 +174,11 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
 
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"sweep_ir","message":format!("{e}")}),
+            );
             return;
         }
         let sr = eng.sample_rate();
@@ -159,7 +191,11 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         let sweep = match log_sweep(&params) {
             Ok(s) => s,
             Err(e) => {
-                send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({"cmd":"sweep_ir","message":format!("{e}")}),
+                );
                 return;
             }
         };
@@ -169,7 +205,11 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         let captured = match eng.play_and_capture(&scaled, tail_s) {
             Ok(c) => c,
             Err(e) => {
-                send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({"cmd":"sweep_ir","message":format!("{e}")}),
+                );
                 return;
             }
         };
@@ -177,7 +217,11 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         let inv = match inverse_sweep(&params) {
             Ok(v) => v,
             Err(e) => {
-                send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({"cmd":"sweep_ir","message":format!("{e}")}),
+                );
                 return;
             }
         };
@@ -192,7 +236,11 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         let irs = match extract_irs(&full, &params, n_harmonics.max(1), window_len) {
             Ok(r) => r,
             Err(e) => {
-                send_pub(&pub_tx, "error", &json!({"cmd":"sweep_ir","message":format!("{e}")}));
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({"cmd":"sweep_ir","message":format!("{e}")}),
+                );
                 return;
             }
         };
@@ -205,10 +253,14 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
             linear_ir: irs.linear.clone(),
             harmonics: irs.harmonics.clone(),
         };
-        send_pub(&pub_tx, "measurement/impulse_response", &json!({
-            "cmd": "sweep_ir",
-            "data": &data,
-        }));
+        send_pub(
+            &pub_tx,
+            "measurement/impulse_response",
+            &json!({
+                "cmd": "sweep_ir",
+                "data": &data,
+            }),
+        );
 
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
@@ -243,10 +295,14 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
                 ..Default::default()
             },
         };
-        send_pub(&pub_tx, "measurement/report", &json!({
-            "cmd": "sweep_ir",
-            "report": &report,
-        }));
+        send_pub(
+            &pub_tx,
+            "measurement/report",
+            &json!({
+                "cmd": "sweep_ir",
+                "report": &report,
+            }),
+        );
 
         eng.stop();
         send_pub(&pub_tx, "done", &json!({"cmd":"sweep_ir"}));

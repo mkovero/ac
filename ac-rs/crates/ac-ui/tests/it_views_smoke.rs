@@ -84,9 +84,7 @@ fn assert_clean_run(view: &str, channels: u32, out: &std::process::Output) {
 
 fn parse_benchmark_frames(stdout: &str) -> Option<usize> {
     // Format: "ac-ui benchmark: 1.5 s, NNNN frames\n  fps mean ..."
-    let line = stdout
-        .lines()
-        .find(|l| l.contains("ac-ui benchmark:"))?;
+    let line = stdout.lines().find(|l| l.contains("ac-ui benchmark:"))?;
     let frames = line.split_whitespace().rev().nth(1)?;
     frames.parse().ok()
 }

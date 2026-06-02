@@ -299,8 +299,10 @@ fn design_butter_bandpass(fs: f64, fl: f64, fh: f64) -> Vec<Biquad> {
     let z0_inv2 = z0_inv * z0_inv;
     let mut gain = C64::new(1.0, 0.0);
     for bq in &sos {
-        let num = C64::new(bq.b0, 0.0) + C64::new(bq.b1, 0.0) * z0_inv + C64::new(bq.b2, 0.0) * z0_inv2;
-        let den = C64::new(1.0, 0.0) + C64::new(bq.a1, 0.0) * z0_inv + C64::new(bq.a2, 0.0) * z0_inv2;
+        let num =
+            C64::new(bq.b0, 0.0) + C64::new(bq.b1, 0.0) * z0_inv + C64::new(bq.b2, 0.0) * z0_inv2;
+        let den =
+            C64::new(1.0, 0.0) + C64::new(bq.a1, 0.0) * z0_inv + C64::new(bq.a2, 0.0) * z0_inv2;
         gain *= num / den;
     }
     let mag = gain.norm();
@@ -323,8 +325,8 @@ fn design_butter_bandpass(fs: f64, fl: f64, fh: f64) -> Vec<Biquad> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng};
     use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     const SR: u32 = 48_000;
 
@@ -416,7 +418,7 @@ mod tests {
             nearest(10_000.0)
         );
         assert!(
-            (nearest(2_000.0) - 1995.262_315).abs() < 1e-3,
+            (nearest(2_000.0) - 1_995.262_315).abs() < 1e-3,
             "2 kHz slot centre = {} (expected ≈1995.262; base-2 would read 2000)",
             nearest(2_000.0)
         );
@@ -436,7 +438,13 @@ mod tests {
             let probe_idxs: Vec<usize> = if n_centres <= 4 {
                 (0..n_centres).collect()
             } else {
-                vec![1, n_centres / 3, n_centres / 2, 2 * n_centres / 3, n_centres - 2]
+                vec![
+                    1,
+                    n_centres / 3,
+                    n_centres / 2,
+                    2 * n_centres / 3,
+                    n_centres - 2,
+                ]
             };
             for &idx in &probe_idxs {
                 let fc = centres[idx];
@@ -590,7 +598,7 @@ mod tests {
         let duration_s = duration_for_bpo(bpo);
         let n = (duration_s * SR as f64) as usize;
         let amp = 1.0; // 0 dBFS peak
-        // Sample at fractional offsets within the passband.
+                       // Sample at fractional offsets within the passband.
         for k in -1..=1 {
             let f = fc * G_OCTAVE.powf(k as f64 / (8.0 * bpo as f64));
             let x = sine(f, amp, n);
