@@ -44,6 +44,20 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
     println!("  CSV  -> {}", path.display());
 }
 
+/// THD/THD+N percent expressed as dB relative to the fundamental.
+///
+/// `dB = 20·log10(pct/100)`. Percent compresses the interesting region near
+/// the floor; the dB-re-fundamental form is linear in the floor and is the
+/// meaningful engineering figure. Returns `-` for a non-positive percent (no
+/// valid measurement), where the dB form is undefined.
+fn thd_db_re_fund(pct: f64) -> String {
+    if pct > 0.0 {
+        format!("{:.1}", 20.0 * (pct / 100.0).log10())
+    } else {
+        "-".to_string()
+    }
+}
+
 pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal: bool) {
     if results.is_empty() {
         return;
@@ -99,14 +113,23 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
     if ac_n > 0 {
         println!("  AC-coupled pts:   {ac_n}  (excluded -- coupling cap rolloff)");
     }
-    println!("  Worst THD:        {worst_thd:.4}%");
-    println!("  Worst THD+N:      {worst_thdn:.4}%");
+    println!(
+        "  Worst THD:        {worst_thd:.4} %    {} dB re fund",
+        thd_db_re_fund(worst_thd)
+    );
+    println!(
+        "  Worst THD+N:      {worst_thdn:.4} %    {} dB re fund",
+        thd_db_re_fund(worst_thdn)
+    );
     let note = if clipped_n > 0 || ac_n > 0 {
         "  (valid points only)"
     } else {
         ""
     };
-    println!("  Average THD:      {avg_thd:.4}%{note}");
+    println!(
+        "  Average THD:      {avg_thd:.4} %    {} dB re fund{note}",
+        thd_db_re_fund(avg_thd)
+    );
 
     if have_cal {
         let lo = results.first().and_then(|r| r.get("out_vrms")).and_then(|v| v.as_f64());
@@ -225,12 +248,34 @@ pub fn print_freq_row(frame: &serde_json::Value) {
         let gain_s = frame
             .get("gain_db")
             .and_then(|v| v.as_f64())
-            .map(|v| format!("{v:+.2}dB"))
+            .map(|v| format!("{v:+.2} dB"))
             .unwrap_or_else(|| "  -".into());
         println!(
             "  {freq:>7.0} Hz  {out_s:>12}  {odbu:>8}  {in_s:>12}  {idbu:>8}  {gain_s:>8}  {thd:>9.4}  {thdn:>9.4}{flag}"
         );
     } else {
         println!("  {freq:>7.0} Hz  {thd:>9.4}  {thdn:>9.4}{flag}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thd_db_re_fund_matches_formula() {
+        // 100% THD is the fundamental itself -> 0 dB re fund.
+        assert_eq!(thd_db_re_fund(100.0), "0.0");
+        // 1% -> 20*log10(0.01) = -40 dB.
+        assert_eq!(thd_db_re_fund(1.0), "-40.0");
+        // Spec example: 0.0042% -> -87.5 dB re fund (1 decimal).
+        assert_eq!(thd_db_re_fund(0.0042), "-87.5");
+    }
+
+    #[test]
+    fn thd_db_re_fund_dash_for_non_positive() {
+        // dB form is undefined for a non-positive percent (no valid point).
+        assert_eq!(thd_db_re_fund(0.0), "-");
+        assert_eq!(thd_db_re_fund(-1.0), "-");
     }
 }
