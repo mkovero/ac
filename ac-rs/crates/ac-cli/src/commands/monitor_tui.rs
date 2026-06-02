@@ -98,9 +98,9 @@ fn format_channel_row(s: &ChannelStats) -> String {
         "      -- Hz".to_string()
     };
     let floor = if s.floor_db.is_finite() {
-        format!("{:>5.0} dB", s.floor_db)
+        format!("{:>7.1} dBFS", s.floor_db)
     } else {
-        "   -- dB".to_string()
+        "     -- dBFS".to_string()
     };
     format!(
         "CH{:<2}   peak {} @ {}   floor {}",
@@ -313,7 +313,7 @@ mod tests {
         assert!(out.contains("CH0"));
         assert!(out.contains("-3.0 dBFS"));
         assert!(out.contains("1000 Hz"));
-        assert!(out.contains("-85 dB"));
+        assert!(out.contains("-85.0 dBFS"));
         assert!(out.contains("fft N=8192"));
         assert!(out.contains("interval=100 ms"));
         assert!(out.contains("xruns=0"));
