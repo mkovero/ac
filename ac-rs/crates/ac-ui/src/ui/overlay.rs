@@ -219,6 +219,11 @@ pub(crate) fn channel_label(idx: usize, n_real: usize, virtual_pairs: &[Transfer
 pub struct MonitorParamsInfo {
     pub interval_ms: u32,
     pub fft_n: u32,
+    /// Dual-resolution LF band (#142). `Some` only when the LF path is
+    /// active (live N below the daemon's LF N); drives the second readout
+    /// line. `None` → single-line fallback (today's exact output).
+    pub lf_fft_n: Option<u32>,
+    pub crossover_hz: Option<f32>,
 }
 
 // Help overlay — RC-9 trim, ≤30 lines, organized by view family. The
@@ -432,18 +437,27 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         let mut stack_row: f32 = 2.0;
         if matches!(input.config.view_mode, ViewMode::Spectrum) {
             if let Some(mp) = input.monitor_params {
-                let mon_line = super::fmt::monitor_knobs_readout(mp.interval_ms, mp.fft_n, sr);
-                painter.text(
-                    Pos2::new(
-                        screen.right() - 8.0,
-                        screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
-                    ),
-                    Align2::RIGHT_TOP,
-                    mon_line,
-                    FontId::monospace(theme::STATUS_PX),
-                    text_color,
+                // One or two lines (#142): line 2 is the LF band when active.
+                let mon_text = super::fmt::monitor_knobs_readout(
+                    mp.interval_ms,
+                    mp.fft_n,
+                    sr,
+                    mp.lf_fft_n,
+                    mp.crossover_hz,
                 );
-                stack_row += 1.0;
+                for mon_line in mon_text.lines() {
+                    painter.text(
+                        Pos2::new(
+                            screen.right() - 8.0,
+                            screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
+                        ),
+                        Align2::RIGHT_TOP,
+                        mon_line,
+                        FontId::monospace(theme::STATUS_PX),
+                        text_color,
+                    );
+                    stack_row += 1.0;
+                }
             }
         }
         if let Some(badge) = input.tier_badge.as_deref() {
