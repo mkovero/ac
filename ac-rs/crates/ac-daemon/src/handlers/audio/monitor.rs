@@ -276,11 +276,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         return json!({"ok": false, "error": "fft_n must be power of 2 in [256, 131072]"});
     }
 
+    let lf_fft_n = defaults.lf_fft_n;
+    let crossover_hz = defaults.crossover_hz;
     {
         let mut mp = state.monitor_params.lock().unwrap();
         *mp = MonitorParams {
             interval,
             fft_n,
+            lf_fft_n,
+            crossover_hz,
             active: true,
         };
     }
@@ -477,6 +481,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             .map(|_| std::collections::VecDeque::with_capacity(131_072))
             .collect();
 
+        // Dual-resolution low-frequency path (#142). A second, longer ring
+        // feeds an `lf_fft_n`-point FFT used only below `crossover_hz`; the
+        // short `fft_rings` above keep driving the high band at the live
+        // refresh rate. The LF spectrum is recomputed at most once per LF
+        // block duration (`lf_fft_n / sr`) — LF content is slow-moving, so
+        // this caps the extra CPU instead of paying a long FFT every tick.
+        // `lf_spec_cache` holds the most recent LF linear half-spectrum per
+        // channel (`None` until its ring first fills).
+        let mut lf_fft_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
+            .iter()
+            .map(|_| std::collections::VecDeque::with_capacity(131_072))
+            .collect();
+        let mut lf_spec_cache: Vec<Option<Vec<f64>>> = vec![None; channels_worker.len()];
+        let mut lf_ticks_since_recompute: Vec<u32> = vec![u32::MAX; channels_worker.len()];
+
         // Per-channel time-integration state for the `fractional_octave_leq`
         // sidecar frame. `None` until the first fractional_octave frame at
         // the current mode + band count arrives. Reset on mode/band-count
@@ -510,10 +529,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            let (cur_interval, cur_fft_n) = {
+            let (cur_interval, cur_fft_n, cur_lf_fft_n, cur_crossover_hz) = {
                 let mp = monitor_params_shared.lock().unwrap();
-                (mp.interval, mp.fft_n)
+                (mp.interval, mp.fft_n, mp.lf_fft_n, mp.crossover_hz)
             };
+            // LF band is only worth running when its FFT is genuinely longer
+            // than the live one — otherwise the live spectrum already has
+            // equal-or-finer Δf everywhere.
+            let lf_band_enabled = cur_lf_fft_n > cur_fft_n;
+            // Recompute the LF FFT at most once per LF block duration.
+            let lf_recompute_every = ((cur_lf_fft_n as f64 / sr as f64) / cur_interval.max(1e-6))
+                .round()
+                .clamp(1.0, 4096.0) as u32;
             let mode = analysis_mode.lock().unwrap().clone();
             let is_cwt = mode == "cwt";
             let is_cqt = mode == "cqt";
@@ -1075,6 +1102,41 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
                 let samples = ring.make_contiguous();
 
+                // Dual-resolution LF path (#142): keep a longer ring fed by the
+                // same capture and recompute its long-N spectrum on the LF
+                // cadence. The cached LF half-spectrum is merged below the
+                // crossover; above it the live `r.spectrum` is untouched.
+                if lf_band_enabled {
+                    let lf_ring = &mut lf_fft_rings[idx];
+                    lf_ring.extend(new.iter());
+                    while lf_ring.len() > cur_lf_fft_n as usize {
+                        lf_ring.pop_front();
+                    }
+                    if lf_ring.len() >= cur_lf_fft_n as usize {
+                        let counter = &mut lf_ticks_since_recompute[idx];
+                        if *counter >= lf_recompute_every {
+                            let lf_buf = lf_ring.make_contiguous();
+                            let (lf_spec, _) =
+                                ac_core::visualize::spectrum::spectrum_only(lf_buf, sr);
+                            lf_spec_cache[idx] = Some(lf_spec);
+                            *counter = 0;
+                        } else {
+                            *counter = counter.saturating_add(1);
+                        }
+                    }
+                } else if !lf_fft_rings[idx].is_empty() || lf_spec_cache[idx].is_some() {
+                    // LF band disabled (live N caught up to LF N) — drop stale
+                    // state so a later re-enable rebuilds from fresh capture.
+                    lf_fft_rings[idx].clear();
+                    lf_spec_cache[idx] = None;
+                    lf_ticks_since_recompute[idx] = u32::MAX;
+                }
+                let lf_spec_for_merge: Option<&[f64]> = if lf_band_enabled {
+                    lf_spec_cache[idx].as_deref()
+                } else {
+                    None
+                };
+
                 {
                     let analyze_result =
                         ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
@@ -1108,23 +1170,61 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let raw_freqs: Vec<f64> = (0..raw_n)
                                 .map(|k| k as f64 * sr as f64 / (2.0 * (raw_n - 1).max(1) as f64))
                                 .collect();
-                            let peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
+                            let peak_thr = r.fundamental_dbfs as f32 - 80.0;
+                            let mut peaks = ac_core::visualize::spectrum::find_interpolated_peaks(
                                 &r.spectrum,
                                 &raw_freqs,
                                 64,
-                                r.fundamental_dbfs as f32 - 80.0,
+                                peak_thr,
                             );
+                            // Below the crossover the long-N LF spectrum gives
+                            // finer peak positions; splice LF peaks under the
+                            // crossover with HF peaks above it (#142).
+                            if let Some(lf) = lf_spec_for_merge {
+                                let cx = cur_crossover_hz;
+                                let lf_n = lf.len();
+                                let lf_freqs: Vec<f64> = (0..lf_n)
+                                    .map(|k| {
+                                        k as f64 * sr as f64 / (2.0 * (lf_n - 1).max(1) as f64)
+                                    })
+                                    .collect();
+                                let mut lf_peaks =
+                                    ac_core::visualize::spectrum::find_interpolated_peaks(
+                                        lf, &lf_freqs, 64, peak_thr,
+                                    );
+                                peaks.retain(|p| p.freq_hz >= cx);
+                                lf_peaks.retain(|p| p.freq_hz < cx);
+                                peaks.append(&mut lf_peaks);
+                                peaks.sort_by(|a, b| {
+                                    b.dbfs
+                                        .partial_cmp(&a.dbfs)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                peaks.truncate(64);
+                            }
                             let peaks_json: Vec<serde_json::Value> =
                                 peaks.iter().map(|p| json!([p.freq_hz, p.dbfs])).collect();
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) =
-                                ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                            let (mut spec, freqs) = match lf_spec_for_merge {
+                                Some(lf) => {
+                                    ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
+                                        lf,
+                                        &r.spectrum,
+                                        sr_f,
+                                        cur_crossover_hz as f64,
+                                        20.0,
+                                        (sr_f / 2.0).max(21.0),
+                                        ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+                                    )
+                                }
+                                None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                     &r.spectrum,
                                     sr_f,
                                     20.0,
                                     (sr_f / 2.0).max(21.0),
                                     ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                );
+                                ),
+                            };
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
@@ -1162,14 +1262,26 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let (spec, _) =
                                 ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) =
-                                ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                            let (mut spec, freqs) = match lf_spec_for_merge {
+                                Some(lf) => {
+                                    ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
+                                        lf,
+                                        &spec,
+                                        sr_f,
+                                        cur_crossover_hz as f64,
+                                        20.0,
+                                        (sr_f / 2.0).max(21.0),
+                                        ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+                                    )
+                                }
+                                None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
                                     &spec,
                                     sr_f,
                                     20.0,
                                     (sr_f / 2.0).max(21.0),
                                     ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                );
+                                ),
+                            };
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
@@ -1232,9 +1344,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     }
     json!({
         "ok": true,
-        "in_port":   primary_in_port,
-        "in_ports":  in_ports,
-        "channels":  channels,
+        "in_port":      primary_in_port,
+        "in_ports":     in_ports,
+        "channels":     channels,
+        "lf_fft_n":     lf_fft_n,
+        "crossover_hz": crossover_hz,
     })
 }
 

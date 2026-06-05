@@ -252,6 +252,12 @@ pub struct App {
     /// and pushed to the daemon via `set_monitor_params`.
     monitor_interval_ms: u32,
     monitor_fft_n: u32,
+    /// Dual-resolution LF band params learned from the daemon's
+    /// `monitor_spectrum` reply (#142). Daemon-owned constants — the UI never
+    /// hardcodes them, only labels with them. `None` until the first reply.
+    /// The LF band is active only while `monitor_fft_n < monitor_lf_fft_n`.
+    monitor_lf_fft_n: Option<u32>,
+    monitor_crossover_hz: Option<f32>,
     /// Insertion-order view of `selected`. Compare layout renders cells in
     /// selection order; the T key reads the first and last entries to form
     /// a virtual transfer pair (meas = first, ref = last).
@@ -597,6 +603,8 @@ impl App {
             // assuming 48 kHz so the very first tick doesn't overshoot.
             monitor_interval_ms: auto_monitor_interval_ms(8192, 48_000),
             monitor_fft_n: 8192,
+            monitor_lf_fft_n: None,
+            monitor_crossover_hz: None,
             selection_order: Vec::new(),
             config,
             cell_views: Vec::new(),

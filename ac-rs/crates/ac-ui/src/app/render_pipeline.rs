@@ -834,9 +834,18 @@ impl App {
             .collect();
         let n_real_snap = n_real;
         let show_help_snap = self.show_help;
+        // LF band is active only while the live N is below the daemon's LF N;
+        // once the user raises N to/above it the live spectrum is already at
+        // least as fine, so the LF augmentation (and its readout line) drops
+        // back to the single-line fallback (#142).
+        let lf_active = self
+            .monitor_lf_fft_n
+            .filter(|&lf_n| lf_n > self.monitor_fft_n);
         let monitor_params_snap = (self.analysis_mode == "fft").then_some(MonitorParamsInfo {
             interval_ms: self.monitor_interval_ms,
             fft_n: self.monitor_fft_n,
+            lf_fft_n: lf_active,
+            crossover_hz: lf_active.and(self.monitor_crossover_hz),
         });
         // For the CQT badge we need the live `f_min` — the daemon
         // clamps it dynamically above the const default based on ring

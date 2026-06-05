@@ -386,7 +386,16 @@ pub fn set_monitor_params(state: &ServerState, cmd: &Value) -> Value {
     if let Some(n) = req_fft_n {
         mp.fft_n = n;
     }
-    json!({"ok": true, "interval": mp.interval, "fft_n": mp.fft_n})
+    // `lf_fft_n` / `crossover_hz` are daemon-owned constants the UI can't set
+    // in this issue — echo them read-only so the LF resolution label stays
+    // single-sourced from the daemon (#142).
+    json!({
+        "ok": true,
+        "interval": mp.interval,
+        "fft_n": mp.fft_n,
+        "lf_fft_n": mp.lf_fft_n,
+        "crossover_hz": mp.crossover_hz,
+    })
 }
 
 pub fn server_connections(state: &ServerState) -> Value {

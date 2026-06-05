@@ -105,6 +105,14 @@ pub struct MonitorParams {
     pub interval: f64,
     /// FFT window length in samples. Must be a power of 2 in [256, 131072].
     pub fft_n: u32,
+    /// Low-frequency FFT window length for the dual-resolution path (#142).
+    /// A second, longer FFT over the same ring drives the spectrum below
+    /// `crossover_hz`; the live `fft_n` keeps driving everything above it.
+    /// The LF band is inactive whenever `fft_n >= lf_fft_n`.
+    pub lf_fft_n: u32,
+    /// Crossover (Hz) splitting the LF long-FFT band from the HF live band.
+    /// Daemon-owned constant, echoed to the UI so labels never hardcode it.
+    pub crossover_hz: f32,
     /// `monitor_spectrum` worker is running.
     pub active: bool,
 }
@@ -113,9 +121,13 @@ impl Default for MonitorParams {
     fn default() -> Self {
         // 8192 @ 48 kHz ≈ 5.86 Hz bin spacing — close to legacy 0.2 s × 48 k
         // = 9600 samples (≈ 5 Hz) while being a clean pow2 for the planner.
+        // LF N=65536 @ 48 kHz ≈ 0.73 Hz, enough to split 5 Hz tones < 100 Hz
+        // (block latency ≈ 1.37 s, applied to the LF band only — #142).
         Self {
             interval: 0.2,
             fft_n: 8192,
+            lf_fft_n: 65536,
+            crossover_hz: ac_core::visualize::aggregate::DEFAULT_LF_CROSSOVER_HZ,
             active: false,
         }
     }

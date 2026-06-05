@@ -119,9 +119,46 @@ pub fn spectrum_readout(
 /// Live-monitor readout for the FFT knobs shown top-right in Spectrum mode.
 /// Pure function so the exact text — including the `Δf = sr / N` math — is
 /// covered by unit tests rather than only by the paint-test harness.
-pub fn monitor_knobs_readout(interval_ms: u32, fft_n: u32, sr: u32) -> String {
+///
+/// When `lf_fft_n` / `crossover_hz` are `Some` the dual-resolution LF path
+/// is active (#142) and a second line is appended (`\n`-separated): the
+/// HF (interactive) line gains a `≥ {crossover} Hz` scope tag and the LF
+/// line reports the long-FFT `N`, its finer `Δf`, and the LF block latency.
+/// When `None` the output is byte-for-byte today's single line — the
+/// fallback for daemons without the feature or when live N ≥ LF N.
+pub fn monitor_knobs_readout(
+    interval_ms: u32,
+    fft_n: u32,
+    sr: u32,
+    lf_fft_n: Option<u32>,
+    crossover_hz: Option<f32>,
+) -> String {
     let df = sr as f32 / fft_n.max(1) as f32;
-    format!("{:>4} ms  │  N {}  │  Δf {:.1} Hz", interval_ms, fft_n, df)
+    let hf = format!("{:>4} ms  │  N {}  │  Δf {:.1} Hz", interval_ms, fft_n, df);
+
+    match (lf_fft_n, crossover_hz) {
+        (Some(lf_n), Some(cx)) => {
+            let lf_df = sr as f32 / lf_n.max(1) as f32;
+            // LF block latency = N / sr — the inherent slow-update trade-off.
+            let lf_latency_s = lf_n as f32 / sr.max(1) as f32;
+            format!(
+                "{hf}   ≥ {cx:.0} Hz\nLF     │  N {lf_n}  │  Δf {} Hz  < {cx:.0} Hz · {lf_latency_s:.1} s",
+                fmt_delta_f(lf_df),
+            )
+        }
+        _ => hf,
+    }
+}
+
+/// Adaptive-precision Δf formatter for the LF band: sub-10 Hz spacings get
+/// 2 decimals so the sub-Hz LF resolution (e.g. `0.73`) isn't rounded away;
+/// ≥ 10 Hz keeps 1 decimal.
+fn fmt_delta_f(df_hz: f32) -> String {
+    if df_hz < 10.0 {
+        format!("{df_hz:.2}")
+    } else {
+        format!("{df_hz:.1}")
+    }
 }
 
 /// Compact label for the top-right top-line ("{sr} Hz │ {channel}").
@@ -838,19 +875,19 @@ mod tests {
     #[test]
     fn monitor_knobs_delta_f_math() {
         // Δf = sr / N. 48000 / 4096 = 11.71875 → rounds to "11.7 Hz".
-        let s = monitor_knobs_readout(10, 4096, 48_000);
+        let s = monitor_knobs_readout(10, 4096, 48_000, None, None);
         assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
         // 96 kHz, N = 8192 → 11.71875 as well.
-        let s = monitor_knobs_readout(10, 8192, 96_000);
+        let s = monitor_knobs_readout(10, 8192, 96_000, None, None);
         assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
         // 48 kHz, N = 2048 → 23.4375 → "23.4 Hz".
-        let s = monitor_knobs_readout(5, 2048, 48_000);
+        let s = monitor_knobs_readout(5, 2048, 48_000, None, None);
         assert!(s.contains("Δf 23.4 Hz"), "got: {s}");
     }
 
     #[test]
     fn monitor_knobs_formats_interval_and_n() {
-        let s = monitor_knobs_readout(7, 16384, 48_000);
+        let s = monitor_knobs_readout(7, 16384, 48_000, None, None);
         assert!(s.contains("   7 ms"));
         assert!(s.contains("N 16384"));
     }
@@ -858,7 +895,43 @@ mod tests {
     #[test]
     fn monitor_knobs_zero_n_does_not_panic() {
         // Defensive guard — mp.fft_n.max(1).
-        let _ = monitor_knobs_readout(1, 0, 48_000);
+        let _ = monitor_knobs_readout(1, 0, 48_000, None, None);
+        let _ = monitor_knobs_readout(1, 8192, 48_000, Some(0), Some(750.0));
+    }
+
+    #[test]
+    fn monitor_knobs_single_line_fallback_is_unchanged() {
+        // `None` LF params → today's exact one-line output, no LF line,
+        // no `≥` scope tag (#142 fallback).
+        let s = monitor_knobs_readout(10, 16384, 48_000, None, None);
+        assert_eq!(s, "  10 ms  │  N 16384  │  Δf 2.9 Hz");
+        assert!(!s.contains('\n'));
+        assert!(!s.contains("LF"));
+        assert!(!s.contains('≥'));
+    }
+
+    #[test]
+    fn monitor_knobs_two_line_when_lf_active() {
+        // HF N=16384 @ 48k → Δf 2.9 Hz; LF N=65536 → Δf 0.73 Hz, latency 1.4 s.
+        let s = monitor_knobs_readout(10, 16384, 48_000, Some(65536), Some(750.0));
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 2, "expected two lines, got: {s:?}");
+        // HF line keeps its byte-for-byte knobs and gains the scope tag.
+        assert!(lines[0].starts_with("  10 ms  │  N 16384  │  Δf 2.9 Hz"));
+        assert!(lines[0].contains("≥ 750 Hz"));
+        // LF line: long N, sub-Hz Δf at 2 decimals, crossover + latency.
+        assert!(lines[1].contains("N 65536"));
+        assert!(lines[1].contains("Δf 0.73 Hz"), "got: {}", lines[1]);
+        assert!(lines[1].contains("< 750 Hz"));
+        assert!(lines[1].contains("· 1.4 s"));
+    }
+
+    #[test]
+    fn monitor_knobs_lf_delta_f_adaptive_decimals() {
+        // LF Δf ≥ 10 Hz uses 1 decimal (e.g. tiny LF N); < 10 Hz uses 2.
+        let s = monitor_knobs_readout(10, 1024, 48_000, Some(2048), Some(750.0));
+        // 48000/2048 = 23.4375 → "23.4" (1 decimal).
+        assert!(s.contains("Δf 23.4 Hz"), "got: {s}");
     }
 
     // ── top-right status ──────────────────────────────────────────────

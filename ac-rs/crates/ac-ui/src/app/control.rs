@@ -416,6 +416,17 @@ impl App {
                 log::info!("monitor_spectrum reply: {reply}");
                 if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
                     self.monitor_spectrum_active = true;
+                    // Learn the daemon's dual-resolution LF constants so the
+                    // readout can label the LF band without hardcoding them
+                    // (#142). Absent fields → LF feature off on this daemon.
+                    self.monitor_lf_fft_n = reply
+                        .get("lf_fft_n")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+                    self.monitor_crossover_hz = reply
+                        .get("crossover_hz")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
                 } else {
                     let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
                     self.notify(&format!("monitor_spectrum: {err}"));
