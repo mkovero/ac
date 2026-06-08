@@ -366,13 +366,19 @@ impl App {
             return;
         }
 
-        // SpectrumEmber image-zoom: scroll magnifies the rendered ember
-        // pixels around the cursor instead of touching freq/dB windows.
-        // The data range stays put (gain unchanged) — what zooms is the
-        // visual. Per-cell `zoom` accumulates; `(zoom_x, zoom_y)` snaps
-        // to the cursor on every tick so the point under the cursor
-        // stays put. Ctrl+R / right-click reset returns zoom to 1.
-        if matches!(self.config.view_mode, ViewMode::SpectrumEmber) {
+        // SpectrumEmber image-zoom: plain / Ctrl / Shift scroll magnifies
+        // the rendered ember pixels around the cursor instead of touching
+        // freq/dB windows. The data range stays put (gain unchanged) —
+        // what zooms is the visual. Per-cell `zoom` accumulates;
+        // `(zoom_x, zoom_y)` snaps to the cursor on every tick so the
+        // point under the cursor stays put. Ctrl+R / right-click reset
+        // returns zoom to 1.
+        //
+        // `Ctrl+Shift+Scroll` is excluded so it falls through to the
+        // dB-window pan ("gain trim") below — previously the unguarded
+        // block swallowed every scroll in ember view, leaving the trim
+        // gesture dead (#147).
+        if matches!(self.config.view_mode, ViewMode::SpectrumEmber) && !(ctrl && shift) {
             // factor < 1 means scroll-up (zoom in). zoom *= 1/factor.
             for &idx in &targets {
                 if let Some(view) = self.cell_views.get_mut(idx) {
@@ -428,8 +434,13 @@ impl App {
                     let span = view.db_max - view.db_min;
                     let mut new_min = (view.db_min + delta).max(-240.0);
                     let mut new_max = new_min + span;
-                    if new_max > 20.0 {
-                        new_max = 20.0;
+                    // Ceiling +140 dB (was +20): calibrated-SPL content
+                    // peaks at +90…+130 dBSPL, and a +20 ceiling clipped
+                    // the trim before such a trace could be pushed down
+                    // into the cell. +140 clears the loudest realistic SPL
+                    // peak with headroom. Floor stays −240 dB. (#147)
+                    if new_max > 140.0 {
+                        new_max = 140.0;
                         new_min = (new_max - span).max(-240.0);
                     }
                     view.db_min = new_min;
