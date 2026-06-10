@@ -30,6 +30,11 @@ pub enum HoverReadout {
     /// Waterfall/CWT cursor Y-axis is time, not dB. Payload is seconds-ago
     /// (0 at the top, newest row; grows downward toward older rows).
     TimeAgo(f32),
+    /// SpectrumEmber cursor: the amplitude is the *trace* magnitude at the
+    /// hovered FFT bin, sampled from the frame spectrum in the footer path —
+    /// not the geometric cursor-Y. Carries no payload; `cursor_readout`
+    /// sources the dB from `sampled_db_at_freq` (`None` sample → `—`).
+    SpectrumBin,
 }
 
 /// Colour hint for a single line of the loudness overlay — lets the R128
@@ -538,12 +543,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // channel. No broadband fallback — toggling between cursor and
         // broadband stats every time the mouse crosses the cell edge
         // was confusing, and the broadband peak/floor/span info doesn't
-        // describe the cursor's position anyway. Suppressed in Scope /
-        // SpectrumEmber where the substrate owns the cell.
-        if !matches!(
-            input.config.view_mode,
-            ViewMode::Scope | ViewMode::SpectrumEmber
-        ) {
+        // describe the cursor's position anyway. Suppressed in Scope where
+        // the substrate owns the cell; SpectrumEmber surfaces the trace
+        // bin-magnitude readout (#154) via the SpectrumBin readout.
+        if !matches!(input.config.view_mode, ViewMode::Scope) {
             if let Some(hover) = input.hover.as_ref().filter(|h| h.channel == display_ch) {
                 // For colormap views (Waterfall / CWT / CQT / reassigned)
                 // the cursor's Y is time and the magnitude isn't on any
@@ -687,13 +690,18 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             1.0,
             Color32::from_rgba_unmultiplied(255, 255, 255, (0.55 * 255.0) as u8),
         );
-        painter.line_segment(
-            [
-                Pos2::new(hover.rect.left(), hover.cursor.y),
-                Pos2::new(hover.rect.right(), hover.cursor.y),
-            ],
-            crosshair,
-        );
+        // SpectrumEmber reports the trace bin magnitude in the footer, not a
+        // geometric cursor-Y dB (#154). A horizontal rule would imply a
+        // height-as-amplitude reading, so draw the vertical line only there.
+        if !matches!(input.config.view_mode, ViewMode::SpectrumEmber) {
+            painter.line_segment(
+                [
+                    Pos2::new(hover.rect.left(), hover.cursor.y),
+                    Pos2::new(hover.rect.right(), hover.cursor.y),
+                ],
+                crosshair,
+            );
+        }
         painter.line_segment(
             [
                 Pos2::new(hover.cursor.x, hover.rect.top()),
