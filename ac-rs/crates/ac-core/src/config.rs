@@ -10,9 +10,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::constants::DBU_REF_EXACT;
 
-fn default_dbu_ref() -> f64 { DBU_REF_EXACT }
-fn default_range_start() -> f64 { 20.0 }
-fn default_range_stop() -> f64 { 20_000.0 }
+fn default_dbu_ref() -> f64 {
+    DBU_REF_EXACT
+}
+fn default_range_start() -> f64 {
+    20.0
+}
+fn default_range_stop() -> f64 {
+    20_000.0
+}
 
 /// Complete hardware configuration.  All fields match the Python DEFAULTS dict.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,31 +109,37 @@ impl Default for Config {
 /// Return the default config file path: `~/.config/ac/config.json`.
 pub fn default_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("ac").join("config.json")
+    PathBuf::from(home)
+        .join(".config")
+        .join("ac")
+        .join("config.json")
 }
 
 /// Load config from disk, merging with defaults for any missing keys.
 /// Returns [`Config::default`] silently if the file does not exist.
 pub fn load(path: Option<&Path>) -> Result<Config> {
-    let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_config_path);
+    let path = path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_config_path);
     if !path.exists() {
         return Ok(Config::default());
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     // serde fills missing fields from defaults; extra fields are ignored.
-    let cfg: Config = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let cfg: Config =
+        serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     Ok(cfg)
 }
 
 /// Merge `updates` into the on-disk config and write back.
 /// Returns the merged config.
 pub fn save(updates: &Config, path: Option<&Path>) -> Result<Config> {
-    let path = path.map(|p| p.to_path_buf()).unwrap_or_else(default_config_path);
+    let path = path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_config_path);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating dir {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating dir {}", dir.display()))?;
     }
     // Merge: start from existing, apply updates field by field via JSON patch.
     let existing = load(Some(&path)).unwrap_or_default();
@@ -141,8 +153,7 @@ pub fn save(updates: &Config, path: Option<&Path>) -> Result<Config> {
     }
     let final_cfg: Config = serde_json::from_value(merged)?;
     let out = serde_json::to_string_pretty(&final_cfg)?;
-    std::fs::write(&path, out)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(final_cfg)
 }
 

@@ -355,7 +355,10 @@ impl TruePeak {
         let len = channels[0].len();
         for (i, ch) in channels.iter().enumerate().skip(1) {
             if ch.len() != len {
-                bail!("channel {i} length {} mismatches channel 0 ({len})", ch.len());
+                bail!(
+                    "channel {i} length {} mismatches channel 0 ({len})",
+                    ch.len()
+                );
             }
         }
         for (ch_idx, x_slice) in channels.iter().enumerate() {
@@ -581,7 +584,10 @@ impl LoudnessState {
         let len = channels[0].len();
         for (i, ch) in channels.iter().enumerate().skip(1) {
             if ch.len() != len {
-                bail!("channel {i} length {} mismatches channel 0 ({len})", ch.len());
+                bail!(
+                    "channel {i} length {} mismatches channel 0 ({len})",
+                    ch.len()
+                );
             }
         }
         // Feed the raw signal through the true-peak meter first — it
@@ -653,6 +659,7 @@ impl LoudnessState {
     /// Integrated loudness (LKFS-I) with BS.1770-5 §2.4 two-pass gating:
     ///   1. absolute gate at −70 LUFS
     ///   2. relative gate at −10 LU below the ungated (pass-1) mean
+    ///
     /// Returns `-∞` when fewer than one block survives the absolute gate.
     pub fn integrated(&self) -> f64 {
         if self.block_ms.is_empty() {
@@ -670,10 +677,7 @@ impl LoudnessState {
         }
         let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
         let rel_gate_ms = lkfs_to_ms(ms_to_lkfs(ungated_mean_ms) + RELATIVE_GATE_DELTA_LU);
-        let pass2: Vec<f64> = pass1
-            .into_iter()
-            .filter(|&ms| ms >= rel_gate_ms)
-            .collect();
+        let pass2: Vec<f64> = pass1.into_iter().filter(|&ms| ms >= rel_gate_ms).collect();
         if pass2.is_empty() {
             return f64::NEG_INFINITY;
         }
@@ -725,9 +729,7 @@ impl LoudnessState {
             return 0.0;
         }
         let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
-        let rel_gate_ms = lkfs_to_ms(
-            ms_to_lkfs(ungated_mean_ms) + LRA_RELATIVE_GATE_DELTA_LU,
-        );
+        let rel_gate_ms = lkfs_to_ms(ms_to_lkfs(ungated_mean_ms) + LRA_RELATIVE_GATE_DELTA_LU);
         // Convert survivors to LKFS and sort so we can pull percentiles.
         let mut lkfs: Vec<f64> = pass1
             .into_iter()
@@ -1120,11 +1122,7 @@ mod tests {
         let short = sine_samples((FS as usize) / 2, 1000.0, -20.0, FS);
         s.push(&[&short]).unwrap();
         assert!(s.momentary().is_finite(), "momentary after 500 ms");
-        assert_eq!(
-            s.short_term(),
-            f64::NEG_INFINITY,
-            "short-term needs 3 s"
-        );
+        assert_eq!(s.short_term(), f64::NEG_INFINITY, "short-term needs 3 s");
         // Push another 3 s — short-term now live.
         let long = sine_samples((FS as usize) * 3, 1000.0, -20.0, FS);
         s.push(&[&long]).unwrap();
@@ -1197,7 +1195,7 @@ mod tests {
         // ~10 s of loud audio → ~9.6 s gated (10 s minus the 400 ms prime).
         let dur = s.gated_duration_s();
         assert!(
-            dur >= 9.0 && dur <= 10.0,
+            (9.0..=10.0).contains(&dur),
             "gated duration {dur} s for 10 s of -23 dBFS audio"
         );
     }

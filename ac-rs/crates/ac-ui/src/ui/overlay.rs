@@ -5,7 +5,6 @@ use crate::data::types::{
     CellView, DisplayConfig, DisplayFrame, LayoutMode, LoudnessReadout, StereoStatus, TransferPair,
     ViewMode,
 };
-use crate::render::waterfall::COLORMAP_LUT;
 use crate::theme;
 use crate::ui::fmt::format_hz;
 use crate::ui::keytips::KeytipChip;
@@ -14,8 +13,8 @@ use crate::ui::stats::StatsSnapshot;
 #[derive(Clone)]
 pub struct HoverInfo {
     pub channel: usize,
-    pub rect:    Rect,
-    pub cursor:  Pos2,
+    pub rect: Rect,
+    pub cursor: Pos2,
     pub freq_hz: f32,
     pub readout: HoverReadout,
 }
@@ -78,6 +77,7 @@ pub struct OverlayInput<'a> {
     /// Active waterfall palette row (0 = inferno, 1 = magma).
     /// The colorbar in the top-right samples this row of the
     /// baked LUT so the legend matches what the GPU is actually rendering.
+    #[allow(dead_code)]
     pub active_palette: u32,
     /// Current fractional-octave smoothing denominator. `None` when the user
     /// has toggled smoothing off. Shown as a small status tag in the top-right
@@ -142,9 +142,9 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
         StereoStatus::Real { l, r } => {
             format!("{view_label} (ember) │ ch {l} + {r}")
         }
-        StereoStatus::NoTransferPair => format!(
-            "{view_label} (ember) │ synthetic — C-select L + R, then T",
-        ),
+        StereoStatus::NoTransferPair => {
+            format!("{view_label} (ember) │ synthetic — C-select L + R, then T",)
+        }
         StereoStatus::NotStreamingYet { l, r } => format!(
             "{view_label} (ember) │ synthetic — daemon not streaming scope yet (ch {l}+{r})"
         ),
@@ -190,9 +190,7 @@ fn format_transfer_status_line(
             "{view_label} (ember) │ meas ch {} → ref ch {}  │  Y {:.0}..{:.0}",
             p.meas, p.ref_ch, y_min, y_max,
         ),
-        None => format!(
-            "{view_label} (ember) │ no transfer pair — C-select MEAS + REF, then T",
-        ),
+        None => format!("{view_label} (ember) │ no transfer pair — C-select MEAS + REF, then T",),
     }
 }
 
@@ -228,6 +226,11 @@ pub(crate) fn channel_label(idx: usize, n_real: usize, virtual_pairs: &[Transfer
 pub struct MonitorParamsInfo {
     pub interval_ms: u32,
     pub fft_n: u32,
+    /// Dual-resolution LF band (#142). `Some` only when the LF path is
+    /// active (live N below the daemon's LF N); drives the second readout
+    /// line. `None` → single-line fallback (today's exact output).
+    pub lf_fft_n: Option<u32>,
+    pub crossover_hz: Option<f32>,
 }
 
 // Help overlay — RC-9 trim, ≤30 lines, organized by view family. The
@@ -282,11 +285,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
     ));
 
     let text_color = Color32::from_rgb(theme::TEXT[0], theme::TEXT[1], theme::TEXT[2]);
-    let clip_color = Color32::from_rgb(
-        theme::CLIP_LED[0],
-        theme::CLIP_LED[1],
-        theme::CLIP_LED[2],
-    );
+    let clip_color = Color32::from_rgb(theme::CLIP_LED[0], theme::CLIP_LED[1], theme::CLIP_LED[2]);
 
     let display_ch = match input.config.layout {
         LayoutMode::Single => input.config.active_channel,
@@ -309,7 +308,11 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // identity any time the user wasn't on cell 0. Cell-local
         // labels handle the identity-at-rest case; this line follows
         // the cursor when present.
-        let status_ch = input.hover.as_ref().map(|h| h.channel).unwrap_or(display_ch);
+        let status_ch = input
+            .hover
+            .as_ref()
+            .map(|h| h.channel)
+            .unwrap_or(display_ch);
         let top_right = super::fmt::top_right_status(
             sr,
             &channel_label(status_ch, input.n_real, input.virtual_pairs),
@@ -342,10 +345,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         let time_tag = match input.time_integration.as_ref() {
             None => String::new(),
             Some(t) => match (t.mode, t.tau_s, t.duration_s) {
-                (mode, Some(tau), _) => format!(
-                    "  │  time {mode} τ={:.0} ms",
-                    tau * 1000.0,
-                ),
+                (mode, Some(tau), _) => format!("  │  time {mode} τ={:.0} ms", tau * 1000.0,),
                 (mode, None, Some(d)) if d.is_finite() => {
                     format!("  │  {mode} {:.1} s", d)
                 }
@@ -356,7 +356,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // they're looking at has been frequency-corrected (or not). Three
         // states match the daemon's `mic_correction` field.
         let mic_tag = match frame.meta.mic_correction.as_deref() {
-            Some("on")  => "  │  mic-cal".to_string(),
+            Some("on") => "  │  mic-cal".to_string(),
             Some("off") => "  │  mic-cal: off".to_string(),
             _ => String::new(),
         };
@@ -408,37 +408,43 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             }
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
             ViewMode::IoTransfer => format_iotransfer_status_line(input.gonio_state),
-            ViewMode::BodeMag => format_transfer_status_line(
-                "bode mag", input.bode_pair, view.db_min, view.db_max,
-            ),
-            ViewMode::Coherence => format_transfer_status_line(
-                "coherence", input.bode_pair, 0.0, 1.0,
-            ),
-            ViewMode::BodePhase => format_transfer_status_line(
-                "bode phase", input.bode_pair, view.db_min, view.db_max,
-            ),
+            ViewMode::BodeMag => {
+                format_transfer_status_line("bode mag", input.bode_pair, view.db_min, view.db_max)
+            }
+            ViewMode::Coherence => {
+                format_transfer_status_line("coherence", input.bode_pair, 0.0, 1.0)
+            }
+            ViewMode::BodePhase => {
+                format_transfer_status_line("bode phase", input.bode_pair, view.db_min, view.db_max)
+            }
             ViewMode::GroupDelay => format_transfer_status_line(
-                "group delay", input.bode_pair, view.db_min, view.db_max,
+                "group delay",
+                input.bode_pair,
+                view.db_min,
+                view.db_max,
             ),
             ViewMode::Nyquist => match input.bode_pair {
                 Some(p) => format!(
                     "nyquist (ember) │ meas ch {} → ref ch {}  │  unit circle = |H|=1",
                     p.meas, p.ref_ch,
                 ),
-                None => "nyquist (ember) │ no transfer pair — C-select MEAS + REF, then T"
-                    .to_string(),
+                None => {
+                    "nyquist (ember) │ no transfer pair — C-select MEAS + REF, then T".to_string()
+                }
             },
             ViewMode::Ir => match input.bode_pair {
                 Some(p) => format!(
                     "ir (ember) │ meas ch {} → ref ch {}  │  t=0 mid-cell",
                     p.meas, p.ref_ch,
                 ),
-                None => "ir (ember) │ no transfer pair — C-select MEAS + REF, then T"
-                    .to_string(),
+                None => "ir (ember) │ no transfer pair — C-select MEAS + REF, then T".to_string(),
             },
         };
         painter.text(
-            Pos2::new(screen.right() - 8.0, screen.top() + 6.0 + theme::STATUS_PX + 2.0),
+            Pos2::new(
+                screen.right() - 8.0,
+                screen.top() + 6.0 + theme::STATUS_PX + 2.0,
+            ),
             Align2::RIGHT_TOP,
             gain_line,
             FontId::monospace(theme::STATUS_PX),
@@ -451,22 +457,34 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         let mut stack_row: f32 = 2.0;
         if matches!(input.config.view_mode, ViewMode::Spectrum) {
             if let Some(mp) = input.monitor_params {
-                let mon_line = super::fmt::monitor_knobs_readout(mp.interval_ms, mp.fft_n, sr);
-                painter.text(
-                    Pos2::new(
-                        screen.right() - 8.0,
-                        screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
-                    ),
-                    Align2::RIGHT_TOP,
-                    mon_line,
-                    FontId::monospace(theme::STATUS_PX),
-                    text_color,
+                // One or two lines (#142): line 2 is the LF band when active.
+                let mon_text = super::fmt::monitor_knobs_readout(
+                    mp.interval_ms,
+                    mp.fft_n,
+                    sr,
+                    mp.lf_fft_n,
+                    mp.crossover_hz,
                 );
-                stack_row += 1.0;
+                for mon_line in mon_text.lines() {
+                    painter.text(
+                        Pos2::new(
+                            screen.right() - 8.0,
+                            screen.top() + 6.0 + stack_row * (theme::STATUS_PX + 2.0),
+                        ),
+                        Align2::RIGHT_TOP,
+                        mon_line,
+                        FontId::monospace(theme::STATUS_PX),
+                        text_color,
+                    );
+                    stack_row += 1.0;
+                }
             }
         }
         if let Some(badge) = input.tier_badge.as_deref() {
-            if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
+            if !matches!(
+                input.config.view_mode,
+                ViewMode::Scope | ViewMode::SpectrumEmber
+            ) {
                 painter.text(
                     Pos2::new(
                         screen.right() - 8.0,
@@ -522,7 +540,10 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         // was confusing, and the broadband peak/floor/span info doesn't
         // describe the cursor's position anyway. Suppressed in Scope /
         // SpectrumEmber where the substrate owns the cell.
-        if !matches!(input.config.view_mode, ViewMode::Scope | ViewMode::SpectrumEmber) {
+        if !matches!(
+            input.config.view_mode,
+            ViewMode::Scope | ViewMode::SpectrumEmber
+        ) {
             if let Some(hover) = input.hover.as_ref().filter(|h| h.channel == display_ch) {
                 // For colormap views (Waterfall / CWT / CQT / reassigned)
                 // the cursor's Y is time and the magnitude isn't on any
@@ -531,7 +552,9 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 // used to show. For Spectrum view this falls through
                 // unused; the Db variant carries the value directly.
                 let sampled_db = super::fmt::sample_spectrum_db_at_freq(
-                    &frame.spectrum, &frame.freqs, hover.freq_hz,
+                    &frame.spectrum,
+                    &frame.freqs,
+                    hover.freq_hz,
                 );
                 let text = super::fmt::cursor_readout(
                     hover.freq_hz,
@@ -640,10 +663,8 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     (rgba[1] * 255.0) as u8,
                     (rgba[2] * 255.0) as u8,
                 );
-                let swatch_rect = Rect::from_min_size(
-                    Pos2::new(x0, y + 2.0),
-                    egui::vec2(12.0, 12.0),
-                );
+                let swatch_rect =
+                    Rect::from_min_size(Pos2::new(x0, y + 2.0), egui::vec2(12.0, 12.0));
                 painter.rect_filled(swatch_rect, CornerRadius::ZERO, swatch);
                 painter.text(
                     Pos2::new(x0 + 18.0, y),
@@ -694,13 +715,28 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 snap.cpu_mean_ms, gpu.gpu_ms, gpu.spectrum_ms, gpu.egui_ms,
             )
         } else {
-            format!("cpu {:>5.2} ms   gpu n/a (TIMESTAMP_QUERY unsupported)", snap.cpu_mean_ms)
+            format!(
+                "cpu {:>5.2} ms   gpu n/a (TIMESTAMP_QUERY unsupported)",
+                snap.cpu_mean_ms
+            )
         };
         let x = screen.left() + 8.0;
         let y0 = screen.top() + 8.0;
         let dy = theme::READOUT_PX + 2.0;
-        painter.text(Pos2::new(x, y0),        Align2::LEFT_TOP, line1, FontId::monospace(theme::READOUT_PX), text_color);
-        painter.text(Pos2::new(x, y0 + dy),   Align2::LEFT_TOP, line2, FontId::monospace(theme::READOUT_PX), text_color);
+        painter.text(
+            Pos2::new(x, y0),
+            Align2::LEFT_TOP,
+            line1,
+            FontId::monospace(theme::READOUT_PX),
+            text_color,
+        );
+        painter.text(
+            Pos2::new(x, y0 + dy),
+            Align2::LEFT_TOP,
+            line2,
+            FontId::monospace(theme::READOUT_PX),
+            text_color,
+        );
     }
 
     if input.show_help {
@@ -708,10 +744,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         let pad = 16.0;
         let panel_w = 520.0;
         let panel_h = HELP_LINES.len() as f32 * line_h + pad * 2.0;
-        let panel = Rect::from_center_size(
-            screen.center(),
-            egui::vec2(panel_w, panel_h),
-        );
+        let panel = Rect::from_center_size(screen.center(), egui::vec2(panel_w, panel_h));
         painter.rect_filled(
             panel,
             CornerRadius::same(4),
@@ -741,4 +774,3 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
         }
     }
 }
-

@@ -22,13 +22,12 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
         }
     };
 
-    wtr.write_record(&fields).ok();
+    wtr.write_record(fields).ok();
     for r in results {
         let mut row = Vec::with_capacity(fields.len());
         for &f in &fields {
             let key = if f == "freq_hz" {
-                r.get("freq_hz")
-                    .or_else(|| r.get("fundamental_hz"))
+                r.get("freq_hz").or_else(|| r.get("fundamental_hz"))
             } else {
                 r.get(f)
             };
@@ -68,7 +67,10 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
     let mut ac_n = 0u32;
     for r in results {
         let clip = r.get("clipping").and_then(|v| v.as_bool()).unwrap_or(false);
-        let ac = r.get("ac_coupled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ac = r
+            .get("ac_coupled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if clip {
             clipped_n += 1;
         }
@@ -132,8 +134,14 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
     );
 
     if have_cal {
-        let lo = results.first().and_then(|r| r.get("out_vrms")).and_then(|v| v.as_f64());
-        let hi = results.last().and_then(|r| r.get("out_vrms")).and_then(|v| v.as_f64());
+        let lo = results
+            .first()
+            .and_then(|r| r.get("out_vrms"))
+            .and_then(|v| v.as_f64());
+        let hi = results
+            .last()
+            .and_then(|r| r.get("out_vrms"))
+            .and_then(|v| v.as_f64());
         if let (Some(lo_v), Some(hi_v)) = (lo, hi) {
             let lo_dbu = ac_core::shared::conversions::vrms_to_dbu(lo_v);
             let hi_dbu = ac_core::shared::conversions::vrms_to_dbu(hi_v);
@@ -202,10 +210,7 @@ pub fn print_freq_header(have_cal: bool) {
             "\u{2500}".repeat(9),
         );
     } else {
-        println!(
-            "  {:>8}  {:>9}  {:>9}",
-            "Freq", "THD%", "THD+N%"
-        );
+        println!("  {:>8}  {:>9}  {:>9}", "Freq", "THD%", "THD+N%");
     }
 }
 
@@ -216,10 +221,19 @@ pub fn print_freq_row(frame: &serde_json::Value) {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     let thd = frame.get("thd_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let thdn = frame.get("thdn_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let thdn = frame
+        .get("thdn_pct")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
 
-    let clip = frame.get("clipping").and_then(|v| v.as_bool()).unwrap_or(false);
-    let ac = frame.get("ac_coupled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let clip = frame
+        .get("clipping")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let ac = frame
+        .get("ac_coupled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let flag = if clip {
         "  [CLIP]"
     } else if ac {
@@ -233,7 +247,7 @@ pub fn print_freq_row(frame: &serde_json::Value) {
         let in_s = frame
             .get("in_vrms")
             .and_then(|v| v.as_f64())
-            .map(|v| ac_core::shared::conversions::fmt_vrms(v))
+            .map(ac_core::shared::conversions::fmt_vrms)
             .unwrap_or_else(|| "  -".into());
         let odbu = frame
             .get("out_dbu")

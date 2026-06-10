@@ -26,12 +26,21 @@ fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
         }
         let mut out = Vec::with_capacity(arr.len());
         for (i, p) in arr.iter().enumerate() {
-            let tuple = p.as_array().ok_or_else(|| format!("pairs[{i}] must be [meas, ref]"))?;
+            let tuple = p
+                .as_array()
+                .ok_or_else(|| format!("pairs[{i}] must be [meas, ref]"))?;
             if tuple.len() != 2 {
-                return Err(format!("pairs[{i}] must have exactly 2 elements, got {}", tuple.len()));
+                return Err(format!(
+                    "pairs[{i}] must have exactly 2 elements, got {}",
+                    tuple.len()
+                ));
             }
-            let m = tuple[0].as_u64().ok_or_else(|| format!("pairs[{i}][0] must be unsigned int"))?;
-            let r = tuple[1].as_u64().ok_or_else(|| format!("pairs[{i}][1] must be unsigned int"))?;
+            let m = tuple[0]
+                .as_u64()
+                .ok_or_else(|| format!("pairs[{i}][0] must be unsigned int"))?;
+            let r = tuple[1]
+                .as_u64()
+                .ok_or_else(|| format!("pairs[{i}][1] must be unsigned int"))?;
             out.push((m as u32, r as u32));
         }
         // De-dup identical pairs — harmless but wasteful to publish twice.
@@ -40,9 +49,13 @@ fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
         return Ok(out);
     }
     // Legacy single-pair form.
-    let m = cmd.get("meas_channel").and_then(Value::as_u64)
+    let m = cmd
+        .get("meas_channel")
+        .and_then(Value::as_u64)
         .ok_or_else(|| "meas_channel required (or use pairs=[[m,r], ...])".to_string())?;
-    let r = cmd.get("ref_channel").and_then(Value::as_u64)
+    let r = cmd
+        .get("ref_channel")
+        .and_then(Value::as_u64)
         .ok_or_else(|| "ref_channel required (or use pairs=[[m,r], ...])".to_string())?;
     Ok(vec![(m as u32, r as u32)])
 }
@@ -55,11 +68,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // estimate against whatever the user is already driving into the inputs.
     // Set `true` to restore the old self-driving behavior (with `level_dbfs`
     // controlling amplitude).
-    let drive      = cmd.get("drive").and_then(Value::as_bool).unwrap_or(false);
-    let level_dbfs = cmd.get("level_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
+    let drive = cmd.get("drive").and_then(Value::as_bool).unwrap_or(false);
+    let level_dbfs = cmd
+        .get("level_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(-10.0);
 
     let pairs = match parse_transfer_pairs(cmd) {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
 
@@ -71,27 +87,34 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let mut unique_chans: Vec<u32> = Vec::new();
     for &(m, r) in &pairs {
         for c in [m, r] {
-            if !unique_chans.contains(&c) { unique_chans.push(c); }
+            if !unique_chans.contains(&c) {
+                unique_chans.push(c);
+            }
         }
     }
     let mut unique_ports = Vec::with_capacity(unique_chans.len());
     for &ch in &unique_chans {
         match capture_ports.get(ch as usize) {
             Some(p) => unique_ports.push(p.clone()),
-            None => return json!({"ok": false,
-                "error": format!("channel {ch} out of range (n_capture={})", capture_ports.len())}),
+            None => {
+                return json!({"ok": false,
+                "error": format!("channel {ch} out of range (n_capture={})", capture_ports.len())})
+            }
         }
     }
 
     // Per-pair buffer indices into the `Vec<Vec<f32>>` that `capture_multi`
     // returns. Precomputed so the worker loop doesn't re-scan per iteration.
-    let pair_idx: Vec<(usize, usize)> = pairs.iter().map(|&(m, r)| {
-        let mi = unique_chans.iter().position(|&c| c == m).unwrap();
-        let ri = unique_chans.iter().position(|&c| c == r).unwrap();
-        (mi, ri)
-    }).collect();
+    let pair_idx: Vec<(usize, usize)> = pairs
+        .iter()
+        .map(|&(m, r)| {
+            let mi = unique_chans.iter().position(|&c| c == m).unwrap();
+            let ri = unique_chans.iter().position(|&c| c == r).unwrap();
+            (mi, ri)
+        })
+        .collect();
 
-    let out_port     = resolve_output(&cfg, state);
+    let out_port = resolve_output(&cfg, state);
     let ref_out_port = resolve_ref_output(&cfg, state);
 
     // Sync routing-capability check so CPAL-only environments get an
@@ -132,13 +155,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let pub_tx = state.pub_tx.clone();
-    let fake   = state.fake_audio;
+    let fake = state.fake_audio;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
-    let out_port_r    = out_port.clone();
-    let meas_port_r   = unique_ports.first().cloned().unwrap_or_default();
-    let ref_port_r    = unique_ports.get(1).cloned().unwrap_or_else(|| meas_port_r.clone());
-    let pairs_r       = pairs.clone();
+    let out_port_r = out_port.clone();
+    let meas_port_r = unique_ports.first().cloned().unwrap_or_default();
+    let ref_port_r = unique_ports
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| meas_port_r.clone());
+    let pairs_r = pairs.clone();
 
     // Per-pair measurement-channel mic-curves. Loaded once at worker
     // start; ref-channel curves were already refused above.
@@ -170,7 +196,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let mut eng = make_engine(fake);
         let main_port = unique_ports[0].clone();
         if let Err(e) = eng.start(&out_ports, Some(&main_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"transfer_stream","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"transfer_stream","message":format!("{e}")}),
+            );
             return;
         }
         for p in &unique_ports[1..] {
@@ -179,18 +209,18 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
-        let sr       = eng.sample_rate();
+        let sr = eng.sample_rate();
         // Sliding window: keep the last `target_total` samples per unique
         // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
         // h1_estimate's internal Welch settings. chunk_secs matches the
         // monitor tick default (50 ms → 20 Hz refresh) — now that per-tick
         // compute is ~5 ms (delay cached), the loop is capture-bound, not
         // compute-bound, and the view matches the FFT/CWT monitor cadence.
-        let nperseg      = sr as usize;              // 1 Hz bin width
-        let step         = nperseg / 2;              // 50% overlap
-        let n_averages   = 4;
+        let nperseg = sr as usize; // 1 Hz bin width
+        let step = nperseg / 2; // 50% overlap
+        let n_averages = 4;
         let target_total = nperseg + step * (n_averages - 1);
-        let chunk_secs   = 0.05;
+        let chunk_secs = 0.05;
         let mut rings: Vec<Vec<f32>> = (0..unique_ports.len())
             .map(|_| Vec::with_capacity(target_total + step))
             .collect();
@@ -210,16 +240,24 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
         while !stop.load(Ordering::Relaxed) {
             let bufs = match eng.capture_multi(chunk_secs) {
-                Ok(b)  => b,
+                Ok(b) => b,
                 Err(e) => {
-                    send_pub(&pub_tx, "error", &json!({"cmd":"transfer_stream","message":format!("{e}")}));
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({"cmd":"transfer_stream","message":format!("{e}")}),
+                    );
                     break;
                 }
             };
-            if stop.load(Ordering::Relaxed) { break; }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
 
             for (i, buf) in bufs.iter().enumerate() {
-                if i >= rings.len() { break; }
+                if i >= rings.len() {
+                    break;
+                }
                 let r = &mut rings[i];
                 r.extend_from_slice(buf);
                 if r.len() > target_total {
@@ -230,7 +268,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
             // Warm-up: wait for the rings to fill to at least one Welch
             // segment so the first H1 has meaningful coherence.
-            if rings.iter().any(|r| r.len() < nperseg) { continue; }
+            if rings.iter().any(|r| r.len() < nperseg) {
+                continue;
+            }
 
             // Estimate any missing per-pair delays once on first entry (after
             // the rings are full). Subsequent ticks reuse the cached value.
@@ -240,13 +280,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 }
                 let (mi, ri) = pair_idx[i];
                 if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
-                    pair_delays[i] = Some(
-                        ac_core::visualize::transfer::estimate_delay_samples(
-                            refb.as_slice(),
-                            meas.as_slice(),
-                            sr,
-                        ),
-                    );
+                    pair_delays[i] = Some(ac_core::visualize::transfer::estimate_delay_samples(
+                        refb.as_slice(),
+                        meas.as_slice(),
+                        sr,
+                    ));
                 }
             }
 
@@ -266,135 +304,140 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
                 .zip(pair_meas_curves.par_iter())
-                .filter_map(|(((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt), curve_opt)| {
-                    let meas = rings.get(mi)?.as_slice();
-                    let refb = rings.get(ri)?.as_slice();
-                    let delay = delay_opt.unwrap_or(0);
-                    let result = ac_core::visualize::transfer::h1_estimate_with_delay(
-                        refb, meas, sr, delay,
-                    );
+                .filter_map(
+                    |(((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt), curve_opt)| {
+                        let meas = rings.get(mi)?.as_slice();
+                        let refb = rings.get(ri)?.as_slice();
+                        let delay = delay_opt.unwrap_or(0);
+                        let result = ac_core::visualize::transfer::h1_estimate_with_delay(
+                            refb, meas, sr, delay,
+                        );
 
-                    let n_pts = result.freqs.len();
-                    let indices: Vec<usize> = if n_pts > 2000 {
-                        let mut idx: Vec<usize> = (0..2000)
-                            .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
-                            .collect();
-                        idx.dedup();
-                        idx
-                    } else {
-                        (0..n_pts).collect()
-                    };
+                        let n_pts = result.freqs.len();
+                        let indices: Vec<usize> = if n_pts > 2000 {
+                            let mut idx: Vec<usize> = (0..2000)
+                                .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
+                                .collect();
+                            idx.dedup();
+                            idx
+                        } else {
+                            (0..n_pts).collect()
+                        };
 
-                    let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
-                    let mut mag = indices.iter()
-                        .map(|&i| result.magnitude_db[i])
-                        .collect::<Vec<_>>();
-                    let phase = indices.iter().map(|&i| result.phase_deg[i]).collect::<Vec<_>>();
-                    let coh   = indices.iter().map(|&i| result.coherence[i]).collect::<Vec<_>>();
-                    // unified.md Phase 3: complex H downsampled in
-                    // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
-                    // group-delay-from-complex) get H(ω) directly
-                    // without re-deriving from mag/phase. Same `indices`
-                    // → guaranteed consistent with mag/phase/coherence.
-                    let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
-                    let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
+                        let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
+                        let mut mag = indices
+                            .iter()
+                            .map(|&i| result.magnitude_db[i])
+                            .collect::<Vec<_>>();
+                        let phase = indices
+                            .iter()
+                            .map(|&i| result.phase_deg[i])
+                            .collect::<Vec<_>>();
+                        let coh = indices
+                            .iter()
+                            .map(|&i| result.coherence[i])
+                            .collect::<Vec<_>>();
+                        // unified.md Phase 3: complex H downsampled in
+                        // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
+                        // group-delay-from-complex) get H(ω) directly
+                        // without re-deriving from mag/phase. Same `indices`
+                        // → guaranteed consistent with mag/phase/coherence.
+                        let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
+                        let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
 
-                    // Mic-curve correction (#101) on the measurement leg
-                    // only — the reference leg was guarded above. H1's
-                    // dB magnitude has the mic over-read embedded; subtract
-                    // the curve at each downsampled bin to recover truth.
-                    // Same correction applied multiplicatively to (re, im)
-                    // — the curve is magnitude-only (no phase change), so
-                    // scaling both re and im by 10^(-curve_db/20)
-                    // preserves arg(H) while shrinking |H| consistently.
-                    if mc_enabled {
-                        if let Some(curve) = curve_opt.as_ref() {
-                            mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
-                            for ((r, i), &f) in
-                                re.iter_mut().zip(im.iter_mut()).zip(freqs.iter())
-                            {
-                                let corr_db = curve.correction_at(f as f32) as f64;
-                                let scale = 10.0_f64.powf(-corr_db / 20.0);
-                                *r *= scale;
-                                *i *= scale;
+                        // Mic-curve correction (#101) on the measurement leg
+                        // only — the reference leg was guarded above. H1's
+                        // dB magnitude has the mic over-read embedded; subtract
+                        // the curve at each downsampled bin to recover truth.
+                        // Same correction applied multiplicatively to (re, im)
+                        // — the curve is magnitude-only (no phase change), so
+                        // scaling both re and im by 10^(-curve_db/20)
+                        // preserves arg(H) while shrinking |H| consistently.
+                        if mc_enabled {
+                            if let Some(curve) = curve_opt.as_ref() {
+                                mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
+                                for ((r, i), &f) in
+                                    re.iter_mut().zip(im.iter_mut()).zip(freqs.iter())
+                                {
+                                    let corr_db = curve.correction_at(f as f32) as f64;
+                                    let scale = 10.0_f64.powf(-corr_db / 20.0);
+                                    *r *= scale;
+                                    *i *= scale;
+                                }
                             }
                         }
-                    }
-                    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
+                        let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
 
-                    let transfer_msg = json!({
-                        "type":           "transfer_stream",
-                        "cmd":            "transfer_stream",
-                        "freqs":          freqs,
-                        "magnitude_db":   mag,
-                        "phase_deg":      phase,
-                        "coherence":      coh,
-                        "re":             re,
-                        "im":             im,
-                        "delay_samples":  result.delay_samples,
-                        "delay_ms":       result.delay_ms,
-                        "ref_channel":    ref_ch,
-                        "meas_channel":   meas_ch,
-                        "sr":             sr,
-                        "mic_correction": mc_tag,
-                    });
-                    // Phase 4b: IR sidecar from full-resolution
-                    // complex H (NOT the downsampled re/im above —
-                    // the IFFT needs the raw nperseg/2+1 bins to
-                    // recover h(t) correctly). Time-domain output is
-                    // 1 s long at sr (matches the 1 Hz Welch
-                    // resolution); downsample to ≤2000 samples for
-                    // wire economy by stride-picking. Mic-curve
-                    // correction is intentionally NOT applied to the
-                    // IR — the downsampled re/im version already
-                    // would have it, but the full-resolution H here
-                    // does not (mic-curve correction in the curve_opt
-                    // branch above only touches the downsampled mag /
-                    // re / im). For the visualization-only Tier 2 IR
-                    // view this is acceptable; if a Tier-1 calibrated
-                    // IR is wanted, that path goes through the sweep
-                    // measurement, not transfer_stream.
-                    let h_full_re = &result.re;
-                    let h_full_im = &result.im;
-                    let ir_full = ac_core::visualize::transfer::impulse_response_from_h(
-                        h_full_re, h_full_im,
-                    );
-                    let ir_msg = if ir_full.is_empty() {
-                        None
-                    } else {
-                        const IR_MAX_SAMPLES: usize = 2000;
-                        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-                        let ir_ds: Vec<f32> = ir_full
-                            .iter()
-                            .step_by(stride)
-                            .copied()
-                            .collect();
-                        // t_origin_ms = -mid_ms because
-                        // impulse_response_from_h centres the IR
-                        // peak at the middle of the array (t=0 in
-                        // the user's mental model).
-                        let dt_ms = 1000.0 / sr as f64 * stride as f64;
-                        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
-                        Some(json!({
-                            "type":         "visualize/ir",
-                            "cmd":          "transfer_stream",
-                            "samples":      ir_ds,
-                            "sr":           sr,
-                            "stride":       stride,
-                            "dt_ms":        dt_ms,
-                            "t_origin_ms":  t_origin_ms,
-                            "ref_channel":  ref_ch,
-                            "meas_channel": meas_ch,
-                            "delay_samples": result.delay_samples,
-                            "delay_ms":     result.delay_ms,
-                        }))
-                    };
-                    let mut out = vec![transfer_msg];
-                    if let Some(m) = ir_msg {
-                        out.push(m);
-                    }
-                    Some(out)
-                })
+                        let transfer_msg = json!({
+                            "type":           "transfer_stream",
+                            "cmd":            "transfer_stream",
+                            "freqs":          freqs,
+                            "magnitude_db":   mag,
+                            "phase_deg":      phase,
+                            "coherence":      coh,
+                            "re":             re,
+                            "im":             im,
+                            "delay_samples":  result.delay_samples,
+                            "delay_ms":       result.delay_ms,
+                            "ref_channel":    ref_ch,
+                            "meas_channel":   meas_ch,
+                            "sr":             sr,
+                            "mic_correction": mc_tag,
+                        });
+                        // Phase 4b: IR sidecar from full-resolution
+                        // complex H (NOT the downsampled re/im above —
+                        // the IFFT needs the raw nperseg/2+1 bins to
+                        // recover h(t) correctly). Time-domain output is
+                        // 1 s long at sr (matches the 1 Hz Welch
+                        // resolution); downsample to ≤2000 samples for
+                        // wire economy by stride-picking. Mic-curve
+                        // correction is intentionally NOT applied to the
+                        // IR — the downsampled re/im version already
+                        // would have it, but the full-resolution H here
+                        // does not (mic-curve correction in the curve_opt
+                        // branch above only touches the downsampled mag /
+                        // re / im). For the visualization-only Tier 2 IR
+                        // view this is acceptable; if a Tier-1 calibrated
+                        // IR is wanted, that path goes through the sweep
+                        // measurement, not transfer_stream.
+                        let h_full_re = &result.re;
+                        let h_full_im = &result.im;
+                        let ir_full = ac_core::visualize::transfer::impulse_response_from_h(
+                            h_full_re, h_full_im,
+                        );
+                        let ir_msg = if ir_full.is_empty() {
+                            None
+                        } else {
+                            const IR_MAX_SAMPLES: usize = 2000;
+                            let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
+                            let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+                            // t_origin_ms = -mid_ms because
+                            // impulse_response_from_h centres the IR
+                            // peak at the middle of the array (t=0 in
+                            // the user's mental model).
+                            let dt_ms = 1000.0 / sr as f64 * stride as f64;
+                            let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
+                            Some(json!({
+                                "type":         "visualize/ir",
+                                "cmd":          "transfer_stream",
+                                "samples":      ir_ds,
+                                "sr":           sr,
+                                "stride":       stride,
+                                "dt_ms":        dt_ms,
+                                "t_origin_ms":  t_origin_ms,
+                                "ref_channel":  ref_ch,
+                                "meas_channel": meas_ch,
+                                "delay_samples": result.delay_samples,
+                                "delay_ms":     result.delay_ms,
+                            }))
+                        };
+                        let mut out = vec![transfer_msg];
+                        if let Some(m) = ir_msg {
+                            out.push(m);
+                        }
+                        Some(out)
+                    },
+                )
                 .collect();
             for batch in messages {
                 for msg in batch {
@@ -407,7 +450,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             eng.set_silence();
         }
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"transfer_stream","stopped":true}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"transfer_stream","stopped":true}),
+        );
     });
 
     {
@@ -426,6 +473,177 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     })
 }
 
+pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
+    busy_guard!(state, "probe");
+
+    let fake = state.fake_audio;
+    let pub_tx = state.pub_tx.clone();
+    let cfg = state.cfg.lock().unwrap().clone();
+    let dmm_host = cfg.dmm_host.clone();
+
+    let (playback, capture) = (
+        super::cached_playback_ports(state),
+        super::cached_capture_ports(state),
+    );
+    let n_play = playback.len();
+    let n_cap = capture.len();
+
+    let worker = spawn_worker(state, "probe", move |stop| {
+        let threshold_rms: f64 = 0.010 / (2.0f64.sqrt()); // 10 mVrms ≈ this linear RMS
+
+        let freq = 1000.0;
+        let amplitude = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+
+        let mut eng = make_engine(fake);
+        if !eng.supports_routing() {
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "probe",
+                    "message": format!("{} backend does not support port routing", eng.backend_name()),
+                }),
+            );
+            return;
+        }
+        if playback.is_empty() {
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"probe","message":"no playback ports"}),
+            );
+            return;
+        }
+
+        if let Err(e) = eng.start(&[playback[0].clone()], None) {
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"probe","message":format!("{e}")}),
+            );
+            return;
+        }
+        eng.set_tone(freq, amplitude);
+        eng.disconnect_output(&playback[0]);
+
+        // Phase 1: DMM output scan
+        let mut analog_channels: Vec<usize> = Vec::new();
+        if let Some(ref host) = dmm_host {
+            send_pub(
+                &pub_tx,
+                "data",
+                &json!({
+                    "cmd": "probe", "phase": "output_start", "n_ports": n_play
+                }),
+            );
+            for (i, port) in playback.iter().enumerate() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                eng.connect_output(port).ok();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let vrms = read_dmm_vrms(host, 3);
+                eng.disconnect_output(port);
+                let is_analog = vrms.map(|v| v > threshold_rms).unwrap_or(false);
+                if is_analog {
+                    analog_channels.push(i);
+                }
+                send_pub(
+                    &pub_tx,
+                    "data",
+                    &json!({
+                        "cmd": "probe", "phase": "output",
+                        "channel": i, "port": port,
+                        "vrms": vrms, "analog": is_analog,
+                    }),
+                );
+            }
+        } else {
+            send_pub(
+                &pub_tx,
+                "data",
+                &json!({
+                    "cmd": "probe", "phase": "output_skip",
+                    "message": "no DMM configured — skipping output scan",
+                }),
+            );
+            analog_channels = (0..n_play).collect();
+        }
+
+        // Phase 2: Loopback detection
+        if !stop.load(Ordering::Relaxed) {
+            send_pub(
+                &pub_tx,
+                "data",
+                &json!({
+                    "cmd": "probe", "phase": "loopback_start",
+                    "n_outputs": analog_channels.len(), "n_inputs": n_cap,
+                }),
+            );
+        }
+
+        if let Some(cap0) = capture.first() {
+            eng.reconnect_input(cap0).ok();
+        }
+
+        for &out_idx in &analog_channels {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            eng.connect_output(&playback[out_idx]).ok();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+
+            for (j, cap_port) in capture.iter().enumerate() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                eng.reconnect_input(cap_port).ok();
+                eng.flush_capture();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let level_dbfs = match eng.capture_block(0.05) {
+                    Ok(data) => {
+                        let rms = (data.iter().map(|&x| (x as f64).powi(2)).sum::<f64>()
+                            / data.len().max(1) as f64)
+                            .sqrt();
+                        20.0 * rms.max(1e-12).log10()
+                    }
+                    Err(_) => -120.0,
+                };
+                if level_dbfs > -30.0 {
+                    send_pub(
+                        &pub_tx,
+                        "data",
+                        &json!({
+                            "cmd": "probe", "phase": "loopback",
+                            "out_ch": out_idx, "out_port": &playback[out_idx],
+                            "in_ch": j, "in_port": cap_port,
+                            "level_dbfs": (level_dbfs * 10.0).round() / 10.0,
+                        }),
+                    );
+                }
+            }
+            eng.disconnect_output(&playback[out_idx]);
+        }
+
+        eng.set_silence();
+        eng.stop();
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({
+                "cmd": "probe",
+                "analog_channels": analog_channels,
+            }),
+        );
+    });
+
+    {
+        let mut workers = state.workers.lock().unwrap();
+        workers.insert("probe".to_string(), worker);
+    }
+    json!({ "ok": true, "n_playback": n_play, "n_capture": n_cap })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,7 +651,10 @@ mod tests {
     #[test]
     fn parse_pairs_multi() {
         let cmd = json!({ "pairs": [[0, 3], [1, 3], [2, 3]] });
-        assert_eq!(parse_transfer_pairs(&cmd).unwrap(), vec![(0, 3), (1, 3), (2, 3)]);
+        assert_eq!(
+            parse_transfer_pairs(&cmd).unwrap(),
+            vec![(0, 3), (1, 3), (2, 3)]
+        );
     }
 
     #[test]
@@ -465,130 +686,4 @@ mod tests {
         let cmd = json!({});
         assert!(parse_transfer_pairs(&cmd).is_err());
     }
-}
-
-pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
-    busy_guard!(state, "probe");
-
-    let fake    = state.fake_audio;
-    let pub_tx  = state.pub_tx.clone();
-    let cfg     = state.cfg.lock().unwrap().clone();
-    let dmm_host = cfg.dmm_host.clone();
-
-    let (playback, capture) = (
-        super::cached_playback_ports(state),
-        super::cached_capture_ports(state),
-    );
-    let n_play = playback.len();
-    let n_cap  = capture.len();
-
-    let worker = spawn_worker(state, "probe", move |stop| {
-        let threshold_rms: f64 = 0.010 / (2.0f64.sqrt()); // 10 mVrms ≈ this linear RMS
-
-        let freq      = 1000.0;
-        let amplitude = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
-
-        let mut eng = make_engine(fake);
-        if !eng.supports_routing() {
-            send_pub(&pub_tx, "error", &json!({
-                "cmd":     "probe",
-                "message": format!("{} backend does not support port routing", eng.backend_name()),
-            }));
-            return;
-        }
-        if playback.is_empty() {
-            send_pub(&pub_tx, "error", &json!({"cmd":"probe","message":"no playback ports"}));
-            return;
-        }
-
-        if let Err(e) = eng.start(&[playback[0].clone()], None) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"probe","message":format!("{e}")}));
-            return;
-        }
-        eng.set_tone(freq, amplitude);
-        eng.disconnect_output(&playback[0]);
-
-        // Phase 1: DMM output scan
-        let mut analog_channels: Vec<usize> = Vec::new();
-        if let Some(ref host) = dmm_host {
-            send_pub(&pub_tx, "data", &json!({
-                "cmd": "probe", "phase": "output_start", "n_ports": n_play
-            }));
-            for (i, port) in playback.iter().enumerate() {
-                if stop.load(Ordering::Relaxed) { break; }
-                eng.connect_output(port).ok();
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let vrms = read_dmm_vrms(host, 3);
-                eng.disconnect_output(port);
-                let is_analog = vrms.map(|v| v > threshold_rms).unwrap_or(false);
-                if is_analog { analog_channels.push(i); }
-                send_pub(&pub_tx, "data", &json!({
-                    "cmd": "probe", "phase": "output",
-                    "channel": i, "port": port,
-                    "vrms": vrms, "analog": is_analog,
-                }));
-            }
-        } else {
-            send_pub(&pub_tx, "data", &json!({
-                "cmd": "probe", "phase": "output_skip",
-                "message": "no DMM configured — skipping output scan",
-            }));
-            analog_channels = (0..n_play).collect();
-        }
-
-        // Phase 2: Loopback detection
-        if !stop.load(Ordering::Relaxed) {
-            send_pub(&pub_tx, "data", &json!({
-                "cmd": "probe", "phase": "loopback_start",
-                "n_outputs": analog_channels.len(), "n_inputs": n_cap,
-            }));
-        }
-
-        if let Some(cap0) = capture.first() {
-            eng.reconnect_input(cap0).ok();
-        }
-
-        for &out_idx in &analog_channels {
-            if stop.load(Ordering::Relaxed) { break; }
-            eng.connect_output(&playback[out_idx]).ok();
-            std::thread::sleep(std::time::Duration::from_millis(150));
-
-            for (j, cap_port) in capture.iter().enumerate() {
-                if stop.load(Ordering::Relaxed) { break; }
-                eng.reconnect_input(cap_port).ok();
-                eng.flush_capture();
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let level_dbfs = match eng.capture_block(0.05) {
-                    Ok(data) => {
-                        let rms = (data.iter().map(|&x| (x as f64).powi(2)).sum::<f64>()
-                            / data.len().max(1) as f64).sqrt();
-                        20.0 * rms.max(1e-12).log10()
-                    }
-                    Err(_) => -120.0,
-                };
-                if level_dbfs > -30.0 {
-                    send_pub(&pub_tx, "data", &json!({
-                        "cmd": "probe", "phase": "loopback",
-                        "out_ch": out_idx, "out_port": &playback[out_idx],
-                        "in_ch": j, "in_port": cap_port,
-                        "level_dbfs": (level_dbfs * 10.0).round() / 10.0,
-                    }));
-                }
-            }
-            eng.disconnect_output(&playback[out_idx]);
-        }
-
-        eng.set_silence();
-        eng.stop();
-        send_pub(&pub_tx, "done", &json!({
-            "cmd": "probe",
-            "analog_channels": analog_channels,
-        }));
-    });
-
-    {
-        let mut workers = state.workers.lock().unwrap();
-        workers.insert("probe".to_string(), worker);
-    }
-    json!({ "ok": true, "n_playback": n_play, "n_capture": n_cap })
 }

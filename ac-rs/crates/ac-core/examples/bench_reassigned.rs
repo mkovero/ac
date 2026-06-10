@@ -5,10 +5,10 @@ use std::time::Instant;
 
 fn main() {
     let sr = 48_000u32;
-    let n  = DEFAULT_N;
+    let n = DEFAULT_N;
     let samples: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
     let kernels = build_kernels(n, sr, DEFAULT_N_OUT_BINS, DEFAULT_F_MIN, default_f_max(sr));
-    let _ = reassigned(&samples, &kernels);                                 // warm scratch
+    let _ = reassigned(&samples, &kernels); // warm scratch
     let iters: usize = std::env::var("AC_BENCH_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())

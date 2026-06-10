@@ -11,7 +11,8 @@ use app::{
     App, AppInit, SourceKind, CONTINUOUS_REPAINT_INTERVAL_DEFAULT, MAX_FPS_MAX, MAX_FPS_MIN,
 };
 use data::store::{
-    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
+    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore,
+    VirtualChannelStore,
 };
 use data::types::{SweepKind, ViewMode};
 
@@ -38,7 +39,9 @@ fn main() -> anyhow::Result<()> {
         match ac_core::config::load(None) {
             Ok(cfg) => {
                 let ch = cfg.input_channel;
-                log::info!("defaulting to configured input_channel={ch} (override with --channels)");
+                log::info!(
+                    "defaulting to configured input_channel={ch} (override with --channels)"
+                );
                 (Some(vec![ch]), 1)
             }
             Err(e) => {
@@ -144,13 +147,13 @@ struct Args {
 }
 
 fn parse_max_fps(s: &str) -> anyhow::Result<Duration> {
-    let hz: u32 = s.parse().map_err(|e| anyhow::anyhow!(
-        "--max-fps: expected integer hz in [{MAX_FPS_MIN}, {MAX_FPS_MAX}], got {s:?}: {e}",
-    ))?;
+    let hz: u32 = s.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "--max-fps: expected integer hz in [{MAX_FPS_MIN}, {MAX_FPS_MAX}], got {s:?}: {e}",
+        )
+    })?;
     if !(MAX_FPS_MIN..=MAX_FPS_MAX).contains(&hz) {
-        anyhow::bail!(
-            "--max-fps: {hz} hz out of range [{MAX_FPS_MIN}, {MAX_FPS_MAX}]",
-        );
+        anyhow::bail!("--max-fps: {hz} hz out of range [{MAX_FPS_MIN}, {MAX_FPS_MAX}]",);
     }
     // Round-down ms — `Duration::from_millis(1000 / hz)` for hz=30 → 33 ms,
     // matching the existing default. Avoids floating-point.
@@ -243,7 +246,8 @@ impl Args {
                         .ok_or_else(|| anyhow::anyhow!("--ctrl requires value"))?;
                 }
                 "--channels" => {
-                    let val = it.next()
+                    let val = it
+                        .next()
                         .ok_or_else(|| anyhow::anyhow!("--channels requires value"))?;
                     out.channels = Some(parse_channel_spec(&val)?);
                 }
@@ -289,7 +293,9 @@ impl Args {
                     out.mode = Some(match v.as_str() {
                         "sweep_frequency" => SweepKind::Frequency,
                         "sweep_level" => SweepKind::Level,
-                        other => anyhow::bail!("--mode: expected sweep_frequency|sweep_level, got {other}"),
+                        other => anyhow::bail!(
+                            "--mode: expected sweep_frequency|sweep_level, got {other}"
+                        ),
                     });
                 }
                 "--present-mode" => {
@@ -394,33 +400,33 @@ mod view_mode_tests {
     #[test]
     fn parses_all_known_view_names() {
         let cases = [
-            ("spectrum",         ViewMode::Spectrum),
-            ("waterfall",        ViewMode::Waterfall),
-            ("scope",            ViewMode::Scope),
-            ("spectrum_ember",   ViewMode::SpectrumEmber),
-            ("spectrum-ember",   ViewMode::SpectrumEmber),
-            ("goniometer",       ViewMode::Goniometer),
-            ("iotransfer",       ViewMode::IoTransfer),
-            ("io_transfer",      ViewMode::IoTransfer),
-            ("io-transfer",      ViewMode::IoTransfer),
-            ("bode_mag",         ViewMode::BodeMag),
-            ("bode-mag",         ViewMode::BodeMag),
-            ("bodemag",          ViewMode::BodeMag),
-            ("bode",             ViewMode::BodeMag),
-            ("coherence",        ViewMode::Coherence),
-            ("coh",              ViewMode::Coherence),
-            ("bode_phase",       ViewMode::BodePhase),
-            ("bode-phase",       ViewMode::BodePhase),
-            ("bodephase",        ViewMode::BodePhase),
-            ("phase",            ViewMode::BodePhase),
-            ("group_delay",      ViewMode::GroupDelay),
-            ("group-delay",      ViewMode::GroupDelay),
-            ("groupdelay",       ViewMode::GroupDelay),
-            ("gd",               ViewMode::GroupDelay),
-            ("nyquist",          ViewMode::Nyquist),
-            ("nyq",              ViewMode::Nyquist),
-            ("ir",               ViewMode::Ir),
-            ("impulse",          ViewMode::Ir),
+            ("spectrum", ViewMode::Spectrum),
+            ("waterfall", ViewMode::Waterfall),
+            ("scope", ViewMode::Scope),
+            ("spectrum_ember", ViewMode::SpectrumEmber),
+            ("spectrum-ember", ViewMode::SpectrumEmber),
+            ("goniometer", ViewMode::Goniometer),
+            ("iotransfer", ViewMode::IoTransfer),
+            ("io_transfer", ViewMode::IoTransfer),
+            ("io-transfer", ViewMode::IoTransfer),
+            ("bode_mag", ViewMode::BodeMag),
+            ("bode-mag", ViewMode::BodeMag),
+            ("bodemag", ViewMode::BodeMag),
+            ("bode", ViewMode::BodeMag),
+            ("coherence", ViewMode::Coherence),
+            ("coh", ViewMode::Coherence),
+            ("bode_phase", ViewMode::BodePhase),
+            ("bode-phase", ViewMode::BodePhase),
+            ("bodephase", ViewMode::BodePhase),
+            ("phase", ViewMode::BodePhase),
+            ("group_delay", ViewMode::GroupDelay),
+            ("group-delay", ViewMode::GroupDelay),
+            ("groupdelay", ViewMode::GroupDelay),
+            ("gd", ViewMode::GroupDelay),
+            ("nyquist", ViewMode::Nyquist),
+            ("nyq", ViewMode::Nyquist),
+            ("ir", ViewMode::Ir),
+            ("impulse", ViewMode::Ir),
             ("impulse_response", ViewMode::Ir),
         ];
         for (s, want) in cases {
@@ -436,8 +442,10 @@ mod view_mode_tests {
         let err = parse_view_mode("polezero").unwrap_err().to_string();
         assert!(err.contains("polezero"), "error mentions input: {err}");
         assert!(
-            err.contains("goniometer") && err.contains("iotransfer")
-                && err.contains("bode_mag") && err.contains("nyquist"),
+            err.contains("goniometer")
+                && err.contains("iotransfer")
+                && err.contains("bode_mag")
+                && err.contains("nyquist"),
             "error lists current view names: {err}"
         );
     }
@@ -451,14 +459,14 @@ mod present_mode_tests {
     #[test]
     fn known_values_round_trip() {
         let cases = [
-            ("auto-vsync",    PresentMode::AutoVsync),
-            ("auto",          PresentMode::AutoVsync),
+            ("auto-vsync", PresentMode::AutoVsync),
+            ("auto", PresentMode::AutoVsync),
             ("auto-no-vsync", PresentMode::AutoNoVsync),
-            ("no-vsync",      PresentMode::AutoNoVsync),
-            ("fifo",          PresentMode::Fifo),
-            ("fifo-relaxed",  PresentMode::FifoRelaxed),
-            ("mailbox",       PresentMode::Mailbox),
-            ("immediate",     PresentMode::Immediate),
+            ("no-vsync", PresentMode::AutoNoVsync),
+            ("fifo", PresentMode::Fifo),
+            ("fifo-relaxed", PresentMode::FifoRelaxed),
+            ("mailbox", PresentMode::Mailbox),
+            ("immediate", PresentMode::Immediate),
         ];
         for (s, want) in cases {
             assert_eq!(parse_present_mode(s).unwrap(), want, "input {s:?}");
@@ -499,7 +507,7 @@ mod max_fps_tests {
         assert_eq!(parse_max_fps("30").unwrap(), Duration::from_millis(33));
         assert_eq!(parse_max_fps("60").unwrap(), Duration::from_millis(16));
         // Floor case (5 Hz = 200 ms) and ceiling (240 Hz = 4 ms).
-        assert_eq!(parse_max_fps("5").unwrap(),   Duration::from_millis(200));
+        assert_eq!(parse_max_fps("5").unwrap(), Duration::from_millis(200));
         assert_eq!(parse_max_fps("240").unwrap(), Duration::from_millis(4));
     }
 

@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use triple_buffer::Input;
 use winit::event_loop::EventLoopProxy;
 
-use super::store::{IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore};
+use super::store::{
+    IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
+};
 use super::types::{
     CwtFrame, IrFrame, LoudnessReadout, ScopeFrame, SpectrumFrame, SweepDone, SweepPoint,
     TransferFrame, TransferPair,
@@ -49,6 +51,7 @@ impl Drop for ReceiverHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     endpoint: String,
     inputs: Vec<Input<SpectrumFrame>>,
@@ -121,11 +124,14 @@ pub fn spawn(
                             .ok()
                             .and_then(|v| {
                                 let cmd = v.get("cmd").and_then(|c| c.as_str()).map(str::to_string);
-                                let msg = v.get("message").and_then(|m| m.as_str()).map(str::to_string);
+                                let msg = v
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .map(str::to_string);
                                 match (cmd, msg) {
                                     (Some(c), Some(m)) => Some(format!("{c}: {m}")),
-                                    (None, Some(m))    => Some(m),
-                                    (Some(c), None)    => Some(c),
+                                    (None, Some(m)) => Some(m),
+                                    (Some(c), None) => Some(c),
                                     _ => None,
                                 }
                             })
@@ -141,7 +147,9 @@ pub fn spawn(
                             if done.cmd == "plot" || done.cmd == "plot_level" {
                                 log::info!(
                                     "sweep done: cmd={} n_points={} xruns={}",
-                                    done.cmd, done.n_points, done.xruns,
+                                    done.cmd,
+                                    done.n_points,
+                                    done.xruns,
                                 );
                                 sweep.set_done(done);
                                 status_c.connected.store(true, Ordering::Relaxed);
@@ -479,7 +487,9 @@ pub fn spawn(
                             Ok(pt) => {
                                 log::debug!(
                                     "sweep_point n={} fund_hz={:.1} thd={:.3}%",
-                                    pt.n, pt.fundamental_hz, pt.thd_pct,
+                                    pt.n,
+                                    pt.fundamental_hz,
+                                    pt.thd_pct,
                                 );
                                 sweep.push(pt);
                                 status_c.connected.store(true, Ordering::Relaxed);

@@ -49,11 +49,10 @@ impl SpectrumRenderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/spectrum.wgsl").into()),
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("spectrum bgl"),
-                entries: &[storage_entry(0), storage_entry(1)],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("spectrum bgl"),
+            entries: &[storage_entry(0), storage_entry(1)],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("spectrum pl"),
@@ -108,12 +107,7 @@ impl SpectrumRenderer {
 
         let spectrum_buf = create_storage::<f32>(device, "spectrum_data", capacity_floats);
         let channel_buf = create_channel_buf(device, capacity_channels);
-        let bind_group = make_bind_group(
-            device,
-            &bind_group_layout,
-            &spectrum_buf,
-            &channel_buf,
-        );
+        let bind_group = make_bind_group(device, &bind_group_layout, &spectrum_buf, &channel_buf);
 
         Self {
             bind_group_layout,
@@ -272,4 +266,3 @@ fn make_bind_group(
         ],
     })
 }
-

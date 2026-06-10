@@ -25,7 +25,7 @@ pub fn run(path: &str, format: ReportFormat) {
     };
     let (ext, bytes): (&str, Vec<u8>) = match format {
         ReportFormat::Html => ("html", render_html(&report).into_bytes()),
-        ReportFormat::Pdf  => match render_pdf(&report) {
+        ReportFormat::Pdf => match render_pdf(&report) {
             Ok(b) => ("pdf", b),
             Err(e) => {
                 eprintln!("  error: PDF render failed: {e:#}");

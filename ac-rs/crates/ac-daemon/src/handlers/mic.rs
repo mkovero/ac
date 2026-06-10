@@ -37,9 +37,9 @@ pub(crate) fn apply_mic_curve_inplace_f64(curve: &MicResponse, freqs: &[f64], ma
 /// have no curve at all.
 pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static str {
     match (curve_loaded, enabled) {
-        (false, _)    => "none",
+        (false, _) => "none",
         (true, false) => "off",
-        (true, true)  => "on",
+        (true, true) => "on",
     }
 }
 
@@ -119,11 +119,26 @@ mod tests {
         // Need at least 16 points; pad.
         let mut text = String::new();
         let mut points: Vec<(f32, f32)> = vec![
-            (100.0, 0.0), (200.0, 0.4), (300.0, 0.8), (400.0, 1.0),
-            (500.0, 1.0), (600.0, 1.2), (700.0, 1.4), (800.0, 1.6),
-            (900.0, 1.8), (1000.0, 2.0), (1100.0, 2.2), (1200.0, 2.4),
-            (1300.0, 2.6), (1400.0, 3.0), (1500.0, 3.5), (1600.0, 4.0),
-            (2000.0, 5.0), (4000.0, 6.0), (8000.0, 5.5), (16000.0, 4.0),
+            (100.0, 0.0),
+            (200.0, 0.4),
+            (300.0, 0.8),
+            (400.0, 1.0),
+            (500.0, 1.0),
+            (600.0, 1.2),
+            (700.0, 1.4),
+            (800.0, 1.6),
+            (900.0, 1.8),
+            (1000.0, 2.0),
+            (1100.0, 2.2),
+            (1200.0, 2.4),
+            (1300.0, 2.6),
+            (1400.0, 3.0),
+            (1500.0, 3.5),
+            (1600.0, 4.0),
+            (2000.0, 5.0),
+            (4000.0, 6.0),
+            (8000.0, 5.5),
+            (16000.0, 4.0),
         ];
         points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (f, g) in &points {
@@ -136,12 +151,12 @@ mod tests {
             fundamental_hz: 1000.0,
             fundamental_dbfs: -10.0,
             linear_rms: 0.1,
-            thd_pct: 0.0,                                       // recomputed
+            thd_pct: 0.0, // recomputed
             thdn_pct: 0.5,
             harmonic_levels: vec![(2000.0, -40.0)],
             noise_floor_dbfs: -90.0,
             spectrum: vec![-90.0; 4],
-            freqs:    vec![500.0, 1000.0, 2000.0, 4000.0],
+            freqs: vec![500.0, 1000.0, 2000.0, 4000.0],
             clipping: false,
             ac_coupled: false,
         };
@@ -149,19 +164,31 @@ mod tests {
         let orig_floor = r.noise_floor_dbfs;
         let orig_rms = r.linear_rms;
         super::apply_mic_curve_to_analysis(&curve, &mut r);
-        assert!((r.fundamental_dbfs - -12.0).abs() < 0.01,
-            "fund: got {}", r.fundamental_dbfs);
-        assert!((r.harmonic_levels[0].1 - -45.0).abs() < 0.01,
-            "h2: got {}", r.harmonic_levels[0].1);
+        assert!(
+            (r.fundamental_dbfs - -12.0).abs() < 0.01,
+            "fund: got {}",
+            r.fundamental_dbfs
+        );
+        assert!(
+            (r.harmonic_levels[0].1 - -45.0).abs() < 0.01,
+            "h2: got {}",
+            r.harmonic_levels[0].1
+        );
         // Spectrum bins corrected by curve at each freq.
         let expected_curve_at = [1.0_f64, 2.0, 5.0, 6.0];
         for (i, m) in r.spectrum.iter().enumerate() {
-            assert!((m - (-90.0 - expected_curve_at[i])).abs() < 0.05,
-                "spec[{i}] got {m}");
+            assert!(
+                (m - (-90.0 - expected_curve_at[i])).abs() < 0.05,
+                "spec[{i}] got {m}"
+            );
         }
         // THD recomputed: corrected fund -12 dBFS = 0.2512, h2 -45 dBFS = 0.005623.
         // THD = 0.005623 / 0.2512 * 100 ≈ 2.238%.
-        assert!((r.thd_pct - 2.238).abs() < 0.01, "thd_pct: got {}", r.thd_pct);
+        assert!(
+            (r.thd_pct - 2.238).abs() < 0.01,
+            "thd_pct: got {}",
+            r.thd_pct
+        );
         // Untouched fields stay untouched.
         assert_eq!(r.thdn_pct, orig_thdn);
         assert_eq!(r.noise_floor_dbfs, orig_floor);
@@ -170,9 +197,9 @@ mod tests {
 
     #[test]
     fn correction_tag_truth_table() {
-        assert_eq!(mic_correction_tag(false, true),  "none");
+        assert_eq!(mic_correction_tag(false, true), "none");
         assert_eq!(mic_correction_tag(false, false), "none");
-        assert_eq!(mic_correction_tag(true,  true),  "on");
-        assert_eq!(mic_correction_tag(true,  false), "off");
+        assert_eq!(mic_correction_tag(true, true), "on");
+        assert_eq!(mic_correction_tag(true, false), "off");
     }
 }

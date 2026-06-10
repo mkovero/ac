@@ -13,9 +13,9 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, capture_rms, read_dmm_vrms, resolve_input,
-    resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
-    spawn_worker, std_dev, TestResult,
+    analyze_mono, busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output,
+    resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, std_dev,
+    TestResult,
 };
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
@@ -27,25 +27,25 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         return json!({"ok": false, "error": "reference channel not configured — run: ac setup reference <channel>"});
     }
 
-    let dmm_mode     = cmd.get("dmm").and_then(Value::as_bool).unwrap_or(false);
-    let out_port     = resolve_output(&cfg, state);
-    let in_port      = resolve_input(&cfg, state);
-    let ref_port     = match resolve_ref_input(&cfg, state) {
+    let dmm_mode = cmd.get("dmm").and_then(Value::as_bool).unwrap_or(false);
+    let out_port = resolve_output(&cfg, state);
+    let in_port = resolve_input(&cfg, state);
+    let ref_port = match resolve_ref_input(&cfg, state) {
         Some(p) => p,
-        None    => in_port.clone(),
+        None => in_port.clone(),
     };
     let ref_out_port = resolve_ref_output(&cfg, state);
 
-    let pub_tx       = state.pub_tx.clone();
-    let fake         = state.fake_audio;
-    let dmm_host     = cfg.dmm_host.clone();
-    let out_ch       = cfg.output_channel;
-    let in_ch        = cfg.input_channel;
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
+    let dmm_host = cfg.dmm_host.clone();
+    let out_ch = cfg.output_channel;
+    let in_ch = cfg.input_channel;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
-    let out_port_r     = out_port.clone();
-    let in_port_r      = in_port.clone();
-    let ref_port_r     = ref_port.clone();
+    let out_port_r = out_port.clone();
+    let in_port_r = in_port.clone();
+    let ref_port_r = ref_port.clone();
     let ref_out_port_r = ref_out_port.clone();
 
     let worker = spawn_worker(state, "test_hardware", move |stop| {
@@ -57,19 +57,27 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
 
         let mut eng = make_engine(fake);
         if !eng.supports_routing() {
-            send_pub(&pub_tx, "error", &json!({
-                "cmd":     "test_hardware",
-                "message": format!("{} backend does not support port routing", eng.backend_name()),
-            }));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "test_hardware",
+                    "message": format!("{} backend does not support port routing", eng.backend_name()),
+                }),
+            );
             return;
         }
         if let Err(e) = eng.start(&out_ports, Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"test_hardware","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"test_hardware","message":format!("{e}")}),
+            );
             return;
         }
         let sr = eng.sample_rate();
 
-        let mut tests_run  = 0usize;
+        let mut tests_run = 0usize;
         let mut tests_pass = 0usize;
 
         // Cal context for the active measurement channel — looked up
@@ -77,8 +85,10 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         // downstream readers can tell whether the test ran on a
         // mic-curve'd channel and at what SPL offset (#103).
         let cal_ctx = Calibration::load(out_ch, in_ch, None).ok().flatten();
-        let mic_curve_loaded = cal_ctx.as_ref()
-            .map(|c| c.mic_response.is_some()).unwrap_or(false);
+        let mic_curve_loaded = cal_ctx
+            .as_ref()
+            .map(|c| c.mic_response.is_some())
+            .unwrap_or(false);
         let spl_offset_db = cal_ctx.as_ref().and_then(Calibration::spl_offset_db);
 
         macro_rules! emit {
@@ -119,7 +129,8 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         }
 
         // DMM tests (only if configured and requested)
-        let mut dmm_run = 0usize; let mut dmm_pass = 0usize;
+        let mut dmm_run = 0usize;
+        let mut dmm_pass = 0usize;
         if dmm_mode {
             if let Some(ref host) = dmm_host {
                 let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
@@ -150,12 +161,16 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
 
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({
-            "cmd": "test_hardware",
-            "tests_run": tests_run, "tests_pass": tests_pass,
-            "dmm_run": dmm_run, "dmm_pass": dmm_pass,
-            "xruns": eng.xruns(),
-        }));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({
+                "cmd": "test_hardware",
+                "tests_run": tests_run, "tests_pass": tests_pass,
+                "dmm_run": dmm_run, "dmm_pass": dmm_pass,
+                "xruns": eng.xruns(),
+            }),
+        );
     });
 
     {
@@ -206,23 +221,37 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
         measured.push(r.map(|x| x.fundamental_dbfs));
     }
 
-    let valid: Vec<(i32, f64)> = levels.iter().copied().zip(measured.iter())
+    let valid: Vec<(i32, f64)> = levels
+        .iter()
+        .copied()
+        .zip(measured.iter())
         .filter_map(|(l, m)| m.map(|v| (l, v)))
         .collect();
 
     let monotonic = valid.windows(2).all(|w| w[0].1 < w[1].1);
-    let deltas: Vec<(i32, i32, f64)> = valid.windows(2)
+    let deltas: Vec<(i32, i32, f64)> = valid
+        .windows(2)
         .map(|w| (w[0].0, w[1].0, w[1].1 - w[0].1))
         .collect();
-    let max_step_err = deltas.iter().enumerate()
+    let max_step_err = deltas
+        .iter()
+        .enumerate()
         .map(|(i, &(_, _, d))| {
-            let tol = if i == deltas.len().saturating_sub(1) { 1.5 } else { 1.0 };
+            let tol = if i == deltas.len().saturating_sub(1) {
+                1.5
+            } else {
+                1.0
+            };
             (d - 6.0).abs() / tol
         })
         .fold(0.0f64, f64::max);
 
     let pass = monotonic && max_step_err <= 1.0;
-    let step_detail = deltas.iter().map(|(a, b, d)| format!("{a}→{b}:{d:.2}")).collect::<Vec<_>>().join(", ");
+    let step_detail = deltas
+        .iter()
+        .map(|(a, b, d)| format!("{a}→{b}:{d:.2}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     TestResult::new(
         "Level linearity",
         pass,
@@ -242,8 +271,15 @@ fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult
             results.push((level, r.thd_pct, r.thdn_pct));
         }
     }
-    let best = results.iter().map(|&(_, t, _)| t).fold(f64::INFINITY, f64::min);
-    let parts = results.iter().map(|(l, t, _)| format!("{l:.0}:{t:.4}%")).collect::<Vec<_>>().join(", ");
+    let best = results
+        .iter()
+        .map(|&(_, t, _)| t)
+        .fold(f64::INFINITY, f64::min);
+    let parts = results
+        .iter()
+        .map(|(l, t, _)| format!("{l:.0}:{t:.4}%"))
+        .collect::<Vec<_>>()
+        .join(", ");
     TestResult::new(
         "THD floor (1 kHz)",
         best < 0.05,
@@ -264,13 +300,28 @@ fn hw_freq_response(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
         }
     }
     if results.len() < 2 {
-        return TestResult::new("Frequency response", false, "insufficient data".to_string(), "");
+        return TestResult::new(
+            "Frequency response",
+            false,
+            "insufficient data".to_string(),
+            "",
+        );
     }
-    let ref_db = results.iter().find(|&&(f, _)| f == 1000.0).map(|&(_, d)| d)
+    let ref_db = results
+        .iter()
+        .find(|&&(f, _)| f == 1000.0)
+        .map(|&(_, d)| d)
         .unwrap_or(results[0].1);
     let deviations: Vec<(f64, f64)> = results.iter().map(|&(f, d)| (f, d - ref_db)).collect();
-    let max_dev = deviations.iter().map(|&(_, d)| d.abs()).fold(0.0f64, f64::max);
-    let parts = deviations.iter().map(|(f, d)| format!("{f:.0}Hz:{d:+.2}dB")).collect::<Vec<_>>().join(", ");
+    let max_dev = deviations
+        .iter()
+        .map(|&(_, d)| d.abs())
+        .fold(0.0f64, f64::max);
+    let parts = deviations
+        .iter()
+        .map(|(f, d)| format!("{f:.0}Hz:{d:+.2}dB"))
+        .collect::<Vec<_>>()
+        .join(", ");
     TestResult::new(
         "Frequency response",
         max_dev < 1.0,
@@ -294,7 +345,7 @@ fn hw_channel_match(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) 
     if measurements.len() < 2 {
         return TestResult::new("Channel match", false, "measurement failed".to_string(), "");
     }
-    let delta_db  = (measurements[0].1 - measurements[1].1).abs();
+    let delta_db = (measurements[0].1 - measurements[1].1).abs();
     let delta_thd = (measurements[0].2 - measurements[1].2).abs();
     TestResult::new(
         "Channel match",
@@ -309,7 +360,7 @@ fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
     eng.set_tone(1000.0, amp);
     eng.reconnect_input(in_port).ok();
     let mut levels: Vec<f64> = Vec::new();
-    let mut thds: Vec<f64>   = Vec::new();
+    let mut thds: Vec<f64> = Vec::new();
     for _ in 0..5 {
         eng.flush_capture();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -319,14 +370,22 @@ fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
         }
     }
     if levels.len() < 3 {
-        return TestResult::new("Repeatability", false, "insufficient measurements".to_string(), "");
+        return TestResult::new(
+            "Repeatability",
+            false,
+            "insufficient measurements".to_string(),
+            "",
+        );
     }
     let level_std = std_dev(&levels);
-    let thd_std   = std_dev(&thds);
+    let thd_std = std_dev(&thds);
     TestResult::new(
         "Repeatability",
         level_std < 0.05 && thd_std < 0.005,
-        format!("level sigma={level_std:.4} dB  THD sigma={thd_std:.6}%  ({}x)", levels.len()),
+        format!(
+            "level sigma={level_std:.4} dB  THD sigma={thd_std:.6}%  ({}x)",
+            levels.len()
+        ),
         "level sigma < 0.05 dB, THD sigma < 0.005%",
     )
 }
@@ -339,18 +398,35 @@ fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
     std::thread::sleep(std::time::Duration::from_millis(500));
     let vrms_dmm = match read_dmm_vrms(host, 5) {
         Some(v) => v,
-        None    => return TestResult::new("DMM absolute level", false, "DMM read failed".to_string(), ""),
+        None => {
+            return TestResult::new(
+                "DMM absolute level",
+                false,
+                "DMM read failed".to_string(),
+                "",
+            )
+        }
     };
     let vrms_pred = match cal.and_then(|c| c.out_vrms(-10.0)) {
         Some(v) => v,
-        None    => return TestResult::new("DMM absolute level", false, "no output calibration".to_string(), "requires calibration"),
+        None => {
+            return TestResult::new(
+                "DMM absolute level",
+                false,
+                "no output calibration".to_string(),
+                "requires calibration",
+            )
+        }
     };
     let err_pct = (vrms_dmm - vrms_pred).abs() / vrms_pred * 100.0;
     TestResult::new(
         "DMM absolute level",
         err_pct < 1.0,
-        format!("DMM: {:.3} mVrms  predicted: {:.3} mVrms  delta: {err_pct:.2}%",
-            vrms_dmm * 1000.0, vrms_pred * 1000.0),
+        format!(
+            "DMM: {:.3} mVrms  predicted: {:.3} mVrms  delta: {err_pct:.2}%",
+            vrms_dmm * 1000.0,
+            vrms_pred * 1000.0
+        ),
         "< 1% error",
     )
 }
@@ -363,10 +439,9 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(400));
-        if let (Some(vrms_dmm), Some(vrms_pred)) = (
-            read_dmm_vrms(host, 3),
-            cal.and_then(|c| c.out_vrms(level)),
-        ) {
+        if let (Some(vrms_dmm), Some(vrms_pred)) =
+            (read_dmm_vrms(host, 3), cal.and_then(|c| c.out_vrms(level)))
+        {
             let err = (vrms_dmm - vrms_pred).abs() / vrms_pred * 100.0;
             max_err = max_err.max(err);
             n_pts += 1;
@@ -392,15 +467,31 @@ fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
         }
     }
     if readings.len() < 3 {
-        return TestResult::new("DMM freq response", false, "insufficient readings".to_string(), "");
+        return TestResult::new(
+            "DMM freq response",
+            false,
+            "insufficient readings".to_string(),
+            "",
+        );
     }
-    let ref_v = readings.iter().find(|&&(f, _)| f == 1000.0).map(|&(_, v)| v)
+    let ref_v = readings
+        .iter()
+        .find(|&&(f, _)| f == 1000.0)
+        .map(|&(_, v)| v)
         .unwrap_or(readings[0].1);
-    let deviations: Vec<(f64, f64)> = readings.iter()
+    let deviations: Vec<(f64, f64)> = readings
+        .iter()
         .map(|&(f, v)| (f, 20.0 * (v / ref_v.max(1e-12)).log10()))
         .collect();
-    let max_dev = deviations.iter().map(|&(_, d)| d.abs()).fold(0.0f64, f64::max);
-    let parts = deviations.iter().map(|(f, d)| format!("{f:.0}Hz:{d:+.2}dB")).collect::<Vec<_>>().join(", ");
+    let max_dev = deviations
+        .iter()
+        .map(|&(_, d)| d.abs())
+        .fold(0.0f64, f64::max);
+    let parts = deviations
+        .iter()
+        .map(|(f, d)| format!("{f:.0}Hz:{d:+.2}dB"))
+        .collect::<Vec<_>>()
+        .join(", ");
     TestResult::new(
         "DMM freq response",
         max_dev < 1.0,

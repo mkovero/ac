@@ -21,8 +21,7 @@ use crate::theme;
 use crate::ui::export::{self, ScreenshotRequest};
 use crate::ui::layout;
 use crate::ui::overlay::{
-    self, HoverInfo, HoverReadout, MonitorParamsInfo, OverlayInput,
-    TimeIntegrationOverlay,
+    self, HoverInfo, HoverReadout, MonitorParamsInfo, OverlayInput, TimeIntegrationOverlay,
 };
 use crate::ui::stats::StatsSnapshot;
 use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
@@ -58,23 +57,26 @@ fn build_time_integration_overlay(
     frames: &[Option<crate::data::types::DisplayFrame>],
 ) -> Option<TimeIntegrationOverlay> {
     let (label, tau_s) = match mode {
-        TimeIntegrationMode::Off  => return None,
+        TimeIntegrationMode::Off => return None,
         TimeIntegrationMode::Fast => ("fast", Some(TAU_FAST_S)),
         TimeIntegrationMode::Slow => ("slow", Some(TAU_SLOW_S)),
-        TimeIntegrationMode::Leq  => ("Leq",  None),
+        TimeIntegrationMode::Leq => ("Leq", None),
     };
     let duration_s = frames
         .iter()
         .flatten()
         .find_map(|f| f.meta.leq_duration_s)
         .filter(|d: &f64| d.is_finite());
-    Some(TimeIntegrationOverlay { mode: label, tau_s, duration_s })
+    Some(TimeIntegrationOverlay {
+        mode: label,
+        tau_s,
+        duration_s,
+    })
 }
 
 use super::helpers::{
-    NOTIFICATION_TTL, PEAK_HOLD_DECAY, PEAK_RELEASE_DB_PER_SEC,
+    median_f32, NOTIFICATION_TTL, PEAK_HOLD_DECAY, PEAK_RELEASE_DB_PER_SEC,
     WATERFALL_ROW_DT_HYSTERESIS, WATERFALL_ROW_DT_MIN, WATERFALL_ROW_DT_WINDOW,
-    median_f32,
 };
 use super::App;
 
@@ -92,7 +94,11 @@ impl App {
         // `error` PUB topic BEFORE we take any long-lived &mut borrows on
         // self — notify() is &mut self and the render_ctx borrow below spans
         // the whole draw body.
-        let pending_error = self.source.as_ref().and_then(|src| src.status()).and_then(|s| s.take_error());
+        let pending_error = self
+            .source
+            .as_ref()
+            .and_then(|src| src.status())
+            .and_then(|s| s.take_error());
         if let Some(err) = pending_error {
             if err.contains("transfer_stream") {
                 self.transfer_stream_active = false;
@@ -170,8 +176,8 @@ impl App {
             self.virtual_seen_serial.retain(|p, _| live.contains(p));
         }
         for (pair, serial, maybe_tf) in &virtual_snapshots {
-            let is_fresh = *serial != 0
-                && self.virtual_seen_serial.get(pair).copied().unwrap_or(0) != *serial;
+            let is_fresh =
+                *serial != 0 && self.virtual_seen_serial.get(pair).copied().unwrap_or(0) != *serial;
             if is_fresh {
                 self.virtual_seen_serial.insert(*pair, *serial);
             }
@@ -179,21 +185,21 @@ impl App {
                 let spectrum = Arc::new(tf.magnitude_db.clone());
                 DisplayFrame {
                     spectrum: spectrum.clone(),
-                    freqs:    Arc::new(tf.freqs.clone()),
+                    freqs: Arc::new(tf.freqs.clone()),
                     meta: FrameMeta {
-                        freq_hz:          0.0,
+                        freq_hz: 0.0,
                         fundamental_dbfs: -140.0,
-                        thd_pct:          0.0,
-                        thdn_pct:         0.0,
-                        in_dbu:           None,
-                        dbu_offset_db:    None,
-                        peaks:            Arc::new(Vec::new()),
-                        spl_offset_db:    None,
-                        mic_correction:   None,
-                        sr:               tf.sr,
-                        clipping:         false,
-                        xruns:            0,
-                        leq_duration_s:   None,
+                        thd_pct: 0.0,
+                        thdn_pct: 0.0,
+                        in_dbu: None,
+                        dbu_offset_db: None,
+                        peaks: Arc::new(Vec::new()),
+                        spl_offset_db: None,
+                        mic_correction: None,
+                        sr: tf.sr,
+                        clipping: false,
+                        xruns: 0,
+                        leq_duration_s: None,
                     },
                     new_row: if is_fresh { Some(spectrum) } else { None },
                 }
@@ -248,7 +254,7 @@ impl App {
                 let needs_rebuild = self
                     .smoothing_cache
                     .as_ref()
-                    .map_or(true, |w| !w.matches(n_frac, frame.freqs.len(), last_f));
+                    .is_none_or(|w| !w.matches(n_frac, frame.freqs.len(), last_f));
                 if needs_rebuild {
                     self.smoothing_cache = Some(smoothing::OctaveWindows::build(
                         n_frac,
@@ -256,10 +262,7 @@ impl App {
                     ));
                 }
                 let windows = self.smoothing_cache.as_ref().unwrap();
-                let smoothed = smoothing::smooth_db(
-                    frame.spectrum.as_slice(),
-                    windows,
-                );
+                let smoothed = smoothing::smooth_db(frame.spectrum.as_slice(), windows);
                 frame.spectrum = Arc::new(smoothed);
             }
         }
@@ -317,14 +320,8 @@ impl App {
                     Some(b) => b,
                     None => continue,
                 };
-                let stamp = self
-                    .peak_last_update
-                    .get_mut(i)
-                    .expect("resized above");
-                let tick = self
-                    .peak_last_tick
-                    .get_mut(i)
-                    .expect("resized above");
+                let stamp = self.peak_last_update.get_mut(i).expect("resized above");
+                let tick = self.peak_last_tick.get_mut(i).expect("resized above");
                 // Seconds since the previous frame we processed for this
                 // channel — used below to scale the release drop. Clamped
                 // into a sane range so a stall (tab hidden, debugger pause)
@@ -353,8 +350,7 @@ impl App {
                             // spectrum stops falling.
                             if now.duration_since(last) >= PEAK_HOLD_DECAY {
                                 let drop = PEAK_RELEASE_DB_PER_SEC * dt;
-                                for (held, fresh) in
-                                    existing.iter_mut().zip(frame.spectrum.iter())
+                                for (held, fresh) in existing.iter_mut().zip(frame.spectrum.iter())
                                 {
                                     if fresh.is_finite() {
                                         *held = (*held - drop).max(*fresh);
@@ -391,14 +387,8 @@ impl App {
                     Some(b) => b,
                     None => continue,
                 };
-                let stamp = self
-                    .min_last_update
-                    .get_mut(i)
-                    .expect("resized above");
-                let tick = self
-                    .min_last_tick
-                    .get_mut(i)
-                    .expect("resized above");
+                let stamp = self.min_last_update.get_mut(i).expect("resized above");
+                let tick = self.min_last_tick.get_mut(i).expect("resized above");
                 let dt = tick
                     .map(|t| now.duration_since(t).as_secs_f32())
                     .unwrap_or(0.0)
@@ -421,8 +411,7 @@ impl App {
                             // fluke dropout forever.
                             if now.duration_since(last) >= PEAK_HOLD_DECAY {
                                 let rise = PEAK_RELEASE_DB_PER_SEC * dt;
-                                for (held, fresh) in
-                                    existing.iter_mut().zip(frame.spectrum.iter())
+                                for (held, fresh) in existing.iter_mut().zip(frame.spectrum.iter())
                                 {
                                     if fresh.is_finite() {
                                         *held = (*held + rise).min(*fresh);
@@ -474,8 +463,7 @@ impl App {
                         }
                         self.waterfall_row_dts.push_back(dt);
                         if self.waterfall_row_dts.len() >= WATERFALL_ROW_DT_MIN {
-                            let slice: Vec<f32> =
-                                self.waterfall_row_dts.iter().copied().collect();
+                            let slice: Vec<f32> = self.waterfall_row_dts.iter().copied().collect();
                             if let Some(med) = median_f32(&slice) {
                                 let cur = self.waterfall_row_period_s.max(1e-6);
                                 if ((med - cur) / cur).abs() > WATERFALL_ROW_DT_HYSTERESIS {
@@ -550,8 +538,7 @@ impl App {
                     .collect();
                 let (db_min, db_max) = if finite.len() >= 8 {
                     finite.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let idx = ((finite.len() as f32 * 0.98) as usize)
-                        .min(finite.len() - 1);
+                    let idx = ((finite.len() as f32 * 0.98) as usize).min(finite.len() - 1);
                     let anchor = finite[idx];
                     let top = (anchor + 5.0).clamp(-20.0, 0.0);
                     (top - 80.0, top)
@@ -610,8 +597,8 @@ impl App {
                     // cell into spectrum (top) + phase subplot (bottom).
                     // GPU viewport uses y=0 at bottom, so shift origin up
                     // by (1 - FRACTION) * cell.h and shrink height.
-                    let single_virtual = matches!(self.config.layout, LayoutMode::Single)
-                        && cell.channel >= n_real;
+                    let single_virtual =
+                        matches!(self.config.layout, LayoutMode::Single) && cell.channel >= n_real;
                     let (vp_y, vp_h) = if single_virtual {
                         let frac = crate::render::virtual_overlay::SPECTRUM_FRACTION_SINGLE;
                         (cell.y + cell.h * (1.0 - frac), cell.h * frac)
@@ -692,12 +679,8 @@ impl App {
                         if let Some(Some(min)) = self.min_holds.get(cell.channel) {
                             if min.len() == frame.spectrum.len() {
                                 let base = theme::channel_color(cell.channel);
-                                let min_color = [
-                                    base[0] * 0.55,
-                                    base[1] * 0.55,
-                                    base[2] * 0.55,
-                                    1.0,
-                                ];
+                                let min_color =
+                                    [base[0] * 0.55, base[1] * 0.55, base[2] * 0.55, 1.0];
                                 let min_cols: Vec<f32> = min.clone();
                                 let n_cols = min_cols.len() as u32;
                                 spectrum_uploads.push(ChannelUpload {
@@ -794,21 +777,17 @@ impl App {
             | ViewMode::SpectrumEmber
             | ViewMode::Goniometer
             | ViewMode::IoTransfer
-                | ViewMode::BodeMag
-                | ViewMode::Coherence
-                | ViewMode::BodePhase
-                | ViewMode::GroupDelay
-                | ViewMode::Nyquist
-                | ViewMode::Ir => {}
+            | ViewMode::BodeMag
+            | ViewMode::Coherence
+            | ViewMode::BodePhase
+            | ViewMode::GroupDelay
+            | ViewMode::Nyquist
+            | ViewMode::Ir => {}
         }
 
         let raw_input = egui_state.take_egui_input(&ctx.window);
         let show_labels = self.config.layout != LayoutMode::Grid || n_channels <= 8;
-        let connected = self
-            .source
-            .as_ref()
-            .map(|s| s.connected())
-            .unwrap_or(false);
+        let connected = self.source.as_ref().map(|s| s.connected()).unwrap_or(false);
         let config_snap = self.config.clone();
         let cell_views_snap = self.cell_views.clone();
         let selected_snap = self.selected.clone();
@@ -843,10 +822,7 @@ impl App {
         // method.
         let gonio_state_snap = self.gonio_real_audio_state;
         let bode_pair_snap = bode_pair;
-        let time_integration_snap = build_time_integration_overlay(
-            self.time_integration,
-            &frames,
-        );
+        let time_integration_snap = build_time_integration_overlay(self.time_integration, &frames);
         let peak_holds_snap = if self.peak_hold_enabled {
             self.peak_holds.clone()
         } else {
@@ -858,9 +834,18 @@ impl App {
             .collect();
         let n_real_snap = n_real;
         let show_help_snap = self.show_help;
+        // LF band is active only while the live N is below the daemon's LF N;
+        // once the user raises N to/above it the live spectrum is already at
+        // least as fine, so the LF augmentation (and its readout line) drops
+        // back to the single-line fallback (#142).
+        let lf_active = self
+            .monitor_lf_fft_n
+            .filter(|&lf_n| lf_n > self.monitor_fft_n);
         let monitor_params_snap = (self.analysis_mode == "fft").then_some(MonitorParamsInfo {
             interval_ms: self.monitor_interval_ms,
             fft_n: self.monitor_fft_n,
+            lf_fft_n: lf_active,
+            crossover_hz: lf_active.and(self.monitor_crossover_hz),
         });
         // For the CQT badge we need the live `f_min` — the daemon
         // clamps it dynamically above the const default based on ring
@@ -917,10 +902,7 @@ impl App {
                 }
             }
             let (channel, rect, nx, ny) = hit?;
-            let view = cell_views_snap
-                .get(channel)
-                .copied()
-                .unwrap_or_default();
+            let view = cell_views_snap.get(channel).copied().unwrap_or_default();
             let log_min = view.freq_min.max(1.0).log10();
             let log_max = view.freq_max.max(log_min.exp().max(1.1)).log10();
             let freq_hz = 10_f32.powf(log_min + nx * (log_max - log_min));
@@ -928,12 +910,8 @@ impl App {
                 let cursor = egui::pos2(cx, cy);
                 let kind = sweep_kind_snap.unwrap_or(SweepKind::Frequency);
                 match crate::render::sweep::hit_test(rect, cursor, kind) {
-                    Some((crate::render::sweep::SweepHitPanel::Thd, v)) => {
-                        HoverReadout::Thd(v)
-                    }
-                    Some((crate::render::sweep::SweepHitPanel::Gain, v)) => {
-                        HoverReadout::Gain(v)
-                    }
+                    Some((crate::render::sweep::SweepHitPanel::Thd, v)) => HoverReadout::Thd(v),
+                    Some((crate::render::sweep::SweepHitPanel::Gain, v)) => HoverReadout::Gain(v),
                     Some((crate::render::sweep::SweepHitPanel::SpectrumDetail, v)) => {
                         HoverReadout::Db(v)
                     }
@@ -989,11 +967,12 @@ impl App {
                     }
                     continue;
                 }
-                let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall)
-                    .then(|| grid::WaterfallTimeAxis {
+                let time_axis = matches!(config_snap.view_mode, ViewMode::Waterfall).then(|| {
+                    grid::WaterfallTimeAxis {
                         row_period_s,
                         rows_visible: view.rows_visible_f,
-                    });
+                    }
+                });
                 // Single view + virtual transfer channel → split cell:
                 // spectrum on top, standalone phase subplot below. In all
                 // other cases the grid fills the full cell and the phase
@@ -1004,14 +983,8 @@ impl App {
                 let (grid_rect, phase_rect) = if single_virtual {
                     let frac = crate::render::virtual_overlay::SPECTRUM_FRACTION_SINGLE;
                     let split_y = rect.top() + rect.height() * frac;
-                    let top = egui::Rect::from_min_max(
-                        rect.min,
-                        egui::pos2(rect.max.x, split_y),
-                    );
-                    let bot = egui::Rect::from_min_max(
-                        egui::pos2(rect.min.x, split_y),
-                        rect.max,
-                    );
+                    let top = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, split_y));
+                    let bot = egui::Rect::from_min_max(egui::pos2(rect.min.x, split_y), rect.max);
                     (top, Some(bot))
                 } else {
                     (rect, None)
@@ -1144,10 +1117,7 @@ impl App {
                         egui::Color32::from_rgba_unmultiplied(170, 170, 170, 200),
                     );
                 }
-                let is_selected = selected_snap
-                    .get(cell.channel)
-                    .copied()
-                    .unwrap_or(false);
+                let is_selected = selected_snap.get(cell.channel).copied().unwrap_or(false);
                 // Highlight selected cells in the non-Compare layouts. In
                 // Compare the cells are already filtered to the selection set,
                 // so a per-cell border just adds noise on top of the legend.
@@ -1168,10 +1138,9 @@ impl App {
                     && matches!(config_snap.view_mode, ViewMode::Spectrum)
                     && cell.channel < n_real_snap
                 {
-                    if let (Some(Some(peak)), Some(Some(frame))) = (
-                        peak_holds_snap.get(cell.channel),
-                        frames.get(cell.channel),
-                    ) {
+                    if let (Some(Some(peak)), Some(Some(frame))) =
+                        (peak_holds_snap.get(cell.channel), frames.get(cell.channel))
+                    {
                         draw_peak_overlay(
                             &painter,
                             grid_rect,
@@ -1211,7 +1180,11 @@ impl App {
                                 ),
                             );
                             crate::render::virtual_overlay::draw_phase_subplot(
-                                &painter, bot, &view, tf, show_labels,
+                                &painter,
+                                bot,
+                                &view,
+                                tf,
+                                show_labels,
                             );
                         }
                     }
@@ -1294,9 +1267,11 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ac-ui frame"),
-        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ac-ui frame"),
+            });
 
         egui_renderer.update_buffers(
             &ctx.device,
@@ -1307,7 +1282,7 @@ impl App {
         );
 
         let spectrum_writes = ctx.timing.as_ref().map(|t| t.spectrum_writes());
-        let egui_writes     = ctx.timing.as_ref().map(|t| t.egui_writes());
+        let egui_writes = ctx.timing.as_ref().map(|t| t.egui_writes());
 
         // Ember substrate: decay + deposit happen as their own off-screen
         // render passes ahead of the surface clear, so the display pass
@@ -1360,9 +1335,13 @@ impl App {
                     ember.set_intensity(0.002 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, scroll_dx, dt,
+                        &polyline,
+                        scroll_dx,
+                        dt,
                     );
                 }
                 ViewMode::SpectrumEmber => {
@@ -1381,230 +1360,215 @@ impl App {
                     // carries the daemon's weighting / time integration
                     // AND the UI-side fractional-octave smoothing
                     // applied earlier in this method.
-                    let polyline: Vec<[f32; 3]> =
-                        if matches!(self.config.layout, LayoutMode::Grid) {
-                            // Cell-edge inset for the empty-cell border:
-                            // 2 % of cell size keeps the rectangle off
-                            // the layout's gap line so adjacent empty
-                            // cells don't visually merge.
-                            const EDGE_INSET: f32 = 0.02;
-                            // Faint constant-amplitude weight for empty
-                            // cells. Decay (τ_p = 1.2 s) and ember
-                            // intensity (~0.003) balance: a steady
-                            // deposit at w=0.35 settles into a dim
-                            // outline, dimmer than active envelopes
-                            // which carry w=1.0 with peaks > 0.5 amp.
-                            const EMPTY_W: f32 = 0.35;
-                            let mut combined = Vec::new();
-                            for cell in &cells {
-                                // Skip virtual transfer cells — their
-                                // ember rendering is pair-keyed, not
-                                // per-channel-spectrum.
-                                if cell.channel >= n_real {
-                                    continue;
-                                }
-                                let view = self
-                                    .cell_views
-                                    .get(cell.channel)
-                                    .copied()
-                                    .unwrap_or_default();
-                                let frame_opt = frames
-                                    .get(cell.channel)
-                                    .and_then(|f| f.as_ref())
-                                    .filter(|f| !f.spectrum.is_empty());
-                                // The ember substrate inverts y between
-                                // deposit and display: deposit y=0 ends
-                                // up at the top of the screen, y=1 at
-                                // the bottom (NDC + wgpu viewport
-                                // convention; verified by tracing the
-                                // deposit / display shaders). The trace is
-                                // baseline-anchored at the cell floor, so
-                                // per-cell positions on the canvas need the
-                                // flip applied (`1.0 - cell.y - ay*cell.h`
-                                // below) for the baseline to land at each
-                                // cell's own bottom edge.
-                                if let Some(frame) = frame_opt {
-                                    let mut local = build_ember_spectrum_trace(
-                                        &frame.freqs,
-                                        &frame.spectrum,
-                                        &view,
-                                        EMBER_LIVE_W,
-                                    );
-                                    // Peak / min hold render as additional
-                                    // baseline-anchored envelopes over the
-                                    // live trace, at lower deposit weight so
-                                    // they recede behind it. The per-bin held
-                                    // buffers are maintained every frame in
-                                    // `redraw` regardless of view; ember view
-                                    // simply never drew them before (#149).
-                                    if self.peak_hold_enabled {
-                                        if let Some(Some(held)) =
-                                            self.peak_holds.get(cell.channel)
-                                        {
-                                            local.extend(build_ember_spectrum_trace(
-                                                &frame.freqs,
-                                                held,
-                                                &view,
-                                                EMBER_PEAK_W,
-                                            ));
-                                        }
-                                    }
-                                    if self.min_hold_enabled {
-                                        if let Some(Some(held)) =
-                                            self.min_holds.get(cell.channel)
-                                        {
-                                            local.extend(build_ember_spectrum_trace(
-                                                &frame.freqs,
-                                                held,
-                                                &view,
-                                                EMBER_MIN_W,
-                                            ));
-                                        }
-                                    }
-                                    combined.reserve(local.len());
-                                    let zx = view.zoom_x;
-                                    let zy = view.zoom_y;
-                                    let zf = view.zoom.max(1e-3);
-                                    // Focus emphasis: focused cell renders
-                                    // at full deposit weight; non-focus
-                                    // cells at 0.85× so the steady-state
-                                    // luminance reads as "dimmer / fading"
-                                    // without touching `ember.advance`'s
-                                    // single-substrate τ_p.
-                                    let focus_w = if cell.channel == self.config.active_channel {
-                                        1.0
-                                    } else {
-                                        0.85
-                                    };
-                                    // Image zoom around the cursor anchor. At
-                                    // zf=1 this is identity. For zf>1 points
-                                    // are spread out around (zx, zy); pairs
-                                    // entirely outside [0,1] are skipped so
-                                    // zoomed content doesn't bleed into
-                                    // neighbouring cells.
-                                    for chunk in local.chunks_exact(2) {
-                                        let a = &chunk[0];
-                                        let b = &chunk[1];
-                                        let ax = zx + (a[0] - zx) * zf;
-                                        let ay = zy + (a[1] - zy) * zf;
-                                        let bx = zx + (b[0] - zx) * zf;
-                                        let by = zy + (b[1] - zy) * zf;
-                                        let in_bounds = |x: f32, y: f32| {
-                                            (0.0..=1.0).contains(&x)
-                                                && (0.0..=1.0).contains(&y)
-                                        };
-                                        if !in_bounds(ax, ay) && !in_bounds(bx, by) {
-                                            continue;
-                                        }
-                                        combined.push([
-                                            cell.x + ax * cell.w,
-                                            1.0 - cell.y - ay * cell.h,
-                                            a[2] * focus_w,
-                                        ]);
-                                        combined.push([
-                                            cell.x + bx * cell.w,
-                                            1.0 - cell.y - by * cell.h,
-                                            b[2] * focus_w,
-                                        ]);
-                                    }
-                                } else {
-                                    // No data yet for this channel —
-                                    // deposit a thin rectangular outline
-                                    // along the cell's edges so the
-                                    // hitbox has a visible counterpart.
-                                    // Eight vertices form a LineList of
-                                    // four segments (one per edge).
-                                    let inset_x = cell.w * EDGE_INSET;
-                                    let inset_y = cell.h * EDGE_INSET;
-                                    let x0 = cell.x + inset_x;
-                                    let x1 = cell.x + cell.w - inset_x;
-                                    let y0 = 1.0 - cell.y - inset_y;
-                                    let y1 = 1.0 - cell.y - cell.h + inset_y;
-                                    let bl = [x0, y0, EMPTY_W];
-                                    let br = [x1, y0, EMPTY_W];
-                                    let tr = [x1, y1, EMPTY_W];
-                                    let tl = [x0, y1, EMPTY_W];
-                                    combined.extend_from_slice(&[
-                                        bl, br,
-                                        br, tr,
-                                        tr, tl,
-                                        tl, bl,
-                                    ]);
-                                }
+                    let polyline: Vec<[f32; 3]> = if matches!(self.config.layout, LayoutMode::Grid)
+                    {
+                        // Cell-edge inset for the empty-cell border:
+                        // 2 % of cell size keeps the rectangle off
+                        // the layout's gap line so adjacent empty
+                        // cells don't visually merge.
+                        const EDGE_INSET: f32 = 0.02;
+                        // Faint constant-amplitude weight for empty
+                        // cells. Decay (τ_p = 1.2 s) and ember
+                        // intensity (~0.003) balance: a steady
+                        // deposit at w=0.35 settles into a dim
+                        // outline, dimmer than active envelopes
+                        // which carry w=1.0 with peaks > 0.5 amp.
+                        const EMPTY_W: f32 = 0.35;
+                        let mut combined = Vec::new();
+                        for cell in &cells {
+                            // Skip virtual transfer cells — their
+                            // ember rendering is pair-keyed, not
+                            // per-channel-spectrum.
+                            if cell.channel >= n_real {
+                                continue;
                             }
-                            combined
-                        } else {
-                            let active = self.config.active_channel;
                             let view = self
                                 .cell_views
-                                .get(active)
+                                .get(cell.channel)
                                 .copied()
                                 .unwrap_or_default();
-                            // Single-mode image zoom: same per-cell
-                            // (zoom, zoom_x, zoom_y) state as Grid.
-                            // Polyline coords in cell-local [0,1] map
-                            // to canvas full-screen [0,1], so zoom
-                            // around the cursor anchor.
-                            let zx = view.zoom_x;
-                            let zy = view.zoom_y;
-                            let zf = view.zoom.max(1e-3);
-                            let raw = frames
-                                .get(active)
+                            let frame_opt = frames
+                                .get(cell.channel)
                                 .and_then(|f| f.as_ref())
-                                .filter(|f| !f.spectrum.is_empty())
-                                .map(|f| {
-                                    let mut v = build_ember_spectrum_trace(
-                                        &f.freqs,
-                                        &f.spectrum,
-                                        &view,
-                                        EMBER_LIVE_W,
-                                    );
-                                    // Held peak / min envelopes over the live
-                                    // trace — same per-bin buffers `redraw`
-                                    // maintains for every view (#149).
-                                    if self.peak_hold_enabled {
-                                        if let Some(Some(held)) = self.peak_holds.get(active) {
-                                            v.extend(build_ember_spectrum_trace(
-                                                &f.freqs,
-                                                held,
-                                                &view,
-                                                EMBER_PEAK_W,
-                                            ));
-                                        }
+                                .filter(|f| !f.spectrum.is_empty());
+                            // The ember substrate inverts y between
+                            // deposit and display: deposit y=0 ends
+                            // up at the top of the screen, y=1 at
+                            // the bottom (NDC + wgpu viewport
+                            // convention; verified by tracing the
+                            // deposit / display shaders). The trace is
+                            // baseline-anchored at the cell floor, so
+                            // per-cell positions on the canvas need the
+                            // flip applied (`1.0 - cell.y - ay*cell.h`
+                            // below) for the baseline to land at each
+                            // cell's own bottom edge.
+                            if let Some(frame) = frame_opt {
+                                let mut local = build_ember_spectrum_trace(
+                                    &frame.freqs,
+                                    &frame.spectrum,
+                                    &view,
+                                    EMBER_LIVE_W,
+                                );
+                                // Peak / min hold render as additional
+                                // baseline-anchored envelopes over the
+                                // live trace, at lower deposit weight so
+                                // they recede behind it. The per-bin held
+                                // buffers are maintained every frame in
+                                // `redraw` regardless of view; ember view
+                                // simply never drew them before (#149).
+                                if self.peak_hold_enabled {
+                                    if let Some(Some(held)) = self.peak_holds.get(cell.channel) {
+                                        local.extend(build_ember_spectrum_trace(
+                                            &frame.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_PEAK_W,
+                                        ));
                                     }
-                                    if self.min_hold_enabled {
-                                        if let Some(Some(held)) = self.min_holds.get(active) {
-                                            v.extend(build_ember_spectrum_trace(
-                                                &f.freqs,
-                                                held,
-                                                &view,
-                                                EMBER_MIN_W,
-                                            ));
-                                        }
-                                    }
-                                    v
-                                })
-                                .unwrap_or_default();
-                            let mut transformed: Vec<[f32; 3]> = Vec::with_capacity(raw.len());
-                            for chunk in raw.chunks_exact(2) {
-                                let a = &chunk[0];
-                                let b = &chunk[1];
-                                let ax = zx + (a[0] - zx) * zf;
-                                let ay = zy + (a[1] - zy) * zf;
-                                let bx = zx + (b[0] - zx) * zf;
-                                let by = zy + (b[1] - zy) * zf;
-                                let in_bounds = |x: f32, y: f32| {
-                                    (0.0..=1.0).contains(&x)
-                                        && (0.0..=1.0).contains(&y)
-                                };
-                                if !in_bounds(ax, ay) && !in_bounds(bx, by) {
-                                    continue;
                                 }
-                                transformed.push([ax, ay, a[2]]);
-                                transformed.push([bx, by, b[2]]);
+                                if self.min_hold_enabled {
+                                    if let Some(Some(held)) = self.min_holds.get(cell.channel) {
+                                        local.extend(build_ember_spectrum_trace(
+                                            &frame.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_MIN_W,
+                                        ));
+                                    }
+                                }
+                                combined.reserve(local.len());
+                                let zx = view.zoom_x;
+                                let zy = view.zoom_y;
+                                let zf = view.zoom.max(1e-3);
+                                // Focus emphasis: focused cell renders
+                                // at full deposit weight; non-focus
+                                // cells at 0.85× so the steady-state
+                                // luminance reads as "dimmer / fading"
+                                // without touching `ember.advance`'s
+                                // single-substrate τ_p.
+                                let focus_w = if cell.channel == self.config.active_channel {
+                                    1.0
+                                } else {
+                                    0.85
+                                };
+                                // Image zoom around the cursor anchor. At
+                                // zf=1 this is identity. For zf>1 points
+                                // are spread out around (zx, zy); pairs
+                                // entirely outside [0,1] are skipped so
+                                // zoomed content doesn't bleed into
+                                // neighbouring cells.
+                                for chunk in local.chunks_exact(2) {
+                                    let a = &chunk[0];
+                                    let b = &chunk[1];
+                                    let ax = zx + (a[0] - zx) * zf;
+                                    let ay = zy + (a[1] - zy) * zf;
+                                    let bx = zx + (b[0] - zx) * zf;
+                                    let by = zy + (b[1] - zy) * zf;
+                                    let in_bounds = |x: f32, y: f32| {
+                                        (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)
+                                    };
+                                    if !in_bounds(ax, ay) && !in_bounds(bx, by) {
+                                        continue;
+                                    }
+                                    combined.push([
+                                        cell.x + ax * cell.w,
+                                        1.0 - cell.y - ay * cell.h,
+                                        a[2] * focus_w,
+                                    ]);
+                                    combined.push([
+                                        cell.x + bx * cell.w,
+                                        1.0 - cell.y - by * cell.h,
+                                        b[2] * focus_w,
+                                    ]);
+                                }
+                            } else {
+                                // No data yet for this channel —
+                                // deposit a thin rectangular outline
+                                // along the cell's edges so the
+                                // hitbox has a visible counterpart.
+                                // Eight vertices form a LineList of
+                                // four segments (one per edge).
+                                let inset_x = cell.w * EDGE_INSET;
+                                let inset_y = cell.h * EDGE_INSET;
+                                let x0 = cell.x + inset_x;
+                                let x1 = cell.x + cell.w - inset_x;
+                                let y0 = 1.0 - cell.y - inset_y;
+                                let y1 = 1.0 - cell.y - cell.h + inset_y;
+                                let bl = [x0, y0, EMPTY_W];
+                                let br = [x1, y0, EMPTY_W];
+                                let tr = [x1, y1, EMPTY_W];
+                                let tl = [x0, y1, EMPTY_W];
+                                combined.extend_from_slice(&[bl, br, br, tr, tr, tl, tl, bl]);
                             }
-                            transformed
-                        };
+                        }
+                        combined
+                    } else {
+                        let active = self.config.active_channel;
+                        let view = self.cell_views.get(active).copied().unwrap_or_default();
+                        // Single-mode image zoom: same per-cell
+                        // (zoom, zoom_x, zoom_y) state as Grid.
+                        // Polyline coords in cell-local [0,1] map
+                        // to canvas full-screen [0,1], so zoom
+                        // around the cursor anchor.
+                        let zx = view.zoom_x;
+                        let zy = view.zoom_y;
+                        let zf = view.zoom.max(1e-3);
+                        let raw = frames
+                            .get(active)
+                            .and_then(|f| f.as_ref())
+                            .filter(|f| !f.spectrum.is_empty())
+                            .map(|f| {
+                                let mut v = build_ember_spectrum_trace(
+                                    &f.freqs,
+                                    &f.spectrum,
+                                    &view,
+                                    EMBER_LIVE_W,
+                                );
+                                // Held peak / min envelopes over the live
+                                // trace — same per-bin buffers `redraw`
+                                // maintains for every view (#149).
+                                if self.peak_hold_enabled {
+                                    if let Some(Some(held)) = self.peak_holds.get(active) {
+                                        v.extend(build_ember_spectrum_trace(
+                                            &f.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_PEAK_W,
+                                        ));
+                                    }
+                                }
+                                if self.min_hold_enabled {
+                                    if let Some(Some(held)) = self.min_holds.get(active) {
+                                        v.extend(build_ember_spectrum_trace(
+                                            &f.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_MIN_W,
+                                        ));
+                                    }
+                                }
+                                v
+                            })
+                            .unwrap_or_default();
+                        let mut transformed: Vec<[f32; 3]> = Vec::with_capacity(raw.len());
+                        for chunk in raw.chunks_exact(2) {
+                            let a = &chunk[0];
+                            let b = &chunk[1];
+                            let ax = zx + (a[0] - zx) * zf;
+                            let ay = zy + (a[1] - zy) * zf;
+                            let bx = zx + (b[0] - zx) * zf;
+                            let by = zy + (b[1] - zy) * zf;
+                            let in_bounds = |x: f32, y: f32| {
+                                (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)
+                            };
+                            if !in_bounds(ax, ay) && !in_bounds(bx, by) {
+                                continue;
+                            }
+                            transformed.push([ax, ay, a[2]]);
+                            transformed.push([bx, by, b[2]]);
+                        }
+                        transformed
+                    };
                     // tau_p 1.2 s — short enough that an old peak's
                     // afterglow is gone in ~3 s, fast enough to keep up
                     // with sweeping or moving sources. The single baseline
@@ -1615,9 +1579,13 @@ impl App {
                     ember.set_intensity(0.006 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::Goniometer => {
@@ -1629,11 +1597,8 @@ impl App {
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let want = ((dt * sr) as usize).clamp(64, 4096);
-                    let (status, real_pair) = resolve_stereo_pair(
-                        bode_pair,
-                        self.scope_store.as_ref(),
-                        want,
-                    );
+                    let (status, real_pair) =
+                        resolve_stereo_pair(bode_pair, self.scope_store.as_ref(), want);
                     self.gonio_real_audio_state = status;
                     let amp = match &real_pair {
                         Some((l, r)) => {
@@ -1653,7 +1618,9 @@ impl App {
                         self.ember_gonio_rotation_ms,
                         amp,
                         dt,
-                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
+                        real_pair
+                            .as_ref()
+                            .map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
                     // Trajectory views revisit the same Lissajous pixels
                     // ~50× per second (1 kHz carrier on a closed orbit) —
@@ -1664,9 +1631,13 @@ impl App {
                     ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::IoTransfer => {
@@ -1678,11 +1649,8 @@ impl App {
                         .find(|&s| s > 0)
                         .unwrap_or(EMBER_FALLBACK_SR) as f32;
                     let want = ((dt * sr) as usize).clamp(64, 4096);
-                    let (status, real_pair) = resolve_stereo_pair(
-                        bode_pair,
-                        self.scope_store.as_ref(),
-                        want,
-                    );
+                    let (status, real_pair) =
+                        resolve_stereo_pair(bode_pair, self.scope_store.as_ref(), want);
                     self.gonio_real_audio_state = status;
                     let amp = match &real_pair {
                         Some((l, r)) => {
@@ -1697,7 +1665,9 @@ impl App {
                         sr,
                         amp,
                         dt,
-                        real_pair.as_ref().map(|(l, r)| (l.as_slice(), r.as_slice())),
+                        real_pair
+                            .as_ref()
+                            .map(|(l, r)| (l.as_slice(), r.as_slice())),
                     );
                     // Same revisit-density profile as Goniometer's raw
                     // mode (1 kHz carrier on a closed loop), so
@@ -1706,9 +1676,13 @@ impl App {
                     ember.set_intensity(0.0008 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 0.6);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::BodeMag => {
@@ -1732,9 +1706,13 @@ impl App {
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::Coherence => {
@@ -1750,9 +1728,13 @@ impl App {
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::BodePhase => {
@@ -1763,16 +1745,22 @@ impl App {
                             self.virtual_channels
                                 .store_for(p)
                                 .and_then(|s| s.read())
-                                .map(|f| build_bodephase_polyline(&f, &view, self.ember_coherence_k))
+                                .map(|f| {
+                                    build_bodephase_polyline(&f, &view, self.ember_coherence_k)
+                                })
                         })
                         .unwrap_or_default();
                     ember.set_tau_p(4.0 * self.ember_tau_p_scale);
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::GroupDelay => {
@@ -1783,16 +1771,22 @@ impl App {
                             self.virtual_channels
                                 .store_for(p)
                                 .and_then(|s| s.read())
-                                .map(|f| build_groupdelay_polyline(&f, &view, self.ember_coherence_k))
+                                .map(|f| {
+                                    build_groupdelay_polyline(&f, &view, self.ember_coherence_k)
+                                })
                         })
                         .unwrap_or_default();
                     ember.set_tau_p(4.0 * self.ember_tau_p_scale);
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::Nyquist => {
@@ -1806,22 +1800,21 @@ impl App {
                     let polyline = bode_pair
                         .and_then(|p| self.virtual_channels.store_for(p).and_then(|s| s.read()))
                         .map(|frame| {
-                            let frame_peak = frame.re.iter().zip(frame.im.iter())
+                            let frame_peak = frame
+                                .re
+                                .iter()
+                                .zip(frame.im.iter())
                                 .map(|(r, i)| (r * r + i * i).sqrt())
                                 .fold(0.0_f32, f32::max);
                             // Same exponential decay as update_stereo_peak.
                             let tau_s = 0.5;
                             let decay = (-dt / tau_s).exp();
-                            self.ember_stereo_peak = self
-                                .ember_stereo_peak
-                                .max(frame_peak)
-                                * decay
+                            self.ember_stereo_peak = self.ember_stereo_peak.max(frame_peak) * decay
                                 + frame_peak * (1.0 - decay);
                             if self.ember_stereo_peak < 0.001 {
                                 self.ember_stereo_peak = 0.001;
                             }
-                            let amp = (0.85 / self.ember_stereo_peak.max(0.02))
-                                .clamp(0.5, 50.0);
+                            let amp = (0.85 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0);
                             build_nyquist_polyline(&frame, amp, self.ember_coherence_k)
                         })
                         .unwrap_or_default();
@@ -1829,9 +1822,13 @@ impl App {
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 ViewMode::Ir => {
@@ -1842,11 +1839,7 @@ impl App {
                     // simultaneously visible) so the dominant IR peak
                     // sits at ~0.4 of cell height.
                     let polyline = bode_pair
-                        .and_then(|p| {
-                            self.ir_store
-                                .as_ref()
-                                .and_then(|s| s.read(p))
-                        })
+                        .and_then(|p| self.ir_store.as_ref().and_then(|s| s.read(p)))
                         .map(|frame| {
                             let frame_peak = frame
                                 .samples
@@ -1855,16 +1848,12 @@ impl App {
                                 .fold(0.0_f32, f32::max);
                             let tau_s = 0.5;
                             let decay = (-dt / tau_s).exp();
-                            self.ember_stereo_peak = self
-                                .ember_stereo_peak
-                                .max(frame_peak)
-                                * decay
+                            self.ember_stereo_peak = self.ember_stereo_peak.max(frame_peak) * decay
                                 + frame_peak * (1.0 - decay);
                             if self.ember_stereo_peak < 0.001 {
                                 self.ember_stereo_peak = 0.001;
                             }
-                            let amp = (0.4 / self.ember_stereo_peak.max(0.02))
-                                .clamp(0.5, 50.0);
+                            let amp = (0.4 / self.ember_stereo_peak.max(0.02)).clamp(0.5, 50.0);
                             build_ir_polyline(&frame, amp)
                         })
                         .unwrap_or_default();
@@ -1872,9 +1861,13 @@ impl App {
                     ember.set_intensity(0.005 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
-                        &ctx.device, &ctx.queue, &mut encoder,
+                        &ctx.device,
+                        &ctx.queue,
+                        &mut encoder,
                         [0.0, 0.0, 1.0, 1.0],
-                        &polyline, 0.0, dt,
+                        &polyline,
+                        0.0,
+                        dt,
                     );
                 }
                 _ => {}
@@ -2083,12 +2076,7 @@ fn finalize_capture(
 /// A 1/3-octave greedy exclusion is applied after sorting by amplitude so
 /// neighbouring bins in the same spectral lobe can't monopolise the list.
 /// Returns `(bin_index, f_hz, amp_db)` in rank order (descending dB).
-fn top_peaks(
-    peak: &[f32],
-    freqs: &[f32],
-    view: &CellView,
-    n: usize,
-) -> Vec<(usize, f32, f32)> {
+fn top_peaks(peak: &[f32], freqs: &[f32], view: &CellView, n: usize) -> Vec<(usize, f32, f32)> {
     if peak.is_empty() || freqs.len() != peak.len() || n == 0 {
         return Vec::new();
     }
@@ -2115,9 +2103,9 @@ fn top_peaks(
         if picked.len() >= n {
             break;
         }
-        let too_close = picked.iter().any(|&(_, f, _)| {
-            (cand.1.max(1e-6) / f.max(1e-6)).log2().abs() < EXCLUSION_OCTAVES
-        });
+        let too_close = picked
+            .iter()
+            .any(|&(_, f, _)| (cand.1.max(1e-6) / f.max(1e-6)).log2().abs() < EXCLUSION_OCTAVES);
         if too_close {
             continue;
         }
@@ -2190,7 +2178,7 @@ fn draw_peak_overlay(
     let tri = [
         egui::pos2(p0.x - 5.0, p0.y - 10.0),
         egui::pos2(p0.x + 5.0, p0.y - 10.0),
-        egui::pos2(p0.x,       p0.y - 2.0),
+        egui::pos2(p0.x, p0.y - 2.0),
     ];
     painter.add(egui::Shape::convex_polygon(
         tri.to_vec(),
@@ -2212,7 +2200,7 @@ fn draw_peak_overlay(
         let tri = [
             egui::pos2(p.x - 3.0, p.y - 8.0),
             egui::pos2(p.x + 3.0, p.y - 8.0),
-            egui::pos2(p.x,       p.y - 2.0),
+            egui::pos2(p.x, p.y - 2.0),
         ];
         painter.add(egui::Shape::convex_polygon(
             tri.to_vec(),
@@ -2247,10 +2235,7 @@ fn draw_peak_overlay(
     for (i, &(_, f, amp)) in picked.iter().enumerate() {
         let color = if i == 0 { marker_color } else { rank_color };
         painter.text(
-            egui::pos2(
-                rect.left() + 4.0,
-                block_top + (i + 1) as f32 * row_h,
-            ),
+            egui::pos2(rect.left() + 4.0, block_top + (i + 1) as f32 * row_h),
             egui::Align2::LEFT_TOP,
             crate::ui::fmt::peak_rank_line(i + 1, f, amp),
             egui::FontId::monospace(theme::GRID_LABEL_PX),
@@ -2271,12 +2256,12 @@ use crate::ui::fmt::format_freq_compact;
 /// since wraparound is impossible inside a single frame's band, every
 /// consecutive sample pair is emitted unconditionally.
 fn build_scope_polyline(
-    sine_phase:   &mut f32,
-    sample_rate:  f32,
+    sine_phase: &mut f32,
+    sample_rate: f32,
     sine_freq_hz: f32,
-    window_s:     f32,
-    y_gain:       f32,
-    dt:           f32,
+    window_s: f32,
+    y_gain: f32,
+    dt: f32,
 ) -> (Vec<[f32; 3]>, f32) {
     let scroll_dx = (dt / window_s.max(1e-3)).clamp(0.0, 1.0);
     let n = ((dt * sample_rate) as usize).min(8000);
@@ -2307,6 +2292,7 @@ fn build_scope_polyline(
 /// (weighting disabled — every bin deposits at full intensity). NaN /
 /// negative coherence falls through to 0.0 so spurious bins don't
 /// brighten unexpectedly.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn coherence_weight(coherence: f32, k: f32) -> f32 {
     if !(k > 0.0) {
         return 1.0;
@@ -2380,8 +2366,12 @@ fn build_ember_spectrum_trace(
     for i in 0..n {
         let f = freqs[i];
         let mag = mags[i];
-        if !f.is_finite() || f < view.freq_min || f > view.freq_max
-            || !mag.is_finite() || mag < view.db_min {
+        if !f.is_finite()
+            || f < view.freq_min
+            || f > view.freq_max
+            || !mag.is_finite()
+            || mag < view.db_min
+        {
             continue;
         }
         let xn = (f.max(1.0).log10() - log_min) / span_f;
@@ -2396,6 +2386,7 @@ fn build_ember_spectrum_trace(
 
     let mut pairs = Vec::with_capacity(n_cols * 2);
     let mut prev: Option<[f32; 3]> = None;
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
         let mag = col_max[col];
         if !mag.is_finite() {
@@ -2445,8 +2436,7 @@ fn build_bodemag_polyline(
     for i in 0..n {
         let f = frame.freqs[i];
         let mag = frame.magnitude_db[i];
-        if !f.is_finite() || f < view.freq_min || f > view.freq_max
-            || !mag.is_finite() {
+        if !f.is_finite() || f < view.freq_min || f > view.freq_max || !mag.is_finite() {
             continue;
         }
         let xn = (f.max(1.0).log10() - log_min) / span_f;
@@ -2500,9 +2490,7 @@ fn build_bodemag_polyline(
 /// pessimistic value (one bad bin in a column means "don't trust
 /// this region"), the inverse of the spectrum's max-aggregation
 /// which prioritises peaks. Phase 2 of unified.md.
-fn build_coherence_polyline(
-    frame: &crate::data::types::TransferFrame,
-) -> Vec<[f32; 3]> {
+fn build_coherence_polyline(frame: &crate::data::types::TransferFrame) -> Vec<[f32; 3]> {
     // Coherence views always span the full audio band — no cell
     // freq-window dependence (γ² is dimensionless and useful across
     // the whole band regardless of where the user has zoomed the dB
@@ -2530,6 +2518,7 @@ fn build_coherence_polyline(
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
     let mut prev: Option<[f32; 3]> = None;
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
         let c = col_min[col];
         if !c.is_finite() {
@@ -2611,8 +2600,7 @@ fn build_bodephase_polyline(
     for i in 0..n {
         let f = frame.freqs[i];
         let p = frame.phase_deg[i];
-        if !f.is_finite() || f < view.freq_min || f > view.freq_max
-            || !p.is_finite() {
+        if !f.is_finite() || f < view.freq_min || f > view.freq_max || !p.is_finite() {
             continue;
         }
         let xn = (f.max(1.0).log10() - log_min) / span_f;
@@ -2625,6 +2613,7 @@ fn build_bodephase_polyline(
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
     let mut prev: Option<[f32; 3]> = None;
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
         let Some((p, c)) = col_phase[col] else {
             // See BodeMag for why we skip without breaking.
@@ -2711,6 +2700,7 @@ fn build_groupdelay_polyline(
     }
     let mut pairs = Vec::with_capacity(n_cols * 2);
     let mut prev: Option<[f32; 3]> = None;
+    #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
         let Some((t, c)) = col_val[col] else {
             // See BodeMag for why we skip without breaking.
@@ -2906,6 +2896,7 @@ fn update_stereo_peak(peak: &mut f32, l: &[f32], r: &[f32], dt: f32) {
 ///   stopped streaming).
 /// - `(NoAudio, None)` when there's no scope store at all
 ///   (synthetic / pre-connect).
+#[allow(clippy::type_complexity)]
 fn resolve_stereo_pair(
     pair: Option<crate::data::types::TransferPair>,
     scope_store: Option<&crate::data::store::ScopeStore>,
@@ -2933,9 +2924,21 @@ fn resolve_stereo_pair(
         (Some((_, fi_l, sl)), Some((_, fi_r, sr_buf)))
             if fi_l.abs_diff(fi_r) <= 1 && sl.len() == sr_buf.len() && !sl.is_empty() =>
         {
-            (StereoStatus::Real { l: phys_l, r: phys_r }, Some((sl, sr_buf)))
+            (
+                StereoStatus::Real {
+                    l: phys_l,
+                    r: phys_r,
+                },
+                Some((sl, sr_buf)),
+            )
         }
-        _ => (StereoStatus::NotStreamingYet { l: phys_l, r: phys_r }, None),
+        _ => (
+            StereoStatus::NotStreamingYet {
+                l: phys_l,
+                r: phys_r,
+            },
+            None,
+        ),
     }
 }
 
@@ -3185,7 +3188,7 @@ mod tests {
     #[test]
     fn top_peaks_respects_n_cap() {
         // Five well-spaced peaks (>1 octave apart each).
-        let freqs: Vec<f32> = (0..11).map(|i| 50.0 * (2.0_f32).powi(i as i32)).collect();
+        let freqs: Vec<f32> = (0..11).map(|i| 50.0 * (2.0_f32).powi(i)).collect();
         let mut peak = vec![-90.0f32; 11];
         for (i, amp) in [-10.0, -15.0, -20.0, -25.0, -30.0].iter().enumerate() {
             peak[1 + 2 * i] = *amp;
@@ -3226,13 +3229,21 @@ mod tests {
         let mut pl = 0.0_f32;
         let mut pr = 0.0_f32;
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            true,
+            EMBER_GONIO_AMP,
+            1.0 / 60.0,
             None,
         );
         // Two consecutive vertices form one connected segment, so the
         // pair count is always even and every emitted vertex must sit
         // inside the substrate viewport.
-        assert!(pairs.len() % 2 == 0, "LineList vertices must be even");
+        assert!(
+            pairs.len().is_multiple_of(2),
+            "LineList vertices must be even"
+        );
         for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
             assert!((0.0..=1.0).contains(y), "y = {y} out of [0,1]");
@@ -3248,9 +3259,8 @@ mod tests {
         let sr = 48_000.0;
         let dt = 0.01;
         let n = (dt * sr) as usize;
-        let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, sr, true, EMBER_GONIO_AMP, dt, None,
-        );
+        let pairs =
+            build_goniometer_polyline(&mut pl, &mut pr, sr, true, EMBER_GONIO_AMP, dt, None);
         assert_eq!(
             pairs.len(),
             2 * n.saturating_sub(1),
@@ -3267,7 +3277,13 @@ mod tests {
         let mut pl = 0.5_f32;
         let mut pr = 1.7_f32;
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, false, EMBER_GONIO_AMP, 0.05, None,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            false,
+            EMBER_GONIO_AMP,
+            0.05,
+            None,
         );
         for [x, y, _] in &pairs {
             assert!((0.0..=1.0).contains(x), "x = {x} out of [0,1]");
@@ -3287,7 +3303,12 @@ mod tests {
         let l: Vec<f32> = (0..32).map(|i| (i as f32 * 0.1).sin()).collect();
         let r = l.clone();
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            true,
+            EMBER_GONIO_AMP,
+            1.0 / 60.0,
             Some((&l, &r)),
         );
         assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
@@ -3309,7 +3330,12 @@ mod tests {
         let l: Vec<f32> = vec![0.1, 0.2, 0.3];
         let r: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
         let pairs = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            true,
+            EMBER_GONIO_AMP,
+            1.0 / 60.0,
             Some((&l, &r)),
         );
         // Synthetic fallback at dt × sr = 800 produces ~798 line pairs;
@@ -3336,11 +3362,22 @@ mod tests {
         let l: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
         let r = l.clone();
         let _ = build_goniometer_polyline(
-            &mut pl, &mut pr, 48_000.0, true, EMBER_GONIO_AMP, 1.0 / 60.0,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            true,
+            EMBER_GONIO_AMP,
+            1.0 / 60.0,
             Some((&l, &r)),
         );
-        assert_eq!(pl, pl_before, "carrier_phase must stay frozen in real branch");
-        assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
+        assert_eq!(
+            pl, pl_before,
+            "carrier_phase must stay frozen in real branch"
+        );
+        assert_eq!(
+            pr, pr_before,
+            "phase_offset must stay frozen in real branch"
+        );
     }
 
     // ---- Phase 1.5 IoTransfer tests ----
@@ -3354,10 +3391,8 @@ mod tests {
         let mut pr = 0.0_f32;
         let l: Vec<f32> = (0..32).map(|i| (i as f32 * 0.1).sin()).collect();
         let r = l.clone();
-        let pairs = build_iotransfer_polyline(
-            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
-            Some((&l, &r)),
-        );
+        let pairs =
+            build_iotransfer_polyline(&mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0, Some((&l, &r)));
         assert!(!pairs.is_empty(), "real-audio branch should produce pairs");
         for [x, y, _] in &pairs {
             assert!(
@@ -3377,10 +3412,8 @@ mod tests {
         let mut pr = 0.0_f32;
         let l: Vec<f32> = (0..64).map(|i| (i as f32 * 0.2).sin()).collect();
         let r: Vec<f32> = l.iter().map(|&v| v.clamp(-0.5, 0.5)).collect();
-        let pairs = build_iotransfer_polyline(
-            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
-            Some((&l, &r)),
-        );
+        let pairs =
+            build_iotransfer_polyline(&mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0, Some((&l, &r)));
         // Substrate map: y = 0.5 + 0.45 * R. R clipped at +0.5 → y =
         // 0.725. Find any vertex where the corresponding L > 0.5
         // (i.e. x > 0.5 + 0.45*0.5 = 0.725) and verify y is pinned
@@ -3405,7 +3438,11 @@ mod tests {
         let mut pl = 0.0_f32;
         let mut pr = 0.0_f32;
         let pairs = build_iotransfer_polyline(
-            &mut pl, &mut pr, 48_000.0, EMBER_GONIO_AMP, 1.0 / 60.0,
+            &mut pl,
+            &mut pr,
+            48_000.0,
+            EMBER_GONIO_AMP,
+            1.0 / 60.0,
             None,
         );
         assert!(!pairs.is_empty(), "synthetic fallback should produce pairs");
@@ -3426,12 +3463,16 @@ mod tests {
         let pr_before = pr;
         let l: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
         let r = l.clone();
-        let _ = build_iotransfer_polyline(
-            &mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0,
-            Some((&l, &r)),
+        let _ =
+            build_iotransfer_polyline(&mut pl, &mut pr, 48_000.0, 1.0, 1.0 / 60.0, Some((&l, &r)));
+        assert_eq!(
+            pl, pl_before,
+            "carrier_phase must stay frozen in real branch"
         );
-        assert_eq!(pl, pl_before, "carrier_phase must stay frozen in real branch");
-        assert_eq!(pr, pr_before, "phase_offset must stay frozen in real branch");
+        assert_eq!(
+            pr, pr_before,
+            "phase_offset must stay frozen in real branch"
+        );
     }
 
     // ---- Phase 2 BodeMag + Coherence builder tests ----
@@ -3535,15 +3576,19 @@ mod tests {
         // Mix of valid coherence + a couple of out-of-range values
         // (defensive: the daemon shouldn't emit these but the builder
         // shouldn't panic if it does).
-        let coh: Vec<f32> = freqs.iter().enumerate().map(|(i, _)| {
-            match i % 5 {
-                0 => 0.0,
-                1 => 0.5,
-                2 => 1.0,
-                3 => 1.2,  // out of range — should clamp
-                _ => -0.1, // out of range — should clamp
-            }
-        }).collect();
+        let coh: Vec<f32> = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                match i % 5 {
+                    0 => 0.0,
+                    1 => 0.5,
+                    2 => 1.0,
+                    3 => 1.2,  // out of range — should clamp
+                    _ => -0.1, // out of range — should clamp
+                }
+            })
+            .collect();
         let f = transfer_frame_lin_log_db(freqs, vec![], coh);
         let pairs = build_coherence_polyline(&f);
         assert!(!pairs.is_empty(), "expected non-empty polyline");
@@ -3866,9 +3911,7 @@ mod tests {
     /// clamps to keep the substrate render path well-behaved).
     #[test]
     fn ir_pairs_stay_in_unit_box() {
-        let samples: Vec<f32> = (0..256)
-            .map(|i| ((i as f32 * 0.1).sin()))
-            .collect();
+        let samples: Vec<f32> = (0..256).map(|i| (i as f32 * 0.1).sin()).collect();
         // Deliberately oversized amp — clamps should still hold.
         let pairs = build_ir_polyline(&ir_frame(samples), 100.0);
         assert!(!pairs.is_empty());
@@ -4020,7 +4063,10 @@ mod tests {
         let pairs = build_coherence_polyline(&f);
         assert!(!pairs.is_empty());
         for [_, _, w] in &pairs {
-            assert!((w - 1.0).abs() < 1e-6, "coherence view must not weight, got {w}");
+            assert!(
+                (w - 1.0).abs() < 1e-6,
+                "coherence view must not weight, got {w}"
+            );
         }
     }
 
@@ -4061,9 +4107,18 @@ mod tests {
             .collect();
         assert!(!trace_weights.is_empty());
         let min_w = trace_weights.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_w = trace_weights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!(min_w < 0.05, "low-γ² trace weight should be near 0, got {min_w}");
-        assert!(max_w > 0.95, "high-γ² trace weight should be near 1, got {max_w}");
+        let max_w = trace_weights
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            min_w < 0.05,
+            "low-γ² trace weight should be near 0, got {min_w}"
+        );
+        assert!(
+            max_w > 0.95,
+            "high-γ² trace weight should be near 1, got {max_w}"
+        );
     }
 
     /// Nyquist unit-circle reference always carries weight 1.0 —
@@ -4097,7 +4152,10 @@ mod tests {
             .collect();
         assert!(!circle_full.is_empty(), "expected unit-circle vertices");
         for w in &circle_full {
-            assert!((w - 1.0).abs() < 1e-6, "circle ref weight must be 1, got {w}");
+            assert!(
+                (w - 1.0).abs() < 1e-6,
+                "circle ref weight must be 1, got {w}"
+            );
         }
         // And confirm the trace weights are at the floor (γ²=0,
         // k=4 → 0) — this is the contrast that makes the
@@ -4120,7 +4178,11 @@ mod tests {
 
     // ---- resolve_stereo_pair (TransferPair-driven) ----
 
-    fn scope_frame(channel: u32, frame_idx: u64, samples: Vec<f32>) -> crate::data::types::ScopeFrame {
+    fn scope_frame(
+        channel: u32,
+        frame_idx: u64,
+        samples: Vec<f32>,
+    ) -> crate::data::types::ScopeFrame {
         crate::data::types::ScopeFrame {
             channel,
             sr: 48_000,
@@ -4210,10 +4272,7 @@ mod tests {
         // The leftmost column the builder emits should sit at low
         // freq: `xn ≈ 0.05` corresponds to ~30 Hz, well below the
         // 1 kHz threshold the user observed pre-fix.
-        let leftmost_x = pairs
-            .iter()
-            .map(|p| p[0])
-            .fold(f32::INFINITY, f32::min);
+        let leftmost_x = pairs.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
         assert!(
             leftmost_x < 0.10,
             "expected polyline to reach into low-freq cols (xn < 0.10); \

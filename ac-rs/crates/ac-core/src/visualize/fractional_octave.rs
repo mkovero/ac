@@ -143,7 +143,13 @@ pub fn cwt_to_fractional_octave(
 
     let powers: Vec<f64> = cwt_col_db
         .iter()
-        .map(|&db| if db.is_finite() { 10f64.powf(db as f64 / 10.0) } else { 0.0 })
+        .map(|&db| {
+            if db.is_finite() {
+                10f64.powf(db as f64 / 10.0)
+            } else {
+                0.0
+            }
+        })
         .collect();
 
     let mut band_power = vec![0.0_f64; n_bands];
@@ -255,7 +261,7 @@ mod tests {
             nearest(10_000.0)
         );
         assert!(
-            (nearest(2_000.0) - 1995.262_315).abs() < 5e-2,
+            (nearest(2_000.0) - 1_995.262_315).abs() < 5e-2,
             "2 kHz slot centre (should be ≈1995.262, base-2 would read 2000) = {}",
             nearest(2_000.0)
         );

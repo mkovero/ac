@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 
 pub struct WorkerHandle {
     pub stop_flag: Arc<AtomicBool>,
-    pub thread:    Option<JoinHandle<()>>,
+    pub thread: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
@@ -53,9 +53,9 @@ pub fn cmd_group(name: &str) -> Option<Group> {
         "sweep_level" | "sweep_frequency" | "generate" | "generate_pink" => Some(Group::Output),
         "sweep_ir" => Some(Group::Exclusive),
         "monitor_spectrum" => Some(Group::Input),
-        "transfer_stream"  => Some(Group::Transfer),
-        "plot" | "plot_level" | "calibrate" | "calibrate_spl"
-        | "probe" | "test_hardware" | "test_dut" => Some(Group::Exclusive),
+        "transfer_stream" => Some(Group::Transfer),
+        "plot" | "plot_level" | "calibrate" | "calibrate_spl" | "probe" | "test_hardware"
+        | "test_dut" => Some(Group::Exclusive),
         _ => None,
     }
 }

@@ -16,15 +16,15 @@ pub struct CellRect {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GridParams {
     pub cell_size: Option<f32>,
-    pub page:      usize,
+    pub page: usize,
 }
 
 /// Plot inset padding. Kept in one place so `compute` and `grid_page_count`
 /// both agree on cell sizing math.
-const PAD_LEFT:  f32 = 0.055;
+const PAD_LEFT: f32 = 0.055;
 const PAD_RIGHT: f32 = 0.025;
-const PAD_TOP:   f32 = 0.05;
-const PAD_BOT:   f32 = 0.10;
+const PAD_TOP: f32 = 0.05;
+const PAD_BOT: f32 = 0.10;
 
 /// Resolve (cols, rows, page_size, pages) for the current grid params. Used
 /// by `compute(Grid)` and by the app when pinning `grid_page` after a resize.
@@ -151,13 +151,7 @@ mod tests {
 
     #[test]
     fn single_layout_exposes_only_active_channel() {
-        let cells = compute(
-            LayoutMode::Single,
-            8,
-            3,
-            &[false; 8],
-            GridParams::default(),
-        );
+        let cells = compute(LayoutMode::Single, 8, 3, &[false; 8], GridParams::default());
         assert_eq!(visible(&cells), HashSet::from([3]));
     }
 
@@ -172,13 +166,7 @@ mod tests {
 
     #[test]
     fn sweep_layout_exposes_only_channel_zero() {
-        let cells = compute(
-            LayoutMode::Sweep,
-            8,
-            5,
-            &[false; 8],
-            GridParams::default(),
-        );
+        let cells = compute(LayoutMode::Sweep, 8, 5, &[false; 8], GridParams::default());
         assert_eq!(visible(&cells), HashSet::from([0]));
     }
 
@@ -186,21 +174,34 @@ mod tests {
     fn grid_layout_pages_change_visible_set() {
         // 8 channels, force a 2×2 = 4-cell page so paging splits 0..4
         // and 4..8 onto separate pages.
-        let small_cell = GridParams { cell_size: Some(0.5), page: 0 };
+        let small_cell = GridParams {
+            cell_size: Some(0.5),
+            page: 0,
+        };
         let page0 = compute(LayoutMode::Grid, 8, 0, &[false; 8], small_cell);
         let page1 = compute(
             LayoutMode::Grid,
             8,
             0,
             &[false; 8],
-            GridParams { page: 1, ..small_cell },
+            GridParams {
+                page: 1,
+                ..small_cell
+            },
         );
         let v0 = visible(&page0);
         let v1 = visible(&page1);
         assert!(!v0.is_empty(), "page 0 must show at least one cell");
         assert!(!v1.is_empty(), "page 1 must show at least one cell");
-        assert!(v0.is_disjoint(&v1), "different pages must show different channels");
-        assert_eq!(v0.union(&v1).count(), 8, "all 8 channels covered across pages");
+        assert!(
+            v0.is_disjoint(&v1),
+            "different pages must show different channels"
+        );
+        assert_eq!(
+            v0.union(&v1).count(),
+            8,
+            "all 8 channels covered across pages"
+        );
     }
 
     #[test]

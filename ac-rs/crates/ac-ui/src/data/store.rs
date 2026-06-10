@@ -220,11 +220,10 @@ impl VirtualChannelStore {
     // Retained: exercised by unit tests below; no production caller yet.
     #[allow(dead_code)]
     pub fn store_for(&self, pair: TransferPair) -> Option<TransferStore> {
-        self.inner.lock().ok().and_then(|g| {
-            g.iter()
-                .find(|(p, _)| *p == pair)
-                .map(|(_, s)| s.clone())
-        })
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.iter().find(|(p, _)| *p == pair).map(|(_, s)| s.clone()))
     }
 
     /// Receiver-side dispatch: write `frame` into the slot matching
@@ -241,9 +240,7 @@ impl VirtualChannelStore {
     /// Snapshot every pair with its current frame and write serial. Consumers
     /// that scroll waterfalls keep per-pair last-seen serials and emit a new
     /// row only when the serial increases.
-    pub fn read_all_with_serial(
-        &self,
-    ) -> Vec<(TransferPair, u64, Option<TransferFrame>)> {
+    pub fn read_all_with_serial(&self) -> Vec<(TransferPair, u64, Option<TransferFrame>)> {
         self.inner
             .lock()
             .ok()
@@ -333,7 +330,10 @@ impl LoudnessStore {
     }
 
     pub fn read(&self, channel: u32) -> Option<LoudnessReadout> {
-        self.inner.lock().ok().and_then(|g| g.get(&channel).copied())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&channel).copied())
     }
 
     pub fn clear(&self) {
@@ -371,6 +371,7 @@ impl IrStore {
         self.inner.lock().ok().and_then(|g| g.get(&pair).cloned())
     }
 
+    #[allow(dead_code)]
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.clear();
@@ -453,6 +454,7 @@ impl ScopeStore {
         Some((ch.sr, ch.last_frame_idx, tail))
     }
 
+    #[allow(dead_code)]
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.clear();
@@ -572,9 +574,7 @@ mod tests {
         let store = ScopeStore::new();
         store.write(scope_frame(0, 1, vec![0.1, 0.2, 0.3]));
         // max_age = 0 means *every* prior write counts as stale.
-        assert!(store
-            .read_recent(0, 2, Duration::from_secs(0))
-            .is_none());
+        assert!(store.read_recent(0, 2, Duration::from_secs(0)).is_none());
     }
 
     #[test]
@@ -584,6 +584,9 @@ mod tests {
         store.write(scope_frame(1, 42, vec![-0.1, -0.2, -0.3, -0.4]));
         let (_, fi_l, _) = store.read_recent(0, 4, Duration::from_secs(1)).unwrap();
         let (_, fi_r, _) = store.read_recent(1, 4, Duration::from_secs(1)).unwrap();
-        assert_eq!(fi_l, fi_r, "frame_idx must match across L and R within a tick");
+        assert_eq!(
+            fi_l, fi_r,
+            "frame_idx must match across L and R within a tick"
+        );
     }
 }

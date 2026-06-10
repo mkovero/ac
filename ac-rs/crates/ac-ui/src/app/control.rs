@@ -293,7 +293,9 @@ impl App {
         }
         let interval = self.monitor_interval_ms as f64 / 1000.0;
         let fft_n = self.monitor_fft_n;
-        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let Some(ctrl) = self.ensure_ctrl() else {
+            return;
+        };
         let cmd = serde_json::json!({
             "cmd":      "set_monitor_params",
             "interval": interval,
@@ -322,18 +324,22 @@ impl App {
         // frame came from.
         if matches!(self.source.as_ref(), Some(DataSource::Synthetic(_))) {
             self.transfer_stream_active = true;
-            self.notify(&format!("transfer_stream: {} pair(s) (synthetic)", pairs.len()));
+            self.notify(&format!(
+                "transfer_stream: {} pair(s) (synthetic)",
+                pairs.len()
+            ));
             return;
         }
         // `transfer_stream` is in the `Transfer` group — coexists with the
         // running `monitor_spectrum` (`Input`) because each worker owns its
         // own JACK client, so no need to pause monitor here.
-        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let Some(ctrl) = self.ensure_ctrl() else {
+            return;
+        };
         // Passive mode: don't ask the daemon to drive the output. The user
         // wires their own stimulus (pink, sweep, speech, music) into the
         // meas/ref inputs externally and we just compute H1 against it.
-        let pairs_json: Vec<[u32; 2]> =
-            pairs.iter().map(|p| [p.meas, p.ref_ch]).collect();
+        let pairs_json: Vec<[u32; 2]> = pairs.iter().map(|p| [p.meas, p.ref_ch]).collect();
         let cmd = serde_json::json!({
             "cmd":   "transfer_stream",
             "pairs": pairs_json,
@@ -389,11 +395,15 @@ impl App {
         if n == 0 {
             return;
         }
-        let channels: Vec<u32> = self.monitor_channels.clone()
+        let channels: Vec<u32> = self
+            .monitor_channels
+            .clone()
             .unwrap_or_else(|| (0..n as u32).collect());
         let interval = self.monitor_interval_ms as f64 / 1000.0;
         let fft_n = self.monitor_fft_n;
-        let Some(ctrl) = self.ensure_ctrl() else { return };
+        let Some(ctrl) = self.ensure_ctrl() else {
+            return;
+        };
         let cmd = serde_json::json!({
             "cmd":      "monitor_spectrum",
             "interval": interval,
@@ -406,6 +416,17 @@ impl App {
                 log::info!("monitor_spectrum reply: {reply}");
                 if reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
                     self.monitor_spectrum_active = true;
+                    // Learn the daemon's dual-resolution LF constants so the
+                    // readout can label the LF band without hardcoding them
+                    // (#142). Absent fields → LF feature off on this daemon.
+                    self.monitor_lf_fft_n = reply
+                        .get("lf_fft_n")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+                    self.monitor_crossover_hz = reply
+                        .get("crossover_hz")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as f32);
                 } else {
                     let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
                     self.notify(&format!("monitor_spectrum: {err}"));

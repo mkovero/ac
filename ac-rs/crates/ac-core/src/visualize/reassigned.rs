@@ -80,20 +80,20 @@ pub const DEFAULT_NOISE_FLOOR_DB: f32 = -60.0;
 
 /// Precomputed plan and windows for a single output column shape.
 pub struct ReassignedKernels {
-    pub n:           usize,
+    pub n: usize,
     pub sample_rate: u32,
-    pub freqs_out:   Vec<f32>,
-    h:               Vec<f64>,
-    th:              Vec<f64>,
-    dh:              Vec<f64>,
-    h_norm:          f64,
+    pub freqs_out: Vec<f32>,
+    h: Vec<f64>,
+    th: Vec<f64>,
+    dh: Vec<f64>,
+    h_norm: f64,
     /// Equivalent noise bandwidth of `h`, in bins. Reassignment funnels a
     /// tone's spread sidelobes back to one output bin, and Parseval says
     /// the sum of one-sided `|Y·amp_scale|²` over those bins exceeds the
     /// tone's `A²` by exactly this factor (≈ 1.5 for Hann). Dividing the
     /// accumulated power by `enbw` recovers `A²`.
-    enbw:            f64,
-    fft_plan:        Arc<dyn RealToComplex<f64>>,
+    enbw: f64,
+    fft_plan: Arc<dyn RealToComplex<f64>>,
     /// Output-bin index for each FFT bin's nominal centre frequency,
     /// precomputed so the hot-path reassignment loop does index math
     /// instead of `log()` per bin.
@@ -103,15 +103,21 @@ pub struct ReassignedKernels {
 /// Build the kernel bundle. The output grid is log-spaced from `f_min`
 /// to `f_max` with `n_out_bins` entries. Both endpoints are included.
 pub fn build_kernels(
-    n:           usize,
+    n: usize,
     sample_rate: u32,
-    n_out_bins:  usize,
-    f_min:       f32,
-    f_max:       f32,
+    n_out_bins: usize,
+    f_min: f32,
+    f_max: f32,
 ) -> ReassignedKernels {
     assert!(n >= 256, "n must be ≥ 256, got {n}");
-    assert!(n.is_power_of_two(), "n must be a power of two for FFT efficiency, got {n}");
-    assert!(n_out_bins >= 16, "n_out_bins must be ≥ 16, got {n_out_bins}");
+    assert!(
+        n.is_power_of_two(),
+        "n must be a power of two for FFT efficiency, got {n}"
+    );
+    assert!(
+        n_out_bins >= 16,
+        "n_out_bins must be ≥ 16, got {n_out_bins}"
+    );
     assert!(sample_rate > 0);
     assert!(f_min > 0.0 && f_max > f_min);
 
@@ -119,21 +125,21 @@ pub fn build_kernels(
     // Time origin at the buffer centre so `th` is antisymmetric — keeps
     // the time-reassignment formula sign-correct.
     let centre = (n as f64 - 1.0) / 2.0;
-    let mut h  = vec![0.0_f64; n];
+    let mut h = vec![0.0_f64; n];
     let mut th = vec![0.0_f64; n];
     let mut wsum = 0.0;
     let mut wsum_sq = 0.0;
     for i in 0..n {
         let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos();
-        h[i]  = w;
+        h[i] = w;
         th[i] = (i as f64 - centre) * w;
-        wsum    += w;
+        wsum += w;
         wsum_sq += w * w;
     }
     let enbw = n as f64 * wsum_sq / (wsum * wsum);
     // Central-difference derivative; edges use forward/backward differences.
     let mut dh = vec![0.0_f64; n];
-    dh[0]     = h[1] - h[0];
+    dh[0] = h[1] - h[0];
     dh[n - 1] = h[n - 1] - h[n - 2];
     for i in 1..(n - 1) {
         dh[i] = (h[i + 1] - h[i - 1]) * 0.5;
@@ -175,16 +181,28 @@ pub fn build_kernels(
 
 /// Map a frequency to its closest log-grid output-bin index.
 fn out_bin_idx(f: f32, grid: &[f32]) -> usize {
-    if !f.is_finite() || f <= grid[0] { return 0; }
-    if f >= grid[grid.len() - 1] { return grid.len() - 1; }
+    if !f.is_finite() || f <= grid[0] {
+        return 0;
+    }
+    if f >= grid[grid.len() - 1] {
+        return grid.len() - 1;
+    }
     // Binary search on monotonically increasing log grid.
     let mut lo = 0usize;
     let mut hi = grid.len() - 1;
     while lo + 1 < hi {
         let mid = (lo + hi) / 2;
-        if grid[mid] <= f { lo = mid; } else { hi = mid; }
+        if grid[mid] <= f {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
-    if (f - grid[lo]).abs() <= (grid[hi] - f).abs() { lo } else { hi }
+    if (f - grid[lo]).abs() <= (grid[hi] - f).abs() {
+        lo
+    } else {
+        hi
+    }
 }
 
 /// Compute one reassigned spectrogram column.
@@ -198,124 +216,153 @@ fn out_bin_idx(f: f32, grid: &[f32]) -> usize {
 /// Bins below `kernels`'s noise gate (60 dB below the column peak) keep
 /// their nominal frequency — reassignment becomes meaningless there
 /// because `1/|X_h|²` blows up.
-pub fn reassigned_into(
-    buf:      &[f32],
-    kernels:  &ReassignedKernels,
-    mags_out: &mut Vec<f32>,
-) {
+pub fn reassigned_into(buf: &[f32], kernels: &ReassignedKernels, mags_out: &mut Vec<f32>) {
     let n = kernels.n;
-    assert!(buf.len() >= n, "buf shorter than kernel.n: {} < {n}", buf.len());
+    assert!(
+        buf.len() >= n,
+        "buf shorter than kernel.n: {} < {n}",
+        buf.len()
+    );
     let n_half = n / 2 + 1;
-    let n_out  = kernels.freqs_out.len();
-    let start  = buf.len() - n;
+    let n_out = kernels.freqs_out.len();
+    let start = buf.len() - n;
 
-    SCRATCH_X.with(|x_cell|
-    SCRATCH_IN_H.with(|h_cell|
-    SCRATCH_IN_T.with(|t_cell|
-    SCRATCH_IN_D.with(|d_cell|
-    SCRATCH_SP_H.with(|sh_cell|
-    SCRATCH_SP_T.with(|st_cell|
-    SCRATCH_SP_D.with(|sd_cell|
-    SCRATCH_FFT.with(|fft_cell|
-    SCRATCH_POW.with(|pow_cell| {
-        let mut x      = x_cell.borrow_mut();
-        let mut in_h   = h_cell.borrow_mut();
-        let mut in_th  = t_cell.borrow_mut();
-        let mut in_dh  = d_cell.borrow_mut();
-        let mut sp_h   = sh_cell.borrow_mut();
-        let mut sp_th  = st_cell.borrow_mut();
-        let mut sp_dh  = sd_cell.borrow_mut();
-        let mut fft_sc = fft_cell.borrow_mut();
-        let mut acc    = pow_cell.borrow_mut();
+    SCRATCH_X.with(|x_cell| {
+        SCRATCH_IN_H.with(|h_cell| {
+            SCRATCH_IN_T.with(|t_cell| {
+                SCRATCH_IN_D.with(|d_cell| {
+                    SCRATCH_SP_H.with(|sh_cell| {
+                        SCRATCH_SP_T.with(|st_cell| {
+                            SCRATCH_SP_D.with(|sd_cell| {
+                                SCRATCH_FFT.with(|fft_cell| {
+                                    SCRATCH_POW.with(|pow_cell| {
+                                        let mut x = x_cell.borrow_mut();
+                                        let mut in_h = h_cell.borrow_mut();
+                                        let mut in_th = t_cell.borrow_mut();
+                                        let mut in_dh = d_cell.borrow_mut();
+                                        let mut sp_h = sh_cell.borrow_mut();
+                                        let mut sp_th = st_cell.borrow_mut();
+                                        let mut sp_dh = sd_cell.borrow_mut();
+                                        let mut fft_sc = fft_cell.borrow_mut();
+                                        let mut acc = pow_cell.borrow_mut();
 
-        x.resize(n, 0.0);
-        in_h.resize(n, 0.0);
-        in_th.resize(n, 0.0);
-        in_dh.resize(n, 0.0);
-        sp_h.resize(n_half, Complex::new(0.0, 0.0));
-        sp_th.resize(n_half, Complex::new(0.0, 0.0));
-        sp_dh.resize(n_half, Complex::new(0.0, 0.0));
-        let need_scratch = kernels.fft_plan.get_scratch_len();
-        if fft_sc.len() < need_scratch {
-            fft_sc.resize(need_scratch, Complex::new(0.0, 0.0));
-        }
-        acc.clear();
-        acc.resize(n_out, 0.0);
+                                        x.resize(n, 0.0);
+                                        in_h.resize(n, 0.0);
+                                        in_th.resize(n, 0.0);
+                                        in_dh.resize(n, 0.0);
+                                        sp_h.resize(n_half, Complex::new(0.0, 0.0));
+                                        sp_th.resize(n_half, Complex::new(0.0, 0.0));
+                                        sp_dh.resize(n_half, Complex::new(0.0, 0.0));
+                                        let need_scratch = kernels.fft_plan.get_scratch_len();
+                                        if fft_sc.len() < need_scratch {
+                                            fft_sc.resize(need_scratch, Complex::new(0.0, 0.0));
+                                        }
+                                        acc.clear();
+                                        acc.resize(n_out, 0.0);
 
-        // f32 → f64 once per call. The inner per-window loops then read
-        // from `x` (already-converted) instead of re-casting per bin.
-        for (dst, &src) in x.iter_mut().zip(buf[start..].iter()) {
-            *dst = src as f64;
-        }
-        for i in 0..n {
-            in_h[i]  = x[i] * kernels.h[i];
-            in_th[i] = x[i] * kernels.th[i];
-            in_dh[i] = x[i] * kernels.dh[i];
-        }
+                                        // f32 → f64 once per call. The inner per-window loops then read
+                                        // from `x` (already-converted) instead of re-casting per bin.
+                                        for (dst, &src) in x.iter_mut().zip(buf[start..].iter()) {
+                                            *dst = src as f64;
+                                        }
+                                        for i in 0..n {
+                                            in_h[i] = x[i] * kernels.h[i];
+                                            in_th[i] = x[i] * kernels.th[i];
+                                            in_dh[i] = x[i] * kernels.dh[i];
+                                        }
 
-        kernels.fft_plan.process_with_scratch(
-            &mut in_h, &mut sp_h, &mut fft_sc[..need_scratch],
-        ).expect("realfft length contract");
-        kernels.fft_plan.process_with_scratch(
-            &mut in_th, &mut sp_th, &mut fft_sc[..need_scratch],
-        ).expect("realfft length contract");
-        kernels.fft_plan.process_with_scratch(
-            &mut in_dh, &mut sp_dh, &mut fft_sc[..need_scratch],
-        ).expect("realfft length contract");
+                                        kernels
+                                            .fft_plan
+                                            .process_with_scratch(
+                                                &mut in_h,
+                                                &mut sp_h,
+                                                &mut fft_sc[..need_scratch],
+                                            )
+                                            .expect("realfft length contract");
+                                        kernels
+                                            .fft_plan
+                                            .process_with_scratch(
+                                                &mut in_th,
+                                                &mut sp_th,
+                                                &mut fft_sc[..need_scratch],
+                                            )
+                                            .expect("realfft length contract");
+                                        kernels
+                                            .fft_plan
+                                            .process_with_scratch(
+                                                &mut in_dh,
+                                                &mut sp_dh,
+                                                &mut fft_sc[..need_scratch],
+                                            )
+                                            .expect("realfft length contract");
 
-        // Two-sided amplitude correction: real FFT returns one-sided spectrum,
-        // so peak amplitude for a cosine A·cos(2πfₖt) is (A/2)·sum(h). Scale
-        // by 2/sum(h) → |X_h[k]|·(2/sum(h)) = A directly.
-        let amp_scale = 2.0 / kernels.h_norm;
-        let amp_scale_sq = amp_scale * amp_scale;
+                                        // Two-sided amplitude correction: real FFT returns one-sided spectrum,
+                                        // so peak amplitude for a cosine A·cos(2πfₖt) is (A/2)·sum(h). Scale
+                                        // by 2/sum(h) → |X_h[k]|·(2/sum(h)) = A directly.
+                                        let amp_scale = 2.0 / kernels.h_norm;
+                                        let amp_scale_sq = amp_scale * amp_scale;
 
-        // First pass: find peak |X_h|² to anchor the noise gate.
-        let mut peak_mag2 = 0.0_f64;
-        for k in 1..(n_half - 1) {
-            let m2 = sp_h[k].norm_sqr();
-            if m2 > peak_mag2 { peak_mag2 = m2; }
-        }
-        let gate_pow = peak_mag2 * 10.0_f64.powf(DEFAULT_NOISE_FLOOR_DB as f64 / 10.0);
+                                        // First pass: find peak |X_h|² to anchor the noise gate.
+                                        let mut peak_mag2 = 0.0_f64;
+                                        for k in 1..(n_half - 1) {
+                                            let m2 = sp_h[k].norm_sqr();
+                                            if m2 > peak_mag2 {
+                                                peak_mag2 = m2;
+                                            }
+                                        }
+                                        let gate_pow = peak_mag2
+                                            * 10.0_f64.powf(DEFAULT_NOISE_FLOOR_DB as f64 / 10.0);
 
-        // Reassign bin-by-bin.
-        let sr = kernels.sample_rate as f64;
-        let inv_two_pi = 1.0 / (2.0 * PI);
-        let inv_n = 1.0 / n as f64;
-        for k in 1..(n_half - 1) {
-            let xh = sp_h[k];
-            let mag2 = xh.norm_sqr();
-            if mag2 < 1e-30 { continue; }
-            let amp_sq = mag2 * amp_scale_sq;
-            let target = if mag2 < gate_pow {
-                kernels.nominal_out_idx[k]
-            } else {
-                let xdh = sp_dh[k];
-                let im_a_conj_b = xdh.re * xh.im - xdh.im * xh.re;
-                let f_k   = k as f64 * sr * inv_n;
-                let f_hat = f_k + (im_a_conj_b / mag2) * sr * inv_two_pi;
-                if f_hat.is_finite() {
-                    out_bin_idx(f_hat as f32, &kernels.freqs_out)
-                } else {
-                    kernels.nominal_out_idx[k]
-                }
-            };
-            acc[target] += amp_sq;
-        }
+                                        // Reassign bin-by-bin.
+                                        let sr = kernels.sample_rate as f64;
+                                        let inv_two_pi = 1.0 / (2.0 * PI);
+                                        let inv_n = 1.0 / n as f64;
+                                        for k in 1..(n_half - 1) {
+                                            let xh = sp_h[k];
+                                            let mag2 = xh.norm_sqr();
+                                            if mag2 < 1e-30 {
+                                                continue;
+                                            }
+                                            let amp_sq = mag2 * amp_scale_sq;
+                                            let target = if mag2 < gate_pow {
+                                                kernels.nominal_out_idx[k]
+                                            } else {
+                                                let xdh = sp_dh[k];
+                                                let im_a_conj_b = xdh.re * xh.im - xdh.im * xh.re;
+                                                let f_k = k as f64 * sr * inv_n;
+                                                let f_hat =
+                                                    f_k + (im_a_conj_b / mag2) * sr * inv_two_pi;
+                                                if f_hat.is_finite() {
+                                                    out_bin_idx(f_hat as f32, &kernels.freqs_out)
+                                                } else {
+                                                    kernels.nominal_out_idx[k]
+                                                }
+                                            };
+                                            acc[target] += amp_sq;
+                                        }
 
-        // ENBW-corrected amplitude² → dBFS.
-        mags_out.clear();
-        mags_out.reserve(n_out);
-        let inv_enbw = 1.0 / kernels.enbw;
-        for &p in acc.iter() {
-            let amp_sq = p * inv_enbw;
-            let db = if amp_sq > 1e-30 {
-                10.0 * amp_sq.log10()
-            } else {
-                -240.0
-            };
-            mags_out.push(db as f32);
-        }
-    })))))))));
+                                        // ENBW-corrected amplitude² → dBFS.
+                                        mags_out.clear();
+                                        mags_out.reserve(n_out);
+                                        let inv_enbw = 1.0 / kernels.enbw;
+                                        for &p in acc.iter() {
+                                            let amp_sq = p * inv_enbw;
+                                            let db = if amp_sq > 1e-30 {
+                                                10.0 * amp_sq.log10()
+                                            } else {
+                                                -240.0
+                                            };
+                                            mags_out.push(db as f32);
+                                        }
+                                    })
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    });
 }
 
 /// Convenience wrapper.
@@ -331,7 +378,9 @@ mod tests {
 
     fn cosine(amp: f32, freq: f32, n: usize, sr: u32) -> Vec<f32> {
         let two_pi = 2.0 * std::f32::consts::PI;
-        (0..n).map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos()).collect()
+        (0..n)
+            .map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos())
+            .collect()
     }
 
     fn linear_chirp(amp: f32, f_start: f32, f_end: f32, n: usize, sr: u32) -> Vec<f32> {
@@ -339,10 +388,12 @@ mod tests {
         let two_pi = 2.0 * std::f32::consts::PI;
         let t_total = n as f32 / sr as f32;
         let k_chirp = (f_end - f_start) / t_total;
-        (0..n).map(|i| {
-            let t = i as f32 / sr as f32;
-            amp * (two_pi * (f_start * t + 0.5 * k_chirp * t * t)).cos()
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                amp * (two_pi * (f_start * t + 0.5 * k_chirp * t * t)).cos()
+            })
+            .collect()
     }
 
     /// Sum two cosines.
@@ -355,16 +406,19 @@ mod tests {
     #[test]
     fn unit_cosine_calibration() {
         let sr = 48_000;
-        let n  = 4096;
+        let n = 4096;
         let f0 = 1000.0_f32;
         let kernels = build_kernels(n, sr, 1024, 20.0, default_f_max(sr));
         let buf = cosine(0.5, f0, n, sr);
         let mags = reassigned(&buf, &kernels);
         // Find the bin with the strongest reading.
-        let (peak_idx, peak_db) = mags.iter().enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        let (peak_idx, peak_db) = mags
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
         let peak_f = kernels.freqs_out[peak_idx];
-        let expected = 20.0 * 0.5_f32.log10();              // -6.02 dBFS
+        let expected = 20.0 * 0.5_f32.log10(); // -6.02 dBFS
         assert!(
             (peak_db - expected).abs() < 1.5,
             "peak {peak_db:.2} dBFS at {peak_f} Hz, expected ≈ {expected:.2} dBFS"
@@ -381,7 +435,7 @@ mod tests {
         // = 11.72 Hz, so the tones land in adjacent bins. Plain FFT
         // smears them into one ridge; reassignment should split them.
         let sr = 48_000;
-        let n  = 4096;
+        let n = 4096;
         let f1 = 1000.0_f32;
         let f2 = 1012.0_f32;
         let buf = two_tones(0.25, f1, f2, n, sr);
@@ -398,14 +452,16 @@ mod tests {
         // within 12 dB of the local maximum (so we don't flag noise floor).
         let local_max = local.iter().fold(f32::NEG_INFINITY, |m, &(_, v)| m.max(v));
         let threshold = local_max - 12.0;
-        let peaks: Vec<(f32, f32)> = (1..local.len() - 1).filter_map(|i| {
-            let v = local[i].1;
-            if v > local[i - 1].1 && v > local[i + 1].1 && v > threshold {
-                Some((kernels.freqs_out[local[i].0], v))
-            } else {
-                None
-            }
-        }).collect();
+        let peaks: Vec<(f32, f32)> = (1..local.len() - 1)
+            .filter_map(|i| {
+                let v = local[i].1;
+                if v > local[i - 1].1 && v > local[i + 1].1 && v > threshold {
+                    Some((kernels.freqs_out[local[i].0], v))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         assert!(
             peaks.len() >= 2,
@@ -429,7 +485,7 @@ mod tests {
         // frequency moves during the analysis window. Reassignment maps
         // each bin to its instantaneous frequency, concentrating energy.
         let sr = 48_000;
-        let n  = 4096;
+        let n = 4096;
         let buf = linear_chirp(0.5, 800.0, 1600.0, n, sr);
         let kernels = build_kernels(n, sr, 2048, 20.0, default_f_max(sr));
         let mags = reassigned(&buf, &kernels);
@@ -439,12 +495,22 @@ mod tests {
         let mut fft_out = vec![Complex::new(0.0, 0.0); n / 2 + 1];
         let scratch_len = kernels.fft_plan.get_scratch_len();
         let mut scratch = vec![Complex::new(0.0, 0.0); scratch_len];
-        kernels.fft_plan.process_with_scratch(&mut fft_in, &mut fft_out, &mut scratch).unwrap();
+        kernels
+            .fft_plan
+            .process_with_scratch(&mut fft_in, &mut fft_out, &mut scratch)
+            .unwrap();
         let amp_scale = 2.0 / kernels.h_norm;
-        let fft_db: Vec<f32> = fft_out.iter().map(|c| {
-            let amp = c.norm() * amp_scale;
-            if amp > 1e-12 { (20.0 * amp.log10()) as f32 } else { -240.0 }
-        }).collect();
+        let fft_db: Vec<f32> = fft_out
+            .iter()
+            .map(|c| {
+                let amp = c.norm() * amp_scale;
+                if amp > 1e-12 {
+                    (20.0 * amp.log10()) as f32
+                } else {
+                    -240.0
+                }
+            })
+            .collect();
 
         // Compare effective bandwidth — count how many bins sit within 6 dB
         // of the peak. Reassignment should concentrate energy more tightly.
@@ -464,25 +530,27 @@ mod tests {
         let fft_band = &fft_db[fft_lo_k..fft_hi_k];
 
         let bw_reass = bandwidth_count(reass_band);
-        let bw_fft   = bandwidth_count(fft_band);
+        let bw_fft = bandwidth_count(fft_band);
         // FFT band has fewer bins absolute (linear vs log), so compare
         // fraction of bins within -6 dB instead. Reassignment should be
         // notably tighter relative to its grid.
         let frac_reass = bw_reass as f32 / reass_band.len() as f32;
-        let frac_fft   = bw_fft   as f32 / fft_band.len()   as f32;
+        let frac_fft = bw_fft as f32 / fft_band.len() as f32;
         assert!(
             frac_reass < frac_fft,
             "reassigned chirp ridge not sharper: \
              reass {bw_reass}/{} ({:.1}%) vs fft {bw_fft}/{} ({:.1}%)",
-            reass_band.len(), frac_reass * 100.0,
-            fft_band.len(),   frac_fft   * 100.0
+            reass_band.len(),
+            frac_reass * 100.0,
+            fft_band.len(),
+            frac_fft * 100.0
         );
     }
 
     #[test]
     fn empty_input_produces_floor() {
         let sr = 48_000;
-        let n  = 4096;
+        let n = 4096;
         let kernels = build_kernels(n, sr, 256, 20.0, default_f_max(sr));
         let buf = vec![0.0_f32; n];
         let mags = reassigned(&buf, &kernels);

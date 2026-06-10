@@ -67,8 +67,8 @@ pub fn measure_noise(samples: &[f32], sample_rate: u32) -> Result<NoiseMetrics> 
     let a_weighted = aw.apply(samples);
     let a_weighted_dbfs = rms_dbfs(&a_weighted[skip_n..]);
 
-    let ccir_weighted_dbfs = ccir468::weighted_quasi_peak_dbfs(&samples[skip_n..], sample_rate)
-        .unwrap_or(MIN_DBFS);
+    let ccir_weighted_dbfs =
+        ccir468::weighted_quasi_peak_dbfs(&samples[skip_n..], sample_rate).unwrap_or(MIN_DBFS);
 
     let n_integrated = samples.len() - skip_n;
     Ok(NoiseMetrics {
@@ -86,11 +86,7 @@ fn rms_dbfs(samples: &[f32]) -> f64 {
     if samples.is_empty() {
         return MIN_DBFS;
     }
-    let mean_sq = samples
-        .iter()
-        .map(|&v| (v as f64).powi(2))
-        .sum::<f64>()
-        / samples.len() as f64;
+    let mean_sq = samples.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / samples.len() as f64;
     mean_sq_to_dbfs(mean_sq)
 }
 
@@ -115,7 +111,9 @@ mod tests {
 
     fn sine(f_hz: f64, amp: f64, n: usize) -> Vec<f32> {
         let w = 2.0 * PI * f_hz / FS as f64;
-        (0..n).map(|i| (amp * (w * i as f64).sin()) as f32).collect()
+        (0..n)
+            .map(|i| (amp * (w * i as f64).sin()) as f32)
+            .collect()
     }
 
     #[test]

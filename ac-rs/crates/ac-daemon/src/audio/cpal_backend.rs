@@ -34,23 +34,23 @@ use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 struct SharedState {
     tone_buf: Mutex<Vec<f32>>,
     tone_pos: AtomicUsize,
-    silence:  AtomicBool,
-    ring:     Mutex<Vec<f32>>,
-    xruns:    AtomicUsize,
+    silence: AtomicBool,
+    ring: Mutex<Vec<f32>>,
+    xruns: AtomicUsize,
     // One-shot playback for `play_and_capture`. When `one_shot_active`
     // is set, output callbacks fill from `one_shot_buf[one_shot_pos..]`
     // instead of the looping tone; when the buffer is exhausted the flag
     // is cleared and playback falls back to silence.
-    one_shot_buf:    Mutex<Vec<f32>>,
-    one_shot_pos:    AtomicUsize,
+    one_shot_buf: Mutex<Vec<f32>>,
+    one_shot_pos: AtomicUsize,
     one_shot_active: AtomicBool,
 }
 
 pub struct CpalEngine {
     sample_rate: u32,
-    state:       Arc<SharedState>,
+    state: Arc<SharedState>,
     _out_stream: Option<Stream>,
-    _in_stream:  Option<Stream>,
+    _in_stream: Option<Stream>,
 }
 
 // SAFETY: CpalEngine is created and used entirely within a single worker thread.
@@ -66,15 +66,15 @@ impl CpalEngine {
             state: Arc::new(SharedState {
                 tone_buf: Mutex::new(vec![0.0f32; 44_100]),
                 tone_pos: AtomicUsize::new(0),
-                silence:  AtomicBool::new(true),
-                ring:     Mutex::new(Vec::new()),
-                xruns:    AtomicUsize::new(0),
-                one_shot_buf:    Mutex::new(Vec::new()),
-                one_shot_pos:    AtomicUsize::new(0),
+                silence: AtomicBool::new(true),
+                ring: Mutex::new(Vec::new()),
+                xruns: AtomicUsize::new(0),
+                one_shot_buf: Mutex::new(Vec::new()),
+                one_shot_pos: AtomicUsize::new(0),
                 one_shot_active: AtomicBool::new(false),
             }),
             _out_stream: None,
-            _in_stream:  None,
+            _in_stream: None,
         }
     }
 }
@@ -172,7 +172,7 @@ fn build_output(
     device: &cpal::Device,
     config: &StreamConfig,
     format: SampleFormat,
-    state:  Arc<SharedState>,
+    state: Arc<SharedState>,
 ) -> Result<Stream> {
     let err_state = state.clone();
     let err = move |e| {
@@ -180,27 +180,30 @@ fn build_output(
         eprintln!("cpal output: {e}");
     };
     match format {
-        SampleFormat::F32 => {
-            device.build_output_stream(
+        SampleFormat::F32 => device
+            .build_output_stream(
                 config,
                 move |data: &mut [f32], _| fill_output_f32(data, &state),
-                err, None,
-            ).context("build output (f32)")
-        }
-        SampleFormat::I16 => {
-            device.build_output_stream(
+                err,
+                None,
+            )
+            .context("build output (f32)"),
+        SampleFormat::I16 => device
+            .build_output_stream(
                 config,
                 move |data: &mut [i16], _| fill_output_i16(data, &state),
-                err, None,
-            ).context("build output (i16)")
-        }
-        SampleFormat::I32 => {
-            device.build_output_stream(
+                err,
+                None,
+            )
+            .context("build output (i16)"),
+        SampleFormat::I32 => device
+            .build_output_stream(
                 config,
                 move |data: &mut [i32], _| fill_output_i32(data, &state),
-                err, None,
-            ).context("build output (i32)")
-        }
+                err,
+                None,
+            )
+            .context("build output (i32)"),
         other => anyhow::bail!("unsupported output sample format: {other:?}"),
     }
 }
@@ -224,7 +227,10 @@ fn drain_input_i16(data: &[i16], channels: usize, state: &SharedState) {
         let mono: Vec<f32> = data.iter().map(|&s| s as f32 * scale).collect();
         state.ring.lock().unwrap().extend_from_slice(&mono);
     } else {
-        let mono: Vec<f32> = data.chunks_exact(channels).map(|f| f[0] as f32 * scale).collect();
+        let mono: Vec<f32> = data
+            .chunks_exact(channels)
+            .map(|f| f[0] as f32 * scale)
+            .collect();
         state.ring.lock().unwrap().extend_from_slice(&mono);
     }
 }
@@ -235,17 +241,20 @@ fn drain_input_i32(data: &[i32], channels: usize, state: &SharedState) {
         let mono: Vec<f32> = data.iter().map(|&s| s as f32 * scale).collect();
         state.ring.lock().unwrap().extend_from_slice(&mono);
     } else {
-        let mono: Vec<f32> = data.chunks_exact(channels).map(|f| f[0] as f32 * scale).collect();
+        let mono: Vec<f32> = data
+            .chunks_exact(channels)
+            .map(|f| f[0] as f32 * scale)
+            .collect();
         state.ring.lock().unwrap().extend_from_slice(&mono);
     }
 }
 
 fn build_input(
-    device:   &cpal::Device,
-    config:   &StreamConfig,
-    format:   SampleFormat,
+    device: &cpal::Device,
+    config: &StreamConfig,
+    format: SampleFormat,
     channels: usize,
-    state:    Arc<SharedState>,
+    state: Arc<SharedState>,
 ) -> Result<Stream> {
     let err_state = state.clone();
     let err = move |e| {
@@ -253,27 +262,30 @@ fn build_input(
         eprintln!("cpal input: {e}");
     };
     match format {
-        SampleFormat::F32 => {
-            device.build_input_stream(
+        SampleFormat::F32 => device
+            .build_input_stream(
                 config,
                 move |data: &[f32], _| drain_input_f32(data, channels, &state),
-                err, None,
-            ).context("build input (f32)")
-        }
-        SampleFormat::I16 => {
-            device.build_input_stream(
+                err,
+                None,
+            )
+            .context("build input (f32)"),
+        SampleFormat::I16 => device
+            .build_input_stream(
                 config,
                 move |data: &[i16], _| drain_input_i16(data, channels, &state),
-                err, None,
-            ).context("build input (i16)")
-        }
-        SampleFormat::I32 => {
-            device.build_input_stream(
+                err,
+                None,
+            )
+            .context("build input (i16)"),
+        SampleFormat::I32 => device
+            .build_input_stream(
                 config,
                 move |data: &[i32], _| drain_input_i32(data, channels, &state),
-                err, None,
-            ).context("build input (i32)")
-        }
+                err,
+                None,
+            )
+            .context("build input (i32)"),
         other => anyhow::bail!("unsupported input sample format: {other:?}"),
     }
 }
@@ -287,9 +299,11 @@ impl AudioEngine for CpalEngine {
         let host = cpal::default_host();
 
         // Output stream
-        let out_dev = host.default_output_device()
+        let out_dev = host
+            .default_output_device()
             .context("no default output device")?;
-        let out_sup = out_dev.default_output_config()
+        let out_sup = out_dev
+            .default_output_config()
             .context("default output config")?;
         self.sample_rate = out_sup.sample_rate().0;
         {
@@ -303,11 +317,13 @@ impl AudioEngine for CpalEngine {
         self._out_stream = Some(out_stream);
 
         // Input stream
-        let in_dev = host.default_input_device()
+        let in_dev = host
+            .default_input_device()
             .context("no default input device")?;
-        let in_sup = in_dev.default_input_config()
+        let in_sup = in_dev
+            .default_input_config()
             .context("default input config")?;
-        let in_ch  = in_sup.channels() as usize;
+        let in_ch = in_sup.channels() as usize;
         let in_cfg: StreamConfig = in_sup.config();
         let in_fmt = in_sup.sample_format();
         let in_stream = build_input(&in_dev, &in_cfg, in_fmt, in_ch, self.state.clone())?;
@@ -319,10 +335,12 @@ impl AudioEngine for CpalEngine {
 
     fn stop(&mut self) {
         self._out_stream = None;
-        self._in_stream  = None;
+        self._in_stream = None;
     }
 
-    fn sample_rate(&self) -> u32 { self.sample_rate }
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
         let buf = generate_sine_1s(freq_hz, amplitude, self.sample_rate);
@@ -375,13 +393,7 @@ impl AudioEngine for CpalEngine {
         if !ok {
             anyhow::bail!("cpal play_and_capture timeout after {duration_s:.1}s");
         }
-        let out: Vec<f32> = self
-            .state
-            .ring
-            .lock()
-            .unwrap()
-            .drain(..n_total)
-            .collect();
+        let out: Vec<f32> = self.state.ring.lock().unwrap().drain(..n_total).collect();
         Ok(out)
     }
 
@@ -391,7 +403,9 @@ impl AudioEngine for CpalEngine {
         let timeout = Instant::now() + Duration::from_secs_f64(duration + 2.0);
         loop {
             std::thread::sleep(Duration::from_millis(10));
-            if self.state.ring.lock().unwrap().len() >= n_needed { break; }
+            if self.state.ring.lock().unwrap().len() >= n_needed {
+                break;
+            }
             if Instant::now() > timeout {
                 anyhow::bail!("cpal capture_block timeout after {duration:.1}s");
             }
@@ -410,8 +424,12 @@ impl AudioEngine for CpalEngine {
 
     // CPAL opens default input/output devices and cannot reroute individual
     // ports, so handlers that rely on routing must refuse on this backend.
-    fn supports_routing(&self) -> bool { false }
-    fn backend_name(&self) -> &'static str { "cpal" }
+    fn supports_routing(&self) -> bool {
+        false
+    }
+    fn backend_name(&self) -> &'static str {
+        "cpal"
+    }
 
     fn playback_ports(&self) -> Vec<String> {
         let host = cpal::default_host();
@@ -419,7 +437,8 @@ impl AudioEngine for CpalEngine {
         if let Ok(devices) = host.output_devices() {
             for device in devices {
                 let name = device.name().unwrap_or_else(|_| "unknown".to_string());
-                let n_ch = device.default_output_config()
+                let n_ch = device
+                    .default_output_config()
                     .map(|c| c.channels())
                     .unwrap_or(2);
                 for ch in 0..n_ch {
@@ -436,7 +455,8 @@ impl AudioEngine for CpalEngine {
         if let Ok(devices) = host.input_devices() {
             for device in devices {
                 let name = device.name().unwrap_or_else(|_| "unknown".to_string());
-                let n_ch = device.default_input_config()
+                let n_ch = device
+                    .default_input_config()
                     .map(|c| c.channels())
                     .unwrap_or(2);
                 for ch in 0..n_ch {
@@ -460,11 +480,11 @@ mod tests {
         SharedState {
             tone_buf: Mutex::new(vec![1.0, 2.0, 3.0, 4.0]),
             tone_pos: AtomicUsize::new(0),
-            silence:  AtomicBool::new(false),
-            ring:     Mutex::new(Vec::new()),
-            xruns:    AtomicUsize::new(0),
-            one_shot_buf:    Mutex::new(Vec::new()),
-            one_shot_pos:    AtomicUsize::new(0),
+            silence: AtomicBool::new(false),
+            ring: Mutex::new(Vec::new()),
+            xruns: AtomicUsize::new(0),
+            one_shot_buf: Mutex::new(Vec::new()),
+            one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
         }
     }
@@ -495,11 +515,11 @@ mod tests {
         let state = SharedState {
             tone_buf: Mutex::new(vec![0.5, -0.5, 1.5]),
             tone_pos: AtomicUsize::new(0),
-            silence:  AtomicBool::new(false),
-            ring:     Mutex::new(Vec::new()),
-            xruns:    AtomicUsize::new(0),
-            one_shot_buf:    Mutex::new(Vec::new()),
-            one_shot_pos:    AtomicUsize::new(0),
+            silence: AtomicBool::new(false),
+            ring: Mutex::new(Vec::new()),
+            xruns: AtomicUsize::new(0),
+            one_shot_buf: Mutex::new(Vec::new()),
+            one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0i16; 3];
@@ -516,17 +536,20 @@ mod tests {
         let state = SharedState {
             tone_buf: Mutex::new(vec![0.25, -2.0]),
             tone_pos: AtomicUsize::new(0),
-            silence:  AtomicBool::new(false),
-            ring:     Mutex::new(Vec::new()),
-            xruns:    AtomicUsize::new(0),
-            one_shot_buf:    Mutex::new(Vec::new()),
-            one_shot_pos:    AtomicUsize::new(0),
+            silence: AtomicBool::new(false),
+            ring: Mutex::new(Vec::new()),
+            xruns: AtomicUsize::new(0),
+            one_shot_buf: Mutex::new(Vec::new()),
+            one_shot_pos: AtomicUsize::new(0),
             one_shot_active: AtomicBool::new(false),
         };
         let mut out = [0i32; 2];
         fill_output_i32(&mut out, &state);
         assert_eq!(out[0], (0.25 * i32::MAX as f32) as i32);
-        assert_eq!(out[1], ((-1.0f32).clamp(-1.0, 1.0) * i32::MAX as f32) as i32);
+        assert_eq!(
+            out[1],
+            ((-1.0f32).clamp(-1.0, 1.0) * i32::MAX as f32) as i32
+        );
     }
 
     // ---- Input drain: mono and multichannel ----
@@ -606,7 +629,11 @@ mod tests {
     #[test]
     fn flush_clears_ring() {
         let mut eng = CpalEngine::new();
-        eng.state.ring.lock().unwrap().extend_from_slice(&[1.0, 2.0, 3.0]);
+        eng.state
+            .ring
+            .lock()
+            .unwrap()
+            .extend_from_slice(&[1.0, 2.0, 3.0]);
         eng.flush_capture();
         assert!(eng.state.ring.lock().unwrap().is_empty());
     }

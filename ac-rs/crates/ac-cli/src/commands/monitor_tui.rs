@@ -51,7 +51,11 @@ pub fn stats_from_frame(value: &Value) -> Option<ChannelStats> {
         .map(|x| x as f32)
         .filter(|x| x.is_finite())
         .fold(f32::INFINITY, f32::min);
-    let floor_db = if floor_db.is_finite() { floor_db } else { -200.0 };
+    let floor_db = if floor_db.is_finite() {
+        floor_db
+    } else {
+        -200.0
+    };
 
     // Peak: prefer the daemon's THD-aware fundamental when present;
     // otherwise scan the spectrum. The fundamental is meaningful only
@@ -98,9 +102,9 @@ fn format_channel_row(s: &ChannelStats) -> String {
         "      -- Hz".to_string()
     };
     let floor = if s.floor_db.is_finite() {
-        format!("{:>5.0} dB", s.floor_db)
+        format!("{:>7.1} dBFS", s.floor_db)
     } else {
-        "   -- dB".to_string()
+        "     -- dBFS".to_string()
     };
     format!(
         "CH{:<2}   peak {} @ {}   floor {}",
@@ -180,10 +184,11 @@ pub fn run(cfg: &ac_core::config::Config, channels: &[u32]) -> Result<()> {
         // Esc all exit; the rest are ignored.
         if event::poll(Duration::from_millis(0))? {
             if let Ok(event::Event::Key(k)) = event::read() {
-                let exit_now = matches!(
-                    (k.code, k.modifiers),
-                    (event::KeyCode::Char('c'), event::KeyModifiers::CONTROL)
-                ) || matches!(k.code, event::KeyCode::Char('q') | event::KeyCode::Esc);
+                let exit_now =
+                    matches!(
+                        (k.code, k.modifiers),
+                        (event::KeyCode::Char('c'), event::KeyModifiers::CONTROL)
+                    ) || matches!(k.code, event::KeyCode::Char('q') | event::KeyCode::Esc);
                 if exit_now {
                     break;
                 }
@@ -262,12 +267,7 @@ mod tests {
     /// peak falls back to a max-scan over the spectrum array.
     #[test]
     fn stats_scan_spectrum_without_fundamental() {
-        let f = frame(
-            0,
-            None,
-            &[100.0, 500.0, 2000.0],
-            &[-50.0, -10.0, -70.0],
-        );
+        let f = frame(0, None, &[100.0, 500.0, 2000.0], &[-50.0, -10.0, -70.0]);
         let s = stats_from_frame(&f).expect("parse");
         assert_eq!(s.channel, 0);
         assert!((s.peak_dbfs + 10.0).abs() < 1e-3);
@@ -313,7 +313,7 @@ mod tests {
         assert!(out.contains("CH0"));
         assert!(out.contains("-3.0 dBFS"));
         assert!(out.contains("1000 Hz"));
-        assert!(out.contains("-85 dB"));
+        assert!(out.contains("-85.0 dBFS"));
         assert!(out.contains("fft N=8192"));
         assert!(out.contains("interval=100 ms"));
         assert!(out.contains("xruns=0"));

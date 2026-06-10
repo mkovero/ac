@@ -1,12 +1,18 @@
+use super::check_ack;
 use crate::client::AcClient;
 use crate::parse::CommandKind;
-use super::check_ack;
 
 pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     let (
-        output, input, reference, device,
-        dbu_ref_vrms, dmm_host, gpio_port,
-        range_start, range_stop,
+        output,
+        input,
+        reference,
+        device,
+        dbu_ref_vrms,
+        dmm_host,
+        gpio_port,
+        range_start,
+        range_stop,
         server_idle_timeout_secs,
     ) = match cmd {
         CommandKind::Setup {
@@ -21,9 +27,15 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             range_stop,
             server_idle_timeout_secs,
         } => (
-            output, input, reference, device,
-            dbu_ref_vrms, dmm_host, gpio_port,
-            range_start, range_stop,
+            output,
+            input,
+            reference,
+            device,
+            dbu_ref_vrms,
+            dmm_host,
+            gpio_port,
+            range_start,
+            range_stop,
             server_idle_timeout_secs,
         ),
         _ => unreachable!(),
@@ -70,10 +82,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     let has_updates = !update.is_empty();
 
     let ack = check_ack(
-        client.send_cmd(
-            &serde_json::json!({"cmd": "setup", "update": update}),
-            None,
-        ),
+        client.send_cmd(&serde_json::json!({"cmd": "setup", "update": update}), None),
         "setup",
     );
 
@@ -122,16 +131,10 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     );
 
     let dmm = srv_cfg.get("dmm_host").and_then(|v| v.as_str());
-    println!(
-        "  DMM host:      {}",
-        dmm.unwrap_or("(not configured)")
-    );
+    println!("  DMM host:      {}", dmm.unwrap_or("(not configured)"));
 
     let gpio = srv_cfg.get("gpio_port").and_then(|v| v.as_str());
-    println!(
-        "  GPIO port:     {}",
-        gpio.unwrap_or("(not configured)")
-    );
+    println!("  GPIO port:     {}", gpio.unwrap_or("(not configured)"));
 
     let r_start = srv_cfg
         .get("range_start_hz")
@@ -165,12 +168,10 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             Some(5000),
         );
         match gpio_ack {
-            Some(ref a) if a.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
-                match gp {
-                    Some(p) => println!("  GPIO: started on {p}"),
-                    None => println!("  GPIO: stopped"),
-                }
-            }
+            Some(ref a) if a.get("ok").and_then(|v| v.as_bool()) == Some(true) => match gp {
+                Some(p) => println!("  GPIO: started on {p}"),
+                None => println!("  GPIO: stopped"),
+            },
             Some(ref a) => {
                 let err = a.get("error").and_then(|e| e.as_str()).unwrap_or("error");
                 println!("  GPIO: {err}");

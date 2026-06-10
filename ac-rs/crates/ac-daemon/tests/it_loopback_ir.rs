@@ -17,7 +17,7 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::thread;
@@ -43,7 +43,7 @@ fn alloc_home() -> PathBuf {
 
 /// Pre-write `$HOME/.config/ac/config.json` so the daemon picks up sticky
 /// port names that self-loop the JACK client (`ac-daemon:out → ac-daemon:in`).
-fn write_loopback_config(home: &PathBuf) {
+fn write_loopback_config(home: &Path) {
     let cfg = json!({
         "device":           0,
         "output_channel":   0,
@@ -60,10 +60,10 @@ fn write_loopback_config(home: &PathBuf) {
 }
 
 struct Daemon {
-    child:     Child,
+    child: Child,
     ctrl_port: u16,
     data_port: u16,
-    home:      PathBuf,
+    home: PathBuf,
 }
 
 impl Daemon {
@@ -77,8 +77,10 @@ impl Daemon {
             .env("HOME", &home)
             .args([
                 "--local",
-                "--ctrl-port", &ctrl.to_string(),
-                "--data-port", &data.to_string(),
+                "--ctrl-port",
+                &ctrl.to_string(),
+                "--data-port",
+                &data.to_string(),
             ])
             .spawn()
             .expect("spawn ac-daemon");
@@ -86,21 +88,38 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(3);
         let ctx = zmq::Context::new();
         loop {
-            if Instant::now() > deadline { panic!("daemon never came up"); }
+            if Instant::now() > deadline {
+                panic!("daemon never came up");
+            }
             thread::sleep(Duration::from_millis(50));
             let s = ctx.socket(zmq::REQ).unwrap();
             s.set_linger(0).ok();
             s.set_rcvtimeo(300).ok();
             s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() { continue; }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() { continue; }
-            if s.recv_bytes(0).is_ok() { break; }
+            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
+                continue;
+            }
+            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
+                continue;
+            }
+            if s.recv_bytes(0).is_ok() {
+                break;
+            }
         }
-        Self { child, ctrl_port: ctrl, data_port: data, home }
+        Self {
+            child,
+            ctrl_port: ctrl,
+            data_port: data,
+            home,
+        }
     }
 
-    fn ctrl_endpoint(&self) -> String { format!("tcp://127.0.0.1:{}", self.ctrl_port) }
-    fn data_endpoint(&self) -> String { format!("tcp://127.0.0.1:{}", self.data_port) }
+    fn ctrl_endpoint(&self) -> String {
+        format!("tcp://127.0.0.1:{}", self.ctrl_port)
+    }
+    fn data_endpoint(&self) -> String {
+        format!("tcp://127.0.0.1:{}", self.data_port)
+    }
 }
 
 impl Drop for Daemon {
@@ -113,8 +132,8 @@ impl Drop for Daemon {
 
 struct Client {
     _ctx: zmq::Context,
-    req:  zmq::Socket,
-    sub:  zmq::Socket,
+    req: zmq::Socket,
+    sub: zmq::Socket,
 }
 
 impl Client {
@@ -133,7 +152,11 @@ impl Client {
         sub.connect(&d.data_endpoint()).unwrap();
 
         thread::sleep(Duration::from_millis(100));
-        Self { _ctx: ctx, req, sub }
+        Self {
+            _ctx: ctx,
+            req,
+            sub,
+        }
     }
 
     fn call(&self, cmd: Value) -> Value {
@@ -158,15 +181,20 @@ impl Client {
     fn wait_for_or_error(&self, want_topic: &str, timeout: Duration) -> Value {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
             match self.recv_pub(remaining.max(1)) {
                 Some((t, v)) if t == want_topic => return v,
                 Some((t, v)) if t == "error" => {
-                    let msg = v.get("message").and_then(Value::as_str).unwrap_or("(no message)");
+                    let msg = v
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(no message)");
                     panic!("daemon error before {want_topic}: {msg}");
                 }
                 Some(_) => continue,
-                None    => panic!("timeout waiting for {want_topic}"),
+                None => panic!("timeout waiting for {want_topic}"),
             }
         }
         panic!("deadline waiting for {want_topic}");
@@ -204,14 +232,25 @@ fn loopback_ir_recovers_sharp_peak() {
         .iter()
         .map(|v| v.as_f64().expect("linear_ir element f64"))
         .collect();
-    assert!(ir.len() >= 256, "linear_ir suspiciously short: {}", ir.len());
+    assert!(
+        ir.len() >= 256,
+        "linear_ir suspiciously short: {}",
+        ir.len()
+    );
 
     // Peak position and magnitude.
     let (peak_idx, peak_abs) = ir.iter().enumerate().fold((0usize, 0.0f64), |acc, (i, v)| {
         let a = v.abs();
-        if a > acc.1 { (i, a) } else { acc }
+        if a > acc.1 {
+            (i, a)
+        } else {
+            acc
+        }
     });
-    assert!(peak_abs > 0.0, "all-zero IR — JACK loopback never delivered audio");
+    assert!(
+        peak_abs > 0.0,
+        "all-zero IR — JACK loopback never delivered audio"
+    );
 
     // The IR peak is the deconvolution delta. `extract_irs` centers the gate
     // at the sweep endpoint, so the peak nominally sits at `window_len / 2`
@@ -233,7 +272,10 @@ fn loopback_ir_recovers_sharp_peak() {
     // enough that the bandlimited-sinc skirts of the delta have decayed
     // below the noise on a clean loopback.
     let far_end = ir.len() / 8;
-    let floor = ir[..far_end].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let floor = ir[..far_end]
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
     let snr_db = 20.0 * (peak_abs / floor.max(1e-15)).log10();
     assert!(
         snr_db >= 40.0,

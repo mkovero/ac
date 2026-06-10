@@ -40,7 +40,10 @@ mod tests {
         assert_eq!(s.as_bytes()[4], b'-', "got {s:?}");
         assert_eq!(s.as_bytes()[13], b':', "got {s:?}");
         // Round-trips through chrono's RFC3339 parser.
-        assert!(chrono::DateTime::parse_from_rfc3339(&s).is_ok(), "got {s:?}");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&s).is_ok(),
+            "got {s:?}"
+        );
     }
 
     #[test]

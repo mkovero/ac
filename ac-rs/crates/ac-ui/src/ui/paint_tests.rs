@@ -192,12 +192,16 @@ fn overlay_hides_footer_when_not_hovering() {
     };
 
     let texts = run_overlay(input);
-    assert!(!texts.iter().any(|t| t.contains("peak")),
-        "broadband readout must not paint without hover: {texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.contains("peak")),
+        "broadband readout must not paint without hover: {texts:?}"
+    );
     // The freq+dBFS line that the cursor would emit must be absent;
     // any "X.XX kHz  -YY.Y dBFS" residue would mean the footer leaked.
     assert!(
-        !texts.iter().any(|t| t.contains("kHz") && t.contains("dBFS")),
+        !texts
+            .iter()
+            .any(|t| t.contains("kHz") && t.contains("dBFS")),
         "cursor readout must not paint without hover: {texts:?}"
     );
 }
@@ -330,7 +334,10 @@ fn overlay_shows_clip_when_clipping() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t == "CLIP"), "CLIP not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "CLIP"),
+        "CLIP not found in: {texts:?}"
+    );
 }
 
 #[test]
@@ -369,7 +376,10 @@ fn overlay_no_clip_when_not_clipping() {
     };
 
     let texts = run_overlay(input);
-    assert!(!texts.iter().any(|t| t == "CLIP"), "unexpected CLIP in: {texts:?}");
+    assert!(
+        !texts.iter().any(|t| t == "CLIP"),
+        "unexpected CLIP in: {texts:?}"
+    );
 }
 
 // ── FROZEN indicator ──────────────────────────────────────────────
@@ -411,7 +421,10 @@ fn overlay_shows_frozen() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t == "FROZEN"), "FROZEN not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "FROZEN"),
+        "FROZEN not found in: {texts:?}"
+    );
 }
 
 // ── Connected/disconnected ────────────────────────────────────────
@@ -451,7 +464,10 @@ fn overlay_shows_connected() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t.contains("connected")), "connection status not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("connected")),
+        "connection status not found in: {texts:?}"
+    );
 }
 
 #[test]
@@ -489,7 +505,10 @@ fn overlay_shows_disconnected() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t.contains("disconnected")), "disconnected status not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("disconnected")),
+        "disconnected status not found in: {texts:?}"
+    );
 }
 
 // ── Hover readout ─────────────────────────────────────────────────
@@ -584,7 +603,10 @@ fn overlay_shows_notification() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t == "saved"), "notification not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "saved"),
+        "notification not found in: {texts:?}"
+    );
 }
 
 // ── Sample rate and channel ───────────────────────────────────────
@@ -625,7 +647,10 @@ fn overlay_shows_sample_rate() {
     };
 
     let texts = run_overlay(input);
-    assert!(texts.iter().any(|t| t.contains("48000 Hz")), "sample rate not found in: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("48000 Hz")),
+        "sample rate not found in: {texts:?}"
+    );
 }
 
 // ── Time-integration overlay tag ──────────────────────────────────
@@ -670,7 +695,9 @@ fn overlay_shows_time_fast_tag() {
     };
 
     let texts = run_overlay(input);
-    let has_tag = texts.iter().any(|t| t.contains("time fast") && t.contains("125 ms"));
+    let has_tag = texts
+        .iter()
+        .any(|t| t.contains("time fast") && t.contains("125 ms"));
     assert!(has_tag, "time fast tag not found in: {texts:?}");
 }
 
@@ -925,6 +952,8 @@ fn overlay_shows_leq_duration() {
     };
 
     let texts = run_overlay(input);
-    let has_tag = texts.iter().any(|t| t.contains("Leq") && t.contains("12.5 s"));
+    let has_tag = texts
+        .iter()
+        .any(|t| t.contains("Leq") && t.contains("12.5 s"));
     assert!(has_tag, "Leq duration tag not found in: {texts:?}");
 }

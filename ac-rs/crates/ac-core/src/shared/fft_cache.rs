@@ -67,7 +67,8 @@ pub(crate) fn with_hann_window<R>(n: usize, f: impl FnOnce(&[f64], f64) -> R) ->
             c.win.clear();
             c.win.reserve(n);
             for i in 0..n {
-                c.win.push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
+                c.win
+                    .push(0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos()));
             }
             c.wc = c.win.iter().sum::<f64>() / n as f64;
             c.n = n;

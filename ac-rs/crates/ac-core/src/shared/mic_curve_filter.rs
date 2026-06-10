@@ -52,10 +52,10 @@ pub const DEFAULT_N_TAPS: usize = 512;
 /// contiguous samples without any modulo or branch — the dominant
 /// per-sample cost in a 1-modulo-per-multiply naïve implementation.
 pub struct MicCurveFir {
-    coeffs:  Vec<f32>,
-    history: Vec<f32>,                      // 2 × n_taps for branch-free reads
-    head:    usize,                         // write index in [0, n_taps)
-    n:       usize,                         // n_taps (cached for hot path)
+    coeffs: Vec<f32>,
+    history: Vec<f32>, // 2 × n_taps for branch-free reads
+    head: usize,       // write index in [0, n_taps)
+    n: usize,          // n_taps (cached for hot path)
     /// Group delay in samples (`(n_taps − 1) / 2` for symmetric FIRs).
     pub group_delay_samples: usize,
 }
@@ -66,7 +66,10 @@ impl MicCurveFir {
     /// [`DEFAULT_N_TAPS`] unless you have a specific reason to deviate.
     pub fn new(curve: &MicResponse, sample_rate: u32, n_taps: usize) -> Self {
         assert!(n_taps >= 16, "n_taps must be ≥ 16, got {n_taps}");
-        assert!(n_taps % 2 == 0, "n_taps must be even, got {n_taps}");
+        assert!(
+            n_taps.is_multiple_of(2),
+            "n_taps must be even, got {n_taps}"
+        );
         assert!(sample_rate > 0);
 
         let sr = sample_rate as f64;
@@ -83,7 +86,7 @@ impl MicCurveFir {
             *bin = Complex::new(10f64.powf(inv_db / 20.0), 0.0);
         }
         // DC and Nyquist must be real for a real-valued IFFT result.
-        spec[0].im          = 0.0;
+        spec[0].im = 0.0;
         spec[n_freq - 1].im = 0.0;
 
         // Inverse real-FFT → time-domain impulse at index 0 wrapping
@@ -92,7 +95,8 @@ impl MicCurveFir {
         // divide by `n_taps` for unity round-trip gain.
         let ifft = RealFftPlanner::<f64>::new().plan_fft_inverse(n_taps);
         let mut h = vec![0.0_f64; n_taps];
-        ifft.process(&mut spec, &mut h).expect("real IFFT length contract");
+        ifft.process(&mut spec, &mut h)
+            .expect("real IFFT length contract");
 
         // Circular-shift so the impulse peaks in the middle (index
         // n_taps/2). After Hann windowing this becomes a symmetric
@@ -114,8 +118,8 @@ impl MicCurveFir {
         Self {
             coeffs,
             history: vec![0.0; 2 * n_taps],
-            head:    0,
-            n:       n_taps,
+            head: 0,
+            n: n_taps,
             group_delay_samples: (n_taps - 1) / 2,
         }
     }
@@ -130,14 +134,14 @@ impl MicCurveFir {
         for s in samples.iter_mut() {
             // Write to both halves so the contiguous read window
             // `[head .. head + n]` is always valid without wrapping.
-            self.history[self.head]       = *s;
-            self.history[self.head + n]   = *s;
+            self.history[self.head] = *s;
+            self.history[self.head + n] = *s;
             // The most recent sample sits at `history[head + n - 1]`,
             // the oldest at `history[head]`. For symmetric coeffs the
             // direction doesn't change the result, but indexing
             // `coeffs[i] * history[head + n - 1 - i]` is the canonical
             // FIR convolution with `h[i] · x[k − i]`.
-            let win = &self.history[self.head .. self.head + n];
+            let win = &self.history[self.head..self.head + n];
             let mut acc = 0.0_f32;
             for i in 0..n {
                 acc += self.coeffs[i] * win[n - 1 - i];
@@ -158,7 +162,9 @@ impl MicCurveFir {
     }
 
     /// Number of FIR coefficients. Useful for sizing benches.
-    pub fn n_taps(&self) -> usize { self.n }
+    pub fn n_taps(&self) -> usize {
+        self.n
+    }
 }
 
 #[cfg(test)]
@@ -182,7 +188,9 @@ mod tests {
 
     fn cosine(amp: f32, freq: f32, n: usize, sr: u32) -> Vec<f32> {
         let two_pi = 2.0 * std::f32::consts::PI;
-        (0..n).map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos()).collect()
+        (0..n)
+            .map(|i| amp * (two_pi * freq * i as f32 / sr as f32).cos())
+            .collect()
     }
 
     /// RMS amplitude over the steady-state portion of a buffer
@@ -248,7 +256,7 @@ mod tests {
         let n_taps = 1024;
         let mut fir = MicCurveFir::new(&curve, sr, n_taps);
 
-        let amp = 0.25_f32;                  // headroom
+        let amp = 0.25_f32; // headroom
         let freq = 2_000.0_f32;
         let mut samples = cosine(amp, freq, 4 * n_taps, sr);
         let rms_in = steady_rms(&samples, n_taps);
@@ -267,13 +275,12 @@ mod tests {
         // Robustness: white noise through the filter must stay finite
         // (no NaN / Inf escape). Catches a NaN-leaking curve point or
         // a divide-by-zero in the design path.
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
         let curve = flat_curve(2.0);
         let mut fir = MicCurveFir::new(&curve, 48_000, 512);
         let mut rng = StdRng::seed_from_u64(0xCAB1_C0DE_DEAD_BEEF);
-        let mut samples: Vec<f32> = (0..4096)
-            .map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let mut samples: Vec<f32> = (0..4096).map(|_| rng.gen_range(-1.0..1.0)).collect();
         fir.process_inplace(&mut samples);
         for &s in &samples {
             assert!(s.is_finite(), "non-finite sample after filter: {s}");

@@ -112,17 +112,15 @@ pub fn analyze(
     let bw = ((fundamental * 0.1 / bin_hz) as usize).max(1);
     let lo = f1_bin.saturating_sub(bw);
     let hi = (f1_bin + bw).min(spec.len());
-    let thdn_sq: f64 =
-        spec[..lo].iter().map(|x| x * x).sum::<f64>() +
-        spec[hi..].iter().map(|x| x * x).sum::<f64>();
+    let thdn_sq: f64 = spec[..lo].iter().map(|x| x * x).sum::<f64>()
+        + spec[hi..].iter().map(|x| x * x).sum::<f64>();
     let thdn = thdn_sq.sqrt() / f1_amp * 100.0;
 
     let fundamental_dbfs = amplitude_to_dbfs(f1_amp);
 
     let trim = ((n as f64 * 0.05) as usize).max(1);
     let rms_slice = &mono[trim..n - trim];
-    let linear_rms =
-        (rms_slice.iter().map(|x| x * x).sum::<f64>() / rms_slice.len() as f64).sqrt();
+    let linear_rms = (rms_slice.iter().map(|x| x * x).sum::<f64>() / rms_slice.len() as f64).sqrt();
 
     // Noise floor = residual after subtracting all harmonics, reconstructed
     // with amplitude from the windowed FFT and phase from the unwindowed
@@ -257,7 +255,11 @@ mod tests {
     fn pure_sine_low_thd() {
         let samples = pure_sine(F1, 0.5, SR, SR as usize);
         let r = analyze(&samples, SR, F1, 10).unwrap();
-        assert!(r.thd_pct < 0.01, "THD too high for pure sine: {:.4}%", r.thd_pct);
+        assert!(
+            r.thd_pct < 0.01,
+            "THD too high for pure sine: {:.4}%",
+            r.thd_pct
+        );
     }
 
     #[test]
@@ -274,7 +276,10 @@ mod tests {
             .map(|x| x.clamp(-1.0, 1.0))
             .collect();
         let r = analyze(&samples, SR, F1, 10).unwrap();
-        assert!(r.clipping, "clipping flag should be set for saturated signal");
+        assert!(
+            r.clipping,
+            "clipping flag should be set for saturated signal"
+        );
     }
 
     #[test]
@@ -377,7 +382,9 @@ mod tests {
 
         fn sine_with_phase(freq: f64, amplitude: f64, phase: f64, sr: u32, n: usize) -> Vec<f32> {
             (0..n)
-                .map(|i| (amplitude * (2.0 * PI * freq * i as f64 / sr as f64 + phase).sin()) as f32)
+                .map(|i| {
+                    (amplitude * (2.0 * PI * freq * i as f64 / sr as f64 + phase).sin()) as f32
+                })
                 .collect()
         }
 

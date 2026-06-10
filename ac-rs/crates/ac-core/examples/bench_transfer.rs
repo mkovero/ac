@@ -23,7 +23,11 @@ fn main() {
         let delay_samples = (sr as f64 * 0.002) as usize;
         let m: Vec<f32> = (0..n)
             .map(|i| {
-                let src = if i >= delay_samples { r[i - delay_samples] } else { 0.0 };
+                let src = if i >= delay_samples {
+                    r[i - delay_samples]
+                } else {
+                    0.0
+                };
                 state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
                 let noise = ((state >> 16) as i16) as f32 / 32768.0 * 0.01;
                 src + noise

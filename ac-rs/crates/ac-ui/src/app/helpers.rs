@@ -119,8 +119,7 @@ pub fn median_f32(samples: &[f32]) -> Option<f32> {
 /// Up/Down arrow tunes FFT size (bin count) through this ladder. Up → larger
 /// N (finer resolution), Down → smaller N (coarser but faster capture).
 /// Protocol rejects anything outside [256, 131072] or non-pow2.
-pub const MONITOR_FFT_N_LADDER: &[u32] =
-    &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+pub const MONITOR_FFT_N_LADDER: &[u32] = &[1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
 /// Step a ladder: find `current`'s index, move by `delta`, clamp to bounds.
 /// Returns the new value, or `current` if it wasn't on the ladder (keeps the
@@ -158,7 +157,10 @@ impl DataSource {
     pub(super) fn connected(&self) -> bool {
         match self {
             DataSource::Synthetic(_) => true,
-            DataSource::Receiver(h) => h.status.connected.load(std::sync::atomic::Ordering::Relaxed),
+            DataSource::Receiver(h) => h
+                .status
+                .connected
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
     pub(super) fn status(&self) -> Option<&ReceiverStatus> {
@@ -200,7 +202,10 @@ mod ladder_tests {
     fn fft_n_ladder_entries_are_pow2_in_protocol_range() {
         for &n in MONITOR_FFT_N_LADDER {
             assert!(n.is_power_of_two(), "ladder entry {n} not pow2");
-            assert!((256..=131_072).contains(&n), "ladder entry {n} out of protocol range");
+            assert!(
+                (256..=131_072).contains(&n),
+                "ladder entry {n} out of protocol range"
+            );
         }
     }
 
@@ -208,8 +213,14 @@ mod ladder_tests {
     fn auto_interval_floors_for_small_n() {
         // Tiny windows never drop below the display-refresh floor — no
         // reason to tick faster than the eye can track.
-        assert_eq!(auto_monitor_interval_ms(1024, 48_000), MONITOR_INTERVAL_FLOOR_MS);
-        assert_eq!(auto_monitor_interval_ms(4096, 48_000), MONITOR_INTERVAL_FLOOR_MS);
+        assert_eq!(
+            auto_monitor_interval_ms(1024, 48_000),
+            MONITOR_INTERVAL_FLOOR_MS
+        );
+        assert_eq!(
+            auto_monitor_interval_ms(4096, 48_000),
+            MONITOR_INTERVAL_FLOOR_MS
+        );
     }
 
     #[test]
@@ -217,9 +228,18 @@ mod ladder_tests {
         // Huge windows cap at the "still feels live" ceiling even though
         // window/8 would suggest much slower ticks. With FLOOR==CEIL=33ms
         // (#108 follow-up) every fft_n≥8192 lands at 33ms = 30 Hz.
-        assert_eq!(auto_monitor_interval_ms(32768, 48_000), MONITOR_INTERVAL_CEIL_MS);
-        assert_eq!(auto_monitor_interval_ms(65536, 48_000), MONITOR_INTERVAL_CEIL_MS);
-        assert_eq!(auto_monitor_interval_ms(131_072, 48_000), MONITOR_INTERVAL_CEIL_MS);
+        assert_eq!(
+            auto_monitor_interval_ms(32768, 48_000),
+            MONITOR_INTERVAL_CEIL_MS
+        );
+        assert_eq!(
+            auto_monitor_interval_ms(65536, 48_000),
+            MONITOR_INTERVAL_CEIL_MS
+        );
+        assert_eq!(
+            auto_monitor_interval_ms(131_072, 48_000),
+            MONITOR_INTERVAL_CEIL_MS
+        );
     }
 
     /// Specific regression guard for the post-#108 fps drop: fft_n≥65k
@@ -290,6 +310,9 @@ mod ladder_tests {
         let mut samples = vec![0.10_f32; 15];
         samples.push(0.50);
         let m = median_f32(&samples).unwrap();
-        assert!((m - 0.10).abs() < 0.01, "median {m} pulled too far by stall");
+        assert!(
+            (m - 0.10).abs() < 0.01,
+            "median {m} pulled too far by stall"
+        );
     }
 }

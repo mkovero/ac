@@ -1078,12 +1078,18 @@ all drawn from the same live port.
 **Reply**
 ```json
 {
-  "ok":       true,
-  "in_port":  "<primary-port>",   // first channel — kept for backward compat
-  "in_ports": ["<port>", ...],    // resolved port per entry in `channels`
-  "channels": [<int>, ...]        // echoed channel indices (defaulted if absent)
+  "ok":           true,
+  "in_port":      "<primary-port>", // first channel — kept for backward compat
+  "in_ports":     ["<port>", ...],  // resolved port per entry in `channels`
+  "channels":     [<int>, ...],     // echoed channel indices (defaulted if absent)
+  "lf_fft_n":     <int>,            // dual-resolution low-band FFT N (see below)
+  "crossover_hz": <float>           // LF/HF split frequency (daemon-owned constant)
 }
 ```
+
+`lf_fft_n` and `crossover_hz` are daemon-owned constants for the
+dual-resolution low-frequency path (see below). They are read-only and
+echoed so the UI can label the LF band without hardcoding daemon values.
 
 **DATA** — repeated until stopped (spectrum frame, see Shared types).
 
@@ -1114,10 +1120,49 @@ Request/reply is synchronous on the REP socket; no frames emitted.
 
 **Reply**
 ```json
-{ "ok": true,  "interval": <float>, "fft_n": <int> }
+{ "ok": true,  "interval": <float>, "fft_n": <int>, "lf_fft_n": <int>, "crossover_hz": <float> }
 { "ok": false, "error": "no active monitor" }
 { "ok": false, "error": "fft_n must be power of 2 in [256, 131072]" }
 ```
+
+`lf_fft_n` / `crossover_hz` are echoed read-only (the UI cannot set them);
+only `interval` and `fft_n` are user-tunable.
+
+---
+
+### Dual-resolution low-frequency path (#142)
+
+Linear FFT bins are equally spaced, so the bottom octaves get few bins and
+closely-spaced low tones smear together. To split tones ~5 Hz apart below
+100 Hz you need `Δf ≲ 2.5 Hz`, i.e. `N ≥ 32768` at 48 kHz — but applying that
+window to the whole band would add ~1.4 s of latency everywhere and smear
+mid/high transients.
+
+Instead the FFT monitor runs a **second, longer** FFT (`lf_fft_n`, default
+65536 ≈ 0.73 Hz Δf at 48 kHz) over the same capture ring and uses it **only
+below `crossover_hz`** (default 750 Hz). The live `fft_n` keeps driving
+everything above the crossover at the normal refresh rate. The two linear
+half-spectra are merged into the single log-column `spectrum` wire frame
+(`spectrum_to_columns_multiband`), cross-faded linearly in dB across a
+±1/6-octave band at the crossover so the splice is seamless. **The wire frame
+shape is unchanged** — subscribers need no changes.
+
+Resolution / trade-off the user gets:
+
+- **Below `crossover_hz`:** `Δf = sr / lf_fft_n` (≈ 0.73 Hz at 48 kHz),
+  enough to separate 5 Hz-spaced tones under 100 Hz. The LF band inherently
+  refreshes at the long-block rate (`lf_fft_n / sr` ≈ 1.4 s) — acceptable
+  because LF content is slow-moving. The long FFT is recomputed at most once
+  per block duration to bound CPU.
+- **Above `crossover_hz`:** unchanged — `Δf = sr / fft_n` at the live refresh
+  rate, so mid/high responsiveness is not degraded.
+
+The LF path is **inactive** whenever `fft_n >= lf_fft_n` (the live spectrum is
+already at least as fine), in which case the monitor behaves exactly as
+before. Peak detection (`peaks` field) uses the LF spectrum below the
+crossover and the live spectrum above it. The UI's top-right readout shows
+both resolutions on two lines, each scoped by the crossover, when the LF path
+is active.
 
 ---
 

@@ -25,7 +25,11 @@ pub fn spawn_save(req: ScreenshotRequest) {
 fn save(req: ScreenshotRequest) -> anyhow::Result<()> {
     std::fs::create_dir_all(&req.output_dir)?;
     let stamp = ac_core::shared::time::now_utc_filename_stamp();
-    let prefix = if req.transfer.is_some() { "transfer" } else { "spectrum" };
+    let prefix = if req.transfer.is_some() {
+        "transfer"
+    } else {
+        "spectrum"
+    };
     let png_path = req.output_dir.join(format!("{prefix}_{stamp}.png"));
     let csv_path = req.output_dir.join(format!("{prefix}_{stamp}.csv"));
 
@@ -91,10 +95,14 @@ fn write_csv(path: &std::path::Path, frames: &[Option<DisplayFrame>]) -> anyhow:
     }
     for (i, frame) in active.iter().enumerate() {
         let mc = frame.meta.mic_correction.as_deref().unwrap_or("none");
-        let spl = frame.meta.spl_offset_db
+        let spl = frame
+            .meta
+            .spl_offset_db
             .map(|v| format!("{v:.2}"))
             .unwrap_or_else(|| "null".into());
-        let dbu = frame.meta.in_dbu
+        let dbu = frame
+            .meta
+            .in_dbu
             .map(|v| format!("{v:+.2}"))
             .unwrap_or_else(|| "null".into());
         writeln!(
@@ -166,28 +174,28 @@ mod tests {
     use std::sync::Arc;
 
     fn frame(
-        sr:             u32,
-        spl:            Option<f32>,
+        sr: u32,
+        spl: Option<f32>,
         mic_correction: Option<&str>,
-        in_dbu:         Option<f32>,
+        in_dbu: Option<f32>,
     ) -> DisplayFrame {
         DisplayFrame {
             spectrum: Arc::new(vec![-12.0, -18.0, -24.0]),
-            freqs:    Arc::new(vec![100.0, 1000.0, 10000.0]),
+            freqs: Arc::new(vec![100.0, 1000.0, 10000.0]),
             meta: FrameMeta {
-                freq_hz:          1000.0,
+                freq_hz: 1000.0,
                 fundamental_dbfs: -12.0,
-                thd_pct:          0.01,
-                thdn_pct:         0.02,
+                thd_pct: 0.01,
+                thdn_pct: 0.02,
                 in_dbu,
-                dbu_offset_db:    None,
-                peaks:            Arc::new(Vec::new()),
-                spl_offset_db:    spl,
-                mic_correction:   mic_correction.map(str::to_string),
+                dbu_offset_db: None,
+                peaks: Arc::new(Vec::new()),
+                spl_offset_db: spl,
+                mic_correction: mic_correction.map(str::to_string),
                 sr,
-                clipping:         false,
-                xruns:            0,
-                leq_duration_s:   None,
+                clipping: false,
+                xruns: 0,
+                leq_duration_s: None,
             },
             new_row: None,
         }
@@ -198,18 +206,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export.csv");
         let frames = vec![
-            Some(frame(48000, Some(114.0), Some("on"),  Some(4.0))),
-            Some(frame(48000, None,        Some("none"), None)),
+            Some(frame(48000, Some(114.0), Some("on"), Some(4.0))),
+            Some(frame(48000, None, Some("none"), None)),
         ];
         write_csv(&path, &frames).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         // Comment-prefixed metadata block.
         assert!(body.starts_with("# ac monitor export"));
         assert!(body.contains("# sample_rate_hz: 48000"));
-        assert!(body.contains("# ch0: mic_correction=on spl_offset_db=114.00 in_dbu=+4.00"),
-            "ch0 metadata line missing: {body}");
-        assert!(body.contains("# ch1: mic_correction=none spl_offset_db=null in_dbu=null"),
-            "ch1 metadata line missing: {body}");
+        assert!(
+            body.contains("# ch0: mic_correction=on spl_offset_db=114.00 in_dbu=+4.00"),
+            "ch0 metadata line missing: {body}"
+        );
+        assert!(
+            body.contains("# ch1: mic_correction=none spl_offset_db=null in_dbu=null"),
+            "ch1 metadata line missing: {body}"
+        );
     }
 
     #[test]
@@ -217,9 +229,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export.csv");
         let frames = vec![
-            Some(frame(48000, Some(100.0), Some("on"),   None)),
-            Some(frame(48000, None,        Some("off"),  None)),
-            Some(frame(48000, None,        None,         None)),
+            Some(frame(48000, Some(100.0), Some("on"), None)),
+            Some(frame(48000, None, Some("off"), None)),
+            Some(frame(48000, None, None, None)),
         ];
         write_csv(&path, &frames).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
@@ -229,10 +241,19 @@ mod tests {
         // First data row: ch0 mic-corrected (on → true), ch1 off → false,
         // ch2 no curve → false.
         let data_lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
-        assert!(data_lines.len() >= 2, "want header + ≥1 row, got: {data_lines:?}");
+        assert!(
+            data_lines.len() >= 2,
+            "want header + ≥1 row, got: {data_lines:?}"
+        );
         let first_row = data_lines[1];
-        assert!(first_row.contains(",true,"),  "ch0 should be mic-corrected: {first_row}");
-        assert!(first_row.contains(",false,"), "ch1/ch2 should not: {first_row}");
+        assert!(
+            first_row.contains(",true,"),
+            "ch0 should be mic-corrected: {first_row}"
+        );
+        assert!(
+            first_row.contains(",false,"),
+            "ch1/ch2 should not: {first_row}"
+        );
     }
 
     #[test]

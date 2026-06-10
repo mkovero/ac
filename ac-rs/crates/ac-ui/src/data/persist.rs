@@ -29,12 +29,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiState {
-    pub schema_version:        u32,
+    pub schema_version: u32,
     /// View token (string form of `ViewMode`). String rather than the
     /// `ViewMode` enum so renaming a variant doesn't bork old configs
     /// — unknown tokens fall back to `Spectrum`.
     #[serde(default)]
-    pub view_mode:             Option<String>,
+    pub view_mode: Option<String>,
     /// Ember substrate global intensity multiplier. Default 1.0
     /// matches App::new's value; user adjusts via `,` / `.`.
     #[serde(default = "default_intensity")]
@@ -42,7 +42,7 @@ pub struct UiState {
     /// Ember substrate global τ_p multiplier. Default 1.0; user
     /// adjusts via `Shift+,` / `Shift+.`.
     #[serde(default = "default_tau_p")]
-    pub ember_tau_p_scale:     f32,
+    pub ember_tau_p_scale: f32,
     /// Goniometer M/S vs raw L/R toggle. Default true (M/S — analog
     /// meter convention); user toggles via `R` while in Goniometer.
     #[serde(default = "default_gonio_rotation")]
@@ -61,21 +61,29 @@ pub struct UiState {
     pub fullscreen: bool,
 }
 
-fn default_intensity() -> f32 { 1.0 }
-fn default_tau_p() -> f32 { 1.0 }
-fn default_gonio_rotation() -> bool { true }
-fn default_coherence_k() -> f32 { 2.0 }
+fn default_intensity() -> f32 {
+    1.0
+}
+fn default_tau_p() -> f32 {
+    1.0
+}
+fn default_gonio_rotation() -> bool {
+    true
+}
+fn default_coherence_k() -> f32 {
+    2.0
+}
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            schema_version:          SCHEMA_VERSION,
-            view_mode:               None,
-            ember_intensity_scale:   default_intensity(),
-            ember_tau_p_scale:       default_tau_p(),
+            schema_version: SCHEMA_VERSION,
+            view_mode: None,
+            ember_intensity_scale: default_intensity(),
+            ember_tau_p_scale: default_tau_p(),
             ember_gonio_rotation_ms: default_gonio_rotation(),
-            ember_coherence_k:       default_coherence_k(),
-            fullscreen:              false,
+            ember_coherence_k: default_coherence_k(),
+            fullscreen: false,
         }
     }
 }
@@ -85,7 +93,10 @@ impl Default for UiState {
 /// `ac-core::shared::calibration`) — same convention.
 pub fn default_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("ac").join("ui.json")
+    PathBuf::from(home)
+        .join(".config")
+        .join("ac")
+        .join("ui.json")
 }
 
 /// Load from disk. Returns `Default` on:
@@ -121,7 +132,8 @@ pub fn load_from(path: &std::path::Path) -> UiState {
     if parsed.schema_version != SCHEMA_VERSION {
         log::warn!(
             "ui.json schema_version {} doesn't match expected {} (using defaults)",
-            parsed.schema_version, SCHEMA_VERSION,
+            parsed.schema_version,
+            SCHEMA_VERSION,
         );
         return UiState::default();
     }
@@ -159,18 +171,18 @@ pub fn save_to(path: &std::path::Path, state: &UiState) {
 /// part of the persistence contract, not just the type's debug repr).
 pub fn view_mode_token(view: ViewMode) -> &'static str {
     match view {
-        ViewMode::Spectrum      => "spectrum",
-        ViewMode::Waterfall     => "waterfall",
-        ViewMode::Scope         => "scope",
+        ViewMode::Spectrum => "spectrum",
+        ViewMode::Waterfall => "waterfall",
+        ViewMode::Scope => "scope",
         ViewMode::SpectrumEmber => "spectrum_ember",
-        ViewMode::Goniometer    => "goniometer",
-        ViewMode::IoTransfer    => "iotransfer",
-        ViewMode::BodeMag       => "bode_mag",
-        ViewMode::Coherence     => "coherence",
-        ViewMode::BodePhase     => "bode_phase",
-        ViewMode::GroupDelay    => "group_delay",
-        ViewMode::Nyquist       => "nyquist",
-        ViewMode::Ir            => "ir",
+        ViewMode::Goniometer => "goniometer",
+        ViewMode::IoTransfer => "iotransfer",
+        ViewMode::BodeMag => "bode_mag",
+        ViewMode::Coherence => "coherence",
+        ViewMode::BodePhase => "bode_phase",
+        ViewMode::GroupDelay => "group_delay",
+        ViewMode::Nyquist => "nyquist",
+        ViewMode::Ir => "ir",
     }
 }
 
@@ -180,18 +192,18 @@ pub fn view_mode_token(view: ViewMode) -> &'static str {
 /// passed via `--view` or `Spectrum`).
 pub fn view_mode_from_token(token: &str) -> Option<ViewMode> {
     Some(match token {
-        "spectrum"       => ViewMode::Spectrum,
-        "waterfall"      => ViewMode::Waterfall,
-        "scope"          => ViewMode::Scope,
+        "spectrum" => ViewMode::Spectrum,
+        "waterfall" => ViewMode::Waterfall,
+        "scope" => ViewMode::Scope,
         "spectrum_ember" => ViewMode::SpectrumEmber,
-        "goniometer"     => ViewMode::Goniometer,
-        "iotransfer"     => ViewMode::IoTransfer,
-        "bode_mag"       => ViewMode::BodeMag,
-        "coherence"      => ViewMode::Coherence,
-        "bode_phase"     => ViewMode::BodePhase,
-        "group_delay"    => ViewMode::GroupDelay,
-        "nyquist"        => ViewMode::Nyquist,
-        "ir"             => ViewMode::Ir,
+        "goniometer" => ViewMode::Goniometer,
+        "iotransfer" => ViewMode::IoTransfer,
+        "bode_mag" => ViewMode::BodeMag,
+        "coherence" => ViewMode::Coherence,
+        "bode_phase" => ViewMode::BodePhase,
+        "group_delay" => ViewMode::GroupDelay,
+        "nyquist" => ViewMode::Nyquist,
+        "ir" => ViewMode::Ir,
         _ => return None,
     })
 }
@@ -249,13 +261,15 @@ mod tests {
     fn save_then_load_round_trip() {
         let path = std::env::temp_dir().join("ac-ui-persist-roundtrip.json");
         let _ = std::fs::remove_file(&path);
-        let mut s = UiState::default();
-        s.view_mode = Some("nyquist".into());
-        s.ember_intensity_scale = 2.5;
-        s.ember_tau_p_scale = 0.4;
-        s.ember_gonio_rotation_ms = false;
-        s.ember_coherence_k = 4.0;
-        s.fullscreen = true;
+        let s = UiState {
+            view_mode: Some("nyquist".into()),
+            ember_intensity_scale: 2.5,
+            ember_tau_p_scale: 0.4,
+            ember_gonio_rotation_ms: false,
+            ember_coherence_k: 4.0,
+            fullscreen: true,
+            ..Default::default()
+        };
         save_to(&path, &s);
         let loaded = load_from(&path);
         assert_eq!(loaded.view_mode.as_deref(), Some("nyquist"));
@@ -290,10 +304,17 @@ mod tests {
         // the persistence string. New ViewMode variants must be added
         // to both view_mode_token and view_mode_from_token to pass.
         let cases = [
-            ViewMode::Spectrum, ViewMode::Waterfall, ViewMode::Scope,
-            ViewMode::SpectrumEmber, ViewMode::Goniometer,
-            ViewMode::IoTransfer, ViewMode::BodeMag, ViewMode::Coherence,
-            ViewMode::BodePhase, ViewMode::GroupDelay, ViewMode::Nyquist,
+            ViewMode::Spectrum,
+            ViewMode::Waterfall,
+            ViewMode::Scope,
+            ViewMode::SpectrumEmber,
+            ViewMode::Goniometer,
+            ViewMode::IoTransfer,
+            ViewMode::BodeMag,
+            ViewMode::Coherence,
+            ViewMode::BodePhase,
+            ViewMode::GroupDelay,
+            ViewMode::Nyquist,
             ViewMode::Ir,
         ];
         for v in cases {

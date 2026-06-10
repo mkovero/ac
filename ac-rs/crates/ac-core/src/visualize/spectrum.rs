@@ -13,7 +13,7 @@ use crate::shared::fft_cache::{freq_axis, real_fft_plan, with_hann_window};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InterpolatedPeak {
     pub freq_hz: f32,
-    pub dbfs:    f32,
+    pub dbfs: f32,
 }
 
 /// Detect local maxima in a linear-amplitude FFT spectrum and apply
@@ -32,15 +32,19 @@ pub struct InterpolatedPeak {
 /// skipped.
 pub fn find_interpolated_peaks(
     spectrum_linear: &[f64],
-    freqs:           &[f64],
-    n_max:           usize,
-    threshold_dbfs:  f32,
+    freqs: &[f64],
+    n_max: usize,
+    threshold_dbfs: f32,
 ) -> Vec<InterpolatedPeak> {
     let n = spectrum_linear.len();
     if n < 3 || freqs.len() != n || n_max == 0 {
         return Vec::new();
     }
-    let bin_hz = if n >= 2 { (freqs[1] - freqs[0]) as f32 } else { return Vec::new(); };
+    let bin_hz = if n >= 2 {
+        (freqs[1] - freqs[0]) as f32
+    } else {
+        return Vec::new();
+    };
 
     // Convert to dB once. `1e-20` floor avoids `-inf` at the silence bins.
     let db: Vec<f32> = spectrum_linear
@@ -69,11 +73,18 @@ pub fn find_interpolated_peaks(
         };
         let peak_db = yk - 0.25 * (yl - yr) * delta;
         let peak_hz = freqs[k] as f32 + delta * bin_hz;
-        peaks.push(InterpolatedPeak { freq_hz: peak_hz, dbfs: peak_db });
+        peaks.push(InterpolatedPeak {
+            freq_hz: peak_hz,
+            dbfs: peak_db,
+        });
     }
 
     // Strongest-first; truncate to n_max.
-    peaks.sort_by(|a, b| b.dbfs.partial_cmp(&a.dbfs).unwrap_or(std::cmp::Ordering::Equal));
+    peaks.sort_by(|a, b| {
+        b.dbfs
+            .partial_cmp(&a.dbfs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     peaks.truncate(n_max);
     peaks
 }
@@ -305,13 +316,13 @@ mod tests {
     fn parabolic_interp_kills_hann_scallop() {
         const AMP: f64 = 0.5; // -6.02 dBFS peak
         const TRUE_DB: f32 = -6.0205994; // 20·log10(0.5)
-        // Tighter near-zero offset, looser at frac=0.5 (algorithm limit).
+                                         // Tighter near-zero offset, looser at frac=0.5 (algorithm limit).
         let cases: &[(f64, f32)] = &[
-            (0.0,  0.05),
-            (0.1,  0.10),
+            (0.0, 0.05),
+            (0.1, 0.10),
             (0.25, 0.15),
-            (0.4,  0.30),
-            (0.5,  0.40),
+            (0.4, 0.30),
+            (0.5, 0.40),
         ];
 
         for &n in &[2048usize, 8192, 32768] {
@@ -360,10 +371,17 @@ mod tests {
         // One real peak.
         spec[1000] = 0.5; // -6 dBFS
         let peaks = find_interpolated_peaks(&spec, &freqs, 8, -100.0);
-        assert_eq!(peaks.len(), 1, "expected 1 peak above -100 dBFS, got {peaks:?}");
+        assert_eq!(
+            peaks.len(),
+            1,
+            "expected 1 peak above -100 dBFS, got {peaks:?}"
+        );
         // No spurious peaks when threshold rejects the real one.
         let none = find_interpolated_peaks(&spec, &freqs, 8, 0.0);
-        assert!(none.is_empty(), "threshold above peak should yield no peaks: {none:?}");
+        assert!(
+            none.is_empty(),
+            "threshold above peak should yield no peaks: {none:?}"
+        );
     }
 
     /// DC-only input: the 0 Hz bin should dominate and carry the signal's

@@ -26,20 +26,20 @@ const PUB_BACKLOG_WARN: usize = 1_000;
 /// Shared server state, accessible to every handler.
 #[derive(Clone)]
 pub struct ServerState {
-    pub cfg:         Arc<Mutex<ac_core::config::Config>>,
-    pub workers:     Arc<Mutex<HashMap<String, WorkerHandle>>>,
+    pub cfg: Arc<Mutex<ac_core::config::Config>>,
+    pub workers: Arc<Mutex<HashMap<String, WorkerHandle>>>,
     /// Worker threads → main thread → PUB socket.
-    pub pub_tx:      Sender<Vec<u8>>,
-    pub src_mtime:   f64,
-    pub fake_audio:  bool,
+    pub pub_tx: Sender<Vec<u8>>,
+    pub src_mtime: f64,
+    pub fake_audio: bool,
     /// Human-readable mode string for `status` / `server_connections` replies.
     pub listen_mode: Arc<Mutex<String>>,
     /// Signal the main loop to rebind: send the new bind host ("*" or "127.0.0.1").
     /// The rebind happens AFTER the current CTRL reply is sent (per ZMQ.md spec).
-    pub rebind_tx:   Sender<String>,
+    pub rebind_tx: Sender<String>,
     /// Ports, so handlers can report correct endpoints.
-    pub ctrl_port:   u16,
-    pub data_port:   u16,
+    pub ctrl_port: u16,
+    pub data_port: u16,
     /// Optional channel to signal the running test_dut worker (compare-mode hand-off).
     pub dut_reply_tx: Arc<Mutex<Option<Sender<()>>>>,
     /// Optional channel to signal the running calibrate worker.
@@ -50,19 +50,19 @@ pub struct ServerState {
     /// per invocation just to resolve sticky port names. Populated lazily and
     /// refreshed by the `devices` command.
     pub playback_ports_cache: Arc<Mutex<Option<Vec<String>>>>,
-    pub capture_ports_cache:  Arc<Mutex<Option<Vec<String>>>>,
+    pub capture_ports_cache: Arc<Mutex<Option<Vec<String>>>>,
     /// Spectrum analysis mode: `"fft"` (default) or `"cwt"` (Morlet wavelet).
     /// Read by the `monitor_spectrum` worker on each tick so toggling it via
     /// `set_analysis_mode` takes effect on the next published frame.
     pub analysis_mode: Arc<Mutex<String>>,
-    pub cwt_sigma:     Arc<Mutex<f32>>,
-    pub cwt_n_scales:  Arc<Mutex<usize>>,
+    pub cwt_sigma: Arc<Mutex<f32>>,
+    pub cwt_n_scales: Arc<Mutex<usize>>,
     /// 1/N-octave aggregation of the CWT column. `None` = disabled (no
     /// extra frame published). `Some(N)` = publish a `type:
     /// "fractional_octave"` frame after each CWT frame with `bpo = N`.
     /// Read every tick by the `monitor_spectrum` worker so `set_ioct_bpo`
     /// takes effect live.
-    pub ioct_bpo:      Arc<Mutex<Option<u32>>>,
+    pub ioct_bpo: Arc<Mutex<Option<u32>>>,
     /// Frequency-weighting curve applied to each band level before the
     /// `fractional_octave` / `fractional_octave_leq` frames are emitted.
     /// One of `"off"` (identity), `"a"`, `"c"`, `"z"`. `"off"` and
@@ -105,6 +105,14 @@ pub struct MonitorParams {
     pub interval: f64,
     /// FFT window length in samples. Must be a power of 2 in [256, 131072].
     pub fft_n: u32,
+    /// Low-frequency FFT window length for the dual-resolution path (#142).
+    /// A second, longer FFT over the same ring drives the spectrum below
+    /// `crossover_hz`; the live `fft_n` keeps driving everything above it.
+    /// The LF band is inactive whenever `fft_n >= lf_fft_n`.
+    pub lf_fft_n: u32,
+    /// Crossover (Hz) splitting the LF long-FFT band from the HF live band.
+    /// Daemon-owned constant, echoed to the UI so labels never hardcode it.
+    pub crossover_hz: f32,
     /// `monitor_spectrum` worker is running.
     pub active: bool,
 }
@@ -113,7 +121,15 @@ impl Default for MonitorParams {
     fn default() -> Self {
         // 8192 @ 48 kHz ≈ 5.86 Hz bin spacing — close to legacy 0.2 s × 48 k
         // = 9600 samples (≈ 5 Hz) while being a clean pow2 for the planner.
-        Self { interval: 0.2, fft_n: 8192, active: false }
+        // LF N=65536 @ 48 kHz ≈ 0.73 Hz, enough to split 5 Hz tones < 100 Hz
+        // (block latency ≈ 1.37 s, applied to the LF band only — #142).
+        Self {
+            interval: 0.2,
+            fft_n: 8192,
+            lf_fft_n: 65536,
+            crossover_hz: ac_core::visualize::aggregate::DEFAULT_LF_CROSSOVER_HZ,
+            active: false,
+        }
     }
 }
 
@@ -132,33 +148,33 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
 
     eprintln!("ac-daemon: CTRL tcp://{bind_host}:{ctrl_port}  DATA tcp://{bind_host}:{data_port}");
 
-    let (pub_tx,    pub_rx):    (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
-    let (rebind_tx, rebind_rx): (Sender<String>,  Receiver<String>)  = crossbeam_channel::unbounded();
+    let (pub_tx, pub_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = crossbeam_channel::unbounded();
+    let (rebind_tx, rebind_rx): (Sender<String>, Receiver<String>) = crossbeam_channel::unbounded();
 
     let cfg = ac_core::config::load(None).unwrap_or_default();
     let listen_mode = if local_only { "local" } else { "public" }.to_string();
 
     let state = ServerState {
-        cfg:          Arc::new(Mutex::new(cfg)),
-        workers:      Arc::new(Mutex::new(HashMap::new())),
+        cfg: Arc::new(Mutex::new(cfg)),
+        workers: Arc::new(Mutex::new(HashMap::new())),
         pub_tx,
-        src_mtime:    crate::binary_mtime(),
+        src_mtime: crate::binary_mtime(),
         fake_audio,
-        listen_mode:  Arc::new(Mutex::new(listen_mode)),
+        listen_mode: Arc::new(Mutex::new(listen_mode)),
         rebind_tx,
         ctrl_port,
         data_port,
         dut_reply_tx: Arc::new(Mutex::new(None)),
         cal_reply_tx: Arc::new(Mutex::new(None)),
         playback_ports_cache: Arc::new(Mutex::new(None)),
-        capture_ports_cache:  Arc::new(Mutex::new(None)),
+        capture_ports_cache: Arc::new(Mutex::new(None)),
         analysis_mode: Arc::new(Mutex::new("fft".to_string())),
-        cwt_sigma:     Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
-        cwt_n_scales:  Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
-        ioct_bpo:      Arc::new(Mutex::new(None)),
+        cwt_sigma: Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
+        cwt_n_scales: Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
+        ioct_bpo: Arc::new(Mutex::new(None)),
         band_weighting: Arc::new(Mutex::new("off".to_string())),
         time_integration_mode: Arc::new(Mutex::new("off".to_string())),
-        leq_reset_request:     Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        leq_reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         loudness_reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mic_correction_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         monitor_params: Arc::new(Mutex::new(MonitorParams::default())),
@@ -194,11 +210,9 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         // Reap finished workers
         {
             let mut workers = state.workers.lock().unwrap();
-            workers.retain(|_, w| {
-                match &w.thread {
-                    Some(t) => !t.is_finished(),
-                    None    => false,
-                }
+            workers.retain(|_, w| match &w.thread {
+                Some(t) => !t.is_finished(),
+                None => false,
             });
         }
 
@@ -225,11 +239,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
             // Queues a rebind via the same channel server_disable uses; the
             // actual socket rebind happens on the next CTRL round.
             if !busy {
-                let timeout_secs = state
-                    .cfg
-                    .lock()
-                    .unwrap()
-                    .server_idle_timeout_secs;
+                let timeout_secs = state.cfg.lock().unwrap().server_idle_timeout_secs;
                 let is_public = state.listen_mode.lock().unwrap().as_str() == "public";
                 if is_public {
                     if let Some(secs) = timeout_secs {
@@ -268,14 +278,28 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
             }
 
             // Rebind AFTER the reply is sent (per ZMQ.md spec)
-            apply_pending_rebind(&rebind_rx, &ctrl, &data, &mut bind_host, ctrl_port, data_port);
+            apply_pending_rebind(
+                &rebind_rx,
+                &ctrl,
+                &data,
+                &mut bind_host,
+                ctrl_port,
+                data_port,
+            );
         }
 
         // Also drain rebinds scheduled outside the CTRL round — e.g. when the
         // keepalive tick auto-disables the public bind on idle timeout. Without
         // this, the rebind would sit in the channel until the next client
         // connected and leave the public socket live in the meantime.
-        apply_pending_rebind(&rebind_rx, &ctrl, &data, &mut bind_host, ctrl_port, data_port);
+        apply_pending_rebind(
+            &rebind_rx,
+            &ctrl,
+            &data,
+            &mut bind_host,
+            ctrl_port,
+            data_port,
+        );
     }
 
     Ok(())
@@ -314,62 +338,67 @@ fn apply_pending_rebind(
     }
 }
 
-fn dispatch(raw: &[u8], state: &ServerState, pub_rx: &Receiver<Vec<u8>>, data_sock: &zmq::Socket) -> Value {
+fn dispatch(
+    raw: &[u8],
+    state: &ServerState,
+    pub_rx: &Receiver<Vec<u8>>,
+    data_sock: &zmq::Socket,
+) -> Value {
     while let Ok(frame) = pub_rx.try_recv() {
         data_sock.send(frame, 0).ok();
     }
 
     let cmd: Value = match serde_json::from_slice(raw) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(_) => return json!({"ok": false, "error": "invalid JSON"}),
     };
 
     let name = match cmd.get("cmd").and_then(Value::as_str) {
         Some(n) => n,
-        None    => return json!({"ok": false, "error": "missing 'cmd' field"}),
+        None => return json!({"ok": false, "error": "missing 'cmd' field"}),
     };
 
     match name {
-        "status"              => handlers::status(state),
-        "quit"                => handlers::quit(state),
-        "stop"                => handlers::stop(state, &cmd),
-        "devices"             => handlers::devices(state),
-        "setup"               => handlers::setup(state, &cmd),
-        "get_calibration"     => handlers::get_calibration(state, &cmd),
-        "list_calibrations"   => handlers::list_calibrations(state),
-        "sweep_level"         => handlers::sweep_level(state, &cmd),
-        "sweep_frequency"     => handlers::sweep_frequency(state, &cmd),
-        "sweep_ir"            => handlers::sweep_ir(state, &cmd),
-        "plot"                => handlers::plot(state, &cmd),
-        "plot_level"          => handlers::plot_level(state, &cmd),
-        "monitor_spectrum"    => handlers::monitor_spectrum(state, &cmd),
-        "set_analysis_mode"   => handlers::set_analysis_mode(state, &cmd),
-        "get_analysis_mode"   => handlers::get_analysis_mode(state),
-        "set_ioct_bpo"        => handlers::set_ioct_bpo(state, &cmd),
-        "set_band_weighting"  => handlers::set_band_weighting(state, &cmd),
-        "get_band_weighting"  => handlers::get_band_weighting(state),
+        "status" => handlers::status(state),
+        "quit" => handlers::quit(state),
+        "stop" => handlers::stop(state, &cmd),
+        "devices" => handlers::devices(state),
+        "setup" => handlers::setup(state, &cmd),
+        "get_calibration" => handlers::get_calibration(state, &cmd),
+        "list_calibrations" => handlers::list_calibrations(state),
+        "sweep_level" => handlers::sweep_level(state, &cmd),
+        "sweep_frequency" => handlers::sweep_frequency(state, &cmd),
+        "sweep_ir" => handlers::sweep_ir(state, &cmd),
+        "plot" => handlers::plot(state, &cmd),
+        "plot_level" => handlers::plot_level(state, &cmd),
+        "monitor_spectrum" => handlers::monitor_spectrum(state, &cmd),
+        "set_analysis_mode" => handlers::set_analysis_mode(state, &cmd),
+        "get_analysis_mode" => handlers::get_analysis_mode(state),
+        "set_ioct_bpo" => handlers::set_ioct_bpo(state, &cmd),
+        "set_band_weighting" => handlers::set_band_weighting(state, &cmd),
+        "get_band_weighting" => handlers::get_band_weighting(state),
         "set_time_integration" => handlers::set_time_integration(state, &cmd),
         "get_time_integration" => handlers::get_time_integration(state),
-        "reset_leq"           => handlers::reset_leq(state),
-        "reset_loudness"      => handlers::reset_loudness(state),
-        "set_monitor_params"  => handlers::set_monitor_params(state, &cmd),
-        "generate"            => handlers::generate(state, &cmd),
-        "generate_pink"       => handlers::generate_pink(state, &cmd),
-        "calibrate"           => handlers::calibrate(state, &cmd),
-        "calibrate_spl"       => handlers::calibrate_spl(state, &cmd),
+        "reset_leq" => handlers::reset_leq(state),
+        "reset_loudness" => handlers::reset_loudness(state),
+        "set_monitor_params" => handlers::set_monitor_params(state, &cmd),
+        "generate" => handlers::generate(state, &cmd),
+        "generate_pink" => handlers::generate_pink(state, &cmd),
+        "calibrate" => handlers::calibrate(state, &cmd),
+        "calibrate_spl" => handlers::calibrate_spl(state, &cmd),
         "calibrate_mic_curve" => handlers::calibrate_mic_curve(state, &cmd),
         "set_mic_correction_enabled" => handlers::set_mic_correction_enabled(state, &cmd),
-        "cal_reply"           => handlers::cal_reply(state, &cmd),
-        "dmm_read"            => handlers::dmm_read(state),
-        "server_enable"       => handlers::server_enable(state),
-        "server_disable"      => handlers::server_disable(state),
-        "server_connections"  => handlers::server_connections(state),
-        "transfer_stream"     => handlers::transfer_stream(state, &cmd),
-        "probe"               => handlers::probe(state, &cmd),
-        "test_software"       => handlers::test_software(state),
-        "test_hardware"       => handlers::test_hardware(state, &cmd),
-        "test_dut"            => handlers::test_dut(state, &cmd),
-        "dut_reply"           => handlers::dut_reply(state),
+        "cal_reply" => handlers::cal_reply(state, &cmd),
+        "dmm_read" => handlers::dmm_read(state),
+        "server_enable" => handlers::server_enable(state),
+        "server_disable" => handlers::server_disable(state),
+        "server_connections" => handlers::server_connections(state),
+        "transfer_stream" => handlers::transfer_stream(state, &cmd),
+        "probe" => handlers::probe(state, &cmd),
+        "test_software" => handlers::test_software(state),
+        "test_hardware" => handlers::test_hardware(state, &cmd),
+        "test_dut" => handlers::test_dut(state, &cmd),
+        "dut_reply" => handlers::dut_reply(state),
         other => json!({"ok": false, "error": format!("unknown command: '{other}'")}),
     }
 }

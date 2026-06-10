@@ -18,8 +18,7 @@
 use crate::measurement::report::StandardsCitation;
 
 pub use crate::shared::conversions::{
-    dbfs_to_vrms, dbu_to_dbv, dbu_to_vrms, dbv_to_dbu, dbv_to_vrms,
-    vrms_to_dbu, vrms_to_dbv,
+    dbfs_to_vrms, dbu_to_dbv, dbu_to_vrms, dbv_to_dbu, dbv_to_vrms, vrms_to_dbu, vrms_to_dbv,
 };
 
 /// Mean-square of a full-scale sinusoid (peak = 1.0). This is the

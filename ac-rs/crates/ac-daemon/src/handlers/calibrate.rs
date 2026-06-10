@@ -12,28 +12,30 @@ use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output, rms_to_dbfs,
-    send_pub, spawn_worker, wait_cal_reply,
+    busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output, rms_to_dbfs, send_pub,
+    spawn_worker, wait_cal_reply,
 };
 
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
-    let cfg    = state.cfg.lock().unwrap().clone();
-    let out_ch = cmd.get("output_channel")
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_ch = cmd
+        .get("output_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch  = cmd.get("input_channel")
+    let in_ch = cmd
+        .get("input_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.input_channel as u64) as u32;
     let ref_dbfs = cmd.get("ref_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
 
-    let pub_tx       = state.pub_tx.clone();
-    let fake         = state.fake_audio;
-    let out_port     = resolve_output(&cfg, state);
-    let mut cfg_in   = cfg.clone();
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
+    let out_port = resolve_output(&cfg, state);
+    let mut cfg_in = cfg.clone();
     cfg_in.input_channel = in_ch;
-    cfg_in.input_port    = None;
-    let in_port      = resolve_input(&cfg_in, state);
+    cfg_in.input_port = None;
+    let in_port = resolve_input(&cfg_in, state);
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
@@ -41,8 +43,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         // Open both directions: output for the reference tone, input so
         // step 2 can measure the actual ADC dBFS instead of assuming
         // unity-gain loopback when scaling the user's DMM reading.
-        if let Err(e) = eng.start(&[out_port.clone()], Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"calibrate","message":format!("{e}")}));
+        if let Err(e) = eng.start(std::slice::from_ref(&out_port), Some(&in_port)) {
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"calibrate","message":format!("{e}")}),
+            );
             return;
         }
         let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
@@ -54,18 +60,24 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let (tx1, rx1) = crossbeam_channel::bounded(1);
         *cal_reply_tx.lock().unwrap() = Some(tx1);
         let dmm_v1 = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
-        send_pub(&pub_tx, "cal_prompt", &json!({
-            "step":      1,
-            "text":      format!(
-                "Output cal — measure DAC output Vrms with DMM (1 kHz @ {ref_dbfs:.1} dBFS). \
-                 Enter reading or press Enter to skip."),
-            "dmm_vrms":  dmm_v1,
-            "ref_dbfs":  ref_dbfs,
-        }));
+        send_pub(
+            &pub_tx,
+            "cal_prompt",
+            &json!({
+                "step":      1,
+                "text":      format!(
+                    "Output cal — measure DAC output Vrms with DMM (1 kHz @ {ref_dbfs:.1} dBFS). \
+                     Enter reading or press Enter to skip."),
+                "dmm_vrms":  dmm_v1,
+                "ref_dbfs":  ref_dbfs,
+            }),
+        );
         let out_reading = wait_cal_reply(&rx1, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
         if stop.load(Ordering::Relaxed) {
-            eng.set_silence(); eng.stop(); return;
+            eng.set_silence();
+            eng.stop();
+            return;
         }
 
         // Step 2 — input voltage. We need the *captured* input dBFS to
@@ -96,21 +108,27 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let prompt_text = if is_loopback {
             format!(
                 "Input cal — loopback detected ({captured_dbfs:.1} dBFS captured). \
-                 Press Enter to reuse the output reading, or override (q to cancel).")
+                 Press Enter to reuse the output reading, or override (q to cancel)."
+            )
         } else {
             format!(
                 "Input cal — measure ADC input Vrms with DMM (captured {captured_dbfs:.1} dBFS). \
-                 Enter reading or press Enter to skip.")
+                 Enter reading or press Enter to skip."
+            )
         };
         let (tx2, rx2) = crossbeam_channel::bounded(1);
         *cal_reply_tx.lock().unwrap() = Some(tx2);
-        send_pub(&pub_tx, "cal_prompt", &json!({
-            "step":          2,
-            "text":          prompt_text,
-            "dmm_vrms":      dmm_v2,
-            "captured_dbfs": captured_dbfs,
-            "loopback":      is_loopback,
-        }));
+        send_pub(
+            &pub_tx,
+            "cal_prompt",
+            &json!({
+                "step":          2,
+                "text":          prompt_text,
+                "dmm_vrms":      dmm_v2,
+                "captured_dbfs": captured_dbfs,
+                "loopback":      is_loopback,
+            }),
+        );
         let in_reading = wait_cal_reply(&rx2, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
 
@@ -119,17 +137,17 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
         // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
         let out_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
-        let in_scale  = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(in_dbfs_for_scale);
+        let in_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(in_dbfs_for_scale);
         let vrms_at_0dbfs_out = out_reading.map(|v| v * out_scale);
-        let vrms_at_0dbfs_in  = in_reading.map(|v| v * in_scale);
+        let vrms_at_0dbfs_in = in_reading.map(|v| v * in_scale);
 
         // Load existing entry to preserve unrelated fields (notably the
         // SPL pistonphone reading set by `calibrate_spl`); only voltage
         // fields are overwritten here.
         let mut cal = Calibration::load_or_new(out_ch, in_ch, None);
-        cal.ref_dbfs          = ref_dbfs;
+        cal.ref_dbfs = ref_dbfs;
         cal.vrms_at_0dbfs_out = vrms_at_0dbfs_out;
-        cal.vrms_at_0dbfs_in  = vrms_at_0dbfs_in;
+        cal.vrms_at_0dbfs_in = vrms_at_0dbfs_in;
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
@@ -138,20 +156,30 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             "vrms_at_0dbfs_out": vrms_at_0dbfs_out,
             "vrms_at_0dbfs_in":  vrms_at_0dbfs_in,
         });
-        if let Some(ref e) = save_err { cal_done_frame["error"] = json!(e); }
+        if let Some(ref e) = save_err {
+            cal_done_frame["error"] = json!(e);
+        }
         send_pub(&pub_tx, "cal_done", &cal_done_frame);
 
         // Route terminal frame on save outcome so the Python client, which
         // treats `done` vs `error` as the authoritative signal, sees failures.
         match save_err {
-            Some(e) => send_pub(&pub_tx, "error", &json!({
-                "cmd":     "calibrate",
-                "message": format!("save failed: {e}"),
-            })),
-            None => send_pub(&pub_tx, "done", &json!({
-                "cmd": "calibrate",
-                "key": key,
-            })),
+            Some(e) => send_pub(
+                &pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "calibrate",
+                    "message": format!("save failed: {e}"),
+                }),
+            ),
+            None => send_pub(
+                &pub_tx,
+                "done",
+                &json!({
+                    "cmd": "calibrate",
+                    "key": key,
+                }),
+            ),
         }
     });
 
@@ -181,11 +209,13 @@ pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {
 /// to drop a stored curve. Voltage and SPL fields on the same entry
 /// stay untouched (`load_or_new` round-trip).
 pub fn calibrate_mic_curve(state: &ServerState, cmd: &Value) -> Value {
-    let cfg    = state.cfg.lock().unwrap().clone();
-    let out_ch = cmd.get("output_channel")
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_ch = cmd
+        .get("output_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch  = cmd.get("input_channel")
+    let in_ch = cmd
+        .get("input_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.input_channel as u64) as u32;
     let op = cmd.get("op").and_then(Value::as_str).unwrap_or("set");
@@ -196,16 +226,22 @@ pub fn calibrate_mic_curve(state: &ServerState, cmd: &Value) -> Value {
             cal.mic_response = None;
         }
         "set" => {
-            let freqs: Option<Vec<f32>> = cmd.get("freqs_hz")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|v| v as f32)).collect());
-            let gains: Option<Vec<f32>> = cmd.get("gain_db")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|v| v as f32)).collect());
+            let freqs: Option<Vec<f32>> = cmd.get("freqs_hz").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|v| v as f32))
+                    .collect()
+            });
+            let gains: Option<Vec<f32>> = cmd.get("gain_db").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|v| v as f32))
+                    .collect()
+            });
             let (freqs_hz, gain_db) = match (freqs, gains) {
                 (Some(f), Some(g)) if !f.is_empty() && f.len() == g.len() => (f, g),
-                _ => return json!({"ok": false,
-                    "error": "calibrate_mic_curve set: missing/mismatched freqs_hz/gain_db"}),
+                _ => {
+                    return json!({"ok": false,
+                    "error": "calibrate_mic_curve set: missing/mismatched freqs_hz/gain_db"})
+                }
             };
             // Re-validate length bounds + monotonicity here too — the CLI
             // already parsed and validated, but a hostile or buggy client
@@ -230,8 +266,10 @@ pub fn calibrate_mic_curve(state: &ServerState, cmd: &Value) -> Value {
                         "error": "gain_db values must be finite"});
                 }
             }
-            let source_path = cmd.get("source_path")
-                .and_then(Value::as_str).map(str::to_string);
+            let source_path = cmd
+                .get("source_path")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             cal.mic_response = Some(MicResponse {
                 freqs_hz,
                 gain_db,
@@ -283,27 +321,33 @@ pub fn set_mic_correction_enabled(state: &ServerState, cmd: &Value) -> Value {
 ///   4. emit `cal_done` with the captured dBFS, then `done` / `error`.
 pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate_spl");
-    let cfg    = state.cfg.lock().unwrap().clone();
-    let out_ch = cmd.get("output_channel")
+    let cfg = state.cfg.lock().unwrap().clone();
+    let out_ch = cmd
+        .get("output_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.output_channel as u64) as u32;
-    let in_ch  = cmd.get("input_channel")
+    let in_ch = cmd
+        .get("input_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.input_channel as u64) as u32;
     let capture_s = cmd.get("capture_s").and_then(Value::as_f64).unwrap_or(1.0);
 
-    let pub_tx       = state.pub_tx.clone();
-    let fake         = state.fake_audio;
-    let mut cfg_in   = cfg.clone();
+    let pub_tx = state.pub_tx.clone();
+    let fake = state.fake_audio;
+    let mut cfg_in = cfg.clone();
     cfg_in.input_channel = in_ch;
-    cfg_in.input_port    = None;
-    let in_port      = resolve_input(&cfg_in, state);
+    cfg_in.input_port = None;
+    let in_port = resolve_input(&cfg_in, state);
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate_spl", move |stop| {
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[], Some(&in_port)) {
-            send_pub(&pub_tx, "error", &json!({"cmd":"calibrate_spl","message":format!("{e}")}));
+            send_pub(
+                &pub_tx,
+                "error",
+                &json!({"cmd":"calibrate_spl","message":format!("{e}")}),
+            );
             return;
         }
         // Prompt the user to seat the pistonphone, wait for the green
@@ -312,15 +356,20 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
         // not silence or seating noise.
         let (tx, rx) = crossbeam_channel::bounded(1);
         *cal_reply_tx.lock().unwrap() = Some(tx);
-        send_pub(&pub_tx, "cal_prompt", &json!({
-            "step":     1,
-            "text":     "Apply 94 dB SPL pistonphone reference, press Enter when ready (q to cancel).",
-            "kind":     "spl",
-        }));
+        send_pub(
+            &pub_tx,
+            "cal_prompt",
+            &json!({
+                "step":     1,
+                "text":     "Apply 94 dB SPL pistonphone reference, press Enter when ready (q to cancel).",
+                "kind":     "spl",
+            }),
+        );
         let _ = wait_cal_reply(&rx, &stop, 300);
         *cal_reply_tx.lock().unwrap() = None;
         if stop.load(Ordering::Relaxed) {
-            eng.stop(); return;
+            eng.stop();
+            return;
         }
 
         // Brief settling period, then a clean capture.
@@ -340,18 +389,28 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
             "mic_sensitivity_dbfs_at_94db_spl": dbfs,
             "kind":                             "spl",
         });
-        if let Some(ref e) = save_err { cal_done_frame["error"] = json!(e); }
+        if let Some(ref e) = save_err {
+            cal_done_frame["error"] = json!(e);
+        }
         send_pub(&pub_tx, "cal_done", &cal_done_frame);
 
         match save_err {
-            Some(e) => send_pub(&pub_tx, "error", &json!({
-                "cmd":     "calibrate_spl",
-                "message": format!("save failed: {e}"),
-            })),
-            None => send_pub(&pub_tx, "done", &json!({
-                "cmd": "calibrate_spl",
-                "key": key,
-            })),
+            Some(e) => send_pub(
+                &pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "calibrate_spl",
+                    "message": format!("save failed: {e}"),
+                }),
+            ),
+            None => send_pub(
+                &pub_tx,
+                "done",
+                &json!({
+                    "cmd": "calibrate_spl",
+                    "key": key,
+                }),
+            ),
         }
     });
 

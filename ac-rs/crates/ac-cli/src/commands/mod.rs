@@ -48,9 +48,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
         CommandKind::MonitorCwt { .. } => monitor::run_cwt(&parsed.cmd, cfg, client),
         CommandKind::MonitorCqt { .. } => monitor::run_cqt(&parsed.cmd, cfg, client),
-        CommandKind::MonitorReassigned { .. } => {
-            monitor::run_reassigned(&parsed.cmd, cfg, client)
-        }
+        CommandKind::MonitorReassigned { .. } => monitor::run_reassigned(&parsed.cmd, cfg, client),
 
         CommandKind::Probe => probe::run(client),
         CommandKind::TestSoftware => test::run_software(client),
@@ -71,7 +69,14 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
 pub fn check_ack(ack: Option<serde_json::Value>, context: &str) -> serde_json::Value {
     match ack {
         None => {
-            eprintln!("  error: no response from server{}", if context.is_empty() { String::new() } else { format!(" ({context})") });
+            eprintln!(
+                "  error: no response from server{}",
+                if context.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({context})")
+                }
+            );
             std::process::exit(1);
         }
         Some(v) => {

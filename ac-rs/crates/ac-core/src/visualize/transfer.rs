@@ -14,20 +14,20 @@ use realfft::RealFftPlanner;
 
 #[derive(Debug, Clone)]
 pub struct TransferResult {
-    pub freqs:         Vec<f64>,
-    pub magnitude_db:  Vec<f64>,
-    pub phase_deg:     Vec<f64>,
-    pub coherence:     Vec<f64>,
+    pub freqs: Vec<f64>,
+    pub magnitude_db: Vec<f64>,
+    pub phase_deg: Vec<f64>,
+    pub coherence: Vec<f64>,
     /// Complex H(ω) — real part. Parallel to `freqs`. `unified.md`
     /// Phase 3 — needed by Tier 2 views that consume H directly
     /// (Nyquist locus, IR via IFFT, group-delay-from-complex).
     /// Existing magnitude_db / phase_deg are derived from this same
     /// h1 complex value so the three views are guaranteed consistent.
-    pub re:            Vec<f64>,
+    pub re: Vec<f64>,
     /// Complex H(ω) — imaginary part. Parallel to `re`.
-    pub im:            Vec<f64>,
+    pub im: Vec<f64>,
     pub delay_samples: i64,
-    pub delay_ms:      f64,
+    pub delay_ms: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,11 @@ fn fft_windowed(
 ) -> Vec<Complex<f64>> {
     let n = seg.len();
     let fft = planner.plan_fft_forward(n);
-    let mut buf: Vec<f64> = seg.iter().zip(window.iter()).map(|(&s, &w)| s * w).collect();
+    let mut buf: Vec<f64> = seg
+        .iter()
+        .zip(window.iter())
+        .map(|(&s, &w)| s * w)
+        .collect();
     let mut out = fft.make_output_vec();
     fft.process(&mut buf, &mut out).ok();
     out
@@ -129,7 +133,11 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> i64 {
     fft.process(&mut mp, &mut fm).ok();
 
     // Cross-spectrum: conj(fr) * fm
-    let mut cross: Vec<Complex<f64>> = fr.iter().zip(fm.iter()).map(|(a, b)| a.conj() * b).collect();
+    let mut cross: Vec<Complex<f64>> = fr
+        .iter()
+        .zip(fm.iter())
+        .map(|(a, b)| a.conj() * b)
+        .collect();
 
     let ifft = planner.plan_fft_inverse(fft_len);
     let mut corr = ifft.make_output_vec();
@@ -199,49 +207,70 @@ pub fn h1_estimate_with_delay(
 fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> TransferResult {
     assert_eq!(r.len(), m.len(), "ref and meas must have equal length");
 
-    let nperseg  = sr as usize; // 1 Hz resolution
+    let nperseg = sr as usize; // 1 Hz resolution
     let noverlap = nperseg / 2;
-    let window   = hann_window(nperseg);
+    let window = hann_window(nperseg);
 
     let delay_ms = delay_samples as f64 / sr as f64 * 1000.0;
 
     let mut planner = RealFftPlanner::<f64>::new();
     let (gxx, gyy, gxy) = welch_all(r, m, nperseg, noverlap, &window, &mut planner);
 
-    let nfft  = nperseg / 2 + 1;
-    let freqs: Vec<f64> = (0..nfft).map(|k| k as f64 * sr as f64 / nperseg as f64).collect();
+    let nfft = nperseg / 2 + 1;
+    let freqs: Vec<f64> = (0..nfft)
+        .map(|k| k as f64 * sr as f64 / nperseg as f64)
+        .collect();
 
     // Delay compensation: Gxy_comp = Gxy * exp(j * 2π * f * delay / sr)
-    let gxy_comp: Vec<Complex<f64>> = gxy.iter().enumerate().map(|(k, &g)| {
-        let phase = 2.0 * PI * freqs[k] * delay_samples as f64 / sr as f64;
-        g * Complex::new(phase.cos(), phase.sin())
-    }).collect();
+    let gxy_comp: Vec<Complex<f64>> = gxy
+        .iter()
+        .enumerate()
+        .map(|(k, &g)| {
+            let phase = 2.0 * PI * freqs[k] * delay_samples as f64 / sr as f64;
+            g * Complex::new(phase.cos(), phase.sin())
+        })
+        .collect();
 
     // H1 = Gxy_comp / Gxx — preserve the complex value so re/im are
     // consistent with magnitude_db / phase_deg (all three derived
     // from the same h1).
     let mut magnitude_db = vec![0.0f64; nfft];
-    let mut phase_deg    = vec![0.0f64; nfft];
-    let mut re           = vec![0.0f64; nfft];
-    let mut im           = vec![0.0f64; nfft];
+    let mut phase_deg = vec![0.0f64; nfft];
+    let mut re = vec![0.0f64; nfft];
+    let mut im = vec![0.0f64; nfft];
     for k in 0..nfft {
         let gxx_safe = gxx[k].max(1e-30);
-        let h1       = gxy_comp[k] / gxx_safe;
-        let mag      = h1.norm().max(1e-6); // floor at −120 dB
+        let h1 = gxy_comp[k] / gxx_safe;
+        let mag = h1.norm().max(1e-6); // floor at −120 dB
         magnitude_db[k] = 20.0 * mag.log10();
-        phase_deg[k]    = h1.arg().to_degrees();
-        re[k]           = h1.re;
-        im[k]           = h1.im;
+        phase_deg[k] = h1.arg().to_degrees();
+        re[k] = h1.re;
+        im[k] = h1.im;
     }
 
     // Coherence = |Gxy|² / (Gxx × Gyy)
-    let coherence: Vec<f64> = (0..nfft).map(|k| {
-        let denom = gxx[k] * gyy[k];
-        let coh   = if denom > 0.0 { gxy[k].norm_sqr() / denom } else { 0.0 };
-        coh.clamp(0.0, 1.0)
-    }).collect();
+    let coherence: Vec<f64> = (0..nfft)
+        .map(|k| {
+            let denom = gxx[k] * gyy[k];
+            let coh = if denom > 0.0 {
+                gxy[k].norm_sqr() / denom
+            } else {
+                0.0
+            };
+            coh.clamp(0.0, 1.0)
+        })
+        .collect();
 
-    TransferResult { freqs, magnitude_db, phase_deg, coherence, re, im, delay_samples, delay_ms }
+    TransferResult {
+        freqs,
+        magnitude_db,
+        phase_deg,
+        coherence,
+        re,
+        im,
+        delay_samples,
+        delay_ms,
+    }
 }
 
 /// Inverse FFT of a complex H(ω) (in `re`, `im` parallel arrays from a
@@ -311,10 +340,10 @@ pub fn impulse_response_from_h(re: &[f64], im: &[f64]) -> Vec<f32> {
 
 /// Number of capture seconds needed for `n_averages` Welch segments at `sr`.
 pub fn capture_duration(n_averages: usize, sr: u32) -> f64 {
-    let nperseg  = sr as usize;
+    let nperseg = sr as usize;
     let noverlap = nperseg / 2;
-    let step     = nperseg - noverlap;
-    let total    = nperseg + step * (n_averages - 1);
+    let step = nperseg - noverlap;
+    let total = nperseg + step * (n_averages - 1);
     total as f64 / sr as f64
 }
 
@@ -359,16 +388,15 @@ mod tests {
         for k in 20..=20_000 {
             assert!(
                 r.magnitude_db[k].abs() < 0.1,
-                "bin {k}: mag {:.3} dB", r.magnitude_db[k]
+                "bin {k}: mag {:.3} dB",
+                r.magnitude_db[k]
             );
             assert!(
                 r.phase_deg[k].abs() < 1.0,
-                "bin {k}: phase {:.3}°", r.phase_deg[k]
+                "bin {k}: phase {:.3}°",
+                r.phase_deg[k]
             );
-            assert!(
-                r.coherence[k] > 0.999,
-                "bin {k}: coh {:.4}", r.coherence[k]
-            );
+            assert!(r.coherence[k] > 0.999, "bin {k}: coh {:.4}", r.coherence[k]);
         }
     }
 
@@ -385,7 +413,7 @@ mod tests {
         for k in 20..=20_000 {
             // Round-trip check: |H| from re/im matches |H| from db.
             let mag_lin_re_im = (r.re[k].powi(2) + r.im[k].powi(2)).sqrt();
-            let mag_lin_db    = 10.0_f64.powf(r.magnitude_db[k] / 20.0);
+            let mag_lin_db = 10.0_f64.powf(r.magnitude_db[k] / 20.0);
             assert_relative_eq!(mag_lin_re_im, mag_lin_db, epsilon = 1e-9);
             // Phase round-trip: atan2(im, re) matches phase_deg.
             let p_re_im = r.im[k].atan2(r.re[k]).to_degrees();
@@ -395,11 +423,13 @@ mod tests {
         for k in 200..=2_000 {
             assert!(
                 (r.re[k] - 1.0).abs() < 0.05,
-                "bin {k}: Re {:.4} (expected ≈ 1)", r.re[k]
+                "bin {k}: Re {:.4} (expected ≈ 1)",
+                r.re[k]
             );
             assert!(
                 r.im[k].abs() < 0.05,
-                "bin {k}: Im {:.4} (expected ≈ 0)", r.im[k]
+                "bin {k}: Im {:.4} (expected ≈ 0)",
+                r.im[k]
             );
         }
     }
@@ -421,12 +451,10 @@ mod tests {
         for k in 100..=20_000 {
             assert!(
                 r.magnitude_db[k].abs() < 0.5,
-                "bin {k}: mag {:.3} dB", r.magnitude_db[k]
+                "bin {k}: mag {:.3} dB",
+                r.magnitude_db[k]
             );
-            assert!(
-                r.coherence[k] > 0.95,
-                "bin {k}: coh {:.4}", r.coherence[k]
-            );
+            assert!(r.coherence[k] > 0.95, "bin {k}: coh {:.4}", r.coherence[k]);
         }
     }
 
@@ -449,12 +477,8 @@ mod tests {
         let r = h1_estimate(&ref_sig, &meas, SR);
 
         // Analytical: H(z) = a / (1 - (1-a)*z^{-1})
-        let spot_checks: &[(f64, f64)] = &[
-            (200.0, 0.5),
-            (2000.0, 0.5),
-            (10000.0, 1.0),
-            (20000.0, 1.5),
-        ];
+        let spot_checks: &[(f64, f64)] =
+            &[(200.0, 0.5), (2000.0, 0.5), (10000.0, 1.0), (20000.0, 1.5)];
         for &(freq, tol) in spot_checks {
             let w = 2.0 * PI * freq / SR as f64;
             let z_inv = Complex::new(w.cos(), -w.sin());
@@ -465,7 +489,8 @@ mod tests {
             assert!(
                 (r.magnitude_db[k] - expected_db).abs() < tol,
                 "f={freq}: got {:.2} dB, expected {:.2} dB",
-                r.magnitude_db[k], expected_db
+                r.magnitude_db[k],
+                expected_db
             );
         }
     }
@@ -482,14 +507,13 @@ mod tests {
 
         let range = 50..=20_000;
         let count = range.clone().count() as f64;
-        let mean_mag_err: f64 =
-            range.clone().map(|k| r.magnitude_db[k].abs()).sum::<f64>() / count;
+        let mean_mag_err: f64 = range.clone().map(|k| r.magnitude_db[k].abs()).sum::<f64>() / count;
         assert!(
             mean_mag_err < 0.5,
-            "mean |mag error| {:.3} dB", mean_mag_err
+            "mean |mag error| {:.3} dB",
+            mean_mag_err
         );
-        let mean_coh: f64 =
-            range.map(|k| r.coherence[k]).sum::<f64>() / count;
+        let mean_coh: f64 = range.map(|k| r.coherence[k]).sum::<f64>() / count;
         assert!(mean_coh > 0.95, "mean coherence {:.4}", mean_coh);
     }
 
@@ -499,8 +523,7 @@ mod tests {
         let b = white_noise(N, 0.5, 99);
         let r = h1_estimate(&a, &b, SR);
 
-        let mean_coh: f64 =
-            r.coherence[1..].iter().sum::<f64>() / (r.coherence.len() - 1) as f64;
+        let mean_coh: f64 = r.coherence[1..].iter().sum::<f64>() / (r.coherence.len() - 1) as f64;
         assert!(
             mean_coh < 0.4,
             "uncorrelated signals should have low coherence, got {:.4}",
@@ -530,14 +553,14 @@ mod tests {
             .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
             .unwrap();
         assert_eq!(peak_idx, mid, "peak index {peak_idx}, expected {mid}");
-        assert!(*peak_val > 0.0, "peak value should be positive, got {peak_val}");
+        assert!(
+            *peak_val > 0.0,
+            "peak value should be positive, got {peak_val}"
+        );
         // Off-peak energy must be ~zero (Re=1 IFFT is a Dirac delta).
         for (i, v) in ir.iter().enumerate() {
             if i != mid {
-                assert!(
-                    v.abs() < 1e-3,
-                    "non-peak bin {i} = {v} (expected ~0)",
-                );
+                assert!(v.abs() < 1e-3, "non-peak bin {i} = {v} (expected ~0)",);
             }
         }
     }

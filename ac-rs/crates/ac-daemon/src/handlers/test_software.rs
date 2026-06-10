@@ -14,19 +14,24 @@ use ac_core::shared::generator::generate_sine;
 use crate::server::ServerState;
 
 struct Check {
-    name:   &'static str,
-    pass:   bool,
+    name: &'static str,
+    pass: bool,
     detail: String,
 }
 
 pub fn test_software(_state: &ServerState) -> Value {
     let checks = run_all_checks();
     let all_pass = checks.iter().all(|c| c.pass);
-    let results: Vec<Value> = checks.iter().map(|c| json!({
-        "name":   c.name,
-        "pass":   c.pass,
-        "detail": c.detail,
-    })).collect();
+    let results: Vec<Value> = checks
+        .iter()
+        .map(|c| {
+            json!({
+                "name":   c.name,
+                "pass":   c.pass,
+                "detail": c.detail,
+            })
+        })
+        .collect();
     json!({
         "ok":       true,
         "results":  results,
@@ -50,15 +55,14 @@ fn run_all_checks() -> Vec<Check> {
 }
 
 fn check_dbu_vrms_known_values() -> Check {
-    let v0  = dbu_to_vrms(0.0);
-    let v4  = dbu_to_vrms(4.0);
+    let v0 = dbu_to_vrms(0.0);
+    let v4 = dbu_to_vrms(4.0);
     let v20 = dbu_to_vrms(20.0);
     // 0 dBu ≈ 0.7746 V (constants::DBU_REF_VRMS); +4 dBu ≈ 1.228 V (pro
     // audio reference); +20 dBu ≈ 7.746 V. Tolerances absorb the trailing
     // rounding of the runtime reference.
-    let pass = (v0 - 0.7746).abs() < 1e-4
-            && (v4 - 1.228).abs()  < 5e-3
-            && (v20 - 7.746).abs() < 1e-3;
+    let pass =
+        (v0 - 0.7746).abs() < 1e-4 && (v4 - 1.228).abs() < 5e-3 && (v20 - 7.746).abs() < 1e-3;
     Check {
         name: "dBu → Vrms (0 / +4 / +20 dBu)",
         pass,
@@ -83,29 +87,26 @@ fn check_vrms_dbu_roundtrip() -> Check {
 
 fn check_dbfs_to_vrms() -> Check {
     let v_n20 = dbfs_to_vrms(-20.0, 1.0);
-    let v_0   = dbfs_to_vrms(0.0,   1.0);
-    let v_n6  = dbfs_to_vrms(-6.0,  1.0);
-    let pass = (v_n20 - 0.1).abs() < 1e-6
-            && (v_0   - 1.0).abs() < 1e-9
-            && (v_n6  - 0.501_187).abs() < 1e-3;
+    let v_0 = dbfs_to_vrms(0.0, 1.0);
+    let v_n6 = dbfs_to_vrms(-6.0, 1.0);
+    let pass =
+        (v_n20 - 0.1).abs() < 1e-6 && (v_0 - 1.0).abs() < 1e-9 && (v_n6 - 0.501_187).abs() < 1e-3;
     Check {
         name: "dBFS → Vrms (cal ref = 1.0 V)",
         pass,
-        detail: format!(
-            "-20 dBFS = {v_n20:.6} V, 0 dBFS = {v_0:.6} V, -6 dBFS = {v_n6:.4} V",
-        ),
+        detail: format!("-20 dBFS = {v_n20:.6} V, 0 dBFS = {v_0:.6} V, -6 dBFS = {v_n6:.4} V",),
     }
 }
 
 fn check_sine_generator_rms() -> Check {
-    let sr   = 48_000;
-    let amp  = 0.1_f64;
+    let sr = 48_000;
+    let amp = 0.1_f64;
     let freq = 1000.0_f64;
-    let s    = generate_sine(freq, amp, sr, sr as usize);
+    let s = generate_sine(freq, amp, sr, sr as usize);
     let rms: f64 = (s.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
     let expected = amp / 2_f64.sqrt();
-    let rel_err  = (rms - expected).abs() / expected;
-    let pass     = rel_err < 1e-3;
+    let rel_err = (rms - expected).abs() / expected;
+    let pass = rel_err < 1e-3;
     Check {
         name: "Generator: sine RMS = amp/√2",
         pass,
@@ -114,10 +115,10 @@ fn check_sine_generator_rms() -> Check {
 }
 
 fn check_pure_sine_thd_low() -> Check {
-    let sr   = 48_000;
+    let sr = 48_000;
     let freq = 1000.0;
-    let s    = generate_sine(freq, 0.5, sr, sr as usize);
-    let r    = thd::analyze(&s, sr, freq, 10).expect("analyze on synthetic sine");
+    let s = generate_sine(freq, 0.5, sr, sr as usize);
+    let r = thd::analyze(&s, sr, freq, 10).expect("analyze on synthetic sine");
     let pass = r.thd_pct < 0.05;
     Check {
         name: "Pure sine: THD < 0.05%",
@@ -135,8 +136,8 @@ fn synth_with_h2(amp_fund: f32, h2_ratio: f32, sr: u32) -> Vec<f32> {
 
 fn check_synthetic_one_percent_thd() -> Check {
     let sr = 48_000;
-    let s  = synth_with_h2(0.5, 0.01, sr);
-    let r  = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
+    let s = synth_with_h2(0.5, 0.01, sr);
+    let r = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
     let pass = (r.thd_pct - 1.0).abs() < 0.1;
     Check {
         name: "Synthetic 1% H2: THD ≈ 1.0%",
@@ -147,8 +148,8 @@ fn check_synthetic_one_percent_thd() -> Check {
 
 fn check_thdn_ge_thd() -> Check {
     let sr = 48_000;
-    let s  = synth_with_h2(0.5, 0.01, sr);
-    let r  = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
+    let s = synth_with_h2(0.5, 0.01, sr);
+    let r = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
     let pass = r.thdn_pct + 1e-9 >= r.thd_pct;
     Check {
         name: "Physical law: THD+N ≥ THD",
@@ -159,8 +160,8 @@ fn check_thdn_ge_thd() -> Check {
 
 fn check_fundamental_dbfs_scaling() -> Check {
     let sr = 48_000;
-    let s  = generate_sine(1000.0, 0.1, sr, sr as usize);
-    let r  = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
+    let s = generate_sine(1000.0, 0.1, sr, sr as usize);
+    let r = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
     // Window-correction tolerance: documented at ±2 dB in TESTING.md. The
     // peak detector lands on the nearest bin so a 1 kHz tone in a 48 kHz
     // window picks up a small windowing penalty.
@@ -180,8 +181,8 @@ fn check_mic_curve_log_linear_interp() -> Check {
         .map(|i| 20.0 * (1000.0_f32 / 20.0).powf(i as f32 / (n - 1) as f32))
         .collect();
     let r = MicResponse {
-        freqs_hz:    freqs,
-        gain_db:     vec![3.0; n],
+        freqs_hz: freqs,
+        gain_db: vec![3.0; n],
         source_path: None,
         imported_at: "1970-01-01T00:00:00Z".to_string(),
     };
@@ -202,8 +203,7 @@ fn check_calibration_roundtrip() -> Check {
     // Use the system temp dir + a per-pid filename. ac-core's test suite
     // pulls in `tempfile`, but it's a dev-dep — at runtime we roll our own
     // unique path so the daemon stays slim.
-    let path = std::env::temp_dir()
-        .join(format!("ac_self_test_{}_cal.json", std::process::id()));
+    let path = std::env::temp_dir().join(format!("ac_self_test_{}_cal.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
 
     let n = 16usize;
@@ -212,12 +212,12 @@ fn check_calibration_roundtrip() -> Check {
         .collect();
 
     let mut cal = Calibration::new(7, 11);
-    cal.vrms_at_0dbfs_out                 = Some(1.234);
-    cal.vrms_at_0dbfs_in                  = Some(0.567);
-    cal.mic_sensitivity_dbfs_at_94db_spl  = Some(-30.0);
+    cal.vrms_at_0dbfs_out = Some(1.234);
+    cal.vrms_at_0dbfs_in = Some(0.567);
+    cal.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
     cal.mic_response = Some(MicResponse {
-        freqs_hz:    freqs,
-        gain_db:     vec![1.0; n],
+        freqs_hz: freqs,
+        gain_db: vec![1.0; n],
         source_path: Some("self-test".to_string()),
         imported_at: "1970-01-01T00:00:00Z".to_string(),
     });
@@ -225,8 +225,8 @@ fn check_calibration_roundtrip() -> Check {
     if let Err(e) = cal.save(Some(&path)) {
         let _ = std::fs::remove_file(&path);
         return Check {
-            name:   "Calibration round-trip (3 layers)",
-            pass:   false,
+            name: "Calibration round-trip (3 layers)",
+            pass: false,
             detail: format!("save failed: {e}"),
         };
     }
@@ -236,16 +236,16 @@ fn check_calibration_roundtrip() -> Check {
         Ok(None) => {
             let _ = std::fs::remove_file(&path);
             return Check {
-                name:   "Calibration round-trip (3 layers)",
-                pass:   false,
+                name: "Calibration round-trip (3 layers)",
+                pass: false,
                 detail: "load returned None".to_string(),
             };
         }
         Err(e) => {
             let _ = std::fs::remove_file(&path);
             return Check {
-                name:   "Calibration round-trip (3 layers)",
-                pass:   false,
+                name: "Calibration round-trip (3 layers)",
+                pass: false,
                 detail: format!("load failed: {e}"),
             };
         }
@@ -253,9 +253,12 @@ fn check_calibration_roundtrip() -> Check {
     let _ = std::fs::remove_file(&path);
 
     let voltage_ok = (loaded.vrms_at_0dbfs_out.unwrap_or(0.0) - 1.234).abs() < 1e-9
-                  && (loaded.vrms_at_0dbfs_in.unwrap_or(0.0) - 0.567).abs() < 1e-9;
-    let spl_ok     = (loaded.mic_sensitivity_dbfs_at_94db_spl.unwrap_or(0.0) + 30.0).abs() < 1e-9;
-    let curve_ok   = loaded.mic_response.as_ref().is_some_and(|r| r.freqs_hz.len() == 16);
+        && (loaded.vrms_at_0dbfs_in.unwrap_or(0.0) - 0.567).abs() < 1e-9;
+    let spl_ok = (loaded.mic_sensitivity_dbfs_at_94db_spl.unwrap_or(0.0) + 30.0).abs() < 1e-9;
+    let curve_ok = loaded
+        .mic_response
+        .as_ref()
+        .is_some_and(|r| r.freqs_hz.len() == 16);
     let pass = voltage_ok && spl_ok && curve_ok;
 
     Check {
@@ -297,7 +300,11 @@ mod tests {
         assert_eq!(json["ok"], json!(true));
         assert!(json["results"].is_array());
         assert_eq!(json["results"].as_array().unwrap().len(), checks.len());
-        assert_eq!(json["all_pass"], json!(true), "shipping a self-test with a known-failing check is a regression");
+        assert_eq!(
+            json["all_pass"],
+            json!(true),
+            "shipping a self-test with a known-failing check is a regression"
+        );
         for r in json["results"].as_array().unwrap() {
             assert!(r["name"].is_string());
             assert!(r["pass"].is_boolean());
