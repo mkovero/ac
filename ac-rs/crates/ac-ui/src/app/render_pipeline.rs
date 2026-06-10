@@ -1231,6 +1231,8 @@ impl App {
                     gonio_state: gonio_state_snap,
                     bode_pair: bode_pair_snap,
                     keytips: &keytips,
+                    peak_hold: peak_hold_enabled_snap,
+                    min_hold: min_hold_enabled_snap,
                 },
             );
         });
@@ -1394,14 +1396,46 @@ impl App {
                             // up at the top of the screen, y=1 at
                             // the bottom (NDC + wgpu viewport
                             // convention; verified by tracing the
-                            // deposit / display shaders). Single-
-                            // cell rendering doesn't notice because
-                            // the mirror envelope is vertically
-                            // symmetric, but per-cell positions on
-                            // the canvas need the flip applied so
-                            // top-row cells display at screen top.
+                            // deposit / display shaders). The trace is
+                            // baseline-anchored at the cell floor, so
+                            // per-cell positions on the canvas need the
+                            // flip applied (`1.0 - cell.y - ay*cell.h`
+                            // below) for the baseline to land at each
+                            // cell's own bottom edge.
                             if let Some(frame) = frame_opt {
-                                let local = build_spectrum_polyline(frame, &view);
+                                let mut local = build_ember_spectrum_trace(
+                                    &frame.freqs,
+                                    &frame.spectrum,
+                                    &view,
+                                    EMBER_LIVE_W,
+                                );
+                                // Peak / min hold render as additional
+                                // baseline-anchored envelopes over the
+                                // live trace, at lower deposit weight so
+                                // they recede behind it. The per-bin held
+                                // buffers are maintained every frame in
+                                // `redraw` regardless of view; ember view
+                                // simply never drew them before (#149).
+                                if self.peak_hold_enabled {
+                                    if let Some(Some(held)) = self.peak_holds.get(cell.channel) {
+                                        local.extend(build_ember_spectrum_trace(
+                                            &frame.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_PEAK_W,
+                                        ));
+                                    }
+                                }
+                                if self.min_hold_enabled {
+                                    if let Some(Some(held)) = self.min_holds.get(cell.channel) {
+                                        local.extend(build_ember_spectrum_trace(
+                                            &frame.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_MIN_W,
+                                        ));
+                                    }
+                                }
                                 combined.reserve(local.len());
                                 let zx = view.zoom_x;
                                 let zy = view.zoom_y;
@@ -1483,7 +1517,38 @@ impl App {
                             .get(active)
                             .and_then(|f| f.as_ref())
                             .filter(|f| !f.spectrum.is_empty())
-                            .map(|f| build_spectrum_polyline(f, &view))
+                            .map(|f| {
+                                let mut v = build_ember_spectrum_trace(
+                                    &f.freqs,
+                                    &f.spectrum,
+                                    &view,
+                                    EMBER_LIVE_W,
+                                );
+                                // Held peak / min envelopes over the live
+                                // trace — same per-bin buffers `redraw`
+                                // maintains for every view (#149).
+                                if self.peak_hold_enabled {
+                                    if let Some(Some(held)) = self.peak_holds.get(active) {
+                                        v.extend(build_ember_spectrum_trace(
+                                            &f.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_PEAK_W,
+                                        ));
+                                    }
+                                }
+                                if self.min_hold_enabled {
+                                    if let Some(Some(held)) = self.min_holds.get(active) {
+                                        v.extend(build_ember_spectrum_trace(
+                                            &f.freqs,
+                                            held,
+                                            &view,
+                                            EMBER_MIN_W,
+                                        ));
+                                    }
+                                }
+                                v
+                            })
                             .unwrap_or_default();
                         let mut transformed: Vec<[f32; 3]> = Vec::with_capacity(raw.len());
                         for chunk in raw.chunks_exact(2) {
@@ -1506,12 +1571,12 @@ impl App {
                     };
                     // tau_p 1.2 s — short enough that an old peak's
                     // afterglow is gone in ~3 s, fast enough to keep up
-                    // with sweeping or moving sources. The mirrored-
-                    // envelope polyline doubles the per-frame deposit
-                    // count vs a single trace, so intensity already
-                    // nets out about right at 0.003.
+                    // with sweeping or moving sources. The single baseline
+                    // trace deposits ~half the vertices the old mirrored
+                    // envelope did, so intensity is doubled to 0.006 to
+                    // keep steady-state luminance where it was.
                     ember.set_tau_p(1.2 * self.ember_tau_p_scale);
-                    ember.set_intensity(0.003 * self.ember_intensity_scale);
+                    ember.set_intensity(0.006 * self.ember_intensity_scale);
                     ember.set_tone(0.6, 1.5);
                     ember.advance(
                         &ctx.device,
@@ -2227,8 +2292,6 @@ fn build_scope_polyline(
 /// (weighting disabled — every bin deposits at full intensity). NaN /
 /// negative coherence falls through to 0.0 so spurious bins don't
 /// brighten unexpectedly.
-// `!(k > 0.0)` is an intentional NaN-aware guard: NaN, zero and negative k
-// all return the neutral weight.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn coherence_weight(coherence: f32, k: f32) -> f32 {
     if !(k > 0.0) {
@@ -2247,12 +2310,39 @@ fn coherence_weight(coherence: f32, k: f32) -> f32 {
 /// feel chunkier without changing the underlying signal interpretation.
 const EMBER_SPECTRUM_COLS: usize = 512;
 
-/// `SpectrumFrame` → mirrored-envelope LineList. Logarithmic frequency
-/// axis on x; magnitude renders as a symmetric envelope around y = 0.5
-/// (top trace at 0.5 + amp, bottom at 0.5 − amp, where amp scales with
-/// the bin's normalised dB). Bins below `db_min` break the polyline so
-/// the trace disappears off-screen rather than pinning a glowing baseline
-/// at y = 0; bins above `db_max` clamp to the top edge as expected.
+/// Per-vertex deposit weight for the live ember spectrum trace. Held
+/// envelopes (peak/min) recede behind it at the lower weights below so the
+/// reader can tell "now" from "held" without introducing a second colour.
+const EMBER_LIVE_W: f32 = 1.0;
+/// Peak-hold envelope weight — brighter-steady than min, dimmer than live.
+const EMBER_PEAK_W: f32 = 0.6;
+/// Min-hold envelope weight — the dimmest of the three so the noise-floor
+/// outline sits furthest behind the live trace.
+const EMBER_MIN_W: f32 = 0.45;
+
+/// Baseline of the ember spectrum trace in deposit space. The substrate
+/// inverts y between deposit and display (y=0 → screen top, y=1 → bottom),
+/// so a baseline near y=1 anchors the trace at the cell *floor*. The trace
+/// rises toward the cell top as level approaches `db_max`.
+const EMBER_TRACE_BASE: f32 = 0.95;
+/// Fraction of the cell the trace deflects across at full scale. A single
+/// baseline-anchored line uses the whole cell for dynamic range (the old
+/// mirror gave each of its two envelopes only half).
+const EMBER_TRACE_FULL: f32 = 0.90;
+
+/// `(freqs, mags)` → single baseline-anchored ember LineList. Logarithmic
+/// frequency axis on x; magnitude renders as one line growing from a
+/// baseline at the cell floor (`EMBER_TRACE_BASE`) up toward the cell top
+/// as the bin's normalised dB rises. A mono channel is one signal, so it
+/// reads as one curve — this replaces the former mirror-about-y=0.5
+/// envelope pair, which falsely implied a stereo/bipolar display. Bins
+/// below `db_min` break the polyline so the trace disappears off-screen
+/// rather than pinning a glowing baseline; bins above `db_max` clamp to
+/// the top edge.
+///
+/// `weight` is the per-vertex deposit weight: live traces pass
+/// `EMBER_LIVE_W`, held peak/min envelopes pass the lower weights so they
+/// recede behind the live ember.
 ///
 /// Bins are first aggregated by max-magnitude into `EMBER_SPECTRUM_COLS`
 /// log-spaced columns. Without this, linear FFT output (~11.7 Hz/bin at
@@ -2260,9 +2350,11 @@ const EMBER_SPECTRUM_COLS: usize = 512;
 /// log x-axis, producing visible moiré/aliasing in the rendered trace.
 /// Max-aggregation matches the existing spectrum view's behaviour: peaks
 /// dominate over averaging so transients still register cleanly.
-fn build_spectrum_polyline(
-    frame: &crate::data::types::DisplayFrame,
+fn build_ember_spectrum_trace(
+    freqs: &[f32],
+    mags: &[f32],
     view: &CellView,
+    weight: f32,
 ) -> Vec<[f32; 3]> {
     let log_min = view.freq_min.max(1.0).log10();
     let log_max = view.freq_max.max(view.freq_min * 1.001).log10();
@@ -2270,10 +2362,10 @@ fn build_spectrum_polyline(
     let span_db = (view.db_max - view.db_min).max(1e-3);
     let n_cols = EMBER_SPECTRUM_COLS;
     let mut col_max: Vec<f32> = vec![f32::NEG_INFINITY; n_cols];
-    let n = frame.freqs.len().min(frame.spectrum.len());
+    let n = freqs.len().min(mags.len());
     for i in 0..n {
-        let f = frame.freqs[i];
-        let mag = frame.spectrum[i];
+        let f = freqs[i];
+        let mag = mags[i];
         if !f.is_finite()
             || f < view.freq_min
             || f > view.freq_max
@@ -2292,8 +2384,8 @@ fn build_spectrum_polyline(
         }
     }
 
-    let mut pairs = Vec::with_capacity(n_cols * 4);
-    let mut prev: Option<([f32; 3], [f32; 3])> = None;
+    let mut pairs = Vec::with_capacity(n_cols * 2);
+    let mut prev: Option<[f32; 3]> = None;
     #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
         let mag = col_max[col];
@@ -2303,16 +2395,13 @@ fn build_spectrum_polyline(
         }
         let x = (col as f32 + 0.5) / n_cols as f32;
         let n_mag = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
-        let amp = 0.45 * n_mag;
-        let top = [x, 0.5 + amp, 1.0];
-        let bot = [x, 0.5 - amp, 1.0];
-        if let Some((prev_top, prev_bot)) = prev {
-            pairs.push(prev_top);
-            pairs.push(top);
-            pairs.push(prev_bot);
-            pairs.push(bot);
+        let y = EMBER_TRACE_BASE - EMBER_TRACE_FULL * n_mag;
+        let cur = [x, y, weight];
+        if let Some(prev_pt) = prev {
+            pairs.push(prev_pt);
+            pairs.push(cur);
         }
-        prev = Some((top, bot));
+        prev = Some(cur);
     }
     pairs
 }
@@ -2323,7 +2412,7 @@ fn build_spectrum_polyline(
 /// dispatch arm gives the free fade-diff workflow promised in §5.
 ///
 /// Bins are aggregated by max-magnitude into `EMBER_SPECTRUM_COLS`
-/// log-spaced columns (same anti-moiré pattern `build_spectrum_polyline`
+/// log-spaced columns (same anti-moiré pattern `build_ember_spectrum_trace`
 /// uses; transfer frames arrive log-spaced from the daemon already, but
 /// column-binning still helps when the cell freq window is zoomed).
 /// Bins outside the cell's freq or dB window break the polyline.

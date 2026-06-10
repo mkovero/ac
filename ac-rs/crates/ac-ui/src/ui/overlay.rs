@@ -124,6 +124,13 @@ pub struct OverlayInput<'a> {
     /// / Esc quit`. Built by `crate::ui::keytips::keytips_for` against
     /// the live state snapshot at render-pipeline time.
     pub keytips: &'a [KeytipChip],
+    /// Peak-hold armed (`P`). Surfaced as a `peak` tag on the ember
+    /// status line so a flat held envelope reads as "armed, no peaks yet"
+    /// rather than "feature off".
+    pub peak_hold: bool,
+    /// Min-hold armed (`M`). Surfaced as a `min` tag on the ember status
+    /// line, mirror of `peak_hold`.
+    pub min_hold: bool,
 }
 
 /// Format the goniometer status line. `view_label` is the short view
@@ -379,13 +386,26 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 mic_tag,
             ),
             ViewMode::Scope => "scope (ember) │ synthetic 1 kHz".to_string(),
-            ViewMode::SpectrumEmber => format!(
-                "spectrum (ember) │ {}..{}{}{}",
-                format_hz(view.freq_min).trim(),
-                format_hz(view.freq_max).trim(),
-                smooth_tag,
-                mic_tag,
-            ),
+            ViewMode::SpectrumEmber => {
+                // `Y floor..ceiling dB` leads the chain so the gain-trim
+                // window the `Ctrl+Shift+Scroll` gesture moves is visible
+                // (#146); reuses the Spectrum arm's `Y {:.0}..{:.0} dB`
+                // format for cross-view consistency. `peak`/`min` tags
+                // show only when armed (#149).
+                let peak_tag = if input.peak_hold { "  │  peak" } else { "" };
+                let min_tag = if input.min_hold { "  │  min" } else { "" };
+                format!(
+                    "spectrum (ember) │ Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}",
+                    view.db_min,
+                    view.db_max,
+                    format_hz(view.freq_min).trim(),
+                    format_hz(view.freq_max).trim(),
+                    smooth_tag,
+                    mic_tag,
+                    peak_tag,
+                    min_tag,
+                )
+            }
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
             ViewMode::IoTransfer => format_iotransfer_status_line(input.gonio_state),
             ViewMode::BodeMag => {

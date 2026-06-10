@@ -135,6 +135,8 @@ fn overlay_shows_cursor_readout_when_hovering() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -185,6 +187,8 @@ fn overlay_hides_footer_when_not_hovering() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -237,6 +241,8 @@ fn overlay_shows_dbspl_when_spl_calibrated() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -280,6 +286,8 @@ fn overlay_shows_dbu_when_calibrated() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -321,6 +329,8 @@ fn overlay_shows_clip_when_clipping() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -361,6 +371,8 @@ fn overlay_no_clip_when_not_clipping() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -404,6 +416,8 @@ fn overlay_shows_frozen() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -445,6 +459,8 @@ fn overlay_shows_connected() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -484,6 +500,8 @@ fn overlay_shows_disconnected() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -534,6 +552,8 @@ fn overlay_shows_hover_db_readout() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -578,6 +598,8 @@ fn overlay_shows_notification() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -620,6 +642,8 @@ fn overlay_shows_sample_rate() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -666,6 +690,8 @@ fn overlay_shows_time_fast_tag() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -706,11 +732,79 @@ fn overlay_shows_band_weighting_tag() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
     let has_tag = texts.iter().any(|t| t.contains("wt A"));
     assert!(has_tag, "wt A tag not found in: {texts:?}");
+}
+
+#[test]
+fn overlay_ember_shows_gain_window_and_hold_tags() {
+    // #146: the ember status line surfaces the dB-window the gain trim
+    // moves as `Y floor..ceiling dB`. #149: `peak`/`min` tags appear only
+    // when the respective hold is armed.
+    let mut config = default_config();
+    config.view_mode = ViewMode::SpectrumEmber;
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView {
+        db_min: -90.0,
+        db_max: 0.0,
+        ..CellView::default()
+    }];
+
+    let make = |peak_hold, min_hold| OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: None,
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: None,
+        gonio_state: crate::data::types::StereoStatus::NoAudio,
+        bode_pair: None,
+        keytips: &[],
+        peak_hold,
+        min_hold,
+    };
+
+    // Holds off: gain window present, no peak/min tags.
+    let texts = run_overlay(make(false, false));
+    let ember = texts
+        .iter()
+        .find(|t| t.contains("spectrum (ember)"))
+        .unwrap_or_else(|| panic!("ember status line not found in: {texts:?}"));
+    assert!(
+        ember.contains("Y -90..0 dB"),
+        "gain window not shown: {ember:?}"
+    );
+    assert!(!ember.contains("peak"), "peak tag must be absent: {ember:?}");
+    assert!(!ember.contains("min"), "min tag must be absent: {ember:?}");
+
+    // Holds armed: both tags appear.
+    let texts = run_overlay(make(true, true));
+    let ember = texts
+        .iter()
+        .find(|t| t.contains("spectrum (ember)"))
+        .unwrap_or_else(|| panic!("ember status line not found in: {texts:?}"));
+    assert!(ember.contains("peak"), "peak tag missing: {ember:?}");
+    assert!(ember.contains("min"), "min tag missing: {ember:?}");
 }
 
 #[test]
@@ -752,6 +846,8 @@ fn overlay_shows_loudness_strip_with_r128_pass() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -804,6 +900,8 @@ fn overlay_r128_fail_tag_when_far_off_target() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
@@ -849,6 +947,8 @@ fn overlay_shows_leq_duration() {
         gonio_state: crate::data::types::StereoStatus::NoAudio,
         bode_pair: None,
         keytips: &[],
+        peak_hold: false,
+        min_hold: false,
     };
 
     let texts = run_overlay(input);
