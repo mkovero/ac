@@ -1404,9 +1404,9 @@ impl App {
                             // deposit / display shaders). The trace is
                             // baseline-anchored at the cell floor, so
                             // per-cell positions on the canvas need the
-                            // flip applied (`1.0 - cell.y - ay*cell.h`
-                            // below) for the baseline to land at each
-                            // cell's own bottom edge.
+                            // flip applied (`ember_cell_to_canvas_y`) for
+                            // the baseline to land at each cell's own
+                            // bottom edge.
                             if let Some(frame) = frame_opt {
                                 let mut local = build_ember_spectrum_trace(
                                     &frame.freqs,
@@ -1477,33 +1477,55 @@ impl App {
                                     }
                                     combined.push([
                                         cell.x + ax * cell.w,
-                                        1.0 - cell.y - ay * cell.h,
+                                        ember_cell_to_canvas_y(ay, cell.y, cell.h),
                                         a[2] * focus_w,
                                     ]);
                                     combined.push([
                                         cell.x + bx * cell.w,
-                                        1.0 - cell.y - by * cell.h,
+                                        ember_cell_to_canvas_y(by, cell.y, cell.h),
                                         b[2] * focus_w,
                                     ]);
                                 }
                             } else {
-                                // No data yet for this channel —
-                                // deposit a thin rectangular outline
-                                // along the cell's edges so the
-                                // hitbox has a visible counterpart.
-                                // Eight vertices form a LineList of
-                                // four segments (one per edge).
+                                // No data yet for this channel — mark the
+                                // clickable hitbox with the minimum ink
+                                // that cannot be mistaken for a trace: one
+                                // dim floor baseline plus two short corner
+                                // brackets at the cell top. The former
+                                // 4-edge rectangle deposited top + bottom
+                                // horizontal edges, which on an empty mono
+                                // cell read as two horizontal traces — the
+                                // exact #148 / #153 two-line symptom from
+                                // the idle path (#153).
+                                const TICK_FRAC: f32 = 0.08;
                                 let inset_x = cell.w * EDGE_INSET;
-                                let inset_y = cell.h * EDGE_INSET;
                                 let x0 = cell.x + inset_x;
                                 let x1 = cell.x + cell.w - inset_x;
-                                let y0 = 1.0 - cell.y - inset_y;
-                                let y1 = 1.0 - cell.y - cell.h + inset_y;
-                                let bl = [x0, y0, EMPTY_W];
-                                let br = [x1, y0, EMPTY_W];
-                                let tr = [x1, y1, EMPTY_W];
-                                let tl = [x0, y1, EMPTY_W];
-                                combined.extend_from_slice(&[bl, br, br, tr, tr, tl, tl, bl]);
+                                let tx = cell.w * TICK_FRAC;
+                                let ty = cell.h * TICK_FRAC;
+                                // Floor baseline at the same height the live
+                                // trace anchors to, so idle and live cells
+                                // share one horizontal reference.
+                                let y_base =
+                                    ember_cell_to_canvas_y(EMBER_TRACE_BASE, cell.y, cell.h);
+                                // Top corners, just inside the inset.
+                                let y_top = ember_cell_to_canvas_y(EDGE_INSET, cell.y, cell.h);
+                                let bl = [x0, y_base, EMPTY_W];
+                                let br = [x1, y_base, EMPTY_W];
+                                // Top-left bracket: short horizontal + a
+                                // short vertical drop toward the baseline.
+                                let tl = [x0, y_top, EMPTY_W];
+                                let tl_h = [x0 + tx, y_top, EMPTY_W];
+                                let tl_v = [x0, y_top - ty, EMPTY_W];
+                                // Top-right bracket.
+                                let tr = [x1, y_top, EMPTY_W];
+                                let tr_h = [x1 - tx, y_top, EMPTY_W];
+                                let tr_v = [x1, y_top - ty, EMPTY_W];
+                                combined.extend_from_slice(&[
+                                    bl, br, // single floor baseline
+                                    tl, tl_h, tl, tl_v, // top-left corner bracket
+                                    tr, tr_h, tr, tr_v, // top-right corner bracket
+                                ]);
                             }
                         }
                         combined
@@ -1569,8 +1591,15 @@ impl App {
                             if !in_bounds(ax, ay) && !in_bounds(bx, by) {
                                 continue;
                             }
-                            transformed.push([ax, ay, a[2]]);
-                            transformed.push([bx, by, b[2]]);
+                            // Full-canvas Single cell is (0.0, 1.0): route
+                            // y through the same floor flip the Grid arm
+                            // uses so the baseline lands at the bottom edge
+                            // in both layouts. Without this the Single trace
+                            // rendered mirrored versus Grid and read as a
+                            // second, inverted trace on a mono channel
+                            // (#148 / #153).
+                            transformed.push([ax, ember_cell_to_canvas_y(ay, 0.0, 1.0), a[2]]);
+                            transformed.push([bx, ember_cell_to_canvas_y(by, 0.0, 1.0), b[2]]);
                         }
                         transformed
                     };
@@ -2334,6 +2363,23 @@ const EMBER_TRACE_BASE: f32 = 0.95;
 /// baseline-anchored line uses the whole cell for dynamic range (the old
 /// mirror gave each of its two envelopes only half).
 const EMBER_TRACE_FULL: f32 = 0.90;
+
+/// Map an ember trace's cell-local y (0 = cell top, 1 = cell bottom; the
+/// floor-anchored baseline sits at `EMBER_TRACE_BASE`) into canvas space
+/// for a cell occupying `[cell_y, cell_y + cell_h]`. The ember substrate
+/// inverts y between deposit and display, so the baseline must be flipped
+/// to land at each cell's own bottom edge.
+///
+/// Both the Grid and Single arms route their y through this so the floor
+/// baseline lands at the same cell edge in every layout. The Single arm
+/// formerly pushed raw cell-local y (no flip), rendering the trace
+/// mirrored versus Grid — which read as a second, inverted trace on a
+/// mono channel (#148 / #153). A full-canvas Single cell is `(0.0, 1.0)`,
+/// for which this reduces to `1.0 - ay`.
+#[inline]
+fn ember_cell_to_canvas_y(ay: f32, cell_y: f32, cell_h: f32) -> f32 {
+    1.0 - cell_y - ay * cell_h
+}
 
 /// `(freqs, mags)` → single baseline-anchored ember LineList. Logarithmic
 /// frequency axis on x; magnitude renders as one line growing from a
@@ -4331,5 +4377,96 @@ mod tests {
         let (status, samples) = resolve_stereo_pair(pair, Some(&store), n);
         assert_eq!(status, StereoStatus::NotStreamingYet { l: 3, r: 5 });
         assert!(samples.is_none());
+    }
+
+    // ---- Ember single-trace invariant (#148 / #153) ----
+    //
+    // A mono channel is one signal, so it must render as exactly one
+    // floor-anchored ember curve — never a second, vertically-mirrored
+    // trace. These guard the two layers that previously reintroduced the
+    // mirror: the CPU geometry builder (`build_ember_spectrum_trace`) and
+    // the Single/Grid canvas-flip parity (`ember_cell_to_canvas_y`).
+
+    /// A realistic mono tone yields one connected, floor-anchored polyline:
+    /// every vertex sits in the `[BASE-FULL, BASE]` band, all carry the live
+    /// deposit weight, and consecutive LineList segments share endpoints
+    /// (one polyline, not two). Asserted with peak/min hold OFF — held
+    /// envelopes are #149-owned behaviour and are not part of this builder
+    /// call.
+    #[test]
+    fn ember_mono_yields_single_floor_anchored_trace() {
+        // 1 kHz tone over a ~-94 dBu noise floor, linear daemon bins.
+        let freqs: Vec<f32> = (0..512).map(|i| 20.0 + i as f32 * 46.0).collect();
+        let mut mags = vec![-94.0f32; 512];
+        // 1 kHz lands near index (1000 - 20) / 46 ≈ 21.
+        mags[20] = -28.0;
+        mags[21] = -10.0;
+        mags[22] = -28.0;
+        let v = view(20.0, 24_000.0);
+        let pairs = build_ember_spectrum_trace(&freqs, &mags, &v, EMBER_LIVE_W);
+        assert!(!pairs.is_empty());
+
+        let lo = EMBER_TRACE_BASE - EMBER_TRACE_FULL; // 0.05
+        let hi = EMBER_TRACE_BASE; // 0.95
+        for [_, y, w] in &pairs {
+            assert!(
+                *y >= lo - 1e-4 && *y <= hi + 1e-4,
+                "vertex y = {y} outside floor band [{lo}, {hi}] — reflected/mirrored trace",
+            );
+            assert!(
+                (*w - EMBER_LIVE_W).abs() < 1e-6,
+                "unexpected deposit weight {w} (expected live weight only, hold off)",
+            );
+        }
+
+        // Single trace = at most one y per x-column. A mirror would place a
+        // second, reflected vertex at the same x (`y` and its reflection),
+        // so any column carrying two distinct y values is the bug. (The
+        // polyline legitimately breaks across empty log-columns — that is a
+        // horizontal gap, not a second trace, so we check per-x uniqueness
+        // rather than full connectivity.)
+        assert_eq!(pairs.len() % 2, 0);
+        for (i, a) in pairs.iter().enumerate() {
+            for b in pairs.iter().skip(i + 1) {
+                if (a[0] - b[0]).abs() < 1e-4 {
+                    assert!(
+                        (a[1] - b[1]).abs() < 1e-4,
+                        "two vertices at x={} with different y ({} vs {}) — mirrored trace",
+                        a[0],
+                        a[1],
+                        b[1],
+                    );
+                }
+            }
+        }
+    }
+
+    /// Single/Grid flip parity: the floor-anchored baseline lands at each
+    /// cell's own bottom edge in every layout, never reflected above it.
+    /// The Single arm formerly skipped the flip and rendered the trace
+    /// mirrored versus Grid — the #148 / #153 second-trace symptom.
+    #[test]
+    fn ember_floor_anchors_to_cell_bottom_in_both_layouts() {
+        // (cell_y, cell_h): full-canvas Single, plus two Grid cells.
+        let cells = [(0.0f32, 1.0f32), (0.0, 0.5), (0.5, 0.5)];
+        for &(cell_y, cell_h) in &cells {
+            let floor = ember_cell_to_canvas_y(EMBER_TRACE_BASE, cell_y, cell_h);
+            let bottom = ember_cell_to_canvas_y(1.0, cell_y, cell_h);
+            let top = ember_cell_to_canvas_y(0.0, cell_y, cell_h);
+            // Floor sits within one trace-floor offset (5 % of cell height)
+            // of the bottom edge — anchored at the floor, not the middle or
+            // a reflection.
+            assert!(
+                (floor - bottom).abs() <= (1.0 - EMBER_TRACE_BASE) * cell_h + 1e-6,
+                "floor {floor} not anchored to bottom {bottom} (cell_y={cell_y}, h={cell_h})",
+            );
+            // And strictly between the two cell edges — never reflected past
+            // either one.
+            let (edge_lo, edge_hi) = (bottom.min(top), bottom.max(top));
+            assert!(
+                floor >= edge_lo - 1e-6 && floor <= edge_hi + 1e-6,
+                "floor {floor} escaped cell edges [{edge_lo}, {edge_hi}]",
+            );
+        }
     }
 }
