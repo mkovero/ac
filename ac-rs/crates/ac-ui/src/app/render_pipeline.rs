@@ -1378,7 +1378,7 @@ impl App {
                         // deposit at w=0.35 settles into a dim
                         // outline, dimmer than active envelopes
                         // which carry w=1.0 with peaks > 0.5 amp.
-                        const EMPTY_W: f32 = 0.35;
+                        // Weight constant: `EMBER_EMPTY_W` (module scope).
                         let mut combined = Vec::new();
                         for cell in &cells {
                             // Skip virtual transfer cells — their
@@ -1488,44 +1488,23 @@ impl App {
                                 }
                             } else {
                                 // No data yet for this channel — mark the
-                                // clickable hitbox with the minimum ink
-                                // that cannot be mistaken for a trace: one
-                                // dim floor baseline plus two short corner
-                                // brackets at the cell top. The former
-                                // 4-edge rectangle deposited top + bottom
-                                // horizontal edges, which on an empty mono
-                                // cell read as two horizontal traces — the
-                                // exact #148 / #153 two-line symptom from
-                                // the idle path (#153).
-                                const TICK_FRAC: f32 = 0.08;
-                                let inset_x = cell.w * EDGE_INSET;
-                                let x0 = cell.x + inset_x;
-                                let x1 = cell.x + cell.w - inset_x;
-                                let tx = cell.w * TICK_FRAC;
-                                let ty = cell.h * TICK_FRAC;
-                                // Floor baseline at the same height the live
-                                // trace anchors to, so idle and live cells
-                                // share one horizontal reference.
-                                let y_base =
-                                    ember_cell_to_canvas_y(EMBER_TRACE_BASE, cell.y, cell.h);
-                                // Top corners, just inside the inset.
-                                let y_top = ember_cell_to_canvas_y(EDGE_INSET, cell.y, cell.h);
-                                let bl = [x0, y_base, EMPTY_W];
-                                let br = [x1, y_base, EMPTY_W];
-                                // Top-left bracket: short horizontal + a
-                                // short vertical drop toward the baseline.
-                                let tl = [x0, y_top, EMPTY_W];
-                                let tl_h = [x0 + tx, y_top, EMPTY_W];
-                                let tl_v = [x0, y_top - ty, EMPTY_W];
-                                // Top-right bracket.
-                                let tr = [x1, y_top, EMPTY_W];
-                                let tr_h = [x1 - tx, y_top, EMPTY_W];
-                                let tr_v = [x1, y_top - ty, EMPTY_W];
-                                combined.extend_from_slice(&[
-                                    bl, br, // single floor baseline
-                                    tl, tl_h, tl, tl_v, // top-left corner bracket
-                                    tr, tr_h, tr, tr_v, // top-right corner bracket
-                                ]);
+                                // clickable hitbox with four dim corner
+                                // brackets and no full-width edge. A spanning
+                                // horizontal edge aliases a real silent
+                                // channel (a flat trace pinned at the floor),
+                                // which was the #148 / #153 two-line symptom
+                                // reaching the idle path. The void shares no
+                                // horizontal reference with a measurement
+                                // (#156). Geometry lives in
+                                // `ember_idle_brackets` so it can be tested.
+                                combined.extend(ember_idle_brackets(
+                                    cell.x,
+                                    cell.y,
+                                    cell.w,
+                                    cell.h,
+                                    EDGE_INSET,
+                                    EMBER_EMPTY_W,
+                                ));
                             }
                         }
                         combined
@@ -2379,6 +2358,76 @@ const EMBER_TRACE_FULL: f32 = 0.90;
 #[inline]
 fn ember_cell_to_canvas_y(ay: f32, cell_y: f32, cell_h: f32) -> f32 {
     1.0 - cell_y - ay * cell_h
+}
+
+/// Faint, constant deposit weight for an idle cell's hitbox marker. Dimmer
+/// than every live deposit (live 1.0 / peak 0.6 / min 0.45) so the marker
+/// recedes into the void and never competes with a real ember.
+const EMBER_EMPTY_W: f32 = 0.35;
+/// Idle-bracket leg length as a fraction of the cell's smaller dimension.
+const EMBER_IDLE_TICK_FRAC: f32 = 0.08;
+/// Upper bound on a bracket leg, equal to a quarter-canvas grid cell's leg.
+/// A 2×2 grid (the coarsest grid, `cols = ceil(sqrt(n))`) has 0.5-wide cells,
+/// so its leg is `0.5 * TICK_FRAC` — that is the reference mark size. The cap
+/// leaves every real grid cell untouched (all ≤ 0.5 dim) and only clamps a
+/// full-canvas (1×1) Single cell down to it instead of ballooning. Display-
+/// only clamp — no surface-pixel detection, only the `cell.w` / `cell.h`
+/// already in hand.
+const EMBER_IDLE_TICK_MAX: f32 = 0.5 * EMBER_IDLE_TICK_FRAC;
+
+/// Idle-cell hitbox marker: four dim corner brackets, no full-width edge.
+///
+/// An empty-but-connected channel must read as "clickable empty," never as a
+/// measurement. A real silent channel renders a flat trace pinned at the
+/// floor, so any spanning horizontal edge in the idle marker aliases that
+/// exact state — the #148 / #153 two-line symptom reaching the idle path.
+/// Four crop-mark corners frame the rectangle without depositing any edge
+/// long enough to read as a trace (#156).
+///
+/// Legs are equal-length — `min(w, h) * TICK_FRAC`, capped at `TICK_MAX` — so
+/// every corner is a square bracket at any cell aspect (per-axis legs skewed
+/// the L in non-square Grid cells) and a full-canvas Single cell shows the
+/// same mark size as a grid cell. Returns a LineList (consecutive vertex
+/// pairs) carrying `weight` as the ember deposit.
+fn ember_idle_brackets(
+    cell_x: f32,
+    cell_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    edge_inset: f32,
+    weight: f32,
+) -> Vec<[f32; 3]> {
+    let inset_x = cell_w * edge_inset;
+    let x0 = cell_x + inset_x;
+    let x1 = cell_x + cell_w - inset_x;
+    let leg = (cell_w.min(cell_h) * EMBER_IDLE_TICK_FRAC).min(EMBER_IDLE_TICK_MAX);
+    // canvas y decreases as cell-local y rises (see `ember_cell_to_canvas_y`),
+    // so top legs drop toward the interior (−leg) and bottom legs rise toward
+    // it (+leg). Both leg arms use the same `leg` so corners read square.
+    let y_top = ember_cell_to_canvas_y(edge_inset, cell_y, cell_h);
+    let y_bot = ember_cell_to_canvas_y(1.0 - edge_inset, cell_y, cell_h);
+    let tl = [x0, y_top, weight];
+    let tr = [x1, y_top, weight];
+    let bl = [x0, y_bot, weight];
+    let br = [x1, y_bot, weight];
+    vec![
+        tl,
+        [x0 + leg, y_top, weight],
+        tl,
+        [x0, y_top - leg, weight], // top-left
+        tr,
+        [x1 - leg, y_top, weight],
+        tr,
+        [x1, y_top - leg, weight], // top-right
+        bl,
+        [x0 + leg, y_bot, weight],
+        bl,
+        [x0, y_bot + leg, weight], // bottom-left
+        br,
+        [x1 - leg, y_bot, weight],
+        br,
+        [x1, y_bot + leg, weight], // bottom-right
+    ]
 }
 
 /// `(freqs, mags)` → single baseline-anchored ember LineList. Logarithmic
@@ -4467,6 +4516,64 @@ mod tests {
                 floor >= edge_lo - 1e-6 && floor <= edge_hi + 1e-6,
                 "floor {floor} escaped cell edges [{edge_lo}, {edge_hi}]",
             );
+        }
+    }
+
+    /// Idle marker = four corner brackets, never a spanning edge. A
+    /// full-width horizontal edge at the floor aliases a real silent
+    /// channel's flat trace — the #148 / #153 symptom reaching the idle path
+    /// — so the idle LineList must contain no segment spanning the cell width
+    /// at a single y, must frame all four corners, and must carry only the
+    /// dim empty weight (#156). Covers a full-canvas Single cell and two
+    /// non-square Grid cells.
+    #[test]
+    fn ember_idle_brackets_have_no_spanning_edge() {
+        const INSET: f32 = 0.02;
+        let cells = [
+            (0.0f32, 0.0f32, 1.0f32, 1.0f32), // full-canvas Single
+            (0.0, 0.0, 0.5, 0.25),            // wide, short Grid cell
+            (0.5, 0.75, 0.5, 0.25),           // offset wide, short Grid cell
+        ];
+        for &(cx, cy, cw, ch) in &cells {
+            let v = ember_idle_brackets(cx, cy, cw, ch, INSET, EMBER_EMPTY_W);
+            // LineList: even vertex count, segments are consecutive pairs.
+            assert_eq!(v.len() % 2, 0, "LineList must be vertex pairs");
+
+            let inset_x = cw * INSET;
+            let x0 = cx + inset_x;
+            let x1 = cx + cw - inset_x;
+            let span = (x1 - x0).abs();
+            // No horizontal segment spans more than half the cell width: every
+            // arm is a short bracket leg, so nothing reads as a floor/top edge.
+            for seg in v.chunks_exact(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let dy = (a[1] - b[1]).abs();
+                let dx = (a[0] - b[0]).abs();
+                assert!(
+                    !(dy < 1e-6 && dx > 0.5 * span),
+                    "idle segment {a:?}-{b:?} spans the cell width — reads as a trace",
+                );
+            }
+
+            // All four corners are framed.
+            let y_top = ember_cell_to_canvas_y(INSET, cy, ch);
+            let y_bot = ember_cell_to_canvas_y(1.0 - INSET, cy, ch);
+            for &(qx, qy) in &[(x0, y_top), (x1, y_top), (x0, y_bot), (x1, y_bot)] {
+                assert!(
+                    v.iter()
+                        .any(|p| (p[0] - qx).abs() < 1e-5 && (p[1] - qy).abs() < 1e-5),
+                    "missing corner bracket at ({qx}, {qy})",
+                );
+            }
+
+            // Every vertex carries the dim empty weight, nothing brighter.
+            for p in &v {
+                assert!(
+                    (p[2] - EMBER_EMPTY_W).abs() < 1e-6,
+                    "idle vertex weight {} != EMBER_EMPTY_W",
+                    p[2],
+                );
+            }
         }
     }
 }
