@@ -925,6 +925,11 @@ impl App {
                 let rows_back = (1.0 - ny) * (rows_visible - 1.0).max(0.0);
                 let t_ago = rows_back * self.waterfall_row_period_s;
                 HoverReadout::TimeAgo(t_ago)
+            } else if matches!(config_snap.view_mode, ViewMode::SpectrumEmber) {
+                // Ember footer reads the trace magnitude at the hovered bin
+                // (sampled from the frame spectrum in the overlay), not the
+                // geometric cursor-Y. The dB is filled in there (#154).
+                HoverReadout::SpectrumBin
             } else {
                 let db = view.db_min + ny * (view.db_max - view.db_min);
                 HoverReadout::Db(db)

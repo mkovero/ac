@@ -253,6 +253,24 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
     parts.join("   ")
 }
 
+/// Nearest detected peak within the snap window: 1% of the cursor
+/// frequency, floored at 2 Hz so low-freq peaks (where 1% is sub-Hz)
+/// still snap reliably. Returns the snapped peak's `(freq_hz, db)`, or
+/// `None` when no peak is close enough.
+fn snap_to_peak(cursor_freq_hz: f32, peaks: &[[f32; 2]]) -> Option<(f32, f32)> {
+    let snap_tol_hz = (cursor_freq_hz * 0.01).max(2.0);
+    let mut best: Option<(f32, f32)> = None;
+    let mut best_dist = f32::INFINITY;
+    for p in peaks {
+        let d = (p[0] - cursor_freq_hz).abs();
+        if d < best_dist && d <= snap_tol_hz {
+            best_dist = d;
+            best = Some((p[0], p[1]));
+        }
+    }
+    best
+}
+
 /// Cursor-driven footer readout for the spectrum / waterfall / sweep
 /// views. Replaces the broadband stats line whenever the cursor is
 /// over a cell — keeps the trace unobstructed and gives the dBu /
@@ -277,6 +295,9 @@ pub fn sweep_readout(pt: &SweepPoint) -> String {
 ///   plus dBu / dB SPL via the same cal offsets the spectrum view uses.
 /// - `Thd(v)` / `Gain(v)`: Sweep cursor panels. Show their value with
 ///   the cursor freq.
+/// - `SpectrumBin`: SpectrumEmber cursor. Amplitude is the *trace* bin
+///   magnitude from `sampled_db_at_freq` (not a geometric cursor-Y);
+///   snaps to a known peak like `Db`, and an empty sample renders `—`.
 pub fn cursor_readout(
     cursor_freq_hz: f32,
     readout: &crate::ui::overlay::HoverReadout,
@@ -288,19 +309,7 @@ pub fn cursor_readout(
     use crate::ui::overlay::HoverReadout;
     match *readout {
         HoverReadout::Db(cursor_db_at_bin) => {
-            // Snap window: 1% of cursor freq, floor at 2 Hz so low-freq
-            // peaks (where 1% is sub-Hz) still snap reliably.
-            let snap_tol_hz = (cursor_freq_hz * 0.01).max(2.0);
-            let mut best: Option<(f32, f32)> = None;
-            let mut best_dist = f32::INFINITY;
-            for p in peaks {
-                let d = (p[0] - cursor_freq_hz).abs();
-                if d < best_dist && d <= snap_tol_hz {
-                    best_dist = d;
-                    best = Some((p[0], p[1]));
-                }
-            }
-            let (freq, db, snapped) = match best {
+            let (freq, db, snapped) = match snap_to_peak(cursor_freq_hz, peaks) {
                 Some((f, d)) => (f, d, true),
                 None => (cursor_freq_hz, cursor_db_at_bin, false),
             };
@@ -319,6 +328,35 @@ pub fn cursor_readout(
                 )
             } else {
                 format!("{} {:+6.2} dBFS{}", format_hz(freq), db, snap_tag,)
+            }
+        }
+        HoverReadout::SpectrumBin => {
+            // Amplitude is the trace magnitude at the hovered bin
+            // (`sampled_db_at_freq`), or the snapped peak's dB when the
+            // cursor is inside the snap window. No sample (empty spectrum or
+            // cursor past the trace edge) → `—`, never a fabricated 0 dB.
+            let (freq, db, snapped) = match snap_to_peak(cursor_freq_hz, peaks) {
+                Some((f, d)) => (f, Some(d), true),
+                None => (cursor_freq_hz, sampled_db_at_freq, false),
+            };
+            let snap_tag = if snapped { "  ▲" } else { "" };
+            match db {
+                None => format!("{} {:>6} dBFS", format_hz(freq), "—"),
+                Some(db) => {
+                    if let Some(off) = spl_offset_db {
+                        format!("{} {:>6.1} dB SPL{}", format_hz(freq), db + off, snap_tag,)
+                    } else if let Some(off) = dbu_offset_db {
+                        format!(
+                            "{} {:+6.2} dBFS  {:+6.2} dBu{}",
+                            format_hz(freq),
+                            db,
+                            db + off,
+                            snap_tag,
+                        )
+                    } else {
+                        format!("{} {:+6.2} dBFS{}", format_hz(freq), db, snap_tag,)
+                    }
+                }
             }
         }
         HoverReadout::TimeAgo(s) => {
@@ -798,6 +836,102 @@ mod tests {
             !s.contains("dBu"),
             "should not show dBu when SPL active: {s}"
         );
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_uses_sampled_magnitude() {
+        // #154: ember cursor amplitude is the sampled trace bin magnitude,
+        // NOT the geometric cursor-Y. The Db payload is irrelevant here.
+        let s = cursor_readout(
+            2000.0,
+            &HoverReadout::SpectrumBin,
+            Some(-78.34),
+            &[],
+            None,
+            None,
+        );
+        assert!(s.contains("kHz"), "want freq unit: {s}");
+        assert!(s.contains("-78.34 dBFS"), "want sampled bin dBFS: {s}");
+        assert!(!s.contains("▲"), "no peaks supplied -> no snap marker: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_empty_sample_shows_dash() {
+        // Cursor past the trace edge / spectrum empty: report freq with a
+        // `—` amplitude, never a stale or fabricated 0 dB.
+        let s = cursor_readout(22050.0, &HoverReadout::SpectrumBin, None, &[], None, None);
+        assert!(s.contains("—"), "empty sample must show em-dash: {s}");
+        assert!(s.contains("dBFS"), "still labels the dBFS field: {s}");
+        assert!(!s.contains("0.00"), "must not fabricate 0 dB: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_snaps_to_peak() {
+        // Within the 1% snap window the readout reports the peak's freq/dB
+        // (overriding the sampled value) and flags it with ▲.
+        let peaks = [[1000.0_f32, -0.02]];
+        let s = cursor_readout(
+            1001.0,
+            &HoverReadout::SpectrumBin,
+            Some(-40.0),
+            &peaks,
+            None,
+            None,
+        );
+        assert!(s.contains("-0.02 dBFS"), "want snapped peak dB: {s}");
+        assert!(s.contains("▲"), "want snap marker: {s}");
+        assert!(
+            !s.contains("-40.0"),
+            "snapped readout must drop the sample: {s}"
+        );
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_voltage_cal_adds_dbu() {
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::SpectrumBin,
+            Some(-10.0),
+            &[],
+            Some(10.17),
+            None,
+        );
+        assert!(s.contains("-10.00 dBFS"), "want dBFS: {s}");
+        assert!(
+            s.contains("+0.17 dBu") || s.contains("+0.16 dBu") || s.contains("+0.18 dBu"),
+            "want dBu near +0.17: {s}"
+        );
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_spl_overrides_dbu() {
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::SpectrumBin,
+            Some(-32.0),
+            &[],
+            Some(10.17),
+            Some(126.0),
+        );
+        assert!(s.contains("dB SPL"), "want SPL: {s}");
+        assert!(!s.contains("dBu"), "SPL overrides dBu: {s}");
+    }
+
+    #[test]
+    fn cursor_readout_spectrum_bin_empty_sample_ignores_cal() {
+        // No magnitude to convert -> show only the `—` dBFS field, no
+        // dangling dBu/SPL derived from nothing.
+        let s = cursor_readout(
+            1000.0,
+            &HoverReadout::SpectrumBin,
+            None,
+            &[],
+            Some(10.17),
+            Some(126.0),
+        );
+        assert!(s.contains("—"), "want em-dash: {s}");
+        assert!(!s.contains("dBu"), "no dBu without a sample: {s}");
+        assert!(!s.contains("SPL"), "no SPL without a sample: {s}");
     }
 
     #[test]

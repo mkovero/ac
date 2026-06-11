@@ -794,7 +794,10 @@ fn overlay_ember_shows_gain_window_and_hold_tags() {
         ember.contains("Y -90..0 dB"),
         "gain window not shown: {ember:?}"
     );
-    assert!(!ember.contains("peak"), "peak tag must be absent: {ember:?}");
+    assert!(
+        !ember.contains("peak"),
+        "peak tag must be absent: {ember:?}"
+    );
     assert!(!ember.contains("min"), "min tag must be absent: {ember:?}");
 
     // Holds armed: both tags appear.
@@ -805,6 +808,69 @@ fn overlay_ember_shows_gain_window_and_hold_tags() {
         .unwrap_or_else(|| panic!("ember status line not found in: {texts:?}"));
     assert!(ember.contains("peak"), "peak tag missing: {ember:?}");
     assert!(ember.contains("min"), "min tag missing: {ember:?}");
+}
+
+#[test]
+fn overlay_ember_shows_cursor_readout_on_hover() {
+    // #154: the SpectrumEmber footer is no longer suppressed. Hovering
+    // surfaces freq + the trace bin magnitude sampled from the frame
+    // spectrum — NOT the geometric cursor-Y carried by the old Db payload.
+    let mut config = default_config();
+    config.view_mode = ViewMode::SpectrumEmber;
+    // Bright bin = -3 dBFS at ~1 kHz; the rest of the spectrum sits at -100.
+    let frame = test_frame(1000.0, -3.0, 0.003, 0.005);
+    let frames = [Some(frame)];
+    let cell_views = [CellView {
+        db_min: -90.0,
+        db_max: 0.0,
+        ..CellView::default()
+    }];
+    // Geometric payload deliberately -12 dBFS to prove it is ignored.
+    let mut hover = hover_at(0, 1000.0, -12.0);
+    hover.readout = HoverReadout::SpectrumBin;
+
+    let input = OverlayInput {
+        config: &config,
+        frames: &frames,
+        cell_views: &cell_views,
+        selected: &[false],
+        connected: true,
+        notification: None,
+        timing: None,
+        gpu_supported: true,
+        hover: Some(hover),
+        show_help: false,
+        monitor_params: None,
+        n_real: 1,
+        virtual_pairs: &[],
+        active_palette: 0,
+        smoothing_frac: None,
+        ioct_bpo: None,
+        tier_badge: None,
+        time_integration: None,
+        band_weighting: None,
+        loudness: None,
+        gonio_state: crate::data::types::StereoStatus::NoAudio,
+        bode_pair: None,
+        keytips: &[],
+        peak_hold: false,
+        min_hold: false,
+    };
+
+    let texts = run_overlay(input);
+    let has_readout = texts
+        .iter()
+        .any(|t| t.contains("kHz") && t.contains("dBFS"));
+    assert!(has_readout, "ember cursor readout missing: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("-3.0")),
+        "amplitude must be the sampled bin magnitude (-3 dBFS), not the \
+         geometric -12 payload: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("-12.0")),
+        "geometric cursor-Y dB must not appear: {texts:?}"
+    );
 }
 
 #[test]
