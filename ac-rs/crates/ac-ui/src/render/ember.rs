@@ -30,6 +30,24 @@ const LUT_PALETTES: u32 = 2;
 #[allow(dead_code)]
 pub const PALETTE_NAMES: &[&str] = &["blackbody", "warm"];
 
+/// One grid cell's containment region for a single `advance` call: a scissor
+/// rect plus the half-open vertex range `[start, end)` that deposits into it.
+///
+/// `rect_norm` is the cell's canvas rect `[x, y, w, h]` in surface-normalised
+/// `[0,1]` coords (`y` bottom-up, matching the layout). `advance` converts it
+/// to texture pixels and scissors both the decay and deposit passes so each
+/// cell's phosphor stays inside its own sub-rect of the shared substrate —
+/// deposit splatter and decay cannot cross the dark seam into a neighbour
+/// (grid-leak fix, #153). `range` indexes the flat `line_pairs` slice in
+/// vertices; the deposit pass draws only that cell's segments under its
+/// scissor. An empty `scissors` slice falls back to whole-surface decay +
+/// deposit (the single-cell behaviour every non-grid ember view uses).
+#[derive(Debug, Clone, Copy)]
+pub struct EmberScissor {
+    pub rect_norm: [f32; 4],
+    pub range: [u32; 2],
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct DecayU {
@@ -453,6 +471,10 @@ impl EmberRenderer {
     /// `scroll_dx_norm` ∈ [0,1] shifts the existing substrate leftward by
     /// that fraction of its width before depositing — pass 0.0 for a static
     /// view (e.g. spectrum), `dt / window_s` for a strip-chart scope.
+    /// `scissors` contains the substrate to per-cell sub-rects: when
+    /// non-empty, the decay and deposit passes run once per `EmberScissor`
+    /// under its scissor rect, so a grid cell's phosphor cannot bleed into a
+    /// neighbour (#153). Pass `&[]` for the whole-surface single-cell views.
     #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &mut self,
@@ -463,6 +485,7 @@ impl EmberRenderer {
         line_pairs: &[[f32; 3]],
         scroll_dx_norm: f32,
         dt: f32,
+        scissors: &[EmberScissor],
     ) {
         let dt = dt.clamp(0.0, 0.25);
 
@@ -523,7 +546,36 @@ impl EmberRenderer {
             );
         }
 
-        // Decay pass: src → dst.
+        // Per-cell scissor rects in texture pixels (origin top-left), paired
+        // with the clamped vertex range to deposit under each. A cell's canvas
+        // rect [x..x+w] × [y..y+h] (y bottom-up) maps to texture rows
+        // [y*H .. (y+h)*H]: the deposit shader's y-flip and the framebuffer's
+        // top-left origin cancel, so the normalised y is used directly. Rounds
+        // to integer pixels and clamps to the substrate bounds; degenerate
+        // (zero-area) rects are dropped.
+        let px_scissors: Vec<([u32; 4], [u32; 2])> = scissors
+            .iter()
+            .filter_map(|s| {
+                let r = s.rect_norm;
+                let x = (r[0] * TEX_W as f32).round().clamp(0.0, TEX_W as f32) as u32;
+                let y = (r[1] * TEX_H as f32).round().clamp(0.0, TEX_H as f32) as u32;
+                let w =
+                    ((r[2] * TEX_W as f32).round().max(0.0) as u32).min(TEX_W.saturating_sub(x));
+                let h =
+                    ((r[3] * TEX_H as f32).round().max(0.0) as u32).min(TEX_H.saturating_sub(y));
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                let start = s.range[0].min(used as u32);
+                let end = s.range[1].min(used as u32).max(start);
+                Some(([x, y, w, h], [start, end]))
+            })
+            .collect();
+
+        // Decay pass: src → dst. The Clear load op wipes the whole target, so
+        // when scissoring per cell every region outside a cell rect is forced
+        // to black each frame (the unlit seam between cells); the decayed src
+        // is rewritten only inside each cell.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ember decay pass"),
@@ -541,7 +593,14 @@ impl EmberRenderer {
             });
             pass.set_pipeline(&self.decay_pipeline);
             pass.set_bind_group(0, src_view_for_decay_bg, &[]);
-            pass.draw(0..4, 0..1);
+            if px_scissors.is_empty() {
+                pass.draw(0..4, 0..1);
+            } else {
+                for (rect, _) in &px_scissors {
+                    pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
+                    pass.draw(0..4, 0..1);
+                }
+            }
         }
 
         // Deposit pass: additive into dst (which now holds decayed values).
@@ -563,7 +622,17 @@ impl EmberRenderer {
             pass.set_pipeline(&self.deposit_pipeline);
             pass.set_bind_group(0, &self.deposit_bg, &[]);
             pass.set_vertex_buffer(0, self.point_vbuf.slice(..));
-            pass.draw(0..used as u32, 0..1);
+            if px_scissors.is_empty() {
+                pass.draw(0..used as u32, 0..1);
+            } else {
+                for (rect, range) in &px_scissors {
+                    if range[1] <= range[0] {
+                        continue;
+                    }
+                    pass.set_scissor_rect(rect[0], rect[1], rect[2], rect[3]);
+                    pass.draw(range[0]..range[1], 0..1);
+                }
+            }
         }
 
         self.front_is_latest = !self.front_is_latest;

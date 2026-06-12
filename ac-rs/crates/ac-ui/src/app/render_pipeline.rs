@@ -14,6 +14,7 @@ use crate::data::types::{
     CellView, DisplayFrame, FrameMeta, LayoutMode, SweepKind, TransferFrame, ViewMode,
 };
 use crate::render::context::RenderContext;
+use crate::render::ember::EmberScissor;
 use crate::render::grid;
 use crate::render::spectrum::{ChannelMeta, ChannelUpload};
 use crate::render::waterfall::CellUpload as WaterfallCellUpload;
@@ -1315,6 +1316,20 @@ impl App {
                 .clamp(0.0, 0.25);
             self.ember_last_tick = Some(now);
 
+            // Force-clear the substrate when the layout configuration changes
+            // so a prior config's phosphor cannot linger under the new one —
+            // the grid-leak / stale-trace regression (#153). The key folds in
+            // the active view, layout, and every visible cell's channel +
+            // geometry, so a Single↔Grid swap, a page turn, a channel-set
+            // change, or a view switch (e.g. scrolling Scope → static
+            // SpectrumEmber) all trip a clear. Persistence within one config is
+            // untouched: an unchanged key never clears.
+            let gen = ember_layout_generation(view_mode, self.config.layout, &cells);
+            if self.ember_layout_gen != Some(gen) {
+                ember.request_clear();
+                self.ember_layout_gen = Some(gen);
+            }
+
             match view_mode {
                 ViewMode::Scope => {
                     // Inlined `current_sr()` because `self.ember` is already
@@ -1347,6 +1362,7 @@ impl App {
                         &polyline,
                         scroll_dx,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::SpectrumEmber => {
@@ -1365,6 +1381,11 @@ impl App {
                     // carries the daemon's weighting / time integration
                     // AND the UI-side fractional-octave smoothing
                     // applied earlier in this method.
+                    // Per-cell scissor rects, populated only in Grid layout so
+                    // each channel's phosphor stays inside its own sub-rect of
+                    // the shared substrate (no cross-cell bleed, #153). Single
+                    // layout leaves this empty → whole-surface deposit + decay.
+                    let mut scissors: Vec<EmberScissor> = Vec::new();
                     let polyline: Vec<[f32; 3]> = if matches!(self.config.layout, LayoutMode::Grid)
                     {
                         // Cell-edge inset for the empty-cell border:
@@ -1407,6 +1428,7 @@ impl App {
                             // flip applied (`ember_cell_to_canvas_y`) for
                             // the baseline to land at each cell's own
                             // bottom edge.
+                            let start = combined.len() as u32;
                             if let Some(frame) = frame_opt {
                                 let mut local = build_ember_spectrum_trace(
                                     &frame.freqs,
@@ -1441,10 +1463,6 @@ impl App {
                                         ));
                                     }
                                 }
-                                combined.reserve(local.len());
-                                let zx = view.zoom_x;
-                                let zy = view.zoom_y;
-                                let zf = view.zoom.max(1e-3);
                                 // Focus emphasis: focused cell renders
                                 // at full deposit weight; non-focus
                                 // cells at 0.85× so the steady-state
@@ -1456,36 +1474,12 @@ impl App {
                                 } else {
                                     0.85
                                 };
-                                // Image zoom around the cursor anchor. At
-                                // zf=1 this is identity. For zf>1 points
-                                // are spread out around (zx, zy); pairs
-                                // entirely outside [0,1] are skipped so
-                                // zoomed content doesn't bleed into
-                                // neighbouring cells.
-                                for chunk in local.chunks_exact(2) {
-                                    let a = &chunk[0];
-                                    let b = &chunk[1];
-                                    let ax = zx + (a[0] - zx) * zf;
-                                    let ay = zy + (a[1] - zy) * zf;
-                                    let bx = zx + (b[0] - zx) * zf;
-                                    let by = zy + (b[1] - zy) * zf;
-                                    let in_bounds = |x: f32, y: f32| {
-                                        (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)
-                                    };
-                                    if !in_bounds(ax, ay) && !in_bounds(bx, by) {
-                                        continue;
-                                    }
-                                    combined.push([
-                                        cell.x + ax * cell.w,
-                                        ember_cell_to_canvas_y(ay, cell.y, cell.h),
-                                        a[2] * focus_w,
-                                    ]);
-                                    combined.push([
-                                        cell.x + bx * cell.w,
-                                        ember_cell_to_canvas_y(by, cell.y, cell.h),
-                                        b[2] * focus_w,
-                                    ]);
-                                }
+                                // Image zoom + clamp into this cell's canvas
+                                // rect. `ember_pack_cell` drops segments fully
+                                // outside the cell and clamps stragglers, so a
+                                // zoomed trace can never deposit a vertex into a
+                                // neighbouring cell (#153 leak #2).
+                                ember_pack_cell(&mut combined, &local, cell, &view, focus_w);
                             } else {
                                 // No data yet for this channel — mark the
                                 // clickable hitbox with four dim corner
@@ -1506,19 +1500,18 @@ impl App {
                                     EMBER_EMPTY_W,
                                 ));
                             }
+                            let end = combined.len() as u32;
+                            if end > start {
+                                scissors.push(EmberScissor {
+                                    rect_norm: [cell.x, cell.y, cell.w, cell.h],
+                                    range: [start, end],
+                                });
+                            }
                         }
                         combined
                     } else {
                         let active = self.config.active_channel;
                         let view = self.cell_views.get(active).copied().unwrap_or_default();
-                        // Single-mode image zoom: same per-cell
-                        // (zoom, zoom_x, zoom_y) state as Grid.
-                        // Polyline coords in cell-local [0,1] map
-                        // to canvas full-screen [0,1], so zoom
-                        // around the cursor anchor.
-                        let zx = view.zoom_x;
-                        let zy = view.zoom_y;
-                        let zf = view.zoom.max(1e-3);
                         let raw = frames
                             .get(active)
                             .and_then(|f| f.as_ref())
@@ -1556,30 +1549,21 @@ impl App {
                                 v
                             })
                             .unwrap_or_default();
+                        // Full-canvas Single cell `(0,0,1,1)` routed through the
+                        // same pack/flip path as Grid so the baseline lands at
+                        // the bottom edge in both layouts (the Single arm
+                        // formerly skipped the flip → mirrored second trace,
+                        // #148 / #153). One cell, no neighbour, so `scissors`
+                        // stays empty and the deposit covers the whole surface.
+                        let full = layout::CellRect {
+                            channel: active,
+                            x: 0.0,
+                            y: 0.0,
+                            w: 1.0,
+                            h: 1.0,
+                        };
                         let mut transformed: Vec<[f32; 3]> = Vec::with_capacity(raw.len());
-                        for chunk in raw.chunks_exact(2) {
-                            let a = &chunk[0];
-                            let b = &chunk[1];
-                            let ax = zx + (a[0] - zx) * zf;
-                            let ay = zy + (a[1] - zy) * zf;
-                            let bx = zx + (b[0] - zx) * zf;
-                            let by = zy + (b[1] - zy) * zf;
-                            let in_bounds = |x: f32, y: f32| {
-                                (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)
-                            };
-                            if !in_bounds(ax, ay) && !in_bounds(bx, by) {
-                                continue;
-                            }
-                            // Full-canvas Single cell is (0.0, 1.0): route
-                            // y through the same floor flip the Grid arm
-                            // uses so the baseline lands at the bottom edge
-                            // in both layouts. Without this the Single trace
-                            // rendered mirrored versus Grid and read as a
-                            // second, inverted trace on a mono channel
-                            // (#148 / #153).
-                            transformed.push([ax, ember_cell_to_canvas_y(ay, 0.0, 1.0), a[2]]);
-                            transformed.push([bx, ember_cell_to_canvas_y(by, 0.0, 1.0), b[2]]);
-                        }
+                        ember_pack_cell(&mut transformed, &raw, &full, &view, 1.0);
                         transformed
                     };
                     // tau_p 1.2 s — short enough that an old peak's
@@ -1599,6 +1583,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &scissors,
                     );
                 }
                 ViewMode::Goniometer => {
@@ -1651,6 +1636,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::IoTransfer => {
@@ -1696,6 +1682,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::BodeMag => {
@@ -1726,6 +1713,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::Coherence => {
@@ -1748,6 +1736,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::BodePhase => {
@@ -1774,6 +1763,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::GroupDelay => {
@@ -1800,6 +1790,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::Nyquist => {
@@ -1842,6 +1833,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 ViewMode::Ir => {
@@ -1881,6 +1873,7 @@ impl App {
                         &polyline,
                         0.0,
                         dt,
+                        &[],
                     );
                 }
                 _ => {}
@@ -2358,6 +2351,83 @@ const EMBER_TRACE_FULL: f32 = 0.90;
 #[inline]
 fn ember_cell_to_canvas_y(ay: f32, cell_y: f32, cell_h: f32) -> f32 {
     1.0 - cell_y - ay * cell_h
+}
+
+/// Transform a cell-local ember LineList (`[x, y, w]` in `[0,1]`) into
+/// canvas space for `cell`, applying the per-cell image zoom and **clamping
+/// every emitted vertex into the cell rect** so a zoomed trace cannot deposit
+/// outside its own cell — the cross-cell bleed half of the grid-leak
+/// regression (#153 leak #2). Segments with both endpoints outside the cell
+/// frame are dropped; a segment straddling the edge keeps its inside endpoint
+/// and clamps the straggler to the boundary. Every appended vertex therefore
+/// satisfies `x ∈ [cell.x, cell.x+cell.w]` and `y ∈ [1-cell.y-cell.h,
+/// 1-cell.y]`. `focus_w` scales the deposit weight (focused cell 1.0, others
+/// dimmer). The y-flip (`ember_cell_to_canvas_y`) anchors the baseline at the
+/// cell floor in every layout.
+fn ember_pack_cell(
+    out: &mut Vec<[f32; 3]>,
+    local: &[[f32; 3]],
+    cell: &layout::CellRect,
+    view: &CellView,
+    focus_w: f32,
+) {
+    let zx = view.zoom_x;
+    let zy = view.zoom_y;
+    let zf = view.zoom.max(1e-3);
+    out.reserve(local.len());
+    for chunk in local.chunks_exact(2) {
+        let a = &chunk[0];
+        let b = &chunk[1];
+        let ax = zx + (a[0] - zx) * zf;
+        let ay = zy + (a[1] - zy) * zf;
+        let bx = zx + (b[0] - zx) * zf;
+        let by = zy + (b[1] - zy) * zf;
+        let in_bounds = |x: f32, y: f32| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y);
+        if !in_bounds(ax, ay) && !in_bounds(bx, by) {
+            continue;
+        }
+        let cl = |v: f32| v.clamp(0.0, 1.0);
+        let (ax, ay, bx, by) = (cl(ax), cl(ay), cl(bx), cl(by));
+        out.push([
+            cell.x + ax * cell.w,
+            ember_cell_to_canvas_y(ay, cell.y, cell.h),
+            a[2] * focus_w,
+        ]);
+        out.push([
+            cell.x + bx * cell.w,
+            ember_cell_to_canvas_y(by, cell.y, cell.h),
+            b[2] * focus_w,
+        ]);
+    }
+}
+
+/// Hash the ember layout configuration into a generation key. The key changes
+/// iff the active view, layout mode, or any visible cell's channel/geometry
+/// changes — i.e. on a Single↔Grid swap, a grid page turn, a channel-set
+/// change, a resize, or a view switch. `redraw` clears the substrate whenever
+/// this differs from the previous frame's key so a stale configuration's
+/// phosphor cannot bleed under the new one (#153 leak #1/#3). Persistence
+/// within one configuration is preserved: an unchanged key never clears.
+fn ember_layout_generation(
+    view_mode: ViewMode,
+    layout: LayoutMode,
+    cells: &[layout::CellRect],
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&view_mode).hash(&mut h);
+    std::mem::discriminant(&layout).hash(&mut h);
+    (cells.len() as u64).hash(&mut h);
+    for cell in cells {
+        (cell.channel as u64).hash(&mut h);
+        // f32 has no Hash; fold the bit patterns so geometry changes (resize,
+        // page, layout) move the key.
+        cell.x.to_bits().hash(&mut h);
+        cell.y.to_bits().hash(&mut h);
+        cell.w.to_bits().hash(&mut h);
+        cell.h.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Faint, constant deposit weight for an idle cell's hitbox marker. Dimmer
@@ -4575,5 +4645,169 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- Grid-leak isolation (#153) ----
+    //
+    // A grid cell's ember must stay inside its own rect: a zoomed trace may
+    // not deposit into a neighbour (leak #2), and the layout-generation key
+    // must change on any config switch so the substrate clears and a stale
+    // configuration cannot linger under the new one (leak #1 / #3).
+
+    /// A heavily-zoomed view pushes parts of the trace outside the cell-local
+    /// frame; `ember_pack_cell` must clamp/drop so every canvas vertex stays
+    /// within the cell rect — no bleed across the seam.
+    #[test]
+    fn ember_pack_cell_contains_zoomed_trace_in_cell() {
+        let cell = layout::CellRect {
+            channel: 1,
+            x: 0.5,
+            y: 0.5,
+            w: 0.5,
+            h: 0.5,
+        };
+        // Zoom 2× around the cell centre — spreads the trace past the cell-
+        // local [0,1] frame on both axes (exercising the clamp/drop path)
+        // while the central span still lands in-bounds (non-empty output).
+        let view = CellView {
+            zoom: 2.0,
+            zoom_x: 0.5,
+            zoom_y: 0.5,
+            ..CellView::default()
+        };
+        // Connected polyline sweeping x across the frame, y oscillating about
+        // the anchor so segments straddle every edge.
+        let cols: Vec<[f32; 3]> = (0..64)
+            .map(|i| {
+                let t = i as f32 / 63.0;
+                [t, 0.5 + 0.2 * (t * 6.0).sin(), EMBER_LIVE_W]
+            })
+            .collect();
+        let mut local = Vec::new();
+        for w in cols.windows(2) {
+            local.push(w[0]);
+            local.push(w[1]);
+        }
+        let mut out = Vec::new();
+        ember_pack_cell(&mut out, &local, &cell, &view, 1.0);
+        assert!(!out.is_empty(), "zoomed trace produced no vertices");
+
+        let x_lo = cell.x;
+        let x_hi = cell.x + cell.w;
+        let y_lo = 1.0 - cell.y - cell.h;
+        let y_hi = 1.0 - cell.y;
+        for p in &out {
+            assert!(
+                p[0] >= x_lo - 1e-5 && p[0] <= x_hi + 1e-5,
+                "vertex x {} escaped cell x-range [{x_lo}, {x_hi}] — cross-cell bleed",
+                p[0],
+            );
+            assert!(
+                p[1] >= y_lo - 1e-5 && p[1] <= y_hi + 1e-5,
+                "vertex y {} escaped cell y-range [{y_lo}, {y_hi}] — cross-cell bleed",
+                p[1],
+            );
+        }
+    }
+
+    /// Two adjacent grid cells, each packed with a trace zoomed toward the
+    /// shared seam: no vertex from one cell may land in the other's rect.
+    #[test]
+    fn ember_grid_cells_do_not_bleed_into_neighbours() {
+        let c0 = layout::CellRect {
+            channel: 0,
+            x: 0.0,
+            y: 0.0,
+            w: 0.5,
+            h: 1.0,
+        };
+        let c1 = layout::CellRect {
+            channel: 1,
+            x: 0.5,
+            y: 0.0,
+            w: 0.5,
+            h: 1.0,
+        };
+        // Zoom 2× about the cell centre pushes the trace's flanks past the
+        // cell-local frame — the clamp must keep every vertex on its own side
+        // of the x=0.5 seam.
+        let view = CellView {
+            zoom: 2.0,
+            zoom_x: 0.5,
+            zoom_y: 0.5,
+            ..CellView::default()
+        };
+        let cols: Vec<[f32; 3]> = (0..64)
+            .map(|i| {
+                let t = i as f32 / 63.0;
+                [t, 0.5 + 0.2 * (t * 6.0).sin(), EMBER_LIVE_W]
+            })
+            .collect();
+        let local: Vec<[f32; 3]> = cols.windows(2).flat_map(|w| [w[0], w[1]]).collect();
+
+        let mut o0 = Vec::new();
+        ember_pack_cell(&mut o0, &local, &c0, &view, 1.0);
+        let mut o1 = Vec::new();
+        ember_pack_cell(&mut o1, &local, &c1, &view, 1.0);
+        assert!(
+            !o0.is_empty() && !o1.is_empty(),
+            "expected vertices in both cells"
+        );
+
+        // Interior-of-rect test on x (the cells split horizontally at x=0.5).
+        let interior_x =
+            |p: &[f32; 3], c: &layout::CellRect| p[0] > c.x + 1e-4 && p[0] < c.x + c.w - 1e-4;
+        for p in &o0 {
+            assert!(!interior_x(p, &c1), "cell0 vertex {p:?} bled into cell1");
+        }
+        for p in &o1 {
+            assert!(!interior_x(p, &c0), "cell1 vertex {p:?} bled into cell0");
+        }
+    }
+
+    /// The layout-generation key must change on every config transition that
+    /// requires a substrate clear, and stay constant for an unchanged config.
+    #[test]
+    fn ember_layout_generation_distinguishes_configs() {
+        let cell = |channel: usize, x: f32, h: f32| layout::CellRect {
+            channel,
+            x,
+            y: 0.0,
+            w: 0.5,
+            h,
+        };
+        let cells_a = vec![cell(0, 0.0, 1.0)];
+        let cells_b = vec![cell(0, 0.0, 0.5), cell(1, 0.5, 0.5)];
+
+        let base = ember_layout_generation(ViewMode::SpectrumEmber, LayoutMode::Single, &cells_a);
+        // Identical config → identical key (persistence is preserved).
+        assert_eq!(
+            base,
+            ember_layout_generation(ViewMode::SpectrumEmber, LayoutMode::Single, &cells_a),
+        );
+        // Layout swap Single↔Grid.
+        assert_ne!(
+            base,
+            ember_layout_generation(ViewMode::SpectrumEmber, LayoutMode::Grid, &cells_a),
+        );
+        // View switch (e.g. scrolling Scope → static SpectrumEmber).
+        assert_ne!(
+            base,
+            ember_layout_generation(ViewMode::Scope, LayoutMode::Single, &cells_a),
+        );
+        // Channel-set / cell-count change (grid paging).
+        assert_ne!(
+            base,
+            ember_layout_generation(ViewMode::SpectrumEmber, LayoutMode::Single, &cells_b),
+        );
+        // Geometry change (resize) at the same channel set.
+        assert_ne!(
+            base,
+            ember_layout_generation(
+                ViewMode::SpectrumEmber,
+                LayoutMode::Single,
+                &[cell(0, 0.0, 0.5)],
+            ),
+        );
     }
 }
