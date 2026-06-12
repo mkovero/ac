@@ -300,6 +300,13 @@ pub struct App {
     spectrum: Option<SpectrumRenderer>,
     waterfall: Option<WaterfallRenderer>,
     pub(super) ember: Option<EmberRenderer>,
+    /// Last ember layout-generation key (hash of view_mode, layout, page,
+    /// visible channel set, and cell geometry). When it changes between
+    /// frames the substrate is force-cleared before the next deposit so a
+    /// prior configuration's phosphor cannot linger under the new one
+    /// (Single↔Grid / paging / channel-set / view switch). `None` until the
+    /// first ember frame. Fixes the grid-leak regression (#153).
+    pub(super) ember_layout_gen: Option<u64>,
     /// Phase 0a synthetic-sine generator state for `ViewMode::Scope`. Phase
     /// continuity matters: regenerating sine_phase from scratch each frame
     /// would cause audible-rate phase jumps between frames, visible as
@@ -622,6 +629,7 @@ impl App {
             spectrum: None,
             waterfall: None,
             ember: None,
+            ember_layout_gen: None,
             ember_sine_phase: 0.0,
             ember_last_tick: None,
             ember_scope_y_gain: 0.45,
