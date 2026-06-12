@@ -2500,6 +2500,26 @@ fn ember_idle_brackets(
     ]
 }
 
+/// Reduce a column of dB magnitudes to a single noise-robust level: the
+/// lower-middle element of the sorted slice (`samples[(len - 1) / 2]`). This
+/// is the median as an *order statistic* — it stays on a measured bin and is
+/// deliberately NOT the mean of the two central values on even-length input,
+/// which would synthesise an unmeasured level and re-introduce the kind of
+/// excursion #158 removes. Kept a dB-domain order statistic, not a
+/// power/RMS mean: a power mean would re-bias the level upward toward the
+/// loud bins and partially reintroduce the upper-envelope symptom.
+///
+/// Returns `None` on an empty slice so the caller breaks the polyline (the
+/// "no signal here" gap). Sorts `samples` in place; NaN-safe via an
+/// `Ordering::Equal` fallback in `partial_cmp`.
+fn column_median(samples: &mut [f32]) -> Option<f32> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(samples[(samples.len() - 1) / 2])
+}
+
 /// `(freqs, mags)` → single baseline-anchored ember LineList. Logarithmic
 /// frequency axis on x; magnitude renders as one line growing from a
 /// baseline at the cell floor (`EMBER_TRACE_BASE`) up toward the cell top
@@ -2514,12 +2534,20 @@ fn ember_idle_brackets(
 /// `EMBER_LIVE_W`, held peak/min envelopes pass the lower weights so they
 /// recede behind the live ember.
 ///
-/// Bins are first aggregated by max-magnitude into `EMBER_SPECTRUM_COLS`
-/// log-spaced columns. Without this, linear FFT output (~11.7 Hz/bin at
-/// 96 kHz / N=8192) collides ~15 bins per pixel in the top decade of a
-/// log x-axis, producing visible moiré/aliasing in the rendered trace.
-/// Max-aggregation matches the existing spectrum view's behaviour: peaks
-/// dominate over averaging so transients still register cleanly.
+/// Bins are first aggregated by **per-column median** into
+/// `EMBER_SPECTRUM_COLS` log-spaced columns. Without column-binning, linear
+/// FFT output (~11.7 Hz/bin at 96 kHz / N=8192) collides ~15 bins per pixel
+/// in the top decade of a log x-axis, producing visible moiré/aliasing in
+/// the rendered trace. The statistic is the median, not max (#158): on an
+/// unaveraged spectrum each column holds many bins carrying several dB of
+/// per-bin noise, and max latches onto each column's noisiest bin so the
+/// trace rides the *upper noise envelope* — a positively-biased estimate
+/// that diverges from the true level toward HF (more bins per column) and,
+/// held by the long SpectrumEmber τ_p, reads as a phantom second trace. The
+/// median is an unbiased central estimate, so the line tracks the true
+/// spectral level. (The transfer/Bode path `build_bodemag_polyline` keeps
+/// per-column max: its frames arrive log-spaced and pre-aggregated, so
+/// bins-per-column stays low and the artefact does not manifest.)
 fn build_ember_spectrum_trace(
     freqs: &[f32],
     mags: &[f32],
@@ -2531,7 +2559,7 @@ fn build_ember_spectrum_trace(
     let span_f = (log_max - log_min).max(1e-6);
     let span_db = (view.db_max - view.db_min).max(1e-3);
     let n_cols = EMBER_SPECTRUM_COLS;
-    let mut col_max: Vec<f32> = vec![f32::NEG_INFINITY; n_cols];
+    let mut col_samples: Vec<Vec<f32>> = vec![Vec::new(); n_cols];
     let n = freqs.len().min(mags.len());
     for i in 0..n {
         let f = freqs[i];
@@ -2549,20 +2577,22 @@ fn build_ember_spectrum_trace(
             continue;
         }
         let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
-        if mag > col_max[col] {
-            col_max[col] = mag;
-        }
+        col_samples[col].push(mag);
     }
 
     let mut pairs = Vec::with_capacity(n_cols * 2);
     let mut prev: Option<[f32; 3]> = None;
     #[allow(clippy::needless_range_loop)]
     for col in 0..n_cols {
-        let mag = col_max[col];
-        if !mag.is_finite() {
-            prev = None;
-            continue;
-        }
+        // Empty column → no bin landed here → break the polyline (preserves
+        // the dB-floor "no signal here" gap; never bridged).
+        let mag = match column_median(&mut col_samples[col]) {
+            Some(m) => m,
+            None => {
+                prev = None;
+                continue;
+            }
+        };
         let x = (col as f32 + 0.5) / n_cols as f32;
         let n_mag = ((mag - view.db_min) / span_db).clamp(0.0, 1.0);
         let y = EMBER_TRACE_BASE - EMBER_TRACE_FULL * n_mag;
@@ -4558,6 +4588,147 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- Per-column median aggregation (#158) ----
+    //
+    // `build_ember_spectrum_trace` aggregates each log-column by median, not
+    // per-column max. Max latches onto the noisiest bin and the trace rides
+    // the upper noise envelope (a positively-biased, HF-divergent phantom
+    // band); median is an unbiased central estimate that tracks true level.
+
+    #[test]
+    fn column_median_empty_is_none() {
+        let mut xs: Vec<f32> = Vec::new();
+        assert_eq!(column_median(&mut xs), None);
+    }
+
+    #[test]
+    fn column_median_single_element() {
+        let mut xs = vec![-42.0f32];
+        assert_eq!(column_median(&mut xs), Some(-42.0));
+    }
+
+    #[test]
+    fn column_median_even_len_returns_lower_middle() {
+        // Even count: lower-middle element, NOT the mean of the two centre
+        // values. sorted centre pair = (-58, -56); lower-middle = -58, the
+        // mean would be -57 (an unmeasured level — the regression we forbid).
+        let mut xs = vec![-54.0f32, -60.0, -56.0, -58.0];
+        assert_eq!(column_median(&mut xs), Some(-58.0));
+    }
+
+    #[test]
+    fn column_median_rejects_lone_outlier() {
+        // A single loud spike (the max-build symptom) must not move the
+        // median off the true level.
+        let mut xs = vec![-60.0f32, -60.0, -60.0, -60.0, -10.0];
+        assert_eq!(column_median(&mut xs), Some(-60.0));
+    }
+
+    /// Conformance: on a deterministic noisy spectrum the median trace sits
+    /// meaningfully *below* the per-column max envelope (the old build) **and**
+    /// tracks the noise-free reference within a tight tolerance. Both halves
+    /// are required: offset-only could pass a trace biased low; truth-tracking
+    /// alone could pass the max build on a quiet column. The metric is the
+    /// vertical envelope offset (max-trace y minus median-trace y per column),
+    /// NOT riser height — on a smooth envelope risers barely differ between
+    /// max and median and would pass both builds, missing the bug.
+    #[test]
+    fn ember_median_trace_sits_below_max_envelope_and_tracks_truth() {
+        // Flat -60 dB reference with ±4 dB deterministic LCG per-bin noise
+        // over the full -120..0 dB window. Linear daemon bins (5.85 Hz) so HF
+        // log-columns hold more bins — where the max bias is largest.
+        let mut state: u32 = 0x1234_5678; // fixed seed, no rng dep
+        let mut lcg = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / 16_777_216.0) * 8.0 - 4.0
+        };
+        let truth = -60.0f32;
+        let freqs: Vec<f32> = (0..4096).map(|i| 20.0 + i as f32 * 5.85).collect();
+        let mags: Vec<f32> = freqs.iter().map(|_| truth + lcg()).collect();
+        let v = view(20.0, 24_000.0);
+
+        let med = build_ember_spectrum_trace(&freqs, &mags, &v, EMBER_LIVE_W);
+        assert!(!med.is_empty());
+
+        // y for the noise-free level, mapped exactly as the builder does.
+        let span_db = (v.db_max - v.db_min).max(1e-3);
+        let ref_y =
+            EMBER_TRACE_BASE - EMBER_TRACE_FULL * ((truth - v.db_min) / span_db).clamp(0.0, 1.0);
+
+        // Reconstruct per-column bin count + max envelope, mirroring the
+        // builder's binning so columns line up 1:1 with the median trace.
+        let n_cols = EMBER_SPECTRUM_COLS;
+        let log_min = v.freq_min.max(1.0).log10();
+        let log_max = v.freq_max.max(v.freq_min * 1.001).log10();
+        let span_f = (log_max - log_min).max(1e-6);
+        let mut col_count = vec![0u32; n_cols];
+        let mut col_max = vec![f32::NEG_INFINITY; n_cols];
+        for (f, m) in freqs.iter().zip(mags.iter()) {
+            if *f < v.freq_min || *f > v.freq_max || *m < v.db_min {
+                continue;
+            }
+            let xn = (f.max(1.0).log10() - log_min) / span_f;
+            if !(0.0..=1.0).contains(&xn) {
+                continue;
+            }
+            let col = ((xn * n_cols as f32) as usize).min(n_cols - 1);
+            col_count[col] += 1;
+            if *m > col_max[col] {
+                col_max[col] = *m;
+            }
+        }
+        let to_y = |mag: f32| {
+            let n_mag = ((mag - v.db_min) / span_db).clamp(0.0, 1.0);
+            EMBER_TRACE_BASE - EMBER_TRACE_FULL * n_mag
+        };
+
+        // The artefact lives in many-bin columns (HF), where max latches onto
+        // the noisiest of many bins. Single/few-bin LF columns inherit one
+        // bin's full ±4 dB noise no matter the statistic — that is upstream
+        // jitter (out-of-scope follow-up), not this bug — so the tight
+        // truth-tracking and envelope-offset assertions target multi-bin
+        // columns. `MIN_BINS = 12` keeps a robust per-column median sample.
+        const MIN_BINS: u32 = 12;
+        let mut strays = Vec::new(); // |median_y - ref_y| on multi-bin cols
+        let mut offsets = Vec::new(); // max_y - median_y on multi-bin cols
+        for [x, y, _] in &med {
+            let col = ((x * n_cols as f32) as usize).min(n_cols - 1);
+            if col_count[col] < MIN_BINS {
+                continue;
+            }
+            strays.push((*y - ref_y).abs());
+            offsets.push(to_y(col_max[col]) - *y); // negative: max sits above median
+        }
+        assert!(
+            strays.len() > 16,
+            "too few multi-bin columns ({}) to exercise the artefact",
+            strays.len(),
+        );
+
+        // Half 1 — on multi-bin columns the median tracks the noise-free
+        // reference within a bounded tolerance. The old max build provably
+        // exceeded this (triage: max p95 ≈ 0.037, max ≈ 0.055 of full scale);
+        // the median's p95 sits decisively under that ceiling.
+        strays.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p95_stray = strays[(strays.len() * 95) / 100];
+        assert!(
+            p95_stray < 0.015,
+            "median trace p95 stray {p95_stray} from noise-free reference exceeds 1.5% of \
+             full scale (max build measured p95 ≈ 0.037 — median must beat it decisively)",
+        );
+
+        // Half 2 — and on those same columns the median sits meaningfully
+        // *below* the max envelope (smaller y = higher trace, so the offset is
+        // negative). Median over columns resists the few where they coincide.
+        offsets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med_offset = offsets[offsets.len() / 2];
+        assert!(
+            med_offset < -0.01,
+            "median trace not meaningfully below the max envelope (median offset {med_offset}); \
+             the per-column max build would have exceeded the truth-tracking ceiling above",
+        );
     }
 
     /// Single/Grid flip parity: the floor-anchored baseline lands at each
