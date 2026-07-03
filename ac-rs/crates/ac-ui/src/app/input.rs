@@ -19,29 +19,16 @@ use super::helpers::{
 };
 use super::App;
 
-/// Slots in the Tab cycle. The cycle is *active-channel-typed*:
-///
-/// - On a real input channel: `SpectrumEmber` → `Waterfall` (FFT) →
-///   `Cwt` (Morlet waterfall) → `SpectrumEmber`. CQT / Reassigned
-///   waterfalls remain reachable only via `--view waterfall` plus a
-///   manual `set_analysis_mode` — kept off the cycle to keep it short.
-/// - On a virtual transfer channel: the 9 ember pair-derived slots
-///   (`SpectrumEmber` + the 8 transfer / trajectory views).
+/// Slots in the Tab cycle: `Spectrum` → `Waterfall` → `SpectrumEmber` →
+/// `Scope` → `Spectrum`. Real channels only — a virtual/transfer cell is
+/// pinned to `Spectrum` and Tab is a no-op there (see `cycle_ember_view`).
+/// `Goniometer` is reached via the dedicated `G` toggle, not this cycle.
 #[derive(Copy, Clone, PartialEq)]
 enum WSlot {
-    SpectrumEmber,
-    /// Waterfall view, FFT analysis mode. Real channels only.
+    Spectrum,
     Waterfall,
-    /// Waterfall view, Morlet CWT analysis mode. Real channels only.
-    Cwt,
-    Goniometer,
-    IoTransfer,
-    BodeMag,
-    Coherence,
-    BodePhase,
-    GroupDelay,
-    Nyquist,
-    Ir,
+    SpectrumEmber,
+    Scope,
 }
 
 /// §2 binding scroll-zoom rules. Pure decision function so the per-view
@@ -49,8 +36,8 @@ enum WSlot {
 /// `(zoom_freq, zoom_y, zoom_time)` — `zoom_y` means dB on spectrum-family
 /// views, ignored on waterfall (where the time axis is the second knob).
 ///
-/// - Spectrum / Bode / Phase / GroupDelay: plain = both axes, Shift = freq,
-///   Ctrl = y (dB or signed-y).
+/// - Spectrum-family (Spectrum/SpectrumEmber/Scope/Goniometer): plain =
+///   both axes, Shift = freq, Ctrl = y (dB or signed-y).
 /// - Waterfall: plain = freq + time, Shift = freq, Ctrl = time.
 ///
 /// Ctrl+Shift is intercepted earlier as the dB-window pan, so this helper
@@ -82,13 +69,6 @@ pub(super) fn view_label(view: ViewMode) -> &'static str {
         ViewMode::Scope => "scope",
         ViewMode::SpectrumEmber => "spectrum",
         ViewMode::Goniometer => "goniometer",
-        ViewMode::IoTransfer => "io-transfer",
-        ViewMode::BodeMag => "bode-mag",
-        ViewMode::Coherence => "coherence",
-        ViewMode::BodePhase => "bode-phase",
-        ViewMode::GroupDelay => "group-delay",
-        ViewMode::Nyquist => "nyquist",
-        ViewMode::Ir => "ir",
     }
 }
 
@@ -158,80 +138,48 @@ impl App {
         self.selection_order.clear();
     }
 
-    /// Step through the Tab views forward (or backward). The cycle is
-    /// *active-channel-typed*:
+    /// Step through the Tab views forward (or backward): `Spectrum` →
+    /// `Waterfall` (FFT) → `SpectrumEmber` → `Scope` → `Spectrum`.
+    /// Real channels only — a virtual/transfer cell is pinned to
+    /// `Spectrum` (enforced wherever `active_channel` moves onto a
+    /// virtual index) and Tab is a no-op there. `Goniometer` is reached
+    /// via the dedicated `G` toggle, not this cycle.
     ///
-    /// - Active on a real input channel → 3-slot cycle: SpectrumEmber
-    ///   → Waterfall (FFT) → Cwt (Morlet waterfall) → SpectrumEmber.
-    ///   The trajectory / transfer views are excluded here — they all
-    ///   paint a stereo or transfer pair, which would silently swap the
-    ///   user away from the channel they explicitly picked.
-    /// - Active on a virtual transfer channel → 9-slot cycle of the
-    ///   ember pair-derived views. Each transfer / trajectory view
-    ///   paints the pair behind that virtual channel via
-    ///   `resolve_transfer_pair_for_active`.
-    ///
-    /// CQT and Reassigned waterfall sub-modes stay reachable only via
-    /// `--view waterfall --mode <mode>` to keep the cycle short.
+    /// The CWT waterfall sub-mode is no longer reachable via Tab (it
+    /// used to occupy a `Cwt` cycle slot); `--view waterfall --mode cwt`
+    /// at startup is the only remaining entry point. Reassigned/CQT
+    /// waterfall sub-modes were already `--view`-only before this.
     /// Shared by Tab / Shift+Tab.
     fn cycle_ember_view(&mut self, forward: bool) {
         let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
         let on_virtual = self.config.active_channel >= n_real
             && (self.config.active_channel - n_real) < self.virtual_channels.len();
-        let next = if on_virtual {
-            if forward {
-                match self.current_w_slot() {
-                    Some(WSlot::SpectrumEmber) => WSlot::Goniometer,
-                    Some(WSlot::Goniometer) => WSlot::IoTransfer,
-                    Some(WSlot::IoTransfer) => WSlot::BodeMag,
-                    Some(WSlot::BodeMag) => WSlot::Coherence,
-                    Some(WSlot::Coherence) => WSlot::BodePhase,
-                    Some(WSlot::BodePhase) => WSlot::GroupDelay,
-                    Some(WSlot::GroupDelay) => WSlot::Nyquist,
-                    Some(WSlot::Nyquist) => WSlot::Ir,
-                    Some(WSlot::Ir) => WSlot::SpectrumEmber,
-                    Some(WSlot::Waterfall) | Some(WSlot::Cwt) => WSlot::SpectrumEmber,
-                    None => WSlot::SpectrumEmber,
-                }
-            } else {
-                match self.current_w_slot() {
-                    Some(WSlot::SpectrumEmber) => WSlot::Ir,
-                    Some(WSlot::Goniometer) => WSlot::SpectrumEmber,
-                    Some(WSlot::IoTransfer) => WSlot::Goniometer,
-                    Some(WSlot::BodeMag) => WSlot::IoTransfer,
-                    Some(WSlot::Coherence) => WSlot::BodeMag,
-                    Some(WSlot::BodePhase) => WSlot::Coherence,
-                    Some(WSlot::GroupDelay) => WSlot::BodePhase,
-                    Some(WSlot::Nyquist) => WSlot::GroupDelay,
-                    Some(WSlot::Ir) => WSlot::Nyquist,
-                    Some(WSlot::Waterfall) | Some(WSlot::Cwt) => WSlot::SpectrumEmber,
-                    None => WSlot::SpectrumEmber,
-                }
-            }
-        } else if forward {
+        if on_virtual {
+            return;
+        }
+        let next = if forward {
             match self.current_w_slot() {
-                Some(WSlot::SpectrumEmber) => WSlot::Waterfall,
-                Some(WSlot::Waterfall) => WSlot::Cwt,
-                Some(WSlot::Cwt) => WSlot::SpectrumEmber,
-                // Coming from a transfer view whose pair was just
-                // unregistered (or `--view <transfer>` startup without
-                // a pair) — drop to SpectrumEmber.
-                _ => WSlot::SpectrumEmber,
+                Some(WSlot::Spectrum) => WSlot::Waterfall,
+                Some(WSlot::Waterfall) => WSlot::SpectrumEmber,
+                Some(WSlot::SpectrumEmber) => WSlot::Scope,
+                Some(WSlot::Scope) => WSlot::Spectrum,
+                None => WSlot::Spectrum,
             }
         } else {
             match self.current_w_slot() {
-                Some(WSlot::SpectrumEmber) => WSlot::Cwt,
-                Some(WSlot::Waterfall) => WSlot::SpectrumEmber,
-                Some(WSlot::Cwt) => WSlot::Waterfall,
-                _ => WSlot::SpectrumEmber,
+                Some(WSlot::Spectrum) => WSlot::Scope,
+                Some(WSlot::Waterfall) => WSlot::Spectrum,
+                Some(WSlot::SpectrumEmber) => WSlot::Waterfall,
+                Some(WSlot::Scope) => WSlot::SpectrumEmber,
+                None => WSlot::Spectrum,
             }
         };
         let (layout, view_mode, mode, label) = match next {
-            WSlot::SpectrumEmber => (
+            WSlot::Spectrum => (
                 LayoutMode::Single,
-                ViewMode::SpectrumEmber,
+                ViewMode::Spectrum,
                 "fft",
-                "view: spectrum (ember)",
+                "view: spectrum",
             ),
             WSlot::Waterfall => (
                 LayoutMode::Single,
@@ -239,55 +187,18 @@ impl App {
                 "fft",
                 "view: waterfall (fft)",
             ),
-            WSlot::Cwt => (
+            WSlot::SpectrumEmber => (
                 LayoutMode::Single,
-                ViewMode::Waterfall,
-                "cwt",
-                "view: waterfall (cwt)",
-            ),
-            WSlot::Goniometer => (
-                LayoutMode::Single,
-                ViewMode::Goniometer,
+                ViewMode::SpectrumEmber,
                 "fft",
-                "view: goniometer (ember)",
+                "view: spectrum (ember)",
             ),
-            WSlot::IoTransfer => (
+            WSlot::Scope => (
                 LayoutMode::Single,
-                ViewMode::IoTransfer,
+                ViewMode::Scope,
                 "fft",
-                "view: iotransfer (ember)",
+                "view: scope (ember)",
             ),
-            WSlot::BodeMag => (
-                LayoutMode::Single,
-                ViewMode::BodeMag,
-                "fft",
-                "view: bode mag (ember)",
-            ),
-            WSlot::Coherence => (
-                LayoutMode::Single,
-                ViewMode::Coherence,
-                "fft",
-                "view: coherence (ember)",
-            ),
-            WSlot::BodePhase => (
-                LayoutMode::Single,
-                ViewMode::BodePhase,
-                "fft",
-                "view: bode phase (ember)",
-            ),
-            WSlot::GroupDelay => (
-                LayoutMode::Single,
-                ViewMode::GroupDelay,
-                "fft",
-                "view: group delay (ember)",
-            ),
-            WSlot::Nyquist => (
-                LayoutMode::Single,
-                ViewMode::Nyquist,
-                "fft",
-                "view: nyquist (ember)",
-            ),
-            WSlot::Ir => (LayoutMode::Single, ViewMode::Ir, "fft", "view: ir (ember)"),
         };
         if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
             return;
@@ -438,21 +349,13 @@ impl App {
             return;
         }
 
-        // Axisless trajectory views — Goniometer (Re/Im trace), IoTransfer
-        // (in/out scatter), Coherence (γ² fixed [0,1]), Nyquist (Re/Im(H)),
-        // Ir (auto-gained polyline). None of these map onto the cell
-        // freq/dB axes, so scroll has no meaningful target. Emit a one-shot
-        // throttled notification so the user knows the gesture was seen
-        // rather than silently swallowed. Throttle 2 s — a continuous
-        // trackpad scroll over the cell shouldn't keep re-firing.
-        if matches!(
-            self.config.view_mode,
-            ViewMode::Goniometer
-                | ViewMode::IoTransfer
-                | ViewMode::Coherence
-                | ViewMode::Nyquist
-                | ViewMode::Ir
-        ) {
+        // Axisless trajectory view — Goniometer (Re/Im trace). Doesn't map
+        // onto the cell freq/dB axes, so scroll has no meaningful target.
+        // Emit a one-shot throttled notification so the user knows the
+        // gesture was seen rather than silently swallowed. Throttle 2 s —
+        // a continuous trackpad scroll over the cell shouldn't keep
+        // re-firing.
+        if matches!(self.config.view_mode, ViewMode::Goniometer) {
             let now = Instant::now();
             let recent = self
                 .last_axisless_scroll_notify
@@ -498,8 +401,8 @@ impl App {
         }
 
         // Hard floor/ceiling on the visible freq window: the spectrum data
-        // only covers ~20 Hz..Nyquist, so letting the user zoom out past the
-        // data just shows empty space. Ceiling grows to match the largest
+        // only covers ~20 Hz up to half the sample rate, so letting the user
+        // zoom out past the data just shows empty space. Ceiling grows to match the largest
         // `freqs.last()` we've seen from the producer (96 kHz sessions etc.).
         let data_log_min = theme::DEFAULT_FREQ_MIN.log10();
         let data_log_max = self.data_freq_ceiling.max(theme::DEFAULT_FREQ_MAX).log10();
@@ -569,7 +472,9 @@ impl App {
     /// movement, treat as a click: in Matrix (Grid) layout, this "zooms in"
     /// — sets the active channel to the one under the cursor and swaps into
     /// Single layout, preserving the current view_mode (spectrum/waterfall/
-    /// cwt). Everywhere else the click is a no-op beyond clearing drag.
+    /// cwt) on a real channel. A virtual/transfer cell is pinned to
+    /// Spectrum regardless of what the grid was showing. Everywhere else
+    /// the click is a no-op beyond clearing drag.
     pub(super) fn end_drag(&mut self) {
         let drag = match self.drag.take() {
             Some(d) => d,
@@ -597,9 +502,11 @@ impl App {
         self.config.active_channel = clicked;
         self.config.layout = LayoutMode::Single;
         if clicked >= n_real {
-            // Virtual transfer cell — index it relative to the start of
-            // the virtual range so the notification matches the
-            // "transferN" naming used elsewhere.
+            // Virtual transfer cell — pinned to Spectrum (the only view
+            // with a transfer-magnitude + phase-subplot rendering path).
+            // Index it relative to the start of the virtual range so the
+            // notification matches the "transferN" naming used elsewhere.
+            self.config.view_mode = ViewMode::Spectrum;
             let v_idx = clicked - n_real;
             self.notify(&format!("zoom: transfer{v_idx}"));
         } else {
@@ -807,23 +714,13 @@ impl App {
         ));
     }
 
-    /// Which of the four canonical W-cycle slots we're currently in.
-    /// Returns None when the app is in a non-cycled layout (Compare, Transfer,
-    /// Sweep); pressing W from any of those jumps back to the start of the
-    /// cycle (Matrix).
+    /// Whether the active view paints on the ember substrate (as opposed
+    /// to Spectrum/Waterfall's dedicated renderers). Gates the ember
+    /// tuning keys (`,`/`.` tau_p, intensity).
     fn is_ember_view(&self) -> bool {
         matches!(
             self.config.view_mode,
-            ViewMode::Scope
-                | ViewMode::SpectrumEmber
-                | ViewMode::Goniometer
-                | ViewMode::IoTransfer
-                | ViewMode::BodeMag
-                | ViewMode::Coherence
-                | ViewMode::BodePhase
-                | ViewMode::GroupDelay
-                | ViewMode::Nyquist
-                | ViewMode::Ir
+            ViewMode::Scope | ViewMode::SpectrumEmber | ViewMode::Goniometer
         )
     }
 
@@ -838,21 +735,13 @@ impl App {
             return None;
         }
         match self.config.view_mode {
+            ViewMode::Spectrum => Some(WSlot::Spectrum),
+            ViewMode::Waterfall => Some(WSlot::Waterfall),
             ViewMode::SpectrumEmber => Some(WSlot::SpectrumEmber),
-            ViewMode::Waterfall => match self.analysis_mode.as_str() {
-                "fft" => Some(WSlot::Waterfall),
-                "cwt" => Some(WSlot::Cwt),
-                _ => None,
-            },
-            ViewMode::Goniometer => Some(WSlot::Goniometer),
-            ViewMode::IoTransfer => Some(WSlot::IoTransfer),
-            ViewMode::BodeMag => Some(WSlot::BodeMag),
-            ViewMode::Coherence => Some(WSlot::Coherence),
-            ViewMode::BodePhase => Some(WSlot::BodePhase),
-            ViewMode::GroupDelay => Some(WSlot::GroupDelay),
-            ViewMode::Nyquist => Some(WSlot::Nyquist),
-            ViewMode::Ir => Some(WSlot::Ir),
-            ViewMode::Spectrum | ViewMode::Scope => None,
+            ViewMode::Scope => Some(WSlot::Scope),
+            // Goniometer is reached via the dedicated `G` toggle, not
+            // tracked by the Tab cycle.
+            ViewMode::Goniometer => None,
         }
     }
 
@@ -1001,12 +890,15 @@ impl App {
                 // Reset the live selection so a follow-up T/C starts fresh.
                 self.clear_selection();
                 // On add, jump to the new virtual transfer channel — that's
-                // what the user just expressed intent to look at — so the
-                // W cycle's pair-gated views immediately have a meaningful
-                // active context.
+                // what the user just expressed intent to look at. Virtual
+                // cells are pinned to Spectrum (the only view with a
+                // transfer-magnitude + phase-subplot rendering path), so
+                // force it here rather than leaving whatever real-channel
+                // view was previously active.
                 if added {
                     let new_virtual_idx = n_real + self.virtual_channels.len() - 1;
                     self.config.active_channel = new_virtual_idx;
+                    self.config.view_mode = ViewMode::Spectrum;
                 }
             }
             KeyCode::KeyF => {
@@ -1027,8 +919,8 @@ impl App {
             // presses span the order of magnitude that separates extremes.
             // Bare , / .  → deposit intensity (brightness).
             // Shift + , / .  → τ_p (fade rate; lower = snappier trail).
-            // Active in every ember view (Scope, SpectrumEmber, Goniometer,
-            // IoTransfer); ignored elsewhere.
+            // Active in every ember view (Scope, SpectrumEmber, Goniometer);
+            // ignored elsewhere.
             KeyCode::Comma if self.is_ember_view() => {
                 if self.modifiers.shift_key() {
                     self.ember_tau_p_scale = (self.ember_tau_p_scale / 1.25).clamp(0.1, 10.0);
@@ -1065,14 +957,41 @@ impl App {
                     "timing off"
                 });
             }
-            // Snap to the ember matrix overview (SpectrumEmber + Grid)
-            // from any view. The legacy Spectrum + Grid line plot is
-            // reachable only via `--view spectrum` for empirical work
-            // on the legacy renderer. Pair with left-click on a cell to
-            // pick a channel: matrix → click → Single+SpectrumEmber on
-            // that channel → Tab cycles SpectrumEmber → Waterfall (FFT)
-            // → Waterfall (CWT) from there.
-            KeyCode::KeyG => {
+            // G — toggle Goniometer on the active real channel, paired
+            // with its immediate neighbour (active, active+1). Dedicated
+            // key, not a Tab-cycle slot — moved out of the old virtual-
+            // channel cycle where it was misplaced: stereo program
+            // material lives on real channels. No-op (with notify) on a
+            // virtual/transfer cell or when there's no real neighbour.
+            KeyCode::KeyG if !self.modifiers.shift_key() => {
+                if matches!(self.config.view_mode, ViewMode::Goniometer) {
+                    self.config.view_mode =
+                        self.goniometer_return.take().unwrap_or(ViewMode::Spectrum);
+                    self.reset_peak_holds();
+                    self.notify("view: goniometer off");
+                    self.mark_ui_dirty();
+                    return;
+                }
+                let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
+                let active = self.config.active_channel;
+                if active >= n_real || active + 1 >= n_real {
+                    self.notify("G: need a real channel with a stereo partner (active+1)");
+                    return;
+                }
+                self.goniometer_return = Some(self.config.view_mode);
+                self.config.view_mode = ViewMode::Goniometer;
+                self.reset_peak_holds();
+                self.notify(&format!("view: goniometer (ch {active}+{})", active + 1));
+                self.mark_ui_dirty();
+            }
+            // Shift+G — snap to the ember matrix overview (SpectrumEmber +
+            // Grid) from any view. The legacy Spectrum + Grid line plot is
+            // reachable only via `--view spectrum` for empirical work on
+            // the legacy renderer. Pair with left-click on a cell to pick
+            // a channel: matrix → click → Single+SpectrumEmber on that
+            // channel → Tab cycles Spectrum → Waterfall → SpectrumEmber →
+            // Scope from there.
+            KeyCode::KeyG if self.modifiers.shift_key() => {
                 let prev_view = self.config.view_mode;
                 let already_matrix = matches!(prev_view, ViewMode::SpectrumEmber)
                     && matches!(self.config.layout, LayoutMode::Grid);
@@ -1218,32 +1137,6 @@ impl App {
                 self.ember_stereo_peak = 0.5;
                 self.notify("ember: cleared");
             }
-            // Coherence-weighting sharpness cycle for transfer-derived
-            // ember views. `K` advances {off, k=1, k=2, k=4}: each step
-            // makes the weighting more punishing (γ²^k → tiny for low
-            // γ²). Default lands on k=2 — moderate dim of low-coherence
-            // fuzz without over-extinguishing borderline bins. Coherence
-            // and IR views ignore this knob (would self-extinguish or
-            // have no per-sample γ²).
-            KeyCode::KeyK
-                if !self.modifiers.control_key()
-                    && !self.modifiers.shift_key()
-                    && self.is_ember_view() =>
-            {
-                let next = match self.ember_coherence_k {
-                    k if k <= 0.0 => 1.0,
-                    k if k < 1.5 => 2.0,
-                    k if k < 3.0 => 4.0,
-                    _ => 0.0,
-                };
-                self.ember_coherence_k = next;
-                if next <= 0.0 {
-                    self.notify("ember coherence weight: off");
-                } else {
-                    self.notify(&format!("ember coherence weight: γ²^{:.0}", next));
-                }
-                self.mark_ui_dirty();
-            }
             KeyCode::Tab => {
                 let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
                 let n_virt = self.virtual_channels.len();
@@ -1298,9 +1191,8 @@ mod tests {
         for view in [
             ViewMode::Spectrum,
             ViewMode::SpectrumEmber,
-            ViewMode::BodeMag,
-            ViewMode::BodePhase,
-            ViewMode::GroupDelay,
+            ViewMode::Scope,
+            ViewMode::Goniometer,
         ] {
             assert_eq!(decide_zoom_axes(view, false, false), (true, true, false));
             assert_eq!(decide_zoom_axes(view, true, false), (true, false, false));
@@ -1331,13 +1223,6 @@ mod tests {
             ViewMode::Scope,
             ViewMode::SpectrumEmber,
             ViewMode::Goniometer,
-            ViewMode::IoTransfer,
-            ViewMode::BodeMag,
-            ViewMode::Coherence,
-            ViewMode::BodePhase,
-            ViewMode::GroupDelay,
-            ViewMode::Nyquist,
-            ViewMode::Ir,
         ] {
             assert!(!view_label(view).is_empty(), "empty label for {view:?}");
         }

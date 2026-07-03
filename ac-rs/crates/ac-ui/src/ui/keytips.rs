@@ -35,7 +35,6 @@ pub struct KeytipState {
     pub smoothing_frac: Option<u32>,
     pub peak_hold: bool,
     pub min_hold: bool,
-    pub coherence_k: f32,
     pub goniometer_ms: bool,
 }
 
@@ -79,12 +78,14 @@ fn chip(key: &'static str, label: impl Into<String>) -> KeytipChip {
     }
 }
 
-/// Universal chips appended to every view's strip. `G matrix`, `H help`,
-/// `S screenshot`, `Esc quit` are always available regardless of view.
-/// `G` snaps to the Spectrum+Grid overview for picking a channel.
+/// Universal chips appended to every view's strip, always available
+/// regardless of view. `G` toggles Goniometer on the active channel's
+/// real neighbour pair (active, active+1); `Shift+G` snaps to the
+/// Spectrum+Grid matrix overview for picking a channel.
 fn universal_chips() -> Vec<KeytipChip> {
     vec![
-        chip("G", "matrix"),
+        chip("G", "gonio"),
+        chip("⇧G", "matrix"),
         chip("H", "help"),
         chip("S", "screenshot"),
         chip("Esc", "quit"),
@@ -149,47 +150,6 @@ pub fn keytips_for(state: &KeytipState) -> Vec<KeytipChip> {
             chip("Z", "clear"),
             chip("Tab", "view"),
         ],
-        ViewMode::IoTransfer => vec![
-            chip(",/.", "ember"),
-            chip("Z", "clear"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::BodeMag => vec![
-            chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip(
-                "O",
-                format!("smooth:{}", smooth_label(state.smoothing_frac)),
-            ),
-            chip("Z", "clear"),
-            chip("T", "transfer"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::BodePhase => vec![
-            chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip("T", "transfer"),
-            chip("Z", "clear"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::Coherence => vec![
-            chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip("T", "transfer"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::GroupDelay => vec![
-            chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip("T", "transfer"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::Nyquist => vec![
-            chip("K", format!("γ²-weight:{:.1}", state.coherence_k)),
-            chip("T", "transfer"),
-            chip("Tab", "view"),
-        ],
-        ViewMode::Ir => vec![
-            chip("T", "transfer"),
-            chip("Z", "clear"),
-            chip("Tab", "view"),
-        ],
         ViewMode::Spectrum => vec![
             chip(
                 "A",
@@ -236,7 +196,6 @@ mod tests {
             smoothing_frac: None,
             peak_hold: false,
             min_hold: false,
-            coherence_k: 2.0,
             goniometer_ms: true,
         }
     }
@@ -248,13 +207,6 @@ mod tests {
         let views = [
             ViewMode::SpectrumEmber,
             ViewMode::Goniometer,
-            ViewMode::IoTransfer,
-            ViewMode::BodeMag,
-            ViewMode::Coherence,
-            ViewMode::BodePhase,
-            ViewMode::GroupDelay,
-            ViewMode::Nyquist,
-            ViewMode::Ir,
             ViewMode::Waterfall,
             ViewMode::Scope,
             ViewMode::Spectrum,
@@ -303,10 +255,10 @@ mod tests {
     /// drops one — the painter ships the strip as a single shaped run.
     #[test]
     fn format_strip_joins_with_separator() {
-        let chips = keytips_for(&base_state(ViewMode::Nyquist));
+        let chips = keytips_for(&base_state(ViewMode::SpectrumEmber));
         let line = format_strip(&chips);
-        // K, T, Tab, G, H, S, Esc all present at minimum.
-        for needle in ["K ", "T ", "Tab ", "G ", "H ", "S ", "Esc "] {
+        // A, Tab, G, ⇧G, H, S, Esc all present at minimum.
+        for needle in ["A ", "Tab ", "G ", "⇧G ", "H ", "S ", "Esc "] {
             assert!(line.contains(needle), "missing {needle:?} in {line:?}");
         }
         // Separator appears N-1 times in N chips.

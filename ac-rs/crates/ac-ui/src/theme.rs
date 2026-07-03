@@ -82,27 +82,9 @@ pub const DEFAULT_COLORMAP_DB_MAX: f32 = -10.0;
 pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f32, f32) {
     use crate::data::types::ViewMode;
     match view_mode {
-        ViewMode::Spectrum
-        | ViewMode::SpectrumEmber
-        | ViewMode::Scope
-        | ViewMode::Goniometer
-        | ViewMode::IoTransfer
-        | ViewMode::Coherence
-        | ViewMode::Nyquist
-        | ViewMode::Ir => (DEFAULT_DB_MIN, DEFAULT_DB_MAX),
-        // Bode magnitude is a transfer-function ratio centred near
-        // 0 dB (unity gain). The wide spectrum default (-120..0) would
-        // pin unity to the top edge — wrong frame for distortion /
-        // EQ-tweak work where the user wants to see ±N dB excursions
-        // around 0. 80 dB span centred at 0 puts unity at mid-cell.
-        ViewMode::BodeMag => (-40.0, 40.0),
-        // Bode phase: wrapped phase domain is [-180°, +180°].
-        ViewMode::BodePhase => (-180.0, 180.0),
-        // Group delay in *milliseconds*. Audio-typical range is well
-        // under ±20 ms; (-5, 20) covers most realistic DUTs (small
-        // negative for digital chains, larger positive for crossovers
-        // / room responses). Tunable via `[`/`]` and `+`/`-`.
-        ViewMode::GroupDelay => (-5.0, 20.0),
+        ViewMode::Spectrum | ViewMode::SpectrumEmber | ViewMode::Scope | ViewMode::Goniometer => {
+            (DEFAULT_DB_MIN, DEFAULT_DB_MAX)
+        }
         ViewMode::Waterfall => (DEFAULT_COLORMAP_DB_MIN, DEFAULT_COLORMAP_DB_MAX),
     }
 }

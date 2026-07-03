@@ -22,25 +22,6 @@ impl App {
         self.send_transfer_stream_start(0, 0);
     }
 
-    /// Resolve which `TransferPair` the active transfer-derived view
-    /// (BodeMag, BodePhase, GroupDelay, Coherence, Nyquist, IR) should
-    /// render. Read-only — pair registration is the user's job via
-    /// Space-select + `T` (see `KeyT` in input.rs).
-    ///
-    /// Used to live as `ensure_transfer_pair_for_active` and auto-
-    /// registered `(active, active+1)` whenever the user entered a
-    /// transfer view. Dropped because the active+1 convention only
-    /// holds for two-channel mic setups; multichannel users were
-    /// getting unwanted virtual channels they hadn't asked for.
-    pub(super) fn resolve_transfer_pair_for_active(
-        &self,
-    ) -> Option<crate::data::types::TransferPair> {
-        let pairs = self.virtual_channels.pairs();
-        let active = self.config.active_channel;
-        let n_real = self.store.as_ref().map(|s| s.len()).unwrap_or(0);
-        resolve_transfer_pair(&pairs, active, n_real)
-    }
-
     pub(super) fn start_data_source(&mut self) {
         let init = match self.init.take() {
             Some(i) => i,
@@ -60,8 +41,6 @@ impl App {
         self.loudness_store = Some(loudness_store.clone());
         let scope_store = init.scope_store.clone();
         self.scope_store = Some(scope_store.clone());
-        let ir_store = init.ir_store.clone();
-        self.ir_store = Some(ir_store.clone());
         match init.source_kind {
             SourceKind::Synthetic => {
                 let (n, bins, rate) = init.synthetic_params.unwrap_or((1, 1000, 10.0));
@@ -84,7 +63,6 @@ impl App {
                     sweep_store,
                     loudness_store,
                     scope_store,
-                    ir_store,
                     self.wake.clone(),
                 );
                 self.source = Some(DataSource::Receiver(handle));
@@ -448,105 +426,5 @@ impl App {
             let _ = ctrl.send(&cmd);
         }
         self.monitor_spectrum_active = false;
-    }
-}
-
-/// Free-function core of `resolve_transfer_pair_for_active` — the
-/// `App`-tied wrapper above just plumbs in `self.virtual_channels`,
-/// `self.config.active_channel`, and `self.store.len()`. Lifted out
-/// so the resolution rule can be unit-tested without standing up an
-/// App + render context.
-///
-/// Resolution:
-/// - No pairs registered → `None`. Overlay hints at Space+T.
-/// - `active >= n_real` (Tab'd onto a virtual channel slot) →
-///   `pairs[active - n_real]` (or `None` if out of range, e.g. a
-///   pair was just removed and the active index hasn't been
-///   clamped yet — defensive).
-/// - `active < n_real` (a real channel) → `pairs[0]`. Lets
-///   "press W → BodeMag" show *something* without forcing the
-///   user to Tab onto a virtual channel first; they can still Tab
-///   to switch between registered pairs.
-fn resolve_transfer_pair(
-    pairs: &[TransferPair],
-    active: usize,
-    n_real: usize,
-) -> Option<TransferPair> {
-    if pairs.is_empty() {
-        return None;
-    }
-    if active >= n_real {
-        pairs.get(active - n_real).copied()
-    } else {
-        pairs.first().copied()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pair(meas: u32, ref_ch: u32) -> TransferPair {
-        TransferPair { meas, ref_ch }
-    }
-
-    /// No registered pairs → `None`, regardless of `active` / `n_real`.
-    /// This is what triggers the "Space-select MEAS + REF, then T"
-    /// caption on transfer views before the user has wired anything.
-    #[test]
-    fn resolve_none_when_no_pairs_registered() {
-        assert_eq!(resolve_transfer_pair(&[], 0, 4), None);
-        assert_eq!(resolve_transfer_pair(&[], 5, 4), None);
-        assert_eq!(resolve_transfer_pair(&[], 0, 0), None);
-    }
-
-    /// Active is on a real channel (`active < n_real`) → fall back to
-    /// the first registered pair so entering BodeMag still shows
-    /// something familiar; the user can Tab onto a virtual cell to
-    /// pick a different pair.
-    #[test]
-    fn resolve_first_pair_when_active_is_real_channel() {
-        let pairs = vec![pair(0, 1), pair(2, 3)];
-        assert_eq!(resolve_transfer_pair(&pairs, 0, 4), Some(pair(0, 1)));
-        assert_eq!(resolve_transfer_pair(&pairs, 1, 4), Some(pair(0, 1)));
-        assert_eq!(resolve_transfer_pair(&pairs, 3, 4), Some(pair(0, 1)));
-    }
-
-    /// Active is on a virtual channel slot (`active >= n_real`) →
-    /// resolve to that slot's pair. This is what makes Tab cycling
-    /// through virtual channels feel right: each Tab step changes the
-    /// pair the transfer view is rendering.
-    #[test]
-    fn resolve_indexed_pair_when_active_is_virtual_slot() {
-        let pairs = vec![pair(0, 1), pair(2, 3), pair(4, 5)];
-        // n_real = 4. Active = 4 → first virtual pair.
-        assert_eq!(resolve_transfer_pair(&pairs, 4, 4), Some(pair(0, 1)));
-        // Active = 5 → second virtual pair.
-        assert_eq!(resolve_transfer_pair(&pairs, 5, 4), Some(pair(2, 3)));
-        // Active = 6 → third virtual pair.
-        assert_eq!(resolve_transfer_pair(&pairs, 6, 4), Some(pair(4, 5)));
-    }
-
-    /// Defensive: if `active` points past the end of the registered
-    /// pairs (e.g. a pair was just removed and the active index
-    /// hasn't been clamped yet) the resolver returns `None` rather
-    /// than panicking. The caller (and overlay) treats that as
-    /// "no pair this tick", which the next input event will fix.
-    #[test]
-    fn resolve_none_when_active_past_virtual_pairs() {
-        let pairs = vec![pair(0, 1)];
-        // n_real = 2; one virtual pair → only active=2 is valid.
-        // active=3 falls off the end of pairs.
-        assert_eq!(resolve_transfer_pair(&pairs, 3, 2), None);
-    }
-
-    /// Edge case: `n_real = 0` (synthetic fallback before any real
-    /// channels exist). Every `active` is a virtual slot.
-    #[test]
-    fn resolve_with_no_real_channels() {
-        let pairs = vec![pair(0, 1), pair(2, 3)];
-        assert_eq!(resolve_transfer_pair(&pairs, 0, 0), Some(pair(0, 1)));
-        assert_eq!(resolve_transfer_pair(&pairs, 1, 0), Some(pair(2, 3)));
-        assert_eq!(resolve_transfer_pair(&pairs, 2, 0), None);
     }
 }

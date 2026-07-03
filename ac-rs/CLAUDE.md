@@ -82,8 +82,9 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Cycle views forward / backward. **On a real input channel**: 3-slot cycle SpectrumEmber → Waterfall (FFT) → Waterfall (CWT) → SpectrumEmber. CQT and Reassigned waterfalls reachable only via `--view waterfall --mode <mode>`. **On a virtual transfer channel**: 9-slot cycle of the ember pair-derived views (SpectrumEmber → Goniometer → IoTransfer → BodeMag → Coherence → BodePhase → GroupDelay → Nyquist → Ir → SpectrumEmber). In Grid layout with multiple pages, Tab pages instead of cycling. Hidden views (Spectrum, Scope) reachable via `--view <name>` only. |
-| `G` | Snap to the ember matrix (SpectrumEmber + Grid) from any view — also the default landing for `ac monitor`. Left-click a cell to zoom into Single+SpectrumEmber on that channel; Tab cycles SpectrumEmber → Waterfall → CWT from there. Legacy Spectrum + Grid line-plot matrix is reachable only via `--view spectrum`. |
+| `Tab` / `Shift+Tab` | Cycle views forward / backward. **On a real input channel**: 4-slot cycle Spectrum → Waterfall (FFT) → SpectrumEmber → Scope → Spectrum. CWT waterfall is reachable only via `--view waterfall --mode cwt` at startup (no longer a Tab stop). **On a virtual/transfer channel**: no-op — pinned to Spectrum (the transfer-magnitude + phase-subplot view). In Grid layout with multiple pages, Tab pages instead of cycling. |
+| `G` | Toggle Goniometer on the active real channel, paired with its immediate neighbour (active, active+1); toggling off restores the prior view. No-op on a virtual/transfer cell or without a real neighbour. |
+| `Shift+G` | Snap to the ember matrix (SpectrumEmber + Grid) from any view — also the default landing for `ac monitor`. Left-click a cell to zoom into Single+SpectrumEmber on that channel; Tab cycles Spectrum → Waterfall → SpectrumEmber → Scope from there. Legacy Spectrum + Grid line-plot matrix is reachable only via `--view spectrum`. |
 | `C` / `Space` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
 | `Shift+C` | Compare selected channels in one rect (needs ≥ 1 selection from `C`) |
 | Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |

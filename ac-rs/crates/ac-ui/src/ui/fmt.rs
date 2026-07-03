@@ -396,18 +396,16 @@ pub fn cursor_readout(
     }
 }
 
-/// Sample a column-aggregated spectrum at a target frequency and return
-/// the dB value of the nearest column. `freqs` is monotonically
-/// increasing; values outside the range fall back to the nearest end.
-/// `None` if the spectrum is empty (e.g. fresh frame before any FFT).
-pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f32) -> Option<f32> {
-    if spectrum.is_empty() || spectrum.len() != freqs.len() {
+/// Nearest-bin index in a monotonically-increasing, log-spaced freq grid.
+/// Binary search + log-distance tie-break so we don't bias toward the
+/// lower bin; values outside the range clamp to the nearest end.
+/// `None` if `freqs` is empty.
+fn nearest_bin_index(freqs: &[f32], target_hz: f32) -> Option<usize> {
+    if freqs.is_empty() {
         return None;
     }
-    // Binary search the log-spaced freq grid; pick whichever neighbour
-    // is closer in log-Hz so we don't bias toward the lower bin.
     let idx = freqs.partition_point(|&f| f < target_hz);
-    let pick = if idx == 0 {
+    Some(if idx == 0 {
         0
     } else if idx >= freqs.len() {
         freqs.len() - 1
@@ -420,13 +418,65 @@ pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f3
         } else {
             idx
         }
-    };
+    })
+}
+
+/// Sample a column-aggregated spectrum at a target frequency and return
+/// the dB value of the nearest column. `freqs` is monotonically
+/// increasing; values outside the range fall back to the nearest end.
+/// `None` if the spectrum is empty (e.g. fresh frame before any FFT).
+pub fn sample_spectrum_db_at_freq(spectrum: &[f32], freqs: &[f32], target_hz: f32) -> Option<f32> {
+    if spectrum.is_empty() || spectrum.len() != freqs.len() {
+        return None;
+    }
+    let pick = nearest_bin_index(freqs, target_hz)?;
     let v = spectrum[pick];
     if v.is_finite() {
         Some(v)
     } else {
         None
     }
+}
+
+/// Sample a `TransferFrame`'s coherence array at a target frequency,
+/// nearest-bin (same log-distance tie-break as `sample_spectrum_db_at_freq`).
+/// `None` if the frame carries no coherence for this bin count (empty /
+/// length-mismatched array) — the caller renders that as "γ² —".
+pub fn coherence_at_freq(freqs: &[f32], coherence: &[f32], target_hz: f32) -> Option<f32> {
+    if coherence.is_empty() || coherence.len() != freqs.len() {
+        return None;
+    }
+    let pick = nearest_bin_index(freqs, target_hz)?;
+    let v = coherence[pick];
+    if v.is_finite() {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Median γ² over the bins whose frequency falls in `[freq_min, freq_max]`
+/// — the cell's currently displayed/zoomed span, not the frame's full
+/// range. Order-statistic median (via `column_median`, the #158 ember-fix
+/// precedent), not a mean: a single dead bin must not drag the summary.
+/// `None` if `freqs`/`coherence` are empty, length-mismatched, or no bin
+/// falls in the span.
+pub fn coherence_band_median(
+    freqs: &[f32],
+    coherence: &[f32],
+    freq_min: f32,
+    freq_max: f32,
+) -> Option<f32> {
+    if coherence.is_empty() || coherence.len() != freqs.len() {
+        return None;
+    }
+    let mut in_band: Vec<f32> = freqs
+        .iter()
+        .zip(coherence.iter())
+        .filter(|(&f, &c)| f >= freq_min && f <= freq_max && c.is_finite())
+        .map(|(_, &c)| c)
+        .collect();
+    crate::app::render_pipeline::column_median(&mut in_band)
 }
 
 /// Hover crosshair readout label.
@@ -959,6 +1009,69 @@ mod tests {
             Some(-120.0)
         );
         assert_eq!(sample_spectrum_db_at_freq(&[], &freqs, 1000.0), None);
+    }
+
+    /// AC7: hover γ² lookup on a synthetic `TransferFrame`-shaped
+    /// (freqs, coherence) pair — same nearest-log-bin behavior as the
+    /// spectrum sampler, hand-computed against the same 4-column fixture.
+    #[test]
+    fn coherence_at_freq_picks_nearest_log_bin() {
+        let freqs = vec![100.0_f32, 1000.0, 10_000.0, 24_000.0];
+        let coherence = vec![0.20_f32, 0.95, 0.60, 0.10];
+        // 800 Hz is closer in log-Hz to 1000 (col 1) than 100 (col 0).
+        assert_eq!(coherence_at_freq(&freqs, &coherence, 800.0), Some(0.95));
+        assert_eq!(coherence_at_freq(&freqs, &coherence, 200.0), Some(0.20));
+        // Out of range clamps to the nearest end.
+        assert_eq!(coherence_at_freq(&freqs, &coherence, 50.0), Some(0.20));
+        assert_eq!(coherence_at_freq(&freqs, &coherence, 30_000.0), Some(0.10));
+        // Empty / length-mismatched coherence -> None (frame carries no
+        // coherence for this bin count), caller renders "γ² —".
+        assert_eq!(coherence_at_freq(&freqs, &[], 1000.0), None);
+        assert_eq!(coherence_at_freq(&freqs, &[0.5, 0.5], 1000.0), None);
+    }
+
+    /// AC8: footer band-median — median (not mean) over bins whose freq
+    /// falls in the *displayed* span, so a single dead bin doesn't drag
+    /// the summary and bins outside the current zoom don't count.
+    #[test]
+    fn coherence_band_median_uses_displayed_span_not_full_frame() {
+        let freqs: Vec<f32> = (0..10).map(|i| 100.0 * (i + 1) as f32).collect(); // 100..1000
+                                                                                 // In-band (100..500 Hz): bins at 100,200,300,400,500 -> coherence
+                                                                                 // 0.9,0.9,0.9,0.9,0.05 (one dead bin). Median must stay near 0.9,
+                                                                                 // not be dragged toward the mean (~0.71) by the outlier.
+        let coherence = vec![0.9, 0.9, 0.9, 0.9, 0.05, 0.99, 0.99, 0.99, 0.99, 0.99];
+        let median = coherence_band_median(&freqs, &coherence, 100.0, 500.0).unwrap();
+        assert!(
+            (median - 0.9).abs() < 1e-6,
+            "expected median ~0.9 (order statistic, not mean), got {median}"
+        );
+        // Bins beyond the displayed span (600..1000 Hz, all 0.99) must not
+        // leak into the band even though they're in the same frame.
+        assert_ne!(median, 0.99);
+    }
+
+    #[test]
+    fn coherence_band_median_empty_or_mismatched_is_none() {
+        assert_eq!(
+            coherence_band_median(&[100.0, 200.0], &[], 0.0, 1000.0),
+            None
+        );
+        assert_eq!(
+            coherence_band_median(&[100.0, 200.0], &[0.5], 0.0, 1000.0),
+            None
+        );
+    }
+
+    /// No bin falls inside the requested span -> `None`, not a panic or a
+    /// stale value from outside the window.
+    #[test]
+    fn coherence_band_median_no_bins_in_span_is_none() {
+        let freqs = vec![100.0_f32, 200.0, 300.0];
+        let coherence = vec![0.9_f32, 0.9, 0.9];
+        assert_eq!(
+            coherence_band_median(&freqs, &coherence, 10_000.0, 20_000.0),
+            None
+        );
     }
 
     #[test]
