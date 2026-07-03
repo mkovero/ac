@@ -47,12 +47,6 @@ pub struct UiState {
     /// meter convention); user toggles via `R` while in Goniometer.
     #[serde(default = "default_gonio_rotation")]
     pub ember_gonio_rotation_ms: bool,
-    /// Coherence-weighting sharpness for transfer-derived ember views.
-    /// Per-bin deposit weight = γ²^k. `K` cycles {0, 1, 2, 4}; 0 = off
-    /// (every bin at full intensity). Default 2.0 — moderate dimming
-    /// of low-γ² noise without over-punishing borderline-coherent bins.
-    #[serde(default = "default_coherence_k")]
-    pub ember_coherence_k: f32,
     /// Window fullscreen state. Captured from `winit::Window::fullscreen()`
     /// at save time; applied via `set_fullscreen` after the window
     /// is created. Default false — first-launch users see a windowed
@@ -70,9 +64,6 @@ fn default_tau_p() -> f32 {
 fn default_gonio_rotation() -> bool {
     true
 }
-fn default_coherence_k() -> f32 {
-    2.0
-}
 
 impl Default for UiState {
     fn default() -> Self {
@@ -82,7 +73,6 @@ impl Default for UiState {
             ember_intensity_scale: default_intensity(),
             ember_tau_p_scale: default_tau_p(),
             ember_gonio_rotation_ms: default_gonio_rotation(),
-            ember_coherence_k: default_coherence_k(),
             fullscreen: false,
         }
     }
@@ -176,13 +166,6 @@ pub fn view_mode_token(view: ViewMode) -> &'static str {
         ViewMode::Scope => "scope",
         ViewMode::SpectrumEmber => "spectrum_ember",
         ViewMode::Goniometer => "goniometer",
-        ViewMode::IoTransfer => "iotransfer",
-        ViewMode::BodeMag => "bode_mag",
-        ViewMode::Coherence => "coherence",
-        ViewMode::BodePhase => "bode_phase",
-        ViewMode::GroupDelay => "group_delay",
-        ViewMode::Nyquist => "nyquist",
-        ViewMode::Ir => "ir",
     }
 }
 
@@ -197,13 +180,6 @@ pub fn view_mode_from_token(token: &str) -> Option<ViewMode> {
         "scope" => ViewMode::Scope,
         "spectrum_ember" => ViewMode::SpectrumEmber,
         "goniometer" => ViewMode::Goniometer,
-        "iotransfer" => ViewMode::IoTransfer,
-        "bode_mag" => ViewMode::BodeMag,
-        "coherence" => ViewMode::Coherence,
-        "bode_phase" => ViewMode::BodePhase,
-        "group_delay" => ViewMode::GroupDelay,
-        "nyquist" => ViewMode::Nyquist,
-        "ir" => ViewMode::Ir,
         _ => return None,
     })
 }
@@ -262,39 +238,20 @@ mod tests {
         let path = std::env::temp_dir().join("ac-ui-persist-roundtrip.json");
         let _ = std::fs::remove_file(&path);
         let s = UiState {
-            view_mode: Some("nyquist".into()),
+            view_mode: Some("goniometer".into()),
             ember_intensity_scale: 2.5,
             ember_tau_p_scale: 0.4,
             ember_gonio_rotation_ms: false,
-            ember_coherence_k: 4.0,
             fullscreen: true,
             ..Default::default()
         };
         save_to(&path, &s);
         let loaded = load_from(&path);
-        assert_eq!(loaded.view_mode.as_deref(), Some("nyquist"));
+        assert_eq!(loaded.view_mode.as_deref(), Some("goniometer"));
         assert_eq!(loaded.ember_intensity_scale, 2.5);
         assert_eq!(loaded.ember_tau_p_scale, 0.4);
         assert!(!loaded.ember_gonio_rotation_ms);
-        assert_eq!(loaded.ember_coherence_k, 4.0);
         assert!(loaded.fullscreen);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// Old config (pre-coherence-weighting) without `ember_coherence_k`
-    /// must load cleanly with the field defaulting to 2.0 — the
-    /// migration is silent (no warn).
-    #[test]
-    fn missing_coherence_k_defaults_to_two() {
-        let path = std::env::temp_dir().join("ac-ui-persist-pre-cohk.json");
-        std::fs::write(
-            &path,
-            br#"{"schema_version":1,"ember_intensity_scale":1.0,
-                "ember_tau_p_scale":1.0,"ember_gonio_rotation_ms":true}"#,
-        )
-        .unwrap();
-        let s = load_from(&path);
-        assert_eq!(s.ember_coherence_k, 2.0);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -309,13 +266,6 @@ mod tests {
             ViewMode::Scope,
             ViewMode::SpectrumEmber,
             ViewMode::Goniometer,
-            ViewMode::IoTransfer,
-            ViewMode::BodeMag,
-            ViewMode::Coherence,
-            ViewMode::BodePhase,
-            ViewMode::GroupDelay,
-            ViewMode::Nyquist,
-            ViewMode::Ir,
         ];
         for v in cases {
             let tok = view_mode_token(v);
@@ -328,5 +278,10 @@ mod tests {
     fn unknown_view_token_returns_none() {
         assert_eq!(view_mode_from_token("polezero"), None);
         assert_eq!(view_mode_from_token(""), None);
+        // A removed view's old token must fall back to None, not panic
+        // — this is the AC5 contract: persisted state from a pre-cull
+        // binary loads without panic and substitutes Spectrum.
+        assert_eq!(view_mode_from_token("nyquist"), None);
+        assert_eq!(view_mode_from_token("bode_mag"), None);
     }
 }

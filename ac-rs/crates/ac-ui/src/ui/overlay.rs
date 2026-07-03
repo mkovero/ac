@@ -79,6 +79,11 @@ pub struct OverlayInput<'a> {
     /// Parallel to cells `n_real..n_real + virtual_pairs.len()`. An entry
     /// `i` corresponds to the cell at channel index `n_real + i`.
     pub virtual_pairs: &'a [TransferPair],
+    /// Parallel to `virtual_pairs` — the latest `TransferFrame` for each
+    /// registered virtual channel, if any has arrived yet. Sourced for
+    /// the coherence (γ²) trust annotation on transfer-derived Spectrum
+    /// cells: hover readout + status-line band-median summary.
+    pub virtual_transfer: &'a [Option<crate::data::types::TransferFrame>],
     /// Active waterfall palette row (0 = inferno, 1 = magma).
     /// The colorbar in the top-right samples this row of the
     /// baked LUT so the legend matches what the GPU is actually rendering.
@@ -113,11 +118,6 @@ pub struct OverlayInput<'a> {
     /// no monitor is running, or the channel hasn't received any frames
     /// yet). Rendered under the live-FFT-monitor line.
     pub loudness: Option<LoudnessReadout>,
-    /// Transfer-derived views (BodeMag/Coherence/BodePhase/GroupDelay/
-    /// Nyquist/IR): the registered pair the dispatch arm resolved for
-    /// the current `active_channel`. `None` means no pair is
-    /// registered yet — the caption hints at the C+T workflow.
-    pub bode_pair: Option<TransferPair>,
     /// Goniometer source state — drives the status caption
     /// so the reader sees whether the figure is real audio (and which
     /// physical channels) or one of the synthetic-fallback variants.
@@ -156,46 +156,6 @@ fn format_stereo_status_line(view_label: &str, status: StereoStatus) -> String {
         StereoStatus::NoAudio => {
             format!("{view_label} (ember) │ synthetic 1 kHz + 0.3 Hz phase walk")
         }
-    }
-}
-
-/// Format the IoTransfer status line. Reuses StereoStatus — the
-/// `Real { l, r }` variant carries `l = ref-input channel` and
-/// `r = DUT-output channel`.
-fn format_iotransfer_status_line(status: StereoStatus) -> String {
-    match status {
-        StereoStatus::Real { l, r } => {
-            format!("iotransfer (ember) │ ref ch {l} → dut ch {r}")
-        }
-        StereoStatus::NoTransferPair => {
-            "iotransfer (ember) │ synthetic — C-select REF + DUT, then T".to_string()
-        }
-        StereoStatus::NotStreamingYet { l, r } => format!(
-            "iotransfer (ember) │ synthetic — daemon not streaming scope yet (ref ch {l} → dut ch {r})"
-        ),
-        StereoStatus::NoAudio => {
-            "iotransfer (ember) │ synthetic — no daemon source".to_string()
-        }
-    }
-}
-
-/// Format the BodeMag / Coherence status line. `view_label` is the
-/// short view name; `pair` carries the meas+ref channel ids the
-/// dispatch arm resolved (None when no transfer pair is registered).
-/// y range is appended for at-a-glance scale: dB window for Bode,
-/// [0,1] for coherence.
-fn format_transfer_status_line(
-    view_label: &str,
-    pair: Option<TransferPair>,
-    y_min: f32,
-    y_max: f32,
-) -> String {
-    match pair {
-        Some(p) => format!(
-            "{view_label} (ember) │ meas ch {} → ref ch {}  │  Y {:.0}..{:.0}",
-            p.meas, p.ref_ch, y_min, y_max,
-        ),
-        None => format!("{view_label} (ember) │ no transfer pair — C-select MEAS + REF, then T",),
     }
 }
 
@@ -365,9 +325,31 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
             Some("off") => "  │  mic-cal: off".to_string(),
             _ => String::new(),
         };
+        // Coherence trust annotation (γ² band median) — Spectrum only,
+        // and only on a virtual/transfer cell (the transfer-magnitude +
+        // phase-subplot path). Median, not mean, over the cell's
+        // currently displayed/zoomed freq span — see `coherence_band_median`.
+        let coherence_tag = if display_ch >= input.n_real {
+            input
+                .virtual_transfer
+                .get(display_ch - input.n_real)
+                .and_then(|o| o.as_ref())
+                .and_then(|tf| {
+                    super::fmt::coherence_band_median(
+                        &tf.freqs,
+                        &tf.coherence,
+                        view.freq_min,
+                        view.freq_max,
+                    )
+                })
+                .map(|m| format!("  │  γ² med {m:.2}"))
+                .unwrap_or_else(|| "  │  γ² —".to_string())
+        } else {
+            String::new()
+        };
         let gain_line = match input.config.view_mode {
             ViewMode::Spectrum => format!(
-                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}{}",
+                "Y {:.0}..{:.0} dB  │  {}..{}{}{}{}{}{}{}",
                 view.db_min,
                 view.db_max,
                 format_hz(view.freq_min).trim(),
@@ -377,6 +359,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 wt_tag,
                 time_tag,
                 mic_tag,
+                coherence_tag,
             ),
             ViewMode::Waterfall => format!(
                 "color {:.0}..{:.0} dB  │  {}..{}{}{}{}{}{}",
@@ -412,38 +395,6 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                 )
             }
             ViewMode::Goniometer => format_stereo_status_line("goniometer", input.gonio_state),
-            ViewMode::IoTransfer => format_iotransfer_status_line(input.gonio_state),
-            ViewMode::BodeMag => {
-                format_transfer_status_line("bode mag", input.bode_pair, view.db_min, view.db_max)
-            }
-            ViewMode::Coherence => {
-                format_transfer_status_line("coherence", input.bode_pair, 0.0, 1.0)
-            }
-            ViewMode::BodePhase => {
-                format_transfer_status_line("bode phase", input.bode_pair, view.db_min, view.db_max)
-            }
-            ViewMode::GroupDelay => format_transfer_status_line(
-                "group delay",
-                input.bode_pair,
-                view.db_min,
-                view.db_max,
-            ),
-            ViewMode::Nyquist => match input.bode_pair {
-                Some(p) => format!(
-                    "nyquist (ember) │ meas ch {} → ref ch {}  │  unit circle = |H|=1",
-                    p.meas, p.ref_ch,
-                ),
-                None => {
-                    "nyquist (ember) │ no transfer pair — C-select MEAS + REF, then T".to_string()
-                }
-            },
-            ViewMode::Ir => match input.bode_pair {
-                Some(p) => format!(
-                    "ir (ember) │ meas ch {} → ref ch {}  │  t=0 mid-cell",
-                    p.meas, p.ref_ch,
-                ),
-                None => "ir (ember) │ no transfer pair — C-select MEAS + REF, then T".to_string(),
-            },
         };
         painter.text(
             Pos2::new(
@@ -559,7 +510,7 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     &frame.freqs,
                     hover.freq_hz,
                 );
-                let text = super::fmt::cursor_readout(
+                let mut text = super::fmt::cursor_readout(
                     hover.freq_hz,
                     &hover.readout,
                     sampled_db,
@@ -567,6 +518,23 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     frame.meta.dbu_offset_db,
                     frame.meta.spl_offset_db,
                 );
+                // Coherence trust annotation: append γ² at the cursor
+                // frequency when hovering a virtual/transfer cell. Not a
+                // new readout kind — an annotation layered onto whatever
+                // the cell already shows.
+                if hover.channel >= input.n_real {
+                    let gamma = input
+                        .virtual_transfer
+                        .get(hover.channel - input.n_real)
+                        .and_then(|o| o.as_ref())
+                        .and_then(|tf| {
+                            super::fmt::coherence_at_freq(&tf.freqs, &tf.coherence, hover.freq_hz)
+                        });
+                    match gamma {
+                        Some(g) => text.push_str(&format!("  │  γ² {g:.2}")),
+                        None => text.push_str("  │  γ² —"),
+                    }
+                }
                 // Hover sits one line above the keytip strip (RC-8).
                 // The strip owns `bottom - 6`, so hover lifts up by
                 // STATUS_PX + 4 px breathing room.

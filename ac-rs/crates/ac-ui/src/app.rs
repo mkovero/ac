@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::data::control::CtrlClient;
 use crate::data::smoothing;
 use crate::data::store::{
-    ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore,
+    ChannelStore, LoudnessStore, ScopeStore, SweepState, SweepStore, TransferStore,
     VirtualChannelStore,
 };
 use crate::data::types::{
@@ -32,7 +32,7 @@ use crate::ui::stats::TimingStats;
 mod control;
 mod helpers;
 mod input;
-mod render_pipeline;
+pub(crate) mod render_pipeline;
 
 pub use helpers::*;
 
@@ -135,7 +135,6 @@ pub struct AppInit {
     pub sweep_store: SweepStore,
     pub loudness_store: LoudnessStore,
     pub scope_store: ScopeStore,
-    pub ir_store: IrStore,
     pub source_kind: SourceKind,
     pub output_dir: PathBuf,
     pub endpoint: String,
@@ -204,15 +203,15 @@ pub struct App {
     /// `visualize/scope` frames; consumed by the Goniometer /
     /// PhaseScope3D dispatch arms (`unified.md` Phase 0b).
     pub(super) scope_store: Option<ScopeStore>,
-    /// Per-pair impulse response populated by the receiver from
-    /// `visualize/ir` frames; consumed by the IR view dispatch arm
-    /// (`unified.md` Phase 4b).
-    pub(super) ir_store: Option<IrStore>,
     /// Computed each render frame at the Goniometer dispatch arm;
     /// read by the overlay so the caption surfaces "ch X + Y" vs
     /// "synthetic — no stereo" vs "synthetic — daemon not streaming
     /// scope yet" to the user.
     pub(super) gonio_real_audio_state: crate::data::types::StereoStatus,
+    /// The view active before `G` toggled into Goniometer, restored when
+    /// `G` toggles it off. `None` if Goniometer was entered some other way
+    /// (e.g. `--view goniometer` at startup) — falls back to `Spectrum`.
+    pub(super) goniometer_return: Option<ViewMode>,
     /// Tracks whether `ac-ui` has told the daemon to run `monitor_spectrum`.
     /// The UI is a passive SUB by default — without this command the daemon
     /// publishes nothing and every view stays blank ("disconnected"). We
@@ -292,7 +291,7 @@ pub struct App {
     /// median above. Bounded at `WATERFALL_ROW_DT_WINDOW` entries.
     waterfall_row_dts: VecDeque<f32>,
     /// Highest `freqs.last()` observed across any frame, used as the freq
-    /// clamp ceiling so zoom/pan caps at real Nyquist instead of the 24 kHz
+    /// clamp ceiling so zoom/pan caps at the real sr/2 instead of the 24 kHz
     /// default (48 kHz sr). Seeded from `DEFAULT_FREQ_MAX`, grows monotonically
     /// as daemons at higher sample rates come online.
     data_freq_ceiling: f32,
@@ -347,15 +346,6 @@ pub struct App {
     /// adjust geometrically. Lower = faster fade (more transient feel);
     /// higher = longer trails (more diff-friendly). Default 1.0.
     pub(super) ember_tau_p_scale: f32,
-    /// Coherence-weighting sharpness for transfer-derived ember views
-    /// (BodeMag, BodePhase, GroupDelay, Nyquist). Per-bin deposit
-    /// intensity is multiplied by `γ²^k` so noisy bins glow dim and
-    /// trustworthy bins glow bright. `K` cycles {0, 1, 2, 4}; 0 disables
-    /// weighting (every bin at full intensity). Coherence and IR views
-    /// are always rendered at k=0 — Coherence would self-extinguish,
-    /// IR has no per-sample γ². Default 2.0 (moderate dimming of low-γ²
-    /// fuzz; full-trust bins still bright).
-    pub(super) ember_coherence_k: f32,
     /// Running peak of the (L, R) real-audio source for the
     /// Goniometer / PhaseScope3D auto-gain. Updated at dispatch from
     /// each frame's max(|L|, |R|) and decayed slowly so transient
@@ -529,16 +519,21 @@ impl App {
         let resolved_view = if init.initial_view_via_cli {
             init.initial_view
         } else {
-            persisted
-                .view_mode
-                .as_deref()
-                .and_then(crate::data::persist::view_mode_from_token)
-                .unwrap_or(init.initial_view)
+            match persisted.view_mode.as_deref() {
+                // Persisted token present but unrecognized — a view removed
+                // since the config was written (or a typo/future-version
+                // token). Falls back to Spectrum specifically, not the
+                // app's general CLI/matrix default, so a stale config never
+                // silently re-lands the user in the ember matrix.
+                Some(tok) => {
+                    crate::data::persist::view_mode_from_token(tok).unwrap_or(ViewMode::Spectrum)
+                }
+                None => init.initial_view,
+            }
         };
         let resolved_intensity = persisted.ember_intensity_scale;
         let resolved_tau_p = persisted.ember_tau_p_scale;
         let resolved_gonio_rotation = persisted.ember_gonio_rotation_ms;
-        let resolved_coherence_k = persisted.ember_coherence_k;
         // Capture the persisted fullscreen flag for init_graphics to
         // apply once the window exists (winit doesn't allow setting
         // fullscreen before creation).
@@ -559,16 +554,7 @@ impl App {
             LayoutMode::Grid
         } else if matches!(
             resolved_view,
-            ViewMode::Scope
-                | ViewMode::SpectrumEmber
-                | ViewMode::Goniometer
-                | ViewMode::IoTransfer
-                | ViewMode::BodeMag
-                | ViewMode::Coherence
-                | ViewMode::BodePhase
-                | ViewMode::GroupDelay
-                | ViewMode::Nyquist
-                | ViewMode::Ir
+            ViewMode::Scope | ViewMode::SpectrumEmber | ViewMode::Goniometer
         ) {
             LayoutMode::Single
         } else {
@@ -595,8 +581,8 @@ impl App {
             sweep_selected_idx: None,
             loudness_store: None,
             scope_store: None,
-            ir_store: None,
             gonio_real_audio_state: crate::data::types::StereoStatus::NoAudio,
+            goniometer_return: None,
             monitor_spectrum_active: false,
             monitor_channels,
             analysis_mode: "fft".to_string(),
@@ -639,7 +625,6 @@ impl App {
             ember_gonio_rotation_ms: resolved_gonio_rotation,
             ember_intensity_scale: resolved_intensity,
             ember_tau_p_scale: resolved_tau_p,
-            ember_coherence_k: resolved_coherence_k,
             ember_stereo_peak: 0.5,
             egui_ctx: egui::Context::default(),
             egui_state: None,
@@ -715,7 +700,6 @@ impl App {
             ember_intensity_scale: self.ember_intensity_scale,
             ember_tau_p_scale: self.ember_tau_p_scale,
             ember_gonio_rotation_ms: self.ember_gonio_rotation_ms,
-            ember_coherence_k: self.ember_coherence_k,
             fullscreen,
         }
     }
@@ -1138,8 +1122,7 @@ mod loop_tests {
     use std::time::Duration;
 
     use crate::data::store::{
-        ChannelStore, IrStore, LoudnessStore, ScopeStore, SweepStore, TransferStore,
-        VirtualChannelStore,
+        ChannelStore, LoudnessStore, ScopeStore, SweepStore, TransferStore, VirtualChannelStore,
     };
     use crate::data::types::ViewMode;
 
@@ -1153,7 +1136,6 @@ mod loop_tests {
             sweep_store: SweepStore::new(),
             loudness_store: LoudnessStore::new(),
             scope_store: ScopeStore::new(),
-            ir_store: IrStore::new(),
             source_kind: SourceKind::Synthetic,
             output_dir: PathBuf::new(),
             endpoint: String::new(),

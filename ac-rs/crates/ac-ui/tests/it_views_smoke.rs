@@ -18,19 +18,11 @@ use std::time::Duration;
 
 const AC_UI: &str = env!("CARGO_BIN_EXE_ac-ui");
 
-/// Views in the canonical W-cycle (RC-4 plan §1) plus the two hidden
-/// views the parser still accepts. Run them all so `--view <name>`
-/// remains exercised.
+/// Every surviving `ViewMode`. Run them all so `--view <name>` remains
+/// exercised.
 const VIEWS: &[&str] = &[
     "spectrum_ember",
     "goniometer",
-    "iotransfer",
-    "bode_mag",
-    "coherence",
-    "bode_phase",
-    "group_delay",
-    "nyquist",
-    "ir",
     "spectrum",
     "waterfall",
     "scope",

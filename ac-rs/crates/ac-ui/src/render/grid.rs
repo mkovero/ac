@@ -29,16 +29,7 @@ pub fn draw_grid(
     // overlay clutter breaks it.
     if matches!(
         view_mode,
-        ViewMode::Scope
-            | ViewMode::SpectrumEmber
-            | ViewMode::Goniometer
-            | ViewMode::IoTransfer
-            | ViewMode::BodeMag
-            | ViewMode::Coherence
-            | ViewMode::BodePhase
-            | ViewMode::GroupDelay
-            | ViewMode::Nyquist
-            | ViewMode::Ir
+        ViewMode::Scope | ViewMode::SpectrumEmber | ViewMode::Goniometer
     ) {
         return;
     }
@@ -138,16 +129,7 @@ pub fn draw_grid(
                 );
             }
         }
-        ViewMode::Scope
-        | ViewMode::SpectrumEmber
-        | ViewMode::Goniometer
-        | ViewMode::IoTransfer
-        | ViewMode::BodeMag
-        | ViewMode::Coherence
-        | ViewMode::BodePhase
-        | ViewMode::GroupDelay
-        | ViewMode::Nyquist
-        | ViewMode::Ir => {
+        ViewMode::Scope | ViewMode::SpectrumEmber | ViewMode::Goniometer => {
             // Ember-substrate views paint their own field on pure black —
             // skip the spectrum/waterfall axis grid. Unreachable here
             // because of the early return at the top of the function, but

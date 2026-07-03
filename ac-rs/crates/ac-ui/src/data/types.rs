@@ -181,15 +181,6 @@ pub struct TransferFrame {
     pub magnitude_db: Vec<f32>,
     pub phase_deg: Vec<f32>,
     pub coherence: Vec<f32>,
-    /// Complex H(ω) — real part. `unified.md` Phase 3. `serde(default)`
-    /// for backward compatibility — older daemon builds without the
-    /// field still produce parseable frames; views that consume re/im
-    /// (Nyquist, IR) check for `!is_empty()` before drawing.
-    #[serde(default)]
-    pub re: Vec<f32>,
-    /// Complex H(ω) — imaginary part. Parallel to `re`.
-    #[serde(default)]
-    pub im: Vec<f32>,
     pub delay_samples: i64,
     pub delay_ms: f32,
     pub meas_channel: u32,
@@ -321,27 +312,6 @@ pub struct ScopeFrame {
     pub n_channels: Option<u32>,
 }
 
-/// `visualize/ir` wire frame — daemon-side IFFT of H₁(ω) into a
-/// time-domain h(t) array. Centred (`t = 0` at the middle of
-/// `samples`); `t_origin_ms` is negative and `dt_ms` is the per-
-/// sample stride. `unified.md` Phase 4b.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct IrFrame {
-    pub samples: Vec<f32>,
-    pub sr: u32,
-    pub dt_ms: f64,
-    pub t_origin_ms: f64,
-    pub ref_channel: u32,
-    pub meas_channel: u32,
-    #[serde(default)]
-    pub stride: u32,
-    #[serde(default)]
-    pub delay_samples: i64,
-    #[serde(default)]
-    pub delay_ms: f32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
     Grid,
@@ -372,53 +342,6 @@ pub enum ViewMode {
     /// `active_channel` as L and `active_channel + 1` as R via Phase 0b
     /// `visualize/scope` frames. Phase 1 of unified.md.
     Goniometer,
-    /// Input/Output transfer Lissajous — classic analog-bench
-    /// distortion-shape view. X = active_channel reference signal,
-    /// Y = active_channel + 1 DUT output (raw, no M/S rotation). A
-    /// linear pass-through DUT traces a diagonal line at slope = gain;
-    /// nonlinear DUTs deform the line into shapes that map directly
-    /// to distortion type (soft compression → S-curve, hard clipping
-    /// → flat tops, asymmetric class-A → asymmetric line about
-    /// origin, …). Phase 1.5 of unified.md.
-    IoTransfer,
-    /// Bode magnitude on the ember substrate. Reads
-    /// `(active_channel, active_channel + 1)` as a transfer pair from
-    /// `VirtualChannelStore`; auto-registers the pair on view-entry
-    /// so the daemon's transfer worker starts producing TransferFrames.
-    /// Long τ_p (~4 s) so successive measurements fade-blend → free
-    /// before/after diff workflow without explicit overlay logic.
-    /// Phase 2 of unified.md.
-    BodeMag,
-    /// Coherence γ²(f) on the ember substrate. Same pair convention
-    /// as `BodeMag` (auto-registers `active + active+1`). Y axis is
-    /// dimensionless [0, 1] — visually obvious where the FRF is
-    /// trustworthy (γ² ≈ 1) vs unreliable (γ² < 0.8). Phase 2.
-    Coherence,
-    /// Bode phase φ(f) on the ember substrate. Wrapped to [-180°,
-    /// +180°] (same convention as the daemon's TransferFrame).
-    /// Same auto-pair convention as BodeMag. Phase 2.5 of unified.md.
-    BodePhase,
-    /// Group delay τ_g(f) = −dφ/dω in milliseconds. Computed from a
-    /// finite-difference derivative of the *unwrapped* phase array
-    /// — wrapped phase would produce ±360°/Δf spikes wherever the
-    /// underlying smooth phase wrapped through ±180°. Same auto-
-    /// pair convention as BodeMag. Phase 2.5 of unified.md.
-    GroupDelay,
-    /// Nyquist locus — parametric (Re H, Im H) curve in the complex
-    /// plane, parameterised by frequency. Consumes the re/im fields
-    /// added in Phase 3. Auto-gain scales the curve to fit the cell;
-    /// a faint unit circle is drawn for visual reference (gain = 1
-    /// boundary). Same auto-pair convention as BodeMag. Phase 4 of
-    /// unified.md.
-    Nyquist,
-    /// Impulse response h(t) — daemon-side IFFT of the H₁(ω) estimate
-    /// shipped as a `visualize/ir` sidecar to `transfer_stream`. Time
-    /// on x (centred so t = 0 is mid-cell), amplitude on y with
-    /// auto-gain. Same auto-pair convention as Nyquist / Bode. For
-    /// calibrated measurement-grade IR use the Tier 1 sweep path
-    /// instead — this view is the live-bench Tier 2 visualisation.
-    /// Phase 4b of unified.md.
-    Ir,
 }
 
 /// Per-cell zoom/pan state. Split out of `DisplayConfig` so mouse interactions
