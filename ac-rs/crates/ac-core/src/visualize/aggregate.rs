@@ -5,6 +5,18 @@
 /// 2048 was picked to match 4K screen width.
 pub const DEFAULT_WIRE_COLUMNS: usize = 4096;
 
+/// Convert a dBFS/dB magnitude to linear power (10^(db/10)).
+#[inline]
+fn db_to_power(db: f32) -> f32 {
+    10f32.powf(db / 10.0)
+}
+
+/// Convert summed linear power back to dB (10·log10(power)).
+#[inline]
+fn power_to_db(power: f32) -> f32 {
+    10.0 * power.log10()
+}
+
 /// Aggregate a linear-binned half-spectrum onto a log-frequency display.
 ///
 /// `spectrum_db` holds `N/2 + 1` magnitudes in dBFS with DC at index 0;
@@ -12,11 +24,16 @@ pub const DEFAULT_WIRE_COLUMNS: usize = 4096;
 ///
 /// Returns `n_columns` values, one per display column. Column `i` covers
 /// `[f_min * r^(i/n), f_min * r^((i+1)/n)]` with `r = f_max/f_min`.
-/// When ≥1 bin falls in the column the column holds the max of those bin
-/// magnitudes (preserves narrow peaks). When 0 bins fall in the column
-/// (low-frequency end, where columns are narrower than Δf), the value is
-/// linearly interpolated in dB against `log10(f)` between the two nearest
-/// bins — smooth curve rather than line segments between sparse samples.
+/// When ≥1 bin falls in the column the column holds the **summed power** of
+/// those bins, `10·log10(Σ 10^(bin_db/10))` — a band-power statistic (IEC
+/// 61260-1:2014 §3.12), N-independent for both discrete tones (single-bin
+/// power passes through unchanged) and broadband content (power = density ×
+/// column bandwidth). When 0 bins fall in the column (low-frequency end,
+/// where columns are narrower than Δf), the value is interpolated in the
+/// **power domain** against `log10(f)` between the two nearest bins — smooth
+/// curve rather than line segments between sparse samples, with a bin
+/// contributing to exactly one column (interpolation only synthesizes a
+/// display value for an empty column; it never re-sums a neighbour's power).
 ///
 /// `f32::NEG_INFINITY`-filled vec is returned for degenerate input
 /// (`spectrum_db.len() < 2` or `n_columns == 0` is handled too).
@@ -54,16 +71,16 @@ pub fn spectrum_to_columns(
         while k < b && freq_of(k) < lo {
             k += 1;
         }
-        let mut peak = f32::NEG_INFINITY;
+        let mut power_sum = 0.0_f32;
+        let mut count = 0usize;
         let mut j = k;
         while j < b && freq_of(j) < hi {
-            if spectrum_db[j] > peak {
-                peak = spectrum_db[j];
-            }
+            power_sum += db_to_power(spectrum_db[j]);
+            count += 1;
             j += 1;
         }
-        if peak.is_finite() {
-            out.push(peak);
+        if count > 0 {
+            out.push(power_to_db(power_sum));
             continue;
         }
         let c = col_centre(i);
@@ -79,7 +96,9 @@ pub fn spectrum_to_columns(
             let lb = f_below.log10();
             let la = f_above.log10();
             let t = (c.log10() - lb) / (la - lb);
-            spectrum_db[below] * (1.0 - t) + spectrum_db[above] * t
+            let p_below = db_to_power(spectrum_db[below]);
+            let p_above = db_to_power(spectrum_db[above]);
+            power_to_db(p_below * (1.0 - t) + p_above * t)
         };
         out.push(v);
     }
@@ -121,6 +140,90 @@ pub fn spectrum_to_columns_wire(
     (cols64, freqs64)
 }
 
+/// Same column geometry and power statistic as [`spectrum_to_columns`], but
+/// takes an explicit frequency axis instead of assuming linear-from-sample-
+/// rate spacing — the transfer-magnitude path's aggregator, since
+/// `transfer_stream` ships a decimated linear axis rather than the
+/// implicit-from-sr layout monitor frames use.
+///
+/// `freqs` and `mags_db` must be the same length; `freqs` must be sorted
+/// ascending. Columns with ≥1 contributing bin hold summed power, exactly as
+/// in `spectrum_to_columns`. Columns with zero contributing bins fall back to
+/// the same power-domain interpolation — unless no usable neighbour pair
+/// exists (column outside the covered frequency range), in which case the
+/// column emits `f32::NAN`. This is a gap sentinel distinct from the legacy
+/// `NEG_INFINITY` fill: downstream consumers treat NAN as "no data" (a
+/// render gap) rather than "silence". Degenerate whole-input cases
+/// (mismatched lengths, too few points, invalid frequency window) return an
+/// all-NAN vec for the same reason.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn samples_on_axis_to_columns(
+    freqs: &[f32],
+    mags_db: &[f32],
+    f_min: f32,
+    f_max: f32,
+    n_columns: usize,
+) -> Vec<f32> {
+    if n_columns == 0 {
+        return Vec::new();
+    }
+    let b = freqs.len();
+    if b < 2 || b != mags_db.len() || !(f_min > 0.0) || !(f_max > f_min) {
+        return vec![f32::NAN; n_columns];
+    }
+
+    let log_ratio = (f_max / f_min).ln();
+    let n = n_columns as f32;
+    let col_lo = |i: usize| f_min * (log_ratio * i as f32 / n).exp();
+    let col_centre = |i: usize| f_min * (log_ratio * (i as f32 + 0.5) / n).exp();
+
+    let mut out = Vec::with_capacity(n_columns);
+    let mut k: usize = 0;
+
+    for i in 0..n_columns {
+        let lo = col_lo(i);
+        let hi = col_lo(i + 1);
+        while k < b && freqs[k] < lo {
+            k += 1;
+        }
+        let mut power_sum = 0.0_f32;
+        let mut count = 0usize;
+        let mut j = k;
+        while j < b && freqs[j] < hi {
+            power_sum += db_to_power(mags_db[j]);
+            count += 1;
+            j += 1;
+        }
+        if count > 0 {
+            out.push(power_to_db(power_sum));
+            continue;
+        }
+        let c = col_centre(i);
+        let above = k.min(b - 1);
+        let below = above.saturating_sub(1);
+        let f_below = freqs[below];
+        let f_above = freqs[above];
+        if below == above || !(f_below > 0.0) || !(f_above > f_below) {
+            out.push(f32::NAN);
+            continue;
+        }
+        let v = if c <= f_below {
+            mags_db[below]
+        } else if c >= f_above {
+            mags_db[above]
+        } else {
+            let lb = f_below.log10();
+            let la = f_above.log10();
+            let t = (c.log10() - lb) / (la - lb);
+            let p_below = db_to_power(mags_db[below]);
+            let p_above = db_to_power(mags_db[above]);
+            power_to_db(p_below * (1.0 - t) + p_above * t)
+        };
+        out.push(v);
+    }
+    out
+}
+
 /// Default crossover (Hz) splitting the long-FFT low band from the live
 /// short-FFT high band in the dual-resolution monitor (#142). Chosen in a
 /// typically quiet region so the splice blend is rarely on top of a strong
@@ -142,8 +245,9 @@ const BLEND_HALF_OCTAVE: f32 = 1.0 / 6.0;
 /// above it the live `hf_spectrum` does; across a ±`BLEND_HALF_OCTAVE`
 /// octave transition band the two are cross-faded linearly in dB so the
 /// splice is seamless. Each band reuses [`spectrum_to_columns`] so the
-/// max-per-column (peak-preserving) and log-interpolation behaviour is
-/// identical to the single-FFT path.
+/// summed-power-per-column and log-interpolation behaviour is identical to
+/// the single-FFT path — this is what makes the two legs agree in level
+/// across the crossover regardless of their differing bin widths (#142/#3).
 ///
 /// Both spectra must share the same amplitude convention (peak-normalized,
 /// N-independent — see `spectrum_only`). When `lf_spectrum` is unusable or
@@ -406,16 +510,25 @@ mod tests {
         }
     }
 
-    /// A flat input through both bands stays flat across the crossover —
-    /// no splice step or doubled peak in the blend region (#142 risk).
+    /// A flat input through both bands has no *systemic* splice step or
+    /// doubled peak in the blend region (#142 risk). Under the band-power
+    /// statistic a flat input is no longer perfectly flat column-to-column —
+    /// bin count per column grows with frequency, so per-column power (and
+    /// thus level) legitimately rises with it (#162/A7 noise-floor tilt,
+    /// expected). A lone bin-count-doubling event at low bin counts produces
+    /// a single ~3 dB step; the 1.5 dB margin below that catches a
+    /// regression back to a systemic multi-dB splice (the original #142
+    /// defect was 9 dB) without flagging normal quantization.
     #[test]
     fn multiband_crossover_is_continuous() {
         let lf = vec![-40.0_f32; 65536 / 2 + 1];
         let hf = vec![-40.0_f32; 8192 / 2 + 1];
-        let cols = spectrum_to_columns_multiband(&lf, &hf, 48_000.0, 750.0, 20.0, 20000.0, 1024);
+        let n_columns = DEFAULT_WIRE_COLUMNS;
+        let cols =
+            spectrum_to_columns_multiband(&lf, &hf, 48_000.0, 750.0, 20.0, 20000.0, n_columns);
         for (i, w) in cols.windows(2).enumerate() {
             assert!(
-                (w[0] - w[1]).abs() < 0.5,
+                (w[0] - w[1]).abs() < 4.5,
                 "discontinuity at column {i}: {} -> {}",
                 w[0],
                 w[1],
@@ -430,5 +543,132 @@ mod tests {
         let merged = spectrum_to_columns_multiband(&[], &hf, 48_000.0, 750.0, 20.0, 20000.0, 256);
         let hf_only = spectrum_to_columns(&hf, 48_000.0, 20.0, 20000.0, 256);
         assert_eq!(merged, hf_only);
+    }
+
+    /// A1 (#162/#163 P1 foundation): `samples_on_axis_to_columns` places a
+    /// single +20 dB feature's max column within one column width of f0, on
+    /// an explicit linear axis (the shape `transfer_stream` actually ships).
+    #[test]
+    fn samples_on_axis_places_feature_at_correct_column() {
+        let sr = 48_000.0_f32;
+        let n = 4096;
+        let len = n / 2 + 1;
+        let df = sr / n as f32;
+        let freqs: Vec<f32> = (0..len).map(|k| k as f32 * df).collect();
+
+        for &f0 in &[100.0_f32, 1_000.0, 10_000.0] {
+            let bin = (f0 / df).round() as usize;
+            // The feature actually sits at the axis's own sample nearest f0
+            // (a coarse linear axis won't have a point exactly on f0) — that
+            // is the frequency placement must reproduce, not the nominal f0.
+            let actual_f0 = bin as f32 * df;
+            let mut mags = vec![-40.0_f32; len];
+            mags[bin] = -20.0; // +20 dB feature above the floor
+
+            let f_min = 20.0_f32;
+            let f_max = 20_000.0_f32;
+            let n_columns = 1000;
+            let cols = samples_on_axis_to_columns(&freqs, &mags, f_min, f_max, n_columns);
+
+            let log_ratio = (f_max / f_min).ln();
+            let col_centre =
+                |i: usize| f_min * (log_ratio * (i as f32 + 0.5) / n_columns as f32).exp();
+            let col_width_at = |i: usize| {
+                let lo = f_min * (log_ratio * i as f32 / n_columns as f32).exp();
+                let hi = f_min * (log_ratio * (i as f32 + 1.0) / n_columns as f32).exp();
+                hi - lo
+            };
+
+            let (max_i, _) = cols
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.is_finite())
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .expect("at least one finite column");
+
+            let placed_at = col_centre(max_i);
+            // Placement tolerance is the wider of the column width and the
+            // axis's own sample spacing at f0 — the aggregator cannot place
+            // a feature more precisely than the input axis resolves it.
+            let tol = col_width_at(max_i).max(df);
+            assert!(
+                (placed_at - actual_f0).abs() <= tol,
+                "f0={f0} (actual axis sample {actual_f0}) placed at {placed_at} (column {max_i}), tol {tol}"
+            );
+        }
+    }
+
+    /// A3 (#162 P3 splice): identical broadband floor read through both FFT
+    /// lengths must agree in column level within 1 dB across the blend
+    /// region. `lf_db`/`hf_db` are exact-synthesis flat-density spectra
+    /// reproducing the measured 9.03 dB peak-normalization offset
+    /// (`10*log10(65536/8192)`) between a long and short FFT reading the
+    /// same white noise — this reproduces the raw per-bin difference, not a
+    /// column-aggregation artifact, so the fixture is deterministic.
+    #[test]
+    fn multiband_noise_floor_matches_across_splice() {
+        let sr = 48_000.0_f32;
+        let lf_n = 65536;
+        let hf_n = 8192;
+        let offset_db = 10.0 * (lf_n as f32 / hf_n as f32).log10(); // 9.03 dB
+        let lf_floor = -80.0_f32;
+        let hf_floor = lf_floor + offset_db;
+
+        let lf = vec![lf_floor; lf_n / 2 + 1];
+        let hf = vec![hf_floor; hf_n / 2 + 1];
+
+        let crossover = 750.0_f32;
+        let f_min = 20.0_f32;
+        let f_max = 20_000.0_f32;
+        let n_columns = 64;
+
+        let lf_cols = spectrum_to_columns(&lf, sr, f_min, f_max, n_columns);
+        let hf_cols = spectrum_to_columns(&hf, sr, f_min, f_max, n_columns);
+
+        let blend = 2.0_f32.powf(BLEND_HALF_OCTAVE);
+        let lo = crossover / blend;
+        let hi = crossover * blend;
+        let log_ratio = (f_max / f_min).ln();
+        let col_centre = |i: usize| f_min * (log_ratio * (i as f32 + 0.5) / n_columns as f32).exp();
+
+        let mut checked = 0;
+        for i in 0..n_columns {
+            let c = col_centre(i);
+            if c < lo || c > hi {
+                continue;
+            }
+            checked += 1;
+            let diff = (lf_cols[i] - hf_cols[i]).abs();
+            assert!(
+                diff < 1.0,
+                "column {i} ({c:.1} Hz): lf={:.3} hf={:.3} diff={diff:.3} dB",
+                lf_cols[i],
+                hf_cols[i]
+            );
+        }
+        assert!(
+            checked > 0,
+            "no columns fell in the blend region — test setup issue"
+        );
+    }
+
+    /// A4 (#162 tone invariance): an on-bin full-scale sine's column power
+    /// equals the pre-existing peak-normalized single-bin dBFS within 0.1 dB
+    /// at both FFT lengths — the statistic change must not disturb tone
+    /// readings, only noise-floor readings.
+    #[test]
+    fn on_bin_tone_column_matches_bin_dbfs_at_both_n() {
+        for &n in &[8192_usize, 65536] {
+            let sr = 48_000.0_f32;
+            let df = sr / n as f32;
+            let tone_bin = (1_000.0_f32 / df).round() as usize;
+            let spec = make_spectrum(n, tone_bin, 0.0, -180.0);
+            let cols = spectrum_to_columns(&spec, sr, 20.0, 20_000.0, 2000);
+            let peak = cols.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                (peak - 0.0).abs() < 0.1,
+                "N={n}: peak column {peak} dB did not match single-bin 0.0 dBFS within 0.1 dB"
+            );
+        }
     }
 }
