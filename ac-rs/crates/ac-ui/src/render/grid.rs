@@ -23,6 +23,7 @@ pub fn draw_grid(
     show_freq_labels: bool,
     time_axis: Option<WaterfallTimeAxis>,
     spl_offset_db: Option<f32>,
+    is_virtual: bool,
 ) {
     // Scope mode owns its full cell — no spectrum-style freq/dB grid or
     // axis labels. The substrate aesthetic is "ember on pure black";
@@ -75,6 +76,11 @@ pub fn draw_grid(
             // `db_min..db_max` range stays in dBFS so zoom / scroll math is
             // unchanged. The unit (`dBFS` vs `dB SPL`) is identified in the
             // bottom-left readout — y-axis tick labels are just numbers.
+            // Virtual (transfer) cells are dB *re unity*, not dBFS — no SPL
+            // offset applies there (`spl_offset_db` is always `None` on a
+            // virtual cell), and the 0 dB line gets its own distinguished
+            // gridline below since it marks unity gain, not just another
+            // 20 dB step.
             let db_step = 20.0_f32;
             let db_span = (view.db_max - view.db_min).max(0.0001);
             let mut db = (view.db_min / db_step).ceil() * db_step;
@@ -96,6 +102,27 @@ pub fn draw_grid(
                     );
                 }
                 db += db_step;
+            }
+            if is_virtual && view.db_min <= 0.0 && 0.0 <= view.db_max {
+                let unity_stroke = Stroke::new(
+                    1.5,
+                    Color32::from_rgba_unmultiplied(255, 200, 120, (0.55 * 255.0) as u8),
+                );
+                let t = -view.db_min / db_span;
+                let y = rect.bottom() - t * rect.height();
+                painter.line_segment(
+                    [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                    unity_stroke,
+                );
+                if show_labels {
+                    painter.text(
+                        Pos2::new(rect.left() - 3.0, y),
+                        egui::Align2::RIGHT_CENTER,
+                        "0 unity",
+                        egui::FontId::monospace(theme::GRID_LABEL_PX),
+                        Color32::from_rgb(255, 200, 120),
+                    );
+                }
             }
         }
         ViewMode::Waterfall => {

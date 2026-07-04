@@ -158,9 +158,23 @@ impl App {
         // Virtual transfer channels get appended as extra cells so the grid /
         // single / compare layouts render `|H(ω)|` alongside real captures. A
         // virtual cell with no frame yet shows as empty (same as a real
-        // channel before its first packet). Phase + coherence rendering is
-        // deferred to a follow-up; this commit only wires magnitude-dB through
-        // the spectrum/waterfall renderers.
+        // channel before its first packet).
+        //
+        // `transfer_stream` ships a linear-Hz axis (uniform index-stride
+        // decimation), not the log-spaced/pre-aggregated layout monitor
+        // frames use — uploading it as-is scrambled the drawn frequency
+        // axis against every other per-frequency element in the cell (#162
+        // problem P1). `samples_on_axis_to_columns` re-aggregates onto the
+        // same log-column grid and band-power statistic real frames use, so
+        // the spectrum/waterfall/ember renderers (which all assume
+        // log-uniform columns) draw it correctly without themselves needing
+        // to know about the transfer path.
+        //
+        // Coherence gating (P2) happens at this same construction site so
+        // every consumer of the resulting `DisplayFrame` inherits it from
+        // one place: a column whose measured γ² samples median below
+        // `theme::PHASE_COH_GATE` is set to NAN, which the spectrum/
+        // waterfall/ember renderers already treat as a gap.
         let n_real = frames.len();
         let virtual_snapshots = self.virtual_channels.read_all_with_serial();
         self.virtual_render_pairs = virtual_snapshots.iter().map(|(p, _, _)| *p).collect();
@@ -176,10 +190,31 @@ impl App {
                 self.virtual_seen_serial.insert(*pair, *serial);
             }
             let frame = maybe_tf.as_ref().map(|tf| {
-                let spectrum = Arc::new(tf.magnitude_db.clone());
+                // Same (f_min, f_max, n_columns) convention the daemon uses
+                // for real monitor frames (`spectrum_to_columns_wire`), so
+                // the virtual cell's freq range lines up with real cells'.
+                let f_min = theme::DEFAULT_FREQ_MIN;
+                let f_max = (tf.sr as f32 / 2.0).max(f_min + 1.0);
+                let n_columns = ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS;
+                let mut mags = ac_core::visualize::aggregate::samples_on_axis_to_columns(
+                    &tf.freqs,
+                    &tf.magnitude_db,
+                    f_min,
+                    f_max,
+                    n_columns,
+                );
+                gate_transfer_columns_by_coherence(
+                    &mut mags,
+                    &tf.freqs,
+                    &tf.coherence,
+                    f_min,
+                    f_max,
+                );
+                let freqs = column_centre_freqs_f32(f_min, f_max, n_columns);
+                let spectrum = Arc::new(mags);
                 DisplayFrame {
                     spectrum: spectrum.clone(),
-                    freqs: Arc::new(tf.freqs.clone()),
+                    freqs: Arc::new(freqs),
                     meta: FrameMeta {
                         freq_hz: 0.0,
                         fundamental_dbfs: -140.0,
@@ -268,7 +303,17 @@ impl App {
         // trailing slots (they'll be reused the next time the user presses T).
         let n_total = frames.len();
         if self.cell_views.len() < n_total {
+            let first_new = self.cell_views.len();
             self.cell_views.resize(n_total, CellView::default());
+            // Virtual (transfer) slots get the dB-re-unity window on
+            // creation (#163 P2) instead of the dBFS default — |H(ω)| has
+            // no meaning on a -120..0 dBFS scale. `first_new.max(n_real)`
+            // is a no-op guard for the (impossible today, cheap to keep
+            // correct) case where this resize covers real slots too.
+            for cv in self.cell_views.iter_mut().skip(first_new.max(n_real)) {
+                cv.db_min = theme::VIRTUAL_DB_MIN;
+                cv.db_max = theme::VIRTUAL_DB_MAX;
+            }
         }
         if self.selected.len() < n_total {
             self.selected.resize(n_total, false);
@@ -975,6 +1020,7 @@ impl App {
                     grid_freq_labels,
                     time_axis,
                     cell_spl_off,
+                    cell.channel >= n_real_snap,
                 );
                 // Channel-identity affordances for ember views, which
                 // otherwise paint every cell in the same thermal palette.
@@ -2174,6 +2220,110 @@ fn ember_idle_brackets(
     ]
 }
 
+/// Per-column centre frequencies for the log-spaced display grid, matching
+/// `ac_core::visualize::aggregate`'s internal column geometry exactly (same
+/// `f_min * (f_max/f_min)^((i+0.5)/n)` formula) so a virtual cell's
+/// synthesized freq axis lines up 1:1 with the magnitudes
+/// `samples_on_axis_to_columns` produces for it. Returns an empty vec for
+/// degenerate input, mirroring `samples_on_axis_to_columns`'s own guard.
+// Negated `>` comparisons are intentional NaN-aware guards (matches
+// aggregate.rs's identical idiom).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn column_centre_freqs_f32(f_min: f32, f_max: f32, n_columns: usize) -> Vec<f32> {
+    if n_columns == 0 || !(f_min > 0.0) || !(f_max > f_min) {
+        return Vec::new();
+    }
+    let log_ratio = (f_max / f_min).ln();
+    let n = n_columns as f32;
+    (0..n_columns)
+        .map(|i| f_min * (log_ratio * (i as f32 + 0.5) / n).exp())
+        .collect()
+}
+
+/// Coherence gate for the transfer-magnitude display (P2): bins the same way
+/// `samples_on_axis_to_columns` bins magnitude, over the same log-column
+/// grid, and NaNs out any column whose γ² falls below `theme::PHASE_COH_GATE`
+/// — incoherent bands become a true gap instead of rendering with the same
+/// visual authority as valid data.
+///
+/// A column with ≥1 directly-contributing coherence sample uses their
+/// median (the same noise-robust order statistic `column_median` gives the
+/// ember trace). A column with none — the same LF-end sparsity
+/// `samples_on_axis_to_columns` handles by interpolating magnitude — falls
+/// back to the same two-neighbour interpolation there, so gating covers the
+/// display exactly as completely as the magnitude curve does: a display
+/// with far more columns than the transfer measurement has bins (common —
+/// `DEFAULT_WIRE_COLUMNS` vs. a modest transfer FFT size) would otherwise
+/// leave most columns spuriously ungated for want of a bin landing exactly
+/// inside them.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn gate_transfer_columns_by_coherence(
+    mags: &mut [f32],
+    freqs: &[f32],
+    coherence: &[f32],
+    f_min: f32,
+    f_max: f32,
+) {
+    let n_columns = mags.len();
+    let b = freqs.len().min(coherence.len());
+    if n_columns == 0 || b == 0 || !(f_min > 0.0) || !(f_max > f_min) {
+        return;
+    }
+    let log_ratio = (f_max / f_min).ln();
+    let n = n_columns as f32;
+    let col_lo = |i: usize| f_min * (log_ratio * i as f32 / n).exp();
+    let col_centre = |i: usize| f_min * (log_ratio * (i as f32 + 0.5) / n).exp();
+
+    let mut k = 0usize;
+    let mut samples: Vec<f32> = Vec::new();
+    for (i, mag) in mags.iter_mut().enumerate() {
+        let lo = col_lo(i);
+        let hi = col_lo(i + 1);
+        while k < b && freqs[k] < lo {
+            k += 1;
+        }
+        samples.clear();
+        let mut j = k;
+        while j < b && freqs[j] < hi {
+            if coherence[j].is_finite() {
+                samples.push(coherence[j]);
+            }
+            j += 1;
+        }
+        let gated_value = column_median(&mut samples).or_else(|| {
+            let c = col_centre(i);
+            let above = k.min(b - 1);
+            let below = above.saturating_sub(1);
+            if below == above {
+                return coherence[below].is_finite().then_some(coherence[below]);
+            }
+            let f_below = freqs[below];
+            let f_above = freqs[above];
+            if !(f_below > 0.0) || !(f_above > f_below) {
+                return None;
+            }
+            if !coherence[below].is_finite() || !coherence[above].is_finite() {
+                return None;
+            }
+            let t = if c <= f_below {
+                0.0
+            } else if c >= f_above {
+                1.0
+            } else {
+                let lb = f_below.log10();
+                let la = f_above.log10();
+                (c.log10() - lb) / (la - lb)
+            };
+            Some(coherence[below] * (1.0 - t) + coherence[above] * t)
+        });
+        if let Some(g) = gated_value {
+            if g < theme::PHASE_COH_GATE {
+                *mag = f32::NAN;
+            }
+        }
+    }
+}
+
 /// Reduce a column of dB magnitudes to a single noise-robust level: the
 /// lower-middle element of the sorted slice (`samples[(len - 1) / 2]`). This
 /// is the median as an *order statistic* — it stays on a measured bin and is
@@ -2219,9 +2369,16 @@ pub(crate) fn column_median(samples: &mut [f32]) -> Option<f32> {
 /// that diverges from the true level toward HF (more bins per column) and,
 /// held by the long SpectrumEmber τ_p, reads as a phantom second trace. The
 /// median is an unbiased central estimate, so the line tracks the true
-/// spectral level. (The transfer/Bode path `build_bodemag_polyline` keeps
-/// per-column max: its frames arrive log-spaced and pre-aggregated, so
-/// bins-per-column stays low and the artefact does not manifest.)
+/// spectral level. Virtual (transfer) channels' frames are *also* already
+/// log-spaced and pre-aggregated by this point — the virtual-snapshot
+/// `DisplayFrame` construction in this module runs them through
+/// `samples_on_axis_to_columns` before this function ever sees them (#162,
+/// #163) — so bins-per-column stays low here too and the moiré artefact
+/// this median statistic exists to fix doesn't reappear on the transfer
+/// path. (A prior version of this comment claimed this was true of all
+/// transfer frames without that aggregation step actually happening for the
+/// live magnitude trace — it wasn't; #163 fixed the scrambled-axis bug that
+/// exposed the gap between the claim and the code.)
 fn build_ember_spectrum_trace(
     freqs: &[f32],
     mags: &[f32],
@@ -2454,6 +2611,133 @@ mod tests {
             freq_min,
             freq_max,
             ..CellView::default()
+        }
+    }
+
+    // ---- #163 virtual transfer channel DisplayFrame construction ----
+
+    /// A5: a contiguous low-coherence band gates its columns to NaN; columns
+    /// backed by high-coherence bins stay finite. Mirrors the exact call the
+    /// virtual-snapshot block makes (`f_min`/`f_max` match the daemon's
+    /// monitor-frame convention).
+    #[test]
+    fn coherence_gate_nans_low_coherence_band_only() {
+        let sr = 48_000.0_f32;
+        let n = 4096;
+        let len = n / 2 + 1;
+        let df = sr / n as f32;
+        let freqs: Vec<f32> = (0..len).map(|k| k as f32 * df).collect();
+        let mags = vec![-20.0_f32; len];
+        let coherence: Vec<f32> = freqs
+            .iter()
+            .map(|&f| {
+                if (1_000.0..4_000.0).contains(&f) {
+                    0.1
+                } else {
+                    0.95
+                }
+            })
+            .collect();
+
+        let f_min = theme::DEFAULT_FREQ_MIN;
+        let f_max = (sr / 2.0).max(f_min + 1.0);
+        let n_columns = ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS;
+        let mut cols = ac_core::visualize::aggregate::samples_on_axis_to_columns(
+            &freqs, &mags, f_min, f_max, n_columns,
+        );
+        assert!(cols.iter().all(|v| v.is_finite()), "no gating applied yet");
+        gate_transfer_columns_by_coherence(&mut cols, &freqs, &coherence, f_min, f_max);
+
+        let centres = column_centre_freqs_f32(f_min, f_max, n_columns);
+        let mut saw_gated = false;
+        let mut saw_ungated = false;
+        for (c, f) in cols.iter().zip(centres.iter()) {
+            // Stay clear of the exact 1k/4k boundary columns, which can mix
+            // gated and ungated bins (same edge-quantization caveat as the
+            // ember gap test above).
+            if (1_300.0..3_700.0).contains(f) {
+                assert!(c.is_nan(), "column at {f} Hz should be gated, got {c}");
+                saw_gated = true;
+            } else if *f < 700.0 || *f > 4_700.0 {
+                assert!(
+                    c.is_finite(),
+                    "column at {f} Hz should not be gated, got {c}"
+                );
+                saw_ungated = true;
+            }
+        }
+        assert!(saw_gated && saw_ungated, "test band coverage too narrow");
+    }
+
+    /// Sparse-column fallback (no bin lands directly in the column) uses
+    /// the same nearest-neighbour interpolation `samples_on_axis_to_columns`
+    /// uses for magnitude — including its flat-extrapolation-at-the-edges
+    /// behaviour — so a uniformly incoherent measurement gates the *entire*
+    /// display, not just the columns a bin happens to land in.
+    #[test]
+    fn coherence_gate_sparse_fallback_matches_magnitude_aggregator_convention() {
+        let freqs = vec![100.0_f32, 200.0, 300.0];
+        let coherence = vec![0.05_f32, 0.05, 0.05]; // uniformly incoherent
+        let f_min = 20.0_f32;
+        let f_max = 20_000.0_f32;
+        let n_columns = 64;
+        let mut cols = vec![-10.0_f32; n_columns];
+        gate_transfer_columns_by_coherence(&mut cols, &freqs, &coherence, f_min, f_max);
+        assert!(
+            cols.iter().all(|v| v.is_nan()),
+            "uniformly incoherent input should gate every column, same as \
+             `spectrum_to_columns`'s flat edge-extrapolation for magnitude"
+        );
+    }
+
+    /// A2 (P1 foundation, integration-level): the virtual-snapshot block's
+    /// two building blocks — `samples_on_axis_to_columns` and
+    /// `column_centre_freqs_f32` — must describe the *same* column grid, so
+    /// `spectrum[i]` and `freqs[i]` in the resulting `DisplayFrame` agree
+    /// with each other the way they always have for real channels. This is
+    /// the actual P1 regression: before #163, the uploaded spectrum values
+    /// were on a linear axis while everything else in the cell (hover,
+    /// gridlines, this freqs array) assumed log columns.
+    #[test]
+    fn virtual_frame_magnitude_and_freqs_describe_the_same_grid() {
+        let sr = 48_000.0_f32;
+        let n = 8192;
+        let len = n / 2 + 1;
+        let df = sr / n as f32;
+        let freqs_in: Vec<f32> = (0..len).map(|k| k as f32 * df).collect();
+
+        for &f0 in &[100.0_f32, 1_000.0, 10_000.0] {
+            let bin = (f0 / df).round() as usize;
+            let actual_f0 = bin as f32 * df;
+            let mut mags_in = vec![-60.0_f32; len];
+            mags_in[bin] = -10.0;
+
+            let f_min = theme::DEFAULT_FREQ_MIN;
+            let f_max = (sr / 2.0).max(f_min + 1.0);
+            let n_columns = ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS;
+            let cols = ac_core::visualize::aggregate::samples_on_axis_to_columns(
+                &freqs_in, &mags_in, f_min, f_max, n_columns,
+            );
+            let centres = column_centre_freqs_f32(f_min, f_max, n_columns);
+            assert_eq!(cols.len(), centres.len());
+
+            let (max_i, _) = cols
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.is_finite())
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .expect("at least one finite column");
+            let col_width = {
+                let log_ratio = (f_max / f_min).ln();
+                let lo = f_min * (log_ratio * max_i as f32 / n_columns as f32).exp();
+                let hi = f_min * (log_ratio * (max_i as f32 + 1.0) / n_columns as f32).exp();
+                hi - lo
+            };
+            assert!(
+                (centres[max_i] - actual_f0).abs() <= col_width.max(df),
+                "f0={f0}: freqs[{max_i}]={} not within one column of the tone at {actual_f0}",
+                centres[max_i],
+            );
         }
     }
 
@@ -2889,6 +3173,68 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// #163 (P2 coherence gate / gap rendering): `build_ember_spectrum_trace`
+    /// already drops non-finite bins before they reach `column_median`
+    /// (`!mag.is_finite()` in its per-bin filter), so an all-NaN column has
+    /// no samples, `column_median` returns `None`, and the polyline breaks
+    /// there — this verifies that behaviour holds for the actual gap
+    /// sentinel the coherence-gated transfer path emits (`f32::NAN`), not
+    /// just for the mirror/median regressions the other tests target.
+    #[test]
+    fn ember_breaks_polyline_on_nan_gap_columns() {
+        // Two isolated tones either side of a NaN-gated band spanning
+        // ~1..4 kHz — every bin in that band is NaN, as
+        // `gate_transfer_columns_by_coherence` would leave them after a
+        // sustained low-coherence run.
+        let n = 2048;
+        let freqs: Vec<f32> = (0..n).map(|i| 20.0 + i as f32 * 11.7).collect();
+        let mut mags = vec![-90.0f32; n];
+        for (i, f) in freqs.iter().enumerate() {
+            if (500.0..800.0).contains(f) {
+                mags[i] = -20.0; // tone below the gap
+            } else if (1_000.0..4_000.0).contains(f) {
+                mags[i] = f32::NAN; // gated band
+            } else if (8_000.0..8_300.0).contains(f) {
+                mags[i] = -20.0; // tone above the gap
+            }
+        }
+        let v = view(20.0, 24_000.0);
+        let pairs = build_ember_spectrum_trace(&freqs, &mags, &v, EMBER_LIVE_W);
+        assert!(!pairs.is_empty());
+
+        let log_min = v.freq_min.max(1.0).log10();
+        let log_max = v.freq_max.log10();
+        let span = log_max - log_min;
+        let x_of = |f: f32| (f.log10() - log_min) / span;
+        let gap_lo = x_of(1_000.0);
+        let gap_hi = x_of(4_000.0);
+        // A column straddling the 1 kHz/4 kHz boundary can still hold one
+        // valid bin from just outside the NaN range, so check an inner
+        // sub-band clear of column-quantization edge effects rather than
+        // the exact NaN boundary.
+        let safe_lo = x_of(1_300.0);
+        let safe_hi = x_of(3_700.0);
+
+        // No vertex should land inside the gap's safe inner x-range.
+        for [x, ..] in &pairs {
+            assert!(
+                *x < safe_lo || *x > safe_hi,
+                "vertex at x={x} falls inside the NaN-gated band [{safe_lo}, {safe_hi}]"
+            );
+        }
+        // And no segment should bridge straight across it (a segment with
+        // one endpoint below the gap and the other above it would render as
+        // a connecting line through supposedly-gapped columns).
+        for pair in pairs.chunks(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let bridges = (a[0] < gap_lo && b[0] > gap_hi) || (b[0] < gap_lo && a[0] > gap_hi);
+            assert!(
+                !bridges,
+                "segment {a:?} -> {b:?} bridges across the NaN gap"
+            );
         }
     }
 

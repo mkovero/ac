@@ -92,6 +92,23 @@ pub fn default_db_window_for_view(view_mode: crate::data::types::ViewMode) -> (f
 pub const DEFAULT_FREQ_MIN: f32 = 20.0;
 pub const DEFAULT_FREQ_MAX: f32 = 24000.0;
 
+/// Coherence gate for transfer-function display (γ² below this renders as a
+/// gap, not a same-authority trace). Single source of truth shared by the
+/// phase-subplot polyline/strip (`render::virtual_overlay`) and the
+/// magnitude-trace column gating applied at `DisplayFrame` construction
+/// (`app::render_pipeline`) — both must agree on what "incoherent" means for
+/// the same transfer measurement.
+pub const PHASE_COH_GATE: f32 = 0.4;
+
+/// Virtual (transfer) cell dB window on creation: |H(ω)| is dB *re unity*,
+/// not dBFS — unity gain sits mid-window (0 dB gridline) instead of at the
+/// dBFS ceiling, so both attenuation and gain above unity are visible.
+/// Applies identically across the virtual cell's Spectrum / Waterfall /
+/// SpectrumEmber sub-views (there's no colormap-specific convention here
+/// the way `DEFAULT_COLORMAP_DB_MIN/MAX` exists for real channels).
+pub const VIRTUAL_DB_MIN: f32 = -60.0;
+pub const VIRTUAL_DB_MAX: f32 = 20.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
