@@ -20,9 +20,11 @@ use super::helpers::{
 use super::App;
 
 /// Slots in the Tab cycle: `Spectrum` → `Waterfall` → `SpectrumEmber` →
-/// `Scope` → `Spectrum`. Real channels only — a virtual/transfer cell is
-/// pinned to `Spectrum` and Tab is a no-op there (see `cycle_ember_view`).
-/// `Goniometer` is reached via the dedicated `G` toggle, not this cycle.
+/// `Scope` → `Spectrum` on a real channel. On a virtual/transfer cell the
+/// cycle is `Spectrum` → `Waterfall` → `SpectrumEmber` → `Spectrum` — no
+/// `Scope`, since a transfer channel has no time-domain samples to show one
+/// (#163). `Goniometer` is reached via the dedicated `G` toggle on real
+/// channels only, not this cycle.
 #[derive(Copy, Clone, PartialEq)]
 enum WSlot {
     Spectrum,
@@ -139,11 +141,11 @@ impl App {
     }
 
     /// Step through the Tab views forward (or backward): `Spectrum` →
-    /// `Waterfall` (FFT) → `SpectrumEmber` → `Scope` → `Spectrum`.
-    /// Real channels only — a virtual/transfer cell is pinned to
-    /// `Spectrum` (enforced wherever `active_channel` moves onto a
-    /// virtual index) and Tab is a no-op there. `Goniometer` is reached
-    /// via the dedicated `G` toggle, not this cycle.
+    /// `Waterfall` (FFT) → `SpectrumEmber` → `Scope` → `Spectrum` on a real
+    /// channel, or `Spectrum` → `Waterfall` → `SpectrumEmber` → `Spectrum`
+    /// (no `Scope`) on a virtual/transfer cell — see `cycle_virtual_view`.
+    /// `Goniometer` is reached via the dedicated `G` toggle on real
+    /// channels, not this cycle.
     ///
     /// The CWT waterfall sub-mode is no longer reachable via Tab (it
     /// used to occupy a `Cwt` cycle slot); `--view waterfall --mode cwt`
@@ -155,6 +157,7 @@ impl App {
         let on_virtual = self.config.active_channel >= n_real
             && (self.config.active_channel - n_real) < self.virtual_channels.len();
         if on_virtual {
+            self.cycle_virtual_view(forward);
             return;
         }
         let next = if forward {
@@ -221,12 +224,65 @@ impl App {
         let prev_default = crate::theme::default_db_window_for_view(prev_view);
         let next_default = crate::theme::default_db_window_for_view(view_mode);
         if prev_default != next_default {
-            for view in self.cell_views.iter_mut() {
+            // Real channels only (#163): virtual cells run a fixed dB-re-
+            // unity window across all three of their views, independent of
+            // `default_db_window_for_view`'s dBFS/colormap conventions — a
+            // real-channel Tab press must not stomp that.
+            for view in self.cell_views.iter_mut().take(n_real) {
                 view.db_min = next_default.0;
                 view.db_max = next_default.1;
             }
         }
         self.reset_peak_holds();
+        self.notify(label);
+        self.mark_ui_dirty();
+    }
+
+    /// Virtual/transfer-cell counterpart of `cycle_ember_view`: `Spectrum` →
+    /// `Waterfall` → `SpectrumEmber` → `Spectrum`, no `Scope` slot (a
+    /// transfer channel has no time-domain samples). The dB window is
+    /// intentionally left untouched here — unlike real channels, a virtual
+    /// cell's dB-re-unity convention (`theme::VIRTUAL_DB_MIN/MAX`) is the
+    /// same across all three views, so there's no default to swap to, and
+    /// the user's own pan/zoom on that cell should survive the view switch
+    /// (#163).
+    fn cycle_virtual_view(&mut self, forward: bool) {
+        let next = if forward {
+            match self.current_w_slot() {
+                Some(WSlot::Spectrum) => WSlot::Waterfall,
+                Some(WSlot::Waterfall) => WSlot::SpectrumEmber,
+                _ => WSlot::Spectrum,
+            }
+        } else {
+            match self.current_w_slot() {
+                Some(WSlot::Waterfall) => WSlot::Spectrum,
+                Some(WSlot::SpectrumEmber) => WSlot::Waterfall,
+                _ => WSlot::SpectrumEmber,
+            }
+        };
+        let (view_mode, mode, label) = match next {
+            WSlot::Spectrum => (ViewMode::Spectrum, "fft", "view: spectrum (transfer)"),
+            WSlot::Waterfall => (ViewMode::Waterfall, "fft", "view: waterfall (transfer)"),
+            WSlot::SpectrumEmber => (
+                ViewMode::SpectrumEmber,
+                "fft",
+                "view: spectrum ember (transfer)",
+            ),
+            WSlot::Scope => unreachable!("Scope excluded from the virtual-cell roster"),
+        };
+        if self.analysis_mode != mode && !self.send_set_analysis_mode(mode) {
+            return;
+        }
+        self.config.layout = LayoutMode::Single;
+        self.config.view_mode = view_mode;
+        if matches!(view_mode, ViewMode::Waterfall) {
+            for init in &mut self.waterfall_inited {
+                *init = false;
+            }
+            if let (Some(ctx), Some(wf)) = (self.render_ctx.as_ref(), self.waterfall.as_mut()) {
+                wf.clear_history(&ctx.queue);
+            }
+        }
         self.notify(label);
         self.mark_ui_dirty();
     }

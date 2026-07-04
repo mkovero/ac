@@ -14,12 +14,11 @@ const PHASE_MIN_DEG: f32 = -180.0;
 const PHASE_MAX_DEG: f32 = 180.0;
 const PHASE_TRACE_WIDTH: f32 = 1.2;
 const COH_STRIP_PX: f32 = 6.0;
-/// Bins below this coherence are hidden from the phase curve — phase is
-/// meaningless where the output isn't linearly related to the reference.
-/// Segments between the gate and 1.0 are rendered with alpha proportional
-/// to the segment's average coherence, so noisy bands fade out instead of
-/// jaggedly slashing across the subplot.
-const PHASE_COH_GATE: f32 = 0.4;
+// Bins below `theme::PHASE_COH_GATE` are hidden from the phase curve — phase
+// is meaningless where the output isn't linearly related to the reference.
+// Segments between the gate and 1.0 are rendered with alpha proportional to
+// the segment's average coherence, so noisy bands fade out instead of
+// jaggedly slashing across the subplot.
 const PHASE_ALPHA_MIN: f32 = 55.0;
 const PHASE_ALPHA_MAX: f32 = 215.0;
 
@@ -196,7 +195,7 @@ fn draw_phase_polyline(
             continue;
         }
         let coh = coherence[i];
-        if !coh.is_finite() || coh < PHASE_COH_GATE {
+        if !coh.is_finite() || coh < theme::PHASE_COH_GATE {
             flush(&mut current, &mut segments);
             last_phase = None;
             continue;
@@ -226,9 +225,9 @@ fn draw_phase_polyline(
         let avg = if seg.coh_n > 0 {
             seg.coh_sum / seg.coh_n as f32
         } else {
-            PHASE_COH_GATE
+            theme::PHASE_COH_GATE
         };
-        let t = ((avg - PHASE_COH_GATE) / (1.0 - PHASE_COH_GATE)).clamp(0.0, 1.0);
+        let t = ((avg - theme::PHASE_COH_GATE) / (1.0 - theme::PHASE_COH_GATE)).clamp(0.0, 1.0);
         // sqrt gives a gentler ramp so mid-coherence segments already
         // read as present rather than near-invisible.
         let alpha = (PHASE_ALPHA_MIN + t.sqrt() * (PHASE_ALPHA_MAX - PHASE_ALPHA_MIN)) as u8;
@@ -298,12 +297,12 @@ fn draw_coherence_strip(
 /// phase trace.
 fn coherence_color(c: f32) -> Color32 {
     let c = c.clamp(0.0, 1.0);
-    if c < PHASE_COH_GATE {
-        let t = c / PHASE_COH_GATE;
+    if c < theme::PHASE_COH_GATE {
+        let t = c / theme::PHASE_COH_GATE;
         let alpha = (40.0 * t) as u8;
         return Color32::from_rgba_unmultiplied(90, 95, 100, alpha);
     }
-    let t = ((c - PHASE_COH_GATE) / (1.0 - PHASE_COH_GATE)).clamp(0.0, 1.0);
+    let t = ((c - theme::PHASE_COH_GATE) / (1.0 - theme::PHASE_COH_GATE)).clamp(0.0, 1.0);
     let r = 120.0 * (1.0 - t) + 110.0 * t;
     let g = 130.0 * (1.0 - t) + 175.0 * t;
     let b = 135.0 * (1.0 - t) + 165.0 * t;

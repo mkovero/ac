@@ -20,6 +20,15 @@ struct WaterfallCell {
 
 const LN10: f32 = 2.302585;
 
+// Bit-pattern NaN test — see spectrum.wgsl's `is_nan_bits` for why this is
+// used instead of `x != x` (some backends fold that away under fast-math).
+fn is_nan_bits(x: f32) -> bool {
+    let bits = bitcast<u32>(x);
+    let exponent = (bits >> 23u) & 0xFFu;
+    let mantissa = bits & 0x7FFFFFu;
+    return exponent == 0xFFu && mantissa != 0u;
+}
+
 @group(0) @binding(0) var<storage, read> cells: array<WaterfallCell>;
 @group(0) @binding(1) var history: texture_2d_array<f32>;
 @group(0) @binding(2) var lut:     texture_2d<f32>;
@@ -106,6 +115,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let m10 = textureLoad(history, vec2<i32>(i32(bin_hi), i32(row_a)), i32(m.layer), 0).r;
     let m01 = textureLoad(history, vec2<i32>(i32(bin_lo), i32(row_b)), i32(m.layer), 0).r;
     let m11 = textureLoad(history, vec2<i32>(i32(bin_hi), i32(row_b)), i32(m.layer), 0).r;
+
+    // Gap sentinel (coherence-gated / out-of-range transfer column, see
+    // ac-core::visualize::aggregate): render the palette floor directly
+    // instead of feeding NaN into the LUT lookup below, where `i32(NaN)` is
+    // implementation-defined and could paint garbage instead of a gap.
+    if (is_nan_bits(m00) || is_nan_bits(m10) || is_nan_bits(m01) || is_nan_bits(m11)) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
 
     let mag = mix(mix(m00, m10, bf), mix(m01, m11, bf), rf);
     let span = max(m.db_max - m.db_min, 0.0001);

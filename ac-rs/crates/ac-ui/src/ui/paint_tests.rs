@@ -1023,3 +1023,104 @@ fn overlay_shows_leq_duration() {
         .any(|t| t.contains("Leq") && t.contains("12.5 s"));
     assert!(has_tag, "Leq duration tag not found in: {texts:?}");
 }
+
+// ── #163 virtual (transfer) cell dB-re-unity window ────────────────
+//
+// A6: a virtual cell's dB window is seeded to +20..-60 (re unity, not
+// dBFS) on creation, and `grid::draw_grid` paints a distinguished 0 dB
+// gridline for it (`is_virtual = true`) that a real cell's grid never
+// draws even when 0 dB happens to fall in its window.
+
+fn collect_line_segments(shape: &epaint::Shape, out: &mut Vec<(Pos2, Pos2, epaint::Stroke)>) {
+    match shape {
+        epaint::Shape::LineSegment { points, stroke } => {
+            out.push((points[0], points[1], stroke.clone().into()));
+        }
+        epaint::Shape::Vec(shapes) => {
+            for s in shapes {
+                collect_line_segments(s, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn run_grid_paint(view: &CellView, is_virtual: bool) -> Vec<(Pos2, Pos2, epaint::Stroke)> {
+    let ctx = egui::Context::default();
+    let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0));
+    let output = ctx.run(default_raw_input(), |ctx| {
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        crate::render::grid::draw_grid(
+            &painter,
+            rect,
+            view,
+            ViewMode::Spectrum,
+            true,
+            true,
+            None,
+            None,
+            is_virtual,
+        );
+    });
+    let mut segs = Vec::new();
+    for cs in &output.shapes {
+        collect_line_segments(&cs.shape, &mut segs);
+    }
+    segs
+}
+
+/// Reproduces the resize-time seed in `App::redraw`'s virtual-snapshot
+/// block: new virtual cell slots get `theme::VIRTUAL_DB_MIN/MAX`, not
+/// `CellView::default()`'s dBFS window.
+#[test]
+fn virtual_cell_seeds_unity_db_window() {
+    let mut cell_views: Vec<CellView> = vec![CellView::default()]; // 1 real slot
+    let n_real = 1;
+    let n_total = 2; // + 1 virtual slot appended
+    let first_new = cell_views.len();
+    cell_views.resize(n_total, CellView::default());
+    for cv in cell_views.iter_mut().skip(first_new.max(n_real)) {
+        cv.db_min = crate::theme::VIRTUAL_DB_MIN;
+        cv.db_max = crate::theme::VIRTUAL_DB_MAX;
+    }
+    assert_eq!(cell_views[0].db_min, crate::theme::DEFAULT_DB_MIN);
+    assert_eq!(cell_views[0].db_max, crate::theme::DEFAULT_DB_MAX);
+    assert_eq!(cell_views[1].db_min, -60.0);
+    assert_eq!(cell_views[1].db_max, 20.0);
+}
+
+#[test]
+fn virtual_cell_grid_paints_distinguished_unity_gridline() {
+    let view = CellView {
+        db_min: crate::theme::VIRTUAL_DB_MIN,
+        db_max: crate::theme::VIRTUAL_DB_MAX,
+        ..CellView::default()
+    };
+    let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 300.0));
+    let expected_y = {
+        let db_span = view.db_max - view.db_min;
+        let t = -view.db_min / db_span;
+        rect.bottom() - t * rect.height()
+    };
+
+    let virtual_segs = run_grid_paint(&view, true);
+    let has_unity_line = virtual_segs.iter().any(|(a, b, stroke)| {
+        (a.y - expected_y).abs() < 0.5 && (b.y - expected_y).abs() < 0.5 && stroke.width > 1.0
+        // thicker than the regular 1.0px grid stroke
+    });
+    assert!(
+        has_unity_line,
+        "no distinguished 0 dB gridline found at y={expected_y} in {virtual_segs:?}"
+    );
+
+    // Same window on a *real* cell (is_virtual = false) must not draw the
+    // distinguished line — only the regular grid stroke at that y.
+    let real_segs = run_grid_paint(&view, false);
+    let real_has_unity_line = real_segs.iter().any(|(a, b, stroke)| {
+        (a.y - expected_y).abs() < 0.5 && (b.y - expected_y).abs() < 0.5 && stroke.width > 1.0
+    });
+    assert!(
+        !real_has_unity_line,
+        "real cell should not paint the virtual-only unity gridline"
+    );
+}
