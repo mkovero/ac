@@ -134,6 +134,33 @@ fn json_finite(v: f64) -> Value {
     }
 }
 
+/// `analyze()`/`spectrum_only()` return `|FFT[k]|/norm` — linear amplitude,
+/// not dB (see `ac-ui`'s receiver, which does its own `20·log10` on the
+/// wire `spectrum` field after receiving it; that conversion is the actual
+/// contract and is unaffected by this hotfix). `spectrum_to_columns[_wire]`
+/// aggregates in the power domain (`10^(x/10)`, band-power statistic —
+/// see aggregate.rs), which only makes sense fed genuine dB: run on raw
+/// linear amplitude, every small value collapses toward `10^(tiny) ≈ 1`
+/// and the aggregated result degenerates into `10·log10(bin_count)`,
+/// decoupled from the actual signal — the "hi bins go dead, low bins do
+/// something" regression. Convert to dB going in, aggregate, convert back
+/// to linear coming out, so the wire format and the receiver's conversion
+/// stay exactly as they've always been; only the internal aggregation math
+/// runs in the domain it actually needs.
+fn linear_to_db_for_aggregation(v: &[f64]) -> Vec<f64> {
+    v.iter().map(|&x| 20.0 * x.max(1e-20).log10()).collect()
+}
+
+/// Inverse of `linear_to_db_for_aggregation`, applied to the aggregator's
+/// output before it goes on the wire. `10^(-inf/20) = 0.0` — a genuinely
+/// silent/degenerate column round-trips to linear zero, exactly the
+/// convention the pre-aggregation linear data already used.
+fn db_to_linear_after_aggregation(v: &mut [f64]) {
+    for x in v.iter_mut() {
+        *x = 10f64.powf(*x / 20.0);
+    }
+}
+
 // mic-curve helpers live in `super::super::mic` (handlers/mic.rs) since
 // the Tier 1 handlers also need them; see #97 / #98.
 use crate::handlers::mic::{
@@ -1205,11 +1232,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let peaks_json: Vec<serde_json::Value> =
                                 peaks.iter().map(|p| json!([p.freq_hz, p.dbfs])).collect();
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) = match lf_spec_for_merge {
+                            let r_spectrum_db = linear_to_db_for_aggregation(&r.spectrum);
+                            let lf_db = lf_spec_for_merge.map(linear_to_db_for_aggregation);
+                            let (mut spec, freqs) = match lf_db.as_deref() {
                                 Some(lf) => {
                                     ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
                                         lf,
-                                        &r.spectrum,
+                                        &r_spectrum_db,
                                         sr_f,
                                         cur_crossover_hz as f64,
                                         20.0,
@@ -1218,13 +1247,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     )
                                 }
                                 None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                    &r.spectrum,
+                                    &r_spectrum_db,
                                     sr_f,
                                     20.0,
                                     (sr_f / 2.0).max(21.0),
                                     ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                                 ),
                             };
+                            db_to_linear_after_aggregation(&mut spec);
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
@@ -1262,11 +1292,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let (spec, _) =
                                 ac_core::visualize::spectrum::spectrum_only(samples, sr);
                             let sr_f = sr as f64;
-                            let (mut spec, freqs) = match lf_spec_for_merge {
+                            let spec_db = linear_to_db_for_aggregation(&spec);
+                            let lf_db = lf_spec_for_merge.map(linear_to_db_for_aggregation);
+                            let (mut spec, freqs) = match lf_db.as_deref() {
                                 Some(lf) => {
                                     ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
                                         lf,
-                                        &spec,
+                                        &spec_db,
                                         sr_f,
                                         cur_crossover_hz as f64,
                                         20.0,
@@ -1275,13 +1307,14 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     )
                                 }
                                 None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                    &spec,
+                                    &spec_db,
                                     sr_f,
                                     20.0,
                                     (sr_f / 2.0).max(21.0),
                                     ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
                                 ),
                             };
+                            db_to_linear_after_aggregation(&mut spec);
                             if mc_enabled {
                                 if let Some(curve) = &mic_curves[idx] {
                                     apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
