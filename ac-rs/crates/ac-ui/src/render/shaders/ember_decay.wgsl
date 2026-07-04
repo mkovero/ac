@@ -9,8 +9,8 @@
 struct Params {
     decay:     f32,
     /// Horizontal scroll, in normalised texture coords. 0 = stationary
-    /// (pure decay). >0 = strip-chart: the destination texel at uv.x reads
-    /// the source at (uv.x + scroll_dx), so old content moves leftward and
+    /// (pure decay). >0 = strip-chart: the destination texel at x reads
+    /// the source at (x + scroll_dx), so old content moves leftward and
     /// the rightmost band falls off the source domain (returns 0 = fresh).
     scroll_dx: f32,
     _pad0:     f32,
@@ -22,7 +22,6 @@ struct Params {
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
 }
 
 @vertex
@@ -31,18 +30,29 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     let v = f32((vid >> 1u) & 1u);
     var out: VsOut;
     out.pos = vec4(u * 2.0 - 1.0, v * 2.0 - 1.0, 0.0, 1.0);
-    out.uv = vec2(u, v);
     return out;
 }
 
+// Samples `src` at this fragment's own render-target pixel coordinate
+// (`@builtin(position)`), not at a separately-computed uv varying. Those two
+// are not guaranteed to agree for an offscreen render target — the
+// vertex-shader NDC we emit and the rasterizer's actual row assignment for a
+// non-presentation target can differ from a naive uv fraction, and did: the
+// old uv-based read silently sampled the mirror row (dims.y - 1 - row) on
+// every decay pass, so persisted content built up a y-flipped ghost trace
+// alongside the correct one (visible as "double ember" once persistence
+// accumulated a few frames' worth). `frag_coord` is defined by WGSL to be the
+// exact pixel this invocation is writing to, so read-row == write-row always,
+// independent of any NDC convention.
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let src_uv_x = in.uv.x + params.scroll_dx;
-    if (src_uv_x >= 1.0 || src_uv_x < 0.0) {
+fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(src);
+    let scroll_px = params.scroll_dx * f32(dims.x);
+    let src_x = i32(frag_coord.x + scroll_px);
+    if (src_x < 0 || src_x >= i32(dims.x)) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
-    let dims = textureDimensions(src);
-    let coord = vec2<i32>(vec2<f32>(src_uv_x, in.uv.y) * vec2<f32>(dims));
+    let coord = vec2<i32>(src_x, i32(frag_coord.y));
     let l = textureLoad(src, coord, 0).r;
     return vec4(l * params.decay, 0.0, 0.0, 1.0);
 }
