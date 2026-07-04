@@ -235,7 +235,7 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "freq_hz":          <float>,        // auto-detected dominant frequency
   "sr":               <int>,          // sample rate (Hz)
   "freqs":            [<float>, ...], // downsampled, DC removed
-  "spectrum":         [<float>, ...],
+  "spectrum":         [<float>, ...], // linear amplitude, one-sided, [0, 1] for bounded input — NOT dB
   "fundamental_dbfs": <float>,
   "thd_pct":          <float>,
   "thdn_pct":         <float>,
@@ -1141,11 +1141,12 @@ mid/high transients.
 Instead the FFT monitor runs a **second, longer** FFT (`lf_fft_n`, default
 65536 ≈ 0.73 Hz Δf at 48 kHz) over the same capture ring and uses it **only
 below `crossover_hz`** (default 750 Hz). The live `fft_n` keeps driving
-everything above the crossover at the normal refresh rate. The two linear
-half-spectra are merged into the single log-column `spectrum` wire frame
-(`spectrum_to_columns_multiband`), cross-faded linearly in dB across a
-±1/6-octave band at the crossover so the splice is seamless. **The wire frame
-shape is unchanged** — subscribers need no changes.
+everything above the crossover at the normal refresh rate. The two
+linear-amplitude half-spectra are merged into the single log-column
+`spectrum` wire frame (`spectrum_to_columns_multiband`), cross-faded linearly
+in linear amplitude across a ±1/6-octave band at the crossover so the splice
+is seamless. **The wire frame shape is unchanged** — subscribers need no
+changes.
 
 Resolution / trade-off the user gets:
 

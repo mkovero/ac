@@ -485,10 +485,12 @@ pub fn spawn(
                     if frame.spectrum.is_empty() {
                         continue;
                     }
-                    // Daemon publishes a linear amplitude spectrum (|FFT|/N/wc
-                    // in [0, ~1]). The UI pipeline — auto-init dB window,
-                    // colormap mapping, hover readout — all assume dBFS. Match
-                    // `ac/ui/spectrum.py:131` which does the same conversion.
+                    // The `monitor_spectrum` wire `spectrum` field is linear
+                    // amplitude BY CONTRACT (|FFT|/N/wc in [0, ~1]), not dB —
+                    // see ZMQ.md's `spectrum` frame doc. This is the single
+                    // linear→dB conversion on the display path; the UI
+                    // pipeline downstream (auto-init dB window, colormap
+                    // mapping, hover readout) all assume dBFS.
                     for v in frame.spectrum.iter_mut() {
                         *v = 20.0 * v.max(1e-12).log10();
                     }
