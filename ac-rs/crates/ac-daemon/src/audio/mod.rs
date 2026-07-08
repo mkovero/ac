@@ -133,6 +133,30 @@ pub trait AudioEngine: Send + 'static {
     fn backend_name(&self) -> &'static str {
         "unknown"
     }
+
+    /// Set continuous output as the sum of several simultaneous sine tones,
+    /// each `(freq_hz, amplitude)`. Used by the display-truth harness (#170)
+    /// to drive the I3 orientation invariant (two tones at distinct levels,
+    /// check the louder one renders higher). Default delegates to
+    /// `set_tone` with the first tone and drops the rest — only the fake
+    /// backend (test/`--fake-audio` use) needs true multi-tone synthesis;
+    /// real backends generating a single physical output tone is an
+    /// acceptable degradation since routing-dependent commands already gate
+    /// on `supports_routing`.
+    fn set_tone_pair(&mut self, tones: &[(f64, f64)]) {
+        if let Some(&(freq, amp)) = tones.first() {
+            self.set_tone(freq, amp);
+        }
+    }
+
+    /// Set continuous calibrated broadband noise at the given peak
+    /// amplitude (0..1 full-scale). Used by the display-truth harness
+    /// (#170) to drive the I2 flat-noise continuity invariant, which needs
+    /// genuine spectral content (not a single tone) to check for
+    /// band-boundary steps. Default delegates to `set_pink`.
+    fn set_broadband_noise(&mut self, amplitude: f64) {
+        self.set_pink(amplitude);
+    }
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.

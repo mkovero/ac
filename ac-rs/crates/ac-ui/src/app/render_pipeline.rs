@@ -2084,7 +2084,11 @@ fn ember_cell_to_canvas_y(ay: f32, cell_y: f32, cell_h: f32) -> f32 {
 /// 1-cell.y]`. `focus_w` scales the deposit weight (focused cell 1.0, others
 /// dimmer). The y-flip (`ember_cell_to_canvas_y`) anchors the baseline at the
 /// cell floor in every layout.
-fn ember_pack_cell(
+/// `pub(crate)`: reused verbatim by the headless display-truth harness
+/// (#170, `ac test software`) so its T3 pixel checks exercise the exact
+/// same freq/dB → canvas-position transform SpectrumEmber renders with,
+/// not a reimplementation that could hide a bug both share.
+pub(crate) fn ember_pack_cell(
     out: &mut Vec<[f32; 3]>,
     local: &[[f32; 3]],
     cell: &layout::CellRect,
@@ -2379,7 +2383,9 @@ pub(crate) fn column_median(samples: &mut [f32]) -> Option<f32> {
 /// transfer frames without that aggregation step actually happening for the
 /// live magnitude trace — it wasn't; #163 fixed the scrambled-axis bug that
 /// exposed the gap between the claim and the code.)
-fn build_ember_spectrum_trace(
+/// `pub(crate)`: reused verbatim by the headless display-truth harness
+/// (#170) — see `ember_pack_cell` above for why this isn't reimplemented.
+pub(crate) fn build_ember_spectrum_trace(
     freqs: &[f32],
     mags: &[f32],
     view: &CellView,

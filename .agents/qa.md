@@ -259,3 +259,11 @@ wrong without any test catching it. These are the highest priority.}
 - Do not flag style preferences as correctness issues. Clippy is the style arbiter.
 - If you find a bug outside the PR's scope, open a new issue — do not block this PR for it.
 - One review comment per PR pass. If the developer pushes a fix, do a second pass.
+- Do not approve a value-display PR (any PR that changes what gets rendered to
+  screen: spectrum/waterfall/ember/scope trace data, axis calibration, or the
+  post-receiver display buffer feeding them) without the display-truth harness
+  (`ac test software`'s T2/T3 checks, `ac-ui --headless-test`, #170) reporting
+  green for the invariants that apply to the changed view. A PR that only
+  changes internal correctness checks (CSV export, cursor readout) while the
+  harness is red is not `qa-approved` — that gap is exactly what #170 exists
+  to close.
