@@ -36,7 +36,12 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims = textureDimensions(src);
-    let coord = vec2<i32>(in.uv * vec2<f32>(dims));
+    // Deposit writes via NDC (y=1 -> top texel row); the display viewport's
+    // uv.y also runs screen-bottom(0)->top(1) with no inherent row flip, so
+    // sampling `uv` directly reads the substrate mirrored top-to-bottom
+    // (the ember Y-inversion bug, #172). Flip here, matching the row lookup
+    // waterfall.wgsl already does for the same deposit/read asymmetry.
+    let coord = vec2<i32>(vec2<f32>(in.uv.x, 1.0 - in.uv.y) * vec2<f32>(dims));
     let l = textureLoad(src, coord, 0).r;
     let scaled = max(l * params.gain, 0.0);
     let t = clamp(pow(scaled, params.gamma), 0.0, 1.0);

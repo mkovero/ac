@@ -179,14 +179,15 @@ fn display_truth_harness_runs_and_reports_i1_i4() {
     );
 }
 
-/// Acceptance criterion (#170 handoff.md): "ember flip fails I3" must be
-/// demonstrated as a currently-failing test, not silently absent. If this
-/// assertion starts failing, the ember Y-inversion bug has been fixed —
-/// flip it to `assert_eq!(..., Some(true), ...)` and close out the
-/// tracking reference in `handoff-ember-yflip.md`.
+/// Ember Y-axis orientation, permanent I3 assertion (#172). Was tracked as
+/// `known_open_bug_ember_orientation_currently_fails_i3` while the bug was
+/// open (`ember_display.wgsl` sampled the substrate texture without the
+/// screen/deposit row flip `waterfall.wgsl` already applies, so the louder
+/// tone rendered lower on screen instead of higher). Converted to a normal
+/// pass assertion now that the flip is in place.
 #[test]
 #[ignore = "spawns ac-daemon + ac-ui; needs a wgpu adapter — runbook only (#170)"]
-fn known_open_bug_ember_orientation_currently_fails_i3() {
+fn ember_orientation_passes_i3() {
     let (ctrl_port, data_port) = free_port_pair();
     let _daemon = Daemon::spawn(ctrl_port, data_port);
     let result = run_headless_test(ctrl_port, data_port);
@@ -196,9 +197,9 @@ fn known_open_bug_ember_orientation_currently_fails_i3() {
         .expect("results array");
     let ember_i3 = find_check(results, "I3 orientation (SpectrumEmber)")
         .unwrap_or_else(|| panic!("missing SpectrumEmber I3 check in {results:?}"));
-    assert_ne!(
+    assert_eq!(
         ember_i3.get("pass").and_then(Value::as_bool),
         Some(true),
-        "ember Y-inversion appears fixed ({ember_i3}) — see the doc comment on this test"
+        "ember I3 orientation should pass post-fix: {ember_i3}"
     );
 }
