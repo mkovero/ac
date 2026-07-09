@@ -405,6 +405,10 @@ impl App {
                         .get("crossover_hz")
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32);
+                    self.monitor_lf_avg_tau_ms =
+                        reply.get("lf_avg_tau_ms").and_then(|v| v.as_f64());
+                    self.monitor_lf_overlap_pct =
+                        reply.get("lf_overlap_pct").and_then(|v| v.as_f64());
                 } else {
                     let err = reply.get("error").and_then(|v| v.as_str()).unwrap_or("?");
                     self.notify(&format!("monitor_spectrum: {err}"));

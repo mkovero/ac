@@ -123,6 +123,27 @@ fn push_loudness_with_optional_fir(
     }
 }
 
+/// LF-band FFT overlap fraction (#173). The previous un-overlapped block
+/// cadence (~0.7-1.4 s depending on `lf_fft_n`) recomputed the LF spectrum
+/// from entirely fresh samples each time; under broadband material each
+/// recompute is an independent chi-squared(2) draw per bin (~5.6 dB sigma,
+/// matching #173's measurement), so the LF half of the display lurched
+/// while the HF band (refreshed every tick) glided smoothly. 90% overlap
+/// keeps the 65536-point FFT's frequency resolution (needed to split
+/// closely-spaced LF tones, #142) while recomputing every
+/// `(1 - LF_OVERLAP) * lf_fft_n / sr` seconds instead of the full block —
+/// ~136 ms at the N=65536/48kHz default, under the ~170 ms cadence target.
+const LF_OVERLAP: f64 = 0.9;
+
+/// Power-domain EMA time constant applied to each newly-recomputed LF
+/// spectrum (#173), reusing `EmaIntegrator`'s existing fast/slow/Leq
+/// convention at per-bin scale. Tuned in
+/// `ac_core::visualize::time_integration::tests::lf_ema_brings_variance_within_2x_of_hf_target`
+/// to bring the raw ~5.6 dB chi-squared sigma down to ~2.2-2.4 dB, within
+/// 2x of the HF band's measured 0.7-2.4 dB range, without smearing tone
+/// levels (EMA is power-domain, unbiased at steady state).
+const LF_AVG_TAU_S: f64 = 0.25;
+
 /// Convert a possibly-infinite `f64` to JSON — `null` when not finite,
 /// real number otherwise. Keeps the sidecar frame JSON-parseable; `-inf`
 /// would otherwise fail `serde_json`'s finite-value check.
@@ -533,17 +554,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // Dual-resolution low-frequency path (#142). A second, longer ring
         // feeds an `lf_fft_n`-point FFT used only below `crossover_hz`; the
         // short `fft_rings` above keep driving the high band at the live
-        // refresh rate. The LF spectrum is recomputed at most once per LF
-        // block duration (`lf_fft_n / sr`) — LF content is slow-moving, so
-        // this caps the extra CPU instead of paying a long FFT every tick.
-        // `lf_spec_cache` holds the most recent LF linear half-spectrum per
-        // channel (`None` until its ring first fills).
+        // refresh rate. The LF spectrum is recomputed every `LF_OVERLAP`-hop
+        // (`(1 - LF_OVERLAP) * lf_fft_n / sr`, #173) rather than once per
+        // full block, and each new raw recompute is smoothed through a
+        // power-domain EMA (`lf_ema`) before caching — see `LF_OVERLAP` /
+        // `LF_AVG_TAU_S` above. `lf_spec_cache` holds the most recent
+        // smoothed LF linear half-spectrum per channel (`None` until its
+        // ring first fills).
         let mut lf_fft_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
             .iter()
             .map(|_| std::collections::VecDeque::with_capacity(131_072))
             .collect();
         let mut lf_spec_cache: Vec<Option<Vec<f64>>> = vec![None; channels_worker.len()];
         let mut lf_ticks_since_recompute: Vec<u32> = vec![u32::MAX; channels_worker.len()];
+        let mut lf_ema: Vec<Option<EmaIntegrator>> = vec![None; channels_worker.len()];
+        let mut lf_ema_last_ts: Vec<Option<std::time::Instant>> = vec![None; channels_worker.len()];
 
         // Per-channel time-integration state for the `fractional_octave_leq`
         // sidecar frame. `None` until the first fractional_octave frame at
@@ -586,10 +611,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             // than the live one — otherwise the live spectrum already has
             // equal-or-finer Δf everywhere.
             let lf_band_enabled = cur_lf_fft_n > cur_fft_n;
-            // Recompute the LF FFT at most once per LF block duration.
-            let lf_recompute_every = ((cur_lf_fft_n as f64 / sr as f64) / cur_interval.max(1e-6))
-                .round()
-                .clamp(1.0, 4096.0) as u32;
+            // Recompute the LF FFT every overlap-hop instead of once per
+            // full block (#173) — see `LF_OVERLAP`.
+            let lf_recompute_every = ((cur_lf_fft_n as f64 * (1.0 - LF_OVERLAP) / sr as f64)
+                / cur_interval.max(1e-6))
+            .round()
+            .clamp(1.0, 4096.0) as u32;
             let mode = analysis_mode.lock().unwrap().clone();
             let is_cwt = mode == "cwt";
             let is_cqt = mode == "cqt";
@@ -1167,7 +1194,34 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             let lf_buf = lf_ring.make_contiguous();
                             let (lf_spec, _) =
                                 ac_core::visualize::spectrum::spectrum_only(lf_buf, sr);
-                            lf_spec_cache[idx] = Some(lf_spec);
+                            // Power-domain EMA smoothing (#173): re-init
+                            // whenever the bin count changes (lf_fft_n
+                            // change) so stale state never gets fed a
+                            // mismatched vector length.
+                            let n_bins = lf_spec.len();
+                            let ema_slot = &mut lf_ema[idx];
+                            if ema_slot
+                                .as_ref()
+                                .map(|e| e.state_len() != n_bins)
+                                .unwrap_or(true)
+                            {
+                                *ema_slot = Some(EmaIntegrator::new(LF_AVG_TAU_S, n_bins));
+                                lf_ema_last_ts[idx] = None;
+                            }
+                            let now = std::time::Instant::now();
+                            let dt = lf_ema_last_ts[idx]
+                                .map(|t| now.duration_since(t).as_secs_f64())
+                                .unwrap_or(cur_lf_fft_n as f64 * (1.0 - LF_OVERLAP) / sr as f64)
+                                .max(1e-6);
+                            lf_ema_last_ts[idx] = Some(now);
+                            let raw_db: Vec<f64> =
+                                lf_spec.iter().map(|&a| 20.0 * a.log10()).collect();
+                            let smoothed_db = ema_slot.as_mut().unwrap().update(&raw_db, dt);
+                            let smoothed_amp: Vec<f64> = smoothed_db
+                                .iter()
+                                .map(|&db| 10f64.powf(db / 20.0))
+                                .collect();
+                            lf_spec_cache[idx] = Some(smoothed_amp);
                             *counter = 0;
                         } else {
                             *counter = counter.saturating_add(1);
@@ -1179,6 +1233,8 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     lf_fft_rings[idx].clear();
                     lf_spec_cache[idx] = None;
                     lf_ticks_since_recompute[idx] = u32::MAX;
+                    lf_ema[idx] = None;
+                    lf_ema_last_ts[idx] = None;
                 }
                 let lf_spec_for_merge: Option<&[f64]> = if lf_band_enabled {
                     lf_spec_cache[idx].as_deref()
@@ -1393,11 +1449,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     }
     json!({
         "ok": true,
-        "in_port":      primary_in_port,
-        "in_ports":     in_ports,
-        "channels":     channels,
-        "lf_fft_n":     lf_fft_n,
-        "crossover_hz": crossover_hz,
+        "in_port":         primary_in_port,
+        "in_ports":        in_ports,
+        "channels":        channels,
+        "lf_fft_n":        lf_fft_n,
+        "crossover_hz":    crossover_hz,
+        "lf_avg_tau_ms":   LF_AVG_TAU_S * 1000.0,
+        "lf_overlap_pct":  LF_OVERLAP * 100.0,
     })
 }
 

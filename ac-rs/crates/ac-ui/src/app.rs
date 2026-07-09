@@ -257,6 +257,10 @@ pub struct App {
     /// The LF band is active only while `monitor_fft_n < monitor_lf_fft_n`.
     monitor_lf_fft_n: Option<u32>,
     monitor_crossover_hz: Option<f32>,
+    /// LF temporal-averaging settle info learned from the same reply
+    /// (#173) — daemon-owned EMA tau / overlap, purely for the readout.
+    monitor_lf_avg_tau_ms: Option<f64>,
+    monitor_lf_overlap_pct: Option<f64>,
     /// Insertion-order view of `selected`. Compare layout renders cells in
     /// selection order; the T key reads the first and last entries to form
     /// a virtual transfer pair (meas = first, ref = last).
@@ -598,6 +602,8 @@ impl App {
             monitor_fft_n: 8192,
             monitor_lf_fft_n: None,
             monitor_crossover_hz: None,
+            monitor_lf_avg_tau_ms: None,
+            monitor_lf_overlap_pct: None,
             selection_order: Vec::new(),
             config,
             cell_views: Vec::new(),

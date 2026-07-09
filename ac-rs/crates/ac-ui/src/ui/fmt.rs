@@ -123,15 +123,21 @@ pub fn spectrum_readout(
 /// When `lf_fft_n` / `crossover_hz` are `Some` the dual-resolution LF path
 /// is active (#142) and a second line is appended (`\n`-separated): the
 /// HF (interactive) line gains a `≥ {crossover} Hz` scope tag and the LF
-/// line reports the long-FFT `N`, its finer `Δf`, and the LF block latency.
-/// When `None` the output is byte-for-byte today's single line — the
-/// fallback for daemons without the feature or when live N ≥ LF N.
+/// line reports the long-FFT `N`, its finer `Δf`, the recompute cadence
+/// (`lf_avg_tau_ms`/`lf_overlap_pct` when present, #173 — replaces the
+/// stale full-block-latency figure now that LF recomputes overlap), and
+/// the EMA time constant smoothing it. When `None` the output is
+/// byte-for-byte today's single line — the fallback for daemons without
+/// the feature or when live N ≥ LF N.
+#[allow(clippy::too_many_arguments)]
 pub fn monitor_knobs_readout(
     interval_ms: u32,
     fft_n: u32,
     sr: u32,
     lf_fft_n: Option<u32>,
     crossover_hz: Option<f32>,
+    lf_avg_tau_ms: Option<f64>,
+    lf_overlap_pct: Option<f64>,
 ) -> String {
     let df = sr as f32 / fft_n.max(1) as f32;
     let hf = format!("{:>4} ms  │  N {}  │  Δf {:.1} Hz", interval_ms, fft_n, df);
@@ -139,10 +145,19 @@ pub fn monitor_knobs_readout(
     match (lf_fft_n, crossover_hz) {
         (Some(lf_n), Some(cx)) => {
             let lf_df = sr as f32 / lf_n.max(1) as f32;
-            // LF block latency = N / sr — the inherent slow-update trade-off.
-            let lf_latency_s = lf_n as f32 / sr.max(1) as f32;
+            // Recompute cadence with overlap (#173): (1 - overlap) * N / sr,
+            // the actual update rate now — no longer the full block duration.
+            let overlap_frac = lf_overlap_pct.unwrap_or(0.0) / 100.0;
+            let lf_cadence_s = lf_n as f64 * (1.0 - overlap_frac) / sr.max(1) as f64;
+            let settle = match lf_avg_tau_ms {
+                Some(tau_ms) => format!(
+                    " · τ {tau_ms:.0} ms @ {:.0}% ovl",
+                    lf_overlap_pct.unwrap_or(0.0)
+                ),
+                None => String::new(),
+            };
             format!(
-                "{hf}   ≥ {cx:.0} Hz\nLF     │  N {lf_n}  │  Δf {} Hz  < {cx:.0} Hz · {lf_latency_s:.1} s",
+                "{hf}   ≥ {cx:.0} Hz\nLF     │  N {lf_n}  │  Δf {} Hz  < {cx:.0} Hz · {lf_cadence_s:.3} s{settle}",
                 fmt_delta_f(lf_df),
             )
         }
@@ -1122,19 +1137,19 @@ mod tests {
     #[test]
     fn monitor_knobs_delta_f_math() {
         // Δf = sr / N. 48000 / 4096 = 11.71875 → rounds to "11.7 Hz".
-        let s = monitor_knobs_readout(10, 4096, 48_000, None, None);
+        let s = monitor_knobs_readout(10, 4096, 48_000, None, None, None, None);
         assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
         // 96 kHz, N = 8192 → 11.71875 as well.
-        let s = monitor_knobs_readout(10, 8192, 96_000, None, None);
+        let s = monitor_knobs_readout(10, 8192, 96_000, None, None, None, None);
         assert!(s.contains("Δf 11.7 Hz"), "got: {s}");
         // 48 kHz, N = 2048 → 23.4375 → "23.4 Hz".
-        let s = monitor_knobs_readout(5, 2048, 48_000, None, None);
+        let s = monitor_knobs_readout(5, 2048, 48_000, None, None, None, None);
         assert!(s.contains("Δf 23.4 Hz"), "got: {s}");
     }
 
     #[test]
     fn monitor_knobs_formats_interval_and_n() {
-        let s = monitor_knobs_readout(7, 16384, 48_000, None, None);
+        let s = monitor_knobs_readout(7, 16384, 48_000, None, None, None, None);
         assert!(s.contains("   7 ms"));
         assert!(s.contains("N 16384"));
     }
@@ -1142,15 +1157,23 @@ mod tests {
     #[test]
     fn monitor_knobs_zero_n_does_not_panic() {
         // Defensive guard — mp.fft_n.max(1).
-        let _ = monitor_knobs_readout(1, 0, 48_000, None, None);
-        let _ = monitor_knobs_readout(1, 8192, 48_000, Some(0), Some(750.0));
+        let _ = monitor_knobs_readout(1, 0, 48_000, None, None, None, None);
+        let _ = monitor_knobs_readout(
+            1,
+            8192,
+            48_000,
+            Some(0),
+            Some(750.0),
+            Some(250.0),
+            Some(90.0),
+        );
     }
 
     #[test]
     fn monitor_knobs_single_line_fallback_is_unchanged() {
         // `None` LF params → today's exact one-line output, no LF line,
         // no `≥` scope tag (#142 fallback).
-        let s = monitor_knobs_readout(10, 16384, 48_000, None, None);
+        let s = monitor_knobs_readout(10, 16384, 48_000, None, None, None, None);
         assert_eq!(s, "  10 ms  │  N 16384  │  Δf 2.9 Hz");
         assert!(!s.contains('\n'));
         assert!(!s.contains("LF"));
@@ -1159,24 +1182,37 @@ mod tests {
 
     #[test]
     fn monitor_knobs_two_line_when_lf_active() {
-        // HF N=16384 @ 48k → Δf 2.9 Hz; LF N=65536 → Δf 0.73 Hz, latency 1.4 s.
-        let s = monitor_knobs_readout(10, 16384, 48_000, Some(65536), Some(750.0));
+        // HF N=16384 @ 48k → Δf 2.9 Hz; LF N=65536 → Δf 0.73 Hz. Overlap
+        // 90% / tau 250ms (#173) → recompute cadence ~0.137 s, far under
+        // the stale non-overlapped 1.37 s full-block figure.
+        let s = monitor_knobs_readout(
+            10,
+            16384,
+            48_000,
+            Some(65536),
+            Some(750.0),
+            Some(250.0),
+            Some(90.0),
+        );
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines.len(), 2, "expected two lines, got: {s:?}");
         // HF line keeps its byte-for-byte knobs and gains the scope tag.
         assert!(lines[0].starts_with("  10 ms  │  N 16384  │  Δf 2.9 Hz"));
         assert!(lines[0].contains("≥ 750 Hz"));
-        // LF line: long N, sub-Hz Δf at 2 decimals, crossover + latency.
+        // LF line: long N, sub-Hz Δf at 2 decimals, crossover, overlapped
+        // cadence (not the old 1.4 s full-block latency), and the EMA tau.
         assert!(lines[1].contains("N 65536"));
         assert!(lines[1].contains("Δf 0.73 Hz"), "got: {}", lines[1]);
         assert!(lines[1].contains("< 750 Hz"));
-        assert!(lines[1].contains("· 1.4 s"));
+        assert!(lines[1].contains("0.137 s"), "got: {}", lines[1]);
+        assert!(lines[1].contains("τ 250 ms"), "got: {}", lines[1]);
+        assert!(lines[1].contains("90% ovl"), "got: {}", lines[1]);
     }
 
     #[test]
     fn monitor_knobs_lf_delta_f_adaptive_decimals() {
         // LF Δf ≥ 10 Hz uses 1 decimal (e.g. tiny LF N); < 10 Hz uses 2.
-        let s = monitor_knobs_readout(10, 1024, 48_000, Some(2048), Some(750.0));
+        let s = monitor_knobs_readout(10, 1024, 48_000, Some(2048), Some(750.0), None, None);
         // 48000/2048 = 23.4375 → "23.4" (1 decimal).
         assert!(s.contains("Δf 23.4 Hz"), "got: {s}");
     }

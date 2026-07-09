@@ -856,6 +856,8 @@ impl App {
             fft_n: self.monitor_fft_n,
             lf_fft_n: lf_active,
             crossover_hz: lf_active.and(self.monitor_crossover_hz),
+            lf_avg_tau_ms: lf_active.and(self.monitor_lf_avg_tau_ms),
+            lf_overlap_pct: lf_active.and(self.monitor_lf_overlap_pct),
         });
         // For the CQT badge we need the live `f_min` — the daemon
         // clamps it dynamically above the const default based on ring
