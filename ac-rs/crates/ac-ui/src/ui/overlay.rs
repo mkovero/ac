@@ -196,6 +196,11 @@ pub struct MonitorParamsInfo {
     /// line. `None` → single-line fallback (today's exact output).
     pub lf_fft_n: Option<u32>,
     pub crossover_hz: Option<f32>,
+    /// LF temporal-averaging settle info (#173) — daemon-reported EMA tau
+    /// and overlap fraction, echoed on the LF readout line. `None` on a
+    /// daemon predating #173 (or when the LF band itself is inactive).
+    pub lf_avg_tau_ms: Option<f64>,
+    pub lf_overlap_pct: Option<f64>,
 }
 
 // Help overlay — RC-9 trim, ≤30 lines, organized by view family. The
@@ -420,6 +425,8 @@ pub fn draw(ctx: &Context, input: OverlayInput<'_>) {
                     sr,
                     mp.lf_fft_n,
                     mp.crossover_hz,
+                    mp.lf_avg_tau_ms,
+                    mp.lf_overlap_pct,
                 );
                 for mon_line in mon_text.lines() {
                     painter.text(
