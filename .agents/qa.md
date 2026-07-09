@@ -267,3 +267,19 @@ wrong without any test catching it. These are the highest priority.}
   changes internal correctness checks (CSV export, cursor readout) while the
   harness is red is not `qa-approved` — that gap is exactly what #170 exists
   to close.
+- Do not approve a value-display PR or a daemon-pipeline PR (anything
+  touching `ac-daemon/src/handlers/audio/monitor.rs`, the ring buffers /
+  time-integration state feeding it, or the display buffer it publishes
+  into) without the I5 soak (`ac-ui --headless-test`'s "I5 soak" checks,
+  same binary as T1-T4, handoff.md) reporting green in addition to I1-I4.
+  I1-I4 are single-snapshot checks — settle, read one frame, judge — and
+  are structurally blind to any bug with onset delay (ring-buffer wrap,
+  EMA/state poisoning, cadence-boundary mishandling). I5 runs a seeded
+  deterministic fake-audio stimulus for long enough to exceed every
+  internal buffer period (derived from the daemon's own reported
+  `lf_fft_n`/`lf_overlap_pct`/`lf_avg_tau_ms`, not hardcoded) and asserts
+  I4-t bounded / I2-t continuity / I5a liveness / I5b plausibility on
+  every published frame, not just the last one. On first violation it
+  dumps frames N-1/N/N+1 as CSVs with the elapsed-time-to-violation —
+  treat that dump as the debugging input for the fix, the same way the
+  HF-garbage fixture corpus works for I4.
