@@ -555,6 +555,134 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
 }
 
 #[test]
+fn monitor_spectrum_fake_tones_produce_two_distinct_peaks() {
+    // #170 display-truth harness: `fake_tones` must actually reach the
+    // fake engine (via `dbfs_to_amplitude` + `set_tone_pair` in
+    // handlers/audio/monitor.rs) and produce two independently-detectable
+    // spectral peaks at their requested levels — the I1/I3 stimulus this
+    // harness needs. Frequencies chosen well clear of each other and of
+    // the LF/HF crossover so both land cleanly in one FFT.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "channels": [0],
+        "interval_ms": 100,
+        "fft_n": 8192,
+        "fake_tones": [
+            {"freq_hz": 2000.0, "level_dbfs": -6.0},
+            {"freq_hz": 9000.0, "level_dbfs": -24.0},
+        ],
+    }));
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut accepted = 0;
+    while Instant::now() < deadline {
+        let Some((topic, payload)) = c.recv_pub(2_000) else {
+            break;
+        };
+        if topic != "data"
+            || payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum")
+        {
+            continue;
+        }
+        if payload
+            .get("spectrum")
+            .and_then(Value::as_array)
+            .is_none_or(|a| a.is_empty())
+        {
+            continue;
+        }
+        accepted += 1;
+        if accepted >= 2 {
+            frame = Some(payload);
+            break;
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no usable spectrum frame within 5 s");
+
+    let peaks = frame["peaks"].as_array().expect("peaks array");
+    let find = |target_hz: f64| {
+        peaks
+            .iter()
+            .filter_map(|v| v.as_array())
+            .find(|p| (p[0].as_f64().unwrap_or(0.0) - target_hz).abs() < 5.0)
+            .map(|p| p[1].as_f64().unwrap())
+    };
+    let p1 = find(2000.0).expect("peak near 2000 Hz");
+    let p2 = find(9000.0).expect("peak near 9000 Hz");
+    assert!(
+        (p1 - (-6.0)).abs() < 1.5,
+        "2000 Hz peak = {p1:.2} dBFS, want ~-6.0"
+    );
+    assert!(
+        (p2 - (-24.0)).abs() < 1.5,
+        "9000 Hz peak = {p2:.2} dBFS, want ~-24.0"
+    );
+    assert!(
+        p1 > p2,
+        "louder tone (-6 dBFS) must measure above quieter tone (-24 dBFS)"
+    );
+}
+
+#[test]
+fn monitor_spectrum_fake_noise_stays_bounded() {
+    // #170 I4 (bounded output): calibrated broadband noise stimulus must
+    // never produce a post-receiver value above 0 dBFS.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "channels": [0],
+        "interval_ms": 100,
+        "fft_n": 8192,
+        "fake_noise_dbfs": -20.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "monitor_spectrum ack: {r}");
+
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let Some((topic, payload)) = c.recv_pub(2_000) else {
+            break;
+        };
+        if topic != "data"
+            || payload.get("type").and_then(Value::as_str) != Some("visualize/spectrum")
+        {
+            continue;
+        }
+        if let Some(spec) = payload.get("spectrum").and_then(Value::as_array) {
+            if !spec.is_empty() {
+                frame = Some(payload);
+                break;
+            }
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no usable spectrum frame within 5 s");
+    let spec = frame["spectrum"].as_array().expect("spectrum array");
+    let max = spec
+        .iter()
+        .filter_map(Value::as_f64)
+        .fold(f64::MIN, f64::max);
+    // Tolerance rationale: -20 dBFS peak-amplitude noise is 20 dB clear of
+    // 0 dBFS; a single FFT bin can still read a few hundredths of a dB
+    // above nominal from window-leakage constructive summation of random
+    // phase, so 1.0 dB catches a real gain/clamping bug (which produces
+    // multi-dB or +19 dB-class violations, see fixtures-spectrum-hf-garbage)
+    // without flagging that benign noise floor.
+    assert!(
+        max <= 1.0,
+        "noise stimulus produced a value above 0 dBFS + tolerance: max={max}"
+    );
+}
+
+#[test]
 fn monitor_spectrum_emits_scope_frames() {
     // unified.md Phase 0b: the daemon must emit a `visualize/scope`
     // sidecar frame per channel per tick alongside the spectrum frame.

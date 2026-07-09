@@ -49,7 +49,9 @@ fn save(req: ScreenshotRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn unpad(padded: &[u8], width: u32, height: u32, bytes_per_row: u32) -> Vec<u8> {
+/// `pub(crate)`: reused by the headless display-truth harness (#170) to
+/// de-pad a wgpu texture readback the same way a screenshot does.
+pub(crate) fn unpad(padded: &[u8], width: u32, height: u32, bytes_per_row: u32) -> Vec<u8> {
     let row_bytes = (width * 4) as usize;
     let mut out = Vec::with_capacity(row_bytes * height as usize);
     for y in 0..height as usize {
@@ -59,7 +61,8 @@ fn unpad(padded: &[u8], width: u32, height: u32, bytes_per_row: u32) -> Vec<u8> 
     out
 }
 
-fn channel_swap_if_needed(mut rgba: Vec<u8>, format: wgpu::TextureFormat) -> Vec<u8> {
+/// `pub(crate)`: see `unpad` above.
+pub(crate) fn channel_swap_if_needed(mut rgba: Vec<u8>, format: wgpu::TextureFormat) -> Vec<u8> {
     if matches!(
         format,
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb

@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod headless;
 mod render;
 mod theme;
 mod ui;
@@ -22,6 +23,19 @@ fn main() -> anyhow::Result<()> {
     if args.help {
         print_help();
         return Ok(());
+    }
+
+    // Display-truth harness (#170, `ac test software`): run T2/T3 checks
+    // against whatever daemon `--ctrl`/`--connect` point at and exit —
+    // never opens a window, never touches JACK/CPAL, no winit event loop.
+    if args.headless_test {
+        let result = headless::run(&args.ctrl, &args.connect);
+        println!("{}", serde_json::to_string(&result)?);
+        let all_pass = result
+            .get("all_pass")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        std::process::exit(if all_pass { 0 } else { 1 });
     }
 
     let (monitor_channels, n_channels) = if let Some(ref chs) = args.channels {
@@ -141,6 +155,9 @@ struct Args {
     /// for smoother motion. On stacks where `present()` is expensive
     /// (NVIDIA + Vulkan + X11) leave at 30 or drop further.
     continuous_interval: Duration,
+    /// `--headless-test` — run the T2/T3 display-truth harness (#170)
+    /// against `--ctrl`/`--connect` and exit; no window, no winit loop.
+    headless_test: bool,
 }
 
 fn parse_max_fps(s: &str) -> anyhow::Result<Duration> {
@@ -219,6 +236,7 @@ impl Args {
             mode: None,
             present_mode: env_present_mode,
             continuous_interval: env_continuous_interval,
+            headless_test: false,
         };
         let mut it = args.peekable();
         while let Some(arg) = it.next() {
@@ -268,6 +286,9 @@ impl Args {
                 }
                 "--no-persist" => {
                     out.no_persist = true;
+                }
+                "--headless-test" => {
+                    out.headless_test = true;
                 }
                 "--view" => {
                     let v = it
@@ -350,6 +371,8 @@ Options:\n  \
   --output-dir <path>  Screenshot/CSV dir [default: ~/ac-screenshots]\n  \
   --benchmark <secs>   Run for N seconds, print timing summary, exit\n  \
   --no-persist         Don't read/write ~/.config/ac/ui.json this session\n  \
+  --headless-test      Run T2/T3 display-truth checks against --ctrl/--connect, print JSON, exit\n  \
+                       (#170; no window, no winit loop — driven by `ac test software`)\n  \
   --view <mode>        Initial view: spectrum|waterfall|scope|spectrum_ember|goniometer [default: spectrum]\n  \
   --mode <mode>        Start in sweep mode: sweep_frequency|sweep_level\n  \
   --present-mode <m>   wgpu present mode: auto-vsync|auto-no-vsync|fifo|fifo-relaxed|mailbox|immediate\n  \

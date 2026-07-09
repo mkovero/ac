@@ -255,9 +255,41 @@ impl ReconnectState {
     }
 }
 
+/// One tone in a `fake_tones` stimulus request — see `monitor_spectrum`.
+struct FakeTone {
+    freq_hz: f64,
+    level_dbfs: f64,
+}
+
+/// Full-scale dBFS → linear peak amplitude (0 dBFS = 1.0). Used only for
+/// the `--fake-audio` stimulus knobs below (#170 display-truth harness);
+/// real backends never see this.
+fn dbfs_to_amplitude(dbfs: f64) -> f64 {
+    10f64.powf(dbfs / 20.0)
+}
+
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
+    // Fake-audio-only stimulus knobs for the display-truth harness (#170,
+    // `ac test software`). Ignored entirely on real backends — the harness
+    // is required to never touch physical hardware, so these are only
+    // read/applied below when `state.fake_audio` is true.
+    let amplitude = cmd.get("amplitude").and_then(Value::as_f64).unwrap_or(0.0);
+    let fake_tones: Option<Vec<FakeTone>> =
+        cmd.get("fake_tones").and_then(Value::as_array).map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let freq_hz = t.get("freq_hz").and_then(Value::as_f64)?;
+                    let level_dbfs = t.get("level_dbfs").and_then(Value::as_f64)?;
+                    Some(FakeTone {
+                        freq_hz,
+                        level_dbfs,
+                    })
+                })
+                .collect()
+        });
+    let fake_noise_dbfs = cmd.get("fake_noise_dbfs").and_then(Value::as_f64);
 
     let defaults = MonitorParams::default();
     let interval = cmd
@@ -359,6 +391,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 &json!({"cmd":"monitor_spectrum","message":format!("{e}")}),
             );
             return;
+        }
+        // Apply the display-truth harness's stimulus knobs (#170) — fake
+        // backend only, real hardware is never touched by this command.
+        // Precedence when more than one is given: fake_tones > fake_noise_dbfs
+        // > freq_hz/amplitude single-tone (the pre-#170 default path).
+        if fake {
+            if let Some(tones) = &fake_tones {
+                let pairs: Vec<(f64, f64)> = tones
+                    .iter()
+                    .map(|t| (t.freq_hz, dbfs_to_amplitude(t.level_dbfs)))
+                    .collect();
+                eng.set_tone_pair(&pairs);
+            } else if let Some(noise_dbfs) = fake_noise_dbfs {
+                eng.set_broadband_noise(dbfs_to_amplitude(noise_dbfs));
+            } else {
+                eng.set_tone(freq_hz, amplitude);
+            }
         }
         let sr = eng.sample_rate();
         // Per-channel mic-curve FIRs for the loudness path (#104). One
