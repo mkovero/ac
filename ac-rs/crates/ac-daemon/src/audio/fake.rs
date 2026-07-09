@@ -12,6 +12,7 @@
 //! offsets for the measurement and reference channels.
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::time::Duration;
 
@@ -47,6 +48,19 @@ pub struct FakeEngine {
     output_ports: Vec<String>,
     input_port: Option<String>,
     ref_port: Option<String>,
+    /// Per-channel-offset LCG state for `Stimulus::Noise`, keyed on the
+    /// offset's bit pattern (one entry per distinct channel). Persisted
+    /// across `capture_block`/`capture_stereo` calls so a soak driving the
+    /// I5 display-truth invariant (handoff.md) sees a genuine continuing
+    /// pseudorandom stream rather than the same block on every tick — the
+    /// LCG used to be re-seeded to the same fixed state on every single
+    /// call (state was a local var in `make_samples_for`, `&self`), so a
+    /// ring buffer fed one identical block per tick became a periodic
+    /// buffer after wrapping, freezing the FFT output on whatever comb
+    /// spectrum that periodicity produced. Reproducible from a fresh
+    /// engine (same offset -> same starting state) so replay from a
+    /// logged seed still works; see `noise_stream_advances_across_calls`.
+    noise_state: HashMap<u64, u64>,
 }
 
 impl FakeEngine {
@@ -58,6 +72,7 @@ impl FakeEngine {
             output_ports: Vec::new(),
             input_port: None,
             ref_port: None,
+            noise_state: HashMap::new(),
         }
     }
 
@@ -90,7 +105,7 @@ impl FakeEngine {
 
     /// Generate `duration` seconds of synthetic signal for `port`'s channel
     /// (frequency-shifted per `CHANNEL_OFFSET_HZ`, same as pre-#170).
-    fn make_samples_for(&self, port: Option<&str>, duration: f64) -> Vec<f32> {
+    fn make_samples_for(&mut self, port: Option<&str>, duration: f64) -> Vec<f32> {
         let n = (self.sample_rate as f64 * duration) as usize;
         let offset = Self::channel_offset_hz(port);
         let sr = self.sample_rate as f64;
@@ -128,13 +143,22 @@ impl FakeEngine {
                 // pink/white — good enough as a calibrated-amplitude
                 // broadband stimulus for I2, which checks for band-boundary
                 // steps rather than an exact spectral shape.
-                let mut state: u64 = 0x9E3779B97F4A7C15 ^ offset.to_bits();
+                //
+                // State persists in `self.noise_state` across calls (keyed
+                // by the channel offset) so consecutive captures continue
+                // the same pseudorandom stream instead of each replaying an
+                // identical block — see the field doc on `noise_state`.
+                let key = offset.to_bits();
+                let state = self
+                    .noise_state
+                    .entry(key)
+                    .or_insert(0x9E3779B97F4A7C15 ^ key);
                 (0..n)
                     .map(|_| {
-                        state = state
+                        *state = state
                             .wrapping_mul(6364136223846793005)
                             .wrapping_add(1442695040888963407);
-                        let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                        let u = ((*state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
                         (amp * u) as f32
                     })
                     .collect()
@@ -178,7 +202,8 @@ impl AudioEngine for FakeEngine {
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         std::thread::sleep(Duration::from_secs_f64(duration));
-        Ok(self.make_samples_for(self.input_port.as_deref(), duration))
+        let port = self.input_port.clone();
+        Ok(self.make_samples_for(port.as_deref(), duration))
     }
 
     /// Fake loopback: returns `samples` delayed by a fixed number of
@@ -203,8 +228,10 @@ impl AudioEngine for FakeEngine {
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         std::thread::sleep(Duration::from_secs_f64(duration));
         // If no explicit ref_port, reference mirrors the generator (channel 0).
-        let meas = self.make_samples_for(self.input_port.as_deref(), duration);
-        let refch = self.make_samples_for(self.ref_port.as_deref(), duration);
+        let in_port = self.input_port.clone();
+        let ref_port = self.ref_port.clone();
+        let meas = self.make_samples_for(in_port.as_deref(), duration);
+        let refch = self.make_samples_for(ref_port.as_deref(), duration);
         Ok((meas, refch))
     }
 
@@ -343,6 +370,47 @@ mod tests {
             m1 > m2,
             "louder tone (0.5) should measure higher than quieter tone (0.1): {m1} vs {m2}"
         );
+    }
+
+    /// Regression for the frozen/repeated-block bug the I5 soak invariant
+    /// exists to catch (`handoff.md`): before the fix, `Stimulus::Noise`
+    /// re-seeded its LCG to the same fixed state on every `capture_block`
+    /// call, so a caller polling repeatedly (as `monitor_spectrum`'s LF
+    /// ring does) saw the identical block over and over — a ring fed only
+    /// identical blocks becomes periodic once fully wrapped, freezing
+    /// whatever spectrum falls out of that periodicity. Two consecutive
+    /// captures must now differ.
+    #[test]
+    fn noise_stream_advances_across_calls() {
+        let mut eng = FakeEngine::new();
+        eng.set_broadband_noise(0.5);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        let a = eng.capture_block(0.01).unwrap();
+        let b = eng.capture_block(0.01).unwrap();
+        assert_eq!(a.len(), b.len());
+        assert_ne!(
+            a, b,
+            "consecutive noise captures must not repeat the same block"
+        );
+    }
+
+    /// Same starting state (fresh engine, same channel) must reproduce the
+    /// same first block — the soak's "same seed -> same result" acceptance
+    /// criterion (handoff.md) depends on this, not just on the stream
+    /// advancing.
+    #[test]
+    fn noise_stream_is_deterministic_from_a_fresh_engine() {
+        let mut eng1 = FakeEngine::new();
+        eng1.set_broadband_noise(0.5);
+        eng1.reconnect_input("fake:capture_0").unwrap();
+        let first = eng1.capture_block(0.01).unwrap();
+
+        let mut eng2 = FakeEngine::new();
+        eng2.set_broadband_noise(0.5);
+        eng2.reconnect_input("fake:capture_0").unwrap();
+        let replay = eng2.capture_block(0.01).unwrap();
+
+        assert_eq!(first, replay, "same seed must replay identically");
     }
 
     #[test]
