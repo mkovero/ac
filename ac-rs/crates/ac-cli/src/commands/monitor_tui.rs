@@ -26,6 +26,19 @@ pub struct ChannelStats {
     pub floor_db: f32,
 }
 
+/// Wire `spectrum` bins are linear amplitude, not dB — see
+/// `ac_core::visualize::spectrum::spectrum_only`, which normalizes to a
+/// linear magnitude and never takes a log. The linear→dB conversion used
+/// to happen in `ac-ui/src/data/receiver.rs` before that crate was
+/// detached (handoff.md A2); it hasn't been re-homed anywhere since, so
+/// every direct consumer of `spectrum` must do it locally. Clamped at
+/// 1e-12 so a silent/zero bin converts to a finite floor instead of
+/// `-inf`, matching the floor convention in
+/// `ac_core::visualize::aggregate`'s `to_dbfs` test helper.
+fn linear_to_dbfs(amp: f64) -> f32 {
+    (20.0 * amp.max(1e-12).log10()) as f32
+}
+
 /// Parse one daemon `data` frame into per-channel stats. Returns `None`
 /// for non-spectrum frames or malformed payloads. Pure — easy to unit-
 /// test without spinning up ZMQ or a daemon.
@@ -40,13 +53,14 @@ pub fn stats_from_frame(value: &Value) -> Option<ChannelStats> {
         return None;
     }
 
-    // Floor: minimum finite dB across the spectrum. Filters NaN/-inf
-    // bins so an empty/mute channel doesn't peg the readout to -inf.
+    // Floor: minimum finite dB across the spectrum, after converting each
+    // linear-amplitude bin. Filters NaN bins first so an empty/mute
+    // channel doesn't peg the readout via a spuriously "quiet" NaN.
     let floor_db = spec_arr
         .iter()
         .filter_map(|v| v.as_f64())
-        .map(|x| x as f32)
         .filter(|x| x.is_finite())
+        .map(linear_to_dbfs)
         .fold(f32::INFINITY, f32::min);
     let floor_db = if floor_db.is_finite() {
         floor_db
@@ -54,9 +68,11 @@ pub fn stats_from_frame(value: &Value) -> Option<ChannelStats> {
         -200.0
     };
 
-    // Peak: prefer the daemon's THD-aware fundamental when present;
-    // otherwise scan the spectrum. The fundamental is meaningful only
-    // when `freq_hz` is also reported (the analysis succeeded).
+    // Peak: prefer the daemon's THD-aware fundamental when present
+    // (already dB, sent as-is); otherwise scan the spectrum, converting
+    // each linear-amplitude bin before comparing. The fundamental is
+    // meaningful only when `freq_hz` is also reported (the analysis
+    // succeeded).
     let fundamental_dbfs = value.get("fundamental_dbfs").and_then(|v| v.as_f64());
     let fundamental_freq = value.get("freq_hz").and_then(|v| v.as_f64());
 
@@ -65,12 +81,15 @@ pub fn stats_from_frame(value: &Value) -> Option<ChannelStats> {
         (d as f32, f as f32)
     } else {
         let mut best = (f32::NEG_INFINITY, 0.0_f32);
-        for (db_v, freq_v) in spec_arr.iter().zip(freqs_arr.iter()) {
-            let (Some(db), Some(freq)) = (db_v.as_f64(), freq_v.as_f64()) else {
+        for (amp_v, freq_v) in spec_arr.iter().zip(freqs_arr.iter()) {
+            let (Some(amp), Some(freq)) = (amp_v.as_f64(), freq_v.as_f64()) else {
                 continue;
             };
-            let db = db as f32;
-            if db.is_finite() && db > best.0 {
+            if !amp.is_finite() {
+                continue;
+            }
+            let db = linear_to_dbfs(amp);
+            if db > best.0 {
                 best = (db, freq as f32);
             }
         }
@@ -232,12 +251,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn frame(channel: u32, fundamental: Option<(f64, f64)>, freqs: &[f64], spec: &[f64]) -> Value {
+    /// Fixtures below are authored in dB for readability; `spec_db` is
+    /// converted to the linear amplitude the wire actually carries (see
+    /// `linear_to_dbfs`) before being embedded, so the round-trip through
+    /// `stats_from_frame` recovers the same numbers the test asserts on.
+    fn frame(
+        channel: u32,
+        fundamental: Option<(f64, f64)>,
+        freqs: &[f64],
+        spec_db: &[f64],
+    ) -> Value {
+        let spec_amp: Vec<f64> = spec_db.iter().map(|&db| 10f64.powf(db / 20.0)).collect();
         let mut v = json!({
             "type": "visualize/spectrum",
             "channel": channel,
             "freqs": freqs,
-            "spectrum": spec,
+            "spectrum": spec_amp,
         });
         if let Some((freq, db)) = fundamental {
             v["freq_hz"] = json!(freq);

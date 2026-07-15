@@ -444,7 +444,15 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             })
             .collect();
         let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
-        let mut xruns_total = 0u32;
+        // `eng.xruns()` is already a cumulative count for this engine
+        // session (see `jack_backend.rs`'s `SharedState::xruns`), so every
+        // read below assigns rather than accumulates — summing it across
+        // per-tick, per-channel reads would multiply a handful of real
+        // xruns into thousands over a long monitor session. Always
+        // assigned before use (each analysis-mode branch below reads
+        // `eng.xruns()` before any frame referencing `xruns_total` is
+        // built), so no dead initial value is needed.
+        let mut xruns_total: u32;
         // Per-tick monotonic counter shared across all channels in the
         // tick. Phase 0b: the UI's Goniometer / PhaseScope3D pair L and
         // R scope frames by `frame_idx`, so it MUST increment exactly
@@ -735,7 +743,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             return;
                         }
                     };
-                    xruns_total += eng.xruns();
+                    xruns_total = eng.xruns();
                     // Feed the raw capture into the loudness meter before
                     // any downstream consumers touch it.
                     push_loudness_with_optional_fir(
@@ -930,7 +938,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             return;
                         }
                     };
-                    xruns_total += eng.xruns();
+                    xruns_total = eng.xruns();
                     push_loudness_with_optional_fir(
                         &mut loudness[idx],
                         &mut loudness_firs[idx],
@@ -1027,7 +1035,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             return;
                         }
                     };
-                    xruns_total += eng.xruns();
+                    xruns_total = eng.xruns();
                     push_loudness_with_optional_fir(
                         &mut loudness[idx],
                         &mut loudness_firs[idx],
@@ -1149,7 +1157,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                     }
                 };
-                xruns_total += eng.xruns();
+                xruns_total = eng.xruns();
                 // Loudness runs on the raw capture, independent of the
                 // FFT-N sliding ring.
                 push_loudness_with_optional_fir(
