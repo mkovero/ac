@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ac-core", "crates/ac-daemon", "crates/ac-ui", "crates/ac-cli"]
+members = ["crates/ac-core", "crates/ac-daemon", "crates/ac-cli"]
 resolver = "2"
 
 # Release build with symbols for samply / perf. Use via:

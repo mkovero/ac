@@ -153,8 +153,9 @@ accumulator and the LRA histogram; doesn't flush the K-weighting filter
 state (that's per-channel, not per-measurement).
 
 UI: top-right status row under the fractional-octave overlay. Bound to
-`Shift+L` (reset) — confirm no collision in `ac-ui/src/app/input.rs`
-before wiring.
+`Shift+L` (reset) — confirm no collision in the input handler before
+wiring. (Historical note: this was the now-detached ac-ui's input
+handler — see `attic/ac-ui`.)
 
 ## Test vectors
 

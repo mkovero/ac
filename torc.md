@@ -1,5 +1,9 @@
 # RC-UX-PLAN — release-candidate UX tightening for ac-ui / ac-cli
 
+**SUPERSEDED.** ac-ui was deprecated and detached (see `attic/ac-ui`,
+handoff.md). Everything below scoped to the GPU UI is moot; kept as a
+historical record only — do not pick up unimplemented items from here.
+
 Status: planning — to be sliced into 11 GitHub issues, one PR each.
 
 ## 0. Decisions (binding)

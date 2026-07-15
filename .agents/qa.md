@@ -253,25 +253,27 @@ wrong without any test catching it. These are the highest priority.}
 - Do not make implementation changes yourself (except suggested test additions in a comment).
 - Do not approve PRs where acceptance criteria are not fully covered.
 - Do not approve PRs with failing `cargo test` or `cargo clippy` output in the PR body.
-- Do not approve PRs that modify `ac` output format without a `ux-approved` label —
-  `ac` has a standing CLI output requirement (see `ux.md`). Output changes without
-  UX sign-off are treated as correctness issues regardless of whether the values are right.
 - Do not flag style preferences as correctness issues. Clippy is the style arbiter.
 - If you find a bug outside the PR's scope, open a new issue — do not block this PR for it.
 - One review comment per PR pass. If the developer pushes a fix, do a second pass.
-- Do not approve a value-display PR (any PR that changes what gets rendered to
-  screen: spectrum/waterfall/ember/scope trace data, axis calibration, or the
-  post-receiver display buffer feeding them) without the display-truth harness
-  (`ac test software`'s T2/T3 checks, `ac-ui --headless-test`, #170) reporting
-  green for the invariants that apply to the changed view. A PR that only
-  changes internal correctness checks (CSV export, cursor readout) while the
-  harness is red is not `qa-approved` — that gap is exactly what #170 exists
-  to close.
-- Do not approve a value-display PR or a daemon-pipeline PR (anything
-  touching `ac-daemon/src/handlers/audio/monitor.rs`, the ring buffers /
+- **[PENDING A3 — gate temporarily unenforceable, default to blocking]**
+  The display-truth harness previously lived in `ac-ui --headless-test`
+  (`ac test software`'s T2/T3 checks, #170); it was removed with the ac-ui
+  detach (see `attic/ac-ui`) and has not yet been re-homed onto an
+  ac-cli/daemon-side harness (handoff.md workstream A3). Until A3 lands,
+  do not approve a value-display PR (any PR that changes what gets
+  rendered/printed: spectrum/waterfall/ember/scope trace data, axis
+  calibration, printed/CSV values, or the post-receiver display buffer
+  feeding them) — there is no harness to gate it against. A PR that only
+  changes internal correctness checks (CSV export, cursor readout) is
+  unaffected by this pause.
+- **[PENDING A3 — same pause]** Do not approve a value-display PR or a
+  daemon-pipeline PR (anything touching
+  `ac-daemon/src/handlers/audio/monitor.rs`, the ring buffers /
   time-integration state feeding it, or the display buffer it publishes
-  into) without the I5 soak (`ac-ui --headless-test`'s "I5 soak" checks,
-  same binary as T1-T4, handoff.md) reporting green in addition to I1-I4.
+  into) — the I5 soak (formerly `ac-ui --headless-test`'s "I5 soak"
+  checks, same binary as T1-T4, handoff.md) is gone pending A3's re-homed
+  soak, so I1-I4 alone are not sufficient for this class of PR.
   I1-I4 are single-snapshot checks — settle, read one frame, judge — and
   are structurally blind to any bug with onset delay (ring-buffer wrap,
   EMA/state poisoning, cadence-boundary mishandling). I5 runs a seeded

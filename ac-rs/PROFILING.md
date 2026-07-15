@@ -11,7 +11,6 @@ measurable wins are.
 | `samply` | Sampling profiler. Produces a Firefox Profiler JSON and opens `profiler.firefox.com`. |
 | `cargo bench` / `cargo run --example bench_*` | Micro-benches for Tier 1 / Tier 2 hot paths. |
 | `scripts/profile-samply.sh` | Full daemon profile with synthetic workload over ZMQ. |
-| `scripts/profile-ui-samply.sh` | Full ac-ui profile with synthetic backend. |
 
 ### One-time host setup
 
@@ -21,11 +20,10 @@ echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 echo 'kernel.perf_event_paranoid = 1' | sudo tee /etc/sysctl.d/99-perf.conf
 ```
 
-### Profiling the daemon / UI
+### Profiling the daemon
 
 ```
 scripts/profile-samply.sh 20
-scripts/profile-ui-samply.sh 20
 samply load /tmp/ac-profile-<ts>.json.gz
 ```
 
@@ -263,20 +261,6 @@ not CPU-bound anywhere on current hardware.
 The expensive calls (`h1_estimate`, `Filterbank::process`, long-window
 `analyze`) are per-sweep, not per-tick, so their budget is human-scale
 (~seconds per measurement).
-
-## UI (`ac-ui`)
-
-Profile via `scripts/profile-ui-samply.sh`. Synthetic producer at
-`CHANNELS × BINS @ RATE` Hz drives a deterministic workload so runs are
-comparable. Most interesting viewports in order of CPU weight:
-
-1. `waterfall` — wgpu texture streams + per-frame palette lookup.
-2. `matrix` — repeated `egui::Ui::with_clip_rect` over every channel cell.
-3. `cwt` — same producer as `waterfall`; extra cost is the `fractional_octave`
-   aggregation optionally layered on top (keys `Shift+O`, `A`, `I`).
-
-No per-frame latency numbers tabulated here yet — add them once there's a
-reason to optimize a specific view.
 
 ## Reading symbolicated profiles offline
 

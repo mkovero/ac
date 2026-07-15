@@ -80,8 +80,6 @@ Always apply exactly one category label:
 
 Then apply the routing label:
 - If needs architect review → `needs-design`
-- If touches any output format, display field, or CLI output of `ac`, `thd_tool`, or `ds` → `needs-ux`
-  (this is not optional — `ac` CLI output has a standing design requirement, see `ux.md`)
 - Otherwise → `ready-to-implement`
 
 If the issue is an epic (multiple independent pieces of work) → `epic`.

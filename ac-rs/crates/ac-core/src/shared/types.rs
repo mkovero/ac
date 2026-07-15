@@ -71,6 +71,6 @@ pub struct CwtFrame {
     pub frequencies: Vec<f32>,
 
     /// Monotonic timestamp in nanoseconds; convention matches the other
-    /// ac-ui frame timestamps.
+    /// DATA frame timestamps (see ZMQ.md).
     pub timestamp: u64,
 }

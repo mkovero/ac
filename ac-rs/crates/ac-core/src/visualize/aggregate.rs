@@ -331,8 +331,10 @@ pub fn spectrum_to_columns_multiband_wire(
 mod tests {
     use super::*;
 
-    /// `20*log10(v)` with the receiver's own floor (`ac-ui/data/receiver.rs`)
-    /// so tests reason in the dBFS domain the field actually observes,
+    /// `20*log10(v)` with the same floor as the wire's single genuine
+    /// linear-to-dB conversion point (formerly `ac-ui/data/receiver.rs`,
+    /// pending re-home onto ac-cli's receive path — handoff.md A2) so
+    /// tests reason in the dBFS domain the field actually observes,
     /// without duplicating the display conversion's own correctness.
     fn to_dbfs(v: f32) -> f32 {
         20.0 * v.max(1e-12).log10()

@@ -303,8 +303,9 @@ Emitted by `monitor_spectrum` once per channel per tick, **alongside**
 the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
 (not instead of it). Carries raw f32 audio samples — no calibration,
 no mic-curve, just the unmodified per-tick capture truncated to the
-newest 2048 samples. Consumed by `ac-ui`'s Goniometer / PhaseScope3D
-trajectory views (`unified.md` Phase 0b, resolves §9 OQ7).
+newest 2048 samples. Intended for a client-side goniometer / trajectory
+view (`unified.md` Phase 0b, resolves §9 OQ7); no current client
+subscribes to it since the ac-ui detach (see `attic/ac-ui`).
 
 ```json
 {
