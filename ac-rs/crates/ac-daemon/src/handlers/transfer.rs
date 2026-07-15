@@ -79,6 +79,33 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
 
+    // Per-meas-channel SPL session params (D10 — static for the session,
+    // set once here, not live-toggleable). `weighting`'s wire contract
+    // (handoff: transfer-frame-v2 M0) is a strict 3-way A/C/Z — no
+    // "off" — so `WeightingCurve::from_tag`'s existing rejection of
+    // anything else (including "off") is exactly the validation wanted.
+    let weighting_tag = cmd.get("weighting").and_then(Value::as_str).unwrap_or("Z");
+    let weighting = match ac_core::visualize::weighting_curves::WeightingCurve::from_tag(
+        weighting_tag,
+    ) {
+        Some(w) => w,
+        None => {
+            return json!({"ok": false, "error": format!("weighting must be one of A, C, Z, got '{weighting_tag}'")})
+        }
+    };
+    let integration_tag = cmd
+        .get("integration")
+        .and_then(Value::as_str)
+        .unwrap_or("fast")
+        .to_ascii_lowercase();
+    let integration_tau_s = match integration_tag.as_str() {
+        "fast" => ac_core::visualize::time_integration::TAU_FAST_S,
+        "slow" => ac_core::visualize::time_integration::TAU_SLOW_S,
+        _ => {
+            return json!({"ok": false, "error": format!("integration must be 'fast' or 'slow', got '{integration_tag}'")})
+        }
+    };
+
     let cfg = state.cfg.lock().unwrap().clone();
     let capture_ports = super::cached_capture_ports(state);
 
@@ -178,6 +205,21 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         })
         .collect();
 
+    // Full per-pair calibration (voltage / SPL / mic-curve) for
+    // `meas_spectrum`/`ref_spectrum`/`spl`/`cal_tags` (handoff:
+    // transfer-frame-v2 M0). Kept side by side with `pair_meas_curves`
+    // above (mic_response only, feeds the existing mag/phase/re/im
+    // correction) rather than merged, so that path stays untouched
+    // (additive-only discipline).
+    let pair_meas_cals: Vec<Option<Calibration>> = pairs
+        .iter()
+        .map(|&(meas, _)| Calibration::load(out_ch, meas, None).ok().flatten())
+        .collect();
+    let pair_ref_cals: Vec<Option<Calibration>> = pairs
+        .iter()
+        .map(|&(_, r)| Calibration::load(out_ch, r, None).ok().flatten())
+        .collect();
+
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -210,6 +252,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
 
         let sr = eng.sample_rate();
+        // Fixed log-column grid for `meas_spectrum`/`ref_spectrum` (D18) —
+        // computed once since it's constant for the worker's lifetime
+        // (sr never changes mid-session); `spectrum_to_columns_wire`'s
+        // returned freqs are then identical on every tick by construction
+        // (AC #1).
+        let spec_f_min = 20.0_f64;
+        let spec_f_max = sr as f64 / 2.0;
+        let spec_n_columns =
+            ac_core::visualize::aggregate::transfer_spectrum_n_columns(spec_f_min, spec_f_max);
         // Sliding window: keep the last `target_total` samples per unique
         // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
         // h1_estimate's internal Welch settings. chunk_secs matches the
@@ -237,6 +288,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // work from ~17 ms → ~3 ms and takes the refresh rate from choppy
         // ~8.5 Hz to the capture-interval-limited ~10 Hz.
         let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
+
+        // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
+        // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
+        // channel has no SPL calibration layer; `spl` stays `null` for
+        // that pair's whole session, matching `spl_offsets` in
+        // `monitor.rs`. Session-static per D10, so built once here
+        // rather than re-checked per tick.
+        let mut spl_integrators: Vec<Option<ac_core::visualize::time_integration::EmaIntegrator>> =
+            pair_meas_cals
+                .iter()
+                .map(|c| {
+                    c.as_ref().and_then(Calibration::spl_offset_db).map(|_| {
+                        ac_core::visualize::time_integration::EmaIntegrator::new(
+                            integration_tau_s,
+                            1,
+                        )
+                    })
+                })
+                .collect();
+        let mut spl_last_ts: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
         while !stop.load(Ordering::Relaxed) {
             let bufs = match eng.capture_multi(chunk_secs) {
@@ -299,13 +370,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // computed from the same H₁ result). flat_map flattens to
             // one Vec<Value> per filter_map; overall Vec<Vec<Value>>
             // is then chained into the per-message send loop below.
-            let messages: Vec<Vec<Value>> = pairs
+            let messages: Vec<(usize, Vec<Value>, Option<f64>)> = pairs
                 .par_iter()
+                .enumerate()
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
                 .zip(pair_meas_curves.par_iter())
+                .zip(pair_meas_cals.par_iter())
+                .zip(pair_ref_cals.par_iter())
                 .filter_map(
-                    |(((&(meas_ch, ref_ch), &(mi, ri)), &delay_opt), curve_opt)| {
+                    |((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         let delay = delay_opt.unwrap_or(0);
@@ -368,21 +442,132 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         }
                         let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
 
+                        // Calibrated per-channel spectra (D18, handoff:
+                        // transfer-frame-v2 M0). Full-resolution
+                        // `result.meas_amp`/`result.ref_amp` (NOT the
+                        // 2000-pt indices above — same full-res-then-
+                        // aggregate split the IR sidecar below already
+                        // uses) so the mic-curve's per-freq correction is
+                        // applied at native Welch-bin resolution, then
+                        // `spectrum_to_columns_wire` band-power-aggregates
+                        // to the fixed grid — same aggregator, same tests,
+                        // the monitor `spectrum` frame already uses.
+                        let mut mc_meas_amp = result.meas_amp.clone();
+                        if mc_enabled {
+                            if let Some(curve) = curve_opt.as_ref() {
+                                for (amp, &f) in
+                                    mc_meas_amp.iter_mut().zip(result.freqs.iter())
+                                {
+                                    let corr_db = curve.correction_at(f as f32) as f64;
+                                    *amp *= 10.0_f64.powf(-corr_db / 20.0);
+                                }
+                            }
+                        }
+                        // `spl` is computed from the mic-corrected (acoustic
+                        // truth) spectrum, before voltage-cal scaling below
+                        // — SPL derives from the dBFS + spl_offset_db model
+                        // (Calibration::spl_offset_db), independent of the
+                        // electrical Vrms voltage-cal layer.
+                        let spl_raw: Option<f64> = meas_cal_opt
+                            .as_ref()
+                            .and_then(Calibration::spl_offset_db)
+                            .map(|offset| {
+                                ac_core::visualize::spl_level::weighted_broadband_dbfs(
+                                    &mc_meas_amp,
+                                    &result.freqs,
+                                    weighting,
+                                ) + offset
+                            });
+
+                        // Voltage cal (D3): a constant per-channel scale
+                        // factor, so it commutes with column aggregation
+                        // (`sqrt(Σ(c·x)²) = c·sqrt(Σx²)`) — applied here,
+                        // post mic-curve, pre-aggregation.
+                        let meas_amp_wire = {
+                            let mut a = mc_meas_amp;
+                            if let Some(scale) =
+                                meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in)
+                            {
+                                for v in a.iter_mut() {
+                                    *v *= scale;
+                                }
+                            }
+                            a
+                        };
+                        let ref_amp_wire = {
+                            let mut a = result.ref_amp.clone();
+                            if let Some(scale) =
+                                ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in)
+                            {
+                                for v in a.iter_mut() {
+                                    *v *= scale;
+                                }
+                            }
+                            a
+                        };
+                        let (meas_spectrum, spec_freqs) =
+                            ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                                &meas_amp_wire,
+                                sr as f64,
+                                spec_f_min,
+                                spec_f_max,
+                                spec_n_columns,
+                            );
+                        let (ref_spectrum, _) =
+                            ac_core::visualize::aggregate::spectrum_to_columns_wire(
+                                &ref_amp_wire,
+                                sr as f64,
+                                spec_f_min,
+                                spec_f_max,
+                                spec_n_columns,
+                            );
+
+                        // Per-channel provenance tags (tier-framing
+                        // labelled-tag rules, #97/#98 vocabulary):
+                        // "on"/"none" for voltage and SPL (no daemon-side
+                        // enable toggle for either, unlike mic-curve);
+                        // "on"/"off"/"none" for mic_curve via the existing
+                        // `mic_correction_tag`. Ref leg's mic_curve is
+                        // structurally always "none" — a ref-channel mic
+                        // curve is refused at request time, above.
+                        let ref_curve_loaded = ref_cal_opt
+                            .as_ref()
+                            .is_some_and(|c| c.mic_response.is_some());
+                        let cal_tags = json!({
+                            "meas": {
+                                "voltage": if meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+                                "spl":     if meas_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+                                "mic_curve": mc_tag,
+                            },
+                            "ref": {
+                                "voltage": if ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+                                "spl":     if ref_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+                                "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
+                            },
+                        });
+
                         let transfer_msg = json!({
-                            "type":           "transfer_stream",
-                            "cmd":            "transfer_stream",
-                            "freqs":          freqs,
-                            "magnitude_db":   mag,
-                            "phase_deg":      phase,
-                            "coherence":      coh,
-                            "re":             re,
-                            "im":             im,
-                            "delay_samples":  result.delay_samples,
-                            "delay_ms":       result.delay_ms,
-                            "ref_channel":    ref_ch,
-                            "meas_channel":   meas_ch,
-                            "sr":             sr,
-                            "mic_correction": mc_tag,
+                            "type":            "transfer_stream",
+                            "cmd":             "transfer_stream",
+                            "freqs":           freqs,
+                            "magnitude_db":    mag,
+                            "phase_deg":       phase,
+                            "coherence":       coh,
+                            "re":              re,
+                            "im":              im,
+                            "delay_samples":   result.delay_samples,
+                            "delay_ms":        result.delay_ms,
+                            "ref_channel":     ref_ch,
+                            "meas_channel":    meas_ch,
+                            "sr":              sr,
+                            "mic_correction":  mc_tag,
+                            "spec_freqs":      spec_freqs,
+                            "meas_spectrum":   meas_spectrum,
+                            "ref_spectrum":    ref_spectrum,
+                            "spl":             Value::Null,
+                            "spl_weighting":   weighting.tag(),
+                            "spl_integration": integration_tag.as_str(),
+                            "cal_tags":        cal_tags,
                         });
                         // Phase 4b: IR sidecar from full-resolution
                         // complex H (NOT the downsampled re/im above —
@@ -435,11 +620,28 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         if let Some(m) = ir_msg {
                             out.push(m);
                         }
-                        Some(out)
+                        Some((pos, out, spl_raw))
                     },
                 )
                 .collect();
-            for batch in messages {
+            for (pos, mut batch, spl_raw) in messages {
+                // Sequential, indexed by original pair position — the
+                // EMA integrator holds mutable per-pair state that can't
+                // safely live inside the parallel closure above (#pos is
+                // preserved through `filter_map` via `enumerate()` at the
+                // top of the chain, not the post-filter Vec position).
+                if let (Some(raw), Some(integ)) = (spl_raw, spl_integrators[pos].as_mut()) {
+                    let now = std::time::Instant::now();
+                    let dt = spl_last_ts[pos]
+                        .map(|t| now.duration_since(t).as_secs_f64())
+                        .unwrap_or(chunk_secs)
+                        .max(1e-6);
+                    spl_last_ts[pos] = Some(now);
+                    let integrated = integ.update(&[raw], dt)[0];
+                    if let Some(first) = batch.first_mut() {
+                        first["spl"] = json!(integrated);
+                    }
+                }
                 for msg in batch {
                     send_pub(&pub_tx, "data", &msg);
                 }

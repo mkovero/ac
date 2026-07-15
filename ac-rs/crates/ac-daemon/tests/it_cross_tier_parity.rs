@@ -455,3 +455,110 @@ fn plot_fundamental_dbfs_reflects_mic_curve_at_test_freq() {
          (uncorrected={fund_uncorrected:.2}, corrected={fund_corrected:.2})"
     );
 }
+
+/// #99 extension (handoff: transfer-frame-v2 M0, AC #4): the same fake
+/// channel-0 stimulus (1 kHz @ 0.1 peak amplitude, `audio/fake.rs`'s
+/// fallback default — both `monitor_spectrum`'s implicit `set_tone(1000,
+/// 0.0)` and `transfer_stream`'s untouched-stimulus passive path hit the
+/// same "no amplitude set" branch) must read the same physical level
+/// whether observed through `monitor_spectrum`'s `visualize/spectrum`
+/// frame or `transfer_stream`'s new `meas_spectrum` field — two
+/// independent aggregation code paths (`DEFAULT_WIRE_COLUMNS`=4096 vs the
+/// coarser 48-cols/octave transfer grid) over the same underlying signal.
+///
+/// Tolerance derivation: the two paths use different FFT lengths
+/// (monitor's default `fft_n` vs transfer's fixed `nperseg=sr`), so 1 kHz
+/// isn't bin-aligned on both — monitor pays a Hann scalloping loss
+/// (measured ≈0.6 dB) on its non-bin-aligned nearest bin, while
+/// transfer's exact bin-aligned tone instead sums its own Hann 3-tap
+/// leakage into ±1 Hz neighbours at transfer's coarser column width
+/// (measured ≈1.76 dB, see `transfer_stream_meas_spectrum_amplitude_truth`
+/// in `it_protocol.rs` for the derivation). These are different, real
+/// artifacts of each path's own geometry, not a shared physical
+/// discrepancy — 3.0 dB clears their combined ≈2.4 dB with margin while
+/// still catching a several-dB normalization or calibration regression.
+#[test]
+fn parity_transfer_meas_spectrum_matches_monitor_spectrum_level() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let m_freqs: Vec<f64> = mf["freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let m_spec: Vec<f64> = mf["spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (m_peak_i, &m_peak_amp) = m_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty monitor spectrum");
+    let m_peak_hz = m_freqs[m_peak_i];
+    let m_peak_dbfs = 20.0 * m_peak_amp.max(1e-12).log10();
+    assert!(
+        (m_peak_hz - 1000.0).abs() < 20.0,
+        "monitor peak at {m_peak_hz} Hz, expected ~1000 Hz"
+    );
+
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let mut tframe: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                tframe = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let tframe = tframe.expect("no transfer_stream frame within 10 s");
+
+    let t_freqs: Vec<f64> = tframe["spec_freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let t_spec: Vec<f64> = tframe["meas_spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (t_peak_i, &t_peak_amp) = t_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty meas_spectrum");
+    let t_peak_hz = t_freqs[t_peak_i];
+    let t_peak_dbfs = 20.0 * t_peak_amp.max(1e-12).log10();
+    assert!(
+        (t_peak_hz - 1000.0).abs() < 50.0,
+        "transfer peak at {t_peak_hz} Hz, expected ~1000 Hz"
+    );
+
+    let delta = (m_peak_dbfs - t_peak_dbfs).abs();
+    assert!(
+        delta < 3.0,
+        "cross-path level mismatch: monitor={m_peak_dbfs:.2} dBFS \
+         transfer={t_peak_dbfs:.2} dBFS (Δ={delta:.2})"
+    );
+}

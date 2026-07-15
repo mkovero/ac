@@ -28,6 +28,18 @@ pub struct TransferResult {
     pub im: Vec<f64>,
     pub delay_samples: i64,
     pub delay_ms: f64,
+    /// Reference-channel linear amplitude spectrum, parallel to `freqs` —
+    /// `sqrt(Gxx)` normalized to the same peak-amplitude convention as
+    /// `visualize::spectrum::spectrum_only` (handoff: transfer-frame-v2
+    /// M0). A full-scale on-bin sine reads ≈1.0 here, matching the
+    /// monitor path, so the two are cross-comparable (I-C). Uncalibrated
+    /// — voltage cal / mic curve are applied by the caller, same as
+    /// `magnitude_db` today.
+    pub ref_amp: Vec<f64>,
+    /// Measurement-channel linear amplitude spectrum, parallel to `freqs`
+    /// — `sqrt(Gyy)`, same normalization and calibration state as
+    /// `ref_amp`.
+    pub meas_amp: Vec<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +273,20 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
         })
         .collect();
 
+    // Peak-amplitude normalization matching `spectrum_only`'s convention
+    // (handoff: transfer-frame-v2 M0, decision 0): `gxx`/`gyy` are raw
+    // `|FFT|²` averaged across Welch segments with no window-compensation.
+    // `wc` (Hann coherent gain, mean of the window) and `norm = (nperseg/2)
+    // · wc` are the same quantities `with_hann_window`/`spectrum_only` use
+    // (`shared/fft_cache.rs`) — recomputed locally here (not imported)
+    // because `welch_all` already built its own identical Hann window
+    // above and this stays a pure post-processing step with zero risk to
+    // the existing (tested) magnitude_db/phase_deg/re/im/coherence outputs.
+    let wc = window.iter().sum::<f64>() / nperseg as f64;
+    let norm = (nperseg as f64 / 2.0) * wc;
+    let ref_amp: Vec<f64> = gxx.iter().map(|&p| p.max(0.0).sqrt() / norm).collect();
+    let meas_amp: Vec<f64> = gyy.iter().map(|&p| p.max(0.0).sqrt() / norm).collect();
+
     TransferResult {
         freqs,
         magnitude_db,
@@ -270,6 +296,8 @@ fn h1_estimate_core(r: &[f64], m: &[f64], sr: u32, delay_samples: i64) -> Transf
         im,
         delay_samples,
         delay_ms,
+        ref_amp,
+        meas_amp,
     }
 }
 
@@ -366,6 +394,76 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         let dist = Normal::new(0.0, amplitude).unwrap();
         (0..n).map(|_| dist.sample(&mut rng) as f32).collect()
+    }
+
+    // ---- Amplitude normalization (handoff: transfer-frame-v2 M0, decision 0) ----
+
+    /// A full-scale on-bin sine must read amplitude ≈1.0 in both
+    /// `meas_amp` and `ref_amp` — the same peak-amplitude convention
+    /// `spectrum_only` uses, so the two paths are cross-comparable (I-C).
+    /// Without the missing window-compensation this reads far above 1.0
+    /// (raw `|FFT|²` sum, no `÷((nperseg/2)·wc)²`).
+    #[test]
+    fn meas_and_ref_amp_match_spectrum_only_convention_on_bin_tone() {
+        use crate::visualize::spectrum::spectrum_only;
+        let f0 = 1_000.0_f64; // exact bin at 1 Hz/bin (nperseg == SR)
+        let tone: Vec<f32> = (0..N)
+            .map(|i| (2.0 * PI * f0 * i as f64 / SR as f64).sin() as f32)
+            .collect();
+        let r = h1_estimate(&tone, &tone, SR);
+        let bin = f0 as usize;
+
+        assert!(
+            (r.meas_amp[bin] - 1.0).abs() < 0.02,
+            "meas_amp[{bin}] = {} (expected ~1.0)",
+            r.meas_amp[bin]
+        );
+        assert!(
+            (r.ref_amp[bin] - 1.0).abs() < 0.02,
+            "ref_amp[{bin}] = {} (expected ~1.0)",
+            r.ref_amp[bin]
+        );
+
+        // Cross-path parity (I-C): a single-block spectrum_only reading of
+        // the same tone lands on the same amplitude scale as the
+        // Welch-averaged meas_amp.
+        let (spec, _freqs) = spectrum_only(&tone[..SR as usize], SR);
+        assert!(
+            (spec[bin] - r.meas_amp[bin]).abs() < 0.02,
+            "spectrum_only[{bin}]={} vs meas_amp[{bin}]={}",
+            spec[bin],
+            r.meas_amp[bin]
+        );
+    }
+
+    #[test]
+    fn amp_off_tone_bins_are_near_silence() {
+        let f0 = 1_000.0_f64;
+        let tone: Vec<f32> = (0..N)
+            .map(|i| (2.0 * PI * f0 * i as f64 / SR as f64).sin() as f32)
+            .collect();
+        let r = h1_estimate(&tone, &tone, SR);
+        let bin = f0 as usize;
+        for k in [bin - 100, bin + 100, 20, 20_000] {
+            assert!(
+                r.meas_amp[k] < 0.05,
+                "meas_amp[{k}] = {} leaked tone energy",
+                r.meas_amp[k]
+            );
+            assert!(
+                r.ref_amp[k] < 0.05,
+                "ref_amp[{k}] = {} leaked tone energy",
+                r.ref_amp[k]
+            );
+        }
+    }
+
+    #[test]
+    fn amp_arrays_parallel_to_freqs() {
+        let sig = white_noise(N, 0.5, 7);
+        let r = h1_estimate(&sig, &sig, SR);
+        assert_eq!(r.ref_amp.len(), r.freqs.len());
+        assert_eq!(r.meas_amp.len(), r.freqs.len());
     }
 
     // ---- capture_duration ----
