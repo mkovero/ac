@@ -466,6 +466,69 @@ mod tests {
         assert_eq!(r.meas_amp.len(), r.freqs.len());
     }
 
+    /// AC #3 (band-power N-independence), the axis actually variable in
+    /// this estimator: `nperseg` is pinned to `sr` in `h1_estimate_core`
+    /// (1 Hz bins always), so "N" here means **Welch segment count**
+    /// (`(len - nperseg) / step + 1`), which varies with capture length.
+    /// Same broadband noise (same seed ⇒ same underlying signal, just
+    /// truncated to different lengths) fed at K=2 segments (1.5 s, the
+    /// minimum above the 1-segment warm-up floor) vs K=8 segments (4.5 s)
+    /// must integrate to the same broadband level in a sub-band —
+    /// checked as **one integrated level across ~1800 bins**, not
+    /// per-column (per-column would be flaky/vacuous: bin→column
+    /// assignment doesn't even change with segment count, only the
+    /// per-bin averaging noise does).
+    ///
+    /// Tolerance derivation: a single periodogram bin's power estimate
+    /// averaged over K segments has relative variance ≈1/K (chi²(2K)/2K).
+    /// Summing power over ~1800 roughly-independent bins in the
+    /// 200–2000 Hz sub-band further reduces the *total*'s relative
+    /// variance by ≈1/√1800 (central-limit-like reduction across bins;
+    /// 50 % Welch overlap correlates adjacent segments but not
+    /// far-apart frequency bins). Combined expected relative std ≈
+    /// 1/√(K·1800) ≈ 1.3 % (K=2) → ≈0.1 dB. 1.0 dB tolerance clears
+    /// that with an order of magnitude of margin while still catching a
+    /// real N-dependence regression (the historical #142/#162 defects
+    /// were multi-dB).
+    #[test]
+    fn broadband_level_invariant_to_welch_segment_count() {
+        use crate::visualize::spl_level::weighted_broadband_dbfs;
+        use crate::visualize::weighting_curves::WeightingCurve;
+
+        let step = SR as usize / 2; // 50 % overlap, matches h1_estimate_core
+        let len_k2 = SR as usize + step; // K=2 segments, 1.5 s
+        let len_k8 = SR as usize + step * 7; // K=8 segments, 4.5 s
+
+        // Same seed ⇒ same underlying noise stream; K8's tail is simply
+        // more of the same stationary process, not a different signal.
+        let noise_full = white_noise(len_k8, 0.3, 99);
+        let noise_k2 = &noise_full[..len_k2];
+        let noise_k8 = &noise_full[..];
+
+        let r_k2 = h1_estimate(noise_k2, noise_k2, SR);
+        let r_k8 = h1_estimate(noise_k8, noise_k8, SR);
+
+        let sub_band = |r: &TransferResult| -> (Vec<f64>, Vec<f64>) {
+            r.freqs
+                .iter()
+                .zip(r.meas_amp.iter())
+                .filter(|(&f, _)| (200.0..2000.0).contains(&f))
+                .map(|(&f, &a)| (f, a))
+                .unzip()
+        };
+        let (freqs_k2, amp_k2) = sub_band(&r_k2);
+        let (freqs_k8, amp_k8) = sub_band(&r_k8);
+        assert!(freqs_k2.len() > 1000, "expected ~1800 bins in 200-2000 Hz");
+
+        let db_k2 = weighted_broadband_dbfs(&amp_k2, &freqs_k2, WeightingCurve::Z);
+        let db_k8 = weighted_broadband_dbfs(&amp_k8, &freqs_k8, WeightingCurve::Z);
+        assert!(
+            (db_k2 - db_k8).abs() < 1.0,
+            "K=2 segments: {db_k2:.3} dB, K=8 segments: {db_k8:.3} dB — \
+             band level should be segment-count-independent within 1.0 dB"
+        );
+    }
+
     // ---- capture_duration ----
 
     #[test]

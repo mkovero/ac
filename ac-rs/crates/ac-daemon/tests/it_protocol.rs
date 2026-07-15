@@ -1405,7 +1405,9 @@ fn transfer_stream_meas_spectrum_amplitude_truth() {
 /// Invalid `weighting`/`integration` session params are rejected
 /// synchronously before worker spawn, matching the handoff's validation
 /// style — including the strict A/C/Z-only contract (no "off", unlike
-/// `set_band_weighting`'s 4-way enum).
+/// `set_band_weighting`'s 4-way enum). Also checks no partial session is
+/// left behind: `status` reports idle right after a rejection, not just
+/// "the trailing valid call happened to succeed".
 #[test]
 fn transfer_stream_rejects_invalid_spl_session_params() {
     let d = Daemon::spawn();
@@ -1415,6 +1417,12 @@ fn transfer_stream_rejects_invalid_spl_session_params() {
         "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1, "weighting": "off",
     }));
     assert_eq!(r["ok"], json!(false), "weighting=off must be rejected: {r}");
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(
+        s["busy"],
+        json!(false),
+        "rejected weighting must leave no partial session running: {s}"
+    );
 
     let r = c.call(json!({
         "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1, "weighting": "q",
@@ -1437,6 +1445,122 @@ fn transfer_stream_rejects_invalid_spl_session_params() {
     assert_eq!(r["ok"], json!(true), "valid params (case-insensitive): {r}");
     let _ = c.call(json!({"cmd": "stop"}));
     let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+/// QA gap fill: the presence/rejection tests above only exercise the
+/// uncalibrated (`cal_tags` all "none", `spl: null`) path. This drives
+/// the calibrated branch — voltage cal + SPL cal + mic curve all loaded
+/// on the meas channel, nothing on the ref channel — and checks every
+/// new tag flips to "on" (meas) / stays "none" (ref) accordingly, and
+/// `spl` becomes a finite, plausible number.
+#[test]
+fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // Voltage cal on channel 0 (both directions get saved by `calibrate`).
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 1 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 2.0}));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 2 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 2.0}));
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
+
+    // SPL cal on channel 0.
+    let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("spl cal_prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("spl cal_done");
+
+    // Mic curve on channel 0.
+    let (freqs, gains) = {
+        let mut f = Vec::with_capacity(24);
+        let mut g = Vec::with_capacity(24);
+        let log_min = 100.0_f64.ln();
+        let log_max = 10_000.0_f64.ln();
+        for i in 0..24 {
+            let t = i as f64 / 23.0;
+            f.push((log_min + t * (log_max - log_min)).exp());
+            g.push(3.0);
+        }
+        (f, g)
+    };
+    let r = c.call(json!({
+        "cmd": "calibrate_mic_curve", "op": "set", "input_channel": 0,
+        "freqs_hz": freqs, "gain_db": gains,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                frame = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no transfer_stream frame within 10 s");
+
+    let meas_tags = &frame["cal_tags"]["meas"];
+    assert_eq!(
+        meas_tags["voltage"],
+        json!("on"),
+        "meas voltage tag: {frame}"
+    );
+    assert_eq!(meas_tags["spl"], json!("on"), "meas spl tag: {frame}");
+    assert_eq!(
+        meas_tags["mic_curve"],
+        json!("on"),
+        "meas mic_curve tag: {frame}"
+    );
+
+    let ref_tags = &frame["cal_tags"]["ref"];
+    assert_eq!(
+        ref_tags["voltage"],
+        json!("none"),
+        "ref voltage tag: {frame}"
+    );
+    assert_eq!(ref_tags["spl"], json!("none"), "ref spl tag: {frame}");
+    assert_eq!(
+        ref_tags["mic_curve"],
+        json!("none"),
+        "ref mic_curve tag: {frame}"
+    );
+
+    let spl = frame["spl"].as_f64().unwrap_or_else(|| {
+        panic!("spl must be a finite number when meas channel is SPL-calibrated: {frame}")
+    });
+    assert!(
+        spl.is_finite() && (0.0..=200.0).contains(&spl),
+        "spl={spl} outside a plausible dB SPL range"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1626,13 +1626,33 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 ```
 
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
-**linear amplitude only** — the daemon never converts them to dB. The
-single dB-conversion site for these fields is the receiver (`ac-scene`,
-from M2 onward). This mirrors the existing `visualize/spectrum` frame's
-`spectrum` field and closes the historical "dual trace" / N-dependence
-class of bug (#142/#162): band-power aggregation (√Σamp²) is
-N-independent for both discrete tones and broadband content, and
-summing dB values instead would not be.
+**linear amplitude only** — the daemon never converts them to dB. dB
+conversion happens in the receiver, nowhere else — the single such site
+for these fields is `ac-scene` (from M2 onward). This mirrors the
+existing `visualize/spectrum` frame's `spectrum` field and closes the
+historical "dual trace" / N-dependence class of bug (#142/#162):
+band-power aggregation (√Σamp²) is N-independent for both discrete
+tones and broadband content, and summing dB values instead would not be.
+
+**Wire cost.** Measured at K=491 columns (48 kHz session): the M0
+fields add ≈31 KB/frame/pair (JSON text — the K≈480 f64×2-channel
+estimate that motivated the fixed grid assumed binary encoding; this
+wire is JSON text, roughly 4× that). `meas_spectrum`/`ref_spectrum`
+(2×K f64 values as decimal text) dominate. If wire economy needs to
+improve later, the designated first lever is **precision reduction**
+(round to fewer significant digits before serializing, or ship as f32)
+— not shrinking `K` or reverting to per-column dB, both of which would
+undo D18's N-independence guarantee.
+
+**Not an IEC 61672 sound level meter.** `spl` is a Welch/FFT band-power
+sum, weighted (A/C/Z, IEC 61672-1 Annex E curve formulas) and time-
+integrated (fast/slow, matching IEC 61672-1's F/S time constants) —
+but it is not a IEC 61672-1-compliant true-RMS SLM measurement chain.
+The weighting curves and time constants are standards-conformant; the
+upstream level (an aggregated linear-amplitude spectrum, not a
+continuously-integrated pressure-squared signal) is not. Same caveat
+as the existing `fractional_octave_leq` frame — display-only, must not
+be quoted as a certified SPL reading.
 
 **Complex H consistency.** `re` and `im` carry H₁(ω) directly so Tier 2
 views can render Nyquist locus, IFFT-based impulse response, and
