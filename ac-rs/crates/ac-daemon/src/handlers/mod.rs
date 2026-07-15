@@ -28,6 +28,7 @@ mod admin;
 mod audio;
 mod calibrate;
 pub(crate) mod mic;
+pub mod snapshot;
 mod test_dut;
 mod test_hw;
 mod test_software;
@@ -46,6 +47,7 @@ pub use audio::{
 pub use calibrate::{
     cal_reply, calibrate, calibrate_mic_curve, calibrate_spl, set_mic_correction_enabled,
 };
+pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
 pub use test_software::test_software;

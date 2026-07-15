@@ -220,6 +220,23 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .map(|&(_, r)| Calibration::load(out_ch, r, None).ok().flatten())
         .collect();
 
+    // Snapshot ring (handoff: snapshot-backend M1). Per-unique-channel
+    // calibration (not per-pair — a channel used in >1 pair gets one
+    // entry here) for `.acsnap` provenance; the ring itself is built
+    // inside the worker once `sr` is known.
+    let unique_cals: Vec<Option<Calibration>> = unique_chans
+        .iter()
+        .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
+        .collect();
+    let snapshot_ring_slot = state.snapshot_ring.clone();
+    let snapshot_spool = state.snapshot_spool.clone();
+    let snapshot_spool_dir = ac_core::config::snapshot_spool_dir(&cfg);
+    let snapshot_ring_s = cfg.snapshot_ring_s;
+    let snapshot_weighting_tag = weighting.tag().to_string();
+    let snapshot_integration_tag = integration_tag.clone();
+    let unique_chans_for_ring = unique_chans.clone();
+    let pairs_for_ring = pairs.clone();
+
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -261,6 +278,27 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let spec_f_max = sr as f64 / 2.0;
         let spec_n_columns =
             ac_core::visualize::aggregate::transfer_spectrum_n_columns(spec_f_min, spec_f_max);
+
+        // Snapshot ring (handoff: snapshot-backend M1, deliverable 1):
+        // raw pre-processing samples for every unique session channel,
+        // capped at `snapshot_ring_s` seconds. Crash-safety: wipe any
+        // stale spool from a prior session before publishing this one's
+        // ring handle (module doc, `handlers/snapshot.rs`).
+        crate::handlers::snapshot::reset_spool_dir(&snapshot_spool_dir, &snapshot_spool);
+        let snapshot_cap_samples = (snapshot_ring_s * sr as f64).round() as usize;
+        let snapshot_ring = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::handlers::snapshot::SnapshotRingState::new(
+                sr,
+                unique_chans_for_ring.clone(),
+                snapshot_cap_samples,
+                pairs_for_ring.clone(),
+                snapshot_weighting_tag.clone(),
+                snapshot_integration_tag.clone(),
+                unique_cals.clone(),
+            ),
+        ));
+        *snapshot_ring_slot.lock().unwrap() = Some(snapshot_ring.clone());
+
         // Sliding window: keep the last `target_total` samples per unique
         // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
         // h1_estimate's internal Welch settings. chunk_secs matches the
@@ -325,6 +363,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 break;
             }
 
+            // Feed the snapshot ring the same raw, pre-processing `bufs`
+            // the H1 sliding window below derives from — same capture,
+            // second (larger, longer-retention) consumer.
+            snapshot_ring.lock().unwrap().push_tick(&bufs);
+
             for (i, buf) in bufs.iter().enumerate() {
                 if i >= rings.len() {
                     break;
@@ -358,6 +401,10 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     ));
                 }
             }
+            // Keep the ring's copy in sync — cheap (small Vec), and
+            // simpler than trying to push incrementally from inside the
+            // loop above.
+            snapshot_ring.lock().unwrap().delay_samples = pair_delays.clone();
 
             // Pairs are independent H1 estimates — fan out across the rayon
             // pool so multi-pair sessions (e.g. 4 mic positions against one
@@ -652,6 +699,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             eng.set_silence();
         }
         eng.stop();
+
+        // Snapshot ring/spool lifecycle ends with the session (deliverable
+        // 3's retention policy — module doc, `handlers/snapshot.rs`).
+        *snapshot_ring_slot.lock().unwrap() = None;
+        crate::handlers::snapshot::clear_spool(&snapshot_spool);
+
         send_pub(
             &pub_tx,
             "done",

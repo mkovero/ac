@@ -133,6 +133,19 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
             cfg.server_idle_timeout_secs = if n == 0 { None } else { Some(n) };
         }
     }
+    // Snapshot backend (handoff: snapshot-backend M1, deliverable 1/2).
+    if let Some(v) = update.get("snapshot_ring_s").and_then(Value::as_f64) {
+        if v > 0.0 {
+            cfg.snapshot_ring_s = v;
+        }
+    }
+    if let Some(v) = update.get("snapshot_spool_dir") {
+        if v.is_null() {
+            cfg.snapshot_spool_dir = None;
+        } else if let Some(s) = v.as_str() {
+            cfg.snapshot_spool_dir = Some(std::path::PathBuf::from(s));
+        }
+    }
 
     let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
     if let Err(e) = ac_core::config::save(&cfg, None) {

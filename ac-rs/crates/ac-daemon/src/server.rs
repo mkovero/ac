@@ -45,6 +45,21 @@ pub struct ServerState {
     /// Optional channel to signal the running calibrate worker.
     /// Sends Option<f64>: Some(vrms) = user reading, None = skip.
     pub cal_reply_tx: Arc<Mutex<Option<Sender<Option<f64>>>>>,
+    /// Handle to the active `transfer_stream` session's snapshot ring
+    /// (handoff: snapshot-backend M1). `None` when no transfer session is
+    /// running — the `snapshot` handler's "only while a transfer session
+    /// runs" rule (deliverable 2) is exactly this check. Populated at
+    /// worker start, cleared at stop, same lifecycle as `cal_reply_tx`.
+    /// Double `Arc` so the worker thread can hold and mutate its own
+    /// clone of the inner `Mutex<SnapshotRingState>` after the outer
+    /// slot is read once by a CTRL handler.
+    pub snapshot_ring: Arc<Mutex<Option<Arc<Mutex<crate::handlers::snapshot::SnapshotRingState>>>>>,
+    /// Spooled `.acsnap` files, keyed by `id` (= the file's own sha256 —
+    /// content-addressed, so identical snapshots share one spool entry
+    /// and no separate ID generator/dependency is needed). Cleared at
+    /// `transfer_stream` session end (deliverable 3's retention policy —
+    /// see `handlers::snapshot`'s module doc for the full rationale).
+    pub snapshot_spool: Arc<Mutex<HashMap<String, crate::handlers::snapshot::SpoolEntry>>>,
     /// Cached port lists. JACK port queries open a fresh probe client every
     /// call, so before this cache `test_hardware` would build 4+ probe clients
     /// per invocation just to resolve sticky port names. Populated lazily and
@@ -166,6 +181,8 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         data_port,
         dut_reply_tx: Arc::new(Mutex::new(None)),
         cal_reply_tx: Arc::new(Mutex::new(None)),
+        snapshot_ring: Arc::new(Mutex::new(None)),
+        snapshot_spool: Arc::new(Mutex::new(HashMap::new())),
         playback_ports_cache: Arc::new(Mutex::new(None)),
         capture_ports_cache: Arc::new(Mutex::new(None)),
         analysis_mode: Arc::new(Mutex::new("fft".to_string())),
@@ -394,6 +411,10 @@ fn dispatch(
         "server_disable" => handlers::server_disable(state),
         "server_connections" => handlers::server_connections(state),
         "transfer_stream" => handlers::transfer_stream(state, &cmd),
+        "snapshot" => handlers::snapshot(state, &cmd),
+        "snapshot_fetch" => handlers::snapshot_fetch(state, &cmd),
+        "snapshot_list" => handlers::snapshot_list(state, &cmd),
+        "snapshot_delete" => handlers::snapshot_delete(state, &cmd),
         "probe" => handlers::probe(state, &cmd),
         "test_software" => handlers::test_software(state),
         "test_hardware" => handlers::test_hardware(state, &cmd),
