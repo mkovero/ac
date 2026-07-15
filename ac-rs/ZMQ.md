@@ -1531,7 +1531,15 @@ the DUT externally and the daemon just observes `ref` → `meas`. Pass
 
   // … or the single-pair legacy form (still accepted):
   "meas_channel": <int>,     // capture port index for the measurement signal (DUT output)
-  "ref_channel":  <int>      // capture port index for the reference signal (DUT input)
+  "ref_channel":  <int>,     // capture port index for the reference signal (DUT input)
+
+  // SPL session params (handoff: transfer-frame-v2 M0) — per-meas-channel,
+  // static for the session (D10): set once here, not live-toggleable.
+  "weighting":    "A" | "C" | "Z",     // optional, default "Z". Case-insensitive.
+                                        // Strict 3-way — "off" is rejected
+                                        // (unlike `set_band_weighting`'s 4-way enum).
+  "integration":  "fast" | "slow"      // optional, default "fast". Case-insensitive.
+                                        // "leq" is not implemented in M0 — rejected.
 }
 ```
 
@@ -1540,6 +1548,8 @@ in the list once per iteration and emits one `transfer_stream` DATA frame
 per pair (each tagged with its own `meas_channel` / `ref_channel`). The
 legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
 `pairs` must be non-empty and every channel index must be within range.
+`weighting`/`integration` apply to every pair in the session; invalid values
+reply `{"ok": false, "error": "..."}` before the worker spawns.
 
 **Reply**
 ```json
@@ -1561,21 +1571,88 @@ legacy single-pair form is equivalent to `pairs: [[meas_channel, ref_channel]]`.
 ```json
 // topic: data
 {
-  "type":          "transfer_stream",
-  "cmd":           "transfer_stream",
-  "freqs":         [<float>, ...],     // up to 2000 points
-  "magnitude_db":  [<float>, ...],
-  "phase_deg":     [<float>, ...],
-  "coherence":     [<float>, ...],
-  "re":            [<float>, ...],     // unified.md Phase 3: complex H, real part
-  "im":            [<float>, ...],     // complex H, imaginary part
-  "delay_samples": <int>,
-  "delay_ms":      <float>,
-  "meas_channel":  <int>,
-  "ref_channel":   <int>,
-  "sr":            <int>
+  "type":            "transfer_stream",
+  "cmd":             "transfer_stream",
+  "freqs":           [<float>, ...],     // up to 2000 points
+  "magnitude_db":    [<float>, ...],
+  "phase_deg":       [<float>, ...],
+  "coherence":       [<float>, ...],
+  "re":              [<float>, ...],     // unified.md Phase 3: complex H, real part
+  "im":              [<float>, ...],     // complex H, imaginary part
+  "delay_samples":   <int>,
+  "delay_ms":        <float>,
+  "meas_channel":    <int>,
+  "ref_channel":     <int>,
+  "sr":              <int>,
+  "mic_correction":  "on" | "off" | "none",
+
+  // Additive (handoff: transfer-frame-v2 M0) — per-channel calibrated
+  // spectra + SPL scalar + processing tags, derived from the same
+  // capture/Welch segments as H₁ above, so everything on screen shares
+  // one time origin (D2).
+  "spec_freqs":      [<float>, ...],     // log-spaced column centre frequencies,
+                                          // 48 cols/octave, 20 Hz-Nyquist, K≈480 at
+                                          // 48 kHz. Identical every frame in a session.
+  "meas_spectrum":   [<float>, ...],     // LINEAR amplitude, band-power aggregated
+                                          // (ac-core::visualize::aggregate::
+                                          // spectrum_to_columns_wire) from the meas
+                                          // channel's Welch amplitude spectrum.
+                                          // Calibrated: voltage cal + mic curve
+                                          // applied in linear domain. NOT dB.
+  "ref_spectrum":    [<float>, ...],     // same, reference channel — no mic curve
+                                          // (ref leg is guarded, see above), voltage
+                                          // cal still applied if present.
+  "spl":             <float> | null,     // per meas channel: A/C/Z-weighted,
+                                          // fast/slow time-integrated, SPL-offset-
+                                          // applied dB SPL scalar. null when the
+                                          // meas channel has no SPL cal layer.
+  "spl_weighting":   "A" | "C" | "Z",    // echoes the session's `weighting` param
+  "spl_integration": "fast" | "slow",    // echoes the session's `integration` param
+  "cal_tags": {                          // per-channel provenance (tier-framing
+                                          // labelled-tag rules, #97/#98 vocabulary)
+    "meas": {
+      "voltage":   "on" | "none",        // vrms_at_0dbfs_in present and applied
+      "spl":       "on" | "none",        // SPL cal layer present and applied
+      "mic_curve": "on" | "off" | "none" // same vocabulary as `mic_correction`
+    },
+    "ref": {
+      "voltage":   "on" | "none",
+      "spl":       "on" | "none",
+      "mic_curve": "none"                // always "none" — a ref-channel mic
+                                          // curve is refused at request time
+    }
+  }
 }
 ```
+
+**Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
+**linear amplitude only** — the daemon never converts them to dB. dB
+conversion happens in the receiver, nowhere else — the single such site
+for these fields is `ac-scene` (from M2 onward). This mirrors the
+existing `visualize/spectrum` frame's `spectrum` field and closes the
+historical "dual trace" / N-dependence class of bug (#142/#162):
+band-power aggregation (√Σamp²) is N-independent for both discrete
+tones and broadband content, and summing dB values instead would not be.
+
+**Wire cost.** Measured at K=491 columns (48 kHz session): the M0
+fields add ≈31 KB/frame/pair (JSON text — the K≈480 f64×2-channel
+estimate that motivated the fixed grid assumed binary encoding; this
+wire is JSON text, roughly 4× that). `meas_spectrum`/`ref_spectrum`
+(2×K f64 values as decimal text) dominate. If wire economy needs to
+improve later, the designated first lever is **precision reduction**
+(round to fewer significant digits before serializing, or ship as f32)
+— not shrinking `K` or reverting to per-column dB, both of which would
+undo D18's N-independence guarantee.
+
+**Not an IEC 61672 sound level meter.** `spl` is a Welch/FFT band-power
+sum, weighted (A/C/Z, IEC 61672-1 Annex E curve formulas) and time-
+integrated (fast/slow, matching IEC 61672-1's F/S time constants) —
+but it is not a IEC 61672-1-compliant true-RMS SLM measurement chain.
+The weighting curves and time constants are standards-conformant; the
+upstream level (an aggregated linear-amplitude spectrum, not a
+continuously-integrated pressure-squared signal) is not. Same caveat
+as the existing `fractional_octave_leq` frame — display-only, must not
+be quoted as a certified SPL reading.
 
 **Complex H consistency.** `re` and `im` carry H₁(ω) directly so Tier 2
 views can render Nyquist locus, IFFT-based impulse response, and

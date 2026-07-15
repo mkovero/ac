@@ -455,3 +455,421 @@ fn plot_fundamental_dbfs_reflects_mic_curve_at_test_freq() {
          (uncorrected={fund_uncorrected:.2}, corrected={fund_corrected:.2})"
     );
 }
+
+/// #99 extension (handoff: transfer-frame-v2 M0, AC #4): the same fake
+/// channel-0 stimulus (1 kHz @ 0.1 peak amplitude, `audio/fake.rs`'s
+/// fallback default — both `monitor_spectrum`'s implicit `set_tone(1000,
+/// 0.0)` and `transfer_stream`'s untouched-stimulus passive path hit the
+/// same "no amplitude set" branch) must read the same physical level
+/// whether observed through `monitor_spectrum`'s `visualize/spectrum`
+/// frame or `transfer_stream`'s new `meas_spectrum` field — two
+/// independent aggregation code paths (`DEFAULT_WIRE_COLUMNS`=4096 vs the
+/// coarser 48-cols/octave transfer grid) over the same underlying signal.
+///
+/// Tolerance derivation: the two paths use different FFT lengths
+/// (monitor's default `fft_n` vs transfer's fixed `nperseg=sr`), so 1 kHz
+/// isn't bin-aligned on both — monitor pays a Hann scalloping loss
+/// (measured ≈0.6 dB) on its non-bin-aligned nearest bin, while
+/// transfer's exact bin-aligned tone instead sums its own Hann 3-tap
+/// leakage into ±1 Hz neighbours at transfer's coarser column width
+/// (measured ≈1.76 dB, see `transfer_stream_meas_spectrum_amplitude_truth`
+/// in `it_protocol.rs` for the derivation). These are different, real
+/// artifacts of each path's own geometry, not a shared physical
+/// discrepancy — 3.0 dB clears their combined ≈2.4 dB with margin while
+/// still catching a several-dB normalization or calibration regression.
+#[test]
+fn parity_transfer_meas_spectrum_matches_monitor_spectrum_level() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let m_freqs: Vec<f64> = mf["freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let m_spec: Vec<f64> = mf["spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (m_peak_i, &m_peak_amp) = m_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty monitor spectrum");
+    let m_peak_hz = m_freqs[m_peak_i];
+    let m_peak_dbfs = 20.0 * m_peak_amp.max(1e-12).log10();
+    assert!(
+        (m_peak_hz - 1000.0).abs() < 20.0,
+        "monitor peak at {m_peak_hz} Hz, expected ~1000 Hz"
+    );
+
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let mut tframe: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                tframe = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let tframe = tframe.expect("no transfer_stream frame within 10 s");
+
+    let t_freqs: Vec<f64> = tframe["spec_freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let t_spec: Vec<f64> = tframe["meas_spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (t_peak_i, &t_peak_amp) = t_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty meas_spectrum");
+    let t_peak_hz = t_freqs[t_peak_i];
+    let t_peak_dbfs = 20.0 * t_peak_amp.max(1e-12).log10();
+    assert!(
+        (t_peak_hz - 1000.0).abs() < 50.0,
+        "transfer peak at {t_peak_hz} Hz, expected ~1000 Hz"
+    );
+
+    let delta = (m_peak_dbfs - t_peak_dbfs).abs();
+    assert!(
+        delta < 3.0,
+        "cross-path level mismatch: monitor={m_peak_dbfs:.2} dBFS \
+         transfer={t_peak_dbfs:.2} dBFS (Δ={delta:.2})"
+    );
+}
+
+/// qa-signoff.md item 4, bullet 2-3 (identical cal chain, voltage layer):
+/// with voltage cal loaded, `meas_spectrum` is voltage-scaled (linear
+/// Vrms-domain) while monitor's plain `spectrum` field is never
+/// voltage-scaled (it stays dBFS-domain; voltage info ships separately as
+/// `in_dbu`) — this is by design (ZMQ.md's `visualize/spectrum` contract
+/// predates this PR and isn't changed by it). So "matches" here means:
+/// monitor's dBFS-domain peak, scaled by the *same* `vrms_at_0dbfs_in`
+/// the daemon applied to `meas_spectrum`, reproduces transfer's peak —
+/// not bit-identical numbers, but the same physical quantity read
+/// through both paths' own unit contracts. `get_calibration` is queried
+/// for the scale factor rather than re-deriving it, so this test can't
+/// silently drift from whatever the daemon actually calibrated.
+///
+/// No mic curve is loaded for this test — see
+/// `cal_tags_mic_curve_matches_monitor_mic_correction_tag` below for why.
+#[test]
+fn parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 1 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 2.0}));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("step 2 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 2.0}));
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done");
+
+    let cal = c.call(json!({"cmd": "get_calibration", "output_channel": 0, "input_channel": 0}));
+    assert_eq!(cal["ok"], json!(true));
+    assert_eq!(cal["found"], json!(true));
+    let vrms_scale = cal["vrms_at_0dbfs_in"]
+        .as_f64()
+        .expect("vrms_at_0dbfs_in must be set after calibrate");
+
+    while c.recv_pub(50).is_some() {}
+
+    let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let m_freqs: Vec<f64> = mf["freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let m_spec: Vec<f64> = mf["spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (m_peak_i, &m_peak_amp) = m_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty monitor spectrum");
+    assert!(
+        (m_freqs[m_peak_i] - 1000.0).abs() < 20.0,
+        "monitor peak at {} Hz",
+        m_freqs[m_peak_i]
+    );
+    // monitor's `spectrum` is dBFS-domain amplitude, never voltage-scaled
+    // (unlike transfer's `meas_spectrum`) — predict what transfer *should*
+    // read by applying the same scale the daemon fetched above.
+    let predicted_transfer_dbfs = 20.0 * (m_peak_amp * vrms_scale).max(1e-12).log10();
+
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let mut tframe: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                tframe = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let tframe = tframe.expect("no transfer_stream frame within 10 s");
+
+    let t_freqs: Vec<f64> = tframe["spec_freqs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let t_spec: Vec<f64> = tframe["meas_spectrum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let (t_peak_i, &t_peak_amp) = t_spec
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .expect("non-empty meas_spectrum");
+    assert!(
+        (t_freqs[t_peak_i] - 1000.0).abs() < 50.0,
+        "transfer peak at {} Hz",
+        t_freqs[t_peak_i]
+    );
+    let t_peak_dbfs = 20.0 * t_peak_amp.max(1e-12).log10();
+
+    // Same 3.0 dB combined-artifact bound as the uncalibrated cross-path
+    // test above (Hann scallop vs Hann leak, different column geometry)
+    // — the voltage-cal scale factor is exact (queried, not re-derived),
+    // so it doesn't add its own error term.
+    let delta = (predicted_transfer_dbfs - t_peak_dbfs).abs();
+    assert!(
+        delta < 3.0,
+        "voltage-cal cross-path mismatch: predicted={predicted_transfer_dbfs:.2} dBFS \
+         (monitor {m_peak_amp:.4} × scale {vrms_scale:.4}) actual transfer={t_peak_dbfs:.2} dBFS \
+         (Δ={delta:.2})"
+    );
+}
+
+/// qa-signoff.md item 4, bullet 3 (spl vs monitor-derived SPL). Monitor
+/// has no broadband weighted+integrated SPL scalar to compare against
+/// directly (by design — M0 adds no field to `monitor_spectrum`), so
+/// this reconstructs the equivalent quantity from monitor's own
+/// calibrated `fundamental_dbfs` (the parabolic-interpolated, window-
+/// corrected peak reading — *not* re-derived from the aggregated
+/// `spectrum` display array; see the note below on why) and compares to
+/// transfer's actual `spl` on its first published frame — the one frame
+/// where `EmaIntegrator` hasn't smoothed anything yet (`primed == false`
+/// on the first `update()` call returns the input unchanged; see
+/// `time_integration.rs`), so it's directly comparable to a single-frame
+/// reconstruction rather than a running average.
+///
+/// **Why not sum monitor's `spectrum` array directly** (tried first):
+/// `spectrum` is already column-aggregated for display
+/// (`DEFAULT_WIRE_COLUMNS`=4096). At low frequencies many consecutive
+/// columns are narrower than the FFT's bin spacing and get the *same*
+/// interpolated noise-floor value repeated across each empty column
+/// (`spectrum_to_columns`'s documented empty-column fallback) — summing
+/// power over all 4096 columns therefore counts that repeated floor
+/// value many times over, inflating a "total power" reconstruction by
+/// several dB. That's a real property of a *display* aggregate, not a
+/// bug — but it makes the aggregate array the wrong basis for a power-
+/// summing reconstruction. `fundamental_dbfs` sidesteps it entirely
+/// (single windowed-and-normalized peak reading, not touched by column
+/// aggregation) and is the correct native quantity to compare against
+/// for a stimulus that's a near-pure tone (harmonics ≳40 dB down,
+/// contributing <0.01 dB to a linear power sum — negligible).
+///
+/// No mic curve loaded (SPL cal only) — deliberately avoids exercising
+/// `monitor.rs`'s mic-curve application to the `spectrum` array, which a
+/// close read during this review suggests may apply a dB-domain
+/// correction (`apply_mic_curve_inplace_f64`) to an array documented as
+/// linear amplitude (`AnalysisResult.spectrum`). That's a pre-existing
+/// question unrelated to this PR (monitor.rs is untouched) — flagged in
+/// qa-signoff.md as an out-of-scope finding, not asserted against here
+/// either way.
+#[test]
+fn parity_transfer_spl_matches_monitor_derived_spl_on_first_frame() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+    assert_eq!(r["ok"], json!(true));
+    let _ = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(3))
+        .expect("spl cal_prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+    let _ = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("spl cal_done");
+    while c.recv_pub(50).is_some() {}
+
+    let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let m_spl_offset = mf["spl_offset_db"]
+        .as_f64()
+        .expect("spl_offset_db must be set after calibrate_spl");
+    let m_fundamental_dbfs = mf["fundamental_dbfs"]
+        .as_f64()
+        .expect("fundamental_dbfs must be present");
+
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let mut tframe: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                tframe = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let tframe = tframe.expect("no transfer_stream frame within 10 s");
+    let t_spl = tframe["spl"]
+        .as_f64()
+        .expect("spl must be a finite number, meas channel is SPL-calibrated");
+
+    // Z weighting (identity) matches the transfer session's own
+    // `weighting: "Z"` param above — no curve to import.
+    let m_derived_spl = m_fundamental_dbfs + m_spl_offset;
+
+    // Tolerance derivation: transfer's `spl` sums power over *all*
+    // ~24 001 raw 1 Hz bins (no display aggregation), so it includes the
+    // tone's own Hann 3-tap leakage into its ±1 Hz neighbours — the same
+    // effect derived and measured in
+    // `transfer_stream_meas_spectrum_amplitude_truth` (it_protocol.rs):
+    // +1.76 dB in theory. Monitor's `fundamental_dbfs` is a peak reading
+    // and does *not* carry that same-signal leakage inflation. Plus a
+    // smaller cross-FFT-length scalloping/quantization difference
+    // (≲1 dB, same character as the uncalibrated cross-path test above).
+    // Combined expected delta ≈ 2-2.5 dB; 4.0 dB clears it with margin
+    // while still catching a several-dB regression.
+    let delta = (t_spl - m_derived_spl).abs();
+    assert!(
+        delta < 4.0,
+        "spl cross-path mismatch: transfer spl={t_spl:.2} monitor-derived={m_derived_spl:.2} \
+         (Δ={delta:.2}, monitor spl_offset={m_spl_offset:.2}, fundamental_dbfs={m_fundamental_dbfs:.2})"
+    );
+}
+
+/// qa-signoff.md item 4, bullet 4: `cal_tags` vocabulary must be
+/// string-identical to the existing `mic_correction` tag vocabulary
+/// monitor-path frames already use — asserted as literal string
+/// equality, not "semantically equivalent". Mic curve loaded here (this
+/// test only compares tag *strings*, not the `spectrum` array's
+/// numbers, so it doesn't touch the numeric question flagged in the
+/// `spl` parity test above).
+#[test]
+fn cal_tags_mic_curve_matches_monitor_mic_correction_tag() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let (freqs, gains) = synthetic_curve_flat(3.0);
+    let r = c.call(json!({
+        "cmd": "calibrate_mic_curve", "op": "set", "input_channel": 0,
+        "freqs_hz": freqs, "gain_db": gains,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    while c.recv_pub(50).is_some() {}
+
+    let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 3);
+    let monitor_tag = mf["mic_correction"]
+        .as_str()
+        .expect("mic_correction must be a string")
+        .to_string();
+    assert_eq!(monitor_tag, "on", "sanity: curve should be applied");
+
+    while c.recv_pub(50).is_some() {}
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    let tframe = wait_for_transfer_frame(&c);
+    let _ = c.call(json!({"cmd": "stop"}));
+    let tframe = tframe.expect("no transfer_stream frame within 10 s");
+
+    assert_eq!(
+        tframe["cal_tags"]["meas"]["mic_curve"].as_str(),
+        Some(monitor_tag.as_str()),
+        "cal_tags.meas.mic_curve must be string-identical to monitor's mic_correction tag"
+    );
+    // mic_correction (top-level, existing field) must also agree —
+    // same channel, same curve, same daemon-global enable flag.
+    assert_eq!(
+        tframe["mic_correction"].as_str(),
+        Some(monitor_tag.as_str()),
+        "transfer's own mic_correction tag must match monitor's"
+    );
+}
+
+fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => return Some(v),
+            Some(_) => continue,
+            None => return None,
+        }
+    }
+    None
+}

@@ -8,6 +8,7 @@ pub mod cwt;
 pub mod fractional_octave;
 pub mod reassigned;
 pub mod spectrum;
+pub mod spl_level;
 pub mod time_integration;
 pub mod transfer;
 pub mod weighting_curves;

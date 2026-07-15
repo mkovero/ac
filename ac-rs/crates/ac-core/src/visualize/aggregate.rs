@@ -5,6 +5,26 @@
 /// 2048 was picked to match 4K screen width.
 pub const DEFAULT_WIRE_COLUMNS: usize = 4096;
 
+/// Log-spaced columns per octave for `transfer_stream`'s calibrated
+/// per-channel spectra (`meas_spectrum` / `ref_spectrum`, D18,
+/// handoff: transfer-frame-v2 M0). Deliberately coarser than
+/// `DEFAULT_WIRE_COLUMNS`'s ~3 cents/column — these are calibrated level
+/// readouts, not a peak-picking display; fine-structure inspection is
+/// what snapshots are for (D18).
+pub const TRANSFER_SPECTRUM_COLS_PER_OCTAVE: f64 = 48.0;
+
+/// Column count for [`TRANSFER_SPECTRUM_COLS_PER_OCTAVE`] bands/octave
+/// between `f_min` and `f_max`. K ≈ 480 at 48 kHz (20 Hz–24 kHz). Returns
+/// 0 for a degenerate range (mirrors the other aggregators' degenerate
+/// handling — the caller's `n_columns == 0` early-out takes it from there).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn transfer_spectrum_n_columns(f_min: f64, f_max: f64) -> usize {
+    if !(f_min > 0.0) || !(f_max > f_min) {
+        return 0;
+    }
+    ((f_max / f_min).log2() * TRANSFER_SPECTRUM_COLS_PER_OCTAVE).round() as usize
+}
+
 /// Convert a dBFS/dB magnitude to linear power (10^(db/10)).
 #[inline]
 fn db_to_power(db: f32) -> f32 {
@@ -352,6 +372,20 @@ mod tests {
         let mut v = vec![amp_from_db(floor_db); len];
         v[tone_bin] = amp_from_db(tone_db);
         v
+    }
+
+    #[test]
+    fn transfer_spectrum_n_columns_matches_handoff_k_at_48k() {
+        // handoff-transfer-frame-v2.md: "K ≈ 480 at 48 kHz" (20 Hz–24 kHz).
+        let k = transfer_spectrum_n_columns(20.0, 24_000.0);
+        assert!((460..=500).contains(&k), "K={k}, expected ~480");
+    }
+
+    #[test]
+    fn transfer_spectrum_n_columns_degenerate_range_is_zero() {
+        assert_eq!(transfer_spectrum_n_columns(0.0, 20_000.0), 0);
+        assert_eq!(transfer_spectrum_n_columns(100.0, 50.0), 0);
+        assert_eq!(transfer_spectrum_n_columns(100.0, 100.0), 0);
     }
 
     #[test]
