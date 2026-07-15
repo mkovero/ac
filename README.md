@@ -28,16 +28,15 @@ The entire stack is implemented in Rust:
 
 | Crate | Binary | Role |
 |-------|--------|------|
-| `ac-cli` | `ac` | CLI client — parser, ZMQ client, CSV export, UI launch |
+| `ac-cli` | `ac` | CLI client — parser, ZMQ client, CSV export |
 | `ac-daemon` | `ac-daemon` | ZMQ server — audio I/O, analysis, worker management |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum / waterfall (FFT / CWT / CQT / reassigned) / transfer / sweep |
 | `ac-core` | (library) | Pure DSP — FFT, THD, sweep IR, fractional-octave filterbank, A/C/Z weighting, BS.1770-5 loudness, generator, calibration, config |
 
 ## Install
 
 ```bash
 cd ac-rs && cargo build --release
-# Binaries: target/release/ac, target/release/ac-daemon, target/release/ac-ui
+# Binaries: target/release/ac, target/release/ac-daemon
 ```
 
 ## Audio backend
@@ -63,9 +62,9 @@ ac setup output 11 input 0          # tell ac which channels to use
 ac calibrate                        # interactive level cal (enables dBu)
 ac calibrate spl input 0            # pistonphone SPL cal — readouts in dB SPL
 ac calibrate mic-curve mic.frd input 0   # attach mic frequency-response curve
-ac plot 20hz 20khz 0dbu 20ppd show  # measure THD vs frequency, open plot
+ac plot 20hz 20khz 0dbu 20ppd        # measure THD vs frequency
 ac s f 20hz 20khz 0dbu              # fast output-only chirp
-ac m sh                             # live spectrum, GPU UI window
+ac m                                # live spectrum, terminal view
 ac monitor cwt                      # live Morlet-CWT waterfall
 ac monitor cqt                      # live constant-Q waterfall
 ac monitor reassigned               # live reassigned-STFT waterfall
@@ -99,8 +98,6 @@ Everything is positional. The suffix tells `ac` what it is:
 | `dbu` `dbfs` `vrms` `mvrms` `vpp` | Level | `0dbu` `-12dbfs` `775mvrms` `1vrms` `2vpp` |
 | `s` | Duration / interval | `1s` `0.5s` |
 | `ppd` | Points per decade | `10ppd` `20ppd` |
-
-Append `show` to any command to open a live view (`ac-ui`).
 
 ## Abbreviations
 
@@ -169,9 +166,9 @@ protocol.
 
 ```bash
 cd ac-rs
-cargo build                   # all crates (ac, ac-daemon, ac-ui)
-cargo test                    # ~516 tests + 1 #[ignore]'d JACK-loopback runbook
-                              # (ac-core 243, ac-cli 74 parse + 53 cmd, ac-daemon 34 + 1 ignored, ac-ui 112)
+cargo build                   # all crates (ac, ac-daemon)
+cargo test                    # ~485 tests + 1 #[ignore]'d JACK-loopback runbook
+                              # (ac-core 243, ac-cli 74 parse + 53 cmd, ac-daemon 34 + 1 ignored)
 ```
 
 ## Dependencies

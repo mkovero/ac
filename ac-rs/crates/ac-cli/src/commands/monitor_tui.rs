@@ -1,14 +1,11 @@
-//! Headless TUI fallback for `ac monitor` — runs when ac-ui exits 71
-//! (no GPU adapter, broken driver, headless container) or isn't on PATH.
+//! Terminal display for `ac monitor`.
 //!
 //! Renders a `htop`-style refreshing display per monitored channel:
 //! peak dBFS, peak frequency, broadband floor, weighting / averaging
 //! state. ANSI cursor-home redraw at the daemon's monitor interval;
 //! Ctrl+C sends `stop` over CTRL and exits cleanly.
 //!
-//! Pure read-only display — no keybindings, no zoom. The intent is to
-//! give a developer SSH'd into the bench host *something* useful when
-//! the GPU UI can't paint.
+//! Pure read-only display — no keybindings, no zoom.
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -151,8 +148,7 @@ pub fn run(cfg: &ac_core::config::Config, channels: &[u32]) -> Result<()> {
     let host = cfg.server_host.as_deref().unwrap_or("127.0.0.1");
     let mut client = AcClient::new(host, 5556, 5557)?;
 
-    // Default monitor params — match ac-ui's defaults so behaviour is
-    // consistent regardless of which client started the session.
+    // Default monitor params.
     let interval_ms: u32 = 100;
     let fft_n: u32 = 8192;
 

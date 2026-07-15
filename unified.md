@@ -1,5 +1,10 @@
 # unified — planning document
 
+**SUPERSEDED.** ac-ui was deprecated and detached (see `attic/ac-ui`,
+handoff.md). The "ember" GPU renderer and its views described below no
+longer exist in the product; kept as a historical record only — do not
+pick up unimplemented items from here.
+
 A unified measurement instrument view for `ac`. Multiple synchronized
 views of the same underlying signals and transfer functions, sharing a
 single rendering substrate based on CRT phosphor physics ("ember"

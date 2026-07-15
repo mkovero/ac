@@ -2,7 +2,7 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test            # ~516 tests + 1 #[ignore]'d JACK-loopback runbook
+cd ac-rs && cargo test            # ~485 tests + 1 #[ignore]'d JACK-loopback runbook
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
@@ -25,8 +25,6 @@ cargo test -p ac-cli              # 74 parse + 53 cmd tests — all commands, ab
                                   #   error cases (incl. SPL / mic-curve subcommands)
 cargo test -p ac-daemon           # 34 integration tests + 1 #[ignore]'d loopback runbook —
                                   #   ZMQ protocol, sweep IR, calibrate flows, monitor frame shapes
-cargo test -p ac-ui               # 112 tests — fmt formatting (incl. dB SPL / LKFS-as-SPL composition,
-                                  #   mic-corrected suffix), grid ticks, egui paint-capture overlay tests
 cargo test                        # all crates
 ```
 
@@ -34,7 +32,7 @@ cargo test                        # all crates
 
 ```bash
 cd ac-rs
-cargo build                       # all crates: ac (CLI), ac-daemon, ac-ui
+cargo build                       # all crates: ac (CLI), ac-daemon
 cargo build --release             # optimized
 ```
 
@@ -42,7 +40,7 @@ The Rust CLI auto-discovers the debug build at `ac-rs/target/debug/ac-daemon`. F
 
 ```bash
 cargo build --release
-sudo install -m 755 target/release/ac target/release/ac-daemon target/release/ac-ui /usr/local/bin/
+sudo install -m 755 target/release/ac target/release/ac-daemon /usr/local/bin/
 ```
 
 Use `--fake-audio` to run the daemon without JACK (for integration testing):
@@ -108,14 +106,6 @@ runtime dependency — the pyzmq client lives inline in `conftest.py`.
 | other handler unit tests | 5 | misc unit coverage inside `ac-daemon` |
 | integration (`it_protocol`) | 10 | ZMQ protocol: status, devices, generate/stop, sweep, calibration cycle, busy guard, monitor-params live updates |
 
-#### ac-ui (81 tests)
-
-| Module | Tests | What it covers |
-|--------|-------|----------------|
-| `ui::fmt` | 31 | Pure formatting functions: spectrum readout (THD, freq, dBFS, dBu), transfer delay, sweep readout, hover labels, format_hz — tests exact numeric output, field alignment, sign formatting, optional field presence/absence |
-| `render::grid` | 12 | Axis ticks: freq_ticks (log decade + sub-decade), format_freq_tick (Hz/kHz), time_ticks, format_time_tick |
-| `ui::paint_tests` | 11 | egui paint-capture: drive overlay::draw() headlessly with synthetic FrameMeta, extract text from rendered shapes, verify spectrum readout, CLIP, FROZEN, connected/disconnected, transfer delay, hover readout, notification, sample rate |
-
 ## What is verified numerically
 
 ### THD accuracy (ac-core `analysis` module)
@@ -145,24 +135,6 @@ These tests generate synthetic signals with mathematically known distortion and 
 
 - Injecting broadband noise raises the measured noise floor proportionally
 - Clean sine noise floor is lower than noisy sine noise floor
-
-### UI display formatting (ui::fmt)
-
-- THD 0.003% and 0.030% produce distinct readout strings (catches decimal-place bugs)
-- dBu shown only when calibrated, absent when uncalibrated
-- Field alignment preserved ({:>7.1} Hz, {:>6.1} dBFS)
-- Sweep readout: THD 4 decimal places, gain sign formatting, optional dBu fields
-- Transfer delay: sign on both ms and samples, zero case
-- Hover readout: all 5 variants (dB, phase, coherence, THD, gain) with correct units
-
-### UI overlay rendering (ui::paint_tests)
-
-- Spectrum readout text appears in egui paint output with correct THD/freq/dBFS values
-- CLIP indicator present when clipping=true, absent otherwise
-- FROZEN indicator present when frozen=true
-- Connected/disconnected status text renders correctly
-- Transfer delay readout renders in Transfer layout
-- Hover crosshair label renders with correct channel, frequency, and value
 
 ### Unit conversions (ac-core `conversions` module)
 
@@ -267,6 +239,3 @@ Expected results: gain ≈ 0 dB, flat frequency response (±0 dB), coherence = 1
 - **Analysis tests**: add to `ac-rs/crates/ac-core/src/analysis.rs`. Build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
 - **Black-box protocol tests**: add to `tests/test_server_client.py`. Use the session-scoped `server_client` fixture. Must drain to `done`/`error` before returning so the server is idle for the next test.
 - **Daemon integration tests**: add to `ac-rs/crates/ac-daemon/tests/it_protocol.rs` for scenarios needing fine-grained control over daemon state.
-- **UI formatting tests**: add to `ac-rs/crates/ac-ui/src/ui/fmt.rs`. Pure `fn → String`, no egui/wgpu dependencies.
-- **UI rendering tests**: add to `ac-rs/crates/ac-ui/src/ui/paint_tests.rs`. Construct `OverlayInput` with synthetic data, call `run_overlay()`, assert on extracted text strings.
-- **Grid/axis tests**: add to `ac-rs/crates/ac-ui/src/render/grid.rs`. Pure functions (`freq_ticks`, `format_freq_tick`, `time_ticks`, `format_time_tick`).

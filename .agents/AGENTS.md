@@ -9,7 +9,6 @@ what it must produce, and its hard constraints.
 |---|---|---|
 | `triage.md` | PM — writes specs, routes issues | new issue opened |
 | `architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
-| `ux.md` | UX design — output format, display, information hierarchy | issue labeled `needs-ux` or any PR touching output formatting |
 | `developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `audit.md` | audit coordinator — orchestrates full codebase audit | manual invocation |
@@ -22,9 +21,8 @@ Pass the agent file as context alongside the issue or PR:
 ```bash
 # full audit (run specialists in sequence, then coordinator)
 claude "audit the codebase as architect" --context .agents/architect.md > audit/architect-raw.md
-claude "audit the codebase as ux"        --context .agents/ux.md        > audit/ux-raw.md
 claude "audit the codebase as qa"        --context .agents/qa.md        > audit/qa-raw.md
-claude "You are the audit coordinator. Read .agents/audit.md then read audit/architect-raw.md, audit/ux-raw.md, and audit/qa-raw.md and produce the consolidated audit report."
+claude "You are the audit coordinator. Read .agents/audit.md then read audit/architect-raw.md and audit/qa-raw.md and produce the consolidated audit report."
   "triage issue #42: https://github.com/mkovero/ac/issues/42"
 
 # implement a ready issue
@@ -53,7 +51,6 @@ See `.github/workflows/` for workflow definitions (if present).
 new issue
   └─ triage
        ├─ needs-design → architect → ready-to-implement
-       ├─ needs-ux → ux → ready-to-implement (or needs-design if structural)
        └─ ready-to-implement → developer → PR → qa → human merge
 
 ambiguous issue
@@ -73,11 +70,9 @@ These actions are always human-only:
 |---|---|---|
 | `needs-clarification` | triage | waiting on reporter |
 | `needs-design` | triage | architect must review |
-| `needs-ux` | triage | UX agent must produce display design |
-| `needs-discussion` | architect or ux | human input needed |
+| `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |
-| `ux-approved` | ux | display design decided, ready for dev |
-| `ready-to-implement` | triage, architect, or ux | developer can pick up |
+| `ready-to-implement` | triage or architect | developer can pick up |
 | `in-review` | developer (via PR) | PR open |
 | `needs-work` | qa | PR has issues, developer must revise |
 | `blocked` | any agent | external dependency |

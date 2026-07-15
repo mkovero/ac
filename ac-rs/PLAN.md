@@ -14,7 +14,9 @@
 ## Non-goals (for now)
 
 - ~~Rust CLI client~~ — **Done.** `ac-cli` crate, 28+ commands, 50 parser tests.
-- ~~Plotting / UI~~ — **Done.** `ac-ui` crate: spectrum, waterfall, CWT, transfer, sweep views.
+- ~~Plotting / UI~~ — **Done, then detached.** The `ac-ui` crate (spectrum,
+  waterfall, CWT, transfer, sweep views) shipped, then was deprecated and
+  removed — see `attic/ac-ui`. `ac-cli` + `ac-daemon` are the product now.
 - DMM / SCPI — ported to Rust daemon (`dmm_read` handler)
 
 ---
@@ -61,7 +63,7 @@ ac-rs/
         parse.rs      # positional token parser
         client.rs     # ZMQ REQ/SUB wrapper
         io.rs         # CSV export, print helpers
-        spawn.rs      # daemon/UI auto-spawn
+        spawn.rs      # daemon auto-spawn
         commands/      # one file per command group
 
     ac-daemon/        # ZMQ REP+PUB wrapper around ac-core
@@ -70,15 +72,9 @@ ac-rs/
         server.rs     # main loop, worker reaping
         handlers.rs   # command handlers
         audio/        # jack_backend, cpal_backend, fake
-
-    ac-ui/            # GPU UI — wgpu + egui
-      src/
-        main.rs       # CLI args, window setup
-        app.rs        # event loop, render dispatch
-        data/         # ZMQ receiver, triple-buffer store, types
-        render/       # spectrum (wgpu), waterfall (wgpu), grid/transfer/sweep (egui)
-        ui/           # layout, overlay, export
 ```
+
+(The former `ac-ui/` GPU UI crate was detached — see `attic/ac-ui`.)
 
 ### Why this split
 
@@ -195,26 +191,7 @@ Python client compares `_SRC_MTIME` of server source files. Rust binary can expo
 ## What stays in Python
 
 - `ac/client/` — alternative CLI (Rust `ac-cli` is the primary now)
-- `ac/ui/` — pyqtgraph views (alternative to Rust `ac-ui`)
+- `ac/ui/` — pyqtgraph views (Rust `ac-ui` equivalent was detached — see `attic/ac-ui`)
 - `scripts/` — babyface/OSM shell scripts
-
----
-
-## ac-ui — GPU spectrum/sweep/transfer monitor
-
-`crates/ac-ui` is a standalone wgpu/winit/egui binary. Views:
-
-- **Spectrum** — wgpu log-freq × dB pipeline, scales to 100+ channels at 60 fps
-- **Waterfall** — wgpu scrolling spectrogram (FFT or CWT)
-- **Transfer** — egui H1 magnitude/phase/coherence (3-panel)
-- **Sweep** — egui THD/THD+N/gain/spectrum (3-panel freq, 2-panel level)
-
-Layouts: grid, single, compare, transfer, sweep. Sweep entered via `--mode sweep_frequency|sweep_level`.
-
-```
-ac-ui                               # auto-discovers daemon, starts spectrum view
-ac-ui --mode sweep_frequency        # sweep view (launched by ac plot ... show)
-ac-ui --synthetic --channels 10     # benchmark mode
-```
 
 See `ac-rs/CLAUDE.md` for keybindings.

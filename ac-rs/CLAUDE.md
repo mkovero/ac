@@ -1,6 +1,7 @@
 # ac-rs — Rust audio measurement system
 
-Full Rust implementation of the `ac` stack: CLI client, ZMQ daemon, and GPU UI.
+Full Rust implementation of the `ac` stack: CLI client and ZMQ daemon. (The
+former GPU UI, `ac-ui`, was deprecated and detached — see `attic/ac-ui`.)
 
 When adding a new analysis feature, **first decide its tier** — Tier 1 (reference measurement, `ac-core/src/measurement/`) vs Tier 2 (live analysis, `ac-core/src/visualize/`). See `../ARCHITECTURE.md`.
 
@@ -9,9 +10,9 @@ When adding a new analysis feature, **first decide its tier** — Tier 1 (refere
 ```bash
 cargo build                       # all crates
 cargo build --release             # optimized
-cargo test                        # ~516 tests + 1 #[ignore]'d (JACK loopback runbook)
+cargo test                        # ~485 tests + 1 #[ignore]'d (JACK loopback runbook)
                                   #   ac-core: 243   ac-cli: 74 parse + 53 cmd
-                                  #   ac-daemon: 34 + 1 ignored   ac-ui: 112
+                                  #   ac-daemon: 34 + 1 ignored
 ```
 
 ## Crate layout
@@ -19,9 +20,8 @@ cargo test                        # ~516 tests + 1 #[ignore]'d (JACK loopback ru
 | Crate | Binary | Role |
 |-------|--------|------|
 | `ac-core` | — | Pure library — Tier 1 (`measurement/*`): IEC 61260-1 filterbank, IEC 61672-1 A/C/Z weighting, AES17 idle-channel noise, IEC 60268-3 THD, ITU-R BS.468-4 CCIR weighting, BS.1770-5 / EBU R128 loudness, Farina log-sweep IR, HTML + PDF report renderers. Tier 2 (`visualize/*`): live FFT spectrum, Morlet CWT, constant-Q transform, Auger-Flandrin reassigned STFT, fractional-octave aggregator, time integration. Plus `shared/`: 3-layer calibration (voltage / SPL / mic-curve), conversions, generator, config. ~243 tests. |
-| `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon/UI auto-spawn. 74 parser + 53 command tests. |
+| `ac-cli` | `ac` | CLI client — positional parser, ZMQ REQ/SUB, CSV export, daemon auto-spawn. 74 parser + 53 command tests. |
 | `ac-daemon` | `ac-daemon` | ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management. Thin shell over `ac-core`. 34 integration tests + 1 #[ignore]'d JACK-loopback runbook (`tests/it_loopback_ir.rs`). |
-| `ac-ui` | `ac-ui` | GPU UI — wgpu spectrum / waterfall (FFT / CWT / CQT / reassigned), egui transfer / sweep views. Connects via ZMQ SUB + REQ. 112 tests. |
 
 ## ac-daemon binary
 
@@ -78,39 +78,9 @@ See `ZMQ.md` — authoritative for both Python and Rust implementations.
 - Capture rings grow unbounded on long output-only commands (issue #25).
 - `handlers.rs` is 1931 LOC; slated for split into per-concern modules (#29).
 
-## ac-ui keybindings
-
-| Key | Action |
-|-----|--------|
-| `Tab` / `Shift+Tab` | Cycle views forward / backward. **On a real input channel**: 4-slot cycle Spectrum → Waterfall (FFT) → SpectrumEmber → Scope → Spectrum. CWT waterfall is reachable only via `--view waterfall --mode cwt` at startup (no longer a Tab stop). **On a virtual/transfer channel** (#163): 3-slot cycle Spectrum → Waterfall → SpectrumEmber → Spectrum — no Scope (a transfer channel has no time-domain samples). `T` always lands on Spectrum first. The dB window on a virtual cell is fixed dB-re-unity (`+20`/`-60`, unity gain gridlined) across all three views, independent of the dBFS/colormap conventions real channels swap between. In Grid layout with multiple pages, Tab pages instead of cycling. |
-| `G` | Toggle Goniometer on the active real channel, paired with its immediate neighbour (active, active+1); toggling off restores the prior view. No-op on a virtual/transfer cell or without a real neighbour. |
-| `Shift+G` | Snap to the ember matrix (SpectrumEmber + Grid) from any view — also the default landing for `ac monitor`. Left-click a cell to zoom into Single+SpectrumEmber on that channel; Tab cycles Spectrum → Waterfall → SpectrumEmber → Scope from there. Legacy Spectrum + Grid line-plot matrix is reachable only via `--view spectrum`. |
-| `C` / `Space` | Toggle channel selection at hovered cell. Builds the set used by `T` (transfer pair) and `Shift+C` (compare). |
-| `Shift+C` | Compare selected channels in one rect (needs ≥ 1 selection from `C`) |
-| Left click (Matrix) | Zoom in: swap to Single layout on the clicked channel |
-| `F` | Toggle fullscreen |
-| `D` | Toggle timing overlay |
-| `Left` / `Right` | FFT monitor tick interval ±1 ms (clamped 1–1000 ms, FFT mode only) |
-| `Up` / `Down` | FFT monitor N (1024 … 65536, FFT mode only) |
-| `Ctrl+R` | Reset all views |
-| `S` | Screenshot |
-| `P` | Toggle peak hold (Spectrum view) — top-5 local maxima ranked by dB with ≥1/3-octave spacing, auto-decays at 20 dB/s after 1 s idle |
-| `M` | Toggle min hold (Spectrum view) — per-bin rolling minimum, same decay as peak |
-| `Shift+M` | Toggle daemon-side mic frequency-response correction. Per-channel curves are loaded via `ac calibrate mic-curve` and applied in the daemon before frame emission; the toggle gates application without unloading the curve. Top-right shows `mic-cal` (on) or `mic-cal: off` (loaded but disabled); bottom-left appends `[mic-corrected]` to the readout. |
-| `O` | Cycle fractional-octave smoothing: off → 1/24 → 1/12 → 1/6 → 1/3 (default: 1/6; applies to spectrum, waterfall, and transfer |H(f)|; state shown top-right) |
-| `Shift+O` | Cycle fractional-octave CWT aggregation (CWT mode only): off → 1/1 → 1/3 → 1/6 → 1/12 → 1/24 → off. Replaces the displayed CWT column with summed-power per band; preserves single-tone dBFS at synthetic isolated scales (kernel-overlap drift on real signals — see `ac-core::fractional_octave`); state shown top-right |
-| `A` | Cycle per-band frequency weighting: off → A → C → Z → off. Daemon adds the IEC 61672-1 Annex E dB offset at each band centre before emitting `fractional_octave` / `fractional_octave_leq`. Display-only — same Morlet-CWT caveat. |
-| `I` | Cycle per-band time integration: off → fast (τ=125 ms) → slow (τ=1 s) → Leq → off. Daemon emits a `fractional_octave_leq` sidecar frame when non-off. Display-only — not IEC 61672 SPL (upstream aggregation is Morlet CWT, not IEC 61260 filters). |
-| `Shift+I` | Reset Leq accumulators on the daemon. Fast/slow modes ignore it — they re-prime from their next input. |
-| `Shift+L` | Reset BS.1770-5 loudness accumulators (integrated LKFS, LRA, true-peak) for every monitored channel. |
-| `Shift+Up/Down` | CWT sigma ±1 (5–24, only in CWT mode) |
-| `Shift+Left/Right` | CWT scales ×2/÷2 (64–8192, only in CWT mode) |
-| Scroll | Zoom both axes toward cursor (spectrum: freq+dB; waterfall: freq+time) |
-| `Shift+Scroll` | Zoom freq-axis only |
-| `Ctrl+Scroll` | Zoom Y-axis only (dB on spectrum-family, time-rows on waterfall) |
-| `Ctrl+Shift+Scroll` | Pan dB window ±2 dB/tick — analog gain trim (floor and ceiling shift together) |
-| `;` / `Ctrl+;` | Cycle waterfall palette forward / backward (Waterfall view only) |
-| Drag | Pan freq/dB axes |
-| Right-click | Reset hovered cell view |
-
 For the full backlog see <https://github.com/mkovero/ac/issues?q=is%3Aopen+label%3Abacklog>.
+
+Note: the GPU UI's keybinding-driven daemon toggles (mic correction, per-band
+weighting, time integration, Leq/loudness reset, fractional-octave smoothing)
+had no ac-cli equivalent as of the ac-ui detach. Whether ac-cli needs flags
+for these is a B1 command-matrix question (handoff.md), not resolved here.

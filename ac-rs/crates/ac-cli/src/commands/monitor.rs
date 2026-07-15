@@ -2,10 +2,9 @@ use crate::client::AcClient;
 use crate::parse::CommandKind;
 
 /// Resolve the channel list, defaulting to the configured `input_channel`,
-/// and print a one-liner so it's obvious which channel(s) the UI will
-/// monitor (was a silent default before; users hit it via "why is ac-ui
-/// showing a different view than ac monitor?" — they were on different
-/// implicit defaults).
+/// and print a one-liner so it's obvious which channel(s) will be
+/// monitored (was a silent default before, which caused confusion when
+/// commands picked different implicit channels).
 fn resolve_channels_or_default(
     explicit: Option<Vec<u32>>,
     cfg: &ac_core::config::Config,
