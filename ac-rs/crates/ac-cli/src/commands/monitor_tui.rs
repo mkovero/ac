@@ -210,7 +210,12 @@ pub fn run(cfg: &ac_core::config::Config, channels: &[u32]) -> Result<()> {
         // Clear from cursor to end of screen so a shrinking row count
         // (channel drops out) doesn't leave stale lines on screen.
         execute!(stdout, terminal::Clear(terminal::ClearType::FromCursorDown))?;
-        stdout.write_all(body.as_bytes())?;
+        // Raw mode disables the terminal's automatic \n -> \r\n
+        // translation, so a bare \n only moves the cursor down without
+        // returning it to column 0 — each line staircases one column
+        // further right than the last. Terminal is in raw mode here, so
+        // supply the \r ourselves.
+        stdout.write_all(body.replace('\n', "\r\n").as_bytes())?;
         stdout.flush()?;
     }
 
