@@ -2,6 +2,37 @@
 //!
 //! Reads and writes `~/.config/ac/cal.json`.  Key format: `out{N}_in{M}`.
 //! The file is a flat JSON object; each value is a [`CalibrationEntry`].
+//!
+//! # Layer topology: voltage cal and SPL cal are parallel, not composed
+//!
+//! `vrms_at_0dbfs_in` (electrical) and `mic_sensitivity_dbfs_at_94db_spl`
+//! (acoustic) are two **independent** readings off the same raw digital
+//! amplitude — neither is applied through the other. Concretely: SPL
+//! ([`Calibration::spl_offset_db`]) is computed from the *uncalibrated*
+//! dBFS amplitude, not from the voltage-cal-scaled one.
+//!
+//! This is deliberate, not an oversight one call site happened to get
+//! right. The 94 dB SPL pistonphone reference tone is itself captured as
+//! a raw digital level, so `mic_sensitivity_dbfs_at_94db_spl` already
+//! represents "what 94 dB SPL reads as raw dBFS". `dbspl = dbfs -
+//! mic_sens + 94.0` therefore needs `dbfs` to be the same raw quantity
+//! the pistonphone reading was taken against. Multiplying by
+//! `vrms_at_0dbfs_in` first would rescale one side of that equation and
+//! not the other, silently breaking the SPL reading the moment a
+//! channel picks up an electrical calibration — voltage cal and SPL cal
+//! would no longer agree on what "0 dBFS" means.
+//!
+//! Every call site that computes an absolute SPL number follows this
+//! topology and is expected to keep doing so:
+//! [`crate::visualize::pair_derivation::derive_pair`] (`spl` is derived
+//! from `h1.meas_amp` before `meas_amp_wire`'s voltage scaling is
+//! applied), `ac-daemon`'s live `transfer_stream` handler (same split,
+//! `mc_meas_amp` vs. `meas_amp_wire`), and `monitor.rs` (never scales
+//! `spec/cwt_mags` by `vrms_at_0dbfs_in`; voltage info ships only as the
+//! separate `dbu_offset_db` field). Verified non-accidental by
+//! `ac-daemon`'s `parity_transfer_spl_is_independent_of_voltage_cal_scale`
+//! (`it_cross_tier_parity.rs`) — `spl` stays put across a non-trivial
+//! voltage-cal scale change, not just the trivial/unset case.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -249,7 +280,8 @@ impl Calibration {
     /// Additive offset that converts dBFS → dB SPL (so `dbspl = dbfs +
     /// spl_offset_db()`). Returned for transport in wire frames; the UI
     /// applies it to whichever readout it's rendering. `None` when SPL
-    /// calibration is unset.
+    /// calibration is unset. `dbfs` here means *uncalibrated* (no
+    /// voltage-cal scale) — see the module-level "layer topology" doc.
     pub fn spl_offset_db(&self) -> Option<f64> {
         self.mic_sensitivity_dbfs_at_94db_spl
             .map(|m| PISTONPHONE_REF_SPL - m)

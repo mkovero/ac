@@ -140,21 +140,27 @@ For each landed issue:
 Unrelated to the tier-framing work above — logged here rather than a
 fourth QA sign-off re-justifying the same retry from scratch.
 
-- **`handlers::test_software::tests::every_self_test_passes`**
-  (`ac-daemon`, unit test binary). Fails intermittently under
-  `cargo test --workspace`'s full parallel run; passes reliably in
-  isolation (`cargo test -p ac-daemon --bin ac-daemon
-  every_self_test_passes`) and on immediate retry of the full suite.
-  Symptom: a single test failure with no panic message pointing at a
-  specific assertion beyond the test's own top-level `assert`,
-  consistent with a resource race (port allocation or similar) rather
-  than a logic bug in the module itself. Observed across three
-  independent QA passes on unrelated diffs (M0's
-  `qa-signoff.md`, M1's `qa-signoff-m1.md`, M1.5's
-  `qa-signoff-m1.5.md`) — never reproduces when the failing test is run
-  alone, and none of the three diffs touched `test_software.rs` or its
+- **`handlers::test_software::tests::*`** (`ac-daemon`, unit test
+  binary — module-wide, not one fixed test name). Fails intermittently
+  under `cargo test --workspace`'s full parallel run; passes reliably in
+  isolation and on immediate retry of the full suite. Symptom: a single
+  test failure with no panic message pointing at a specific assertion
+  beyond the test's own top-level `assert`, consistent with a resource
+  race (both observed failures used a shared per-process cal.json path,
+  e.g. `/tmp/ac_self_test_<pid>_cal.json` — plausible contention when
+  the workspace's other test binaries run concurrently) rather than a
+  logic bug in the module itself. Observed across four independent QA
+  passes on unrelated diffs: M0 (`qa-signoff.md`), M1
+  (`qa-signoff-m1.md`), M1.5 (`qa-signoff-m1.5.md`) all saw
+  `every_self_test_passes`; M2 (`qa-signoff-m2.md`) saw a *different*
+  test in the same module,
+  `handler_returns_results_array_and_all_pass_true` — same symptom
+  (passes in isolation, passes on retry), different specific test name,
+  which supports the shared-resource-race theory over a per-test logic
+  bug. None of the four diffs touched `test_software.rs` or its
   dependencies. Not yet root-caused or filed as a numbered GitHub
   issue. Future QA passes: cite this entry instead of re-deriving the
-  "isolate + retry, confirm pre-existing" argument each time; if it
-  ever fails *in isolation*, that's new information and should be
-  investigated immediately rather than assumed to be this same flake.
+  "isolate + retry, confirm pre-existing" argument each time, for any
+  test in this module; if a failure ever reproduces *in isolation*,
+  that's new information and should be investigated immediately rather
+  than assumed to be this same flake.

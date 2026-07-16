@@ -808,6 +808,82 @@ fn parity_transfer_spl_matches_monitor_derived_spl_on_first_frame() {
     );
 }
 
+/// handoff: ac-scene M2 (QA follow-up item 1) — the SPL-parity test
+/// above never loads a voltage calibration, so it can't distinguish
+/// "voltage cal and SPL cal are parallel layers off raw digital
+/// amplitude" (the actual, deliberate topology — see
+/// `Calibration::spl_offset_db`'s doc comment) from "voltage cal gets
+/// composed into SPL" (a plausible-looking but wrong alternative that
+/// would double-count the calibration tone's own already-known SPL).
+/// This test loads a **non-trivial** voltage cal (`vrms=5.0`, chosen
+/// far from the 1.0/unset trivial case so a composed-topology bug would
+/// produce an obvious ~14 dB error, not something tolerance could hide)
+/// alongside SPL cal, and asserts `spl` is unchanged from the no-
+/// voltage-cal baseline within a tolerance that only needs to absorb
+/// capture-timing jitter between two independent daemon runs of the
+/// same deterministic fake stimulus — not a cross-path methodology
+/// difference like the test above, so the bound is much tighter.
+#[test]
+fn parity_transfer_spl_is_independent_of_voltage_cal_scale() {
+    fn spl_with_optional_voltage_cal(vrms: Option<f64>) -> f64 {
+        let d = Daemon::spawn();
+        let c = Client::new(&d);
+
+        if let Some(vrms) = vrms {
+            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                                   "output_channel": 0, "input_channel": 0}));
+            assert_eq!(r["ok"], json!(true));
+            let _ = c
+                .wait_for_topic("cal_prompt", Duration::from_secs(3))
+                .expect("voltage cal step 1 prompt");
+            let _ = c.call(json!({"cmd": "cal_reply", "vrms": vrms}));
+            let _ = c
+                .wait_for_topic("cal_prompt", Duration::from_secs(3))
+                .expect("voltage cal step 2 prompt");
+            let _ = c.call(json!({"cmd": "cal_reply", "vrms": vrms}));
+            let _ = c
+                .wait_for_topic("cal_done", Duration::from_secs(5))
+                .expect("voltage cal_done");
+        }
+
+        let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+        assert_eq!(r["ok"], json!(true));
+        let _ = c
+            .wait_for_topic("cal_prompt", Duration::from_secs(3))
+            .expect("spl cal_prompt");
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+        let _ = c
+            .wait_for_topic("cal_done", Duration::from_secs(5))
+            .expect("spl cal_done");
+        while c.recv_pub(50).is_some() {}
+
+        let r = c.call(json!({
+            "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+            "weighting": "Z", "integration": "fast",
+        }));
+        assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+        let tframe = wait_for_transfer_frame(&c).expect("no transfer_stream frame within 10 s");
+        let _ = c.call(json!({"cmd": "stop"}));
+        tframe["spl"]
+            .as_f64()
+            .expect("spl must be finite, meas channel is SPL-calibrated")
+    }
+
+    let spl_no_voltage_cal = spl_with_optional_voltage_cal(None);
+    let spl_with_voltage_cal = spl_with_optional_voltage_cal(Some(5.0));
+
+    // A composed topology would show up as ~20*log10(5.0) = 13.98 dB;
+    // 2.0 dB comfortably separates that from cross-run capture jitter
+    // on the same deterministic stimulus.
+    let delta = (spl_with_voltage_cal - spl_no_voltage_cal).abs();
+    assert!(
+        delta < 2.0,
+        "spl must not depend on voltage-cal scale (parallel-layer topology): \
+         no-voltage-cal spl={spl_no_voltage_cal:.2} vrms=5.0 spl={spl_with_voltage_cal:.2} \
+         (Δ={delta:.2} — a composed topology would show ~14 dB here)"
+    );
+}
+
 /// qa-signoff.md item 4, bullet 4: `cal_tags` vocabulary must be
 /// string-identical to the existing `mic_correction` tag vocabulary
 /// monitor-path frames already use — asserted as literal string
