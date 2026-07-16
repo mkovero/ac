@@ -19,6 +19,9 @@ fn default_range_start() -> f64 {
 fn default_range_stop() -> f64 {
     20_000.0
 }
+fn default_snapshot_ring_s() -> f64 {
+    30.0
+}
 
 /// Complete hardware configuration.  All fields match the Python DEFAULTS dict.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +82,20 @@ pub struct Config {
     /// daemon's keepalive tick; only fires when no workers are running.
     #[serde(default)]
     pub server_idle_timeout_secs: Option<u64>,
+
+    /// Duration of the `transfer_stream` snapshot ring, in seconds
+    /// (handoff: snapshot-backend M1, deliverable 1). Raw pre-processing
+    /// samples for every session channel are retained for this long;
+    /// `snapshot` can only capture what's still in the ring.
+    #[serde(default = "default_snapshot_ring_s")]
+    pub snapshot_ring_s: f64,
+
+    /// Daemon-local directory `.acsnap` files spool to before/while a
+    /// client fetches them (handoff: snapshot-backend M1, deliverable 2).
+    /// `None` = `~/.config/ac/snapshots/`. Never exposed to clients — the
+    /// `snapshot` reply carries an opaque `id`, never a path (D6).
+    #[serde(default)]
+    pub snapshot_spool_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -102,8 +119,22 @@ impl Default for Config {
             server_host: None,
             report_dir: None,
             server_idle_timeout_secs: None,
+            snapshot_ring_s: 30.0,
+            snapshot_spool_dir: None,
         }
     }
+}
+
+/// Resolve the effective snapshot spool directory: `cfg.snapshot_spool_dir`
+/// if set, else `~/.config/ac/snapshots/`.
+pub fn snapshot_spool_dir(cfg: &Config) -> PathBuf {
+    cfg.snapshot_spool_dir.clone().unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join(".config")
+            .join("ac")
+            .join("snapshots")
+    })
 }
 
 /// Return the default config file path: `~/.config/ac/config.json`.

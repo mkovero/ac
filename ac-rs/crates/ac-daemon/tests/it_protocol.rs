@@ -337,6 +337,48 @@ fn setup_channel_clears_sticky_port() {
     );
 }
 
+/// handoff: snapshot-backend M1 — `snapshot_ring_s`/`snapshot_spool_dir`
+/// round-trip through `setup` like every other config field, including
+/// persistence (a second `setup` read reflects the earlier write).
+#[test]
+fn setup_updates_snapshot_ring_and_spool_dir() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"setup","update":{
+        "snapshot_ring_s": 60.0,
+        "snapshot_spool_dir": "/tmp/custom-acsnap-spool",
+    }}));
+    assert_eq!(r["ok"], json!(true), "setup: {r}");
+    assert_eq!(r["config"]["snapshot_ring_s"], json!(60.0));
+    assert_eq!(
+        r["config"]["snapshot_spool_dir"],
+        json!("/tmp/custom-acsnap-spool")
+    );
+
+    // Persisted, not just echoed back.
+    let r2 = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r2["config"]["snapshot_ring_s"], json!(60.0));
+    assert_eq!(
+        r2["config"]["snapshot_spool_dir"],
+        json!("/tmp/custom-acsnap-spool")
+    );
+
+    // snapshot_ring_s <= 0 is ignored (invalid), not silently accepted.
+    let r3 = c.call(json!({"cmd":"setup","update":{"snapshot_ring_s": -5.0}}));
+    assert_eq!(r3["ok"], json!(true));
+    assert_eq!(
+        r3["config"]["snapshot_ring_s"],
+        json!(60.0),
+        "non-positive snapshot_ring_s must be rejected, not applied"
+    );
+
+    // null clears the spool dir override back to the default.
+    let r4 = c.call(json!({"cmd":"setup","update":{"snapshot_spool_dir": Value::Null}}));
+    assert_eq!(r4["ok"], json!(true));
+    assert!(r4["config"]["snapshot_spool_dir"].is_null());
+}
+
 #[test]
 fn setup_clearing_reference_channel_clears_reference_port() {
     // The `reference_channel: null` branch (the way the user disables

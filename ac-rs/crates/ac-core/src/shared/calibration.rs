@@ -180,7 +180,7 @@ fn default_ref_dbfs() -> f64 {
 }
 
 /// High-level calibration object with computed helpers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Calibration {
     pub output_channel: u32,
     pub input_channel: u32,

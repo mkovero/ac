@@ -783,7 +783,9 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "dbu_ref_vrms":      <float>,   // optional
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
-    "backend":           "jack" | "sounddevice" | null  // optional
+    "backend":           "jack" | "sounddevice" | null,  // optional
+    "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
+    "snapshot_spool_dir":"<path>" | null  // optional — see `snapshot`
   }
 }
 ```
@@ -1711,6 +1713,137 @@ measurement instead.
 // topic: done
 { "cmd": "transfer_stream", "stopped": true }
 ```
+
+---
+
+### `snapshot`
+
+Freezes the active `transfer_stream` session's raw capture ring into a
+self-contained `.acsnap` file (handoff: snapshot-backend M1). Valid only
+while a `transfer_stream` session is running — the ring lives inside that
+session's worker. See `SNAPSHOT.md` for the full `.acsnap` binary schema.
+
+Ungated by the busy guard (below) — reads shared state and writes a spool
+file, doesn't spawn a worker or touch audio I/O, so it runs regardless of
+what else is active (same as `get_calibration`/`status`/`devices`).
+
+**Request**
+```json
+{ "cmd": "snapshot" }
+```
+
+**Reply — success**
+```json
+{
+  "ok":          true,
+  "id":          "<sha256 of the .acsnap file — also its fetch handle>",
+  "bytes":       <int>,
+  "duration_s":  <float>,
+  "channels":    ["meas_0", "ref", ...],
+  "sha256":      "<same as id>"
+}
+```
+
+`id` is the file's own sha256 — content-addressed, so identical
+snapshots share one spool entry. **No daemon filesystem path is ever
+returned** (D6) — remote is first-class; a client fetches by `id` only,
+never by path.
+
+**Reply — no session running**
+```json
+{ "ok": false, "error": "no transfer_stream session running" }
+```
+
+---
+
+### `snapshot_fetch`
+
+Chunked read of a spooled `.acsnap` over CTRL (DATA stays pure frames,
+per D6). Client reassembles chunks by `offset` and verifies the whole
+file against `sha256` from the `snapshot` reply.
+
+**Request**
+```json
+{
+  "cmd":    "snapshot_fetch",
+  "id":     "<id from the snapshot reply>",
+  "offset": <int>,           // byte offset, default 0
+  "len":    <int>            // bytes requested, default/max 262144 (256 KiB)
+}
+```
+
+`len` is silently clamped to 262144 — chosen for CTRL sanity (a single
+REQ/REP round-trip stays fast even over a slow remote link). Larger
+requests are not an error; they're served in multiple chunks.
+
+**Reply**
+```json
+{
+  "ok":          true,
+  "id":          "<id>",
+  "offset":      <int>,
+  "chunk_b64":   "<base64-encoded chunk bytes>",
+  "chunk_len":   <int>,       // decoded byte length of chunk_b64
+  "total_bytes": <int>        // total file size — client stops when offset+chunk_len >= total_bytes
+}
+```
+
+**Reply — unknown id**
+```json
+{ "ok": false, "error": "unknown snapshot id '<id>'" }
+```
+
+---
+
+### `snapshot_list`
+
+Lists spooled snapshots from the current session.
+
+**Request**
+```json
+{ "cmd": "snapshot_list" }
+```
+
+**Reply**
+```json
+{
+  "ok": true,
+  "snapshots": [
+    { "id": "<id>", "bytes": <int>, "duration_s": <float>, "channels": [...], "sha256": "<id>" }
+  ]
+}
+```
+
+---
+
+### `snapshot_delete`
+
+Removes one spooled snapshot before session end (session end also clears
+the whole spool — see retention policy below).
+
+**Request**
+```json
+{ "cmd": "snapshot_delete", "id": "<id>" }
+```
+
+**Reply**
+```json
+{ "ok": true }
+{ "ok": false, "error": "unknown snapshot id '<id>'" }
+```
+
+---
+
+**Snapshot retention policy.** The spool is cleared when its
+`transfer_stream` session's worker stops — a snapshot is only valid
+while its session runs (deliverable 2), so every `.acsnap` taken during a
+session is deleted when that session ends. As a crash-safety fallback (a
+killed daemon skips its own cleanup), the spool directory is also wiped
+at the *start* of every new `transfer_stream` session, so a stale file
+from a prior crashed session never outlives the next session's start.
+Spool location: `~/.config/ac/snapshots/` by default, overridable via
+`setup`'s `snapshot_spool_dir` (or `snapshot_ring_s` for the ring's
+retention window, default 30 s) — never exposed in any CTRL reply.
 
 ---
 
