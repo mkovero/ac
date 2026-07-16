@@ -28,11 +28,39 @@ const CHANNEL_OFFSET_HZ: f64 = 100.0;
 /// single-element vec reproduces the old behaviour exactly. `Noise` is a
 /// deterministic pseudo-random broadband signal for the I2 flat-noise
 /// continuity invariant; deterministic (fixed LCG per channel offset) so
-/// harness runs are reproducible.
+/// harness runs are reproducible. `CorrelatedPair` (handoff: parity-
+/// completion M1.5) is a fake DUT with known ground truth: the ref-role
+/// port carries a seeded broadband source, the meas-role port carries the
+/// *same* source scaled and delayed — `|H1| = gain`, coherence ≈ 1.
 #[derive(Clone)]
 enum Stimulus {
     Tones(Vec<(f64, f64)>),
     Noise(f64),
+    CorrelatedPair { gain: f64, delay_samples: usize },
+}
+
+/// Fixed seed for `CorrelatedPair` — deterministic across runs so
+/// fixture regeneration (`ac_core::snapshot`'s regenerator test) is
+/// reproducible: same seed, same stimulus, same `.acsnap` bytes, same
+/// sha256, every time.
+const CORRELATED_PAIR_SEED: u64 = 0xC0FFEE_C0FFEE_u64;
+
+/// Deterministic pseudo-random sample at absolute index `index`, in
+/// `[-1, 1)`. A *pure* function of `(seed, index)` — unlike `Stimulus::
+/// Noise`'s sequentially-advanced LCG, this needs to be independently
+/// seekable at arbitrary (possibly negative-relative, i.e. "before the
+/// source existed") offsets, since the meas-role reads the same
+/// underlying stream `delay_samples` behind the ref-role's position with
+/// no shared mutable cursor between the two (call order between meas and
+/// ref within one tick is not guaranteed — see `make_samples_for`).
+/// SplitMix64's finalizer — good avalanche, no persistent state needed.
+fn correlated_source_at(seed: u64, index: u64) -> f32 {
+    let mut z = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let u = ((z >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+    u as f32
 }
 
 impl Default for Stimulus {
@@ -61,6 +89,17 @@ pub struct FakeEngine {
     /// engine (same offset -> same starting state) so replay from a
     /// logged seed still works; see `noise_stream_advances_across_calls`.
     noise_state: HashMap<u64, u64>,
+    /// Absolute-sample read position per role for `Stimulus::
+    /// CorrelatedPair`, tracked independently (not a shared cursor) so
+    /// the two roles' blocks are correct regardless of which is
+    /// generated first within a tick — see `correlated_source_at`'s doc.
+    /// Both advance by the same `n` each tick since `capture_stereo`/
+    /// `capture_multi` always request the same `duration` for both, so
+    /// they stay equal call-for-call; that equality (not call order) is
+    /// what makes "ref now" and "meas now, sourced from `now - delay`"
+    /// consistent.
+    correlated_ref_pos: u64,
+    correlated_meas_pos: u64,
 }
 
 impl FakeEngine {
@@ -73,6 +112,8 @@ impl FakeEngine {
             input_port: None,
             ref_port: None,
             noise_state: HashMap::new(),
+            correlated_ref_pos: 0,
+            correlated_meas_pos: 0,
         }
     }
 
@@ -99,7 +140,7 @@ impl FakeEngine {
         let offset = Self::channel_offset_hz(port);
         match &self.stimulus {
             Stimulus::Tones(tones) => tones.first().map(|&(f, _)| f + offset).unwrap_or(0.0),
-            Stimulus::Noise(_) => offset,
+            Stimulus::Noise(_) | Stimulus::CorrelatedPair { .. } => offset,
         }
     }
 
@@ -163,6 +204,46 @@ impl FakeEngine {
                     })
                     .collect()
             }
+            Stimulus::CorrelatedPair {
+                gain,
+                delay_samples,
+            } => {
+                let gain = *gain as f32;
+                let delay_samples = *delay_samples as u64;
+                // Role dispatch: the ref-role port (`self.ref_port`) is the
+                // source; anything else (the meas-role `input_port`, in
+                // practice) reads the same source, scaled and delayed.
+                // Independent per-role position counters (not a shared
+                // cursor) — see the field doc on `correlated_ref_pos`.
+                let is_ref = port.is_some() && port == self.ref_port.as_deref();
+                let start_pos = if is_ref {
+                    let p = self.correlated_ref_pos;
+                    self.correlated_ref_pos += n as u64;
+                    p
+                } else {
+                    let p = self.correlated_meas_pos;
+                    self.correlated_meas_pos += n as u64;
+                    p
+                };
+                (0..n)
+                    .map(|i| {
+                        let abs_index = start_pos + i as u64;
+                        if is_ref {
+                            correlated_source_at(CORRELATED_PAIR_SEED, abs_index)
+                        } else {
+                            // Silence before the source "existed" (real DUT:
+                            // no output before its input arrived) rather
+                            // than wrapping into negative-index territory.
+                            match abs_index.checked_sub(delay_samples) {
+                                Some(src_index) => {
+                                    gain * correlated_source_at(CORRELATED_PAIR_SEED, src_index)
+                                }
+                                None => 0.0,
+                            }
+                        }
+                    })
+                    .collect()
+            }
         }
     }
 }
@@ -198,6 +279,18 @@ impl AudioEngine for FakeEngine {
 
     fn set_broadband_noise(&mut self, amplitude: f64) {
         self.stimulus = Stimulus::Noise(amplitude);
+    }
+
+    fn set_correlated_pair(&mut self, gain: f64, delay_samples: usize) {
+        self.stimulus = Stimulus::CorrelatedPair {
+            gain,
+            delay_samples,
+        };
+        // Fresh stimulus, fresh positions — otherwise a session that
+        // switches stimulus mid-life would read from a stale absolute
+        // index instead of starting the pair cleanly at t=0.
+        self.correlated_ref_pos = 0;
+        self.correlated_meas_pos = 0;
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
@@ -430,5 +523,111 @@ mod tests {
             m < rms,
             "energy concentrated at 1000 Hz looks tonal, not broadband: mag/n={m} rms={rms}"
         );
+    }
+
+    /// Ground truth (handoff: parity-completion M1.5): meas must equal
+    /// `gain * ref[i - delay_samples]` sample-for-sample, for every `i`
+    /// once past the initial `delay_samples` silence — checked directly
+    /// against the captured arrays, not just "differs" (the way
+    /// `stereo_channels_are_independent` checks the *old* stimuli).
+    #[test]
+    fn correlated_pair_meas_is_exact_delayed_scaled_copy_of_ref() {
+        let mut eng = FakeEngine::new();
+        let gain = 0.5_f64;
+        let delay = 37_usize;
+        eng.set_correlated_pair(gain, delay);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+
+        let (meas, refch) = eng.capture_stereo(0.01).unwrap();
+        assert_eq!(meas.len(), refch.len());
+        assert!(
+            meas.len() > delay,
+            "test capture too short to exercise the delay"
+        );
+
+        for i in delay..meas.len() {
+            let expected = gain as f32 * refch[i - delay];
+            assert!(
+                (meas[i] - expected).abs() < 1e-6,
+                "meas[{i}]={} expected {expected} (= {gain} * ref[{}]={})",
+                meas[i],
+                i - delay,
+                refch[i - delay]
+            );
+        }
+        // Before the delay has elapsed, meas is silence (no output before
+        // the DUT's input arrived).
+        for (i, &m) in meas.iter().enumerate().take(delay) {
+            assert_eq!(m, 0.0, "meas[{i}] should be silence before delay elapses");
+        }
+    }
+
+    /// Same check across a call boundary (two consecutive `capture_stereo`
+    /// calls) — the per-role position counters must keep the delay
+    /// relationship correct across ticks, not just within one block.
+    #[test]
+    fn correlated_pair_delay_relationship_holds_across_call_boundary() {
+        let mut eng = FakeEngine::new();
+        let gain = 0.7_f64;
+        let delay = 5_usize;
+        eng.set_correlated_pair(gain, delay);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+
+        let (mut meas_all, mut ref_all) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let (meas, refch) = eng.capture_stereo(0.001).unwrap();
+            meas_all.extend(meas);
+            ref_all.extend(refch);
+        }
+        assert!(meas_all.len() > delay * 2);
+        for i in delay..meas_all.len() {
+            let expected = gain as f32 * ref_all[i - delay];
+            assert!(
+                (meas_all[i] - expected).abs() < 1e-6,
+                "meas_all[{i}]={} expected {expected}",
+                meas_all[i]
+            );
+        }
+    }
+
+    /// Broadband, not a hidden tone — the ground-truth H1/coherence test
+    /// (`it_snapshot.rs`) needs genuine spectral content, same reasoning
+    /// as `broadband_noise_has_no_dominant_tone`.
+    #[test]
+    fn correlated_pair_ref_is_broadband_not_tonal() {
+        let mut eng = FakeEngine::new();
+        eng.set_correlated_pair(1.0, 0);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+        let (_, refch) = eng.capture_stereo(0.5).unwrap();
+        let rms: f64 =
+            (refch.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / refch.len() as f64).sqrt();
+        assert!(rms > 0.05, "expected broadband energy, rms = {rms}");
+        let m = goertzel_mag(&refch, 48_000.0, 1_000.0) / refch.len() as f64;
+        assert!(
+            m < rms,
+            "energy concentrated at 1000 Hz, not broadband: mag/n={m} rms={rms}"
+        );
+    }
+
+    /// Determinism (needed for reproducible fixture regeneration): same
+    /// seed (fixed in code) + same params ⇒ identical stream from a
+    /// fresh engine, same acceptance criterion as `Stimulus::Noise`'s own
+    /// `noise_stream_is_deterministic_from_a_fresh_engine`.
+    #[test]
+    fn correlated_pair_is_deterministic_from_a_fresh_engine() {
+        let build = || {
+            let mut eng = FakeEngine::new();
+            eng.set_correlated_pair(0.5, 10);
+            eng.reconnect_input("fake:capture_0").unwrap();
+            eng.add_ref_input("fake:capture_1").unwrap();
+            eng.capture_stereo(0.01).unwrap()
+        };
+        let (meas1, ref1) = build();
+        let (meas2, ref2) = build();
+        assert_eq!(meas1, meas2, "meas stream must replay identically");
+        assert_eq!(ref1, ref2, "ref stream must replay identically");
     }
 }

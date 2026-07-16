@@ -40,6 +40,16 @@ pub struct PairDerivation {
     /// callers wanting a time-evolving trace can call `derive_pair` on
     /// successive sub-windows and integrate themselves.
     pub spl: Option<f64>,
+    /// The weighting curve actually used to compute `spl` on *this*
+    /// call — the caller's argument, echoed back (handoff: parity-
+    /// completion M1.5, deliverable 3's edge case). Reprocessing under a
+    /// weighting different from the snapshot's capture-time
+    /// `ChannelMeta::weighting` is expected and supported (D10/D11
+    /// edit-time freedom) — this field is what tells a caller which one
+    /// actually produced `spl`, so it never has to be inferred from (or
+    /// confused with) the capture-time provenance, which stays untouched
+    /// in `SnapshotMeta`.
+    pub spl_weighting: WeightingCurve,
 }
 
 /// Subtract `curve`'s per-frequency correction from `amp` in the linear
@@ -111,6 +121,7 @@ pub fn derive_pair(
         meas_spectrum,
         ref_spectrum,
         spl,
+        spl_weighting: weighting,
     }
 }
 

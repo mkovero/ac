@@ -74,6 +74,17 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .and_then(Value::as_f64)
         .unwrap_or(-10.0);
 
+    // Fake-audio-only stimulus knob (handoff: parity-completion M1.5),
+    // same pattern as `monitor_spectrum`'s `fake_tones`/`fake_noise_dbfs`
+    // (`handlers/audio/monitor.rs`): read unconditionally here, applied
+    // only inside `if fake { ... }` below — real backends never see it.
+    let fake_correlated_pair: Option<(f64, usize)> =
+        cmd.get("fake_correlated_pair").and_then(|v| {
+            let gain = v.get("gain").and_then(Value::as_f64)?;
+            let delay_samples = v.get("delay_samples").and_then(Value::as_u64)?;
+            Some((gain, delay_samples as usize))
+        });
+
     let pairs = match parse_transfer_pairs(cmd) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -267,6 +278,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 eprintln!("transfer_stream: warning — ref input {p}: {e}");
             }
         }
+        if fake {
+            if let Some((gain, delay_samples)) = fake_correlated_pair {
+                eng.set_correlated_pair(gain, delay_samples);
+            }
+        }
 
         let sr = eng.sample_rate();
         // Fixed log-column grid for `meas_spectrum`/`ref_spectrum` (D18) —
@@ -317,7 +333,25 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         if drive {
             eng.set_pink(amplitude);
         }
-        let _ = eng.capture_block(0.2); // warmup flush
+        // Warmup flush: discard whatever's buffered before the engine
+        // started (real hardware) / prime the fake generator (fake
+        // backend). Must go through `capture_multi` — not the
+        // single-channel `capture_block` — whenever the fake correlated-
+        // pair stimulus is active: `capture_block` only reads the meas-
+        // role port, which would advance `FakeEngine`'s meas-side
+        // position counter with no matching ref-side advance, desyncing
+        // the pair's `gain`/`delay_samples` relationship before the main
+        // loop even starts (found by the M1.5 I-B parity test failing
+        // with a corrupted downstream FLAC encode — traced to meas and
+        // ref silently reading unrelated windows of the same generator).
+        // Harmless to do unconditionally, but scoped to the fake+
+        // correlated case to keep every other stimulus path byte-
+        // identical to before.
+        if fake && fake_correlated_pair.is_some() {
+            let _ = eng.capture_multi(0.2);
+        } else {
+            let _ = eng.capture_block(0.2);
+        }
 
         // Delay cache: ref↔meas propagation is constant during a streaming
         // session (fixed hardware path), so we estimate once per pair on

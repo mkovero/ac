@@ -157,6 +157,15 @@ pub trait AudioEngine: Send + 'static {
     fn set_broadband_noise(&mut self, amplitude: f64) {
         self.set_pink(amplitude);
     }
+
+    /// Set a correlated-pair stimulus (handoff: parity-completion M1.5):
+    /// the reference-role port carries a seeded deterministic broadband
+    /// source; the measurement-role port carries the *same* source scaled
+    /// by `gain` and delayed by `delay_samples` — a fake DUT with known
+    /// ground truth (`|H1| = gain`, coherence ≈ 1). Default no-op — only
+    /// the fake backend (test / `--fake-audio` use) implements this; real
+    /// backends have no "known ground truth" concept to synthesize.
+    fn set_correlated_pair(&mut self, _gain: f64, _delay_samples: usize) {}
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.
