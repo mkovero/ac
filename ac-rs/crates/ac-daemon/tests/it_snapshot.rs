@@ -36,8 +36,15 @@ struct Daemon {
 
 impl Daemon {
     fn spawn() -> Self {
+        Self::spawn_at_home(alloc_home())
+    }
+
+    /// Same as [`Self::spawn`] but against a caller-chosen `HOME` —
+    /// needed to test the crash-safety spool wipe (a second daemon
+    /// instance must see the *same* on-disk spool a killed first
+    /// instance left behind).
+    fn spawn_at_home(home: PathBuf) -> Self {
         let (ctrl, data) = alloc_ports();
-        let home = alloc_home();
         let bin = env!("CARGO_BIN_EXE_ac-daemon");
         let child = Command::new(bin)
             .env("HOME", &home)
@@ -263,6 +270,151 @@ fn snapshot_list_empty_when_no_snapshots_taken() {
     let r = c.call(json!({"cmd": "snapshot_list"}));
     assert_eq!(r["ok"], json!(true));
     assert_eq!(r["snapshots"].as_array().unwrap().len(), 0);
+}
+
+/// Retention policy (`handlers/snapshot.rs` module doc): the spool is
+/// cleared when its `transfer_stream` session's worker stops. Not
+/// previously exercised by any test — checked here directly, both via
+/// `snapshot_list` and via a `snapshot_fetch` on the now-deleted id.
+#[test]
+fn snapshot_spool_cleared_on_session_stop() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let _live = start_transfer_and_get_live_frame(&c, 1.0);
+
+    let r = c.call(json!({"cmd": "snapshot"}));
+    assert_eq!(r["ok"], json!(true), "snapshot: {r}");
+    let id = r["id"].as_str().unwrap().to_string();
+
+    let listed = c.call(json!({"cmd": "snapshot_list"}));
+    assert_eq!(
+        listed["snapshots"].as_array().unwrap().len(),
+        1,
+        "snapshot should be listed pre-stop"
+    );
+
+    let r = c.call(json!({"cmd": "stop"}));
+    assert_eq!(r["ok"], json!(true));
+    // Drain the terminal `done` frame so the daemon has fully finished
+    // the worker's cleanup path (spool-clear happens right before it).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "done" && v["cmd"] == json!("transfer_stream") => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+
+    let listed_after = c.call(json!({"cmd": "snapshot_list"}));
+    assert_eq!(
+        listed_after["snapshots"].as_array().unwrap().len(),
+        0,
+        "spool must be empty after session stop"
+    );
+    let fetch_after = c.call(json!({"cmd": "snapshot_fetch", "id": id, "offset": 0, "len": 1024}));
+    assert_eq!(
+        fetch_after["ok"],
+        json!(false),
+        "fetch of a spool-cleared id must fail: {fetch_after}"
+    );
+}
+
+/// Crash-safety fallback (`handlers/snapshot.rs` module doc, distinct
+/// from the clean-stop path above): a daemon killed mid-session skips
+/// its own cleanup, so a stale `.acsnap` is left on disk. The *next*
+/// `transfer_stream` session (even in a freshly-spawned daemon process,
+/// same `HOME`) must wipe that leftover at start, not just at its own
+/// eventual stop. `std::mem::forget` on the first `Daemon` skips its
+/// `Drop` (which would otherwise delete the shared `home` out from
+/// under the second instance) — deliberately simulating "process died,
+/// no cleanup ran" rather than a clean shutdown.
+#[test]
+fn snapshot_spool_wiped_at_next_session_start_after_a_crash() {
+    let home = alloc_home();
+
+    let d1 = Daemon::spawn_at_home(home.clone());
+    let c1 = Client::new(&d1);
+    let _live = start_transfer_and_get_live_frame(&c1, 1.0);
+    let r = c1.call(json!({"cmd": "snapshot"}));
+    assert_eq!(r["ok"], json!(true), "snapshot: {r}");
+
+    let spool_dir = home.join(".config").join("ac").join("snapshots");
+    let leftover_files_before = fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    assert_eq!(
+        leftover_files_before, 1,
+        "expected exactly one spooled .acsnap on disk"
+    );
+
+    // Simulate a crash: kill without going through the `stop` CTRL
+    // command or a clean process exit, then skip this instance's own
+    // `Drop` so it doesn't clean up the shared `home`.
+    let mut d1 = d1;
+    let _ = d1.child.kill();
+    let _ = d1.child.wait();
+    std::mem::forget(d1);
+
+    // Leftover file must still be there — proving the crash really did
+    // skip cleanup (otherwise this test would trivially pass for the
+    // wrong reason).
+    let leftover_files_after_kill = fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    assert_eq!(
+        leftover_files_after_kill, 1,
+        "crash must leave the stale spool file behind"
+    );
+
+    let d2 = Daemon::spawn_at_home(home.clone());
+    let c2 = Client::new(&d2);
+    let r = c2.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "second session start: {r}");
+    thread::sleep(Duration::from_millis(300));
+
+    let leftover_files_after_new_session =
+        fs::read_dir(&spool_dir).map(|it| it.count()).unwrap_or(0);
+    assert_eq!(
+        leftover_files_after_new_session, 0,
+        "new session must wipe the stale spool from the crashed prior one"
+    );
+    let listed = c2.call(json!({"cmd": "snapshot_list"}));
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 0);
+
+    let _ = c2.call(json!({"cmd": "stop"}));
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// Regression test (QA pass, M1): `snapshot` used to hold the ring's
+/// mutex across the FLAC encode, which the live worker's capture tick
+/// needs on every tick (`push_tick`) — a snapshot of a near-full ring
+/// would stall live capture for the whole encode. Fixed by cloning the
+/// ring's contents out under the lock (fast) and encoding outside it
+/// (`snapshot_meta_and_channels` / `build_acsnap` in
+/// `handlers/snapshot.rs`). Asserted here as a round-trip-time bound —
+/// generous (2 s) to avoid CI-jitter flakiness, but tight enough that a
+/// regression back to lock-held-across-encode on this test's ~1.8 s ring
+/// would still trip it on any machine, since that reintroduces a
+/// dependency between REP latency and encode time that a properly
+/// lock-scoped implementation doesn't have.
+#[test]
+fn snapshot_ctrl_call_returns_promptly_even_with_a_near_full_ring() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let _live = start_transfer_and_get_live_frame(&c, 1.5);
+
+    let t0 = Instant::now();
+    let r = c.call(json!({"cmd": "snapshot"}));
+    let elapsed = t0.elapsed();
+    assert_eq!(r["ok"], json!(true), "snapshot: {r}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "snapshot took {elapsed:?} — the ring lock may be held across the FLAC encode again"
+    );
+
+    let _ = c.call(json!({"cmd": "stop"}));
 }
 
 // ---------------------------------------------------------------------------

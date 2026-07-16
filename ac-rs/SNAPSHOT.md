@@ -125,6 +125,25 @@ This calls the exact same low-level functions the live daemon path calls
 (`h1_estimate_with_delay`, `spectrum_to_columns_wire`,
 `weighted_broadband_dbfs`) — see `ac_core::visualize::pair_derivation`.
 
+**I-B parity — what's actually verified, honestly.** `meas_spectrum`
+parity between a live frame and a snapshot-derived reprocessing of the
+same window is tested and holds (`snapshot_reprocessing_matches_live_frame_within_tolerance`,
+`it_snapshot.rs`) — it depends only on the meas channel's own signal.
+**H1 magnitude and coherence parity are not asserted**, and are not
+currently believed to hold frame-for-frame under the fake-audio test
+stimulus: reprocessing reproduces the live H1/coherence only when the
+Welch windows are exactly aligned and the estimator has converged on a
+genuinely correlated pair. The daemon's default passive `--fake-audio`
+stimulus puts two clean, *uncorrelated* deterministic tones on meas vs.
+ref (different frequencies per channel), so H1's magnitude is a
+noise/noise ratio with no true value to converge to — a QA pass measured
+~7 dB live-vs-reprocessed drift and coherence pinned at 1.0 instead of
+near-zero, traced to that stimulus property, not a reprocessing defect.
+Exact H1/coherence parity testing needs a correlated ref/meas stimulus
+(e.g. `drive=true` with a shared source, or a fixture built from a real
+loopback) and is not yet in place — treat H1/coherence reprocessing as
+unverified, not merely untested, until that lands.
+
 ## Fixture
 
 `tests/fixtures/snapshot-fixture-v1.acsnap` (repo root) is a checked-in,

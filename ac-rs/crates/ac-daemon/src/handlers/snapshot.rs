@@ -99,12 +99,21 @@ impl SnapshotRingState {
         }
     }
 
-    /// Build a `.acsnap` from the ring's *current* contents. Returns
-    /// `(bytes, sha256, duration_s, channel_roles)`.
-    fn to_acsnap(
-        &self,
-        daemon_version: &str,
-    ) -> anyhow::Result<(Vec<u8>, String, f64, Vec<String>)> {
+    /// Snapshot the ring's *current* contents into an owned
+    /// `(SnapshotMeta, channels)` pair — cheap (just clones out the
+    /// already-in-memory samples and builds a small struct), so the
+    /// caller should hold the ring's lock for only as long as this call
+    /// takes, not for the FLAC-encoding step that follows (that step is
+    /// [`build_acsnap`], deliberately a free function taking owned data
+    /// rather than a method on `&self`, so it's impossible to call it
+    /// while still holding the ring's mutex).
+    ///
+    /// The live worker thread needs this same mutex on every capture
+    /// tick (`push_tick`, `delay_samples` sync) — holding it across a
+    /// FLAC encode of up to `snapshot_ring_s` seconds of multichannel
+    /// audio would stall that tick loop and glitch the live
+    /// `transfer_stream` cadence for the encode's whole duration.
+    fn snapshot_meta_and_channels(&self, daemon_version: &str) -> (SnapshotMeta, Vec<Vec<f32>>) {
         let channels: Vec<Vec<f32>> = self
             .channels
             .iter()
@@ -152,7 +161,7 @@ impl SnapshotRingState {
         let meta = SnapshotMeta {
             format_version: ac_core::snapshot::FORMAT_VERSION,
             sr: self.sr,
-            channel_map: channel_map.clone(),
+            channel_map,
             per_channel,
             session: SessionMeta {
                 pairs: self.pairs.clone(),
@@ -163,10 +172,26 @@ impl SnapshotRingState {
             daemon_version: daemon_version.to_string(),
             ring_duration_s: duration_s,
         };
-
-        let (bytes, sha256) = ac_core::snapshot::write_acsnap(&meta, &channels)?;
-        Ok((bytes, sha256, duration_s, channel_map))
+        (meta, channels)
     }
+}
+
+/// FLAC-encode + zip `meta`/`channels` into a `.acsnap`. Deliberately a
+/// free function (not a `SnapshotRingState` method) taking owned data —
+/// see [`SnapshotRingState::snapshot_meta_and_channels`]'s doc comment
+/// for why this must never run while the ring's mutex is held. Returns
+/// `(bytes, sha256, duration_s, channel_roles)`.
+fn build_acsnap(
+    meta: &SnapshotMeta,
+    channels: &[Vec<f32>],
+) -> anyhow::Result<(Vec<u8>, String, f64, Vec<String>)> {
+    let (bytes, sha256) = ac_core::snapshot::write_acsnap(meta, channels)?;
+    Ok((
+        bytes,
+        sha256,
+        meta.ring_duration_s,
+        meta.channel_map.clone(),
+    ))
 }
 
 pub struct SpoolEntry {
@@ -216,13 +241,19 @@ pub fn snapshot(state: &ServerState, _cmd: &Value) -> Value {
             None => return json!({"ok": false, "error": "no transfer_stream session running"}),
         }
     };
-    let ring = ring_handle.lock().unwrap();
+    // Hold the ring's lock only long enough to clone out its current
+    // contents — never across the FLAC encode below, which would stall
+    // the live worker's capture tick (holding this same mutex) for the
+    // encode's whole duration. See `snapshot_meta_and_channels`'s doc.
     let daemon_version = env!("CARGO_PKG_VERSION");
-    let (bytes, sha256, duration_s, channels) = match ring.to_acsnap(daemon_version) {
+    let (meta, channels) = {
+        let ring = ring_handle.lock().unwrap();
+        ring.snapshot_meta_and_channels(daemon_version)
+    };
+    let (bytes, sha256, duration_s, channels) = match build_acsnap(&meta, &channels) {
         Ok(v) => v,
         Err(e) => return json!({"ok": false, "error": format!("snapshot: {e}")}),
     };
-    drop(ring);
 
     let dir = spool_dir(state);
     if let Err(e) = fs::create_dir_all(&dir) {
