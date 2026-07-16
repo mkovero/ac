@@ -134,3 +134,27 @@ For each landed issue:
 - No deferral of LKFS × mic-curve to a tag-only stub. Issue #104
   ships the deep integration (per-sample inverse-curve FIR before
   K-weighting), as the user committed to during planning.
+
+## Known flaky tests
+
+Unrelated to the tier-framing work above — logged here rather than a
+fourth QA sign-off re-justifying the same retry from scratch.
+
+- **`handlers::test_software::tests::every_self_test_passes`**
+  (`ac-daemon`, unit test binary). Fails intermittently under
+  `cargo test --workspace`'s full parallel run; passes reliably in
+  isolation (`cargo test -p ac-daemon --bin ac-daemon
+  every_self_test_passes`) and on immediate retry of the full suite.
+  Symptom: a single test failure with no panic message pointing at a
+  specific assertion beyond the test's own top-level `assert`,
+  consistent with a resource race (port allocation or similar) rather
+  than a logic bug in the module itself. Observed across three
+  independent QA passes on unrelated diffs (M0's
+  `qa-signoff.md`, M1's `qa-signoff-m1.md`, M1.5's
+  `qa-signoff-m1.5.md`) — never reproduces when the failing test is run
+  alone, and none of the three diffs touched `test_software.rs` or its
+  dependencies. Not yet root-caused or filed as a numbered GitHub
+  issue. Future QA passes: cite this entry instead of re-deriving the
+  "isolate + retry, confirm pre-existing" argument each time; if it
+  ever fails *in isolation*, that's new information and should be
+  investigated immediately rather than assumed to be this same flake.

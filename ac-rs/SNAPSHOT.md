@@ -125,24 +125,35 @@ This calls the exact same low-level functions the live daemon path calls
 (`h1_estimate_with_delay`, `spectrum_to_columns_wire`,
 `weighted_broadband_dbfs`) — see `ac_core::visualize::pair_derivation`.
 
-**I-B parity — what's actually verified, honestly.** `meas_spectrum`
-parity between a live frame and a snapshot-derived reprocessing of the
-same window is tested and holds (`snapshot_reprocessing_matches_live_frame_within_tolerance`,
-`it_snapshot.rs`) — it depends only on the meas channel's own signal.
-**H1 magnitude and coherence parity are not asserted**, and are not
-currently believed to hold frame-for-frame under the fake-audio test
-stimulus: reprocessing reproduces the live H1/coherence only when the
-Welch windows are exactly aligned and the estimator has converged on a
-genuinely correlated pair. The daemon's default passive `--fake-audio`
-stimulus puts two clean, *uncorrelated* deterministic tones on meas vs.
-ref (different frequencies per channel), so H1's magnitude is a
-noise/noise ratio with no true value to converge to — a QA pass measured
-~7 dB live-vs-reprocessed drift and coherence pinned at 1.0 instead of
-near-zero, traced to that stimulus property, not a reprocessing defect.
-Exact H1/coherence parity testing needs a correlated ref/meas stimulus
-(e.g. `drive=true` with a shared source, or a fixture built from a real
-loopback) and is not yet in place — treat H1/coherence reprocessing as
-unverified, not merely untested, until that lands.
+**I-B parity — what's actually verified, honestly.** Exact per-frame H1
+parity (magnitude, phase, coherence — not just `meas_spectrum`) *is*
+tested, under a correlated stimulus: `full_ib_parity_under_correlated_stimulus`
+(`it_snapshot.rs`, handoff: parity-completion M1.5) drives
+`transfer_stream`'s `fake_correlated_pair` mode (a seeded broadband
+source on ref; meas is the same source scaled by a known `gain` and
+delayed by a known `delay_samples` — a fake DUT with real ground truth),
+and asserts live-vs-snapshot-reprocessed agreement on `meas_spectrum`,
+`ref_spectrum`, `spl`, `|H1|`, phase, and coherence, plus both sides
+independently against the ground truth (`|H1| = gain`, coherence ≥ 0.99)
+— measured within ~0.1 dB / ~0.0001 coherence at the seed/gain/delay
+that test uses.
+
+**Under uncorrelated or low-coherence signals — including the daemon's
+default passive `--fake-audio` stimulus, which puts two clean but
+*uncorrelated* deterministic tones on meas vs. ref (different
+frequencies per channel, `audio/fake.rs`) — snapshot-derived H1 matches
+live statistically, not per-frame.** With no true underlying transfer
+function to converge to, H1's magnitude is a noise/noise ratio,
+sensitive to exact sample-window alignment in a way a wall-clock-
+correlated snapshot trigger can't guarantee frame-for-frame (a QA pass
+measured ~7 dB live-vs-reprocessed drift under exactly this condition,
+traced to the stimulus property, not a reprocessing defect —
+`snapshot_reprocessing_matches_live_frame_within_tolerance` covers this
+case using `meas_spectrum` instead, which only depends on meas's own
+signal and isn't affected). Use `fake_correlated_pair` (or a real
+loopback) whenever H1/coherence reprocessing needs to be trusted
+per-frame; under any other stimulus, only spectra/SPL parity is
+verified.
 
 ## Fixture
 
