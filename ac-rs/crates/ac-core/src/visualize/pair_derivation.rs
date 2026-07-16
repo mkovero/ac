@@ -33,7 +33,11 @@ pub struct PairDerivation {
     pub meas_spectrum: Vec<f64>,
     /// Same, reference channel (no mic curve, matches the wire contract).
     pub ref_spectrum: Vec<f64>,
-    /// Weighted broadband SPL for this window. `None` when `meas_cal` has
+    /// Weighted broadband SPL for this window, computed from the
+    /// *uncalibrated* (pre-voltage-cal) amplitude — see
+    /// `shared::calibration`'s "layer topology" module doc: voltage cal
+    /// and SPL cal are parallel readings off the same raw digital
+    /// amplitude, not composed. `None` when `meas_cal` has
     /// no SPL calibration layer. Unlike the live wire's `spl` (which is
     /// F/S time-integrated across ticks), this is the single-window
     /// value — the natural quantity for a static reprocessed capture;

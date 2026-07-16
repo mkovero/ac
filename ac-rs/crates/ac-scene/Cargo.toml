@@ -1,0 +1,13 @@
+[package]
+name = "ac-scene"
+version = "0.1.0"
+edition = "2021"
+description = "Pure scene/data layer for the spectrum view — traces, axes, readouts as plain data (no rendering)"
+
+[dependencies]
+ac-core    = { path = "../ac-core" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+approx = "0.5"
