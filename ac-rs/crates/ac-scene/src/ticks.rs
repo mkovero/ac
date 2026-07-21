@@ -43,7 +43,17 @@ fn freq_label(hz: f64) -> String {
 /// log(f_max/f_min)` — the same log mapping trace x-coordinates use, so
 /// a tick's position and a trace point's x-coordinate agree for the
 /// same frequency (AC3's log-mapping-correctness requirement).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn freq_axis(f_min: f64, f_max: f64) -> Axis {
+    // Defensive (handoff: ac-view M3, deliverable 5 — a degenerate
+    // range must be unrepresentable in `ac-view`'s own UI state, but
+    // this function shouldn't trust that and produce NaN/Inf ticks if
+    // it's ever called with one anyway): `f_min <= 0` makes the log
+    // mapping undefined, and `f_min >= f_max` makes `freq_to_x`'s
+    // denominator zero.
+    if !(f_min > 0.0) || !(f_max > f_min) {
+        return Axis { ticks: Vec::new() };
+    }
     let ticks = FREQ_CANDIDATES_HZ
         .iter()
         .filter(|&&f| f >= f_min && f <= f_max)
@@ -64,7 +74,13 @@ pub fn freq_to_x(f_hz: f64, f_min: f64, f_max: f64) -> f64 {
 /// dB axis: ticks every 20 dB within `[db_min, db_max]`, labelled as a
 /// bare integer (e.g. `"-60"`, `"-40"`) — the unit itself is an axis
 /// title, not part of each tick's label.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub fn db_axis(db_min: f64, db_max: f64) -> Axis {
+    // Defensive, same reasoning as `freq_axis` above: `db_min >=
+    // db_max` makes `db_to_y`'s denominator zero.
+    if !(db_max > db_min) {
+        return Axis { ticks: Vec::new() };
+    }
     let start = (db_min / 20.0).ceil() as i64;
     let end = (db_max / 20.0).floor() as i64;
     let ticks = (start..=end)
@@ -131,5 +147,43 @@ mod tests {
         assert_eq!(labels, vec!["-80", "-60", "-40", "-20", "0"]);
         let tick_minus40 = axis.ticks.iter().find(|t| t.label == "-40").unwrap();
         assert!((tick_minus40.position - 0.5).abs() < 1e-9);
+    }
+
+    // ---------------------------------------------------------------
+    // Defensive degenerate-input tests (handoff: ac-view M3, deliverable
+    // 5 — sanctioned additive edit). `ac-view`'s own `FreqRange`/
+    // `DbRange` types make these inputs unrepresentable in UI state,
+    // but this module shouldn't rely on that and produce NaN/Inf ticks
+    // if it's ever handed one directly.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn freq_axis_degenerate_equal_bounds_is_empty_not_nan() {
+        let axis = freq_axis(1_000.0, 1_000.0);
+        assert!(axis.ticks.is_empty());
+    }
+
+    #[test]
+    fn freq_axis_degenerate_inverted_bounds_is_empty_not_nan() {
+        let axis = freq_axis(20_000.0, 20.0);
+        assert!(axis.ticks.is_empty());
+    }
+
+    #[test]
+    fn freq_axis_degenerate_zero_or_negative_min_is_empty_not_nan() {
+        assert!(freq_axis(0.0, 20_000.0).ticks.is_empty());
+        assert!(freq_axis(-20.0, 20_000.0).ticks.is_empty());
+    }
+
+    #[test]
+    fn db_axis_degenerate_equal_bounds_is_empty_not_nan() {
+        let axis = db_axis(0.0, 0.0);
+        assert!(axis.ticks.is_empty());
+    }
+
+    #[test]
+    fn db_axis_degenerate_inverted_bounds_is_empty_not_nan() {
+        let axis = db_axis(0.0, -80.0);
+        assert!(axis.ticks.is_empty());
     }
 }

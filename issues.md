@@ -157,9 +157,18 @@ fourth QA sign-off re-justifying the same retry from scratch.
   `handler_returns_results_array_and_all_pass_true` — same symptom
   (passes in isolation, passes on retry), different specific test name,
   which supports the shared-resource-race theory over a per-test logic
-  bug. None of the four diffs touched `test_software.rs` or its
-  dependencies. Not yet root-caused or filed as a numbered GitHub
-  issue. Future QA passes: cite this entry instead of re-deriving the
+  bug. M3's QA pass (`qa-signoff-m3.md`) saw `every_self_test_passes`
+  again, twice across roughly four full-workspace runs (up from
+  "usually once" in prior passes) — both clean on isolated retry.
+  M3 adds several new daemon-spawning integration tests to the
+  workspace (`ac-view/tests/it_live_end_to_end.rs` and siblings), so
+  a full `cargo test --workspace` now runs more concurrent
+  `ac-daemon` child processes than before M3 existed; the increased
+  hit rate is consistent with, not contrary to, the resource-race
+  theory below, not new information requiring investigation. None of
+  the five diffs touched `test_software.rs` or its dependencies. Not
+  yet root-caused or filed as a numbered GitHub issue. Future QA
+  passes: cite this entry instead of re-deriving the
   "isolate + retry, confirm pre-existing" argument each time, for any
   test in this module; if a failure ever reproduces *in isolation*,
   that's new information and should be investigated immediately rather
