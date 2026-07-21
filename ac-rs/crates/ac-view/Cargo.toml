@@ -1,0 +1,23 @@
+[package]
+name = "ac-view"
+version = "0.1.0"
+edition = "2021"
+description = "Keyboard-driven egui shell for the spectrum view — draws ac-scene scenes, no numeric computation of its own"
+
+[[bin]]
+name = "ac-view"
+path = "src/main.rs"
+
+[dependencies]
+ac-core    = { path = "../ac-core" }
+ac-scene   = { path = "../ac-scene" }
+egui       = { version = "0.35", default-features = false }
+eframe     = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+zmq        = "0.10"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.11.0"
+anyhow     = "1"
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", default-features = false, features = ["eframe"] }
