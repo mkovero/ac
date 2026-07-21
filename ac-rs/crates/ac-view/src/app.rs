@@ -18,6 +18,14 @@ pub struct AcViewApp {
     endpoint: Endpoint,
     view: ViewKind,
     scene: Option<Scene>,
+    /// The last frame received, kept so the scene can be rebuilt on a
+    /// zoom/pan (range change) without waiting for the next frame —
+    /// otherwise zoom appears frozen on a paused or slow stream.
+    last_frame: Option<ac_scene::WireFrame>,
+    /// The ranges the current `scene` was last built with, so a
+    /// range change alone (no new frame) is detected and triggers a
+    /// rebuild from `last_frame`.
+    last_scene_ranges: Option<((f64, f64), (f64, f64))>,
     help_open: bool,
     weighting: WeightingCurve,
     integration: &'static str,
@@ -30,6 +38,8 @@ impl AcViewApp {
             endpoint,
             view: ViewKind::Spectrum(SpectrumViewState::default()),
             scene: None,
+            last_frame: None,
+            last_scene_ranges: None,
             help_open: false,
             weighting: WeightingCurve::Z,
             integration: "fast",
@@ -94,16 +104,36 @@ impl eframe::App for AcViewApp {
             }
         });
 
+        let mut got_new_frame = false;
         if let Some(session) = &mut self.session {
-            if let Some(frame) = session.poll_frame(Duration::from_millis(1)) {
+            // Drain to the newest queued frame rather than parsing one
+            // per repaint: the daemon publishes faster than the UI
+            // repaints, so a single `if let` would fall progressively
+            // behind. `self.last_frame` is overwritten each iteration,
+            // so the backlog is discarded and only the freshest frame
+            // survives — correct for a live display.
+            while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
                 if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
-                    let ViewKind::Spectrum(state) = &self.view;
-                    self.scene = Some(Scene::from_wire_frame(
-                        &wire_frame,
-                        (state.freq_range.min(), state.freq_range.max()),
-                        (state.db_range.min(), state.db_range.max()),
-                    ));
+                    self.last_frame = Some(wire_frame);
+                    got_new_frame = true;
                 }
+            }
+        }
+
+        let ViewKind::Spectrum(state) = &self.view;
+        let ranges = (
+            (state.freq_range.min(), state.freq_range.max()),
+            (state.db_range.min(), state.db_range.max()),
+        );
+        // Rebuild the scene once per pass — never once per backlog
+        // frame — either because a new frame arrived or because
+        // zoom/pan changed the ranges. Range-only changes must also
+        // rebuild, or zoom/pan appears frozen on a paused/snapshot
+        // scene until the next frame happens to arrive.
+        if let Some(wire_frame) = &self.last_frame {
+            if got_new_frame || self.last_scene_ranges != Some(ranges) {
+                self.scene = Some(Scene::from_wire_frame(wire_frame, ranges.0, ranges.1));
+                self.last_scene_ranges = Some(ranges);
             }
         }
 
@@ -131,7 +161,16 @@ impl eframe::App for AcViewApp {
             });
         }
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // Continuous repaint (paced to vsync by egui/eframe) while a
+        // session is live, so the display updates every frame without
+        // needing mouse-move input events to force a repaint — the
+        // sluggish-at-rest bug this replaces. Lazy repaint when idle so
+        // a static "no session" screen doesn't burn a CPU core.
+        if self.session.is_some() {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 }
 
