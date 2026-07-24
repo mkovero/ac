@@ -28,6 +28,35 @@ mod tests {
     }
 
     #[test]
+    fn no_trig_in_crate_sources() {
+        // Forbidden: any trigonometry. De-rotation (M4a) is phase
+        // arithmetic — display truth — and lives in
+        // `ac_scene::transfer`. A `sin`/`cos` appearing here would mean
+        // the renderer had started computing phase rather than mapping
+        // an already-computed normalized coordinate, which is the
+        // failure mode this crate's whole contract exists to prevent.
+        for (path, content) in source_files() {
+            for token in [
+                ".sin(",
+                ".cos(",
+                ".tan(",
+                ".atan(",
+                ".atan2(",
+                ".asin(",
+                ".acos(",
+                ".to_radians(",
+                ".to_degrees(",
+            ] {
+                assert!(
+                    !content.contains(token),
+                    "{path} contains forbidden trigonometry: {token} \
+                     (ac-view computes nothing — de-rotation belongs in ac-scene::transfer)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn no_log_arithmetic_in_crate_sources() {
         // Forbidden: any dB/log-domain conversion. `ac-scene` owns the
         // single conversion site (M2); this crate must never contain a
