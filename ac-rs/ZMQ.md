@@ -1583,6 +1583,16 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "im":              [<float>, ...],     // complex H, imaginary part
   "delay_samples":   <int>,
   "delay_ms":        <float>,
+
+  // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
+  // the transfer view's input-level meters.
+  "meas_peak_dbfs":  <float> | null,     // 20*log10(max|sample|) over this frame's
+                                          // capture blocks, taken BEFORE any
+                                          // calibration, weighting, or aggregation.
+                                          // `null` for digital silence (-inf, which
+                                          // JSON cannot represent).
+  "ref_peak_dbfs":   <float> | null,     // same, reference channel
+
   "meas_channel":    <int>,
   "ref_channel":     <int>,
   "sr":              <int>,
@@ -1713,6 +1723,94 @@ measurement instead.
 // topic: done
 { "cmd": "transfer_stream", "stopped": true }
 ```
+
+**Why the peaks are raw.** `meas_peak_dbfs` / `ref_peak_dbfs` are
+deliberately NOT taken from `meas_spectrum` / `ref_spectrum` or from the
+window-normalised amplitudes behind them. The meters these feed exist to
+judge gain staging, and a calibrated or band-aggregated value hides
+clipping — which is the one thing an input meter must never do. A
+voltage-calibrated session and an uncalibrated one publish the same peak
+for the same physical input.
+
+Consumers should treat an **absent** field and an explicit **null** as
+the same thing (no reading), and must not use the field's presence to
+detect daemon version: the display truth for "silent channel" and "old
+daemon" is identical, so any branch on the difference is a second
+behaviour with no observable justification.
+
+---
+
+### `set_drive`
+
+Starts, stops, or re-levels the stimulus of a **running**
+`transfer_stream` session (handoff: field-transfer §4.3, #183). Valid
+only while such a session runs — the drive state lives inside that
+session's worker, the same lifetime rule `snapshot` follows.
+
+Like `snapshot`, this command targets a live worker rather than spawning
+one, so it does not go through the busy guard. That is load-bearing
+rather than incidental: routing it through the guard would make it
+contend with the very worker it targets, and since this is also the
+command that STOPS the drive, the contention would land on the
+panic-stop path.
+
+**CTRL**
+```json
+{ "cmd": "set_drive", "on": true | false, "level_dbfs": <float> }
+```
+
+`level_dbfs` is **required on every request, including `on: false`**.
+Every message doubles as the keepalive (below), so every message is a
+full state assertion rather than a delta against server-remembered
+state.
+
+**Reply** — echoes the **applied** state:
+```json
+{ "ok": true, "on": true, "level_dbfs": -10.0 }
+```
+
+`level_dbfs` in the reply is what was applied after the server-side
+clamp to `drive_max_dbfs` (config, default `-10.0`), which may differ
+from what was requested. **A clamp is success, not a partial failure**:
+a stimulus command that errors instead of applying a safe level is a
+worse failure in the field than one that quietly applies the ceiling.
+There is no `clamped` flag — the client knows what it asked for, and a
+second field that must agree with the first is a second thing to keep
+consistent. The client is expected to clamp too; this one is
+authoritative.
+
+A missing `on`, or a missing or non-finite `level_dbfs`, is a request
+error (`{"ok": false, "error": ...}`) rather than something to coerce —
+this is the one command where a silently substituted number reaches a
+loudspeaker.
+
+**Errors**
+```json
+{ "ok": false, "error": "no transfer_stream session running" }
+```
+
+**Keepalive / dead-man.** There is no separate keepalive command and no
+sequence number. Every `set_drive` refreshes the session's keepalive
+timestamp; the client re-sends its current state every 250 ms while
+driving, and a byte-identical resend is the normal case — indistinguish-
+able from any other request, and cheap (the worker acts only on observed
+transitions, so an unchanged resend never re-drives the engine). If more
+than **1500 ms** passes with no `set_drive`, the worker drops drive on
+its own; **the session keeps running**. 250 ms against 1500 ms is a 6x
+margin — do not change either without changing both.
+
+The timestamp is monotonic, not wall-clock: a clock step must not be
+able to extend or trip a dead-man whose purpose is stopping an
+unattended process from driving a loudspeaker.
+
+The dead-man is armed by the first `set_drive`, not at session start. A
+session launched with the legacy `drive: true` param and driven by a
+script sends no keepalives; arming at start would silence it after
+1.5 s. Every UI-driven session goes through `set_drive`, so the UI is
+always covered.
+
+**Sessions always launch with drive off** unless the legacy launch-time
+`drive` param says otherwise. `ac transfer` never sets it.
 
 ---
 
