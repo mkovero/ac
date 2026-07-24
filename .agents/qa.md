@@ -256,40 +256,57 @@ wrong without any test catching it. These are the highest priority.}
 - Do not flag style preferences as correctness issues. Clippy is the style arbiter.
 - If you find a bug outside the PR's scope, open a new issue — do not block this PR for it.
 - One review comment per PR pass. If the developer pushes a fix, do a second pass.
-- **[PENDING A3 — gate temporarily unenforceable, default to blocking]**
-  The display-truth harness previously lived in `ac-ui --headless-test`
-  (`ac test software`'s T2/T3 checks, #170); it was removed with the ac-ui
-  detach (see `attic/ac-ui`) and has not yet been re-homed onto an
-  ac-cli/daemon-side harness (handoff.md workstream A3). Until A3 lands,
-  do not approve a value-display PR (any PR that changes what gets
-  rendered/printed: spectrum/waterfall/ember/scope trace data, transfer
-  magnitude/phase traces, the coherence mask, the delay readout (ms and
-  meters), input-level meter heights and clip latch, and stimulus banner
-  strings, axis calibration, printed/CSV values, or the post-receiver
-  display buffer feeding them) — there is no harness to gate it against.
+- **Value-display PRs — the display-truth gate (A3 rendering half, discharged).**
+  A value-display PR is any PR that changes what gets rendered/printed:
+  spectrum/waterfall/ember/scope trace data, transfer magnitude/phase
+  traces, the coherence mask, the delay readout (ms and meters),
+  input-level meter heights and clip latch, and stimulus banner strings,
+  axis calibration, printed/CSV values, or the post-receiver display
+  buffer feeding them. The old `ac-ui --headless-test` T2/T3 harness (#170)
+  was removed with the ac-ui detach (`attic/ac-ui`); the rendering half of
+  A3 has since been **re-homed**, so this is a live gate again, not a
+  blocking pause. Enforce it as two layers:
+  - **Scene-computed values** (every number, string, and normalized
+    coordinate) are gated by `ac-scene`'s display-truth fixture tests —
+    a pure crate, CI-blocking, no GPU. These are authoritative; a
+    value-display PR whose numbers live in `ac-scene` is fully gated here.
+  - **`ac-view` drawing** (the affine map to screen, gap rendering, layout)
+    is gated by the `ac-view` harness — `it_geometry` (shape/vertex
+    assertions, mutation-verified), `it_live_end_to_end` and
+    `it_snapshot_end_to_end` (the on-screen string equals `ac-scene`'s
+    output for the same frame, asserted at harness level), `it_remote`,
+    `it_trace_distinction` — plus, per the A3 resolution
+    (`handoff-ac-view.md`, accepted at M2/M3 signoff), **one manual
+    real-adapter run with a screenshot attached to the PR** as the
+    pixel-level evidence. That run is documented, not CI-blocking (sandbox
+    lavapipe segfaults — standing policy); QA judges its adequacy. Pixel
+    truth still has no CI harness, and that is the accepted M3+ posture,
+    not a pending blocker.
   A PR that only changes internal correctness checks (CSV export, cursor
-  readout) is unaffected by this pause.
-  `ac-scene`'s display-truth fixture tests are the enforcement mechanism
-  for scene-computed values (pure crate, no harness needed); the
-  rendering harness gate applies only to `ac-view` drawing changes.
-- **[PENDING A3 — same pause]** Do not approve a value-display PR or a
-  daemon-pipeline PR (anything touching
+  readout) is outside this gate.
+- **Daemon-pipeline PRs — the I5 temporal soak (A3 soak half, STILL
+  OUTSTANDING).** Do not approve a daemon-pipeline PR (anything touching
   `ac-daemon/src/handlers/audio/monitor.rs`, the ring buffers /
   time-integration state feeding it, or the display buffer it publishes
-  into) — the I5 soak (formerly `ac-ui --headless-test`'s "I5 soak"
-  checks, same binary as T1-T4, handoff.md) is gone pending A3's re-homed
-  soak, so I1-I4 alone are not sufficient for this class of PR.
-  I1-I4 are single-snapshot checks — settle, read one frame, judge — and
-  are structurally blind to any bug with onset delay (ring-buffer wrap,
-  EMA/state poisoning, cadence-boundary mishandling). I5 runs a seeded
-  deterministic fake-audio stimulus for long enough to exceed every
-  internal buffer period (derived from the daemon's own reported
-  `lf_fft_n`/`lf_overlap_pct`/`lf_avg_tau_ms`, not hardcoded) and asserts
-  I4-t bounded / I2-t continuity / I5a liveness / I5b plausibility on
-  every published frame, not just the last one. On first violation it
-  dumps frames N-1/N/N+1 as CSVs with the elapsed-time-to-violation —
-  treat that dump as the debugging input for the fix, the same way the
-  HF-garbage fixture corpus works for I4.
+  into) on the strength of single-snapshot checks alone. The I5 soak
+  (formerly `ac-ui --headless-test`'s "I5 soak", removed in the same
+  detach) has **not** been re-homed daemon-side — unlike the rendering
+  half above, this half of A3 is genuinely still missing (see the tracking
+  issue). I1-I4 are single-snapshot checks — settle, read one frame,
+  judge — and are structurally blind to any bug with onset delay
+  (ring-buffer wrap, EMA/state poisoning, cadence-boundary mishandling).
+  A conforming soak runs a seeded deterministic fake-audio stimulus for
+  long enough to exceed every internal buffer period (derived from the
+  daemon's own reported `lf_fft_n`/`lf_overlap_pct`/`lf_avg_tau_ms`, not
+  hardcoded) and asserts I4-t bounded / I2-t continuity / I5a liveness /
+  I5b plausibility on every published frame, not just the last one. Until
+  such a soak exists daemon-side, require a PR-specific temporal argument
+  (a targeted test or a reasoned case) for this class of PR; do not accept
+  I1-I4 as sufficient.
+  **Scope note:** this bullet gates *daemon-pipeline* PRs only. A pure
+  `ac-view` drawing PR or a pure `ac-scene` PR does not touch `monitor.rs`
+  or the daemon pipeline and is not subject to it — it is gated by the
+  display-truth layers above.
 
 ### drive-path safety (any PR touching stimulus/`set_drive`)
 
