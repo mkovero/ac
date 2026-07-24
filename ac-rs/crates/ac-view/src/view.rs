@@ -349,20 +349,59 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
         return;
     };
 
+    // The stimulus banner (safety UI) owns a reserved top band that
+    // nothing else draws into — UX finding: it must be top-center and
+    // must not collide with the delay readout or the meter labels. Build
+    // it first so its height carves the band out before anything else is
+    // placed. DRIVING is louder than ARMED and uses the signal colour
+    // (never green); strings are verbatim ac-scene (F5). Channel/port
+    // come from config in M4c (#182) — placeholder channel for now, but
+    // the STRING is ac-scene's, which is what F5 checks.
+    let banner = match state.stimulus {
+        StimulusState::Idle => None,
+        StimulusState::Armed => Some((
+            ac_scene::readout::format_armed_banner(0, None, state.level_dbfs),
+            18.0,
+            COLOR_VALUE,
+        )),
+        StimulusState::Driving => Some((
+            ac_scene::readout::format_driving_banner(0, None, state.level_dbfs),
+            24.0,
+            COLOR_SIGNAL,
+        )),
+    };
+    let banner_band = banner
+        .as_ref()
+        .map(|(_, size, _)| size + 8.0)
+        .unwrap_or(0.0);
+    if let Some((text, size, color)) = &banner {
+        painter.text(
+            egui::pos2(rect.center().x, rect.min.y + 4.0),
+            egui::Align2::CENTER_TOP,
+            text,
+            egui::FontId::proportional(*size),
+            *color,
+        );
+    }
+
+    // Everything else lives below the banner band.
+    let content =
+        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.min.y + banner_band), rect.max);
+
     // Two stacked panes: magnitude (top), phase (bottom). Shared x
     // (log-f); each pane maps its own normalized y over its own band.
     let gap = 8.0;
-    let pane_h = (rect.height() - gap) / 2.0;
+    let pane_h = (content.height() - gap) / 2.0;
     let mag_vp = Viewport {
-        x: rect.min.x,
-        y: rect.min.y,
-        width: rect.width(),
+        x: content.min.x,
+        y: content.min.y,
+        width: content.width(),
         height: pane_h,
     };
     let phase_vp = Viewport {
-        x: rect.min.x,
-        y: rect.min.y + pane_h + gap,
-        width: rect.width(),
+        x: content.min.x,
+        y: content.min.y + pane_h + gap,
+        width: content.width(),
         height: pane_h,
     };
 
@@ -379,49 +418,22 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
         Stroke::new(1.5, COLOR_SIGNAL),
     );
 
-    // Delay readout: verbatim ac-scene string, top-left.
+    // Delay readout: verbatim ac-scene string, top-left of the content
+    // band (below the banner).
     painter.text(
-        rect.left_top(),
+        content.left_top(),
         egui::Align2::LEFT_TOP,
         &scene.delay_readout,
         egui::FontId::default(),
         COLOR_VALUE,
     );
 
-    // Input-level meters: two thin bars at the right edge, M above/left
-    // of R (UX standing requirement), heights already normalized by
-    // ac-scene. Always on (D6) — no toggle.
-    draw_meter(painter, rect, 0, &scene.meas_meter, "M");
-    draw_meter(painter, rect, 1, &scene.ref_meter, "R");
-
-    // Stimulus banner: safety UI, large type, top-center, verbatim
-    // ac-scene string (F5 forbids any reformatting here). DRIVING uses
-    // the signal colour and is louder than ARMED (never green — "noise
-    // blasting" is not success). The output channel/port come from
-    // config in M4c (#182); until then a placeholder channel is shown —
-    // the STRING is still ac-scene's, which is what F5 checks.
-    let banner = match state.stimulus {
-        StimulusState::Idle => None,
-        StimulusState::Armed => Some((
-            ac_scene::readout::format_armed_banner(0, None, state.level_dbfs),
-            18.0,
-            COLOR_VALUE,
-        )),
-        StimulusState::Driving => Some((
-            ac_scene::readout::format_driving_banner(0, None, state.level_dbfs),
-            24.0,
-            COLOR_SIGNAL,
-        )),
-    };
-    if let Some((text, size, color)) = banner {
-        painter.text(
-            egui::pos2(rect.center().x, rect.min.y + 4.0),
-            egui::Align2::CENTER_TOP,
-            text,
-            egui::FontId::proportional(size),
-            color,
-        );
-    }
+    // Input-level meters: two thin bars at the right edge, M left of R
+    // (UX standing requirement), heights normalized by ac-scene. Always
+    // on (D6) — no toggle. `idx` counts from the right edge, so R (idx 0)
+    // is rightmost and M (idx 1) sits to its left.
+    draw_meter(painter, content, 0, &scene.ref_meter, "R");
+    draw_meter(painter, content, 1, &scene.meas_meter, "M");
 }
 
 /// Draw one trace's segments in a pane — one polyline per segment, so a

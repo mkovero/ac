@@ -101,6 +101,7 @@ fn snapshot_transfer_live_masked_gap() {
         .with_size(SIZE)
         .wgpu()
         .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+    ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_live_masked_gap");
 }
@@ -114,6 +115,7 @@ fn snapshot_transfer_armed_banner() {
         .with_size(SIZE)
         .wgpu()
         .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+    ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_armed_banner");
 }
@@ -127,6 +129,7 @@ fn snapshot_transfer_driving_banner() {
         .with_size(SIZE)
         .wgpu()
         .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+    ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_driving_banner");
 }
@@ -143,6 +146,7 @@ fn snapshot_spectrum_ref_trace_on() {
         .with_size(SIZE)
         .wgpu()
         .build_ui(|ui| draw_view(&view, ui, Some(&scene), None));
+    ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_on");
 }
@@ -159,6 +163,7 @@ fn snapshot_spectrum_ref_trace_off() {
         .with_size(SIZE)
         .wgpu()
         .build_ui(|ui| draw_view(&view, ui, Some(&scene), None));
+    ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_off");
 }
