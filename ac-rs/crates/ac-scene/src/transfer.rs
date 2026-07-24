@@ -48,8 +48,11 @@
 //! null. Fixtures F1′/F1″/F2′ (`tests/it_transfer.rs`) are built from
 //! daemon-shaped frames specifically to catch that.
 
+use ac_core::visualize::pair_derivation::PairDerivation;
+
 use crate::scene::{Provenance, Source, Trace};
-use crate::ticks::freq_to_x;
+use crate::ticks::{db_to_y, freq_to_x};
+use crate::wire::WireFrame;
 
 /// Columns below this coherence are masked out of both panes (D5 —
 /// fixed threshold, no tuning UI).
@@ -226,6 +229,55 @@ pub struct TransferInput {
     pub sr: u32,
 }
 
+impl TransferInput {
+    /// Adapt a live `transfer_stream` frame. `phase_deg` is carried
+    /// through as-is — it is already session-compensated (see the module
+    /// doc), and `delay_ms` is τ_sess for this session.
+    pub fn from_wire_frame(frame: &WireFrame) -> TransferInput {
+        TransferInput {
+            freqs: frame.freqs.clone(),
+            magnitude_db: frame.magnitude_db.clone(),
+            phase_deg: frame.phase_deg.clone(),
+            coherence: frame.coherence.clone(),
+            delay_ms: frame.delay_ms,
+            meas_peak_dbfs: frame.meas_peak_dbfs,
+            ref_peak_dbfs: frame.ref_peak_dbfs,
+            channel_role: format!("meas_{}", frame.meas_channel),
+            source: Source::Live,
+            sr: frame.sr,
+        }
+    }
+
+    /// Adapt an offline snapshot derivation. This is deliverable 3's
+    /// mechanism: [`stored_delay_ms`] reads the derivation's frozen delay
+    /// (`d.h1.delay_ms`) back out, so a live frame can be de-rotated by a
+    /// snapshot's delay — `DerotMode::Snapshot { snapshot_delay_ms:
+    /// TransferInput::stored_delay_ms(d) }` — and the two land on a
+    /// common reference (F2′). A snapshot has no input-level meters (it
+    /// is a static capture, not a live gain-staging aid), so its peaks
+    /// are `None`.
+    pub fn from_pair_derivation(d: &PairDerivation, channel_role: &str, sr: u32) -> TransferInput {
+        TransferInput {
+            freqs: d.h1.freqs.clone(),
+            magnitude_db: d.h1.magnitude_db.clone(),
+            phase_deg: d.h1.phase_deg.clone(),
+            coherence: d.h1.coherence.clone(),
+            delay_ms: d.h1.delay_ms,
+            meas_peak_dbfs: None,
+            ref_peak_dbfs: None,
+            channel_role: channel_role.to_string(),
+            source: Source::Snapshot,
+            sr,
+        }
+    }
+
+    /// A snapshot derivation's stored (frozen) delay in ms — the τ_snap
+    /// a live trace is de-rotated by to overlay it (deliverable 3).
+    pub fn stored_delay_ms(d: &PairDerivation) -> f64 {
+        d.h1.delay_ms
+    }
+}
+
 impl TransferScene {
     /// Build the scene. `derot` selects the phase mode; `meters` carries
     /// the cross-frame hold/latch state; `now_s` is scene time.
@@ -247,10 +299,31 @@ impl TransferScene {
             sr: input.sr,
         };
 
+        // Column count is the shortest of the parallel arrays. A
+        // conforming daemon sends them equal-length; a truncated or
+        // malformed frame is degraded to what agrees rather than
+        // indexed past its end. `ac-view` deserializes whatever arrives
+        // (WireFrame is `#[serde(default)]`-lenient), so a length
+        // mismatch must drop the transfer traces for this frame and let
+        // the next one through — never panic the live, keypress-adjacent
+        // render path.
+        let n = input
+            .freqs
+            .len()
+            .min(input.magnitude_db.len())
+            .min(input.phase_deg.len())
+            .min(input.coherence.len());
+        let coherence = &input.coherence[..n];
+
         let mag_points = |i: usize| {
+            // db_to_y is the crate's one dB→y mapping — do not
+            // re-implement it, and do not clamp: an over-range magnitude
+            // runs off-canvas (the viewport clips it), which is honest.
+            // Pinning it to the pane border would fabricate a value at
+            // exactly the overload moment the display must not lie about.
             (
                 freq_to_x(input.freqs[i], f_min, f_max),
-                ((input.magnitude_db[i] - db_min) / (db_max - db_min)).clamp(0.0, 1.0),
+                db_to_y(input.magnitude_db[i], db_min, db_max),
             )
         };
         let phase_points = |i: usize| {
@@ -263,11 +336,11 @@ impl TransferScene {
 
         TransferScene {
             magnitude: Trace {
-                segments: split_on_mask(&input.coherence, mag_points),
+                segments: split_on_mask(coherence, mag_points),
                 provenance: provenance.clone(),
             },
             phase: Trace {
-                segments: split_on_mask(&input.coherence, phase_points),
+                segments: split_on_mask(coherence, phase_points),
                 provenance,
             },
             delay_readout: format_delay_readout(input.delay_ms),
@@ -366,5 +439,136 @@ mod tests {
         // Past the window: tick follows the level down.
         let m = st.update(Some(-40.0), 2.0);
         assert!((m.hold - m.height).abs() < 1e-12);
+    }
+
+    // QA gap: the hold-decay boundary itself. The implementation resets
+    // the tick when `now - hold_set_at >= PEAK_HOLD_S`, so at exactly the
+    // window the tick releases. Pins the `>=` convention.
+    #[test]
+    fn peak_hold_releases_at_exactly_the_window_boundary() {
+        let mut st = MeterState::default();
+        st.update(Some(-6.0206), 0.0);
+        // Exactly PEAK_HOLD_S later, with a lower level: the `>=` means
+        // the hold releases to the current height on this frame.
+        let m = st.update(Some(-40.0), PEAK_HOLD_S);
+        assert!((m.hold - m.height).abs() < 1e-12);
+    }
+
+    // QA gap: phase-pane normalization asserted directly, not through the
+    // test-helper's inverse — a matched sign flip in mapping + helper
+    // would cancel and hide itself. −180 → 0.0, 0 → 0.5, +180 → 1.0, read
+    // straight off the segment.
+    #[test]
+    fn phase_pane_normalization_is_pinned_directly() {
+        // Three columns whose wire phase de-rotates (session mode, τ=0)
+        // to −180, 0, +180 — chosen as literal wire values so no derot
+        // arithmetic is involved.
+        let inp = TransferInput {
+            freqs: vec![100.0, 200.0, 300.0],
+            magnitude_db: vec![0.0; 3],
+            phase_deg: vec![-180.0, 0.0, 180.0],
+            coherence: vec![0.9; 3],
+            delay_ms: 0.0,
+            meas_peak_dbfs: None,
+            ref_peak_dbfs: None,
+            channel_role: "meas_0".to_string(),
+            source: Source::Live,
+            sr: 48_000,
+        };
+        let mut meters = (MeterState::default(), MeterState::default());
+        let s = TransferScene::from_input(
+            &inp,
+            DerotMode::Session,
+            (20.0, 20_000.0),
+            (-80.0, 20.0),
+            &mut meters,
+            0.0,
+        );
+        let ys: Vec<f64> = s.phase.segments[0].iter().map(|p| p.1).collect();
+        // wrap((−180,+180]) sends −180 to +180, so BOTH ends map to 1.0
+        // and the midpoint to 0.5 — the pane is single-valued at the
+        // wrap seam, which is the intended behaviour, not a bug.
+        assert!((ys[0] - 1.0).abs() < 1e-12, "−180 wire → {}", ys[0]);
+        assert!((ys[1] - 0.5).abs() < 1e-12, "0 → {}", ys[1]);
+        assert!((ys[2] - 1.0).abs() < 1e-12, "+180 → {}", ys[2]);
+    }
+
+    // QA issue 1 regression: a length-mismatched frame must degrade to
+    // the common length, never panic — the render path is live and
+    // keypress-adjacent, and WireFrame parses partial frames by design.
+    #[test]
+    fn length_mismatch_degrades_to_the_common_length_without_panic() {
+        let inp = TransferInput {
+            freqs: vec![100.0, 200.0],
+            magnitude_db: vec![0.0, 0.0],
+            phase_deg: vec![0.0, 0.0],
+            // Longer than the rest — a truncated/malformed frame.
+            coherence: vec![0.9, 0.9, 0.9, 0.9],
+            delay_ms: 0.0,
+            meas_peak_dbfs: None,
+            ref_peak_dbfs: None,
+            channel_role: "meas_0".to_string(),
+            source: Source::Live,
+            sr: 48_000,
+        };
+        let mut meters = (MeterState::default(), MeterState::default());
+        let s = TransferScene::from_input(
+            &inp,
+            DerotMode::Session,
+            (20.0, 20_000.0),
+            (-80.0, 20.0),
+            &mut meters,
+            0.0,
+        );
+        // Two columns emitted (the common length), no panic.
+        assert_eq!(s.magnitude.segments[0].len(), 2);
+        assert_eq!(s.phase.segments[0].len(), 2);
+    }
+
+    // QA gap: a coherence mask that touches the array ends. F3 masks an
+    // interior run; a leading/trailing masked column would expose an
+    // off-by-one that an interior-only test cannot.
+    #[test]
+    fn mask_at_both_ends_produces_no_empty_edge_segments() {
+        let coherence = [0.3, 0.9, 0.9, 0.3];
+        let seg = split_on_mask(&coherence, |i| (i as f64, 0.0));
+        // One interior segment of the two live columns; no leading or
+        // trailing empty segment.
+        assert_eq!(seg.len(), 1);
+        assert_eq!(seg[0].len(), 2);
+        assert_eq!(seg[0][0].0, 1.0);
+        assert_eq!(seg[0][1].0, 2.0);
+    }
+
+    // Deliverable 3: a snapshot derivation's stored delay is readable and
+    // is exactly what a live frame de-rotates by to overlay it.
+    #[test]
+    fn snapshot_stored_delay_round_trips_into_the_derot_mode() {
+        use ac_core::visualize::transfer::h1_estimate_with_delay;
+        // Build a PairDerivation with a known frozen delay by running the
+        // estimator with a caller-supplied delay, then wrap it.
+        let sr = 48_000u32;
+        let n = sr as usize;
+        let r: Vec<f32> = (0..n).map(|i| ((i as f64 * 0.01).sin()) as f32).collect();
+        let m = r.clone();
+        let h1 = h1_estimate_with_delay(&r, &m, sr, 144); // 3.0 ms at 48 kHz
+        let d = PairDerivation {
+            h1,
+            spec_freqs: vec![],
+            meas_spectrum: vec![],
+            ref_spectrum: vec![],
+            spl: None,
+            spl_weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+        };
+        let tau_snap = TransferInput::stored_delay_ms(&d);
+        assert!((tau_snap - 3.0).abs() < 1e-9, "stored delay {tau_snap}");
+        // And it feeds the snapshot derot mode as τ_snap.
+        assert_eq!(
+            DerotMode::Snapshot {
+                snapshot_delay_ms: tau_snap
+            }
+            .tau_derot_ms(2.5),
+            0.5
+        );
     }
 }
