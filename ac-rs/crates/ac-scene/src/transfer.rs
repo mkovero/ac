@@ -299,48 +299,58 @@ impl TransferScene {
             sr: input.sr,
         };
 
-        // Column count is the shortest of the parallel arrays. A
-        // conforming daemon sends them equal-length; a truncated or
-        // malformed frame is degraded to what agrees rather than
-        // indexed past its end. `ac-view` deserializes whatever arrives
-        // (WireFrame is `#[serde(default)]`-lenient), so a length
-        // mismatch must drop the transfer traces for this frame and let
-        // the next one through — never panic the live, keypress-adjacent
-        // render path.
-        let n = input
-            .freqs
-            .len()
-            .min(input.magnitude_db.len())
-            .min(input.phase_deg.len())
-            .min(input.coherence.len());
-        let coherence = &input.coherence[..n];
+        // A conforming daemon sends the four transfer arrays equal-length.
+        // If they disagree, the frame's producer is malformed — and the
+        // four are independent JSON fields, so nothing guarantees the
+        // prefixes are mutually aligned: a producer that dropped trailing
+        // columns and one that misaligned the arrays entirely present the
+        // same symptom. Truncating to the common length would draw the
+        // second case as if it were truth, fabricating data at exactly the
+        // moment the input is known-bad — the same display-truth argument
+        // that rules out clamping. So a mismatched frame contributes NO
+        // transfer traces (empty segments); the render path stays alive
+        // and draws the next good frame. `ac-view` parses partial frames
+        // by design (WireFrame is `#[serde(default)]`-lenient), so this
+        // must never panic.
+        let lengths_agree = input.freqs.len() == input.magnitude_db.len()
+            && input.freqs.len() == input.phase_deg.len()
+            && input.freqs.len() == input.coherence.len();
 
-        let mag_points = |i: usize| {
-            // db_to_y is the crate's one dB→y mapping — do not
-            // re-implement it, and do not clamp: an over-range magnitude
-            // runs off-canvas (the viewport clips it), which is honest.
-            // Pinning it to the pane border would fabricate a value at
-            // exactly the overload moment the display must not lie about.
+        let (mag_segments, phase_segments) = if lengths_agree {
+            let mag_points = |i: usize| {
+                // db_to_y is the crate's one dB→y mapping — do not
+                // re-implement it, and do not clamp: an over-range
+                // magnitude runs off-canvas (the viewport clips it), which
+                // is honest. Pinning it to the pane border would fabricate
+                // a value at exactly the overload moment the display must
+                // not lie about.
+                (
+                    freq_to_x(input.freqs[i], f_min, f_max),
+                    db_to_y(input.magnitude_db[i], db_min, db_max),
+                )
+            };
+            let phase_points = |i: usize| {
+                let phi = derotate_deg(input.phase_deg[i], input.freqs[i], tau);
+                (
+                    freq_to_x(input.freqs[i], f_min, f_max),
+                    (phi + 180.0) / 360.0,
+                )
+            };
             (
-                freq_to_x(input.freqs[i], f_min, f_max),
-                db_to_y(input.magnitude_db[i], db_min, db_max),
+                split_on_mask(&input.coherence, mag_points),
+                split_on_mask(&input.coherence, phase_points),
             )
-        };
-        let phase_points = |i: usize| {
-            let phi = derotate_deg(input.phase_deg[i], input.freqs[i], tau);
-            (
-                freq_to_x(input.freqs[i], f_min, f_max),
-                (phi + 180.0) / 360.0,
-            )
+        } else {
+            (Vec::new(), Vec::new())
         };
 
         TransferScene {
             magnitude: Trace {
-                segments: split_on_mask(coherence, mag_points),
+                segments: mag_segments,
                 provenance: provenance.clone(),
             },
             phase: Trace {
-                segments: split_on_mask(coherence, phase_points),
+                segments: phase_segments,
                 provenance,
             },
             delay_readout: format_delay_readout(input.delay_ms),
@@ -493,16 +503,20 @@ mod tests {
         assert!((ys[2] - 1.0).abs() < 1e-12, "+180 → {}", ys[2]);
     }
 
-    // QA issue 1 regression: a length-mismatched frame must degrade to
-    // the common length, never panic — the render path is live and
+    // QA issue 1 regression: a length-mismatched frame contributes NO
+    // transfer traces — it is omitted, not truncated-and-drawn. The four
+    // arrays are independent JSON fields with no prefix-alignment
+    // guarantee, so drawing a common prefix would fabricate data from a
+    // known-malformed producer. Absence is asserted, not truncated
+    // presence. Must not panic — the render path is live and
     // keypress-adjacent, and WireFrame parses partial frames by design.
     #[test]
-    fn length_mismatch_degrades_to_the_common_length_without_panic() {
+    fn length_mismatch_omits_transfer_traces_entirely() {
         let inp = TransferInput {
             freqs: vec![100.0, 200.0],
             magnitude_db: vec![0.0, 0.0],
             phase_deg: vec![0.0, 0.0],
-            // Longer than the rest — a truncated/malformed frame.
+            // Longer than the rest — a malformed frame.
             coherence: vec![0.9, 0.9, 0.9, 0.9],
             delay_ms: 0.0,
             meas_peak_dbfs: None,
@@ -520,9 +534,13 @@ mod tests {
             &mut meters,
             0.0,
         );
-        // Two columns emitted (the common length), no panic.
-        assert_eq!(s.magnitude.segments[0].len(), 2);
-        assert_eq!(s.phase.segments[0].len(), 2);
+        // No segments on either pane — the frame drew nothing, no panic.
+        assert!(s.magnitude.segments.is_empty(), "magnitude not omitted");
+        assert!(s.phase.segments.is_empty(), "phase not omitted");
+        // The meters still update — they are independent of the trace
+        // arrays and come from the peak fields, which are not part of the
+        // mismatch.
+        let _ = s.meas_meter;
     }
 
     // QA gap: a coherence mask that touches the array ends. F3 masks an
