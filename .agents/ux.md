@@ -147,6 +147,21 @@ conflicts with their use as neutral signal indicators.
 - Sparse line spacing (one blank line between logical groups) beats dense
   output with separator lines.
 
+### stimulus state visibility (transfer view)
+
+The ARMED and DRIVING banners are safety UI, not chrome. Review requirements:
+
+- Large type, top-center, cannot be occluded by any overlay except help.
+- Banner names the output (channel number + sticky JACK port when configured) and the
+  current level in dBFS. Verbatim `ac-scene` strings — reject any reformatting in
+  `ac-view`.
+- DRIVING must be visually louder than ARMED. Ember principle applies: the driving
+  state may use the signal color; never green (success baggage — "noise blasting" is
+  not success feedback).
+- Input-level meters (transfer view only): two thin bars, right edge, M above/left of
+  R, raw dBFS, peak-hold tick, red clip latch. They are health indicators — always on,
+  not part of the toggle set; reject PRs adding a toggle for them.
+
 ## inputs you will receive
 - Issue or PR describing new or changed output format, new display field,
   new CLI flag affecting display, or new TUI element

@@ -262,11 +262,16 @@ wrong without any test catching it. These are the highest priority.}
   detach (see `attic/ac-ui`) and has not yet been re-homed onto an
   ac-cli/daemon-side harness (handoff.md workstream A3). Until A3 lands,
   do not approve a value-display PR (any PR that changes what gets
-  rendered/printed: spectrum/waterfall/ember/scope trace data, axis
-  calibration, printed/CSV values, or the post-receiver display buffer
-  feeding them) — there is no harness to gate it against. A PR that only
-  changes internal correctness checks (CSV export, cursor readout) is
-  unaffected by this pause.
+  rendered/printed: spectrum/waterfall/ember/scope trace data, transfer
+  magnitude/phase traces, the coherence mask, the delay readout (ms and
+  meters), input-level meter heights and clip latch, and stimulus banner
+  strings, axis calibration, printed/CSV values, or the post-receiver
+  display buffer feeding them) — there is no harness to gate it against.
+  A PR that only changes internal correctness checks (CSV export, cursor
+  readout) is unaffected by this pause.
+  `ac-scene`'s display-truth fixture tests are the enforcement mechanism
+  for scene-computed values (pure crate, no harness needed); the
+  rendering harness gate applies only to `ac-view` drawing changes.
 - **[PENDING A3 — same pause]** Do not approve a value-display PR or a
   daemon-pipeline PR (anything touching
   `ac-daemon/src/handlers/audio/monitor.rs`, the ring buffers /
@@ -285,3 +290,16 @@ wrong without any test catching it. These are the highest priority.}
   dumps frames N-1/N/N+1 as CSVs with the elapsed-time-to-violation —
   treat that dump as the debugging input for the fix, the same way the
   HF-garbage fixture corpus works for I4.
+
+### drive-path safety (any PR touching stimulus/`set_drive`)
+
+Do not approve unless ALL of the following are demonstrated by tests, not by reading:
+
+- [ ] Sessions launch with drive **off**; no code path starts drive without an explicit
+      `set_drive on`.
+- [ ] Panic stop works from BOTH armed and driving states (state-machine tests).
+- [ ] Dead-man: drive drops within 1.5 s of keepalive silence (integration test,
+      fake-audio); the session itself keeps running.
+- [ ] Level is clamped to `drive_max_dbfs` at every entry point (arrow keys, overlay,
+      CTRL command) — test each entry point, not one representative.
+- [ ] `set_drive off` silences output within one audio block (fake-audio energy test).
