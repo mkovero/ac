@@ -20,4 +20,8 @@ sha2       = "0.11.0"
 anyhow     = "1"
 
 [dev-dependencies]
-egui_kittest = { version = "0.35", default-features = false, features = ["eframe"] }
+egui_kittest = { version = "0.35", default-features = false, features = [
+    "eframe",
+    "wgpu",
+    "snapshot",
+] }
