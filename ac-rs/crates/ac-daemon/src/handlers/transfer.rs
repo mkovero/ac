@@ -309,8 +309,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let unique_chans_for_ring = unique_chans.clone();
     let pairs_for_ring = pairs.clone();
 
+    // Publish the drive state BEFORE spawning the worker, so it exists
+    // the instant this handler returns `{"ok":true}`. If it were created
+    // inside the closure (as `snapshot_ring` still is), there would be a
+    // window — the whole of `eng.start`, tens to hundreds of ms of JACK
+    // port registration — during which a client that got the ok reply and
+    // immediately armed+fired would be told "no session running". #182's
+    // stimulus client is exactly that caller. Constructing it here closes
+    // the race structurally rather than narrowing it. (The snapshot_ring
+    // twin is tracked separately.)
+    let drive_state = std::sync::Arc::new(crate::workers::DriveState::new(drive, level_dbfs));
+    *drive_state_slot.lock().unwrap() = Some(drive_state.clone());
+    let drive_state_for_worker = drive_state;
+
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
+        let drive_state = drive_state_for_worker;
 
         // Passive mode (default): open no output ports at all so the daemon
         // doesn't need exclusive access to the playback side — the user is
@@ -391,12 +405,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             .map(|_| Vec::with_capacity(target_total + step))
             .collect();
 
-        // Live stimulus state (§4.3). Seeded from the launch params so
+        // `drive_state` was constructed and published by the handler
+        // before this worker was spawned (see the note there) — the
+        // worker only holds and polls it. Seeded from the launch params:
         // the legacy scripted `drive: true` path behaves exactly as
         // before; `ac transfer` never sets that param and drives only
         // via `set_drive`.
-        let drive_state = std::sync::Arc::new(crate::workers::DriveState::new(drive, level_dbfs));
-        *drive_state_slot.lock().unwrap() = Some(drive_state.clone());
 
         // What the engine is currently doing, so the poll below acts
         // only on transitions — an unchanged 250 ms resend must not
@@ -852,6 +866,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         eng.stop();
         *drive_state_slot.lock().unwrap() = None;
 
+        // Known, bounded: a `set_drive` arriving between this worker's
+        // last poll and the slot-clear below returns `{"ok":true}` for a
+        // session that will not act on it — a few ms at teardown. Not
+        // worth a lock redesign; the dead-man and the client's own
+        // teardown both converge on silence regardless.
+        //
         // Snapshot ring/spool lifecycle ends with the session (deliverable
         // 3's retention policy — module doc, `handlers/snapshot.rs`).
         *snapshot_ring_slot.lock().unwrap() = None;

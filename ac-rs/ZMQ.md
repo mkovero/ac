@@ -1803,11 +1803,14 @@ The timestamp is monotonic, not wall-clock: a clock step must not be
 able to extend or trip a dead-man whose purpose is stopping an
 unattended process from driving a loudspeaker.
 
-The dead-man is armed by the first `set_drive`, not at session start. A
+The dead-man arms on the **first `set_drive`** received by the worker and
+remains armed for the rest of the session — not at session start. A
 session launched with the legacy `drive: true` param and driven by a
-script sends no keepalives; arming at start would silence it after
-1.5 s. Every UI-driven session goes through `set_drive`, so the UI is
-always covered.
+script sends no keepalives; arming at start would silence it after 1.5 s.
+That launch-time path retains its existing **unsupervised** semantics
+(it drives until stopped, on the operator's deliberate responsibility);
+the dead-man governs only stimulus started through `set_drive`. Every
+UI-driven session goes through `set_drive`, so the UI is always covered.
 
 **Sessions always launch with drive off** unless the legacy launch-time
 `drive` param says otherwise. `ac transfer` never sets it.

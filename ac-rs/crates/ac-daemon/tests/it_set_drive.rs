@@ -312,6 +312,42 @@ fn frames_carry_raw_input_peaks_for_both_channels() {
     }
 }
 
+/// Swapped-channel detection — the AC this actually kills. Both channels
+/// at the idle level (as above) cannot fail on a meas/ref swap, because
+/// the swap produces the same co-located peaks. `fake_correlated_pair`
+/// makes the channels asymmetric on purpose: ref is the source, meas is
+/// `gain × delayed(source)`. With gain 0.5, meas must sit ≈ 6 dB BELOW
+/// ref — and the SIGN of that difference is what a swap flips.
+#[test]
+fn peaks_distinguish_meas_from_ref_so_a_swap_would_fail() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+        "fake_correlated_pair": {"gain": 0.5, "delay_samples": 120},
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+
+    let f = c.frame_after(Duration::from_millis(1_500));
+    let m = peak(&f, "meas_peak_dbfs").expect("meas peak");
+    let rf = peak(&f, "ref_peak_dbfs").expect("ref peak");
+
+    // gain 0.5 ⇒ meas is ~6 dB quieter than ref. Assert the sign and a
+    // generous magnitude band (the uniform source's per-block max is not
+    // exactly full scale, so the gap is ~6 dB but not to the decimal).
+    assert!(
+        rf - m > 3.0,
+        "ref should be clearly louder than meas (gain 0.5): ref {rf}, meas {m} — \
+         a meas/ref swap would invert this"
+    );
+    assert!(
+        rf - m < 9.0,
+        "ref−meas {} dB is not the expected ~6 dB for gain 0.5: ref {rf}, meas {m}",
+        rf - m
+    );
+}
+
 /// The peaks must come from the raw capture blocks, before any
 /// calibration or aggregation. A voltage-calibrated session moves
 /// `meas_spectrum` (and the H1 magnitude) but must leave the meter's
@@ -458,6 +494,32 @@ fn dead_man_drops_drive_after_keepalive_silence_but_keeps_the_session() {
         "session stopped publishing"
     );
     assert_eq!(c.call(json!({"cmd": "status"}))["ok"], json!(true));
+}
+
+/// Dead-man LOWER bound: drive must still be up well before the 1.5 s
+/// window. A timeout accidentally set too short (e.g. 1000 ms) would
+/// pass every other test in this file but fail here.
+#[test]
+fn drive_survives_up_to_the_dead_man_window() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(start_transfer(&c)["ok"], json!(true));
+    let _ = c.frame_after(Duration::from_millis(1_200));
+
+    assert_eq!(
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        json!(true)
+    );
+
+    // 1.2 s of silence — inside the 1.5 s window, so drive must persist.
+    thread::sleep(Duration::from_millis(1_200));
+
+    let still = peak(&c.frame_after(Duration::from_millis(200)), "meas_peak_dbfs")
+        .expect("peak before the window");
+    assert!(
+        (still - CEILING_DBFS).abs() < 2.0,
+        "drive dropped early ({still} dBFS at 1.2 s) — dead-man window too short"
+    );
 }
 
 /// An idempotent resend keeps drive alive indefinitely — this is what
