@@ -27,13 +27,33 @@ pub struct Provenance {
     pub sr: u32,
 }
 
-/// One channel's spectrum as a polyline in normalized `[0,1]²`
+/// One channel's data as one or more polylines in normalized `[0,1]²`
 /// coordinates. Orientation (defined in this crate, structural rule 2):
 /// `x=0` = low frequency, `y=0` = bottom = low level.
+///
+/// `segments` rather than a single point list because a coherence-gated
+/// transfer trace has gaps: masked columns are *absent*, never emitted
+/// as `y=0` (D5). A spectrum trace is simply a one-segment trace.
+///
+/// The alternative — one `Trace` per contiguous run — was rejected in
+/// #180's architect pass: it copies `Provenance` per fragment and forces
+/// the renderer to group traces by provenance to recover what is one
+/// logical curve. That grouping is inference, in `ac-view`, which AC1
+/// forbids and `computes_nothing`'s token grep would not catch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
-    pub points: Vec<(f64, f64)>,
+    pub segments: Vec<Vec<(f64, f64)>>,
     pub provenance: Provenance,
+}
+
+impl Trace {
+    /// A gapless trace — the spectrum-view case.
+    pub fn single(points: Vec<(f64, f64)>, provenance: Provenance) -> Trace {
+        Trace {
+            segments: vec![points],
+            provenance,
+        }
+    }
 }
 
 /// Formatted readout strings (deliverable 4).
@@ -101,8 +121,8 @@ impl Scene {
             .map(|&a| linear_to_dbfs(a))
             .collect();
 
-        let meas_trace = Trace {
-            points: to_points(
+        let meas_trace = Trace::single(
+            to_points(
                 &input.spec_freqs,
                 &meas_level_db,
                 f_min,
@@ -110,14 +130,14 @@ impl Scene {
                 db_min,
                 db_max,
             ),
-            provenance: Provenance {
+            Provenance {
                 channel_role: input.meas_role.clone(),
                 source: input.source,
                 sr: input.sr,
             },
-        };
-        let ref_trace = Trace {
-            points: to_points(
+        );
+        let ref_trace = Trace::single(
+            to_points(
                 &input.spec_freqs,
                 &ref_level_db,
                 f_min,
@@ -125,12 +145,12 @@ impl Scene {
                 db_min,
                 db_max,
             ),
-            provenance: Provenance {
+            Provenance {
                 channel_role: input.ref_role.clone(),
                 source: input.source,
                 sr: input.sr,
             },
-        };
+        );
 
         let has_spl_cal = input.spl.is_some();
         let readouts = Readouts {
@@ -272,14 +292,14 @@ mod tests {
     #[test]
     fn orientation_higher_level_yields_larger_y_higher_freq_yields_larger_x() {
         let scene = Scene::from_input(sample_input(Source::Live), (20.0, 20_000.0), (-80.0, 0.0));
-        let meas = &scene.traces[0];
+        let meas = &scene.traces[0].segments[0];
         // freqs ascending -> x must be strictly ascending.
-        assert!(meas.points[0].0 < meas.points[1].0);
-        assert!(meas.points[1].0 < meas.points[2].0);
+        assert!(meas[0].0 < meas[1].0);
+        assert!(meas[1].0 < meas[2].0);
         // levels: 0.1 -> -20dB, 0.5 -> -6dB, 0.05 -> -26dB — so y order
         // should be point[2] < point[0] < point[1].
-        assert!(meas.points[2].1 < meas.points[0].1);
-        assert!(meas.points[0].1 < meas.points[1].1);
+        assert!(meas[2].1 < meas[0].1);
+        assert!(meas[0].1 < meas[1].1);
     }
 
     // AC4 mechanism check: identical SceneInput content (differing only
@@ -294,8 +314,8 @@ mod tests {
             (20.0, 20_000.0),
             (-80.0, 0.0),
         );
-        assert_eq!(live.traces[0].points, snap.traces[0].points);
-        assert_eq!(live.traces[1].points, snap.traces[1].points);
+        assert_eq!(live.traces[0].segments, snap.traces[0].segments);
+        assert_eq!(live.traces[1].segments, snap.traces[1].segments);
         // spl value survives on both paths (architect review 3b) —
         // only the integration clause differs (3a).
         assert_eq!(

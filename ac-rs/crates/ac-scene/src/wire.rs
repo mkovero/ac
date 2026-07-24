@@ -1,10 +1,33 @@
 //! Deserialization types for the `transfer_stream` v2 DATA frame
-//! (`ZMQ.md` lines ~1572-1627). Deliberately narrow — only the fields
-//! this crate's V1 spectrum view uses (architect review, decision 1);
-//! H1/phase/coherence trace fields are M4+ scope and are not modelled
-//! here. `serde` ignores JSON fields this struct doesn't name, so a real
-//! wire frame deserializes fine even though this struct is a strict
-//! subset of the schema.
+//! (`ZMQ.md` lines ~1572-1627). `serde` ignores JSON fields this struct
+//! doesn't name, so a real wire frame deserializes fine even though this
+//! struct is a subset of the schema.
+//!
+//! The spectrum-view fields (M2, architect review decision 1) and the
+//! transfer-view fields (M4a, §4.1/§4.2) both live here. The transfer
+//! fields carry `#[serde(default)]` so a frame without H1 content still
+//! parses into an (empty-trace) spectrum scene rather than failing the
+//! whole deserialize — `ac-view` drops unparseable frames silently
+//! (`app.rs`), so a hard requirement here would show up as a blank view,
+//! not as an error.
+//!
+//! # `phase_deg` is NOT raw phase
+//!
+//! The daemon delay-compensates before forming H1:
+//! `ac-core/src/visualize/transfer.rs` multiplies `Gxy` by
+//! `exp(+j·2π·f·delay_samples/sr)` and takes `phase_deg = h1.arg()`
+//! after that, with `delay_samples` estimated once per session and
+//! frozen (D4). So this field carries
+//!
+//! ```text
+//! φ_wire(f) = φ_raw(f) + 360·f·τ_sess
+//! ```
+//!
+//! already de-rotated by the session's own delay. [`crate::transfer`]
+//! owns the mapping from a display mode to the τ_derot that must be
+//! applied on top of it; see that module's doc for the table. Treating
+//! this field as raw phase double-compensates — the failure #180's
+//! architect pass exists to have caught.
 
 use serde::Deserialize;
 
@@ -28,6 +51,47 @@ pub struct WireFrame {
     pub spl_weighting: String,
     /// `"fast"` | `"slow"` — echoes the session's `integration` param.
     pub spl_integration: String,
+
+    // ---- transfer view (§4.1) — the H grid, DISTINCT from `spec_freqs` ----
+    /// H1 column centre frequencies. Not `spec_freqs`: that is the
+    /// log-spaced spectrum grid, this is the linear FFT grid the H1
+    /// estimate is computed on.
+    #[serde(default)]
+    pub freqs: Vec<f64>,
+    /// `|H|` in dB, same length as [`Self::freqs`].
+    #[serde(default)]
+    pub magnitude_db: Vec<f64>,
+    /// `arg(H)` in degrees, wrapped to `(-180, +180]` (the range of
+    /// `Complex::arg`). **Already delay-compensated** — see the module
+    /// doc.
+    #[serde(default)]
+    pub phase_deg: Vec<f64>,
+    /// γ² in `[0,1]`, same length as [`Self::freqs`].
+    #[serde(default)]
+    pub coherence: Vec<f64>,
+    /// The session's frozen delay estimate, in samples.
+    #[serde(default)]
+    pub delay_samples: i64,
+    /// The same estimate in ms — τ_sess, the quantity the de-rotation
+    /// mapping is written in terms of.
+    #[serde(default)]
+    pub delay_ms: f64,
+
+    // ---- input level meters (§4.2) ----
+    /// Raw capture peak, `20·log10(max|sample|)` over the frame's
+    /// blocks, taken BEFORE any calibration or aggregation. `null` on
+    /// the wire when the frame's peak is `-inf` (digital silence).
+    ///
+    /// `None` covers both `null` and a field absent entirely (a daemon
+    /// predating §4.2). That collapse is deliberate and load-bearing:
+    /// the display truth is identical for "silent" and "old daemon",
+    /// so nothing downstream may distinguish them (M4a AC — no version
+    /// sniffing).
+    #[serde(default)]
+    pub meas_peak_dbfs: Option<f64>,
+    /// Same, reference channel.
+    #[serde(default)]
+    pub ref_peak_dbfs: Option<f64>,
 }
 
 #[cfg(test)]

@@ -35,8 +35,10 @@ pub mod dbfs;
 pub mod readout;
 pub mod scene;
 pub mod ticks;
+pub mod transfer;
 pub mod wire;
 
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use ticks::{Axis, Tick};
+pub use transfer::{DerotMode, Meter, MeterState, TransferInput, TransferScene};
 pub use wire::WireFrame;

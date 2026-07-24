@@ -58,9 +58,68 @@ pub fn format_cursor_readout(freq_hz: f64, level_db: f64, has_spl_cal: bool) -> 
     format!("{freq_hz:.0} Hz: {level_db:.2} {unit}")
 }
 
+/// The ARMED banner (§5). Safety UI, not chrome: `ac-view` draws this
+/// string verbatim and must never reformat it — F5 exists to catch a
+/// renderer that re-derives the text.
+///
+/// `output_port` is appended in parentheses only when the session has a
+/// sticky JACK port configured; with no port the operator sees the
+/// channel number alone rather than an empty pair of brackets.
+pub fn format_armed_banner(
+    output_channel: u32,
+    output_port: Option<&str>,
+    level_dbfs: f64,
+) -> String {
+    format!(
+        "ARMED  →  OUT {}   {level_dbfs:+.1} dBFS  — Enter starts, Esc cancels",
+        format_output_target(output_channel, output_port)
+    )
+}
+
+/// The DRIVING banner (§5). Same verbatim contract as
+/// [`format_armed_banner`].
+pub fn format_driving_banner(
+    output_channel: u32,
+    output_port: Option<&str>,
+    level_dbfs: f64,
+) -> String {
+    format!(
+        "DRIVING   OUT {}   {level_dbfs:+.1} dBFS  — Space/Enter/Esc stops",
+        format_output_target(output_channel, output_port)
+    )
+}
+
+fn format_output_target(output_channel: u32, output_port: Option<&str>) -> String {
+    match output_port {
+        Some(port) => format!("{output_channel} ({port})"),
+        None => format!("{output_channel}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F5: byte-exact banners, both the with-port and no-port shapes.
+    #[test]
+    fn banner_strings_are_byte_exact() {
+        assert_eq!(
+            format_armed_banner(3, Some("Fireface400:AN3"), -20.0),
+            "ARMED  →  OUT 3 (Fireface400:AN3)   -20.0 dBFS  — Enter starts, Esc cancels"
+        );
+        assert_eq!(
+            format_driving_banner(3, Some("Fireface400:AN3"), -20.0),
+            "DRIVING   OUT 3 (Fireface400:AN3)   -20.0 dBFS  — Space/Enter/Esc stops"
+        );
+        assert_eq!(
+            format_armed_banner(0, None, -10.0),
+            "ARMED  →  OUT 0   -10.0 dBFS  — Enter starts, Esc cancels"
+        );
+        assert_eq!(
+            format_driving_banner(0, None, -10.0),
+            "DRIVING   OUT 0   -10.0 dBFS  — Space/Enter/Esc stops"
+        );
+    }
 
     #[test]
     fn spl_readout_none_when_no_spl_cal() {

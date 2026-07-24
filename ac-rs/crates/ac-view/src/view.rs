@@ -92,29 +92,34 @@ fn draw_spectrum(state: &SpectrumViewState, ui: &mut Ui, scene: Option<&Scene>) 
     // stroke style distinguishes live (solid) from snapshot (dashed)
     // provenance (D15, deliverable 6) — two independent facts on two
     // independent non-colliding visual channels.
+    // One draw per segment: a trace with a coherence gap is several
+    // polylines, and the gap is the absence of a segment — this crate
+    // never decides where a gap goes, it only stops drawing where
+    // ac-scene stopped emitting.
     for trace in &scene.traces {
-        let points: Vec<egui::Pos2> = trace
-            .points
-            .iter()
-            .map(|&pt| {
-                let (x, y) = scene_to_screen(pt, viewport);
-                egui::pos2(x, y)
-            })
-            .collect();
         let is_meas = trace.provenance.channel_role.starts_with("meas");
         let stroke = if is_meas {
             Stroke::new(1.5, COLOR_SIGNAL)
         } else {
             Stroke::new(1.0, COLOR_STRUCTURAL)
         };
-        match trace.provenance.source {
-            Source::Live => {
-                painter.add(egui::Shape::line(points, stroke));
-            }
-            Source::Snapshot => {
-                let mut shapes = Vec::new();
-                egui::Shape::dashed_line_many(&points, stroke, 6.0, 4.0, &mut shapes);
-                painter.extend(shapes);
+        for segment in &trace.segments {
+            let points: Vec<egui::Pos2> = segment
+                .iter()
+                .map(|&pt| {
+                    let (x, y) = scene_to_screen(pt, viewport);
+                    egui::pos2(x, y)
+                })
+                .collect();
+            match trace.provenance.source {
+                Source::Live => {
+                    painter.add(egui::Shape::line(points, stroke));
+                }
+                Source::Snapshot => {
+                    let mut shapes = Vec::new();
+                    egui::Shape::dashed_line_many(&points, stroke, 6.0, 4.0, &mut shapes);
+                    painter.extend(shapes);
+                }
             }
         }
     }

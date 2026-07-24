@@ -136,8 +136,10 @@ fn ac4_wire_and_snapshot_scenes_are_equivalent_except_the_integration_tag() {
 
     assert_eq!(wire_scene.traces.len(), snap_scene.traces.len());
     for (w, s) in wire_scene.traces.iter().zip(snap_scene.traces.iter()) {
-        assert_eq!(w.points.len(), s.points.len());
-        for (wp, sp) in w.points.iter().zip(s.points.iter()) {
+        assert_eq!(w.segments.len(), s.segments.len());
+        let (w_pts, s_pts) = (&w.segments[0], &s.segments[0]);
+        assert_eq!(w_pts.len(), s_pts.len());
+        for (wp, sp) in w_pts.iter().zip(s_pts.iter()) {
             assert!((wp.0 - sp.0).abs() < 1e-9, "x mismatch: {wp:?} vs {sp:?}");
             assert!((wp.1 - sp.1).abs() < 1e-9, "y mismatch: {wp:?} vs {sp:?}");
         }

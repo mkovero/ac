@@ -92,7 +92,7 @@ fn wire_frame_deserializes_a_real_daemon_emitted_frame() {
     // counterparty end to end, not just a parse check.
     let scene = Scene::from_wire_frame(&frame, FREQ_RANGE, DB_RANGE);
     assert_eq!(scene.traces.len(), 2);
-    assert!(!scene.traces[0].points.is_empty());
+    assert!(!scene.traces[0].segments[0].is_empty());
     assert!(scene.readouts.spl.is_some());
     assert!(scene.cursor_readout(1_000.0).is_some());
 }
