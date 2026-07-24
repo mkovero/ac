@@ -60,6 +60,66 @@ fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
     Ok(vec![(m as u32, r as u32)])
 }
 
+/// `set_drive` (§4.3) — start, stop, or re-level the stimulus of a
+/// running `transfer_stream` session.
+///
+/// Dispatched like `snapshot`: a CTRL command that targets a live worker
+/// without spawning one, so it has no `cmd_group` entry and never
+/// consults `check_busy`. That is not an exception carved out for it —
+/// routing it through the busy guard would make it contend with the very
+/// `Group::Transfer` worker it targets, and since this is also the
+/// command that STOPS the drive, the contention would land on the
+/// panic-stop path.
+///
+/// `level_dbfs` is required on every request, including `on: false`:
+/// every message doubles as the keepalive, so every message is a full
+/// state assertion rather than a delta against state the server would
+/// otherwise have to remember.
+/// `20·log10(max|sample|)` over one capture block, or `None` for
+/// digital silence (which would be `-inf`, unrepresentable in JSON).
+///
+/// Takes raw capture samples. There is no calibrated variant of this on
+/// purpose: a voltage-calibrated frame must not move the input meters.
+fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
+    let peak = block.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+    if peak <= 0.0 {
+        return None;
+    }
+    Some(20.0 * (peak as f64).log10())
+}
+
+pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
+    let drive = {
+        let slot = state.drive_state.lock().unwrap();
+        match slot.as_ref() {
+            Some(d) => d.clone(),
+            None => return json!({"ok": false, "error": "no transfer_stream session running"}),
+        }
+    };
+
+    let on = match cmd.get("on").and_then(Value::as_bool) {
+        Some(v) => v,
+        None => return json!({"ok": false, "error": "'on' required (bool)"}),
+    };
+    // A missing or non-finite level is a client bug. Coercing it would
+    // hide that, and this is the one command where a silently
+    // substituted number reaches a loudspeaker.
+    let level = match cmd.get("level_dbfs").and_then(Value::as_f64) {
+        Some(v) if v.is_finite() => v,
+        _ => return json!({"ok": false, "error": "'level_dbfs' required (finite number)"}),
+    };
+
+    let ceiling = state.cfg.lock().unwrap().drive_max_dbfs;
+    // Clamping is normal operation, not an error: a stimulus command
+    // that fails instead of applying a safe level is a worse field
+    // failure than one that quietly applies the ceiling. The echo below
+    // is always the APPLIED value, so the client can see what happened.
+    let applied = level.min(ceiling);
+    drive.set(on, applied);
+
+    json!({"ok": true, "on": on, "level_dbfs": applied})
+}
+
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
 
@@ -240,6 +300,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
         .collect();
     let snapshot_ring_slot = state.snapshot_ring.clone();
+    let drive_state_slot = state.drive_state.clone();
     let snapshot_spool = state.snapshot_spool.clone();
     let snapshot_spool_dir = ac_core::config::snapshot_spool_dir(&cfg);
     let snapshot_ring_s = cfg.snapshot_ring_s;
@@ -248,8 +309,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let unique_chans_for_ring = unique_chans.clone();
     let pairs_for_ring = pairs.clone();
 
+    // Publish the drive state BEFORE spawning the worker, so it exists
+    // the instant this handler returns `{"ok":true}`. If it were created
+    // inside the closure (as `snapshot_ring` still is), there would be a
+    // window — the whole of `eng.start`, tens to hundreds of ms of JACK
+    // port registration — during which a client that got the ok reply and
+    // immediately armed+fired would be told "no session running". #182's
+    // stimulus client is exactly that caller. Constructing it here closes
+    // the race structurally rather than narrowing it. (The snapshot_ring
+    // twin is tracked separately.)
+    let drive_state = std::sync::Arc::new(crate::workers::DriveState::new(drive, level_dbfs));
+    *drive_state_slot.lock().unwrap() = Some(drive_state.clone());
+    let drive_state_for_worker = drive_state;
+
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
+        let drive_state = drive_state_for_worker;
 
         // Passive mode (default): open no output ports at all so the daemon
         // doesn't need exclusive access to the playback side — the user is
@@ -330,6 +405,18 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             .map(|_| Vec::with_capacity(target_total + step))
             .collect();
 
+        // `drive_state` was constructed and published by the handler
+        // before this worker was spawned (see the note there) — the
+        // worker only holds and polls it. Seeded from the launch params:
+        // the legacy scripted `drive: true` path behaves exactly as
+        // before; `ac transfer` never sets that param and drives only
+        // via `set_drive`.
+
+        // What the engine is currently doing, so the poll below acts
+        // only on transitions — an unchanged 250 ms resend must not
+        // re-drive the engine four times a second.
+        let mut engine_on = drive;
+        let mut engine_level = level_dbfs;
         if drive {
             eng.set_pink(amplitude);
         }
@@ -397,6 +484,32 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 break;
             }
 
+            // Dead-man + drive poll, once per capture tick. The timeout
+            // is evaluated here rather than on message arrival because
+            // silence is precisely the condition being detected.
+            drive_state.expire_if_stale(crate::workers::DRIVE_DEADMAN_MS);
+            let want_on = drive_state.on();
+            let want_level = drive_state.level_dbfs();
+            if want_on != engine_on || (want_on && want_level != engine_level) {
+                if want_on {
+                    eng.set_pink(ac_core::shared::generator::dbfs_to_amplitude(want_level));
+                } else {
+                    eng.set_silence();
+                }
+                engine_on = want_on;
+                engine_level = want_level;
+            }
+
+            // Raw capture peaks (§4.2), per unique-port index, from
+            // THIS tick's blocks — before any calibration, weighting, or
+            // aggregation. Deliberately not derived from `rings` (a
+            // multi-segment window, not the frame's blocks) and not from
+            // `TransferResult`'s `meas_amp`/`ref_amp` (window-normalised
+            // and calibration-adjacent). The meters exist to judge gain
+            // staging, and a calibrated or band-aggregated value hides
+            // clipping — which is the one thing they must never do.
+            let tick_peaks_dbfs: Vec<Option<f64>> = bufs.iter().map(|b| raw_peak_dbfs(b)).collect();
+
             // Feed the snapshot ring the same raw, pre-processing `bufs`
             // the H1 sliding window below derives from — same capture,
             // second (larger, longer-retention) consumer.
@@ -463,6 +576,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     |((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
+                        // `-inf` (digital silence) travels as JSON null:
+                        // serde_json cannot serialise a non-finite float,
+                        // so the conversion is explicit here rather than
+                        // left to the `json!` site.
+                        let meas_peak: Value = tick_peaks_dbfs
+                            .get(mi)
+                            .copied()
+                            .flatten()
+                            .map(Value::from)
+                            .unwrap_or(Value::Null);
+                        let ref_peak: Value = tick_peaks_dbfs
+                            .get(ri)
+                            .copied()
+                            .flatten()
+                            .map(Value::from)
+                            .unwrap_or(Value::Null);
                         let delay = delay_opt.unwrap_or(0);
                         let result = ac_core::visualize::transfer::h1_estimate_with_delay(
                             refb, meas, sr, delay,
@@ -638,6 +767,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "im":              im,
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
+                            "meas_peak_dbfs":  meas_peak,
+                            "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,
                             "meas_channel":    meas_ch,
                             "sr":              sr,
@@ -729,11 +860,18 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
-        if drive {
+        if engine_on {
             eng.set_silence();
         }
         eng.stop();
+        *drive_state_slot.lock().unwrap() = None;
 
+        // Known, bounded: a `set_drive` arriving between this worker's
+        // last poll and the slot-clear below returns `{"ok":true}` for a
+        // session that will not act on it — a few ms at teardown. Not
+        // worth a lock redesign; the dead-man and the client's own
+        // teardown both converge on silence regardless.
+        //
         // Snapshot ring/spool lifecycle ends with the session (deliverable
         // 3's retention policy — module doc, `handlers/snapshot.rs`).
         *snapshot_ring_slot.lock().unwrap() = None;

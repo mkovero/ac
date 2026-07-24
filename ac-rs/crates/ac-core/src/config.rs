@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::constants::DBU_REF_EXACT;
 
+/// Ceiling for stimulus drive level, in dBFS (§4.3). Clamped
+/// server-side on every `set_drive`; the client clamps too, but this is
+/// the authoritative one. −10 dBFS by default: loud enough for a usable
+/// H1 estimate, quiet enough that a mis-typed level does not damage a
+/// PA system or the operator's hearing.
+fn default_drive_max_dbfs() -> f64 {
+    -10.0
+}
 fn default_dbu_ref() -> f64 {
     DBU_REF_EXACT
 }
@@ -49,6 +57,11 @@ pub struct Config {
 
     #[serde(default = "default_dbu_ref")]
     pub dbu_ref_vrms: f64,
+
+    /// Stimulus drive ceiling in dBFS. `serde` default fills it for
+    /// config files written before this field existed.
+    #[serde(default = "default_drive_max_dbfs")]
+    pub drive_max_dbfs: f64,
 
     pub dmm_host: Option<String>,
 
@@ -109,6 +122,7 @@ impl Default for Config {
             reference_channel: None,
             reference_port: None,
             dbu_ref_vrms: DBU_REF_EXACT,
+            drive_max_dbfs: default_drive_max_dbfs(),
             dmm_host: None,
             range_start_hz: 20.0,
             range_stop_hz: 20_000.0,
