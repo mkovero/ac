@@ -57,6 +57,10 @@ ambiguous issue
   └─ triage applies needs-clarification → wait for reporter
 ```
 
+PRs touching stimulus/drive (`set_drive`, arm/fire state machine, keepalive):
+  apply `drive-path` → qa uses the drive-path safety checklist; wire-protocol side
+  routes to architect as usual.
+
 ## human gates
 These actions are always human-only:
 - Merging PRs to main
@@ -77,6 +81,7 @@ These actions are always human-only:
 | `needs-work` | qa | PR has issues, developer must revise |
 | `blocked` | any agent | external dependency |
 | `epic` | triage | contains sub-issues |
+| `drive-path` | triage or developer | stimulus/drive safety checklist applies |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
