@@ -84,3 +84,47 @@ fn geometry_orientation_holds_through_the_actual_paint_call() {
          the quiet (100Hz) point — orientation/anti-mirror check: {meas_line:?}"
     );
 }
+
+/// The `V` ref-trace toggle must actually change what is painted, not
+/// just a state bool (QA #191, issue 1). With the toggle ON both traces
+/// (meas + ref) paint; with it OFF the ref trace is gone — one fewer
+/// polyline. Asserted through the real `draw_view` paint path so it is
+/// mutation-sound: a render that ignored the flag would paint the same
+/// count both times and fail.
+#[test]
+fn ref_trace_toggle_removes_a_polyline_through_the_paint_path() {
+    let scene = scene_with_known_points();
+
+    let on = SpectrumViewState {
+        ref_trace_visible: true,
+        ..SpectrumViewState::default()
+    };
+    let view_on = ViewKind::Spectrum(on);
+    let mut h_on = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(400.0, 300.0));
+        draw_view(&view_on, ui, Some(&scene), None);
+    });
+    h_on.run();
+    let n_on = extract_line_points(&h_on.output().shapes).len();
+
+    let off = SpectrumViewState {
+        ref_trace_visible: false,
+        ..SpectrumViewState::default()
+    };
+    let view_off = ViewKind::Spectrum(off);
+    let mut h_off = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(400.0, 300.0));
+        draw_view(&view_off, ui, Some(&scene), None);
+    });
+    h_off.run();
+    let n_off = extract_line_points(&h_off.output().shapes).len();
+
+    assert_eq!(
+        n_off + 1,
+        n_on,
+        "hiding the ref trace must remove exactly one polyline: on={n_on}, off={n_off}"
+    );
+    // The meas trace still paints when the ref is hidden — the toggle
+    // clears the reference, never the signal.
+    assert!(n_off >= 1, "meas trace vanished with the ref toggle off");
+}

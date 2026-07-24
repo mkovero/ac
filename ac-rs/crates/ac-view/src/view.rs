@@ -130,6 +130,13 @@ fn draw_spectrum(state: &SpectrumViewState, ui: &mut Ui, scene: Option<&Scene>) 
     // ac-scene stopped emitting.
     for trace in &scene.traces {
         let is_meas = trace.provenance.channel_role.starts_with("meas");
+        // Ref-trace visibility (`V`): skip the reference trace when the
+        // toggle is off. The meas trace is always drawn — the toggle
+        // exists to clear the ref out of the way when comparing against a
+        // snapshot, not to blank the display.
+        if !is_meas && !state.ref_trace_visible {
+            continue;
+        }
         let stroke = if is_meas {
             Stroke::new(1.5, COLOR_SIGNAL)
         } else {

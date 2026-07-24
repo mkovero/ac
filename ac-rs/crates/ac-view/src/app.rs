@@ -74,6 +74,63 @@ impl AcViewApp {
         self.scene.as_ref()
     }
 
+    /// The transfer scene currently being drawn, if in the transfer view
+    /// and a frame has been received — the same test-support role
+    /// `current_scene` plays for spectrum. Lets a test confirm a toggle
+    /// reached the built scene (e.g. a derot-mode change moved the phase
+    /// segments), closing the hole a state-only assertion (`derot_mode()`
+    /// changed) cannot: that the changed mode failed to reach the scene.
+    pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
+        self.transfer_scene.as_ref()
+    }
+
+    /// Feed one wire frame directly, bypassing the ZMQ session — the
+    /// hook a headless test uses to drive `current_scene` /
+    /// `current_transfer_scene` without a live daemon. Rebuilds the
+    /// active view's scene the same way the paint pass does.
+    #[cfg(test)]
+    pub(crate) fn ingest_frame_for_test(&mut self, frame: ac_scene::WireFrame, now_s: f64) {
+        self.last_frame = Some(frame);
+        match &self.view {
+            ViewKind::Spectrum(state) => {
+                let ranges = (
+                    (state.freq_range.min(), state.freq_range.max()),
+                    (state.db_range.min(), state.db_range.max()),
+                );
+                self.scene = self
+                    .last_frame
+                    .as_ref()
+                    .map(|f| Scene::from_wire_frame(f, ranges.0, ranges.1));
+                self.transfer_scene = None;
+            }
+            ViewKind::Transfer(state) => {
+                let freq_range = (state.freq_range.min(), state.freq_range.max());
+                if let Some(f) = &self.last_frame {
+                    let input = ac_scene::TransferInput::from_wire_frame(f);
+                    self.transfer_scene = Some(ac_scene::TransferScene::from_input(
+                        &input,
+                        state.derot_mode(),
+                        freq_range,
+                        (-80.0, 20.0),
+                        &mut self.meters,
+                        now_s,
+                    ));
+                }
+                self.scene = None;
+            }
+        }
+    }
+
+    /// Apply a keypress action in a test, then rebuild the active scene —
+    /// so a test can assert the scene changed, not merely the state.
+    #[cfg(test)]
+    pub(crate) fn press_for_test(&mut self, action: Action, now_s: f64) {
+        self.handle_action(action, false);
+        if let Some(frame) = self.last_frame.clone() {
+            self.ingest_frame_for_test(frame, now_s);
+        }
+    }
+
     fn handle_action(&mut self, action: Action, shift: bool) {
         match action {
             // -- global --
@@ -323,4 +380,92 @@ pub fn connect_and_launch(
     app.weighting = weighting;
     app.integration = integration;
     Ok(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::Action;
+
+    fn transfer_frame() -> ac_scene::WireFrame {
+        // A mis-estimated delay so the wire carries non-zero phase and
+        // Session (τ_derot 0) differs from the other modes — otherwise
+        // cycling would be a no-op and the test could not fail on the bug
+        // it names.
+        let json = serde_json::json!({
+            "type": "transfer_stream",
+            "sr": 48000,
+            "meas_channel": 0,
+            "ref_channel": 1,
+            "spec_freqs": [100.0, 1000.0, 10000.0],
+            "meas_spectrum": [0.1, 0.1, 0.1],
+            "ref_spectrum": [0.1, 0.1, 0.1],
+            "spl": null,
+            "spl_weighting": "Z",
+            "spl_integration": "fast",
+            "freqs": [100.0, 1000.0, 10000.0],
+            "magnitude_db": [-6.0, -6.0, -6.0],
+            "phase_deg": [-18.0, -180.0, 60.0],
+            "coherence": [0.9, 0.9, 0.9],
+            "delay_samples": 96,
+            "delay_ms": 2.0,
+            "meas_peak_dbfs": -6.0,
+            "ref_peak_dbfs": -12.0
+        });
+        serde_json::from_value(json).expect("wire frame")
+    }
+
+    // Scene-accessor AC (no shape scraping): a derot keypress must change
+    // the BUILT transfer scene's phase segments — not merely the
+    // `derot_mode()` state field. Closes the hole a state-only assertion
+    // cannot: a mode change that fails to reach the scene.
+    #[test]
+    fn cycling_derot_changes_the_built_transfer_scene_phase() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(transfer_frame(), 0.0);
+
+        let before: Vec<Vec<(f64, f64)>> = app
+            .current_transfer_scene()
+            .expect("scene built")
+            .phase
+            .segments
+            .clone();
+
+        app.press_for_test(Action::CycleDerotReference, 0.1);
+
+        let after = &app
+            .current_transfer_scene()
+            .expect("scene rebuilt")
+            .phase
+            .segments;
+        assert_ne!(
+            &before, after,
+            "cycling de-rotation reference did not change the built phase pane"
+        );
+    }
+
+    // The magnitude pane must NOT move when only the de-rotation
+    // reference changes — de-rotation is a phase-only operation.
+    #[test]
+    fn cycling_derot_leaves_the_magnitude_pane_unchanged() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(transfer_frame(), 0.0);
+        let before = app
+            .current_transfer_scene()
+            .unwrap()
+            .magnitude
+            .segments
+            .clone();
+        app.press_for_test(Action::CycleDerotReference, 0.1);
+        let after = &app.current_transfer_scene().unwrap().magnitude.segments;
+        assert_eq!(&before, after, "de-rotation moved the magnitude pane");
+    }
 }
