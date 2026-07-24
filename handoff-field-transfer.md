@@ -110,7 +110,14 @@ Semantics:
 - EVERY `set_drive` message refreshes the keepalive timestamp — there is no separate
   keepalive command. The UI re-sends the current state every 250 ms while driving
   (idempotent). Worker drops drive (on-flag → false) when now − last_keepalive > 1500 ms;
-  the session keeps running.
+  the session keeps running. Keepalive clock is monotonic (Instant baseline), not
+  wall-clock epoch millis — a clock step must not extend or trip the dead-man.
+- The dead-man arms on the **first `set_drive`** received by the worker and remains armed
+  for the session (amended 2026-07-24, #187 QA + ratification). A session launched with
+  the legacy `drive: true` param sends no keepalives; that launch-time path retains its
+  existing **unsupervised** semantics (drives until stopped, on the operator's deliberate
+  responsibility), and the dead-man governs only stimulus started through `set_drive`.
+  Every UI-driven session goes through `set_drive`, so the UI is always covered.
 - `level_dbfs` clamped server-side to ≤ `drive_max_dbfs` (new Config field, default
   −10.0, filled by serde default for old config files). Client clamps too; server clamp
   is the one QA tests as authoritative.
