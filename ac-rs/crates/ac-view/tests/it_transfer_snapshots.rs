@@ -10,11 +10,14 @@
 //! real-adapter-gated: sandbox lavapipe segfaults on wgpu, and a
 //! reference PNG rendered on one adapter will not pixel-match another.
 //! Run on the real adapter (192.168.9.25, RTX 2070). Generate references
-//! with `UPDATE_SNAPSHOTS=1`, then re-run to pixel-diff:
+//! with `UPDATE_SNAPSHOTS=1`, then re-run to pixel-diff. Use
+//! `--test-threads=1`: several wgpu device contexts spun up in parallel
+//! contend and hang the process at teardown, so the snapshots run one at
+//! a time.
 //!
 //! ```text
-//! UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots -- --ignored
-//! cargo test -p ac-view --test it_transfer_snapshots -- --ignored
+//! UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots -- --ignored --test-threads=1
+//! cargo test -p ac-view --test it_transfer_snapshots -- --ignored --test-threads=1
 //! ```
 //!
 //! The committed `tests/snapshots/*.png` are also the human-viewable
