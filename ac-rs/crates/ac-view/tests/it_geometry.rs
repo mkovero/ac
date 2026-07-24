@@ -60,7 +60,7 @@ fn geometry_orientation_holds_through_the_actual_paint_call() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, Some(&scene));
+        draw_view(&view, ui, Some(&scene), None);
     });
     harness.run();
 

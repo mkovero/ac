@@ -63,7 +63,7 @@ fn meas_and_ref_traces_use_different_colors() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, Some(&scene));
+        draw_view(&view, ui, Some(&scene), None);
     });
     harness.run();
 
@@ -91,7 +91,7 @@ fn snapshot_traces_paint_as_multiple_dash_segments_live_traces_as_one_solid_path
     let live_scene = scene(Source::Live);
     let mut live_harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&live_view, ui, Some(&live_scene));
+        draw_view(&live_view, ui, Some(&live_scene), None);
     });
     live_harness.run();
     let live_count = line_like_shape_count(&live_harness.output().shapes);
@@ -102,7 +102,7 @@ fn snapshot_traces_paint_as_multiple_dash_segments_live_traces_as_one_solid_path
     let snap_scene = scene(Source::Snapshot);
     let mut snap_harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&snap_view, ui, Some(&snap_scene));
+        draw_view(&snap_view, ui, Some(&snap_scene), None);
     });
     snap_harness.run();
     let snap_count = line_like_shape_count(&snap_harness.output().shapes);
