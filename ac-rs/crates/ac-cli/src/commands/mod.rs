@@ -14,9 +14,48 @@ pub mod setup;
 pub mod stop;
 pub mod sweep;
 pub mod test;
+pub mod transfer;
 
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec, ParsedCommand};
+
+/// Spawn the `ac-view` window (M4d-CLI #185) and wait for it — `ac
+/// monitor` (default) and `ac transfer` both launch through here. Host
+/// comes from config's `server_host` (localhost when unset); ports are
+/// the daemon defaults. `--transfer` selects the transfer view.
+///
+/// **No drive is ever passed.** The `ac-view` arg surface has no drive
+/// option, so a CLI launch cannot bring a session up driving — drive only
+/// starts through the in-app arm→fire machine. `meas_override` maps an
+/// explicit CLI channel spec onto the measurement leg ("as today").
+pub fn spawn_ac_view(cfg: &ac_core::config::Config, transfer: bool, meas_override: Option<u32>) {
+    let Some(bin) = crate::spawn::find_binary("ac-view") else {
+        eprintln!("  error: ac-view binary not found — build it with `cargo build -p ac-view`");
+        return;
+    };
+    let host = cfg.server_host.as_deref().unwrap_or("localhost");
+    let args = ac_view_args(host, transfer, meas_override);
+    if let Err(e) = std::process::Command::new(bin).args(&args).status() {
+        eprintln!("  error: failed to launch ac-view: {e}");
+    }
+}
+
+/// Build the `ac-view` argv (pure, testable). Carries host, ports, the
+/// view flag, and an optional meas override — and, load-bearingly, **no
+/// drive option**: there is no path here to pass a drive/on argument, so
+/// the CLI-launch AC (#185, "`ac transfer` never sets launch-time drive")
+/// holds by construction of this arg list, not by the UI's separate proof.
+fn ac_view_args(host: &str, transfer: bool, meas_override: Option<u32>) -> Vec<String> {
+    let mut args = vec![host.to_string(), "5556".to_string(), "5557".to_string()];
+    if transfer {
+        args.push("--transfer".to_string());
+    }
+    if let Some(m) = meas_override {
+        args.push("--meas".to_string());
+        args.push(m.to_string());
+    }
+    args
+}
 
 pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let show = parsed.show_plot;
@@ -46,6 +85,7 @@ pub fn dispatch(parsed: ParsedCommand, cfg: &ac_core::config::Config, client: &m
         CommandKind::PlotLevel { .. } => plot::run_level(&parsed.cmd, cfg, client, show),
 
         CommandKind::Monitor { .. } => monitor::run(&parsed.cmd, cfg),
+        CommandKind::Transfer { .. } => transfer::run(&parsed.cmd, cfg),
         CommandKind::MonitorCwt { .. } => monitor::run_cwt(&parsed.cmd, cfg, client),
         CommandKind::MonitorCqt { .. } => monitor::run_cqt(&parsed.cmd, cfg, client),
         CommandKind::MonitorReassigned { .. } => monitor::run_reassigned(&parsed.cmd, cfg, client),
@@ -135,5 +175,45 @@ pub fn get_cal(client: &mut AcClient) -> Option<serde_json::Value> {
         Some(reply)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ac_view_args;
+
+    // The CLI-path drive-off AC (#185), asserted through the CLI's own arg
+    // construction — not by reusing ac-view's in-app proof. `ac transfer`
+    // spawns ac-view with a view flag and channels only; no argument
+    // mentions drive/on, so a session launched this way is always
+    // drive-off. If a `--drive` ever gets added here, this trips.
+    #[test]
+    fn ac_view_launch_args_carry_no_drive_option() {
+        for transfer in [true, false] {
+            for meas in [None, Some(3u32)] {
+                let args = ac_view_args("localhost", transfer, meas);
+                let joined = args.join(" ").to_lowercase();
+                assert!(
+                    !joined.contains("drive") && !joined.contains("--on"),
+                    "ac-view launch args must carry no drive option: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_flag_selects_the_transfer_view() {
+        assert!(ac_view_args("h", true, None).contains(&"--transfer".to_string()));
+        assert!(!ac_view_args("h", false, None).contains(&"--transfer".to_string()));
+    }
+
+    #[test]
+    fn meas_override_maps_the_channel() {
+        let args = ac_view_args("h", true, Some(5));
+        let i = args
+            .iter()
+            .position(|a| a == "--meas")
+            .expect("--meas present");
+        assert_eq!(args[i + 1], "5");
     }
 }

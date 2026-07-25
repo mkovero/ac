@@ -639,10 +639,57 @@ pub fn connect_and_launch(
     weighting: WeightingCurve,
     integration: &'static str,
 ) -> anyhow::Result<AcViewApp> {
+    connect_and_launch_view(
+        endpoint,
+        meas_channel,
+        ref_channel,
+        weighting,
+        integration,
+        false,
+    )
+}
+
+/// Same as [`connect_and_launch`] but starts in the **transfer** view
+/// (`ac transfer`, M4d-CLI #185). The launched session is identical — a
+/// plain `transfer_stream`, drive **off**: `session.launch` sends no
+/// `drive` param and this path adds none, so a CLI launch structurally
+/// cannot bring a session up already driving (the load-bearing AC). The
+/// only difference from the spectrum entry is which view renders the
+/// frames.
+pub fn connect_and_launch_transfer(
+    endpoint: Endpoint,
+    meas_channel: u32,
+    ref_channel: u32,
+    weighting: WeightingCurve,
+    integration: &'static str,
+) -> anyhow::Result<AcViewApp> {
+    connect_and_launch_view(
+        endpoint,
+        meas_channel,
+        ref_channel,
+        weighting,
+        integration,
+        true,
+    )
+}
+
+fn connect_and_launch_view(
+    endpoint: Endpoint,
+    meas_channel: u32,
+    ref_channel: u32,
+    weighting: WeightingCurve,
+    integration: &'static str,
+    transfer: bool,
+) -> anyhow::Result<AcViewApp> {
     let client = Client::connect(&endpoint)?;
     let mut session = Session::new(client);
+    // No `drive` param — neither entry (UI or CLI) ever launches driving.
     session.launch(meas_channel, ref_channel, weighting, integration)?;
-    let mut app = AcViewApp::new(endpoint);
+    let mut app = if transfer {
+        AcViewApp::new_transfer(endpoint)
+    } else {
+        AcViewApp::new(endpoint)
+    };
     app.session = Some(session);
     app.weighting = weighting;
     app.integration = integration;

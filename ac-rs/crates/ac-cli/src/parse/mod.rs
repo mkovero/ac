@@ -194,6 +194,7 @@ fn expand(word: &str) -> &str {
     match word.to_lowercase().as_str() {
         "s" | "sw" => "sweep",
         "m" | "mon" => "monitor",
+        "tr" | "trans" => "transfer",
         "g" | "gen" => "generate",
         "c" | "cal" => "calibrate",
         "p" | "pl" => "plot",
@@ -333,6 +334,15 @@ pub enum CommandKind {
         start_freq: f64,
         end_freq: f64,
         interval: f64,
+        channels: Option<Vec<u32>>,
+        /// `--tui` keeps the ratatui terminal monitor; default spawns the
+        /// `ac-view` spectrum window (M4d-CLI #185).
+        tui: bool,
+    },
+    /// `ac transfer` — launch the `ac-view` transfer view (#185). The
+    /// session is a plain drive-off `transfer_stream`; there is no drive
+    /// option here, so a CLI launch can never come up driving.
+    Transfer {
         channels: Option<Vec<u32>>,
     },
     #[allow(dead_code)]
@@ -475,6 +485,7 @@ pub fn parse(argv: &[String]) -> Result<ParsedCommand, String> {
     match verb.as_str() {
         "sweep" => parse_sweep(&mut args, show_plot),
         "monitor" => parse_monitor(&args, show_plot),
+        "transfer" => parse_transfer(&args),
         "plot" => parse_plot(&mut args, show_plot),
         "generate" => parse_generate(&mut args, show_plot),
         "calibrate" => parse_calibrate(&args, show_plot),
@@ -614,7 +625,7 @@ mod test;
 
 use calibrate::parse_calibrate;
 use generate::parse_generate;
-use monitor::parse_monitor;
+use monitor::{parse_monitor, parse_transfer};
 use plot::parse_plot;
 use server::parse_server;
 use setup::parse_setup;
