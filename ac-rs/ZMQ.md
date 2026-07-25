@@ -1521,11 +1521,26 @@ caller is expected to feed stimulus (pink noise, music, sweep, speech, …) into
 the DUT externally and the daemon just observes `ref` → `meas`. Pass
 `drive=true` to restore the self-stimulating pink-noise loopback mode.
 
+Output-port **allocation** and **emission** are separate concerns:
+
+| params | output ports | emits at launch |
+|--------|--------------|-----------------|
+| neither | none opened — daemon never touches the playback side | no |
+| `drivable=true` | opened + connected at launch | no — gated on `set_drive` |
+| `drive=true` | opened + connected (implies drivable) | yes, at `level_dbfs` |
+
+`drivable` is what an interactive client (`ac transfer` / `ac-view`) wants: the
+session comes up silent, but a later `set_drive` reaches the interface. Without
+it the generator would play onto an unconnected port — audible silence with
+every other observable looking correct.
+
 **Request**
 ```json
 {
   "cmd":          "transfer_stream",
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
+  "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
+                             //   silent until `set_drive`. Implied by drive=true.
   "level_dbfs":   <float>,   // only meaningful when drive=true, default -10
 
   // Either the multi-pair form …

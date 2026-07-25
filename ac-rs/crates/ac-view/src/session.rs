@@ -61,6 +61,10 @@ impl Session {
         self.client.drain_pending();
         let reply = self.client.call(&json!({
             "cmd": "transfer_stream",
+            // Drivable but silent: the daemon connects its output at launch
+            // so a later `set_drive` actually reaches the interface, while
+            // `drive` stays unset so the session comes up emitting nothing.
+            "drivable": true,
             "meas_channel": meas_channel,
             "ref_channel": ref_channel,
             "weighting": weighting.tag(),

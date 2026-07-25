@@ -60,6 +60,26 @@ fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, String> {
     Ok(vec![(m as u32, r as u32)])
 }
 
+/// Which output ports a `transfer_stream` worker must open and connect at
+/// launch. Deliberately a pure fn: this decision is invisible to the fake
+/// backend (which synthesizes the generator's signal into the capture
+/// buffer regardless of routing), so peak-based tests cannot see it and a
+/// live JACK run is the only other observer. This seam makes it falsifiable
+/// headlessly.
+///
+/// Keyed on `drivable`, **not** `drive`: allocation and emission are
+/// separate. A drivable session comes up connected but silent — emission
+/// stays gated on `set_drive` / launch-time `drive`.
+fn drive_out_ports(drivable: bool, out_port: &str, ref_out_port: &str) -> Vec<String> {
+    if !drivable {
+        Vec::new()
+    } else if ref_out_port != out_port {
+        vec![out_port.to_string(), ref_out_port.to_string()]
+    } else {
+        vec![out_port.to_string()]
+    }
+}
+
 /// `set_drive` (§4.3) — start, stop, or re-level the stimulus of a
 /// running `transfer_stream` session.
 ///
@@ -129,6 +149,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // Set `true` to restore the old self-driving behavior (with `level_dbfs`
     // controlling amplitude).
     let drive = cmd.get("drive").and_then(Value::as_bool).unwrap_or(false);
+    // `drivable` opens and connects the output ports at launch while staying
+    // silent — the shape `ac transfer` needs, where drive arrives later via
+    // `set_drive`. Legacy `drive=true` implies drivable. Neither means fully
+    // passive: no output ports at all (external-DUT workflow).
+    let drivable = drive
+        || cmd
+            .get("drivable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
@@ -328,15 +357,10 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
         // Passive mode (default): open no output ports at all so the daemon
         // doesn't need exclusive access to the playback side — the user is
-        // driving the DUT externally. `drive=true` restores the old
-        // pink-noise self-stimulus path for the loopback workflow.
-        let out_ports: Vec<String> = if !drive {
-            Vec::new()
-        } else if ref_out_port != out_port {
-            vec![out_port.clone(), ref_out_port.clone()]
-        } else {
-            vec![out_port.clone()]
-        };
+        // driving the DUT externally. Any drivable session connects its
+        // outputs here and stays silent until drive is asked for; without
+        // this the generator plays onto an unconnected port.
+        let out_ports: Vec<String> = drive_out_ports(drivable, &out_port, &ref_out_port);
 
         let mut eng = make_engine(fake);
         let main_port = unique_ports[0].clone();
@@ -1112,5 +1136,35 @@ mod tests {
     fn parse_pairs_missing_fields_errors() {
         let cmd = json!({});
         assert!(parse_transfer_pairs(&cmd).is_err());
+    }
+
+    // The regression: a drivable session must connect its output even though
+    // launch-time `drive` is false. Against the old `!drive` gate this is
+    // empty, the generator plays onto an unconnected port, and the interface
+    // is silent — invisible to every peak-based test.
+    #[test]
+    fn drivable_session_connects_output_with_drive_off() {
+        assert_eq!(
+            drive_out_ports(true, "system:playback_1", "system:playback_1"),
+            vec!["system:playback_1".to_string()]
+        );
+    }
+
+    #[test]
+    fn drivable_session_connects_distinct_ref_output() {
+        assert_eq!(
+            drive_out_ports(true, "system:playback_1", "system:playback_2"),
+            vec![
+                "system:playback_1".to_string(),
+                "system:playback_2".to_string()
+            ]
+        );
+    }
+
+    // Passive sessions must still touch no playback port at all — the
+    // external-DUT workflow depends on the daemon keeping its hands off.
+    #[test]
+    fn passive_session_opens_no_output_ports() {
+        assert!(drive_out_ports(false, "system:playback_1", "system:playback_2").is_empty());
     }
 }
