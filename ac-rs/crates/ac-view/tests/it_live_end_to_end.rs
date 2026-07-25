@@ -97,7 +97,18 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         found.expect("no transfer_stream frame within 10s")
     };
     let frame_text = serde_json::to_string(&raw_frame).unwrap();
-    let parse_a: ac_scene::WireFrame = serde_json::from_str(&frame_text).unwrap();
+    // TEMP #192 diag: on parse failure, dump what poll_frame actually
+    // returned — type, cmd, key presence — so we see the offending frame.
+    let parse_a: ac_scene::WireFrame = match serde_json::from_str(&frame_text) {
+        Ok(f) => f,
+        Err(e) => {
+            let ty = raw_frame.get("type").and_then(|v| v.as_str()).unwrap_or("<none>");
+            let cmd = raw_frame.get("cmd").and_then(|v| v.as_str()).unwrap_or("<none>");
+            let has_sf = raw_frame.get("spec_freqs").is_some();
+            let keys: Vec<&str> = raw_frame.as_object().map(|o| o.keys().map(|k| k.as_str()).collect()).unwrap_or_default();
+            panic!("#192 parse fail: {e}\n  type={ty} cmd={cmd} spec_freqs_present={has_sf}\n  keys={keys:?}\n  bytes={}", frame_text.len());
+        }
+    };
     let parse_b: ac_scene::WireFrame = serde_json::from_str(&frame_text).unwrap();
     let scene_a = Scene::from_wire_frame(&parse_a, (20.0, 20_000.0), (-140.0, 0.0));
     let scene_b = Scene::from_wire_frame(&parse_b, (20.0, 20_000.0), (-140.0, 0.0));
