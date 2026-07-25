@@ -188,6 +188,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             .and_then(Value::as_f64)
             .unwrap_or(0.005)
     });
+    // Producer granularity. A real backend hands the ring one whole period at
+    // a time, and that quantisation — not the gap length — is what decides
+    // which stimulus frequencies expose the splice at all: a tone at an exact
+    // multiple of `sr/period` survives a discarded period with zero phase
+    // error. 1024 matches the verified rig (RME Babyface Pro at 96 kHz).
+    let fake_ring_period: usize = cmd
+        .get("fake_ring")
+        .and_then(|v| v.get("period"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1024) as usize;
 
     let pairs = match parse_transfer_pairs(cmd) {
         Ok(p) => p,
@@ -399,7 +409,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // After `add_ref_input` above, so the ring count matches the
             // channels this session actually captures.
             if let Some(process_secs) = fake_ring_process_secs {
-                eng.enable_ring_mode(process_secs, unique_ports.len().saturating_sub(1));
+                eng.enable_ring_mode(
+                    process_secs,
+                    unique_ports.len().saturating_sub(1),
+                    fake_ring_period,
+                );
             }
         }
 

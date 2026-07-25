@@ -193,8 +193,9 @@ pub trait AudioEngine: Send + 'static {
     fn set_correlated_pair(&mut self, _gain: f64, _delay_samples: usize) {}
 
     /// Route fake capture through a real ring driven by a synthetic clock,
-    /// with `process_secs` of modelled per-tick consumer processing time and
-    /// `n_refs` reference channels.
+    /// with `process_secs` of modelled per-tick consumer processing time,
+    /// `n_refs` reference channels, and a producer granularity of `period`
+    /// samples (the backend's period/quantum — 1024 on the verified rig).
     ///
     /// Instrumentation for the capture-contiguity investigation
     /// (`handoff-capture-contiguity.md`, D1). The default fake backend
@@ -205,7 +206,7 @@ pub trait AudioEngine: Send + 'static {
     ///
     /// Default no-op, same as `set_correlated_pair`: real backends already
     /// have rings, fed by their own hardware clock.
-    fn enable_ring_mode(&mut self, _process_secs: f64, _n_refs: usize) {}
+    fn enable_ring_mode(&mut self, _process_secs: f64, _n_refs: usize, _period: usize) {}
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.

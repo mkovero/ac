@@ -79,6 +79,16 @@ const TONE_HZ: f64 = 15_100.0;
 /// into the measurement.
 const MIN_PEAK_SEP_BINS: usize = 3;
 
+/// A producer granularity of one sample — i.e. *no* period quantisation.
+///
+/// Used by the tests below that isolate the processing gap as the single
+/// variable. It is deliberately **not** what real hardware does: a JACK
+/// producer moves whole periods, and that quantisation turns out to dominate
+/// which frequencies expose the defect at all. See
+/// `period_quantisation_decides_which_frequencies_expose_the_splice`, which
+/// covers the realistic case, and `FakeRings::period`.
+const SAMPLE_ACCURATE: usize = 1;
+
 /// Whether a tick's capture goes through the clearing drain or the
 /// contiguous one. The single independent variable of the experiment.
 #[derive(Clone, Copy, PartialEq)]
@@ -97,16 +107,27 @@ enum Drain {
 /// `extend_from_slice` and a front `drain` to `target_total`, and that
 /// assembly is the step that presents spliced fragments as continuous time.
 fn assemble_window(drain: Drain, process_secs: f64, sr: u32) -> (Vec<f32>, u64) {
+    assemble_window_with_period(drain, process_secs, sr, SAMPLE_ACCURATE, TONE_HZ)
+}
+
+/// As `assemble_window`, but with an explicit producer granularity and tone.
+fn assemble_window_with_period(
+    drain: Drain,
+    process_secs: f64,
+    sr: u32,
+    period: usize,
+    tone_hz: f64,
+) -> (Vec<f32>, u64) {
     let nperseg = sr as usize;
     let step = nperseg / 2;
     let target_total = nperseg + step * (N_AVERAGES - 1);
     let chunk_samples = (sr as f64 * CHUNK_SECS) as usize;
 
     let mut eng = FakeEngine::new();
-    eng.set_tone(TONE_HZ, 0.5);
+    eng.set_tone(tone_hz, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
-    eng.enable_ring_mode(process_secs, 1);
+    eng.enable_ring_mode(process_secs, 1, period);
 
     let mut ring: Vec<f32> = Vec::with_capacity(target_total + step);
     // Enough ticks to fill the window several times over, so the result is
@@ -402,7 +423,7 @@ fn discard_count_tracks_the_modelled_processing_time() {
     let mut eng = FakeEngine::new();
     eng.set_tone(TONE_HZ, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
-    eng.enable_ring_mode(0.01, 0);
+    eng.enable_ring_mode(0.01, 0, SAMPLE_ACCURATE);
     for _ in 0..ticks {
         eng.capture_block(CHUNK_SECS).unwrap();
     }
@@ -531,5 +552,80 @@ fn jack_hf_sweep_replica_read() {
             peaks.last(),
             &peaks[..peaks.len().min(12)],
         );
+    }
+}
+
+/// **The selection rule, measured on hardware and reproduced here.**
+///
+/// A real producer hands the ring one whole *period* at a time, so the gap a
+/// `clear()` discards is always `k · period` samples. The phase discontinuity
+/// a splice imposes is therefore `frac(f · period / sr)` cycles — **exactly
+/// zero** whenever the stimulus is an integer multiple of `sr / period`. Such
+/// a tone survives an arbitrary number of discarded periods with no phase
+/// error at all, and the defect is spectrally invisible.
+///
+/// This is not a refinement, it is the dominant term. Measured on the RME
+/// Babyface Pro (`sr = 96 000`, quantum 1024, so `sr/period = 93.75 Hz`),
+/// −40 dBFS, identical discard rate (326/tick) in every case:
+///
+/// | tone | multiple of 93.75? | peaks | spacing |
+/// |---|---|---|---|
+/// | 12 000 Hz | yes (×128) | 1 | — |
+/// | 15 000 Hz | yes (×160) | 1 | — |
+/// | 18 000 Hz | yes (×192) | 1 | — |
+/// | 15 100 Hz | **no** (×161.07) | **67** | 20 Hz |
+///
+/// A sample-accurate producer predicts splatter at all four and is simply
+/// wrong. The check below is that the fake, given the same granularity,
+/// reproduces the same split — i.e. that it *predicts* hardware rather than
+/// merely resembling it.
+///
+/// Practical consequence, and the reason this matters beyond the model: the
+/// round frequencies an operator naturally reaches for are exactly the ones
+/// likely to be commensurate with the period, so **the obvious test tone can
+/// hide this defect completely.**
+#[test]
+fn period_quantisation_decides_which_frequencies_expose_the_splice() {
+    const SR: u32 = 96_000;
+    const PERIOD: usize = 1024;
+    let period_rate = SR as f64 / PERIOD as f64; // 93.75 Hz
+
+    // Same split the hardware showed: three commensurate tones, one not.
+    for &(tone, expect_clean) in &[
+        (12_000.0f64, true),
+        (15_000.0, true),
+        (18_000.0, true),
+        (15_100.0, false),
+    ] {
+        let commensurate = (tone / period_rate).fract() < 1e-9;
+        assert_eq!(
+            commensurate, expect_clean,
+            "{tone} Hz vs period rate {period_rate}: test's own premise is wrong"
+        );
+
+        let (window, discarded) =
+            assemble_window_with_period(Drain::Clearing, 0.005, SR, PERIOD, tone);
+        assert!(discarded > 0, "{tone} Hz: the clear() must still discard");
+
+        let db = meas_amp_db(&window, SR);
+        let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), tone, SR);
+
+        if expect_clean {
+            assert_eq!(
+                peaks.len(),
+                1,
+                "{tone} Hz is an exact multiple of sr/period ({period_rate} Hz), so a \
+                 discarded whole period costs it zero phase — it must stay clean \
+                 despite {discarded} samples discarded. Got peaks at {peaks:?} Hz"
+            );
+        } else {
+            assert!(
+                peaks.len() > 1,
+                "{tone} Hz is NOT a multiple of sr/period ({period_rate} Hz), so each \
+                 discarded period costs it {:.3} cycles of phase — it must replicate. \
+                 Got peaks at {peaks:?} Hz",
+                (tone * PERIOD as f64 / SR as f64).fract()
+            );
+        }
     }
 }

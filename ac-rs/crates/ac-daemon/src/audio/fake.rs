@@ -133,6 +133,30 @@ struct FakeRings {
     /// running cursor. `Noise` and `CorrelatedPair` already carry their own
     /// continuous state and ignore it.
     tone_pos: u64,
+    /// Producer granularity in samples — the backend's period/quantum.
+    ///
+    /// **The dominant term, established on hardware.** A JACK process callback
+    /// pushes one whole period at a time, so at `clear()` time the ring holds a
+    /// whole number of periods, never a partial one. The discarded gap is
+    /// therefore always `k · period` samples, and the phase discontinuity a
+    /// splice imposes is `frac(f · period / sr)` cycles — **exactly zero** for
+    /// any tone that is an integer multiple of `sr / period`.
+    ///
+    /// Measured on the RME Babyface Pro, `sr = 96 000`, quantum 1024
+    /// (`sr/period = 93.75 Hz`): 12 000, 15 000 and 18 000 Hz — every one an
+    /// exact multiple of 93.75 — gave a single clean peak, while 15 100 Hz
+    /// (161.07 cycles per period) splattered into a 20 Hz comb. A
+    /// sample-accurate producer predicts splatter at *all four* and so is
+    /// simply wrong about which frequencies expose the defect. Modelling this
+    /// is what makes the fake predict hardware rather than merely resemble it.
+    period: usize,
+    /// Sub-period time accrued but not yet materialised as a whole period.
+    ///
+    /// Carrying this is what turns a 5 ms gap at 96 kHz (480 samples, less
+    /// than one 1024-sample period) into "one whole period discarded on ~32%
+    /// of ticks and nothing on the rest" — the 0-or-1024 pattern the hardware
+    /// shows — rather than a constant 480.
+    residue: usize,
 }
 
 pub struct FakeEngine {
@@ -193,7 +217,7 @@ impl FakeEngine {
     /// `n_refs` reference rings are allocated up front rather than on
     /// `add_ref_input`, because the fake has no RT handler to hand producers
     /// to and the transfer worker registers its refs before the first tick.
-    fn enable_ring_mode_inner(&mut self, process_secs: f64, n_refs: usize) {
+    fn enable_ring_mode_inner(&mut self, process_secs: f64, n_refs: usize, period: usize) {
         let (meas_prod, meas_cons) = HeapRb::<f32>::new(FAKE_RING_CAPACITY).split();
         let mut rings = CaptureRings::new();
         rings.set_meas(meas_cons);
@@ -212,6 +236,8 @@ impl FakeEngine {
             ref_prods,
             process_secs: process_secs.max(0.0),
             tone_pos: 0,
+            period: period.max(1),
+            residue: 0,
         });
     }
 
@@ -230,16 +256,19 @@ impl FakeEngine {
         ports
     }
 
-    /// Synthesise `n` samples per channel and push them into the rings,
-    /// advancing the virtual clock. This is what the ring-mode waiter does
-    /// instead of blocking.
+    /// Push `periods` whole periods of synthesised audio into the rings.
     ///
-    /// Samples are generated *before* the producers are borrowed so the
-    /// generator's `&mut self` and the ring's `&mut` never overlap.
-    fn ring_advance(&mut self, n: usize) {
-        if n == 0 || self.ring.is_none() {
+    /// The producer only ever moves in whole periods — that is the property
+    /// that decides which stimulus frequencies expose the splice at all (see
+    /// [`FakeRings::period`]). Samples are generated *before* the producers
+    /// are borrowed so the generator's `&mut self` and the ring's `&mut` never
+    /// overlap.
+    fn ring_push_periods(&mut self, periods: usize) {
+        if periods == 0 || self.ring.is_none() {
             return;
         }
+        let period = self.ring.as_ref().map(|r| r.period).unwrap_or(1);
+        let n = periods * period;
         let ports = self.ring_ports();
         let duration = n as f64 / self.sample_rate as f64;
         let tone_pos = self.ring.as_ref().map(|r| r.tone_pos).unwrap_or(0);
@@ -259,19 +288,24 @@ impl FakeEngine {
         }
     }
 
-    /// Samples-per-tick equivalent of `process_secs`.
-    fn ring_gap_samples(&self) -> usize {
-        self.ring
-            .as_ref()
-            .map(|r| (self.sample_rate as f64 * r.process_secs) as usize)
-            .unwrap_or(0)
-    }
-
     /// Model the consumer's processing time: the ring keeps filling while the
     /// caller works on the block it just popped. Whatever accrues here is
     /// exactly what the *next* tick's `clear()` discards — the splice.
+    ///
+    /// Accrued time is banked in `residue` and materialises only as whole
+    /// periods, so a gap shorter than one period does not produce a small
+    /// discard every tick — it produces a *whole period* discarded on some
+    /// ticks and nothing on the others, which is what the hardware does.
     fn ring_charge_processing(&mut self) {
-        self.ring_advance(self.ring_gap_samples());
+        let Some(r) = self.ring.as_ref() else { return };
+        let period = r.period;
+        let gap = (self.sample_rate as f64 * r.process_secs) as usize;
+        let banked = r.residue + gap;
+        let periods = banked / period;
+        if let Some(r) = self.ring.as_mut() {
+            r.residue = banked % period;
+        }
+        self.ring_push_periods(periods);
     }
 
     /// One ring-mode capture tick.
@@ -296,9 +330,25 @@ impl FakeEngine {
     /// generator's `&mut self` never overlaps the ring borrow — that is why
     /// the wait closure only needs the producers.
     fn ring_drain(&mut self, n: usize, duration: f64, kind: RingDrain) -> Result<Vec<Vec<f32>>> {
+        let Some(r) = self.ring.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let period = r.period;
+        // The clearing drains empty the ring first, so plan the fill from what
+        // will actually be there when the wait runs. Whole periods only — a
+        // producer that could deliver a partial period would model the wrong
+        // machine (see `FakeRings::period`).
+        let occupied_at_wait = match kind {
+            RingDrain::Available => r.rings.occupied(),
+            _ => 0,
+        };
+        let shortfall = n.saturating_sub(occupied_at_wait);
+        let fill_periods = shortfall.div_ceil(period);
+        let fill = fill_periods * period;
+
         let ports = self.ring_ports();
         let tone_pos = self.ring.as_ref().map(|r| r.tone_pos).unwrap_or(0);
-        let wait_duration = n as f64 / self.sample_rate as f64;
+        let wait_duration = fill as f64 / self.sample_rate as f64;
         let blocks: Vec<Vec<f32>> = ports
             .iter()
             .map(|p| self.make_samples_from(p.as_deref(), wait_duration, tone_pos))
@@ -307,7 +357,7 @@ impl FakeEngine {
         let Some(ref mut r) = self.ring else {
             return Ok(Vec::new());
         };
-        r.tone_pos += n as u64;
+        r.tone_pos += fill as u64;
 
         // Destructured so `rings` and the producers are disjoint borrows:
         // the drain owns the ordering, the waiter owns the fill.
@@ -609,8 +659,8 @@ impl AudioEngine for FakeEngine {
             .unwrap_or(0)
     }
 
-    fn enable_ring_mode(&mut self, process_secs: f64, n_refs: usize) {
-        self.enable_ring_mode_inner(process_secs, n_refs);
+    fn enable_ring_mode(&mut self, process_secs: f64, n_refs: usize, period: usize) {
+        self.enable_ring_mode_inner(process_secs, n_refs, period);
     }
 
     fn reconnect_input(&mut self, port: &str) -> Result<()> {
