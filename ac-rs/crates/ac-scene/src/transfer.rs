@@ -51,7 +51,7 @@
 use ac_core::visualize::pair_derivation::PairDerivation;
 
 use crate::scene::{Provenance, Source, Trace};
-use crate::ticks::{db_to_y, freq_to_x};
+use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
 use crate::wire::WireFrame;
 
 /// Columns below this coherence are masked out of both panes (D5 —
@@ -205,6 +205,13 @@ pub struct TransferScene {
     pub magnitude: Trace,
     /// De-rotated phase, normalized against a fixed ±180° pane.
     pub phase: Trace,
+    /// Shared log-frequency axis for both panes (#194).
+    pub freq_axis: crate::ticks::Axis,
+    /// dB gridlines for the magnitude pane, over the caller's dB range.
+    pub mag_axis: crate::ticks::Axis,
+    /// Degrees gridlines for the phase pane — `{+180, +90, 0, −90}`, with
+    /// no −180 line (matches the trace's `(−180, +180]` wrap boundary).
+    pub phase_axis: crate::ticks::Axis,
     /// `"2.50 ms  (0.86 m)"`.
     pub delay_readout: String,
     pub meas_meter: Meter,
@@ -331,10 +338,11 @@ impl TransferScene {
             };
             let phase_points = |i: usize| {
                 let phi = derotate_deg(input.phase_deg[i], input.freqs[i], tau);
-                (
-                    freq_to_x(input.freqs[i], f_min, f_max),
-                    (phi + 180.0) / 360.0,
-                )
+                // phase_to_y is the crate's one phase→y mapping — the same
+                // function the phase axis ticks use, so a gridline and a
+                // trace point at the same degrees agree by construction
+                // (the AC3 shared-mapping law, extended to the phase pane).
+                (freq_to_x(input.freqs[i], f_min, f_max), phase_to_y(phi))
             };
             (
                 split_on_mask(&input.coherence, mag_points),
@@ -353,6 +361,9 @@ impl TransferScene {
                 segments: phase_segments,
                 provenance,
             },
+            freq_axis: crate::ticks::freq_axis(f_min, f_max),
+            mag_axis: crate::ticks::db_axis(db_min, db_max),
+            phase_axis: crate::ticks::phase_axis(),
             delay_readout: format_delay_readout(input.delay_ms),
             meas_meter: meters.0.update(input.meas_peak_dbfs, now_s),
             ref_meter: meters.1.update(input.ref_peak_dbfs, now_s),

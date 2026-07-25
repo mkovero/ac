@@ -378,6 +378,15 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
         height: pane_h,
     };
 
+    // Axis context (#194): gridlines + labels behind the traces, drawn
+    // from ac-scene ticks verbatim — positions are ac-scene's normalized
+    // coordinates, this crate only maps them (no tick math here). dB grid
+    // on the magnitude pane, ±180° grid on the phase pane (with the 0°
+    // reference), shared freq labels along the bottom.
+    draw_pane_grid(painter, &scene.mag_axis, mag_vp);
+    draw_pane_grid(painter, &scene.phase_axis, phase_vp);
+    draw_freq_labels(painter, &scene.freq_axis, phase_vp);
+
     draw_segments(
         painter,
         &scene.magnitude,
@@ -407,6 +416,42 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
     // is rightmost and M (idx 1) sits to its left.
     draw_meter(painter, content, 0, &scene.ref_meter, "R");
     draw_meter(painter, content, 1, &scene.meas_meter, "M");
+}
+
+/// Draw a pane's horizontal gridlines + left-edge labels from an
+/// `ac-scene` axis (#194). Positions and label strings are verbatim from
+/// the scene — this crate maps the normalized y to screen and draws,
+/// nothing more (no tick math, no formatting: `computes_nothing` holds).
+fn draw_pane_grid(painter: &egui::Painter, axis: &ac_scene::Axis, vp: Viewport) {
+    for tick in &axis.ticks {
+        let (_, y) = scene_to_screen((0.0, tick.position), vp);
+        painter.line_segment(
+            [egui::pos2(vp.x, y), egui::pos2(vp.x + vp.width, y)],
+            Stroke::new(0.5, COLOR_STRUCTURAL),
+        );
+        painter.text(
+            egui::pos2(vp.x + 2.0, y),
+            egui::Align2::LEFT_CENTER,
+            &tick.label,
+            egui::FontId::default(),
+            COLOR_LABEL,
+        );
+    }
+}
+
+/// Shared log-frequency labels along the bottom of a pane (#194) — verbatim
+/// from the scene's freq axis.
+fn draw_freq_labels(painter: &egui::Painter, axis: &ac_scene::Axis, vp: Viewport) {
+    for tick in &axis.ticks {
+        let (x, _) = scene_to_screen((tick.position, 0.0), vp);
+        painter.text(
+            egui::pos2(x, vp.y + vp.height),
+            egui::Align2::CENTER_BOTTOM,
+            &tick.label,
+            egui::FontId::default(),
+            COLOR_LABEL,
+        );
+    }
 }
 
 /// Draw one trace's segments in a pane — one polyline per segment, so a

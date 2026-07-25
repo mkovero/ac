@@ -75,7 +75,11 @@ fn wait_for_peak(
     let start = Instant::now();
     while start.elapsed() < within {
         if let Some(p) = next_peak(session, Duration::from_millis(300)) {
-            let crossed = if want_above { p > threshold } else { p < threshold };
+            let crossed = if want_above {
+                p > threshold
+            } else {
+                p < threshold
+            };
             if crossed {
                 return Some(start.elapsed());
             }
@@ -113,7 +117,10 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
     m.press_space(t);
     relay(&session, m.press_enter(t)); // fire → set_drive on
     let up = wait_for_peak(&mut session, true, IDLE_DBFS + 5.0, Duration::from_secs(3));
-    assert!(up.is_some(), "fire did not drive the daemon (peak never rose)");
+    assert!(
+        up.is_some(),
+        "fire did not drive the daemon (peak never rose)"
+    );
 
     // --- 2. keepalive holds the drive up across seconds, real cadence,
     //        never gapping past the 1.5 s dead-man ---
