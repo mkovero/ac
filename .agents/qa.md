@@ -191,6 +191,22 @@ Post a PR review in this structure:
 - If approving → apply `in-review` (already set) — no change needed, leave for human merge
 - If requesting changes → apply `needs-work`, remove `in-review`
 
+### approval covers a specific commit — a later push voids it
+An `agent:qa` approval attests to the tree **at the commit it reviewed**,
+not the branch forever. **Any commit pushed after approval reverts the PR
+to `needs-work` and requires a fresh gate pass** — re-run the full check
+(`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against
+the new tip and re-review the delta before the label returns to
+`in-review`. This holds even when the post-approval commit "looks
+harmless" (a fmt reflow, a comment, a doc tweak): the gate cannot
+distinguish a whitespace change from a logic change by trust, only by
+running, and the highest-consequence PRs (drive-path, wire protocol) are
+exactly where an ungated post-approval commit does the most damage. The
+rule exists because a real one slipped through: #197's closure-evidence
+commit landed on `main` unformatted and CI-red *after* approval (#199).
+The relay between "approved" and "merged" is a seam like any other —
+close it structurally, not by remembering to re-check.
+
 ## audit mode
 
 When invoked with "audit the codebase as qa", do the following instead of
