@@ -10,32 +10,41 @@
 
 use std::env;
 use std::fs;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Per-**process** port base (#195). Each integration test file is its
-/// own binary/process with its own copy of this static, so a single
-/// shared literal base collided across the three daemon-spawning ac-view
-/// binaries under parallel `cargo test` — a SUB then connected to a
-/// sibling binary's daemon and read a frame its own session never
-/// launched. Seed the base from the PID so concurrent binaries get
-/// disjoint ranges. Stride 100 on `pid % 400` keeps even **consecutive**
-/// PIDs — which cargo hands sibling test binaries — 100 ports apart,
-/// far more than the <10 ports any one binary allocates. Range
-/// 20_000..=59_900, clear of the app's fixed 5556/5557.
-static PORT_CURSOR: LazyLock<AtomicU16> = LazyLock::new(|| {
-    let base = 20_000 + (std::process::id() % 400) as u16 * 100;
-    AtomicU16::new(base)
-});
 static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
 
+/// Two **OS-assigned** free ports (#195). A shared/derived port base
+/// collided across the three daemon-spawning ac-view binaries under
+/// parallel `cargo test` — statics are per-process, and any deterministic
+/// base (a literal, or a `pid % N` seed) can hand two concurrent binaries
+/// the same range. Binding `:0` lets the OS pick a currently-free port,
+/// with no modulo to alias on. The listeners are dropped before the
+/// daemon rebinds, leaving a small TOCTOU window; ephemeral ports are
+/// assigned round-robin over a large range, so immediate reuse by another
+/// process is vanishingly unlikely — strictly better than a base that can
+/// alias deterministically.
 pub fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
+    let port = || {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    };
+    let ctrl = port();
+    let mut data = port();
+    // Guard the (rare) case the OS handed the same port twice across the
+    // two independent binds.
+    while data == ctrl {
+        data = port();
+    }
+    (ctrl, data)
 }
 
 pub fn alloc_home() -> PathBuf {
