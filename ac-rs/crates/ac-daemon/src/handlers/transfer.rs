@@ -174,6 +174,21 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             Some((gain, delay_samples as usize))
         });
 
+    // Fake-audio-only capture knob (handoff-capture-contiguity D1): route
+    // fake capture through a real ring so `clear()`-before-wait has the same
+    // observable consequence it has on JACK. Presence of the key selects the
+    // mode; absence leaves the on-demand generator in place, unchanged.
+    //
+    // `process_secs` defaults to the transfer worker's own measured per-tick
+    // compute (~5 ms with the delay cached — see the hot-loop note further
+    // down), so an unparameterised run models this worker rather than an
+    // arbitrary gap.
+    let fake_ring_process_secs: Option<f64> = cmd.get("fake_ring").map(|v| {
+        v.get("process_secs")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.005)
+    });
+
     let pairs = match parse_transfer_pairs(cmd) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -380,6 +395,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         if fake {
             if let Some((gain, delay_samples)) = fake_correlated_pair {
                 eng.set_correlated_pair(gain, delay_samples);
+            }
+            // After `add_ref_input` above, so the ring count matches the
+            // channels this session actually captures.
+            if let Some(process_secs) = fake_ring_process_secs {
+                eng.enable_ring_mode(process_secs, unique_ports.len().saturating_sub(1));
             }
         }
 
@@ -887,6 +907,25 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         if engine_on {
             eng.set_silence();
         }
+
+        // Capture-contiguity instrumentation (handoff-capture-contiguity D2).
+        // `capture_multi` clears the ring before waiting, so every tick
+        // discards whatever accrued while the previous tick was being
+        // processed — meaning the window `rings` assembles above is spliced by
+        // this many samples in total, not the continuous stretch of time the
+        // FFT assumes. Reported once at teardown rather than per tick so it
+        // cannot flood a long session, and deliberately kept off the wire (the
+        // frame contract is unchanged).
+        let discarded = eng.discarded_samples();
+        if discarded > 0 {
+            let spliced_s = discarded as f64 / sr as f64;
+            eprintln!(
+                "transfer_stream: capture discontinuity — {discarded} samples \
+                 ({spliced_s:.2} s) discarded by the pre-wait ring clear; the \
+                 analysis window is not contiguous"
+            );
+        }
+
         eng.stop();
         *drive_state_slot.lock().unwrap() = None;
 

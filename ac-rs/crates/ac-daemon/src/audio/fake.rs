@@ -12,10 +12,13 @@
 //! offsets for the measurement and reference channels.
 
 use anyhow::Result;
+use ringbuf::traits::{Producer, Split};
+use ringbuf::{HeapProd, HeapRb};
 use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::time::Duration;
 
+use super::rings::CaptureRings;
 use super::AudioEngine;
 
 /// Channel-index → frequency offset, in Hz. Picked so that two channels
@@ -69,6 +72,69 @@ impl Default for Stimulus {
     }
 }
 
+/// Ring capacity for the opt-in ring-backed mode. Generous relative to any
+/// single capture request so an overrun is a genuine backlog signal rather
+/// than an artifact of a tight buffer.
+const FAKE_RING_CAPACITY: usize = 4 * 192_000;
+
+/// Which shared drain sequence a ring-mode capture should run. The variants
+/// differ only in whether they clear before waiting and how many channels
+/// they return — the point of routing all four through one enum is that the
+/// ordering itself is never restated here.
+enum RingDrain {
+    Block,
+    /// The non-clearing arm.
+    Available,
+    Stereo,
+    Multi,
+}
+
+/// Push a whole block into a ring producer. A short push means the ring
+/// overran and the newest samples were dropped — bounded memory, same as the
+/// JACK producer.
+fn push_block(prod: &mut HeapProd<f32>, block: &[f32]) {
+    prod.push_slice(block);
+}
+
+/// Opt-in ring-backed capture state (`fake_ring` request param).
+///
+/// The default `FakeEngine` synthesises samples on demand from a
+/// phase-continuous cursor: there is no ring, and nothing is ever cleared or
+/// discarded, so the default backend is *structurally incapable* of
+/// reproducing a splice, drop, or backlog defect. This mode routes fake
+/// capture through the same [`CaptureRings`] drain the JACK backend uses, so
+/// `clear()`-before-wait has the same observable consequence here that it has
+/// on real hardware.
+///
+/// The clock is synthetic, not wall-clock: each capture call advances a
+/// virtual sample cursor by exactly the samples it needs and synthesises them
+/// into the ring. Deterministic, and it removes the `thread::sleep` that
+/// makes the on-demand path run in real time.
+struct FakeRings {
+    rings: CaptureRings,
+    meas_prod: HeapProd<f32>,
+    ref_prods: Vec<HeapProd<f32>>,
+    /// Seconds of audio the ring accrues between one tick's pop and the next
+    /// tick's `clear()` — i.e. the consumer's processing time, which is what
+    /// the pre-wait `clear()` actually throws away.
+    ///
+    /// **This is the independent variable of the splice experiment, not a
+    /// simulated delay.** Gap length sets the spacing of the spectral
+    /// replicas a spliced window produces, so a test can sweep this and check
+    /// the measured spacing against the `sr/L` the splice hypothesis predicts
+    /// (`handoff-capture-contiguity.md`, acceptance criterion 5). A zero-gap
+    /// run is the contiguous control.
+    process_secs: f64,
+    /// Absolute sample position for tone synthesis. `Stimulus::Tones`
+    /// restarts its phase at `t = 0` on every `make_samples_for` call, which
+    /// is fine for the on-demand path (one call per capture) but would make
+    /// *every* ring-mode window spliced regardless of the `clear()`, hiding
+    /// the very effect under test. Ring mode therefore generates from this
+    /// running cursor. `Noise` and `CorrelatedPair` already carry their own
+    /// continuous state and ignore it.
+    tone_pos: u64,
+}
+
 pub struct FakeEngine {
     sample_rate: u32,
     stimulus: Stimulus,
@@ -100,6 +166,9 @@ pub struct FakeEngine {
     /// consistent.
     correlated_ref_pos: u64,
     correlated_meas_pos: u64,
+    /// `Some` only when the caller opted into ring-backed capture. `None` —
+    /// the default — leaves every capture path byte-identical to before.
+    ring: Option<FakeRings>,
 }
 
 impl FakeEngine {
@@ -114,7 +183,162 @@ impl FakeEngine {
             noise_state: HashMap::new(),
             correlated_ref_pos: 0,
             correlated_meas_pos: 0,
+            ring: None,
         }
+    }
+
+    /// Enable ring-backed capture with `process_secs` of per-tick consumer
+    /// processing time. Opt-in, fake-only; see [`FakeRings`].
+    ///
+    /// `n_refs` reference rings are allocated up front rather than on
+    /// `add_ref_input`, because the fake has no RT handler to hand producers
+    /// to and the transfer worker registers its refs before the first tick.
+    fn enable_ring_mode_inner(&mut self, process_secs: f64, n_refs: usize) {
+        let (meas_prod, meas_cons) = HeapRb::<f32>::new(FAKE_RING_CAPACITY).split();
+        let mut rings = CaptureRings::new();
+        rings.set_meas(meas_cons);
+
+        let mut ref_prods = Vec::with_capacity(n_refs);
+        rings.reserve_refs(n_refs);
+        for _ in 0..n_refs {
+            let (p, c) = HeapRb::<f32>::new(FAKE_RING_CAPACITY).split();
+            ref_prods.push(p);
+            rings.push_ref(c);
+        }
+
+        self.ring = Some(FakeRings {
+            rings,
+            meas_prod,
+            ref_prods,
+            process_secs: process_secs.max(0.0),
+            tone_pos: 0,
+        });
+    }
+
+    /// Port names for the ring-mode channels, measurement first then refs, in
+    /// the order `capture_multi` returns them. The fake models a single
+    /// `ref_port`, so every ref ring reads the same channel — enough for the
+    /// contiguity question, which is per-channel and not about routing (that
+    /// blind spot is #204).
+    fn ring_ports(&self) -> Vec<Option<String>> {
+        let n_refs = self.ring.as_ref().map(|r| r.ref_prods.len()).unwrap_or(0);
+        let mut ports = Vec::with_capacity(1 + n_refs);
+        ports.push(self.input_port.clone());
+        for _ in 0..n_refs {
+            ports.push(self.ref_port.clone());
+        }
+        ports
+    }
+
+    /// Synthesise `n` samples per channel and push them into the rings,
+    /// advancing the virtual clock. This is what the ring-mode waiter does
+    /// instead of blocking.
+    ///
+    /// Samples are generated *before* the producers are borrowed so the
+    /// generator's `&mut self` and the ring's `&mut` never overlap.
+    fn ring_advance(&mut self, n: usize) {
+        if n == 0 || self.ring.is_none() {
+            return;
+        }
+        let ports = self.ring_ports();
+        let duration = n as f64 / self.sample_rate as f64;
+        let tone_pos = self.ring.as_ref().map(|r| r.tone_pos).unwrap_or(0);
+
+        let blocks: Vec<Vec<f32>> = ports
+            .iter()
+            .map(|p| self.make_samples_from(p.as_deref(), duration, tone_pos))
+            .collect();
+
+        let Some(ref mut r) = self.ring else { return };
+        r.tone_pos += n as u64;
+        // Overrun drops the newest samples, matching the JACK producer's
+        // bounded-memory behaviour (see `jack_backend`'s module docs).
+        push_block(&mut r.meas_prod, &blocks[0]);
+        for (prod, block) in r.ref_prods.iter_mut().zip(blocks.iter().skip(1)) {
+            push_block(prod, block);
+        }
+    }
+
+    /// Samples-per-tick equivalent of `process_secs`.
+    fn ring_gap_samples(&self) -> usize {
+        self.ring
+            .as_ref()
+            .map(|r| (self.sample_rate as f64 * r.process_secs) as usize)
+            .unwrap_or(0)
+    }
+
+    /// Model the consumer's processing time: the ring keeps filling while the
+    /// caller works on the block it just popped. Whatever accrues here is
+    /// exactly what the *next* tick's `clear()` discards — the splice.
+    fn ring_charge_processing(&mut self) {
+        self.ring_advance(self.ring_gap_samples());
+    }
+
+    /// One ring-mode capture tick.
+    ///
+    /// Timeline, matching what a real consumer does against a live ring:
+    ///
+    /// 1. the requested drain runs — `clear()` (for every variant except
+    ///    `Available`) throws away whatever accrued during step 3 of the
+    ///    *previous* tick, then the wait synthesises this tick's `n` samples
+    ///    and they are popped;
+    /// 2. the caller gets its block;
+    /// 3. the caller processes it, during which `process_secs` more audio
+    ///    accrues — charged here so the next tick's `clear()` has something
+    ///    real to discard.
+    ///
+    /// Step 3 is what makes this reproduce anything. A virtual clock that
+    /// advanced only inside the wait would leave the ring empty at every
+    /// `clear()`, discarding nothing, and the mode would model no defect at
+    /// all.
+    ///
+    /// Samples are pre-generated before the producers are borrowed, so the
+    /// generator's `&mut self` never overlaps the ring borrow — that is why
+    /// the wait closure only needs the producers.
+    fn ring_drain(&mut self, n: usize, duration: f64, kind: RingDrain) -> Result<Vec<Vec<f32>>> {
+        let ports = self.ring_ports();
+        let tone_pos = self.ring.as_ref().map(|r| r.tone_pos).unwrap_or(0);
+        let wait_duration = n as f64 / self.sample_rate as f64;
+        let blocks: Vec<Vec<f32>> = ports
+            .iter()
+            .map(|p| self.make_samples_from(p.as_deref(), wait_duration, tone_pos))
+            .collect();
+
+        let Some(ref mut r) = self.ring else {
+            return Ok(Vec::new());
+        };
+        r.tone_pos += n as u64;
+
+        // Destructured so `rings` and the producers are disjoint borrows:
+        // the drain owns the ordering, the waiter owns the fill.
+        let FakeRings {
+            rings,
+            meas_prod,
+            ref_prods,
+            ..
+        } = r;
+        let mut wait = |_: &CaptureRings, _n: usize, _d: f64| {
+            push_block(meas_prod, &blocks[0]);
+            for (prod, block) in ref_prods.iter_mut().zip(blocks.iter().skip(1)) {
+                push_block(prod, block);
+            }
+            Ok(())
+        };
+
+        let out = match kind {
+            RingDrain::Block => rings.capture_block(n, duration, &mut wait).map(|b| vec![b]),
+            RingDrain::Available => {
+                wait(&*rings, n, duration)?;
+                Ok(vec![rings.capture_available(n)])
+            }
+            RingDrain::Stereo => rings
+                .capture_stereo(n, duration, &mut wait)
+                .map(|(m, r)| vec![m, r]),
+            RingDrain::Multi => rings.capture_multi(n, duration, &mut wait),
+        }?;
+
+        self.ring_charge_processing();
+        Ok(out)
     }
 
     /// Parse the trailing channel index from a `fake:<kind>_<N>` name.
@@ -147,6 +371,22 @@ impl FakeEngine {
     /// Generate `duration` seconds of synthetic signal for `port`'s channel
     /// (frequency-shifted per `CHANNEL_OFFSET_HZ`, same as pre-#170).
     fn make_samples_for(&mut self, port: Option<&str>, duration: f64) -> Vec<f32> {
+        self.make_samples_from(port, duration, 0)
+    }
+
+    /// As `make_samples_for`, but with tone phase advanced to absolute sample
+    /// position `tone_start` instead of restarting at `t = 0`.
+    ///
+    /// Only ring mode passes a nonzero `tone_start`; the on-demand path calls
+    /// this with `0`, which reduces to the original expression exactly, so
+    /// default output stays byte-identical. `Noise` and `CorrelatedPair`
+    /// already track their own absolute position and are unaffected.
+    fn make_samples_from(
+        &mut self,
+        port: Option<&str>,
+        duration: f64,
+        tone_start: u64,
+    ) -> Vec<f32> {
         let n = (self.sample_rate as f64 * duration) as usize;
         let offset = Self::channel_offset_hz(port);
         let sr = self.sample_rate as f64;
@@ -163,7 +403,7 @@ impl FakeEngine {
                 };
                 (0..n)
                     .map(|i| {
-                        let t = i as f64 / sr;
+                        let t = (tone_start + i as u64) as f64 / sr;
                         let sig: f64 = effective
                             .iter()
                             .map(|&(freq, amp)| {
@@ -294,9 +534,27 @@ impl AudioEngine for FakeEngine {
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
+        if self.ring.is_some() {
+            let n = (self.sample_rate as f64 * duration) as usize;
+            let out = self.ring_drain(n, duration, RingDrain::Block)?;
+            return Ok(out.into_iter().next().unwrap_or_default());
+        }
         std::thread::sleep(Duration::from_secs_f64(duration));
         let port = self.input_port.clone();
         Ok(self.make_samples_for(port.as_deref(), duration))
+    }
+
+    /// Non-clearing drain. In ring mode this is the *contiguous* control arm:
+    /// identical to `capture_block` except for the absent `clear()`, which is
+    /// precisely the variable H1 says the defect turns on.
+    fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
+        if self.ring.is_some() {
+            let duration = max_samples as f64 / self.sample_rate as f64;
+            let out = self.ring_drain(max_samples, duration, RingDrain::Available)?;
+            return Ok(out.into_iter().next().unwrap_or_default());
+        }
+        let sr = self.sample_rate() as f64;
+        self.capture_block(max_samples as f64 / sr.max(1.0))
     }
 
     /// Fake loopback: returns `samples` delayed by a fixed number of
@@ -319,6 +577,13 @@ impl AudioEngine for FakeEngine {
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
+        if self.ring.is_some() {
+            let n = (self.sample_rate as f64 * duration) as usize;
+            let mut out = self.ring_drain(n, duration, RingDrain::Stereo)?.into_iter();
+            let meas = out.next().unwrap_or_default();
+            let refch = out.next().unwrap_or_default();
+            return Ok((meas, refch));
+        }
         std::thread::sleep(Duration::from_secs_f64(duration));
         // If no explicit ref_port, reference mirrors the generator (channel 0).
         let in_port = self.input_port.clone();
@@ -326,6 +591,26 @@ impl AudioEngine for FakeEngine {
         let meas = self.make_samples_for(in_port.as_deref(), duration);
         let refch = self.make_samples_for(ref_port.as_deref(), duration);
         Ok((meas, refch))
+    }
+
+    fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        if self.ring.is_some() {
+            let n = (self.sample_rate as f64 * duration) as usize;
+            return self.ring_drain(n, duration, RingDrain::Multi);
+        }
+        let (meas, refch) = self.capture_stereo(duration)?;
+        Ok(vec![meas, refch])
+    }
+
+    fn discarded_samples(&self) -> u64 {
+        self.ring
+            .as_ref()
+            .map(|r| r.rings.discarded_samples())
+            .unwrap_or(0)
+    }
+
+    fn enable_ring_mode(&mut self, process_secs: f64, n_refs: usize) {
+        self.enable_ring_mode_inner(process_secs, n_refs);
     }
 
     fn reconnect_input(&mut self, port: &str) -> Result<()> {

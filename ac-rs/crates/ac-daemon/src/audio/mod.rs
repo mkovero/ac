@@ -2,6 +2,12 @@
 
 pub mod fake;
 
+pub(crate) mod rings;
+
+/// Capture-contiguity evidence (`handoff-capture-contiguity.md`, D3).
+#[cfg(test)]
+mod contiguity;
+
 #[cfg(feature = "jack-audio")]
 pub mod jack_backend;
 
@@ -114,6 +120,25 @@ pub trait AudioEngine: Send + 'static {
     /// Number of xruns since start.
     fn xruns(&self) -> u32;
 
+    /// Cumulative samples thrown away by the `clear()` that precedes the wait
+    /// in `capture_block` / `capture_stereo` / `capture_multi`.
+    ///
+    /// Instrumentation for the capture-contiguity investigation
+    /// (`handoff-capture-contiguity.md`, D2): a nonzero value means the
+    /// buffer those calls assemble is discontinuous by exactly this many
+    /// samples per tick boundary. Excludes routing clears (`reconnect_input`)
+    /// and explicit `flush_capture` — only per-tick discards count, or the
+    /// number stops answering the question it was added for.
+    ///
+    /// Default 0 for backends with no ring (the on-demand fake generator),
+    /// where the concept genuinely does not apply. Unlike `xruns()` — which
+    /// returns a hardcoded 0 on every backend (issue #24) — a backend that
+    /// *does* have a ring must report the real count, since a false zero here
+    /// reads as positive evidence of contiguity.
+    fn discarded_samples(&self) -> u64 {
+        0
+    }
+
     /// List of available playback port names.
     fn playback_ports(&self) -> Vec<String>;
 
@@ -166,6 +191,21 @@ pub trait AudioEngine: Send + 'static {
     /// the fake backend (test / `--fake-audio` use) implements this; real
     /// backends have no "known ground truth" concept to synthesize.
     fn set_correlated_pair(&mut self, _gain: f64, _delay_samples: usize) {}
+
+    /// Route fake capture through a real ring driven by a synthetic clock,
+    /// with `process_secs` of modelled per-tick consumer processing time and
+    /// `n_refs` reference channels.
+    ///
+    /// Instrumentation for the capture-contiguity investigation
+    /// (`handoff-capture-contiguity.md`, D1). The default fake backend
+    /// synthesises samples on demand and has no ring, so it cannot reproduce
+    /// a splice, drop, or backlog defect at all — which is why this class of
+    /// bug has never reproduced headlessly. Opt-in, so the default fake path
+    /// stays byte-identical.
+    ///
+    /// Default no-op, same as `set_correlated_pair`: real backends already
+    /// have rings, fed by their own hardware clock.
+    fn enable_ring_mode(&mut self, _process_secs: f64, _n_refs: usize) {}
 }
 
 /// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.

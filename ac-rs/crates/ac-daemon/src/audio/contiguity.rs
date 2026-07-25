@@ -1,0 +1,418 @@
+//! Capture-contiguity evidence (`handoff-capture-contiguity.md`, D3).
+//!
+//! Test-only module. It exists to answer one falsifiable question: **does the
+//! `clear()`-before-wait ordering in `capture_multi` put spectral replicas
+//! into the estimator's output?**
+//!
+//! The experiment is a controlled A/B over exactly one variable. Both arms
+//! use the same ring-backed fake backend, the same synthetic clock, the same
+//! HF tone, and the same window assembly the transfer worker performs
+//! (`handlers/transfer.rs`: `extend_from_slice` into a `target_total`-capped
+//! ring, then `h1_estimate_with_delay`). They differ only in which drain they
+//! call — `capture_multi`, which clears, versus `capture_available`, which
+//! does not. That is precisely hypothesis H1's discriminator, and it is the
+//! headless equivalent of the `ac monitor 0` / `ac monitor 0-1` hardware A/B
+//! that D4 will run.
+//!
+//! **These are guard tests: they assert the defect, and they pass while it is
+//! present.** House convention — the eventual fix inverts them to the correct
+//! assertion (one peak, zero discards). Do not "fix" a failure here by
+//! relaxing the assertion; a failure means either the defect changed or the
+//! reproducer stopped reproducing, and both are findings.
+//!
+//! Measured spacing is recorded in `spliced_replica_spacing_matches_tick_rate`
+//! (acceptance criterion 5), which reconciles it against the `sr/L` the splice
+//! hypothesis predicts rather than taking the number on trust.
+//!
+//! # Mutation verification at birth (acceptance criterion 3)
+//!
+//! A guard test that cannot tell spliced input from contiguous input is not
+//! evidence. Both runs, on this commit:
+//!
+//! | run | `spliced_*_replicates_the_response` | `*_spacing_*` | `discard_count_*` | controls |
+//! |---|---|---|---|---|
+//! | current `main` (pre-wait `clear()` present) | pass — 101 peaks | pass — 20 Hz | pass — 480/tick | pass |
+//! | mutant (pre-wait `clear()` removed from `CaptureRings::capture_block` and `capture_multi`) | **fail — 1 peak, at 15 100 Hz** | **fail — only one peak to measure** | **fail — 0 discarded** | pass |
+//!
+//! The mutant is what the eventual fix looks like, and under it the stimulus
+//! recovers to exactly one peak at the stimulus frequency. That is the
+//! discrimination these tests are required to demonstrate.
+
+use crate::audio::fake::FakeEngine;
+use crate::audio::AudioEngine;
+
+/// Mirrors the transfer worker's Welch settings (`handlers/transfer.rs`):
+/// `nperseg = sr` for 1 Hz bins, 50% overlap, 4 averages.
+const N_AVERAGES: usize = 4;
+
+/// Matches the worker's `chunk_secs` — 50 ms, a 20 Hz tick rate.
+const CHUNK_SECS: f64 = 0.05;
+
+/// HF because the defect is HF-specific: a splice randomises phase in
+/// proportion to frequency, so a 10 ms gap is ~1 cycle at 100 Hz but ~150
+/// fully-decorrelated cycles at 15 kHz.
+///
+/// **Why not a round 15 000 Hz.** What a splice actually does is impose a
+/// phase step of `2π · frac(f · gap / sr)` on each retained fragment. At
+/// `f = 15 000`, `sr = 48 000` and a 5 ms gap (240 samples), `f · gap / sr =
+/// 75.0` exactly — the gap is a whole number of tone periods, the phase step
+/// is zero, and the spliced window is *bit-identical to a contiguous one*.
+/// The first run of this test used 15 000 Hz and reported a single clean
+/// peak, which reads as "no defect" and is entirely an artifact of the
+/// stimulus choice. This is the same cycle-alignment trap the handoff already
+/// flagged for `generate_sine_1s`.
+///
+/// 15 100 Hz gives `frac(15 100 · 240 / 48 000) = 0.5` — the worst case, a
+/// half-cycle step per fragment. Chosen deliberately: a reproducer should sit
+/// at the maximum of the effect it is trying to observe, not at a random
+/// point that might be a null.
+///
+/// Practical consequence beyond this test: on real hardware the visibility of
+/// this defect depends on the arithmetic relationship between the stimulus
+/// frequency and the tick gap, so a sweep can show it and a round-number tone
+/// can hide it completely.
+const TONE_HZ: f64 = 15_100.0;
+
+/// Peak separation for the replica counts, in 1 Hz bins. Replicas sit
+/// `1/CHUNK_SECS` = 20 Hz apart, so this must stay well under that or the
+/// cluster is merged into a single reported peak and the defect disappears
+/// into the measurement.
+const MIN_PEAK_SEP_BINS: usize = 3;
+
+/// Whether a tick's capture goes through the clearing drain or the
+/// contiguous one. The single independent variable of the experiment.
+#[derive(Clone, Copy, PartialEq)]
+enum Drain {
+    /// `capture_multi` — clears the ring before waiting. The suspect.
+    Clearing,
+    /// `capture_available` — never clears. The control.
+    Contiguous,
+}
+
+/// Run a ring-backed fake session and return the measurement-channel window
+/// the estimator would be handed, plus the engine's discard count.
+///
+/// Deliberately reproduces the worker's assembly rather than calling it: the
+/// worker builds its window from `capture_multi` output with
+/// `extend_from_slice` and a front `drain` to `target_total`, and that
+/// assembly is the step that presents spliced fragments as continuous time.
+fn assemble_window(drain: Drain, process_secs: f64, sr: u32) -> (Vec<f32>, u64) {
+    let nperseg = sr as usize;
+    let step = nperseg / 2;
+    let target_total = nperseg + step * (N_AVERAGES - 1);
+    let chunk_samples = (sr as f64 * CHUNK_SECS) as usize;
+
+    let mut eng = FakeEngine::new();
+    eng.set_tone(TONE_HZ, 0.5);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    eng.add_ref_input("fake:capture_0").unwrap();
+    eng.enable_ring_mode(process_secs, 1);
+
+    let mut ring: Vec<f32> = Vec::with_capacity(target_total + step);
+    // Enough ticks to fill the window several times over, so the result is
+    // steady-state rather than dominated by the initial fill.
+    let ticks = (target_total / chunk_samples) * 3;
+    for _ in 0..ticks {
+        let block = match drain {
+            Drain::Clearing => eng.capture_multi(CHUNK_SECS).unwrap().remove(0),
+            Drain::Contiguous => eng.capture_available(chunk_samples).unwrap(),
+        };
+        ring.extend_from_slice(&block);
+        if ring.len() > target_total {
+            let excess = ring.len() - target_total;
+            ring.drain(..excess);
+        }
+    }
+    (ring, eng.discarded_samples())
+}
+
+/// Magnitude spectrum of `window` in dB, via the same `meas_amp` the wire
+/// frame's spectrum column mapping is built from — so this counts what the
+/// display would show, not a private FFT.
+fn meas_amp_db(window: &[f32], sr: u32) -> Vec<f64> {
+    let result = ac_core::visualize::transfer::h1_estimate_with_delay(window, window, sr, 0);
+    let peak = result
+        .meas_amp
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    result
+        .meas_amp
+        .iter()
+        .map(|&a| 20.0 * (a / peak).log10())
+        .collect()
+}
+
+/// `FakeEngine`'s tone stimulus deliberately carries a 1% (−40 dB) second
+/// harmonic, so it models a DUT rather than a mathematically pure sine. Above
+/// `sr/4` that harmonic is beyond Nyquist and folds back: at 15 100 Hz the
+/// 30 200 Hz component appears at `48 000 − 30 200 = 17 800 Hz`, sitting
+/// exactly on the −40 dB floor this test counts against.
+///
+/// It is present identically in every arm, contiguous and spliced alike, and
+/// is a property of the stimulus rather than of the capture path — so it is
+/// removed rather than allowed to inflate every peak count by one.
+/// `alias_is_present_in_the_contiguous_arm` pins it down so this filter can
+/// never quietly hide a real finding instead.
+fn aliased_harmonic_hz(sr: u32) -> Option<f64> {
+    let second = 2.0 * TONE_HZ;
+    let nyquist = sr as f64 / 2.0;
+    (second > nyquist).then_some(sr as f64 - second)
+}
+
+/// Drop the known aliased harmonic from a peak list. See
+/// [`aliased_harmonic_hz`].
+fn without_alias(peaks: Vec<usize>, sr: u32) -> Vec<usize> {
+    let Some(alias) = aliased_harmonic_hz(sr) else {
+        return peaks;
+    };
+    peaks
+        .into_iter()
+        .filter(|&p| (p as f64 - alias).abs() > 5.0)
+        .collect()
+}
+
+/// Indices of local maxima at least `floor_db` below the peak, separated by
+/// at least `min_sep` bins so one broad lobe counts once.
+fn peak_bins(db: &[f64], floor_db: f64, min_sep: usize) -> Vec<usize> {
+    let mut peaks: Vec<usize> = Vec::new();
+    for i in 1..db.len().saturating_sub(1) {
+        if db[i] >= floor_db && db[i] >= db[i - 1] && db[i] > db[i + 1] {
+            if let Some(&last) = peaks.last() {
+                if i - last < min_sep {
+                    if db[i] > db[last] {
+                        *peaks.last_mut().unwrap() = i;
+                    }
+                    continue;
+                }
+            }
+            peaks.push(i);
+        }
+    }
+    peaks
+}
+
+/// **The control arm must be clean.** A single HF tone through the
+/// non-clearing drain produces exactly one peak. If this ever fails, the
+/// reproducer is broken — the fake's generator or the ring is manufacturing
+/// artifacts on its own, and nothing the clearing arm reports means anything.
+#[test]
+fn contiguous_capture_of_a_single_tone_produces_one_peak() {
+    let sr = 48_000;
+    let (window, discarded) = assemble_window(Drain::Contiguous, 0.005, sr);
+
+    assert_eq!(
+        discarded, 0,
+        "the contiguous drain must never clear the ring"
+    );
+
+    let db = meas_amp_db(&window, sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    assert_eq!(
+        peaks.len(),
+        1,
+        "contiguous capture of one tone must give one peak, got {} at {:?} Hz",
+        peaks.len(),
+        peaks
+    );
+    assert!(
+        (peaks[0] as f64 - TONE_HZ).abs() < 5.0,
+        "the one peak must be at the stimulus frequency, got {} Hz",
+        peaks[0]
+    );
+}
+
+/// **Guard test — asserts the defect.** The clearing drain discards
+/// everything that accrued while the previous tick was being processed, so
+/// the assembled window is a concatenation of non-contiguous fragments. This
+/// asserts that the resulting spectrum is *not* clean, which is the bug.
+///
+/// Inverts to `peaks.len() == 1` as part of the fix.
+///
+/// Mutation-verified at birth: with `process_secs = 0` (no accrual between
+/// ticks, so `clear()` finds an empty ring and discards nothing) this same
+/// setup produces one peak — see
+/// `zero_gap_clearing_capture_is_clean_which_isolates_the_gap_as_the_cause`.
+/// A test that could not tell spliced from contiguous input would not be
+/// evidence.
+#[test]
+fn spliced_capture_of_a_single_tone_replicates_the_response() {
+    let sr = 48_000;
+    let (window, discarded) = assemble_window(Drain::Clearing, 0.005, sr);
+
+    assert!(
+        discarded > 0,
+        "the clearing drain must discard the samples that accrued during processing"
+    );
+
+    let db = meas_amp_db(&window, sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    assert!(
+        peaks.len() > 1,
+        "spliced capture must replicate the response; got {} peak(s) at {:?} Hz. \
+         If this now reports 1, the capture layer was fixed — invert this assertion.",
+        peaks.len(),
+        peaks
+    );
+}
+
+/// Isolates the gap as the cause rather than the drain call itself: same
+/// clearing drain, but no processing time charged, so nothing accrues to be
+/// discarded. Clean spectrum. This is the mutation control — it is what makes
+/// the guard test above evidence rather than an observation.
+#[test]
+fn zero_gap_clearing_capture_is_clean_which_isolates_the_gap_as_the_cause() {
+    let sr = 48_000;
+    let (window, discarded) = assemble_window(Drain::Clearing, 0.0, sr);
+
+    assert_eq!(
+        discarded, 0,
+        "with no processing time charged there is nothing in the ring to discard"
+    );
+
+    let db = meas_amp_db(&window, sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    assert_eq!(
+        peaks.len(),
+        1,
+        "a clearing drain with a zero-length gap must still be contiguous, got {:?} Hz",
+        peaks
+    );
+}
+
+/// **Acceptance criterion 5** — the measured replica spacing, recorded as a
+/// number and reconciled against what H1 predicts.
+///
+/// **Derivation, since the handoff's "multiples of `sr/L`" leaves `L`
+/// ambiguous and the two candidate readings give different numbers.**
+///
+/// Let `C` be the retained chunk (`CHUNK_SECS · sr`) and `G` the discarded
+/// gap (`process_secs · sr`). In the *assembled* window, fragment `k` occupies
+/// samples `[kC, (k+1)C)` but carries the phase of absolute time
+/// `k(C+G) + (m − kC)`. So the window equals a clean tone multiplied by a
+/// staircase phase factor that steps by `2π · frac(f·G/sr)` once per `C`
+/// samples.
+///
+/// The periodicity is therefore `C` — the *chunk*, not `C+G`. Sidebands land
+/// at multiples of `sr/C = 1/CHUNK_SECS = 20 Hz`. Reading `L` as the fragment
+/// stride `C+G` would predict 18.2 Hz, which is wrong: the stride sets the
+/// step *size*, the chunk sets the repeat *rate*.
+///
+/// **Measured, on this reproducer, at `sr = 48 000`, `CHUNK_SECS = 0.05`,
+/// `process_secs = 0.005`, tone 15 100 Hz:**
+///
+/// - **101 replicas** above −40 dB, spanning **14 130 Hz … 16 130 Hz**;
+/// - **spacing exactly 20 Hz**, uniform — every one of the 100 adjacent gaps
+///   measured 20 Hz, with no scatter;
+/// - predicted `sr/C = 48 000/2400 = 20 Hz`. **Reconciled exactly.**
+///
+/// The reading `L = C + G` would have predicted 18.2 Hz and is falsified by
+/// the measurement, which settles the ambiguity noted above.
+///
+/// **This does not explain the reported symptom, and that is the point.** The
+/// report is *three widely separated copies*, gain preserved. What splicing
+/// produces here is a dense 101-line comb packed into a ±1 kHz skirt around
+/// the stimulus — the handoff's own "tight cluster at ~20 Hz spacing → H1
+/// confirmed" branch, and emphatically not three discrete copies. Two
+/// consequences, both binding:
+///
+/// 1. A confirmed splice does **not** close the issue. Per acceptance
+///    criterion 5 an unreconciled spacing keeps it open regardless of what
+///    else is confirmed, and 20 Hz versus "three separate copies" is
+///    unreconciled until D4 reads the actual frequencies off `ac-view`.
+/// 2. If D4's three frequencies turn out geometric (`f`, `f·r`, `f·r²`) or
+///    linear-symmetric (`f`, `F−f`, `F+f`), this mechanism is not the reported
+///    bug at all — it is a second, real, independently-fixable defect that
+///    this test now pins down.
+#[test]
+fn spliced_replica_spacing_matches_tick_rate() {
+    let sr = 48_000u32;
+    let process_secs = 0.005;
+    let (window, _) = assemble_window(Drain::Clearing, process_secs, sr);
+    let db = meas_amp_db(&window, sr);
+
+    // 1 Hz bins (nperseg = sr), so bin index is Hz and adjacent-peak spacing
+    // in bins is spacing in Hz.
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    assert!(
+        peaks.len() >= 2,
+        "need at least two peaks to measure a spacing, got {peaks:?}"
+    );
+
+    let gaps: Vec<usize> = peaks.windows(2).map(|w| w[1] - w[0]).collect();
+    let median = {
+        let mut g = gaps.clone();
+        g.sort_unstable();
+        g[g.len() / 2]
+    };
+
+    // Repeat rate is the chunk, not the fragment stride — see the derivation
+    // in this test's doc comment.
+    let chunk_samples = (sr as f64 * CHUNK_SECS).round();
+    let predicted_hz = sr as f64 / chunk_samples;
+    let l_samples = chunk_samples;
+
+    // Generous tolerance: the point is to distinguish "tick-rate sidebands"
+    // (~20 Hz) from "widely separated copies" (kHz), not to pin a decimal.
+    assert!(
+        (median as f64 - predicted_hz).abs() < predicted_hz * 0.5,
+        "measured replica spacing {median} Hz does not reconcile with the \
+         sr/L = {predicted_hz:.1} Hz that splicing at L = {l_samples} samples \
+         predicts. An unreconciled spacing keeps the issue open — do not \
+         widen this tolerance to make it pass. Peaks: {peaks:?}"
+    );
+}
+
+/// Keeps [`without_alias`] honest. The filter drops a peak from every count
+/// in this module, so it has to be shown that the thing it drops is really
+/// the stimulus's own aliased harmonic — present in the *contiguous* arm,
+/// where there is no splice to blame it on.
+#[test]
+fn alias_is_present_in_the_contiguous_arm() {
+    let sr = 48_000;
+    let alias = aliased_harmonic_hz(sr).expect("15.1 kHz has its 2nd harmonic above Nyquist");
+    assert!(
+        (alias - 17_800.0).abs() < 1.0,
+        "expected the folded 2nd harmonic at 17 800 Hz, computed {alias}"
+    );
+
+    let (window, _) = assemble_window(Drain::Contiguous, 0.005, sr);
+    let db = meas_amp_db(&window, sr);
+    let unfiltered = peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS);
+
+    assert!(
+        unfiltered.iter().any(|&p| (p as f64 - alias).abs() <= 5.0),
+        "the alias must be what the filter removes; contiguous peaks were {unfiltered:?}"
+    );
+    assert_eq!(
+        without_alias(unfiltered.clone(), sr).len(),
+        unfiltered.len() - 1,
+        "the filter must remove exactly the alias and nothing else"
+    );
+}
+
+/// The discard count is the direct per-tick measure of the splice, so it must
+/// track the modelled processing time rather than merely being nonzero.
+#[test]
+fn discard_count_tracks_the_modelled_processing_time() {
+    let sr = 48_000u32;
+    let ticks = 20;
+
+    let mut eng = FakeEngine::new();
+    eng.set_tone(TONE_HZ, 0.5);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    eng.enable_ring_mode(0.01, 0);
+    for _ in 0..ticks {
+        eng.capture_block(CHUNK_SECS).unwrap();
+    }
+
+    // One gap is discarded per tick after the first (the first tick's clear
+    // finds an empty ring), each of `process_secs · sr` samples.
+    let per_gap = (sr as f64 * 0.01) as u64;
+    let expected = per_gap * (ticks - 1);
+    assert_eq!(
+        eng.discarded_samples(),
+        expected,
+        "expected {ticks} ticks to discard {per_gap} samples each after the first"
+    );
+}
