@@ -10,18 +10,41 @@
 
 use std::env;
 use std::fs;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(29_400);
 static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
 
+/// Two **OS-assigned** free ports (#195). A shared/derived port base
+/// collided across the three daemon-spawning ac-view binaries under
+/// parallel `cargo test` — statics are per-process, and any deterministic
+/// base (a literal, or a `pid % N` seed) can hand two concurrent binaries
+/// the same range. Binding `:0` lets the OS pick a currently-free port,
+/// with no modulo to alias on. The listeners are dropped before the
+/// daemon rebinds, leaving a small TOCTOU window; ephemeral ports are
+/// assigned round-robin over a large range, so immediate reuse by another
+/// process is vanishingly unlikely — strictly better than a base that can
+/// alias deterministically.
 pub fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
+    let port = || {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    };
+    let ctrl = port();
+    let mut data = port();
+    // Guard the (rare) case the OS handed the same port twice across the
+    // two independent binds.
+    while data == ctrl {
+        data = port();
+    }
+    (ctrl, data)
 }
 
 pub fn alloc_home() -> PathBuf {
