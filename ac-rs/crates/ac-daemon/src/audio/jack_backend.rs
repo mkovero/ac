@@ -719,6 +719,73 @@ mod tests {
         assert_eq!(cons.occupied_len(), 0);
     }
 
+    // ---- Hardware runbook (capture-contiguity D4, partial) ----
+
+    /// Confirms on **real JACK** that `capture_multi`'s pre-wait `clear()`
+    /// discards live audio between ticks — the hardware half of
+    /// `handoff-capture-contiguity.md` H1, which the headless reproducer in
+    /// `audio/contiguity.rs` can only model.
+    ///
+    /// **Emits nothing.** Capture only: no output ports are connected and no
+    /// generator is started, so this is safe to run against an interface with
+    /// unknown equipment downstream and needs no stimulus consent.
+    ///
+    /// `#[ignore]`d — needs a running JACK server, same convention as
+    /// `tests/it_loopback_ir.rs`. Run with:
+    ///
+    /// ```text
+    /// AC_TEST_CAPTURE_PORT='Babyface Pro Pro:capture_1' \
+    ///   cargo test --bin ac-daemon -- --ignored --nocapture jack_capture_multi
+    /// ```
+    #[test]
+    #[ignore = "requires a running JACK server; set AC_TEST_CAPTURE_PORT"]
+    fn jack_capture_multi_discards_live_audio_between_ticks() {
+        const TICKS: u64 = 40;
+        const CHUNK_SECS: f64 = 0.05;
+        // Stands in for the transfer worker's per-tick compute (~5 ms with
+        // the delay cached). This is the interval during which the ring keeps
+        // filling and which the next `clear()` throws away.
+        const PROCESS: Duration = Duration::from_millis(5);
+
+        let port = std::env::var("AC_TEST_CAPTURE_PORT")
+            .unwrap_or_else(|_| "system:capture_1".to_string());
+
+        let mut eng = JackEngine::new();
+        eng.start(&[], Some(&port)).expect("JACK start");
+        let sr = eng.sample_rate();
+
+        // Warm up past the connect transient before measuring.
+        let _ = eng.capture_multi(0.2);
+        let baseline = eng.discarded_samples();
+
+        for _ in 0..TICKS {
+            eng.capture_multi(CHUNK_SECS).expect("capture_multi");
+            std::thread::sleep(PROCESS);
+        }
+
+        let discarded = eng.discarded_samples() - baseline;
+        let backend = eng.backend_name();
+        eng.stop();
+
+        let per_tick = discarded as f64 / TICKS as f64;
+        let expected_per_tick = sr as f64 * PROCESS.as_secs_f64();
+        eprintln!(
+            "backend={backend} sr={sr} port={port}\n\
+             discarded {discarded} samples over {TICKS} ticks \
+             = {per_tick:.0}/tick ({:.1} ms), expected ~{expected_per_tick:.0} \
+             from a {:.0} ms processing gap",
+            per_tick / sr as f64 * 1000.0,
+            PROCESS.as_secs_f64() * 1000.0,
+        );
+
+        assert!(
+            discarded > 0,
+            "pre-wait clear() discarded nothing on real JACK over {TICKS} ticks — \
+             either the ring never filled during the {PROCESS:?} gap, or H1 does \
+             not hold on this backend. Both are findings; do not delete this test."
+        );
+    }
+
     // ---- Stereo ref-channel padding ----
 
     #[test]
