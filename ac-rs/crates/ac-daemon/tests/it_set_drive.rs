@@ -24,7 +24,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(28_400);
+// 28_800, not 28_400 — the latter collides with it_scene_fixture's base
+// under parallel `cargo test` (#195). Each ac-daemon test binary keeps a
+// distinct base rather than the ac-view PID-seed approach, since these
+// bases are inline per binary, not a shared module.
+static PORT_CURSOR: AtomicU16 = AtomicU16::new(28_800);
 static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
 
 /// The default `drive_max_dbfs` ceiling (`ac_core::config`).

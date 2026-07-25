@@ -13,10 +13,24 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(29_400);
+/// Per-**process** port base (#195). Each integration test file is its
+/// own binary/process with its own copy of this static, so a single
+/// shared literal base collided across the three daemon-spawning ac-view
+/// binaries under parallel `cargo test` — a SUB then connected to a
+/// sibling binary's daemon and read a frame its own session never
+/// launched. Seed the base from the PID so concurrent binaries get
+/// disjoint ranges. Stride 100 on `pid % 400` keeps even **consecutive**
+/// PIDs — which cargo hands sibling test binaries — 100 ports apart,
+/// far more than the <10 ports any one binary allocates. Range
+/// 20_000..=59_900, clear of the app's fixed 5556/5557.
+static PORT_CURSOR: LazyLock<AtomicU16> = LazyLock::new(|| {
+    let base = 20_000 + (std::process::id() % 400) as u16 * 100;
+    AtomicU16::new(base)
+});
 static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
 
 pub fn alloc_ports() -> (u16, u16) {
