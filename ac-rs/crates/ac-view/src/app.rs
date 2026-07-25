@@ -35,6 +35,13 @@ pub struct AcViewApp {
     settings: Option<crate::settings::SettingsOverlay>,
     weighting: WeightingCurve,
     integration: &'static str,
+    /// The single seam a future key-capturing UI mode flips to signal the
+    /// panic cluster can't reach the machine this frame — gates the
+    /// keepalive (`panic_reachable`). `false` in production today
+    /// (panic-first keeps the panic keys reachable); a modal that ever
+    /// swallows them sets it, and the keepalive goes silent so the
+    /// dead-man takes over.
+    panic_keys_obstructed: bool,
     /// Every `DriveCmd` relayed, recorded so app-adapter tests can assert
     /// what reached `set_drive` without a live daemon — the layer between
     /// the proven machine and the wire, which is where the drive-path
@@ -61,6 +68,7 @@ impl AcViewApp {
             settings: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
+            panic_keys_obstructed: false,
             #[cfg(test)]
             sent_drive: Vec::new(),
         }
@@ -326,15 +334,33 @@ impl AcViewApp {
     /// Whether the panic path can reach the machine this frame — the gate
     /// on the keepalive (ratified backstop, PR #197). With
     /// [`Self::panic_first`] running unconditionally before every modal,
-    /// the panic keys are always reachable, so this is `true` today. It
-    /// is the single explicit gate: if a future change ever obstructs the
-    /// panic cluster, flip it to `false` there and the keepalive stops
+    /// the panic keys are always reachable, so this is `true` in
+    /// production today. `panic_keys_obstructed` is the single seam a
+    /// future key-capturing UI mode flips: set it, and the keepalive stops
     /// asserting the drive — handing the daemon's 1.5 s dead-man back its
-    /// job instead of the UI's own tick keeping the drive alive. A
-    /// keepalive that runs independent of panic-reachability is the exact
-    /// mechanism that made the trapped-modal hole lethal.
+    /// job instead of the UI's own tick keeping an un-stoppable drive
+    /// alive (the exact mechanism that made the trapped-modal hole
+    /// lethal).
     fn panic_reachable(&self) -> bool {
-        true
+        !self.panic_keys_obstructed
+    }
+
+    /// Per-frame keepalive, gated on panic-reachability (PR #197). While
+    /// Driving and reachable, re-sends the current state every 250 ms so
+    /// the daemon's dead-man never trips on a live session; while the
+    /// panic path is obstructed, it stays **silent** so the dead-man is
+    /// the backstop. `now` is the frame clock (real time in the app, a
+    /// controlled instant in tests).
+    fn keepalive_tick(&mut self, now: std::time::Instant) {
+        if !self.panic_reachable() {
+            return;
+        }
+        let cmd = if let ViewKind::Transfer(t) = &mut self.view {
+            t.stimulus.tick(now)
+        } else {
+            None
+        };
+        self.send_drive(cmd);
     }
 
     /// Route a frame's overlay keypresses. Enter applies (persist +
@@ -469,16 +495,9 @@ impl eframe::App for AcViewApp {
             }
         }
 
-        // Per-frame keepalive: while Driving, re-send the current state
-        // every 250 ms so the daemon's dead-man never trips on a live
-        // session — but ONLY while the panic path is reachable. If it
-        // ever isn't, the keepalive must not assert the drive, or the UI's
-        // own tick would keep an un-stoppable drive alive (the mechanism
-        // that made the trapped-modal hole lethal).
-        if self.panic_reachable() {
-            let keepalive = self.transfer_stimulus(|m, now| m.tick(now));
-            self.send_drive(keepalive);
-        }
+        // Per-frame keepalive, gated on panic-reachability (see
+        // keepalive_tick).
+        self.keepalive_tick(std::time::Instant::now());
 
         let mut got_new_frame = false;
         if let Some(session) = &mut self.session {
@@ -722,6 +741,59 @@ mod tests {
             assert_eq!(stim_state(&app), StimState::Idle, "{key} did not stop");
             assert!(!app.sent_drive.last().unwrap().on, "{key} relayed no off");
         }
+    }
+
+    // Drive the machine directly to Driving at a controlled instant, so
+    // the keepalive cadence can be exercised on logical time.
+    fn drive_at(app: &mut AcViewApp, t0: std::time::Instant) {
+        if let ViewKind::Transfer(t) = &mut app.view {
+            t.stimulus.press_space(t0);
+            t.stimulus.press_enter(t0); // last_send = t0
+        }
+        assert_eq!(stim_state(app), StimState::Driving);
+        app.sent_drive.clear();
+    }
+
+    // Keepalive backstop, happy path: while Driving and reachable, a tick
+    // past the 250 ms interval relays set_drive on.
+    #[test]
+    fn keepalive_relays_on_while_driving_and_reachable() {
+        let mut app = transfer_app();
+        let t0 = std::time::Instant::now();
+        drive_at(&mut app, t0);
+        assert!(app.panic_reachable());
+
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(300));
+
+        let last = app
+            .sent_drive
+            .last()
+            .expect("keepalive must relay while reachable");
+        assert!(last.on, "reachable keepalive must assert the drive");
+    }
+
+    // Keepalive backstop, the hazard that matters: when the panic path is
+    // obstructed, the keepalive stays SILENT — no set_drive on — so the
+    // daemon's dead-man takes over instead of the UI's tick keeping an
+    // un-stoppable drive alive.
+    #[test]
+    fn keepalive_stays_silent_when_panic_is_obstructed() {
+        let mut app = transfer_app();
+        let t0 = std::time::Instant::now();
+        drive_at(&mut app, t0);
+
+        app.panic_keys_obstructed = true; // a future capturing modal
+        assert!(!app.panic_reachable());
+
+        // Even well past the keepalive interval, nothing is relayed.
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(300));
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(600));
+
+        assert!(
+            app.sent_drive.is_empty(),
+            "obstructed keepalive must not assert the drive — got {:?}",
+            app.sent_drive
+        );
     }
 
     // panic_first is a no-op when Idle (does not consume keys the normal
