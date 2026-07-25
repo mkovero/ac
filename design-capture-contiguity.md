@@ -2,6 +2,23 @@
 
 # design decision — capture contiguity (handoff-capture-contiguity.md, D1/D2)
 
+> **Scope correction (2026-07-25, from the reporter).** The handoff's premise
+> is wrong. It reads the symptom as three copies **on the frequency axis** and
+> builds D4 around classifying three frequencies as geometric or
+> linear-symmetric. The actual symptom is **temporal**: the response recurs
+> every ~3–5 s, identical each time, decaying as the stimulus ends and then
+> repeating indefinitely *with no stimulus present*.
+>
+> A splice removes time and cannot repeat it, so H1 — however well confirmed,
+> and it is now confirmed on hardware — is **not** the reported bug. It is a
+> separate defect found along the way. The reported bug points at H3 (ring
+> backlog; `RING_CAPACITY` is a *sample* count, so its duration halves as the
+> rate doubles) and plausibly shares a root cause with the separately-filed
+> "LF ~10 s anomaly".
+>
+> Everything below still describes the delivered work correctly. Read D4's
+> frequency-classification list as void.
+
 Scope: D1's mode-selection surface, the D1↔#192 shared-seam question, and
 D2's counter placement. Markus has answered both Open Questions: **shared
 synthetic-clock seam** (Q2), **partial D4 now, transfer path only** (Q1).

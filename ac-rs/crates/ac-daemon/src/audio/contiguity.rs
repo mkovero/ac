@@ -1,5 +1,27 @@
 //! Capture-contiguity evidence (`handoff-capture-contiguity.md`, D3).
 //!
+//! # Scope correction (2026-07-25, from the reporter)
+//!
+//! **What this module characterises is NOT the originally reported bug.** The
+//! handoff describes the symptom as "the displayed spectrum shows the response
+//! three times" and its D4 asks for three *frequencies* to be classified as
+//! geometric or linear-symmetric — a frequency-axis reading. The reporter has
+//! since clarified that the symptom is **temporal**: the response recurs every
+//! roughly 3–5 seconds, each recurrence identical, decaying as the stimulus
+//! ends and then repeating again and again *with no stimulus present*.
+//!
+//! A splice removes time; it cannot repeat it. So the defect characterised
+//! here — real, and confirmed on hardware — is a **separate** one that this
+//! investigation found along the way. The reported bug is a recurrence of
+//! stale audio, which points at H3 (ring backlog, `RING_CAPACITY`, and the
+//! never-clearing `capture_available` path) rather than at H1, and plausibly
+//! at the same root cause as the separately-filed "LF ~10 s anomaly".
+//!
+//! Nothing below is invalidated by that — the splice, its hardware
+//! confirmation and the period-quantisation selection rule all stand on their
+//! own measurements. But do not read this module as an account of the
+//! three-copies report.
+//!
 //! Test-only module. It exists to answer one falsifiable question: **does the
 //! `clear()`-before-wait ordering in `capture_multi` put spectral replicas
 //! into the estimator's output?**
@@ -331,20 +353,20 @@ fn zero_gap_clearing_capture_is_clean_which_isolates_the_gap_as_the_cause() {
 /// the measurement, which settles the ambiguity noted above.
 ///
 /// **This does not explain the reported symptom, and that is the point.** The
-/// report is *three widely separated copies*, gain preserved. What splicing
-/// produces here is a dense 101-line comb packed into a ±1 kHz skirt around
-/// the stimulus — the handoff's own "tight cluster at ~20 Hz spacing → H1
-/// confirmed" branch, and emphatically not three discrete copies. Two
-/// consequences, both binding:
+/// reported symptom is a *temporal* recurrence — the response reappearing
+/// every ~3–5 s with no stimulus present (see the scope correction in this
+/// module's docs). What splicing produces is a dense 101-line comb in a ±1 kHz
+/// skirt around the stimulus: a frequency-domain artifact that cannot repeat
+/// anything in time. Two consequences, both binding:
 ///
-/// 1. A confirmed splice does **not** close the issue. Per acceptance
-///    criterion 5 an unreconciled spacing keeps it open regardless of what
-///    else is confirmed, and 20 Hz versus "three separate copies" is
-///    unreconciled until D4 reads the actual frequencies off `ac-view`.
-/// 2. If D4's three frequencies turn out geometric (`f`, `f·r`, `f·r²`) or
-///    linear-symmetric (`f`, `F−f`, `F+f`), this mechanism is not the reported
-///    bug at all — it is a second, real, independently-fixable defect that
-///    this test now pins down.
+/// 1. A confirmed splice does **not** close the reported issue, and cannot:
+///    it is the wrong domain. Acceptance criterion 5's spacing reconciliation
+///    is satisfied *for this defect* (20 Hz, derived and measured) while
+///    saying nothing about the recurrence.
+/// 2. The splice is a second, real, independently-fixable defect that these
+///    tests now pin down. The reported recurrence needs its own instrument —
+///    the D2 buffer dump over a stimulus-then-silence run, which answers
+///    whether the captured audio itself repeats.
 #[test]
 fn spliced_replica_spacing_matches_tick_rate() {
     let sr = 48_000u32;
