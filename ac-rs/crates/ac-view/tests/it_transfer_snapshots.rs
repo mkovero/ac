@@ -31,7 +31,11 @@ use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
 const DB_RANGE: (f64, f64) = (-80.0, 20.0);
-const SIZE: egui::Vec2 = egui::vec2(600.0, 400.0);
+// A representative field-laptop content width — wide enough that the
+// DRIVING banner (the longest, largest string) fits without clipping. On
+// a much narrower window a long banner can still overflow; the banner
+// stays top-center and readable at the widths this instrument is used at.
+const SIZE: egui::Vec2 = egui::vec2(960.0, 420.0);
 
 /// Transfer scene over 24 columns with a coherence gap at 8..14 and a
 /// sloped magnitude, so the gap and the pane shapes are both visible.
