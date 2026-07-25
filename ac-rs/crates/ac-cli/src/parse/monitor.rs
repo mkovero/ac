@@ -5,6 +5,11 @@ use super::*;
 pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCommand, String> {
     let mut args = args.to_vec();
 
+    // `--tui` keeps the ratatui terminal monitor (M4d-CLI); strip it
+    // before positional parsing so it can sit anywhere.
+    let tui = args.iter().any(|a| a == "--tui");
+    args.retain(|a| a != "--tui");
+
     // Optional leading mode word: spectrum | cwt | cqt | reassigned.
     // Absent or a channel/numeric-looking token → default FFT spectrum
     // (preserves `ac monitor 0-3 20hz 20khz 0.1s`).
@@ -68,9 +73,28 @@ pub(super) fn parse_monitor(args: &[String], show_plot: bool) -> Result<ParsedCo
             end_freq,
             interval,
             channels,
+            tui,
         },
     };
     Ok(ParsedCommand { cmd, show_plot })
+}
+
+/// `ac transfer [channels]` — launch the transfer view. Channels are
+/// optional (the app resolves meas/ref from config); a channel spec
+/// overrides the meas leg the same way `ac monitor` does. No `--drive`,
+/// no drive option of any kind — a CLI launch is always drive-off.
+pub(super) fn parse_transfer(args: &[String]) -> Result<ParsedCommand, String> {
+    let mut args = args.to_vec();
+    let channels = if args.first().is_some_and(|a| is_channel_spec(a)) {
+        Some(parse_channels(&args.remove(0))?)
+    } else {
+        None
+    };
+    check_empty(&classify_all(&args)?)?;
+    Ok(ParsedCommand {
+        cmd: CommandKind::Transfer { channels },
+        show_plot: false,
+    })
 }
 
 #[cfg(test)]
@@ -79,6 +103,59 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn test_transfer_bare() {
+        let p = parse(&args("transfer")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::Transfer { channels: None }));
+    }
+
+    #[test]
+    fn test_transfer_abbreviation_and_channel() {
+        // `tr` expands to `transfer`; an explicit channel spec is carried.
+        let p = parse(&args("tr 2")).unwrap();
+        match p.cmd {
+            CommandKind::Transfer { channels } => assert_eq!(channels, Some(vec![2])),
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    // The load-bearing AC (#185): `ac transfer` carries no drive option of
+    // any kind — the CommandKind has no drive field to set, so a CLI
+    // launch is structurally drive-off. Guard against a future field.
+    #[test]
+    fn transfer_command_has_no_drive_knob() {
+        let p = parse(&args("transfer")).unwrap();
+        // Debug-formatting the whole command must not mention "drive" —
+        // the moment someone adds a drive param here, this trips.
+        let dbg = format!("{:?}", p.cmd);
+        assert!(
+            !dbg.to_lowercase().contains("drive"),
+            "ac transfer must have no drive option: {dbg}"
+        );
+    }
+
+    #[test]
+    fn test_monitor_tui_flag() {
+        let p = parse(&args("monitor --tui")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::Monitor { tui: true, .. }));
+        // Default (no flag) is not tui — spawns ac-view.
+        let p = parse(&args("monitor")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::Monitor { tui: false, .. }));
+    }
+
+    #[test]
+    fn test_monitor_tui_flag_with_channels_anywhere() {
+        // `--tui` can sit anywhere; channels still parse.
+        let p = parse(&args("monitor 0-3 --tui")).unwrap();
+        match p.cmd {
+            CommandKind::Monitor { channels, tui, .. } => {
+                assert_eq!(channels, Some(vec![0, 1, 2, 3]));
+                assert!(tui);
+            }
+            other => panic!("expected Monitor, got {other:?}"),
+        }
     }
 
     #[test]

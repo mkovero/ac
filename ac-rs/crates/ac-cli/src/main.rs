@@ -65,6 +65,11 @@ fn main() {
         commands::monitor::run(&parsed.cmd, &cfg);
         return;
     }
+    if matches!(parsed.cmd, CommandKind::Transfer { .. }) {
+        drop(client);
+        commands::transfer::run(&parsed.cmd, &cfg);
+        return;
+    }
 
     commands::dispatch(parsed, &cfg, &mut client);
 }

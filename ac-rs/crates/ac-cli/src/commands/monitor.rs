@@ -27,13 +27,20 @@ fn resolve_channels_or_default(
 }
 
 pub fn run(cmd: &CommandKind, cfg: &ac_core::config::Config) {
-    let channels = match cmd {
-        CommandKind::Monitor { channels, .. } => channels.clone(),
+    let (channels, tui) = match cmd {
+        CommandKind::Monitor { channels, tui, .. } => (channels.clone(), *tui),
         _ => unreachable!(),
     };
     let channels = resolve_channels_or_default(channels, cfg, "ac monitor");
 
-    super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
+    if tui {
+        // `--tui` keeps the ratatui terminal monitor.
+        super::plot::launch_ui(super::plot::LaunchKind::Monitor, cfg, Some(&channels));
+    } else {
+        // Default: the ac-view spectrum window (M4d-CLI). Explicit channel
+        // spec maps its first entry onto the measurement leg.
+        super::spawn_ac_view(cfg, false, channels.first().copied());
+    }
 }
 
 /// `ac monitor cwt` — pre-step: switch the server analysis mode to
