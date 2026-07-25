@@ -174,6 +174,14 @@ impl StimulusMachine {
         }
     }
 
+    /// Unconditional stop to Idle from any state (auto-stop-on-open, PR
+    /// #197). Emits `off` if we were driving. Unlike [`Self::on_quit`],
+    /// this also clears Armed — opening a modal must never leave the
+    /// machine live.
+    pub fn on_stop(&mut self) -> Option<DriveCmd> {
+        self.stop()
+    }
+
     fn nudge(&mut self, delta: f64, now: Instant) -> Option<DriveCmd> {
         match self.state {
             StimState::Idle => None,
