@@ -154,16 +154,16 @@ fn meas_amp_db(window: &[f32], sr: u32) -> Vec<f64> {
 /// removed rather than allowed to inflate every peak count by one.
 /// `alias_is_present_in_the_contiguous_arm` pins it down so this filter can
 /// never quietly hide a real finding instead.
-fn aliased_harmonic_hz(sr: u32) -> Option<f64> {
-    let second = 2.0 * TONE_HZ;
+fn aliased_harmonic_hz(tone_hz: f64, sr: u32) -> Option<f64> {
+    let second = 2.0 * tone_hz;
     let nyquist = sr as f64 / 2.0;
     (second > nyquist).then_some(sr as f64 - second)
 }
 
 /// Drop the known aliased harmonic from a peak list. See
 /// [`aliased_harmonic_hz`].
-fn without_alias(peaks: Vec<usize>, sr: u32) -> Vec<usize> {
-    let Some(alias) = aliased_harmonic_hz(sr) else {
+fn without_alias(peaks: Vec<usize>, tone_hz: f64, sr: u32) -> Vec<usize> {
+    let Some(alias) = aliased_harmonic_hz(tone_hz, sr) else {
         return peaks;
     };
     peaks
@@ -207,7 +207,7 @@ fn contiguous_capture_of_a_single_tone_produces_one_peak() {
     );
 
     let db = meas_amp_db(&window, sr);
-    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), TONE_HZ, sr);
     assert_eq!(
         peaks.len(),
         1,
@@ -246,7 +246,7 @@ fn spliced_capture_of_a_single_tone_replicates_the_response() {
     );
 
     let db = meas_amp_db(&window, sr);
-    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), TONE_HZ, sr);
     assert!(
         peaks.len() > 1,
         "spliced capture must replicate the response; got {} peak(s) at {:?} Hz. \
@@ -271,7 +271,7 @@ fn zero_gap_clearing_capture_is_clean_which_isolates_the_gap_as_the_cause() {
     );
 
     let db = meas_amp_db(&window, sr);
-    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), TONE_HZ, sr);
     assert_eq!(
         peaks.len(),
         1,
@@ -333,7 +333,7 @@ fn spliced_replica_spacing_matches_tick_rate() {
 
     // 1 Hz bins (nperseg = sr), so bin index is Hz and adjacent-peak spacing
     // in bins is spacing in Hz.
-    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), TONE_HZ, sr);
     assert!(
         peaks.len() >= 2,
         "need at least two peaks to measure a spacing, got {peaks:?}"
@@ -370,7 +370,8 @@ fn spliced_replica_spacing_matches_tick_rate() {
 #[test]
 fn alias_is_present_in_the_contiguous_arm() {
     let sr = 48_000;
-    let alias = aliased_harmonic_hz(sr).expect("15.1 kHz has its 2nd harmonic above Nyquist");
+    let alias =
+        aliased_harmonic_hz(TONE_HZ, sr).expect("15.1 kHz has its 2nd harmonic above Nyquist");
     assert!(
         (alias - 17_800.0).abs() < 1.0,
         "expected the folded 2nd harmonic at 17 800 Hz, computed {alias}"
@@ -385,7 +386,7 @@ fn alias_is_present_in_the_contiguous_arm() {
         "the alias must be what the filter removes; contiguous peaks were {unfiltered:?}"
     );
     assert_eq!(
-        without_alias(unfiltered.clone(), sr).len(),
+        without_alias(unfiltered.clone(), TONE_HZ, sr).len(),
         unfiltered.len() - 1,
         "the filter must remove exactly the alias and nothing else"
     );
@@ -415,4 +416,120 @@ fn discard_count_tracks_the_modelled_processing_time() {
         expected,
         "expected {ticks} ticks to discard {per_gap} samples each after the first"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hardware runbook (D4, partial — transfer path only)
+// ---------------------------------------------------------------------------
+
+/// **Stimulus ceiling, enforced here because this test *is* the driver.**
+///
+/// There is no daemon in this path to clamp the request, so the cap lives in
+/// the code and is deliberately not overridable from the environment. −40 dBFS
+/// nominal; for a sine the nominal amplitude *is* the instantaneous peak (no
+/// crest factor, unlike pink noise), so −40 dBFS here means −40 dBFS peak.
+#[cfg(feature = "jack-audio")]
+const HW_LEVEL_DBFS: f64 = -40.0;
+
+/// HF sweep for the hardware read. Deliberately mixes round frequencies with
+/// off-round ones: the headless work showed the effect vanishes when the tick
+/// gap is a whole number of tone periods, so a sweep measures that
+/// frequency-dependence instead of assuming it.
+#[cfg(feature = "jack-audio")]
+const HW_SWEEP_HZ: [f64; 4] = [12_000.0, 15_000.0, 15_100.0, 18_000.0];
+
+/// Reads the actual replica frequencies off real hardware — the measurement
+/// that discriminates the mechanisms (`handoff-capture-contiguity.md` D4):
+/// geometric (`f`, `f·r`, `f·r²`) points at resampling, linear-symmetric
+/// (`f`, `F−f`, `F+f`) at aliasing images, a tight ~20 Hz cluster at H1.
+///
+/// **Emits.** Drives `AC_TEST_OUTPUT_PORTS` at [`HW_LEVEL_DBFS`] and captures
+/// the loopback from `AC_TEST_MONITOR_PORT`. Monitor ports mirror what is sent
+/// to the corresponding playback channel, so no patch cable is needed — but
+/// the signal does reach the physical output, which is why this is `#[ignore]`d
+/// and run only with explicit per-run operator consent.
+///
+/// ```text
+/// AC_TEST_OUTPUT_PORTS='Babyface Pro Pro:playback_4,Babyface Pro Pro:playback_5' \
+/// AC_TEST_MONITOR_PORT='Babyface Pro Pro:monitor_4' \
+///   cargo test --bin ac-daemon -- --ignored --nocapture jack_hf_sweep
+/// ```
+#[cfg(feature = "jack-audio")]
+#[test]
+#[ignore = "emits stimulus on real hardware; needs per-run operator consent"]
+fn jack_hf_sweep_replica_read() {
+    use crate::audio::jack_backend::JackEngine;
+    use std::time::Duration;
+
+    let out_ports: Vec<String> = std::env::var("AC_TEST_OUTPUT_PORTS")
+        .expect("set AC_TEST_OUTPUT_PORTS")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    let monitor = std::env::var("AC_TEST_MONITOR_PORT").expect("set AC_TEST_MONITOR_PORT");
+    let amplitude = 10f64.powf(HW_LEVEL_DBFS / 20.0);
+
+    eprintln!("=== D4 hardware read: {HW_LEVEL_DBFS} dBFS into {out_ports:?}, capture {monitor}");
+
+    for &tone in HW_SWEEP_HZ.iter() {
+        let mut eng = JackEngine::new();
+        eng.start(&out_ports, Some(&monitor)).expect("JACK start");
+        let sr = eng.sample_rate();
+        let nperseg = sr as usize;
+        let step = nperseg / 2;
+        let target_total = nperseg + step * (N_AVERAGES - 1);
+        let chunk_samples = (sr as f64 * CHUNK_SECS) as usize;
+
+        eng.set_tone(tone, amplitude);
+        let _ = eng.capture_multi(0.3); // settle the output and the ring
+
+        let baseline = eng.discarded_samples();
+        let mut ring: Vec<f32> = Vec::with_capacity(target_total + step);
+        let ticks = (target_total / chunk_samples) * 2;
+        for _ in 0..ticks {
+            let block = eng
+                .capture_multi(CHUNK_SECS)
+                .expect("capture_multi")
+                .remove(0);
+            ring.extend_from_slice(&block);
+            if ring.len() > target_total {
+                let excess = ring.len() - target_total;
+                ring.drain(..excess);
+            }
+            // Stand-in for the transfer worker's per-tick compute.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let discarded = eng.discarded_samples() - baseline;
+
+        // Silence before teardown so nothing is left driving the output.
+        eng.set_silence();
+        eng.stop();
+
+        let rms =
+            (ring.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / ring.len() as f64).sqrt();
+        let db = meas_amp_db(&ring, sr);
+        let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), tone, sr);
+        let gaps: Vec<usize> = peaks.windows(2).map(|w| w[1] - w[0]).collect();
+        let median_gap = if gaps.is_empty() {
+            0
+        } else {
+            let mut g = gaps.clone();
+            g.sort_unstable();
+            g[g.len() / 2]
+        };
+        let phase_step = (tone * (discarded as f64 / ticks as f64) / sr as f64).fract();
+
+        eprintln!(
+            "tone={tone:>7.0} Hz  sr={sr}  rms={rms:.5} ({:.1} dBFS)  \
+             discarded={discarded} ({:.0}/tick)  phase_step={phase_step:.3} cyc\n\
+             \tpeaks={}  span={:?}..{:?} Hz  median_spacing={median_gap} Hz\n\
+             \tfirst 12: {:?}",
+            20.0 * rms.log10(),
+            discarded as f64 / ticks as f64,
+            peaks.len(),
+            peaks.first(),
+            peaks.last(),
+            &peaks[..peaks.len().min(12)],
+        );
+    }
 }
