@@ -102,9 +102,92 @@ pub fn db_to_y(db: f64, db_min: f64, db_max: f64) -> f64 {
     (db - db_min) / (db_max - db_min)
 }
 
+/// Normalized y for a phase in degrees on the fixed ±180° pane
+/// (`y=0` = −180°, `y=1` = +180°) — the shared mapping between the phase
+/// trace and its axis ticks (M4a's `transfer` phase mapping uses this).
+pub fn phase_to_y(phase_deg: f64) -> f64 {
+    (phase_deg + 180.0) / 360.0
+}
+
+/// Phase axis for the transfer view's ±180° pane (#194). A **new**
+/// degrees-linear tick model — not the log/dB ones reused.
+///
+/// The gridline set is `{+180°, +90°, 0°, −90°}` — note **+180 is
+/// present, −180 is absent**. The phase trace wraps at `(−180, +180]`
+/// (M4a's ruling): a point can land exactly on +180 (the closed end) but
+/// never on −180 (the open end, the same physical value as +180). A
+/// −180 gridline would mark a value the data never touches; +180 is
+/// where a wrapped point lands. The 0° line is the crossover reference a
+/// field operator reads phase against.
+pub fn phase_axis() -> Axis {
+    let ticks = [180, 90, 0, -90]
+        .into_iter()
+        .map(|deg| Tick {
+            position: phase_to_y(deg as f64),
+            label: phase_label(deg),
+        })
+        .collect();
+    Axis { ticks }
+}
+
+fn phase_label(deg: i64) -> String {
+    if deg == 0 {
+        "0°".to_string()
+    } else {
+        format!("{deg:+}°")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_axis_positions_and_labels_are_exact() {
+        let axis = phase_axis();
+        let got: Vec<(f64, &str)> = axis
+            .ticks
+            .iter()
+            .map(|t| (t.position, t.label.as_str()))
+            .collect();
+        // +180 at y=1, +90 at 0.75, 0 at 0.5, -90 at 0.25 — hand-derived
+        // from (deg+180)/360.
+        assert_eq!(
+            got,
+            vec![(1.0, "+180°"), (0.75, "+90°"), (0.5, "0°"), (0.25, "-90°"),]
+        );
+    }
+
+    // The seam #194 flags: the phase gridlines must agree with the trace's
+    // wrap boundary (M4a: (−180, +180]). +180 is a real gridline (the
+    // trace lands there); −180 is NOT (the trace never reaches it).
+    #[test]
+    fn phase_axis_has_plus_180_gridline_but_no_minus_180() {
+        let axis = phase_axis();
+        // A tick at y=1.0 (+180), none at y=0.0 (−180).
+        assert!(
+            axis.ticks
+                .iter()
+                .any(|t| t.position == 1.0 && t.label == "+180°"),
+            "the +180 boundary gridline must be present"
+        );
+        assert!(
+            !axis.ticks.iter().any(|t| t.position == 0.0),
+            "there must be no −180 gridline — the trace wraps there, never lands there"
+        );
+        // And the 0° reference is present at the midline.
+        assert!(axis
+            .ticks
+            .iter()
+            .any(|t| t.position == 0.5 && t.label == "0°"));
+    }
+
+    #[test]
+    fn phase_to_y_matches_the_transfer_pane_mapping() {
+        assert_eq!(phase_to_y(-180.0), 0.0);
+        assert_eq!(phase_to_y(0.0), 0.5);
+        assert_eq!(phase_to_y(180.0), 1.0);
+    }
 
     #[test]
     fn freq_axis_ac3_case_a_100_to_10k() {
