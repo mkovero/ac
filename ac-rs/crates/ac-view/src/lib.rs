@@ -12,6 +12,8 @@ pub mod geometry;
 pub mod keys;
 pub mod range;
 pub mod session;
+pub mod settings;
 pub mod snapshot_flow;
+pub mod stimulus;
 pub mod view;
 pub mod zmq_client;

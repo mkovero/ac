@@ -31,6 +31,8 @@ pub struct AcViewApp {
     transfer_scene: Option<ac_scene::TransferScene>,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     help_open: bool,
+    /// The settings overlay (`G`, transfer view). `None` = closed.
+    settings: Option<crate::settings::SettingsOverlay>,
     weighting: WeightingCurve,
     integration: &'static str,
 }
@@ -50,6 +52,7 @@ impl AcViewApp {
                 ac_scene::MeterState::default(),
             ),
             help_open: false,
+            settings: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
         }
@@ -60,7 +63,10 @@ impl AcViewApp {
     /// view is fixed at construction and never switches (§1).
     pub fn new_transfer(endpoint: Endpoint) -> Self {
         let mut app = Self::new(endpoint);
-        app.view = ViewKind::Transfer(TransferViewState::default());
+        // Seed the stimulus ceiling from config's `drive_max_dbfs` so the
+        // client clamp matches the server's authoritative one.
+        let cfg = ac_core::config::load(None).unwrap_or_default();
+        app.view = ViewKind::Transfer(TransferViewState::new(cfg.drive_max_dbfs, -30.0));
         app
     }
 
@@ -148,6 +154,10 @@ impl AcViewApp {
                 // (snapshot_flow::open_local) is implemented and tested.
             }
             Action::Quit => {
+                // Best-effort drive-off on a clean quit (§5); the dead-man
+                // is the guarantee if the process dies uncleanly.
+                let off = self.transfer_stimulus(|m, _| m.on_quit());
+                self.send_drive(off);
                 if let Some(session) = &mut self.session {
                     session.stop();
                 }
@@ -198,35 +208,127 @@ impl AcViewApp {
                 }
             }
             Action::OpenSettings => {
-                // Settings overlay is M4c (#182); M4b binds the key.
+                self.settings = match self.settings {
+                    Some(_) => None, // toggle closed = cancel (no side effects)
+                    None => {
+                        let start = match &self.view {
+                            ViewKind::Transfer(t) => t.stimulus.level_dbfs(),
+                            _ => -30.0,
+                        };
+                        let cfg = ac_core::config::load(None).unwrap_or_default();
+                        Some(crate::settings::SettingsOverlay::from_config(&cfg, start))
+                    }
+                };
             }
-            // -- transfer view: stimulus (local state; M4c wires the
-            // machine + set_drive) --
+            // -- transfer view: stimulus. Each key drives the safety
+            // machine; the DriveCmd it emits (if any) goes to the daemon
+            // via set_drive. The machine owns arm/fire/stop, auto-disarm,
+            // clamp, and keepalive — the app only relays. --
             Action::StimulusArmOrStop => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.arm_or_stop()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_space(now));
+                self.send_drive(cmd);
             }
             Action::StimulusFireOrStop => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.fire_or_stop()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_enter(now));
+                self.send_drive(cmd);
             }
             Action::StimulusCancel => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.cancel()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_esc(now));
+                self.send_drive(cmd);
             }
             Action::StimulusLevelUp => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.nudge_level(true, shift)
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_up(now, shift));
+                self.send_drive(cmd);
             }
             Action::StimulusLevelDown => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.nudge_level(false, shift)
+                let cmd = self.transfer_stimulus(|m, now| m.press_down(now, shift));
+                self.send_drive(cmd);
+            }
+        }
+    }
+
+    /// Apply `f` to the transfer view's stimulus machine with a fresh
+    /// `now`, returning any command it emits. No-op (None) in the
+    /// spectrum view.
+    fn transfer_stimulus(
+        &mut self,
+        f: impl FnOnce(
+            &mut crate::stimulus::StimulusMachine,
+            std::time::Instant,
+        ) -> Option<crate::stimulus::DriveCmd>,
+    ) -> Option<crate::stimulus::DriveCmd> {
+        if let ViewKind::Transfer(t) = &mut self.view {
+            f(&mut t.stimulus, std::time::Instant::now())
+        } else {
+            None
+        }
+    }
+
+    /// Relay a stimulus command to the daemon. Best-effort — a send
+    /// failure surfaces as the dead-man dropping drive, never a crash.
+    fn send_drive(&self, cmd: Option<crate::stimulus::DriveCmd>) {
+        if let (Some(cmd), Some(session)) = (cmd, &self.session) {
+            session.set_drive(cmd.on, cmd.level_dbfs);
+        }
+    }
+
+    /// Route a frame's overlay keypresses. Enter applies (persist +
+    /// relaunch); Esc/`G` cancels with zero side effects (just drops the
+    /// overlay). Everything else edits in memory only.
+    fn handle_settings_keys(&mut self, ev: SettingsKeys) {
+        let Some(overlay) = &mut self.settings else {
+            return;
+        };
+        if ev.esc {
+            self.settings = None; // cancel — nothing written
+            return;
+        }
+        if ev.up {
+            overlay.move_row(false);
+        }
+        if ev.down {
+            overlay.move_row(true);
+        }
+        if ev.left {
+            overlay.adjust_value(false);
+        }
+        if ev.right {
+            overlay.adjust_value(true);
+        }
+        if ev.enter {
+            // Persist (last-writer-wins) then relaunch on the new
+            // channels and reseed the stimulus start level.
+            match overlay.apply(None) {
+                Ok(applied) => {
+                    self.settings = None;
+                    self.relaunch(applied);
+                }
+                Err(e) => {
+                    eprintln!("ac-view: settings apply failed: {e}");
+                    self.settings = None;
                 }
             }
+        }
+    }
+
+    /// Relaunch the session on new channels and reseed the transfer
+    /// view's stimulus (drive off, idle, new start level + ceiling). The
+    /// session is stopped first so the daemon's busy guard accepts the
+    /// new `transfer_stream`.
+    fn relaunch(&mut self, applied: crate::settings::Applied) {
+        if let Some(session) = &mut self.session {
+            session.stop();
+            let _ = session.launch(
+                applied.meas_channel,
+                applied.ref_channel,
+                self.weighting,
+                self.integration,
+            );
+        }
+        if let ViewKind::Transfer(t) = &mut self.view {
+            let cfg = ac_core::config::load(None).unwrap_or_default();
+            t.stimulus =
+                crate::stimulus::StimulusMachine::new(cfg.drive_max_dbfs, applied.start_level_dbfs);
         }
     }
 
@@ -245,21 +347,55 @@ impl AcViewApp {
     }
 }
 
+/// One frame's overlay-navigation keypresses (M4c settings modal).
+#[derive(Default)]
+struct SettingsKeys {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    enter: bool,
+    esc: bool,
+}
+
 impl eframe::App for AcViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let view_id = self.view.id();
-        let mut pressed: Vec<(Action, bool)> = Vec::new();
-        ctx.input(|i| {
-            for binding in bindings_for(view_id) {
-                if i.key_pressed(binding.key) {
-                    pressed.push((binding.action, i.modifiers.shift));
+        if self.settings.is_some() {
+            // Modal: the overlay owns ↑↓/←→/Enter/Esc and `G` while open,
+            // so those keys never leak to the stimulus machine or zoom.
+            use egui::Key;
+            let mut ev = SettingsKeys::default();
+            ctx.input(|i| {
+                ev.up = i.key_pressed(Key::ArrowUp);
+                ev.down = i.key_pressed(Key::ArrowDown);
+                ev.left = i.key_pressed(Key::ArrowLeft);
+                ev.right = i.key_pressed(Key::ArrowRight);
+                ev.enter = i.key_pressed(Key::Enter);
+                ev.esc = i.key_pressed(Key::Escape) || i.key_pressed(Key::G);
+            });
+            self.handle_settings_keys(ev);
+        } else {
+            let view_id = self.view.id();
+            let mut pressed: Vec<(Action, bool)> = Vec::new();
+            ctx.input(|i| {
+                for binding in bindings_for(view_id) {
+                    if i.key_pressed(binding.key) {
+                        pressed.push((binding.action, i.modifiers.shift));
+                    }
                 }
+            });
+            for (action, shift) in pressed {
+                self.handle_action(action, shift);
             }
-        });
-        for (action, shift) in pressed {
-            self.handle_action(action, shift);
         }
+
+        // Per-frame keepalive: while Driving, the machine re-sends the
+        // current state every 250 ms so the daemon's dead-man never trips
+        // on a live session. Ticked every frame regardless of view (no-op
+        // outside Transfer / when idle).
+        let keepalive = self.transfer_stimulus(|m, now| m.tick(now));
+        self.send_drive(keepalive);
 
         let mut got_new_frame = false;
         if let Some(session) = &mut self.session {
@@ -348,6 +484,21 @@ impl eframe::App for AcViewApp {
             });
         }
 
+        if let Some(overlay) = &self.settings {
+            let selected = overlay.selected_row();
+            let rows = overlay.rows();
+            egui::Window::new("settings")
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    for (row, value) in &rows {
+                        let marker = if *row == selected { "▸ " } else { "  " };
+                        ui.label(format!("{marker}{}:  {value}", row.label()));
+                    }
+                    ui.separator();
+                    ui.label("↑↓ row   ←→ value   Enter apply   Esc cancel");
+                });
+        }
+
         // Continuous repaint (paced to vsync by egui/eframe) while a
         // session is live, so the display updates every frame without
         // needing mouse-move input events to force a repaint — the
@@ -359,6 +510,20 @@ impl eframe::App for AcViewApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// Resolve the transfer session's measurement and reference channels
+/// from config (M4c, #182). The hardcoded 0/1 is gone: `input_channel`
+/// is the measurement leg, and `reference_channel` is **required** —
+/// the transfer view is a two-channel H1 estimate with no meaningful
+/// default reference, so a missing one is a fatal error carrying the
+/// exact fix, not a silent fallback that would measure against the
+/// wrong port.
+pub fn resolve_transfer_channels(cfg: &ac_core::config::Config) -> Result<(u32, u32), String> {
+    let reference = cfg.reference_channel.ok_or_else(|| {
+        "reference channel not configured — run `ac setup reference <N>`".to_string()
+    })?;
+    Ok((cfg.input_channel, reference))
 }
 
 /// Construct an `AcViewApp` already connected to `endpoint` and with a
@@ -386,6 +551,30 @@ pub fn connect_and_launch(
 mod tests {
     use super::*;
     use crate::keys::Action;
+
+    #[test]
+    fn missing_reference_channel_is_a_fatal_error_with_the_setup_hint() {
+        let cfg = ac_core::config::Config {
+            input_channel: 2,
+            reference_channel: None,
+            ..ac_core::config::Config::default()
+        };
+        let err = resolve_transfer_channels(&cfg).unwrap_err();
+        assert!(
+            err.contains("ac setup reference"),
+            "error must carry the fix hint: {err}"
+        );
+    }
+
+    #[test]
+    fn configured_channels_resolve_to_input_and_reference() {
+        let cfg = ac_core::config::Config {
+            input_channel: 2,
+            reference_channel: Some(5),
+            ..ac_core::config::Config::default()
+        };
+        assert_eq!(resolve_transfer_channels(&cfg).unwrap(), (2, 5));
+    }
 
     fn transfer_frame() -> ac_scene::WireFrame {
         // A mis-estimated delay so the wire carries non-zero phase and
