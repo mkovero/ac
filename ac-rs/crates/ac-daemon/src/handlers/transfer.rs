@@ -855,6 +855,19 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     }
                 }
                 for msg in batch {
+                    // TEMP #192 instrument (gated): dump each published
+                    // data message's type + spec_freqs presence/len, so we
+                    // can see on the box exactly which frame lacks it.
+                    if std::env::var("AC_DEBUG_192").is_ok() {
+                        let ty = msg.get("type").and_then(Value::as_str).unwrap_or("<none>");
+                        let sf = msg.get("spec_freqs");
+                        eprintln!(
+                            "AC_DEBUG_192 type={ty} spec_freqs_present={} spec_freqs_len={} bytes~={}",
+                            sf.is_some(),
+                            sf.and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+                            serde_json::to_string(&msg).map(|s| s.len()).unwrap_or(0),
+                        );
+                    }
                     send_pub(&pub_tx, "data", &msg);
                 }
             }
