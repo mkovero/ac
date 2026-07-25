@@ -4,6 +4,11 @@ ac/old2
 *.pyc
 *.egg-info/
 *.png
+# ...except the committed kittest reference snapshots (the A3 pixel
+# regression equipment). The .old/.diff working files stay ignored.
+!ac-rs/crates/ac-view/tests/snapshots/*.png
+ac-rs/crates/ac-view/tests/snapshots/*.old.png
+ac-rs/crates/ac-view/tests/snapshots/*.diff.png
 *.csv
 .env
 *.key

@@ -8,9 +8,9 @@ use std::time::Duration;
 use ac_core::visualize::weighting_curves::WeightingCurve;
 use ac_scene::Scene;
 
-use crate::keys::{Action, BINDINGS};
+use crate::keys::{bindings_for, Action};
 use crate::session::{ConnectionState, Session};
-use crate::view::{draw_view, SpectrumViewState, ViewKind};
+use crate::view::{draw_view, SpectrumViewState, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
 
 pub struct AcViewApp {
@@ -26,6 +26,10 @@ pub struct AcViewApp {
     /// range change alone (no new frame) is detected and triggers a
     /// rebuild from `last_frame`.
     last_scene_ranges: Option<((f64, f64), (f64, f64))>,
+    /// Built when the active view is Transfer; the spectrum `scene` stays
+    /// `None` then, and vice versa.
+    transfer_scene: Option<ac_scene::TransferScene>,
+    meters: (ac_scene::MeterState, ac_scene::MeterState),
     help_open: bool,
     weighting: WeightingCurve,
     integration: &'static str,
@@ -40,10 +44,24 @@ impl AcViewApp {
             scene: None,
             last_frame: None,
             last_scene_ranges: None,
+            transfer_scene: None,
+            meters: (
+                ac_scene::MeterState::default(),
+                ac_scene::MeterState::default(),
+            ),
             help_open: false,
             weighting: WeightingCurve::Z,
             integration: "fast",
         }
+    }
+
+    /// Construct in the transfer view rather than the default spectrum
+    /// view. `ac transfer` (M4d-CLI, #185) launches through this; the
+    /// view is fixed at construction and never switches (§1).
+    pub fn new_transfer(endpoint: Endpoint) -> Self {
+        let mut app = Self::new(endpoint);
+        app.view = ViewKind::Transfer(TransferViewState::default());
+        app
     }
 
     /// The scene currently being drawn, if a frame has been received —
@@ -56,18 +74,67 @@ impl AcViewApp {
         self.scene.as_ref()
     }
 
-    fn handle_action(&mut self, action: Action) {
-        let ViewKind::Spectrum(state) = &mut self.view;
+    /// The transfer scene currently being drawn, if in the transfer view
+    /// and a frame has been received — the same test-support role
+    /// `current_scene` plays for spectrum. Lets a test confirm a toggle
+    /// reached the built scene (e.g. a derot-mode change moved the phase
+    /// segments), closing the hole a state-only assertion (`derot_mode()`
+    /// changed) cannot: that the changed mode failed to reach the scene.
+    pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
+        self.transfer_scene.as_ref()
+    }
+
+    /// Feed one wire frame directly, bypassing the ZMQ session — the
+    /// hook a headless test uses to drive `current_scene` /
+    /// `current_transfer_scene` without a live daemon. Rebuilds the
+    /// active view's scene the same way the paint pass does.
+    #[cfg(test)]
+    pub(crate) fn ingest_frame_for_test(&mut self, frame: ac_scene::WireFrame, now_s: f64) {
+        self.last_frame = Some(frame);
+        match &self.view {
+            ViewKind::Spectrum(state) => {
+                let ranges = (
+                    (state.freq_range.min(), state.freq_range.max()),
+                    (state.db_range.min(), state.db_range.max()),
+                );
+                self.scene = self
+                    .last_frame
+                    .as_ref()
+                    .map(|f| Scene::from_wire_frame(f, ranges.0, ranges.1));
+                self.transfer_scene = None;
+            }
+            ViewKind::Transfer(state) => {
+                let freq_range = (state.freq_range.min(), state.freq_range.max());
+                if let Some(f) = &self.last_frame {
+                    let input = ac_scene::TransferInput::from_wire_frame(f);
+                    self.transfer_scene = Some(ac_scene::TransferScene::from_input(
+                        &input,
+                        state.derot_mode(),
+                        freq_range,
+                        (-80.0, 20.0),
+                        &mut self.meters,
+                        now_s,
+                    ));
+                }
+                self.scene = None;
+            }
+        }
+    }
+
+    /// Apply a keypress action in a test, then rebuild the active scene —
+    /// so a test can assert the scene changed, not merely the state.
+    #[cfg(test)]
+    pub(crate) fn press_for_test(&mut self, action: Action, now_s: f64) {
+        self.handle_action(action, false);
+        if let Some(frame) = self.last_frame.clone() {
+            self.ingest_frame_for_test(frame, now_s);
+        }
+    }
+
+    fn handle_action(&mut self, action: Action, shift: bool) {
         match action {
+            // -- global --
             Action::ToggleHelp => self.help_open = !self.help_open,
-            Action::MoveCursorLeft => state.move_cursor(0.95),
-            Action::MoveCursorRight => state.move_cursor(1.05),
-            Action::ZoomFreqIn => state.freq_range = state.freq_range.zoom(0.9),
-            Action::ZoomFreqOut => state.freq_range = state.freq_range.zoom(1.1),
-            Action::ZoomDbIn => state.db_range = state.db_range.zoom(0.9),
-            Action::ZoomDbOut => state.db_range = state.db_range.zoom(1.1),
-            Action::PanFreqLeft => state.freq_range = state.freq_range.pan(0.95),
-            Action::PanFreqRight => state.freq_range = state.freq_range.pan(1.05),
             Action::TriggerSnapshot => {
                 if let Some(session) = &self.session {
                     // Errors surface as a disconnected/no-op state,
@@ -76,19 +143,104 @@ impl AcViewApp {
                     let _ = crate::snapshot_flow::trigger_and_fetch(session.client());
                 }
             }
-            Action::OpenSnapshot | Action::CycleWeighting | Action::CycleIntegration => {
-                // File dialog / re-derivation wiring is UX-gated
-                // (routing: "trace distinction... is UX's call") —
-                // the orchestration functions themselves
-                // (snapshot_flow::open_local/rederive_scene) are
-                // implemented and tested; wiring a file picker is
-                // deferred to the UX pass, not a numeric concern.
+            Action::OpenSnapshot => {
+                // File-picker wiring is UX-gated; the orchestration
+                // (snapshot_flow::open_local) is implemented and tested.
             }
             Action::Quit => {
                 if let Some(session) = &mut self.session {
                     session.stop();
                 }
             }
+            Action::MoveCursorLeft => {
+                if let ViewKind::Spectrum(s) = &mut self.view {
+                    s.move_cursor(0.95)
+                }
+            }
+            Action::MoveCursorRight => {
+                if let ViewKind::Spectrum(s) = &mut self.view {
+                    s.move_cursor(1.05)
+                }
+            }
+            Action::ZoomFreqIn => self.zoom_freq(0.9),
+            Action::ZoomFreqOut => self.zoom_freq(1.1),
+            Action::PanFreqLeft => self.pan_freq(0.95),
+            Action::PanFreqRight => self.pan_freq(1.05),
+            Action::ZoomDbIn => {
+                if let ViewKind::Spectrum(s) = &mut self.view {
+                    s.db_range = s.db_range.zoom(0.9)
+                }
+            }
+            Action::ZoomDbOut => {
+                if let ViewKind::Spectrum(s) = &mut self.view {
+                    s.db_range = s.db_range.zoom(1.1)
+                }
+            }
+            // -- spectrum view --
+            Action::CycleWeighting | Action::CycleIntegration => {
+                // Snapshot re-derivation wiring is UX-gated; the
+                // rederive_scene orchestration is implemented and tested.
+            }
+            Action::ToggleRefTrace => {
+                if let ViewKind::Spectrum(s) = &mut self.view {
+                    s.ref_trace_visible = !s.ref_trace_visible
+                }
+            }
+            // -- transfer view: toggles --
+            Action::ToggleRawPhase => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.toggle_raw_phase()
+                }
+            }
+            Action::CycleDerotReference => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.cycle_derot()
+                }
+            }
+            Action::OpenSettings => {
+                // Settings overlay is M4c (#182); M4b binds the key.
+            }
+            // -- transfer view: stimulus (local state; M4c wires the
+            // machine + set_drive) --
+            Action::StimulusArmOrStop => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.arm_or_stop()
+                }
+            }
+            Action::StimulusFireOrStop => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.fire_or_stop()
+                }
+            }
+            Action::StimulusCancel => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.cancel()
+                }
+            }
+            Action::StimulusLevelUp => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.nudge_level(true, shift)
+                }
+            }
+            Action::StimulusLevelDown => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.nudge_level(false, shift)
+                }
+            }
+        }
+    }
+
+    fn zoom_freq(&mut self, factor: f64) {
+        match &mut self.view {
+            ViewKind::Spectrum(s) => s.freq_range = s.freq_range.zoom(factor),
+            ViewKind::Transfer(t) => t.freq_range = t.freq_range.zoom(factor),
+        }
+    }
+
+    fn pan_freq(&mut self, factor: f64) {
+        match &mut self.view {
+            ViewKind::Spectrum(s) => s.freq_range = s.freq_range.pan(factor),
+            ViewKind::Transfer(t) => t.freq_range = t.freq_range.pan(factor),
         }
     }
 }
@@ -96,13 +248,18 @@ impl AcViewApp {
 impl eframe::App for AcViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let view_id = self.view.id();
+        let mut pressed: Vec<(Action, bool)> = Vec::new();
         ctx.input(|i| {
-            for binding in BINDINGS {
+            for binding in bindings_for(view_id) {
                 if i.key_pressed(binding.key) {
-                    self.handle_action(binding.action);
+                    pressed.push((binding.action, i.modifiers.shift));
                 }
             }
         });
+        for (action, shift) in pressed {
+            self.handle_action(action, shift);
+        }
 
         let mut got_new_frame = false;
         if let Some(session) = &mut self.session {
@@ -120,20 +277,44 @@ impl eframe::App for AcViewApp {
             }
         }
 
-        let ViewKind::Spectrum(state) = &self.view;
-        let ranges = (
-            (state.freq_range.min(), state.freq_range.max()),
-            (state.db_range.min(), state.db_range.max()),
-        );
-        // Rebuild the scene once per pass — never once per backlog
-        // frame — either because a new frame arrived or because
-        // zoom/pan changed the ranges. Range-only changes must also
-        // rebuild, or zoom/pan appears frozen on a paused/snapshot
-        // scene until the next frame happens to arrive.
-        if let Some(wire_frame) = &self.last_frame {
-            if got_new_frame || self.last_scene_ranges != Some(ranges) {
-                self.scene = Some(Scene::from_wire_frame(wire_frame, ranges.0, ranges.1));
-                self.last_scene_ranges = Some(ranges);
+        // Rebuild the scene once per pass — never once per backlog frame
+        // — either because a new frame arrived or because zoom/pan
+        // changed the ranges. Range-only changes must also rebuild, or
+        // zoom/pan appears frozen on a paused/snapshot scene until the
+        // next frame happens to arrive. Only the active view's scene is
+        // built; the other stays `None`.
+        match &self.view {
+            ViewKind::Spectrum(state) => {
+                let ranges = (
+                    (state.freq_range.min(), state.freq_range.max()),
+                    (state.db_range.min(), state.db_range.max()),
+                );
+                if let Some(wire_frame) = &self.last_frame {
+                    if got_new_frame || self.last_scene_ranges != Some(ranges) {
+                        self.scene = Some(Scene::from_wire_frame(wire_frame, ranges.0, ranges.1));
+                        self.last_scene_ranges = Some(ranges);
+                    }
+                }
+                self.transfer_scene = None;
+            }
+            ViewKind::Transfer(state) => {
+                // dB range for the magnitude pane is fixed for now; the
+                // phase pane is a fixed ±180° band inside ac-scene.
+                let db_range = (-80.0, 20.0);
+                let freq_range = (state.freq_range.min(), state.freq_range.max());
+                let now_s = ctx.input(|i| i.time);
+                if let Some(wire_frame) = &self.last_frame {
+                    let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
+                    self.transfer_scene = Some(ac_scene::TransferScene::from_input(
+                        &input,
+                        state.derot_mode(),
+                        freq_range,
+                        db_range,
+                        &mut self.meters,
+                        now_s,
+                    ));
+                }
+                self.scene = None;
             }
         }
 
@@ -153,11 +334,17 @@ impl eframe::App for AcViewApp {
             },
         };
         ui.label(status);
-        draw_view(&self.view, ui, self.scene.as_ref());
+        draw_view(
+            &self.view,
+            ui,
+            self.scene.as_ref(),
+            self.transfer_scene.as_ref(),
+        );
 
         if self.help_open {
+            let help = crate::keys::help_text(self.view.id());
             egui::Window::new("help").show(&ctx, |ui| {
-                ui.label(crate::keys::help_text());
+                ui.label(help);
             });
         }
 
@@ -193,4 +380,92 @@ pub fn connect_and_launch(
     app.weighting = weighting;
     app.integration = integration;
     Ok(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::Action;
+
+    fn transfer_frame() -> ac_scene::WireFrame {
+        // A mis-estimated delay so the wire carries non-zero phase and
+        // Session (τ_derot 0) differs from the other modes — otherwise
+        // cycling would be a no-op and the test could not fail on the bug
+        // it names.
+        let json = serde_json::json!({
+            "type": "transfer_stream",
+            "sr": 48000,
+            "meas_channel": 0,
+            "ref_channel": 1,
+            "spec_freqs": [100.0, 1000.0, 10000.0],
+            "meas_spectrum": [0.1, 0.1, 0.1],
+            "ref_spectrum": [0.1, 0.1, 0.1],
+            "spl": null,
+            "spl_weighting": "Z",
+            "spl_integration": "fast",
+            "freqs": [100.0, 1000.0, 10000.0],
+            "magnitude_db": [-6.0, -6.0, -6.0],
+            "phase_deg": [-18.0, -180.0, 60.0],
+            "coherence": [0.9, 0.9, 0.9],
+            "delay_samples": 96,
+            "delay_ms": 2.0,
+            "meas_peak_dbfs": -6.0,
+            "ref_peak_dbfs": -12.0
+        });
+        serde_json::from_value(json).expect("wire frame")
+    }
+
+    // Scene-accessor AC (no shape scraping): a derot keypress must change
+    // the BUILT transfer scene's phase segments — not merely the
+    // `derot_mode()` state field. Closes the hole a state-only assertion
+    // cannot: a mode change that fails to reach the scene.
+    #[test]
+    fn cycling_derot_changes_the_built_transfer_scene_phase() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(transfer_frame(), 0.0);
+
+        let before: Vec<Vec<(f64, f64)>> = app
+            .current_transfer_scene()
+            .expect("scene built")
+            .phase
+            .segments
+            .clone();
+
+        app.press_for_test(Action::CycleDerotReference, 0.1);
+
+        let after = &app
+            .current_transfer_scene()
+            .expect("scene rebuilt")
+            .phase
+            .segments;
+        assert_ne!(
+            &before, after,
+            "cycling de-rotation reference did not change the built phase pane"
+        );
+    }
+
+    // The magnitude pane must NOT move when only the de-rotation
+    // reference changes — de-rotation is a phase-only operation.
+    #[test]
+    fn cycling_derot_leaves_the_magnitude_pane_unchanged() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(transfer_frame(), 0.0);
+        let before = app
+            .current_transfer_scene()
+            .unwrap()
+            .magnitude
+            .segments
+            .clone();
+        app.press_for_test(Action::CycleDerotReference, 0.1);
+        let after = &app.current_transfer_scene().unwrap().magnitude.segments;
+        assert_eq!(&before, after, "de-rotation moved the magnitude pane");
+    }
 }

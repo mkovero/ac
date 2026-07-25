@@ -24,5 +24,12 @@ fn main() -> eframe::Result<()> {
     });
 
     let options = eframe::NativeOptions::default();
-    eframe::run_native("ac-view", options, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native(
+        "ac-view",
+        options,
+        Box::new(|cc| {
+            ac_view::fonts::install(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    )
 }
