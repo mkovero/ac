@@ -245,15 +245,9 @@ impl DerotChoice {
 
 /// Client-visible stimulus state. M4b holds the state and the level so
 /// the keys are not dead and the banner can render; the full machine
-/// (dead-man resend, 5 s auto-disarm, `set_drive` wire calls, entry-point
-/// clamp) is M4c (#182). Level steps and the arm/fire/stop transitions
-/// live here because the banner reads them.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StimulusState {
-    Idle,
-    Armed,
-    Driving,
-}
+/// clamp) is the [`crate::stimulus::StimulusMachine`], which this state
+/// owns as of M4c. The banner reads the machine's state and level.
+pub use crate::stimulus::StimState;
 
 pub struct TransferViewState {
     pub freq_range: FreqRange,
@@ -261,8 +255,10 @@ pub struct TransferViewState {
     /// `P` toggles raw phase; remembers the previous choice so a second
     /// press restores it rather than landing on Session unconditionally.
     prev_derot: DerotChoice,
-    pub stimulus: StimulusState,
-    pub level_dbfs: f64,
+    /// The full drive-path safety machine (M4c) — arm/fire/stop,
+    /// auto-disarm, clamp, keepalive. The app drives it and sends the
+    /// [`crate::stimulus::DriveCmd`]s it emits.
+    pub stimulus: crate::stimulus::StimulusMachine,
     /// The open snapshot's stored delay (ms), fed to `DerotChoice::Snapshot`.
     /// M4c wires the open-snapshot flow; until then it stays 0.
     pub snapshot_delay_ms: f64,
@@ -270,18 +266,23 @@ pub struct TransferViewState {
 
 impl Default for TransferViewState {
     fn default() -> Self {
-        Self {
-            freq_range: FreqRange::default(),
-            derot: DerotChoice::Session,
-            prev_derot: DerotChoice::Session,
-            stimulus: StimulusState::Idle,
-            level_dbfs: -30.0,
-            snapshot_delay_ms: 0.0,
-        }
+        // Fallback ceiling/start; the app rebuilds with config's
+        // `drive_max_dbfs` via [`TransferViewState::new`].
+        Self::new(-10.0, -30.0)
     }
 }
 
 impl TransferViewState {
+    pub fn new(drive_max_dbfs: f64, start_level_dbfs: f64) -> Self {
+        Self {
+            freq_range: FreqRange::default(),
+            derot: DerotChoice::Session,
+            prev_derot: DerotChoice::Session,
+            stimulus: crate::stimulus::StimulusMachine::new(drive_max_dbfs, start_level_dbfs),
+            snapshot_delay_ms: 0.0,
+        }
+    }
+
     pub fn cycle_derot(&mut self) {
         self.derot = self.derot.next();
     }
@@ -294,35 +295,6 @@ impl TransferViewState {
             self.prev_derot = self.derot;
             self.derot = DerotChoice::Raw;
         }
-    }
-
-    /// `↑`/`↓`. `big` is the Shift-modified 3 dB step (D7); the
-    /// authoritative clamp to `drive_max_dbfs` is the server's (M4d) and
-    /// the client entry-point clamp is M4c — M4b only moves the number.
-    pub fn nudge_level(&mut self, up: bool, big: bool) {
-        let step = if big { 3.0 } else { 1.0 };
-        self.level_dbfs += if up { step } else { -step };
-    }
-
-    /// Space: Idle→Armed, else stop.
-    pub fn arm_or_stop(&mut self) {
-        self.stimulus = match self.stimulus {
-            StimulusState::Idle => StimulusState::Armed,
-            _ => StimulusState::Idle,
-        };
-    }
-
-    /// Enter: Armed→Driving, else stop.
-    pub fn fire_or_stop(&mut self) {
-        self.stimulus = match self.stimulus {
-            StimulusState::Armed => StimulusState::Driving,
-            _ => StimulusState::Idle,
-        };
-    }
-
-    /// Esc: stop from any state.
-    pub fn cancel(&mut self) {
-        self.stimulus = StimulusState::Idle;
     }
 
     pub fn derot_mode(&self) -> ac_scene::DerotMode {
@@ -357,15 +329,16 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
     // (never green); strings are verbatim ac-scene (F5). Channel/port
     // come from config in M4c (#182) — placeholder channel for now, but
     // the STRING is ac-scene's, which is what F5 checks.
-    let banner = match state.stimulus {
-        StimulusState::Idle => None,
-        StimulusState::Armed => Some((
-            ac_scene::readout::format_armed_banner(0, None, state.level_dbfs),
+    let level = state.stimulus.level_dbfs();
+    let banner = match state.stimulus.state() {
+        StimState::Idle => None,
+        StimState::Armed => Some((
+            ac_scene::readout::format_armed_banner(0, None, level),
             18.0,
             COLOR_VALUE,
         )),
-        StimulusState::Driving => Some((
-            ac_scene::readout::format_driving_banner(0, None, state.level_dbfs),
+        StimState::Driving => Some((
+            ac_scene::readout::format_driving_banner(0, None, level),
             24.0,
             COLOR_SIGNAL,
         )),
@@ -559,32 +532,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stimulus_transitions_follow_arm_fire_stop() {
-        let mut t = TransferViewState::default();
-        assert_eq!(t.stimulus, StimulusState::Idle);
-        t.arm_or_stop();
-        assert_eq!(t.stimulus, StimulusState::Armed);
-        t.fire_or_stop();
-        assert_eq!(t.stimulus, StimulusState::Driving);
-        // Stop works from Driving (Space).
-        t.arm_or_stop();
-        assert_eq!(t.stimulus, StimulusState::Idle);
-        // And Esc stops from Armed.
-        t.arm_or_stop();
-        t.cancel();
-        assert_eq!(t.stimulus, StimulusState::Idle);
-    }
-
-    #[test]
-    fn level_nudges_use_1db_and_3db_steps() {
-        let mut t = TransferViewState::default();
-        let base = t.level_dbfs;
-        t.nudge_level(true, false);
-        assert!((t.level_dbfs - (base + 1.0)).abs() < 1e-9);
-        t.nudge_level(true, true);
-        assert!((t.level_dbfs - (base + 4.0)).abs() < 1e-9);
-        t.nudge_level(false, false);
-        assert!((t.level_dbfs - (base + 3.0)).abs() < 1e-9);
-    }
+    // Stimulus transitions, level steps, arm-expiry, clamp, and keepalive
+    // are the StimulusMachine's contract now (M4c) — exhaustively tested
+    // in `stimulus.rs`, not duplicated here against a placeholder.
 }

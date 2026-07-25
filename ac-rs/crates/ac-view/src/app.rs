@@ -31,8 +31,23 @@ pub struct AcViewApp {
     transfer_scene: Option<ac_scene::TransferScene>,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     help_open: bool,
+    /// The settings overlay (`G`, transfer view). `None` = closed.
+    settings: Option<crate::settings::SettingsOverlay>,
     weighting: WeightingCurve,
     integration: &'static str,
+    /// The single seam a future key-capturing UI mode flips to signal the
+    /// panic cluster can't reach the machine this frame — gates the
+    /// keepalive (`panic_reachable`). `false` in production today
+    /// (panic-first keeps the panic keys reachable); a modal that ever
+    /// swallows them sets it, and the keepalive goes silent so the
+    /// dead-man takes over.
+    panic_keys_obstructed: bool,
+    /// Every `DriveCmd` relayed, recorded so app-adapter tests can assert
+    /// what reached `set_drive` without a live daemon — the layer between
+    /// the proven machine and the wire, which is where the drive-path
+    /// hole lived.
+    #[cfg(test)]
+    sent_drive: Vec<crate::stimulus::DriveCmd>,
 }
 
 impl AcViewApp {
@@ -50,8 +65,12 @@ impl AcViewApp {
                 ac_scene::MeterState::default(),
             ),
             help_open: false,
+            settings: None,
             weighting: WeightingCurve::Z,
             integration: "fast",
+            panic_keys_obstructed: false,
+            #[cfg(test)]
+            sent_drive: Vec::new(),
         }
     }
 
@@ -60,7 +79,10 @@ impl AcViewApp {
     /// view is fixed at construction and never switches (§1).
     pub fn new_transfer(endpoint: Endpoint) -> Self {
         let mut app = Self::new(endpoint);
-        app.view = ViewKind::Transfer(TransferViewState::default());
+        // Seed the stimulus ceiling from config's `drive_max_dbfs` so the
+        // client clamp matches the server's authoritative one.
+        let cfg = ac_core::config::load(None).unwrap_or_default();
+        app.view = ViewKind::Transfer(TransferViewState::new(cfg.drive_max_dbfs, -30.0));
         app
     }
 
@@ -148,6 +170,10 @@ impl AcViewApp {
                 // (snapshot_flow::open_local) is implemented and tested.
             }
             Action::Quit => {
+                // Best-effort drive-off on a clean quit (§5); the dead-man
+                // is the guarantee if the process dies uncleanly.
+                let off = self.transfer_stimulus(|m, _| m.on_quit());
+                self.send_drive(off);
                 if let Some(session) = &mut self.session {
                     session.stop();
                 }
@@ -197,36 +223,203 @@ impl AcViewApp {
                     t.cycle_derot()
                 }
             }
-            Action::OpenSettings => {
-                // Settings overlay is M4c (#182); M4b binds the key.
-            }
-            // -- transfer view: stimulus (local state; M4c wires the
-            // machine + set_drive) --
+            Action::OpenSettings => self.open_settings(),
+            // -- transfer view: stimulus. Each key drives the safety
+            // machine; the DriveCmd it emits (if any) goes to the daemon
+            // via set_drive. The machine owns arm/fire/stop, auto-disarm,
+            // clamp, and keepalive — the app only relays. --
             Action::StimulusArmOrStop => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.arm_or_stop()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_space(now));
+                self.send_drive(cmd);
             }
             Action::StimulusFireOrStop => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.fire_or_stop()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_enter(now));
+                self.send_drive(cmd);
             }
             Action::StimulusCancel => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.cancel()
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_esc(now));
+                self.send_drive(cmd);
             }
             Action::StimulusLevelUp => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.nudge_level(true, shift)
-                }
+                let cmd = self.transfer_stimulus(|m, now| m.press_up(now, shift));
+                self.send_drive(cmd);
             }
             Action::StimulusLevelDown => {
-                if let ViewKind::Transfer(t) = &mut self.view {
-                    t.nudge_level(false, shift)
+                let cmd = self.transfer_stimulus(|m, now| m.press_down(now, shift));
+                self.send_drive(cmd);
+            }
+        }
+    }
+
+    /// Apply `f` to the transfer view's stimulus machine with a fresh
+    /// `now`, returning any command it emits. No-op (None) in the
+    /// spectrum view.
+    fn transfer_stimulus(
+        &mut self,
+        f: impl FnOnce(
+            &mut crate::stimulus::StimulusMachine,
+            std::time::Instant,
+        ) -> Option<crate::stimulus::DriveCmd>,
+    ) -> Option<crate::stimulus::DriveCmd> {
+        if let ViewKind::Transfer(t) = &mut self.view {
+            f(&mut t.stimulus, std::time::Instant::now())
+        } else {
+            None
+        }
+    }
+
+    /// Relay a stimulus command to the daemon. Best-effort — a send
+    /// failure surfaces as the dead-man dropping drive, never a crash.
+    fn send_drive(&mut self, cmd: Option<crate::stimulus::DriveCmd>) {
+        let Some(cmd) = cmd else { return };
+        #[cfg(test)]
+        self.sent_drive.push(cmd);
+        if let Some(session) = &self.session {
+            session.set_drive(cmd.on, cmd.level_dbfs);
+        }
+    }
+
+    /// Open the settings overlay — but **auto-stop the drive first** if
+    /// the stimulus is live (ratified fix, PR #197). Configuration is an
+    /// idle-state activity and `apply()` relaunches the session anyway,
+    /// so there is nothing to preserve by keeping the drive on under the
+    /// menu — and leaving it on is exactly what trapped the panic-stop.
+    /// Toggling closed (already open) is a cancel: no side effects.
+    fn open_settings(&mut self) {
+        if self.settings.is_some() {
+            self.settings = None;
+            return;
+        }
+        let stop = self.transfer_stimulus(|m, _| m.on_stop());
+        self.send_drive(stop);
+        let start = match &self.view {
+            ViewKind::Transfer(t) => t.stimulus.level_dbfs(),
+            _ => -30.0,
+        };
+        let cfg = ac_core::config::load(None).unwrap_or_default();
+        self.settings = Some(crate::settings::SettingsOverlay::from_config(&cfg, start));
+    }
+
+    /// **Drive-precedes-modal-dispatch** (structural safety invariant,
+    /// PR #197). While the stimulus is live (Armed/Driving), the panic
+    /// cluster — Space / Enter / Esc — means STOP, and nothing intercepts
+    /// it: not the settings modal, not any modal added later. Runs before
+    /// modal or normal dispatch and consumes the frame's input when it
+    /// fires. Returns whether it consumed the input.
+    ///
+    /// This holds by construction for every future modal — the class of
+    /// bug that opened this hole was a modal (settings) added with no
+    /// awareness of the stimulus invariant.
+    fn panic_first(&mut self, space: bool, enter: bool, esc: bool) -> bool {
+        let live = matches!(
+            &self.view,
+            ViewKind::Transfer(t) if t.stimulus.state() != crate::stimulus::StimState::Idle
+        );
+        if !live || !(space || enter || esc) {
+            return false;
+        }
+        let cmd = self.transfer_stimulus(|m, now| {
+            if space {
+                m.press_space(now)
+            } else if enter {
+                m.press_enter(now)
+            } else {
+                m.press_esc(now)
+            }
+        });
+        self.send_drive(cmd);
+        true
+    }
+
+    /// Whether the panic path can reach the machine this frame — the gate
+    /// on the keepalive (ratified backstop, PR #197). With
+    /// [`Self::panic_first`] running unconditionally before every modal,
+    /// the panic keys are always reachable, so this is `true` in
+    /// production today. `panic_keys_obstructed` is the single seam a
+    /// future key-capturing UI mode flips: set it, and the keepalive stops
+    /// asserting the drive — handing the daemon's 1.5 s dead-man back its
+    /// job instead of the UI's own tick keeping an un-stoppable drive
+    /// alive (the exact mechanism that made the trapped-modal hole
+    /// lethal).
+    fn panic_reachable(&self) -> bool {
+        !self.panic_keys_obstructed
+    }
+
+    /// Per-frame keepalive, gated on panic-reachability (PR #197). While
+    /// Driving and reachable, re-sends the current state every 250 ms so
+    /// the daemon's dead-man never trips on a live session; while the
+    /// panic path is obstructed, it stays **silent** so the dead-man is
+    /// the backstop. `now` is the frame clock (real time in the app, a
+    /// controlled instant in tests).
+    fn keepalive_tick(&mut self, now: std::time::Instant) {
+        if !self.panic_reachable() {
+            return;
+        }
+        let cmd = if let ViewKind::Transfer(t) = &mut self.view {
+            t.stimulus.tick(now)
+        } else {
+            None
+        };
+        self.send_drive(cmd);
+    }
+
+    /// Route a frame's overlay keypresses. Enter applies (persist +
+    /// relaunch); Esc/`G` cancels with zero side effects (just drops the
+    /// overlay). Everything else edits in memory only.
+    fn handle_settings_keys(&mut self, ev: SettingsKeys) {
+        let Some(overlay) = &mut self.settings else {
+            return;
+        };
+        if ev.esc {
+            self.settings = None; // cancel — nothing written
+            return;
+        }
+        if ev.up {
+            overlay.move_row(false);
+        }
+        if ev.down {
+            overlay.move_row(true);
+        }
+        if ev.left {
+            overlay.adjust_value(false);
+        }
+        if ev.right {
+            overlay.adjust_value(true);
+        }
+        if ev.enter {
+            // Persist (last-writer-wins) then relaunch on the new
+            // channels and reseed the stimulus start level.
+            match overlay.apply(None) {
+                Ok(applied) => {
+                    self.settings = None;
+                    self.relaunch(applied);
+                }
+                Err(e) => {
+                    eprintln!("ac-view: settings apply failed: {e}");
+                    self.settings = None;
                 }
             }
+        }
+    }
+
+    /// Relaunch the session on new channels and reseed the transfer
+    /// view's stimulus (drive off, idle, new start level + ceiling). The
+    /// session is stopped first so the daemon's busy guard accepts the
+    /// new `transfer_stream`.
+    fn relaunch(&mut self, applied: crate::settings::Applied) {
+        if let Some(session) = &mut self.session {
+            session.stop();
+            let _ = session.launch(
+                applied.meas_channel,
+                applied.ref_channel,
+                self.weighting,
+                self.integration,
+            );
+        }
+        if let ViewKind::Transfer(t) = &mut self.view {
+            let cfg = ac_core::config::load(None).unwrap_or_default();
+            t.stimulus =
+                crate::stimulus::StimulusMachine::new(cfg.drive_max_dbfs, applied.start_level_dbfs);
         }
     }
 
@@ -245,21 +438,66 @@ impl AcViewApp {
     }
 }
 
+/// One frame's overlay-navigation keypresses (M4c settings modal).
+#[derive(Default)]
+struct SettingsKeys {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    enter: bool,
+    esc: bool,
+}
+
 impl eframe::App for AcViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let view_id = self.view.id();
-        let mut pressed: Vec<(Action, bool)> = Vec::new();
-        ctx.input(|i| {
-            for binding in bindings_for(view_id) {
-                if i.key_pressed(binding.key) {
-                    pressed.push((binding.action, i.modifiers.shift));
-                }
-            }
+        use egui::Key;
+
+        // Drive-precedes-modal-dispatch: the panic cluster is checked and
+        // consumed FIRST, before any modal or normal binding sees a key,
+        // so a live stimulus can always be stopped from the keyboard —
+        // holds for every present and future modal.
+        let (space, enter, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::Space),
+                i.key_pressed(Key::Enter),
+                i.key_pressed(Key::Escape),
+            )
         });
-        for (action, shift) in pressed {
-            self.handle_action(action, shift);
+        let panic_consumed = self.panic_first(space, enter, esc);
+
+        if panic_consumed {
+            // The panic keypress owns this frame — no further dispatch.
+        } else if self.settings.is_some() {
+            let mut ev = SettingsKeys::default();
+            ctx.input(|i| {
+                ev.up = i.key_pressed(Key::ArrowUp);
+                ev.down = i.key_pressed(Key::ArrowDown);
+                ev.left = i.key_pressed(Key::ArrowLeft);
+                ev.right = i.key_pressed(Key::ArrowRight);
+                ev.enter = i.key_pressed(Key::Enter);
+                ev.esc = i.key_pressed(Key::Escape) || i.key_pressed(Key::G);
+            });
+            self.handle_settings_keys(ev);
+        } else {
+            let view_id = self.view.id();
+            let mut pressed: Vec<(Action, bool)> = Vec::new();
+            ctx.input(|i| {
+                for binding in bindings_for(view_id) {
+                    if i.key_pressed(binding.key) {
+                        pressed.push((binding.action, i.modifiers.shift));
+                    }
+                }
+            });
+            for (action, shift) in pressed {
+                self.handle_action(action, shift);
+            }
         }
+
+        // Per-frame keepalive, gated on panic-reachability (see
+        // keepalive_tick).
+        self.keepalive_tick(std::time::Instant::now());
 
         let mut got_new_frame = false;
         if let Some(session) = &mut self.session {
@@ -348,6 +586,21 @@ impl eframe::App for AcViewApp {
             });
         }
 
+        if let Some(overlay) = &self.settings {
+            let selected = overlay.selected_row();
+            let rows = overlay.rows();
+            egui::Window::new("settings")
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    for (row, value) in &rows {
+                        let marker = if *row == selected { "▸ " } else { "  " };
+                        ui.label(format!("{marker}{}:  {value}", row.label()));
+                    }
+                    ui.separator();
+                    ui.label("↑↓ row   ←→ value   Enter apply   Esc cancel");
+                });
+        }
+
         // Continuous repaint (paced to vsync by egui/eframe) while a
         // session is live, so the display updates every frame without
         // needing mouse-move input events to force a repaint — the
@@ -359,6 +612,20 @@ impl eframe::App for AcViewApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// Resolve the transfer session's measurement and reference channels
+/// from config (M4c, #182). The hardcoded 0/1 is gone: `input_channel`
+/// is the measurement leg, and `reference_channel` is **required** —
+/// the transfer view is a two-channel H1 estimate with no meaningful
+/// default reference, so a missing one is a fatal error carrying the
+/// exact fix, not a silent fallback that would measure against the
+/// wrong port.
+pub fn resolve_transfer_channels(cfg: &ac_core::config::Config) -> Result<(u32, u32), String> {
+    let reference = cfg.reference_channel.ok_or_else(|| {
+        "reference channel not configured — run `ac setup reference <N>`".to_string()
+    })?;
+    Ok((cfg.input_channel, reference))
 }
 
 /// Construct an `AcViewApp` already connected to `endpoint` and with a
@@ -386,6 +653,185 @@ pub fn connect_and_launch(
 mod tests {
     use super::*;
     use crate::keys::Action;
+    use crate::stimulus::StimState;
+
+    fn transfer_app() -> AcViewApp {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        // Ceiling −10, start −20; no session (sends still record).
+        app.view = ViewKind::Transfer(TransferViewState::new(-10.0, -20.0));
+        app
+    }
+
+    fn stim_state(app: &AcViewApp) -> StimState {
+        match &app.view {
+            ViewKind::Transfer(t) => t.stimulus.state(),
+            _ => panic!("not transfer view"),
+        }
+    }
+
+    fn drive(app: &mut AcViewApp) {
+        app.handle_action(Action::StimulusArmOrStop, false); // Idle -> Armed
+        app.handle_action(Action::StimulusFireOrStop, false); // Armed -> Driving
+        assert_eq!(stim_state(app), StimState::Driving);
+    }
+
+    // The fix's primary guarantee: opening settings while Driving stops
+    // the drive first — it never stays on under the menu.
+    #[test]
+    fn opening_settings_while_driving_auto_stops_the_drive() {
+        let mut app = transfer_app();
+        drive(&mut app);
+        app.sent_drive.clear();
+
+        app.handle_action(Action::OpenSettings, false);
+
+        assert_eq!(
+            stim_state(&app),
+            StimState::Idle,
+            "drive not stopped on open"
+        );
+        assert!(app.settings.is_some(), "overlay did not open");
+        let last = app.sent_drive.last().expect("an off must be relayed");
+        assert!(
+            !last.on,
+            "opening settings while driving must relay set_drive off"
+        );
+    }
+
+    // The structural invariant: even with a modal open (simulating a
+    // future modal that does NOT auto-stop), the panic cluster stops a
+    // live machine before the modal sees the key. This is the AC "panic
+    // works from Driving regardless of UI modal state" through the adapter.
+    #[test]
+    fn panic_first_stops_a_live_machine_even_with_a_modal_open() {
+        let mut app = transfer_app();
+        drive(&mut app);
+        // Force the overlay open WITHOUT auto-stop — a future modal might.
+        app.settings = Some(crate::settings::SettingsOverlay::from_config(
+            &ac_core::config::Config::default(),
+            -20.0,
+        ));
+        app.sent_drive.clear();
+
+        // Esc arrives. panic_first must consume it and stop the drive —
+        // not let the overlay's Esc-cancel swallow it.
+        let consumed = app.panic_first(false, false, true);
+
+        assert!(consumed, "panic key must be consumed by the stop path");
+        assert_eq!(stim_state(&app), StimState::Idle, "drive not stopped");
+        let last = app.sent_drive.last().expect("an off must be relayed");
+        assert!(!last.on, "panic must relay set_drive off");
+    }
+
+    // Each panic key (Space/Enter/Esc) stops from Driving through the
+    // adapter — the machine's own test proves the transition; this proves
+    // the app relays the off for each.
+    #[test]
+    fn every_panic_key_relays_off_from_driving() {
+        for key in ["space", "enter", "esc"] {
+            let mut app = transfer_app();
+            drive(&mut app);
+            app.sent_drive.clear();
+            let consumed = app.panic_first(key == "space", key == "enter", key == "esc");
+            assert!(consumed, "{key} not consumed");
+            assert_eq!(stim_state(&app), StimState::Idle, "{key} did not stop");
+            assert!(!app.sent_drive.last().unwrap().on, "{key} relayed no off");
+        }
+    }
+
+    // Drive the machine directly to Driving at a controlled instant, so
+    // the keepalive cadence can be exercised on logical time.
+    fn drive_at(app: &mut AcViewApp, t0: std::time::Instant) {
+        if let ViewKind::Transfer(t) = &mut app.view {
+            t.stimulus.press_space(t0);
+            t.stimulus.press_enter(t0); // last_send = t0
+        }
+        assert_eq!(stim_state(app), StimState::Driving);
+        app.sent_drive.clear();
+    }
+
+    // Keepalive backstop, happy path: while Driving and reachable, a tick
+    // past the 250 ms interval relays set_drive on.
+    #[test]
+    fn keepalive_relays_on_while_driving_and_reachable() {
+        let mut app = transfer_app();
+        let t0 = std::time::Instant::now();
+        drive_at(&mut app, t0);
+        assert!(app.panic_reachable());
+
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(300));
+
+        let last = app
+            .sent_drive
+            .last()
+            .expect("keepalive must relay while reachable");
+        assert!(last.on, "reachable keepalive must assert the drive");
+    }
+
+    // Keepalive backstop, the hazard that matters: when the panic path is
+    // obstructed, the keepalive stays SILENT — no set_drive on — so the
+    // daemon's dead-man takes over instead of the UI's tick keeping an
+    // un-stoppable drive alive.
+    #[test]
+    fn keepalive_stays_silent_when_panic_is_obstructed() {
+        let mut app = transfer_app();
+        let t0 = std::time::Instant::now();
+        drive_at(&mut app, t0);
+
+        app.panic_keys_obstructed = true; // a future capturing modal
+        assert!(!app.panic_reachable());
+
+        // Even well past the keepalive interval, nothing is relayed.
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(300));
+        app.keepalive_tick(t0 + std::time::Duration::from_millis(600));
+
+        assert!(
+            app.sent_drive.is_empty(),
+            "obstructed keepalive must not assert the drive — got {:?}",
+            app.sent_drive
+        );
+    }
+
+    // panic_first is a no-op when Idle (does not consume keys the normal
+    // dispatch needs — e.g. Enter/Esc/Space in the settings overlay).
+    #[test]
+    fn panic_first_is_a_noop_when_idle() {
+        let mut app = transfer_app();
+        assert_eq!(stim_state(&app), StimState::Idle);
+        assert!(
+            !app.panic_first(true, true, true),
+            "idle must not consume panic keys"
+        );
+        assert!(app.sent_drive.is_empty());
+    }
+
+    #[test]
+    fn missing_reference_channel_is_a_fatal_error_with_the_setup_hint() {
+        let cfg = ac_core::config::Config {
+            input_channel: 2,
+            reference_channel: None,
+            ..ac_core::config::Config::default()
+        };
+        let err = resolve_transfer_channels(&cfg).unwrap_err();
+        assert!(
+            err.contains("ac setup reference"),
+            "error must carry the fix hint: {err}"
+        );
+    }
+
+    #[test]
+    fn configured_channels_resolve_to_input_and_reference() {
+        let cfg = ac_core::config::Config {
+            input_channel: 2,
+            reference_channel: Some(5),
+            ..ac_core::config::Config::default()
+        };
+        assert_eq!(resolve_transfer_channels(&cfg).unwrap(), (2, 5));
+    }
 
     fn transfer_frame() -> ac_scene::WireFrame {
         // A mis-estimated delay so the wire carries non-zero phase and

@@ -26,7 +26,7 @@
 //! versus off.
 
 use ac_scene::{DerotMode, MeterState, Scene, SceneInput, Source, TransferInput, TransferScene};
-use ac_view::view::{draw_view, SpectrumViewState, StimulusState, TransferViewState, ViewKind};
+use ac_view::view::{draw_view, SpectrumViewState, StimState, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -89,10 +89,22 @@ fn spectrum_scene() -> Scene {
     Scene::from_input(input, FREQ_RANGE, (-80.0, 0.0))
 }
 
-fn transfer_state(stimulus: StimulusState) -> TransferViewState {
-    let mut s = TransferViewState::default();
-    s.stimulus = stimulus;
-    s.level_dbfs = -20.0;
+fn transfer_state(target: StimState) -> TransferViewState {
+    // Drive the real machine to the target state via key presses (start
+    // level −20, ceiling −10). Idle = untouched; Armed = Space; Driving =
+    // Space then Enter.
+    let mut s = TransferViewState::new(-10.0, -20.0);
+    let now = std::time::Instant::now();
+    match target {
+        StimState::Idle => {}
+        StimState::Armed => {
+            s.stimulus.press_space(now);
+        }
+        StimState::Driving => {
+            s.stimulus.press_space(now);
+            s.stimulus.press_enter(now);
+        }
+    }
     s
 }
 
@@ -100,7 +112,7 @@ fn transfer_state(stimulus: StimulusState) -> TransferViewState {
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_live_masked_gap() {
     let scene = transfer_scene();
-    let view = ViewKind::Transfer(transfer_state(StimulusState::Idle));
+    let view = ViewKind::Transfer(transfer_state(StimState::Idle));
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
@@ -114,7 +126,7 @@ fn snapshot_transfer_live_masked_gap() {
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_armed_banner() {
     let scene = transfer_scene();
-    let view = ViewKind::Transfer(transfer_state(StimulusState::Armed));
+    let view = ViewKind::Transfer(transfer_state(StimState::Armed));
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
@@ -128,7 +140,7 @@ fn snapshot_transfer_armed_banner() {
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_driving_banner() {
     let scene = transfer_scene();
-    let view = ViewKind::Transfer(transfer_state(StimulusState::Driving));
+    let view = ViewKind::Transfer(transfer_state(StimState::Driving));
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()

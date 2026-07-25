@@ -84,6 +84,19 @@ impl Session {
         }
     }
 
+    /// Send a `set_drive` (§4.3). Best-effort: a failed send surfaces as
+    /// the daemon's dead-man dropping the drive, never a crash — this is
+    /// the stimulus path and must degrade safely, not panic. `level_dbfs`
+    /// is already clamped client-side by the stimulus machine; the server
+    /// clamps again as the authoritative backstop.
+    pub fn set_drive(&self, on: bool, level_dbfs: f64) {
+        let _ = self.client.call(&json!({
+            "cmd": "set_drive",
+            "on": on,
+            "level_dbfs": level_dbfs,
+        }));
+    }
+
     /// Poll for the next `transfer_stream` DATA frame, non-blocking
     /// beyond `timeout`. Records arrival time for [`Self::connection_state`]
     /// — this is the only place "are we still connected" gets decided,
