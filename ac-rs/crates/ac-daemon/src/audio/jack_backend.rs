@@ -744,6 +744,64 @@ mod tests {
     /// AC_TEST_CAPTURE_PORT='Babyface Pro Pro:capture_1' \
     ///   cargo test --bin ac-daemon -- --ignored --nocapture jack_capture_multi
     /// ```
+    /// The #207 fix, on real JACK: `capture_multi_contiguous` must discard
+    /// nothing under the same conditions where `capture_multi` discards
+    /// 318 samples per tick, and must still keep up — so the audio it returns
+    /// covers the full elapsed wall time rather than a fixed slice.
+    ///
+    /// **Emits nothing.** Capture only, same as the runbook below.
+    #[test]
+    #[ignore = "requires a running JACK server; set AC_TEST_CAPTURE_PORT"]
+    fn jack_contiguous_drain_discards_nothing_and_keeps_up() {
+        const TICKS: u64 = 40;
+        const CHUNK_SECS: f64 = 0.05;
+        const PROCESS: Duration = Duration::from_millis(5);
+
+        let port = std::env::var("AC_TEST_CAPTURE_PORT")
+            .unwrap_or_else(|_| "system:capture_1".to_string());
+
+        let mut eng = JackEngine::new();
+        eng.start(&[], Some(&port)).expect("JACK start");
+        let sr = eng.sample_rate();
+
+        let _ = eng.capture_multi(0.2); // warm-up flush, as the worker does
+        let baseline = eng.discarded_samples();
+
+        let mut total: usize = 0;
+        for _ in 0..TICKS {
+            let bufs = eng
+                .capture_multi_contiguous(CHUNK_SECS)
+                .expect("capture_multi_contiguous");
+            total += bufs[0].len();
+            std::thread::sleep(PROCESS);
+        }
+        let discarded = eng.discarded_samples() - baseline;
+        eng.stop();
+
+        // Wall time actually elapsed per tick: the blocking wait plus the
+        // modelled processing. A drain that keeps up returns all of it.
+        let per_tick_wall = CHUNK_SECS + PROCESS.as_secs_f64();
+        let expected = (sr as f64 * per_tick_wall * TICKS as f64) as usize;
+        eprintln!(
+            "sr={sr} discarded={discarded} captured={total} samples ({:.2} s) \
+             vs {expected} expected from {TICKS} x {per_tick_wall:.3} s wall",
+            total as f64 / sr as f64
+        );
+
+        assert_eq!(
+            discarded, 0,
+            "the contiguous drain must not clear the ring — {discarded} discarded \
+             means the splice is back"
+        );
+        // Within 10%: the first tick has no accrued surplus, and JACK period
+        // quantisation moves a few hundred samples either way.
+        assert!(
+            total as f64 > expected as f64 * 0.9,
+            "returned {total} samples over {TICKS} ticks but {expected} of wall \
+             time elapsed — the drain is falling behind (#208 on this path)"
+        );
+    }
+
     #[test]
     #[ignore = "requires a running JACK server; set AC_TEST_CAPTURE_PORT"]
     fn jack_capture_multi_discards_live_audio_between_ticks() {
