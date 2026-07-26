@@ -255,9 +255,18 @@ impl CaptureRings {
     ) -> Result<Vec<Vec<f32>>> {
         wait(&*self, n_needed, duration)?;
 
-        // Never less than requested (the wait guarantees it on the
-        // measurement ring), and never so much that a channel under-runs.
-        let n = self.min_occupied().max(n_needed);
+        // Exactly the minimum occupancy — deliberately **not** floored at
+        // `n_needed`. The RT callback pushes meas and every ref in lockstep,
+        // so at steady state this equals the measurement ring's occupancy and
+        // the floor would never bind. Where it would bind is precisely where
+        // it does damage: a reference registered mid-session starts behind, and
+        // forcing `n_needed` there would zero-pad the ref to make up the
+        // difference. `capture_multi` gets away with that because it clears
+        // every tick and re-syncs; this drain does not clear, so the padding
+        // would become a permanent meas/ref offset and corrupt H1's phase and
+        // delay. Returning a short block instead keeps the channels aligned,
+        // and the caller's warm-up guard already tolerates one.
+        let n = self.min_occupied();
 
         let mut out = Vec::with_capacity(1 + self.refs.len());
         out.push(self.pop_meas(n));
@@ -372,6 +381,62 @@ mod tests {
         assert_eq!(meas.len(), 10, "meas truncates to what arrived");
         assert_eq!(refch.len(), 64, "ref pads to the requested length");
         assert!(refch.iter().all(|&s| s == 0.0));
+    }
+
+    /// A lagging reference must produce a **short, aligned** block, never a
+    /// zero-padded full-length one.
+    ///
+    /// `capture_multi` can pad because it clears every tick and re-syncs.
+    /// `capture_multi_contiguous` never clears, so a pad would offset ref
+    /// against meas permanently and corrupt H1's phase and delay. This is the
+    /// specific way the fix could be silently un-done.
+    #[test]
+    fn contiguous_drain_returns_short_rather_than_padding_a_lagging_ref() {
+        let mut rings = CaptureRings::new();
+        let (m, _mp) = loaded(1000, 4096);
+        rings.set_meas(m);
+        // Ref registered late: only 300 samples where meas has 1000.
+        let (r, _rp) = loaded(300, 4096);
+        rings.push_ref(r);
+
+        let mut wait = |_: &CaptureRings, _: usize, _: f64| Ok(());
+        let bufs = rings
+            .capture_multi_contiguous(500, 0.01, &mut wait)
+            .unwrap();
+
+        assert_eq!(bufs.len(), 2);
+        assert_eq!(
+            bufs[0].len(),
+            300,
+            "meas must be cut back to the ref's occupancy, not run ahead"
+        );
+        assert_eq!(bufs[1].len(), 300, "ref must not be zero-padded to length");
+        assert!(
+            bufs[1].iter().all(|&s| s != 0.0 || bufs[1][0] == 0.0),
+            "no padding zeros should have been appended"
+        );
+        assert_eq!(rings.discarded_samples(), 0, "and nothing may be discarded");
+    }
+
+    /// The surplus comes back out rather than accumulating — the property
+    /// that stops the #207 fix from becoming #208 on this path.
+    #[test]
+    fn contiguous_drain_returns_the_whole_backlog_not_just_the_request() {
+        let mut rings = CaptureRings::new();
+        let (m, _mp) = loaded(5000, 8192);
+        rings.set_meas(m);
+
+        let mut wait = |_: &CaptureRings, _: usize, _: f64| Ok(());
+        let bufs = rings
+            .capture_multi_contiguous(500, 0.01, &mut wait)
+            .unwrap();
+
+        assert_eq!(
+            bufs[0].len(),
+            5000,
+            "asked for 500 with 5000 buffered — all 5000 must come back or latency grows"
+        );
+        assert_eq!(rings.discarded_samples(), 0);
     }
 
     /// A failing wait must not leave the caller with a partially-drained
