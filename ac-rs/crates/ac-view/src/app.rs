@@ -414,6 +414,44 @@ impl AcViewApp {
     /// view's stimulus (drive off, idle, new start level + ceiling). The
     /// session is stopped first so the daemon's busy guard accepts the
     /// new `transfer_stream`.
+    /// Refresh the observed drive-path state from a frame's `conn_tags` (#205).
+    ///
+    /// A named method rather than a block inside the poll loop so the live
+    /// socket path and the tests exercise **the same code**. Previously this
+    /// lived inline and the tests set the state by hand, which is how a render
+    /// bug survived a green suite.
+    pub(crate) fn apply_conn_tags(&mut self, frame: &ac_scene::WireFrame) {
+        let tags = frame.conn_tags.as_ref();
+        if std::env::var_os("AC_VIEW_DEBUG_CONN").is_some() {
+            eprintln!("AC_VIEW_DEBUG_CONN tags={tags:?}");
+        }
+        if let ViewKind::Transfer(t) = &mut self.view {
+            t.drive_path.out_state =
+                ac_scene::readout::drive_path_state_from_tag(tags.and_then(|c| c.out.as_deref()));
+            t.drive_path.ref_out_state = ac_scene::readout::drive_path_state_from_tag(
+                tags.and_then(|c| c.ref_out.as_deref()),
+            );
+        }
+    }
+
+    /// Copy the resolved drive-path port names out of the session into the
+    /// view. One helper used by both the launch and relaunch paths — they had
+    /// diverged, which is what left a freshly launched session with no port in
+    /// its banner.
+    pub(crate) fn sync_drive_path_ports(&mut self) {
+        let (out, ref_out) = match &self.session {
+            Some(s) => (
+                s.drive_out_port().map(str::to_string),
+                s.drive_ref_out_port().map(str::to_string),
+            ),
+            None => (None, None),
+        };
+        if let ViewKind::Transfer(t) = &mut self.view {
+            t.drive_path.out_port = out;
+            t.drive_path.ref_out_port = ref_out;
+        }
+    }
+
     fn relaunch(&mut self, applied: crate::settings::Applied) {
         if let Some(session) = &mut self.session {
             session.stop();
@@ -424,16 +462,7 @@ impl AcViewApp {
                 self.integration,
             );
         }
-        let routing = self
-            .session
-            .as_ref()
-            .map(|s| {
-                (
-                    s.drive_out_port().map(str::to_string),
-                    s.drive_ref_out_port().map(str::to_string),
-                )
-            })
-            .unwrap_or_default();
+        self.sync_drive_path_ports();
         if let ViewKind::Transfer(t) = &mut self.view {
             let cfg = ac_core::config::load(None).unwrap_or_default();
             t.stimulus =
@@ -445,8 +474,6 @@ impl AcViewApp {
             // would assert something about a routing that no longer exists.
             t.drive_path.out_channel = cfg.output_channel;
             t.drive_path.ref_out_channel = cfg.reference_channel;
-            t.drive_path.out_port = routing.0;
-            t.drive_path.ref_out_port = routing.1;
             t.drive_path.out_state = DrivePathState::Unknown;
             t.drive_path.ref_out_state = DrivePathState::Unknown;
         }
@@ -529,6 +556,12 @@ impl eframe::App for AcViewApp {
         self.keepalive_tick(std::time::Instant::now());
 
         let mut got_new_frame = false;
+        // Collected, then applied after the session borrow ends: `apply_conn_tags`
+        // takes `&mut self`, which cannot coexist with `&mut self.session`. The
+        // previous inline version compiled only because it touched `self.view`
+        // as a disjoint field — which is also why nothing shared code with the
+        // tests.
+        let mut polled: Vec<ac_scene::WireFrame> = Vec::new();
         if let Some(session) = &mut self.session {
             // Drain to the newest queued frame rather than parsing one
             // per repaint: the daemon publishes faster than the UI
@@ -540,19 +573,17 @@ impl eframe::App for AcViewApp {
                 if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
                     // Observed drive-path state, refreshed per frame (#205).
                     // An absent `conn_tags` maps to `Unknown`, never to healthy.
-                    if let ViewKind::Transfer(t) = &mut self.view {
-                        let tags = wire_frame.conn_tags.as_ref();
-                        t.drive_path.out_state = ac_scene::readout::drive_path_state_from_tag(
-                            tags.and_then(|c| c.out.as_deref()),
-                        );
-                        t.drive_path.ref_out_state = ac_scene::readout::drive_path_state_from_tag(
-                            tags.and_then(|c| c.ref_out.as_deref()),
-                        );
-                    }
-                    self.last_frame = Some(wire_frame);
+                    polled.push(wire_frame);
                     got_new_frame = true;
                 }
             }
+        }
+        // Only the freshest frame's routing state matters; the backlog is
+        // discarded for display, so apply the tags from the same frame that
+        // becomes `last_frame`.
+        if let Some(newest) = polled.pop() {
+            self.apply_conn_tags(&newest);
+            self.last_frame = Some(newest);
         }
 
         // Rebuild the scene once per pass — never once per backlog frame
@@ -746,6 +777,11 @@ fn connect_and_launch_view(
     app.session = Some(session);
     app.weighting = weighting;
     app.integration = integration;
+    // Seed the drive-path ports from the launch reply (#205). Without this the
+    // banner and health line render with no port on a freshly launched session
+    // — the normal case — which is half of what this issue exists to fix.
+    // `relaunch()` did this and the launch path did not.
+    app.sync_drive_path_ports();
     Ok(app)
 }
 
@@ -933,7 +969,7 @@ mod tests {
         assert_eq!(resolve_transfer_channels(&cfg).unwrap(), (2, 5));
     }
 
-    fn transfer_frame() -> ac_scene::WireFrame {
+    pub(crate) fn transfer_frame() -> ac_scene::WireFrame {
         // A mis-estimated delay so the wire carries non-zero phase and
         // Session (τ_derot 0) differs from the other modes — otherwise
         // cycling would be a no-op and the test could not fail on the bug
@@ -1013,5 +1049,141 @@ mod tests {
         app.press_for_test(Action::CycleDerotReference, 0.1);
         let after = &app.current_transfer_scene().unwrap().magnitude.segments;
         assert_eq!(&before, after, "de-rotation moved the magnitude pane");
+    }
+}
+
+#[cfg(test)]
+mod drive_path_wiring_tests {
+    use super::*;
+    use ac_scene::readout::DrivePathState;
+
+    /// **QA requirement 1 (#214).** The launch path must seed the drive-path
+    /// ports from the reply. The previous code did this only in `relaunch()`,
+    /// so a freshly launched session — the normal case, and #205's own reported
+    /// case — rendered its banner with no port at all.
+    ///
+    /// Asserts the *wiring*, not the formatter: every earlier `ac-view` test
+    /// would have passed with this population missing entirely.
+    #[test]
+    fn launch_path_seeds_the_drive_path_ports_from_the_session() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.view = ViewKind::Transfer(TransferViewState::new(-10.0, -20.0));
+        app.session = Some(Session::for_test_with_routing(
+            Some("Babyface Pro Pro:playback_5".into()),
+            Some("Babyface Pro Pro:playback_4".into()),
+        ));
+
+        app.sync_drive_path_ports();
+
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!("transfer view")
+        };
+        assert_eq!(
+            t.drive_path.out_port.as_deref(),
+            Some("Babyface Pro Pro:playback_5"),
+            "the launch path must name the resolved output port"
+        );
+        assert_eq!(
+            t.drive_path.ref_out_port.as_deref(),
+            Some("Babyface Pro Pro:playback_4")
+        );
+    }
+
+    /// A reference output resolving to the same port as the main output is not a
+    /// second leg, so it must not be named as one.
+    #[test]
+    fn a_shared_ref_port_is_not_reported_as_a_separate_leg() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.view = ViewKind::Transfer(TransferViewState::new(-10.0, -20.0));
+        app.session = Some(Session::for_test_with_routing(
+            Some("Babyface Pro Pro:playback_5".into()),
+            Some("Babyface Pro Pro:playback_5".into()),
+        ));
+
+        app.sync_drive_path_ports();
+
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!("transfer view")
+        };
+        assert_eq!(t.drive_path.ref_out_port, None);
+    }
+
+    /// **QA requirement 2 (#214).** A frame carrying `conn_tags` must move the
+    /// view's observed state, through the same update the live socket path runs.
+    ///
+    /// This is the seam the render bug hid in: the earlier tests set
+    /// `out_state` by hand, so they proved the formatter and nothing about
+    /// whether a frame ever reaches it.
+    #[test]
+    fn a_frame_with_conn_tags_moves_the_observed_state() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.view = ViewKind::Transfer(TransferViewState::new(-10.0, -20.0));
+
+        // Fresh view: told nothing, so it must say so rather than assume health.
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!()
+        };
+        assert_eq!(t.drive_path.out_state, DrivePathState::Unknown);
+
+        let mut frame = crate::app::tests::transfer_frame();
+        frame.conn_tags = Some(ac_scene::wire::ConnTags {
+            out: Some("off".into()),
+            ref_out: Some("on".into()),
+        });
+        app.apply_conn_tags(&frame);
+
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!()
+        };
+        assert_eq!(
+            t.drive_path.out_state,
+            DrivePathState::NotConnected,
+            "an 'off' tag must reach the view"
+        );
+        assert_eq!(t.drive_path.ref_out_state, DrivePathState::Connected);
+        assert!(
+            !t.drive_path.health_lines().is_empty(),
+            "a disconnected output must produce a health line"
+        );
+    }
+
+    /// A frame with no `conn_tags` must leave the view saying `unknown`, never
+    /// silently healthy.
+    #[test]
+    fn a_frame_without_conn_tags_reports_unknown_not_healthy() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.view = ViewKind::Transfer(TransferViewState::new(-10.0, -20.0));
+        let mut frame = crate::app::tests::transfer_frame();
+        frame.conn_tags = None;
+        app.apply_conn_tags(&frame);
+
+        let ViewKind::Transfer(t) = &app.view else {
+            panic!()
+        };
+        assert_eq!(t.drive_path.out_state, DrivePathState::Unknown);
+        assert!(
+            t.drive_path
+                .health_lines()
+                .iter()
+                .any(|l| l.contains("unknown")),
+            "unobservable must still be stated: {:?}",
+            t.drive_path.health_lines()
+        );
     }
 }

@@ -35,6 +35,23 @@ pub struct Client {
 }
 
 impl Client {
+    /// Test-only: detached sockets, never connected. Enough to construct a
+    /// [`crate::session::Session`] for wiring tests that must not talk to a
+    /// daemon. Any send/recv on it simply goes nowhere.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        let ctx = zmq::Context::new();
+        let req = ctx.socket(zmq::REQ).expect("test REQ socket");
+        let sub = ctx.socket(zmq::SUB).expect("test SUB socket");
+        req.set_linger(0).ok();
+        sub.set_linger(0).ok();
+        Self {
+            req,
+            sub,
+            _ctx: ctx,
+        }
+    }
+
     pub fn connect(endpoint: &Endpoint) -> Result<Self> {
         let ctx = zmq::Context::new();
 

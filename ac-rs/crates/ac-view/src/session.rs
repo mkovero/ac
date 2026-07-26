@@ -51,6 +51,16 @@ impl Session {
         }
     }
 
+    /// Test-only: a session with pre-set resolved routing, standing in for a
+    /// launch reply without needing a daemon.
+    #[cfg(test)]
+    pub fn for_test_with_routing(out: Option<String>, ref_out: Option<String>) -> Self {
+        let mut s = Self::new(Client::for_test());
+        s.drive_out_port = out;
+        s.drive_ref_out_port = ref_out;
+        s
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }
