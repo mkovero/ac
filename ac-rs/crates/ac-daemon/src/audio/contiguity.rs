@@ -167,6 +167,16 @@ fn assemble_window_with_period(
     // Must precede everything else: the engine synthesises at this rate, and
     // the analysis below assumes it.
     eng.set_sample_rate(sr);
+    // The analysis below assumes `sr`; the engine must actually be running at
+    // it. These drifted apart once already (a 96 kHz model synthesising at the
+    // hardcoded 48 kHz default), and the only symptom was every frequency
+    // reading an octave high — which looks like a spectral defect, not a
+    // harness bug.
+    assert_eq!(
+        eng.sample_rate(),
+        sr,
+        "engine rate must match the rate the analysis assumes"
+    );
     eng.set_tone(tone_hz, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
@@ -485,6 +495,7 @@ fn discard_count_tracks_the_modelled_processing_time() {
     let ticks = 20;
 
     let mut eng = FakeEngine::new();
+    eng.set_sample_rate(sr);
     eng.set_tone(TONE_HZ, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.enable_ring_mode(0.01, 0, SAMPLE_ACCURATE);
@@ -897,6 +908,7 @@ fn contiguous_drain_does_not_accumulate_a_backlog() {
     let chunk = (sr as f64 * CHUNK_SECS) as usize;
 
     let mut eng = FakeEngine::new();
+    eng.set_sample_rate(sr);
     eng.set_tone(TONE_HZ, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
@@ -923,5 +935,67 @@ fn contiguous_drain_does_not_accumulate_a_backlog() {
         eng.discarded_samples(),
         0,
         "bounded latency must come from draining, never from discarding"
+    );
+}
+
+/// **Regression guard for a harness bug, not a product bug.**
+///
+/// `FakeEngine::new()` hardcodes 48 kHz. Before `set_sample_rate` existed,
+/// `period_quantisation_decides_which_frequencies_expose_the_splice` declared
+/// `SR = 96_000`, sized its window from that, and analysed at that — while the
+/// engine synthesised at 48 kHz. Every frequency therefore read exactly double:
+/// a 15 100 Hz tone appeared at 30 200 Hz with the fundamental down at
+/// −224 dB.
+///
+/// The dangerous part is how that failure presents. It does not look like a
+/// broken harness; it looks like a spectral defect in the thing under test —
+/// energy at the wrong frequency, the fundamental missing. It was caught only
+/// because a later test asserted a peak *count* that a harmonic disturbed. The
+/// original test still passed, and its conclusion happened to survive only
+/// because 12 000, 15 000 and 18 000 Hz are commensurate with both
+/// `48000/1024` and `96000/1024`.
+///
+/// So this asserts the property directly: at a non-default rate, a tone lands
+/// on its own bin and nowhere else.
+#[test]
+fn fake_engine_honours_a_non_default_sample_rate() {
+    const SR: u32 = 96_000;
+    let tone = 15_100.0f64;
+
+    let mut eng = FakeEngine::new();
+    assert_eq!(
+        eng.sample_rate(),
+        48_000,
+        "default assumed by the tests below; if this changes, check every \
+         test that constructs an engine without setting the rate"
+    );
+
+    eng.set_sample_rate(SR);
+    assert_eq!(eng.sample_rate(), SR, "set_sample_rate must take effect");
+
+    eng.set_tone(tone, 0.5);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    let window = eng.capture_block(2.5).unwrap();
+    assert_eq!(
+        window.len(),
+        (SR as f64 * 2.5) as usize,
+        "block length must follow the configured rate"
+    );
+
+    let db = meas_amp_db(&window, SR);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), tone, SR);
+
+    assert_eq!(
+        peaks.len(),
+        1,
+        "one tone must give one peak once harmonics are excluded, got {peaks:?} Hz"
+    );
+    assert!(
+        (peaks[0] as f64 - tone).abs() < 5.0,
+        "tone must land on its own bin, got {} Hz — a factor of {:.2} off, which \
+         is the signature of the engine and the analysis disagreeing about the \
+         sample rate",
+        peaks[0],
+        peaks[0] as f64 / tone
     );
 }
