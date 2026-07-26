@@ -651,3 +651,114 @@ fn period_quantisation_decides_which_frequencies_expose_the_splice() {
         }
     }
 }
+
+/// **Recurrence probe for #208** — the actual reported defect: the response
+/// reappearing every ~3–5 s, identical, *with no stimulus present*.
+///
+/// Drives a tone for `TONE_SECS`, silences the generator, and keeps capturing
+/// for `SILENCE_SECS`, reporting per-second level and per-second energy at the
+/// stimulus frequency. If the tone re-appears during the silent stretch, the
+/// captured audio itself repeats and the defect is at or before capture
+/// assembly. If the silent stretch stays silent, the captured stream is clean
+/// and the recurrence is downstream of capture.
+///
+/// Runs both drains, because that also settles whether the `ac-ui`-era and
+/// `ac-view`-era sightings share a cause: `monitor_spectrum` used
+/// `capture_available` (never clears, so its ring can back up) while
+/// `transfer_stream` uses `capture_multi` (clears every tick).
+///
+/// **Emits.** `#[ignore]`d, per-run operator consent required. Level is capped
+/// in code at [`HW_LEVEL_DBFS`].
+#[cfg(feature = "jack-audio")]
+#[test]
+#[ignore = "emits stimulus on real hardware; needs per-run operator consent"]
+fn jack_stimulus_then_silence_recurrence_probe() {
+    use crate::audio::jack_backend::JackEngine;
+
+    const TONE_SECS: f64 = 5.0;
+    const SILENCE_SECS: f64 = 30.0;
+
+    let out_ports: Vec<String> = std::env::var("AC_TEST_OUTPUT_PORTS")
+        .expect("set AC_TEST_OUTPUT_PORTS")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    let monitor = std::env::var("AC_TEST_MONITOR_PORT").expect("set AC_TEST_MONITOR_PORT");
+    let amplitude = 10f64.powf(HW_LEVEL_DBFS / 20.0);
+
+    for clearing in [true, false] {
+        let arm = if clearing {
+            "capture_multi (transfer path, clears every tick)"
+        } else {
+            "capture_available (monitor path, never clears)"
+        };
+        let mut eng = JackEngine::new();
+        eng.start(&out_ports, Some(&monitor)).expect("JACK start");
+        let sr = eng.sample_rate();
+        let chunk = (sr as f64 * CHUNK_SECS) as usize;
+
+        eng.set_tone(TONE_HZ, amplitude);
+        let mut stream: Vec<f32> = Vec::new();
+        let total_ticks = ((TONE_SECS + SILENCE_SECS) / CHUNK_SECS) as usize;
+        let tone_ticks = (TONE_SECS / CHUNK_SECS) as usize;
+
+        for t in 0..total_ticks {
+            if t == tone_ticks {
+                eng.set_silence();
+            }
+            let block = if clearing {
+                eng.capture_multi(CHUNK_SECS)
+                    .expect("capture_multi")
+                    .remove(0)
+            } else {
+                eng.capture_available(chunk).expect("capture_available")
+            };
+            stream.extend_from_slice(&block);
+        }
+        let discarded = eng.discarded_samples();
+        eng.set_silence();
+        eng.stop();
+
+        eprintln!(
+            "\n=== {arm}\n    sr={sr} discarded={discarded} captured={} samples ({:.1} s of audio)",
+            stream.len(),
+            stream.len() as f64 / sr as f64
+        );
+        eprintln!("     sec | rms dBFS | tone dBFS    (generator off after {TONE_SECS} s)");
+        for (i, sec) in stream.chunks(sr as usize).enumerate() {
+            if sec.len() < sr as usize / 2 {
+                break;
+            }
+            let rms =
+                (sec.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / sec.len() as f64).sqrt();
+            let tone = goertzel_dbfs(sec, sr as f64, TONE_HZ);
+            let mark = if (i as f64) < TONE_SECS {
+                "STIM"
+            } else {
+                "  --"
+            };
+            eprintln!(
+                "    {mark} {i:>3} | {:>8.1} | {tone:>8.1}",
+                20.0 * rms.max(1e-12).log10()
+            );
+        }
+    }
+}
+
+/// Single-bin magnitude at `freq`, in dBFS — enough to say whether the
+/// stimulus tone is present in a one-second slice without a full FFT.
+#[cfg(feature = "jack-audio")]
+fn goertzel_dbfs(samples: &[f32], sr: f64, freq: f64) -> f64 {
+    let n = samples.len();
+    let k = (0.5 + (n as f64 * freq) / sr).floor();
+    let w = 2.0 * std::f64::consts::PI * k / n as f64;
+    let coeff = 2.0 * w.cos();
+    let (mut s1, mut s2) = (0.0f64, 0.0f64);
+    for &x in samples {
+        let s0 = x as f64 + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let mag = (s1 * s1 + s2 * s2 - s1 * s2 * coeff).sqrt() / n as f64 * 2.0;
+    20.0 * mag.max(1e-12).log10()
+}
