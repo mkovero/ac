@@ -45,6 +45,15 @@ pub(crate) struct CaptureRings {
     /// discard, and folding the two together would contaminate the
     /// measurement on any session that changes inputs mid-flight.
     discarded: u64,
+    /// Per-ring occupancy as it stood inside the last
+    /// [`Self::capture_multi_contiguous`], after its wait and before its pop —
+    /// measurement first, then each reference in registration order.
+    ///
+    /// Instrumentation for #208 D1. Recorded here because that instant is not
+    /// observable from the worker: by the time the call returns the rings have
+    /// been drained, and by the time the worker could poll before the call the
+    /// wait has not happened yet. Written once per drain into a reused `Vec`.
+    last_drain_occupancy: Vec<usize>,
 }
 
 impl CaptureRings {
@@ -53,6 +62,7 @@ impl CaptureRings {
             meas: None,
             refs: Vec::new(),
             discarded: 0,
+            last_drain_occupancy: Vec::new(),
         }
     }
 
@@ -82,6 +92,12 @@ impl CaptureRings {
 
     pub(crate) fn discarded_samples(&self) -> u64 {
         self.discarded
+    }
+
+    /// See [`Self::last_drain_occupancy`]'s field docs. Empty before the first
+    /// contiguous drain.
+    pub(crate) fn last_drain_occupancy(&self) -> &[usize] {
+        &self.last_drain_occupancy
     }
 
     /// Drop everything buffered on the measurement ring, counting it.
@@ -267,6 +283,14 @@ impl CaptureRings {
         // delay. Returning a short block instead keeps the channels aligned,
         // and the caller's warm-up guard already tolerates one.
         let n = self.min_occupied();
+
+        // #208 D1: record what every ring held at this instant, before the pop
+        // consumes it. Reuses the buffer, so no allocation at steady state.
+        self.last_drain_occupancy.clear();
+        self.last_drain_occupancy.push(self.occupied());
+        for c in self.refs.iter() {
+            self.last_drain_occupancy.push(c.occupied_len());
+        }
 
         let mut out = Vec::with_capacity(1 + self.refs.len());
         out.push(self.pop_meas(n));

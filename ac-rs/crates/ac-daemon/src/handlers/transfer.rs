@@ -532,6 +532,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .collect();
         let mut spl_last_ts: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
+        // Drain telemetry (#208 D1). Off unless `AC_DRAIN_TELEMETRY` is set:
+        // this slice adds no behaviour, and a streaming session must log
+        // nothing new by default.
+        let mut drain_telemetry = crate::audio::drain_telemetry::DrainTelemetry::from_env(sr);
+
         while !stop.load(Ordering::Relaxed) {
             // Contiguous drain (#207). `capture_multi` would clear the ring
             // before waiting, discarding whatever accrued while the previous
@@ -550,6 +555,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             };
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // #208 D1: samples popped per tick against wall clock. Logged
+            // before any of this tick's processing so the interval it reports
+            // is the loop's own period, not a partial one. `bufs[0]` is the
+            // measurement channel and every other channel is popped to the
+            // same length by `capture_multi_contiguous`.
+            if drain_telemetry.enabled() {
+                let n = bufs.first().map(|b| b.len()).unwrap_or(0);
+                if let Some(t) = drain_telemetry.tick(
+                    n,
+                    &eng.last_drain_occupancy(),
+                    eng.discarded_samples(),
+                    std::time::Instant::now(),
+                ) {
+                    eprintln!("{}", t.raw);
+                    if let Some(summary) = t.summary {
+                        eprintln!("{summary}");
+                    }
+                }
             }
 
             // Dead-man + drive poll, once per capture tick. The timeout
