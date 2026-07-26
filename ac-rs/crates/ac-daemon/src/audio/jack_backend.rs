@@ -367,7 +367,19 @@ impl AudioEngine for JackEngine {
             self.input_port = Some(src.to_string());
         }
 
+        // Name the client and what it actually connected to. JACK suffixes a
+        // duplicate client name (`ac-daemon-86`), so on a box running more than
+        // one daemon there is otherwise no way to tell which client is which —
+        // and a session's port pattern alone does not identify it, since two
+        // daemons sharing a config produce identical patterns. That ambiguity
+        // has already cost one misdiagnosis: an edge was torn down on the wrong
+        // client and the resulting healthy report read as a stale-cache bug.
         self.output_ports = output_ports.to_vec();
+        eprintln!(
+            "jack: client {:?} out->{:?} in<-{:?}",
+            name, self.output_ports, self.input_port
+        );
+
         self._async_client = Some(async_client);
         Ok(())
     }
