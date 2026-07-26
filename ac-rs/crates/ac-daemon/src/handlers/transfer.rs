@@ -80,6 +80,34 @@ fn drive_out_ports(drivable: bool, out_port: &str, ref_out_port: &str) -> Vec<St
     }
 }
 
+/// Per-leg connection tag for the `transfer_stream` frame (#205).
+///
+/// Three-valued, deliberately reusing `cal_tags`' existing `"on" | "off" |
+/// "none"` vocabulary (ruling 1) rather than inventing a second one:
+///
+/// - `"none"` — this session never opened the leg, so there is nothing to
+///   report. That is the correct answer for a passive (`drivable = false`)
+///   session, where `drive_out_ports` returns an empty vec by design, and for
+///   a reference output that resolves to the same port as the main output.
+/// - `"on"` — the leg was opened and the daemon's output port is observed to
+///   have an edge to it.
+/// - `"off"` — the leg was opened and has **no** edge. This is #203's
+///   condition: driving into nothing.
+///
+/// A fourth state, *unknown*, is expressed by omitting the whole `conn_tags`
+/// field, so a backend that cannot see its graph is never mistaken for one
+/// reporting a fault.
+fn connection_tag(opened: &[String], leg: &str, observed: &[String]) -> &'static str {
+    if !opened.iter().any(|p| p == leg) {
+        return "none";
+    }
+    if observed.iter().any(|c| c == leg) {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 /// `set_drive` (§4.3) — start, stop, or re-level the stimulus of a
 /// running `transfer_stream` session.
 ///
@@ -392,6 +420,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // outputs here and stays silent until drive is asked for; without
         // this the generator plays onto an unconnected port.
         let out_ports: Vec<String> = drive_out_ports(drivable, &out_port, &ref_out_port);
+        // Captured for the per-tick `conn_tags` below: which legs this session
+        // actually opened, and their port names.
+        let drive_ports = out_ports.clone();
+        let out_port_for_tags = out_port.clone();
+        let ref_out_for_tags = ref_out_port.clone();
 
         let mut eng = make_engine(fake);
         let main_port = unique_ports[0].clone();
@@ -405,7 +438,19 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
         for p in &unique_ports[1..] {
             if let Err(e) = eng.add_ref_input(p) {
-                eprintln!("transfer_stream: warning — ref input {p}: {e}");
+                // Was an `eprintln!` that never reached ZMQ (#205, fold-in). A
+                // session can lose its reference input entirely; the only trace
+                // was a line on the daemon's stderr, which no operator reads.
+                // `add_ref_input` is the one connect path that propagates its
+                // error properly — the caller was throwing it away.
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({
+                        "cmd":     "transfer_stream",
+                        "message": format!("reference input {p} could not be connected: {e}"),
+                    }),
+                );
             }
         }
         if fake {
@@ -567,6 +612,19 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 engine_on = want_on;
                 engine_level = want_level;
             }
+
+            // Observed drive-path routing (#205). One atomic load per tick
+            // unless JACK's `ports_connected` notification has fired, so this
+            // is not a graph query at the tick rate. `None` means the backend
+            // cannot see its own graph, and the whole `conn_tags` field is then
+            // omitted so the view renders `unknown` rather than a guess.
+            let observed = eng.observed_output_connections();
+            let conn_tags = observed.as_ref().map(|conns| {
+                json!({
+                    "out":     connection_tag(&drive_ports, &out_port_for_tags, conns),
+                    "ref_out": connection_tag(&drive_ports, &ref_out_for_tags, conns),
+                })
+            });
 
             // Raw capture peaks (§4.2), per unique-port index, from
             // THIS tick's blocks — before any calibration, weighting, or
@@ -824,7 +882,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             },
                         });
 
-                        let transfer_msg = json!({
+                        let mut transfer_msg = json!({
                             "type":            "transfer_stream",
                             "cmd":             "transfer_stream",
                             "freqs":           freqs,
@@ -896,6 +954,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 "delay_ms":     result.delay_ms,
                             }))
                         };
+                        // Present only when the backend can observe its graph;
+                        // an absent field is the wire spelling of *unknown*
+                        // (#205), which the view must render as such rather
+                        // than defaulting to healthy.
+                        if let Some(ct) = conn_tags.as_ref() {
+                            transfer_msg["conn_tags"] = ct.clone();
+                        }
+
                         let mut out = vec![transfer_msg];
                         if let Some(m) = ir_msg {
                             out.push(m);
@@ -1229,5 +1295,79 @@ mod tests {
     #[test]
     fn passive_session_opens_no_output_ports() {
         assert!(drive_out_ports(false, "system:playback_1", "system:playback_2").is_empty());
+    }
+
+    // ---- #205 connection_tag vocabulary ----
+
+    /// A leg this session never opened reports `"none"`, not `"off"`. The
+    /// distinction is the whole point: passive sessions open no output by
+    /// design and must not be flagged as broken.
+    #[test]
+    fn unopened_leg_is_none_not_off() {
+        let opened: Vec<String> = Vec::new();
+        assert_eq!(
+            connection_tag(&opened, "Babyface:playback_5", &[]),
+            "none",
+            "a passive session must not report a drive-path fault"
+        );
+    }
+
+    /// Opened and connected.
+    #[test]
+    fn opened_leg_with_an_edge_is_on() {
+        let opened = vec!["Babyface:playback_5".to_string()];
+        let observed = vec!["Babyface:playback_5".to_string()];
+        assert_eq!(
+            connection_tag(&opened, "Babyface:playback_5", &observed),
+            "on"
+        );
+    }
+
+    /// **#203's condition.** Opened but with no edge — driving into nothing.
+    #[test]
+    fn opened_leg_without_an_edge_is_off() {
+        let opened = vec!["Babyface:playback_5".to_string()];
+        assert_eq!(
+            connection_tag(&opened, "Babyface:playback_5", &[]),
+            "off",
+            "an opened leg with no observed edge is the silent-drive condition"
+        );
+    }
+
+    /// Edges to *other* ports do not make our leg connected. This is what
+    /// distinguishes observing the graph from counting edges: a session driving
+    /// playback_5 is not healthy because something else is patched to
+    /// playback_1.
+    #[test]
+    fn an_edge_to_a_different_port_does_not_count() {
+        let opened = vec!["Babyface:playback_5".to_string()];
+        let observed = vec!["Babyface:playback_1".to_string()];
+        assert_eq!(
+            connection_tag(&opened, "Babyface:playback_5", &observed),
+            "off"
+        );
+    }
+
+    /// Partial failure, the case the per-leg shape exists for: main output
+    /// connected, reference output not.
+    #[test]
+    fn legs_are_reported_independently() {
+        let out = "Babyface:playback_5".to_string();
+        let ref_out = "Babyface:playback_4".to_string();
+        let opened = vec![out.clone(), ref_out.clone()];
+        let observed = vec![out.clone()];
+        assert_eq!(connection_tag(&opened, &out, &observed), "on");
+        assert_eq!(connection_tag(&opened, &ref_out, &observed), "off");
+    }
+
+    /// A reference output that resolves to the same port as the main output is
+    /// not a second leg — `drive_out_ports` dedups it, so it reports `"none"`
+    /// and the view draws no REF OUT line for it.
+    #[test]
+    fn a_ref_out_sharing_the_main_port_is_not_a_separate_leg() {
+        let out = "Babyface:playback_5".to_string();
+        let opened = drive_out_ports(true, &out, &out);
+        assert_eq!(opened.len(), 1, "dedup: one port, one leg");
+        assert_eq!(connection_tag(&opened, &out, &opened), "on");
     }
 }

@@ -50,6 +50,12 @@ struct SharedState {
     tone_buf: ArcSwap<Vec<f32>>,
     silence: AtomicBool,
     xruns: AtomicUsize,
+    /// Bumped by JACK's `ports_connected` notification. The worker re-reads
+    /// `get_connections()` only when this moves, so steady state costs one
+    /// atomic load per frame instead of a graph query at the tick rate
+    /// (#205 ruling 2). The callback itself only bumps the counter — decoding
+    /// port IDs there would be work in a notification handler.
+    graph_epoch: AtomicUsize,
     // Consumer (wait_ring) parks on its own thread handle; the RT process
     // callback does a `try_lock().unpark()` after pushing samples so the
     // waiter wakes within microseconds of data arriving instead of polling
@@ -92,6 +98,10 @@ pub struct JackEngine {
     /// Main-side producer of the on-demand port hand-off queue. `None`
     /// between `stop()` and the next `start()`.
     ref_add_prod: Option<HeapProd<RefAdd>>,
+    /// Last observed connection list for our `out` port, and the `graph_epoch`
+    /// it was read at. Re-read only when the epoch moves.
+    conn_cache: Option<Vec<String>>,
+    conn_cache_epoch: Option<usize>,
 }
 
 impl JackEngine {
@@ -107,6 +117,7 @@ impl JackEngine {
                 tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
                 silence: AtomicBool::new(true),
                 xruns: AtomicUsize::new(0),
+                graph_epoch: AtomicUsize::new(0),
                 waker: Mutex::new(None),
                 one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
                 one_shot_pos: AtomicUsize::new(0),
@@ -118,6 +129,8 @@ impl JackEngine {
             input_port: None,
             ref_ports: Vec::new(),
             ref_add_prod: None,
+            conn_cache: None,
+            conn_cache_epoch: None,
         }
     }
 }
@@ -229,6 +242,20 @@ impl jack::NotificationHandler for Notifications {
     fn xrun(&mut self, _: &Client) -> Control {
         self.state.xruns.fetch_add(1, Ordering::Relaxed);
         Control::Continue
+    }
+
+    /// Any graph edge changing anywhere invalidates our cached view of our own
+    /// output connections. Deliberately does not decode the port IDs: this is a
+    /// notification callback, and a counter bump is all it needs to do. The
+    /// worker resolves what actually changed, lazily, off this thread.
+    fn ports_connected(
+        &mut self,
+        _: &Client,
+        _port_id_a: jack::PortId,
+        _port_id_b: jack::PortId,
+        _are_connected: bool,
+    ) {
+        self.state.graph_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -349,6 +376,8 @@ impl AudioEngine for JackEngine {
         self._async_client = None;
         self.rings.teardown();
         self.ref_ports.clear();
+        self.conn_cache = None;
+        self.conn_cache_epoch = None;
         self.ref_add_prod = None;
     }
 
@@ -424,6 +453,26 @@ impl AudioEngine for JackEngine {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
         let mut waiter = park_waiter(self.state.clone());
         self.rings.capture_multi(n_needed, duration, &mut waiter)
+    }
+
+    fn observed_output_connections(&mut self) -> Option<Vec<String>> {
+        let ac = self._async_client.as_ref()?;
+        let epoch = self.state.graph_epoch.load(Ordering::Relaxed);
+        if self.conn_cache_epoch != Some(epoch) {
+            // `jack_port_get_connections` is valid for ports our own client
+            // registered, which `out` is — looked up by name rather than held
+            // as a second handle, since the `Port` was moved into the RT
+            // process handler.
+            let name = ac.as_client().name().to_string() + ":out";
+            let conns = ac
+                .as_client()
+                .port_by_name(&name)
+                .map(|p| p.get_connections())
+                .unwrap_or_default();
+            self.conn_cache = Some(conns);
+            self.conn_cache_epoch = Some(epoch);
+        }
+        self.conn_cache.clone()
     }
 
     fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
@@ -893,6 +942,7 @@ mod tests {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 48_000])),
             silence: AtomicBool::new(true),
             xruns: AtomicUsize::new(0),
+            graph_epoch: AtomicUsize::new(0),
             waker: Mutex::new(None),
             one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
             one_shot_pos: AtomicUsize::new(0),
@@ -912,6 +962,7 @@ mod tests {
             tone_buf: ArcSwap::new(Arc::new(vec![0.0f32; 4])),
             silence: AtomicBool::new(false),
             xruns: AtomicUsize::new(0),
+            graph_epoch: AtomicUsize::new(0),
             waker: Mutex::new(None),
             one_shot_buf: ArcSwap::new(Arc::new(Vec::new())),
             one_shot_pos: AtomicUsize::new(0),

@@ -166,6 +166,24 @@ impl Client {
     }
 
     /// Wait for a frame on `topic`, discarding others, until `timeout` elapses.
+    /// Wait for a DATA frame whose `type` is `want`, discarding others.
+    fn wait_for_type(&self, want: &str, timeout: Duration) -> Option<Value> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as i32;
+            match self.recv_pub(remaining.max(1)) {
+                Some((_, v)) if v.get("type").and_then(Value::as_str) == Some(want) => {
+                    return Some(v)
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+        None
+    }
+
     fn wait_for_topic(&self, want: &str, timeout: Duration) -> Option<Value> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -2590,4 +2608,63 @@ fn in_range_channels_are_unaffected() {
     let r = c.call(json!({"cmd":"generate","freq_hz":1000.0,"level_dbfs":-40.0,"channels":[2]}));
     assert_eq!(r["ok"], json!(true), "in-range generate must work: {r}");
     c.call(json!({"cmd":"stop"}));
+}
+
+// ---------------------------------------------------------------------------
+// #205 — drive-path connection truth on the wire
+// ---------------------------------------------------------------------------
+
+/// **The honesty requirement (#205 ruling 5).** The fake backend cannot see a
+/// JACK graph, so it must report *unknown* — expressed on the wire by omitting
+/// `conn_tags` entirely — rather than synthesising a connected state for test
+/// convenience. Faking it here would recreate exactly the blind spot #203
+/// documents and make the whole feature unfalsifiable.
+#[test]
+fn fake_backend_omits_conn_tags_rather_than_claiming_connected() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "pairs": [[0, 1]], "drivable": true
+    }));
+    assert_eq!(r["ok"], json!(true), "session should start: {r}");
+
+    let frame = c
+        .wait_for_type("transfer_stream", Duration::from_secs(20))
+        .expect("a transfer_stream frame");
+    c.call(json!({"cmd":"stop"}));
+
+    assert!(
+        frame.get("conn_tags").is_none(),
+        "the fake backend must omit conn_tags (meaning unknown), not report a \
+         connection state it cannot observe. Got: {:?}",
+        frame.get("conn_tags")
+    );
+}
+
+/// A passive session has no drive path, so even a graph-observing backend has
+/// nothing to report for the out leg. Asserted through the tag vocabulary in
+/// `handlers::transfer::tests`; here we only confirm a passive session still
+/// streams normally and is not flagged.
+#[test]
+fn passive_session_streams_without_a_drive_path_claim() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "transfer_stream", "pairs": [[0, 1]]}));
+    assert_eq!(r["ok"], json!(true), "passive session should start: {r}");
+
+    let frame = c
+        .wait_for_type("transfer_stream", Duration::from_secs(20))
+        .expect("a transfer_stream frame");
+    c.call(json!({"cmd":"stop"}));
+
+    // Whatever conn_tags says, it must never mark a passive session's absent
+    // output as a fault.
+    if let Some(tags) = frame.get("conn_tags") {
+        assert_ne!(
+            tags["out"],
+            json!("off"),
+            "a passive session opens no output by design and must not be \
+             reported as disconnected: {tags}"
+        );
+    }
 }

@@ -137,6 +137,22 @@ pub trait AudioEngine: Send + 'static {
     /// Default no-op.
     fn disconnect_output(&mut self, _port: &str) {}
 
+    /// Fully-qualified names of the ports our output is **observed** to be
+    /// connected to, or `None` when this backend cannot see its own graph.
+    ///
+    /// `None` means *unknown*, and callers must render it as such rather than
+    /// guessing either way (#205 ruling 5). The fake backend deliberately does
+    /// not synthesise a connected state for test convenience: that is exactly
+    /// the blind spot #203 documents, and faking it here would make the feature
+    /// unfalsifiable in the same way.
+    ///
+    /// Must reflect observation, not intent — not the port list passed to
+    /// `start`, and not the connect `Result`, because an edge torn down later
+    /// by `jack_disconnect` or a patchbay change is invisible to both.
+    fn observed_output_connections(&mut self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Number of xruns since start.
     fn xruns(&self) -> u32;
 
