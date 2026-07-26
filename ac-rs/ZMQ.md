@@ -1577,6 +1577,11 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 
   // For backward compatibility with single-pair callers the first pair is
   // also exposed at the top level:
+  "ref_out_port": "<resolved-reference-output-port>",  // #205: the reference
+                                                      // output leg, so a
+                                                      // receiver can name it.
+                                                      // NOT `ref_port`, which
+                                                      // is the reference INPUT.
   "meas_port":    "<capture-port>",
   "ref_port":     "<capture-port>",
   "meas_channel": <int>,
@@ -1648,9 +1653,40 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
       "mic_curve": "none"                // always "none" — a ref-channel mic
                                           // curve is refused at request time
     }
+  },
+  "conn_tags": {                         // OPTIONAL — observed drive-path
+                                          // routing (#205). Same per-leg,
+                                          // three-valued shape as `cal_tags`.
+    "out":     "on" | "off" | "none",    // main stimulus output leg
+    "ref_out": "on" | "off" | "none"     // reference output leg
   }
 }
 ```
+
+**`conn_tags` — observed, and absent means unknown.** Added by #205 so a
+receiver can distinguish "driving into a connected output" from "driving
+into nothing", which previously rendered identically.
+
+| value | meaning |
+|---|---|
+| `"on"` | the leg was opened and the daemon's output port is **observed** to have a JACK edge to it |
+| `"off"` | the leg was opened and has **no** edge — the silent-drive condition (#203) |
+| `"none"` | this session never opened the leg. The correct answer for a passive (`drivable=false`) session, and for a reference output that resolved to the same port as the main output |
+| **field absent** | the daemon **cannot observe** its graph — a non-JACK backend, `--fake-audio`, or a daemon predating #205 |
+
+The absent case is the whole point of the field being optional rather than
+carrying a fourth tag value: a receiver must render it as *unknown*, never
+as healthy. Collapsing "I cannot tell" into "everything is fine" is the
+failure #205 exists to fix, so this is the one optional field in the frame
+whose absence must **not** default to the benign reading.
+
+Truth comes from `jack_port_get_connections` on the daemon's own `out`
+port, not from the port list passed to `start` (that is intent) and not
+from the connect result (which is discarded). An edge torn down later by
+`jack_disconnect` or a patchbay change is therefore caught too. The
+daemon re-reads the graph only when JACK's `ports_connected` notification
+fires, so this costs one atomic load per frame in steady state rather
+than a graph query at the tick rate.
 
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB
