@@ -28,13 +28,26 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     }
 
     let dmm_mode = cmd.get("dmm").and_then(Value::as_bool).unwrap_or(false);
-    let out_port = resolve_output(&cfg, state);
-    let in_port = resolve_input(&cfg, state);
-    let ref_port = match resolve_ref_input(&cfg, state) {
-        Some(p) => p,
-        None => in_port.clone(),
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
     };
-    let ref_out_port = resolve_ref_output(&cfg, state);
+    let in_port = match resolve_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let ref_port = match resolve_ref_input(&cfg, state) {
+        // No reference channel configured: measure single-ended against the
+        // measurement input. A configured-but-missing channel is an error, not
+        // a silent downgrade to single-ended.
+        Ok(None) => in_port.clone(),
+        Ok(Some(p)) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let ref_out_port = match resolve_ref_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;

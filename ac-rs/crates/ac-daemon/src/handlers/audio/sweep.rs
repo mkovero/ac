@@ -34,7 +34,10 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
-    let out_port = resolve_output(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let out_port_reply = out_port.clone();
 
     let pub_tx = state.pub_tx.clone();
@@ -88,7 +91,10 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(-10.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
-    let out_port = resolve_output(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let out_port_reply = out_port.clone();
     let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
@@ -156,8 +162,14 @@ pub fn sweep_ir(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(4096) as usize;
 
     let cfg = state.cfg.lock().unwrap().clone();
-    let out_port = resolve_output(&cfg, state);
-    let in_port = resolve_input(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let in_port = match resolve_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let out_port_reply = out_port.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;

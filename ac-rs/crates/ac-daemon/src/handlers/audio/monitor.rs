@@ -392,7 +392,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         .filter(|v: &Vec<u32>| !v.is_empty())
         .unwrap_or_else(|| vec![cfg.input_channel]);
 
-    let in_ports: Vec<String> = channels
+    // One bad channel fails the whole request rather than monitoring a
+    // fabricated port alongside the good ones (#206).
+    let in_ports: Vec<String> = match channels
         .iter()
         .map(|&ch| {
             let mut cfg_override = cfg.clone();
@@ -400,7 +402,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             cfg_override.input_port = None; // force index-based resolution
             resolve_input(&cfg_override, state)
         })
-        .collect();
+        .collect::<Result<Vec<String>, String>>()
+    {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let primary_in_port = in_ports.first().cloned().unwrap_or_default();
 
     let pub_tx = state.pub_tx.clone();

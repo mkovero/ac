@@ -31,11 +31,17 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
-    let out_port = resolve_output(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let mut cfg_in = cfg.clone();
     cfg_in.input_channel = in_ch;
     cfg_in.input_port = None;
-    let in_port = resolve_input(&cfg_in, state);
+    let in_port = match resolve_input(&cfg_in, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
@@ -337,7 +343,10 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     let mut cfg_in = cfg.clone();
     cfg_in.input_channel = in_ch;
     cfg_in.input_port = None;
-    let in_port = resolve_input(&cfg_in, state);
+    let in_port = match resolve_input(&cfg_in, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate_spl", move |stop| {

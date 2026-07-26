@@ -266,8 +266,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         })
         .collect();
 
-    let out_port = resolve_output(&cfg, state);
-    let ref_out_port = resolve_ref_output(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let ref_out_port = match resolve_ref_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
 
     // Sync routing-capability check so CPAL-only environments get an
     // immediate REP error instead of a silent worker exit that the UI never

@@ -152,17 +152,45 @@ pub(super) fn refresh_port_cache(state: &ServerState) {
 // Port resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve output port: config sticky name, or fall back to channel index in engine list.
-pub(super) fn resolve_output(cfg: &Config, state: &ServerState) -> String {
+/// Shared error text for an out-of-range channel index.
+///
+/// Names the kind, the index, and every port that *is* available, because the
+/// operator's next question is always "then what should I have said?".
+fn out_of_range(kind: &str, channel: u32, ports: &[String]) -> String {
+    if ports.is_empty() {
+        return format!(
+            "no physical {kind} ports are available, so channel {channel} cannot be \
+             resolved — is the audio server running?"
+        );
+    }
+    format!(
+        "{kind} channel {channel} is out of range — only {} physical {kind} port(s) \
+         available: {}",
+        ports.len(),
+        ports.join(", "),
+    )
+}
+
+/// Resolve output port: config sticky name, or the channel index in the
+/// engine's playback list.
+///
+/// **Fails rather than fabricating** (issue #206). This used to fall back to
+/// `"system:playback_1"` on an out-of-range index, which on any modern
+/// pipewire-jack setup — where ports are named e.g. `Babyface Pro Pro:playback_5`
+/// — matches nothing at all. `jack_backend::start` discards the connect result
+/// with `.ok()`, so the session came up wired to nothing while the reply and
+/// every subsequent frame named a port the operator never configured. On the
+/// drive path it was worse than cosmetic: a mistyped `output_channel` silently
+/// retargeted the stimulus to channel 1.
+pub(super) fn resolve_output(cfg: &Config, state: &ServerState) -> Result<String, String> {
     if let Some(p) = &cfg.output_port {
-        return p.clone();
+        return Ok(p.clone());
     }
     let ports = cached_playback_ports(state);
-    let ch = cfg.output_channel as usize;
     ports
-        .get(ch)
+        .get(cfg.output_channel as usize)
         .cloned()
-        .unwrap_or_else(|| "system:playback_1".to_string())
+        .ok_or_else(|| out_of_range("playback", cfg.output_channel, &ports))
 }
 
 /// Resolve a specific output channel index to a playback port. Used when
@@ -178,50 +206,69 @@ pub(super) fn resolve_output_by_channel(
     channel: u32,
 ) -> Result<String, String> {
     if channel == cfg.output_channel {
-        return Ok(resolve_output(cfg, state));
+        return resolve_output(cfg, state);
     }
     let ports = cached_playback_ports(state);
-    if let Some(p) = ports.get(channel as usize) {
-        Ok(p.clone())
-    } else {
-        Err(format!(
-            "channel {} is out of range — only {} physical playback port(s) available: {}",
-            channel,
-            ports.len(),
-            ports.join(", "),
-        ))
-    }
+    ports
+        .get(channel as usize)
+        .cloned()
+        .ok_or_else(|| out_of_range("playback", channel, &ports))
 }
 
-/// Resolve input port: config sticky name, or fall back to channel index in engine list.
-pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> String {
+/// Resolve input port: config sticky name, or the channel index in the
+/// engine's capture list. Fails rather than fabricating — see
+/// [`resolve_output`].
+pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> Result<String, String> {
     if let Some(p) = &cfg.input_port {
-        return p.clone();
+        return Ok(p.clone());
     }
     let ports = cached_capture_ports(state);
-    let ch = cfg.input_channel as usize;
     ports
-        .get(ch)
+        .get(cfg.input_channel as usize)
         .cloned()
-        .unwrap_or_else(|| "system:capture_1".to_string())
+        .ok_or_else(|| out_of_range("capture", cfg.input_channel, &ports))
 }
 
-pub(super) fn resolve_ref_input(cfg: &Config, state: &ServerState) -> Option<String> {
-    let ch = cfg.reference_channel? as usize;
+/// Resolve the reference *input* port.
+///
+/// `Ok(None)` means no reference channel is configured, which is a legitimate
+/// state. `Err` means one is configured but does not exist. Those were both
+/// `None` before, so an out-of-range reference channel silently presented as
+/// "no reference" — the measurement then ran single-ended while the operator
+/// believed a reference was wired in.
+pub(super) fn resolve_ref_input(
+    cfg: &Config,
+    state: &ServerState,
+) -> Result<Option<String>, String> {
+    let Some(ch) = cfg.reference_channel else {
+        return Ok(None);
+    };
     if let Some(p) = &cfg.reference_port {
-        return Some(p.clone());
+        return Ok(Some(p.clone()));
     }
-    cached_capture_ports(state).get(ch).cloned()
+    let ports = cached_capture_ports(state);
+    ports
+        .get(ch as usize)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| out_of_range("capture", ch, &ports))
 }
 
-pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> String {
-    if let Some(ch) = cfg.reference_channel {
-        let ports = cached_playback_ports(state);
-        if let Some(p) = ports.get(ch as usize) {
-            return p.clone();
-        }
-    }
-    resolve_output(cfg, state)
+/// Resolve the reference *output* port, falling back to the main output when
+/// no reference channel is configured.
+///
+/// Only the *unconfigured* case falls back. A configured-but-out-of-range
+/// reference channel is an error: silently emitting the reference stimulus on
+/// the main output is a drive-path hazard, not a graceful degradation.
+pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> Result<String, String> {
+    let Some(ch) = cfg.reference_channel else {
+        return resolve_output(cfg, state);
+    };
+    let ports = cached_playback_ports(state);
+    ports
+        .get(ch as usize)
+        .cloned()
+        .ok_or_else(|| out_of_range("playback", ch, &ports))
 }
 
 // ---------------------------------------------------------------------------
