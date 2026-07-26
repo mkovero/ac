@@ -35,7 +35,7 @@ fn resolve_channels(
         })
         .unwrap_or_default();
     if channels.is_empty() {
-        return Ok(vec![resolve_output(cfg, state)]);
+        return Ok(vec![resolve_output(cfg, state)?]);
     }
     let mut ports: Vec<String> = channels
         .iter()

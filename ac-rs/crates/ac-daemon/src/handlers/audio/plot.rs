@@ -38,8 +38,14 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
 
-    let out_port = resolve_output(&cfg, state);
-    let in_port = resolve_input(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let in_port = match resolve_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let out_port_reply = out_port.clone();
     let in_port_reply = in_port.clone();
 
@@ -265,8 +271,14 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
 
-    let out_port = resolve_output(&cfg, state);
-    let in_port = resolve_input(&cfg, state);
+    let out_port = match resolve_output(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let in_port = match resolve_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
     let out_port_reply = out_port.clone();
     let in_port_reply = in_port.clone();
 
