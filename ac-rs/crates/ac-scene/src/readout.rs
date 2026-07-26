@@ -89,6 +89,105 @@ pub fn format_driving_banner(
     )
 }
 
+/// Which output leg a health line is about (#205). The label is fixed-width
+/// by design so the state column aligns across faults.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DriveLeg {
+    /// The main stimulus output.
+    Out,
+    /// The reference output, when it resolves to a different port.
+    RefOut,
+}
+
+impl DriveLeg {
+    fn label(self) -> &'static str {
+        match self {
+            DriveLeg::Out => "OUT",
+            DriveLeg::RefOut => "REF OUT",
+        }
+    }
+}
+
+/// Observed state of one drive leg (#205). Closed set, three positions and no
+/// others — the vocabulary shared with the data-link line (#193) so there is
+/// one health grammar rather than two ad-hoc warnings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DrivePathState {
+    /// Observed to have an edge. Renders as **nothing at all** — the happy path
+    /// costs zero pixels and the void stays void.
+    Connected,
+    /// Observed to have no edge. This is #203's condition: driving into nothing.
+    NotConnected,
+    /// The daemon cannot see its graph (`--fake-audio`, a pre-#205 daemon, a
+    /// non-JACK backend). Lowercase, because an absence of information is not a
+    /// fault and must never be mistaken for one.
+    Unknown,
+    /// This session never opened the leg. Renders as nothing: a passive
+    /// (`drivable = false`) session has no drive path to report on, and
+    /// flagging it would be a false positive by construction.
+    NotApplicable,
+}
+
+/// Maximum columns for a JACK port name inside a health line, derived from the
+/// 80-column budget: fixed chrome is `␣␣drive path␣␣␣REF OUT 3 ()␣␣␣NOT
+/// CONNECTED` = 43 columns, leaving 37.
+const HEALTH_PORT_MAX_COLS: usize = 37;
+
+/// Elide a too-long port name **from the left** (`…:playback_5`) — the suffix
+/// is the discriminating part, so the head is what can be spared.
+fn elide_port_from_left(port: &str) -> String {
+    let chars: Vec<char> = port.chars().collect();
+    if chars.len() <= HEALTH_PORT_MAX_COLS {
+        return port.to_string();
+    }
+    let keep = HEALTH_PORT_MAX_COLS.saturating_sub(1);
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("\u{2026}{tail}")
+}
+
+/// One drive-path health line (#205), or `None` when there is nothing to say.
+///
+/// Grammar, shared with the data-link line so #193 needs no second vocabulary:
+///
+/// ```text
+///   <link>   <the thing named, with real values>   <STATE>
+/// ```
+///
+/// Rendering rules, and the reasoning that makes them load-bearing:
+///
+/// - **Verified good and not-applicable return `None`.** Silence is the
+///   healthy rendering. A line that appeared on every session would be chrome,
+///   and chrome is not read.
+/// - **A verified fault is `CAPS`** — weight without colour, legible piped to
+///   a file, and caps already mean "this is the state that matters" in this UI
+///   (`ARMED`/`DRIVING`).
+/// - **`unknown` is lowercase.** It distinguishes "we looked and there are no
+///   edges" from "we cannot look". Without that distinction the whole design
+///   regresses into a quieter version of the lie it exists to fix.
+///
+/// The leg token comes from the same private `format_output_target` both
+/// banners call, so the token here and the token in the banner are identical
+/// **by construction rather than by convention** — which is the failure that
+/// produced `OUT 0` in the first place.
+pub fn format_drive_path_health(
+    leg: DriveLeg,
+    output_channel: u32,
+    output_port: Option<&str>,
+    state: DrivePathState,
+) -> Option<String> {
+    let verdict = match state {
+        DrivePathState::Connected | DrivePathState::NotApplicable => return None,
+        DrivePathState::NotConnected => "NOT CONNECTED",
+        DrivePathState::Unknown => "unknown",
+    };
+    let elided = output_port.map(elide_port_from_left);
+    Some(format!(
+        "  drive path   {} {}   {verdict}",
+        leg.label(),
+        format_output_target(output_channel, elided.as_deref()),
+    ))
+}
+
 fn format_output_target(output_channel: u32, output_port: Option<&str>) -> String {
     match output_port {
         Some(port) => format!("{output_channel} ({port})"),
@@ -154,6 +253,143 @@ mod tests {
         assert_eq!(
             format_cursor_readout(1000.0, -6.75, true),
             "1000 Hz: -6.75 dB SPL"
+        );
+    }
+
+    // ---- #205 drive-path health line: byte-exact, F5 style ----
+
+    /// The UX-specified line, verbatim, at the reference rig's real values.
+    #[test]
+    fn drive_path_fault_line_is_byte_exact() {
+        assert_eq!(
+            format_drive_path_health(
+                DriveLeg::Out,
+                4,
+                Some("Babyface Pro Pro:playback_5"),
+                DrivePathState::NotConnected
+            )
+            .unwrap(),
+            "  drive path   OUT 4 (Babyface Pro Pro:playback_5)   NOT CONNECTED"
+        );
+    }
+
+    #[test]
+    fn ref_out_fault_line_is_byte_exact() {
+        assert_eq!(
+            format_drive_path_health(
+                DriveLeg::RefOut,
+                3,
+                Some("Babyface Pro Pro:playback_4"),
+                DrivePathState::NotConnected
+            )
+            .unwrap(),
+            "  drive path   REF OUT 3 (Babyface Pro Pro:playback_4)   NOT CONNECTED"
+        );
+    }
+
+    /// `unknown` is lowercase and must never read as a fault.
+    #[test]
+    fn unknown_line_is_lowercase_and_byte_exact() {
+        let line = format_drive_path_health(
+            DriveLeg::Out,
+            4,
+            Some("Babyface Pro Pro:playback_5"),
+            DrivePathState::Unknown,
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "  drive path   OUT 4 (Babyface Pro Pro:playback_5)   unknown"
+        );
+        assert!(
+            !line.contains("NOT CONNECTED") && !line.contains("UNKNOWN"),
+            "unobservable must not be rendered in the fault register: {line}"
+        );
+    }
+
+    /// Verified-good and not-applicable are **silent**. The happy path and the
+    /// passive session both cost zero pixels.
+    #[test]
+    fn healthy_and_passive_render_nothing() {
+        assert_eq!(
+            format_drive_path_health(DriveLeg::Out, 4, Some("x:y"), DrivePathState::Connected),
+            None,
+            "a connected leg must emit no line"
+        );
+        assert_eq!(
+            format_drive_path_health(DriveLeg::Out, 4, None, DrivePathState::NotApplicable),
+            None,
+            "a passive session has no drive path to report on"
+        );
+    }
+
+    /// The health line's leg token is produced by the same formatter the
+    /// banners use. Asserted as a substring relationship rather than by
+    /// duplicating the format string, so the two cannot drift apart — which is
+    /// the failure that produced `OUT 0`.
+    #[test]
+    fn health_line_and_banner_share_the_output_token() {
+        let (ch, port) = (4u32, "Babyface Pro Pro:playback_5");
+        let token = format!("OUT {}", format_output_target(ch, Some(port)));
+
+        let health =
+            format_drive_path_health(DriveLeg::Out, ch, Some(port), DrivePathState::NotConnected)
+                .unwrap();
+        let armed = format_armed_banner(ch, Some(port), -40.0);
+        let driving = format_driving_banner(ch, Some(port), -40.0);
+
+        for (name, s) in [
+            ("health", &health),
+            ("armed", &armed),
+            ("driving", &driving),
+        ] {
+            assert!(
+                s.contains(&token),
+                "{name} line must carry the shared token {token:?}, got: {s}"
+            );
+        }
+    }
+
+    /// Over-long port names elide from the left, keeping the discriminating
+    /// suffix, and the line stays inside 80 columns.
+    #[test]
+    fn long_port_names_elide_from_the_left_and_fit_80_columns() {
+        let long = "some-absurdly-long-jack-client-name-here:playback_5";
+        assert!(long.len() > HEALTH_PORT_MAX_COLS);
+        let line = format_drive_path_health(
+            DriveLeg::RefOut,
+            3,
+            Some(long),
+            DrivePathState::NotConnected,
+        )
+        .unwrap();
+        assert!(
+            line.contains("\u{2026}") && line.contains(":playback_5"),
+            "must elide from the left and keep the suffix: {line}"
+        );
+        assert!(
+            line.chars().count() <= 80,
+            "health line must fit 80 columns, got {}: {line}",
+            line.chars().count()
+        );
+    }
+
+    /// The worst case the UX design counted: longest label, longest permitted
+    /// port name.
+    #[test]
+    fn widest_legal_line_fits_80_columns() {
+        let port = "x".repeat(HEALTH_PORT_MAX_COLS);
+        let line = format_drive_path_health(
+            DriveLeg::RefOut,
+            3,
+            Some(&port),
+            DrivePathState::NotConnected,
+        )
+        .unwrap();
+        assert!(
+            line.chars().count() <= 80,
+            "worst case must fit 80 columns, got {}: {line}",
+            line.chars().count()
         );
     }
 }
