@@ -699,6 +699,10 @@ fn jack_stimulus_then_silence_recurrence_probe() {
 
         eng.set_tone(TONE_HZ, amplitude);
         let mut stream: Vec<f32> = Vec::new();
+        // Per-tick returned sizes. On the non-clearing arm a size that keeps
+        // exceeding `chunk` means the ring is backing up faster than it is
+        // drained — the direct signature of H3.
+        let mut block_sizes: Vec<usize> = Vec::new();
         let total_ticks = ((TONE_SECS + SILENCE_SECS) / CHUNK_SECS) as usize;
         let tone_ticks = (TONE_SECS / CHUNK_SECS) as usize;
 
@@ -707,12 +711,20 @@ fn jack_stimulus_then_silence_recurrence_probe() {
                 eng.set_silence();
             }
             let block = if clearing {
+                // Blocks internally until `chunk` samples exist, so it paces
+                // itself.
                 eng.capture_multi(CHUNK_SECS)
                     .expect("capture_multi")
                     .remove(0)
             } else {
+                // Non-blocking: returns whatever has accrued since the last
+                // call. The caller must pace itself, exactly as
+                // `monitor_spectrum`'s sliding-ring loop does — without this
+                // the loop spins and captures nothing.
+                std::thread::sleep(std::time::Duration::from_secs_f64(CHUNK_SECS));
                 eng.capture_available(chunk).expect("capture_available")
             };
+            block_sizes.push(block.len());
             stream.extend_from_slice(&block);
         }
         let discarded = eng.discarded_samples();
@@ -723,6 +735,12 @@ fn jack_stimulus_then_silence_recurrence_probe() {
             "\n=== {arm}\n    sr={sr} discarded={discarded} captured={} samples ({:.1} s of audio)",
             stream.len(),
             stream.len() as f64 / sr as f64
+        );
+        let bmin = block_sizes.iter().min().copied().unwrap_or(0);
+        let bmax = block_sizes.iter().max().copied().unwrap_or(0);
+        let bmean = block_sizes.iter().sum::<usize>() as f64 / block_sizes.len().max(1) as f64;
+        eprintln!(
+            "    per-tick block samples: min={bmin} max={bmax} mean={bmean:.0} (nominal {chunk})"
         );
         eprintln!("     sec | rms dBFS | tone dBFS    (generator off after {TONE_SECS} s)");
         for (i, sec) in stream.chunks(sr as usize).enumerate() {
