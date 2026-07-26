@@ -91,6 +91,26 @@ pub trait AudioEngine: Send + 'static {
         Ok(vec![meas, refch])
     }
 
+    /// Contiguous multi-channel capture for **streaming** consumers.
+    ///
+    /// Same pacing as `capture_multi` — blocks until `duration` of audio is
+    /// available — but without the pre-wait `clear()`, and returns everything
+    /// that has accumulated rather than exactly `duration`.
+    ///
+    /// Use this wherever successive blocks are concatenated into one analysis
+    /// window (`transfer_stream`'s 2.5 s H1 window). Use `capture_multi` for a
+    /// one-shot measurement, which genuinely wants the flush so it cannot
+    /// return audio recorded before its stimulus was set. Issue #207 was
+    /// `transfer_stream` using the one-shot call in a streaming loop, which
+    /// spliced ~50 non-contiguous fragments into every window.
+    ///
+    /// Default delegates to `capture_multi`: a backend with no ring (the
+    /// on-demand fake generator) has nothing to clear and is already
+    /// contiguous.
+    fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        self.capture_multi(duration)
+    }
+
     /// Reconnect the measurement input port without restarting the engine.
     /// Default no-op (used by fake engine; JACK backend overrides).
     fn reconnect_input(&mut self, _port: &str) -> Result<()> {

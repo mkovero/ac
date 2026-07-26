@@ -87,6 +87,8 @@ enum RingDrain {
     Available,
     Stereo,
     Multi,
+    /// The #207 fix: no pre-wait clear, drains everything available.
+    MultiContiguous,
 }
 
 /// Push a whole block into a ring producer. A short push means the ring
@@ -385,10 +387,23 @@ impl FakeEngine {
                 .capture_stereo(n, duration, &mut wait)
                 .map(|(m, r)| vec![m, r]),
             RingDrain::Multi => rings.capture_multi(n, duration, &mut wait),
+            RingDrain::MultiContiguous => rings.capture_multi_contiguous(n, duration, &mut wait),
         }?;
 
         self.ring_charge_processing();
         Ok(out)
+    }
+
+    /// Test-only: set the rate the engine reports and synthesises at.
+    ///
+    /// `FakeEngine::new()` hardcodes 48 kHz. Any test that models a specific
+    /// rig must set this, or it will synthesise at 48 kHz while analysing at
+    /// the assumed rate and every frequency will read wrong by that ratio —
+    /// which is exactly the mistake `audio/contiguity.rs` made before this
+    /// existed (a 96 kHz model whose tones came out an octave high).
+    #[cfg(test)]
+    pub fn set_sample_rate(&mut self, sr: u32) {
+        self.sample_rate = sr;
     }
 
     /// Parse the trailing channel index from a `fake:<kind>_<N>` name.
@@ -650,6 +665,15 @@ impl AudioEngine for FakeEngine {
         }
         let (meas, refch) = self.capture_stereo(duration)?;
         Ok(vec![meas, refch])
+    }
+
+    fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        if self.ring.is_some() {
+            let n = (self.sample_rate as f64 * duration) as usize;
+            return self.ring_drain(n, duration, RingDrain::MultiContiguous);
+        }
+        // No ring to splice: the on-demand generator is already contiguous.
+        self.capture_multi(duration)
     }
 
     fn discarded_samples(&self) -> u64 {

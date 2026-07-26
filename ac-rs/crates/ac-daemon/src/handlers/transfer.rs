@@ -527,7 +527,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let mut spl_last_ts: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
         while !stop.load(Ordering::Relaxed) {
-            let bufs = match eng.capture_multi(chunk_secs) {
+            // Contiguous drain (#207). `capture_multi` would clear the ring
+            // before waiting, discarding whatever accrued while the previous
+            // tick was being processed — so the `rings` window assembled below
+            // would be ~50 spliced fragments presented as continuous time.
+            let bufs = match eng.capture_multi_contiguous(chunk_secs) {
                 Ok(b) => b,
                 Err(e) => {
                     send_pub(

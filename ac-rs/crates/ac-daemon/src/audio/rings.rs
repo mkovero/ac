@@ -214,6 +214,58 @@ impl CaptureRings {
         }
         Ok(out)
     }
+
+    /// Smallest sample count readable on *every* channel.
+    ///
+    /// Popping this many from each keeps meas and refs sample-aligned without
+    /// relying on a `clear()` to re-sync them. The rings are filled in
+    /// lockstep by one RT callback so they agree in practice; taking the
+    /// minimum makes that a guarantee rather than an assumption.
+    fn min_occupied(&self) -> usize {
+        self.refs
+            .iter()
+            .map(|c| c.occupied_len())
+            .fold(self.occupied(), usize::min)
+    }
+
+    /// Contiguous multi-channel drain — the streaming counterpart of
+    /// [`Self::capture_multi`], and the fix for issue #207.
+    ///
+    /// Two differences, both load-bearing:
+    ///
+    /// 1. **No pre-wait `clear()`.** That clear is correct for a one-shot
+    ///    measurement, which must not return audio recorded before its
+    ///    stimulus was set. It is wrong for a streaming consumer that
+    ///    concatenates successive blocks into one analysis window, because it
+    ///    discards whatever accrued while the previous block was being
+    ///    processed and presents the fragments as continuous time.
+    /// 2. **Returns everything available, not just `n_needed`.** Dropping the
+    ///    clear alone would trade the splice for a growing backlog — which is
+    ///    exactly issue #208, on this path. Draining the surplus keeps latency
+    ///    bounded *and* contiguous. The `clear()` was bounding latency by
+    ///    destroying contiguity; this bounds it by keeping up.
+    ///
+    /// Still blocks until `n_needed` is available, so it paces the caller's
+    /// tick loop exactly as `capture_multi` did.
+    pub(crate) fn capture_multi_contiguous(
+        &mut self,
+        n_needed: usize,
+        duration: f64,
+        wait: WaitFn<'_>,
+    ) -> Result<Vec<Vec<f32>>> {
+        wait(&*self, n_needed, duration)?;
+
+        // Never less than requested (the wait guarantees it on the
+        // measurement ring), and never so much that a channel under-runs.
+        let n = self.min_occupied().max(n_needed);
+
+        let mut out = Vec::with_capacity(1 + self.refs.len());
+        out.push(self.pop_meas(n));
+        for i in 0..self.refs.len() {
+            out.push(self.pop_ref_padded(i, n));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

@@ -36,11 +36,22 @@
 //! headless equivalent of the `ac monitor 0` / `ac monitor 0-1` hardware A/B
 //! that D4 will run.
 //!
-//! **These are guard tests: they assert the defect, and they pass while it is
-//! present.** House convention — the eventual fix inverts them to the correct
-//! assertion (one peak, zero discards). Do not "fix" a failure here by
-//! relaxing the assertion; a failure means either the defect changed or the
-//! reproducer stopped reproducing, and both are findings.
+//! **Status: the defect is fixed (#207).** `transfer_stream` now calls
+//! `capture_multi_contiguous`, which does not clear before waiting. These
+//! tests were written as guards that *asserted the defect* while it was
+//! present, and have been inverted per house convention now that it is not:
+//!
+//! - `fixed_streaming_drain_of_a_single_tone_produces_one_peak` is the
+//!   inverted form and asserts the correct behaviour.
+//! - The `Drain::Clearing` tests are **kept, still asserting replication**,
+//!   because `capture_multi` is not going away — it remains the correct call
+//!   for a one-shot measurement. They are now the demonstration of *why* it
+//!   must never be used for streaming, and they will catch anyone re-pointing
+//!   a streaming consumer at it.
+//!
+//! Do not "fix" a failure here by relaxing an assertion; a failure means
+//! either the defect changed or the reproducer stopped reproducing, and both
+//! are findings.
 //!
 //! Measured spacing is recorded in `spliced_replica_spacing_matches_tick_rate`
 //! (acceptance criterion 5), which reconciles it against the `sr/L` the splice
@@ -115,10 +126,17 @@ const SAMPLE_ACCURATE: usize = 1;
 /// contiguous one. The single independent variable of the experiment.
 #[derive(Clone, Copy, PartialEq)]
 enum Drain {
-    /// `capture_multi` — clears the ring before waiting. The suspect.
+    /// `capture_multi` — clears the ring before waiting. This is the
+    /// one-shot-measurement drain; issue #207 was `transfer_stream` calling it
+    /// in a streaming loop. Kept here so the defect stays *demonstrable*: it
+    /// is still the correct call for a one-shot capture, and these tests are
+    /// what show why it must not be used for streaming.
     Clearing,
     /// `capture_available` — never clears. The control.
     Contiguous,
+    /// `capture_multi_contiguous` — the #207 fix: no pre-wait clear, drains
+    /// everything available. What `transfer_stream` uses now.
+    Fixed,
 }
 
 /// Run a ring-backed fake session and return the measurement-channel window
@@ -146,6 +164,9 @@ fn assemble_window_with_period(
     let chunk_samples = (sr as f64 * CHUNK_SECS) as usize;
 
     let mut eng = FakeEngine::new();
+    // Must precede everything else: the engine synthesises at this rate, and
+    // the analysis below assumes it.
+    eng.set_sample_rate(sr);
     eng.set_tone(tone_hz, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
     eng.add_ref_input("fake:capture_0").unwrap();
@@ -159,6 +180,7 @@ fn assemble_window_with_period(
         let block = match drain {
             Drain::Clearing => eng.capture_multi(CHUNK_SECS).unwrap().remove(0),
             Drain::Contiguous => eng.capture_available(chunk_samples).unwrap(),
+            Drain::Fixed => eng.capture_multi_contiguous(CHUNK_SECS).unwrap().remove(0),
         };
         ring.extend_from_slice(&block);
         if ring.len() > target_total {
@@ -186,32 +208,44 @@ fn meas_amp_db(window: &[f32], sr: u32) -> Vec<f64> {
         .collect()
 }
 
-/// `FakeEngine`'s tone stimulus deliberately carries a 1% (−40 dB) second
-/// harmonic, so it models a DUT rather than a mathematically pure sine. Above
-/// `sr/4` that harmonic is beyond Nyquist and folds back: at 15 100 Hz the
-/// 30 200 Hz component appears at `48 000 − 30 200 = 17 800 Hz`, sitting
-/// exactly on the −40 dB floor this test counts against.
+/// Where the `k`-th harmonic of `tone_hz` lands in the analysed base band,
+/// after any folding around Nyquist.
 ///
-/// It is present identically in every arm, contiguous and spliced alike, and
-/// is a property of the stimulus rather than of the capture path — so it is
-/// removed rather than allowed to inflate every peak count by one.
-/// `alias_is_present_in_the_contiguous_arm` pins it down so this filter can
-/// never quietly hide a real finding instead.
-fn aliased_harmonic_hz(tone_hz: f64, sr: u32) -> Option<f64> {
-    let second = 2.0 * tone_hz;
-    let nyquist = sr as f64 / 2.0;
-    (second > nyquist).then_some(sr as f64 - second)
+/// `FakeEngine`'s tone stimulus deliberately carries a 1% (−40 dB) second
+/// harmonic, so it models a DUT rather than a mathematically pure sine. That
+/// harmonic is a property of the *stimulus*, present identically in every arm,
+/// and it sits exactly on the −40 dB floor these tests count against — so it
+/// must be excluded rather than counted as a capture artifact.
+///
+/// Whether it needs folding depends on the rate, which is why this cannot be
+/// hardcoded: at 48 kHz the 30 200 Hz second harmonic of a 15 100 Hz tone is
+/// above Nyquist and folds back to 17 800 Hz, while at 96 kHz it is simply
+/// in-band at 30 200 Hz. An earlier version of these tests only handled the
+/// folded case and consequently failed at 96 kHz on a peak that was never a
+/// defect.
+fn harmonic_in_band(tone_hz: f64, k: u32, sr: u32) -> f64 {
+    let sr = sr as f64;
+    let mut f = (tone_hz * k as f64) % sr;
+    if f > sr / 2.0 {
+        f = sr - f;
+    }
+    f
 }
 
-/// Drop the known aliased harmonic from a peak list. See
-/// [`aliased_harmonic_hz`].
+/// Drop peaks belonging to the stimulus's own harmonic series.
+///
+/// Splice replicas sit a few tens of Hz from the fundamental (the tick rate),
+/// never at a harmonic, so this cannot hide the effect under test —
+/// `alias_is_present_in_the_contiguous_arm` pins that down.
 fn without_alias(peaks: Vec<usize>, tone_hz: f64, sr: u32) -> Vec<usize> {
-    let Some(alias) = aliased_harmonic_hz(tone_hz, sr) else {
-        return peaks;
-    };
+    let harmonics: Vec<f64> = (2..=8).map(|k| harmonic_in_band(tone_hz, k, sr)).collect();
     peaks
         .into_iter()
-        .filter(|&p| (p as f64 - alias).abs() > 5.0)
+        .filter(|&p| {
+            !harmonics
+                .iter()
+                .any(|&h| (p as f64 - h).abs() <= 5.0 && (p as f64 - tone_hz).abs() > 5.0)
+        })
         .collect()
 }
 
@@ -408,16 +442,24 @@ fn spliced_replica_spacing_matches_tick_rate() {
 
 /// Keeps [`without_alias`] honest. The filter drops a peak from every count
 /// in this module, so it has to be shown that the thing it drops is really
-/// the stimulus's own aliased harmonic — present in the *contiguous* arm,
-/// where there is no splice to blame it on.
+/// the stimulus's own harmonic — present in the *contiguous* arm, where there
+/// is no splice to blame it on.
+///
+/// Also pins the rate-dependence that an earlier version of this module got
+/// wrong: the second harmonic folds at 48 kHz but not at 96 kHz, so a filter
+/// that only handled the folded case failed at the higher rate on a peak that
+/// was never a defect.
 #[test]
 fn alias_is_present_in_the_contiguous_arm() {
     let sr = 48_000;
-    let alias =
-        aliased_harmonic_hz(TONE_HZ, sr).expect("15.1 kHz has its 2nd harmonic above Nyquist");
+    let alias = harmonic_in_band(TONE_HZ, 2, sr);
     assert!(
         (alias - 17_800.0).abs() < 1.0,
-        "expected the folded 2nd harmonic at 17 800 Hz, computed {alias}"
+        "at 48 kHz the 2nd harmonic of 15 100 Hz must fold to 17 800 Hz, computed {alias}"
+    );
+    assert!(
+        (harmonic_in_band(TONE_HZ, 2, 96_000) - 30_200.0).abs() < 1.0,
+        "at 96 kHz the same harmonic is in-band at 30 200 Hz and must not be folded"
     );
 
     let (window, _) = assemble_window(Drain::Contiguous, 0.005, sr);
@@ -779,4 +821,107 @@ fn goertzel_dbfs(samples: &[f32], sr: f64, freq: f64) -> f64 {
     }
     let mag = (s1 * s1 + s2 * s2 - s1 * s2 * coeff).sqrt() / n as f64 * 2.0;
     20.0 * mag.max(1e-12).log10()
+}
+
+/// **The inverted guard (#207 fix).** Same stimulus, same window assembly,
+/// same period quantisation as
+/// `spliced_capture_of_a_single_tone_replicates_the_response` — the only
+/// change is that the tick uses `capture_multi_contiguous` instead of
+/// `capture_multi`, i.e. no pre-wait `clear()`.
+///
+/// One tone in, one peak out, and nothing discarded.
+///
+/// This is the assertion the original guard test promised it would become.
+#[test]
+fn fixed_streaming_drain_of_a_single_tone_produces_one_peak() {
+    let sr = 48_000;
+    let (window, discarded) = assemble_window(Drain::Fixed, 0.005, sr);
+
+    assert_eq!(
+        discarded, 0,
+        "the streaming drain must not clear the ring — any discard is a splice"
+    );
+
+    let db = meas_amp_db(&window, sr);
+    let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), TONE_HZ, sr);
+    assert_eq!(
+        peaks.len(),
+        1,
+        "contiguous streaming capture of one tone must give exactly one peak, \
+         got {} at {:?} Hz",
+        peaks.len(),
+        peaks
+    );
+    assert!(
+        (peaks[0] as f64 - TONE_HZ).abs() < 5.0,
+        "the one peak must sit at the stimulus frequency, got {} Hz",
+        peaks[0]
+    );
+}
+
+/// The fix must hold at the frequencies that *did* expose the splice.
+///
+/// `period_quantisation_decides_which_frequencies_expose_the_splice` shows
+/// 15 100 Hz replicating under the clearing drain at a 1024-sample producer
+/// granularity while the commensurate tones stay clean. Under the contiguous
+/// drain every one of them must be clean — otherwise the fix only works where
+/// the defect was already invisible, which would be no fix at all.
+#[test]
+fn fix_holds_across_the_frequencies_that_exposed_the_splice() {
+    const SR: u32 = 96_000;
+    const PERIOD: usize = 1024;
+
+    for tone in [12_000.0f64, 15_000.0, 15_100.0, 18_000.0] {
+        let (window, discarded) =
+            assemble_window_with_period(Drain::Fixed, 0.005, SR, PERIOD, tone);
+        assert_eq!(discarded, 0, "{tone} Hz: streaming drain must not discard");
+
+        let db = meas_amp_db(&window, SR);
+        let peaks = without_alias(peak_bins(&db, -40.0, MIN_PEAK_SEP_BINS), tone, SR);
+        assert_eq!(
+            peaks.len(),
+            1,
+            "{tone} Hz must be clean under the contiguous drain, got {peaks:?} Hz"
+        );
+    }
+}
+
+/// Latency must stay bounded. Dropping the `clear()` on its own would trade
+/// the splice for an ever-growing backlog — issue #208 on this path — so the
+/// contiguous drain returns *everything* available, not just the requested
+/// chunk. Feed the ring faster than the consumer asks and the surplus must
+/// come back out rather than accumulate.
+#[test]
+fn contiguous_drain_does_not_accumulate_a_backlog() {
+    let sr = 48_000u32;
+    let chunk = (sr as f64 * CHUNK_SECS) as usize;
+
+    let mut eng = FakeEngine::new();
+    eng.set_tone(TONE_HZ, 0.5);
+    eng.reconnect_input("fake:capture_0").unwrap();
+    eng.add_ref_input("fake:capture_0").unwrap();
+    // process_secs deliberately larger than the chunk: every tick accrues
+    // more than the caller nominally asks for.
+    eng.enable_ring_mode(CHUNK_SECS * 2.0, 1, SAMPLE_ACCURATE);
+
+    let mut returned = Vec::new();
+    for _ in 0..40 {
+        let bufs = eng.capture_multi_contiguous(CHUNK_SECS).unwrap();
+        returned.push(bufs[0].len());
+    }
+
+    // Steady state: each tick hands back roughly the chunk plus the accrued
+    // surplus. If the drain were fixed-size the surplus would pile up in the
+    // ring instead and this would sit at exactly `chunk` forever while
+    // latency grew without bound.
+    let late: usize = returned[20..].iter().sum::<usize>() / 20;
+    assert!(
+        late >= chunk,
+        "steady-state drain {late} is below the {chunk}-sample chunk — backlog is accumulating"
+    );
+    assert_eq!(
+        eng.discarded_samples(),
+        0,
+        "bounded latency must come from draining, never from discarding"
+    );
 }
