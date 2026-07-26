@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessScope};
-use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
+use super::rings::CaptureRings;
 use super::AudioEngine;
 use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 
@@ -76,11 +77,11 @@ struct RefAdd {
 pub struct JackEngine {
     sample_rate: u32,
     state: Arc<SharedState>,
-    ring_cons: Option<HeapCons<f32>>,
-    /// One SPSC consumer per active ref input, in insertion order. Parallel
-    /// to `ref_ports`. Grows as `add_ref_input` is called; the RT handler
+    /// Consumer halves plus the shared clear/wait/pop ordering. One SPSC
+    /// consumer per active ref input, in insertion order, parallel to
+    /// `ref_ports`; grows as `add_ref_input` is called, and the RT handler
     /// owns the matching producers and drains new ones via `ref_add_prod`.
-    ring_ref_cons: Vec<HeapCons<f32>>,
+    rings: CaptureRings,
     _async_client: Option<jack::AsyncClient<Notifications, Process>>,
     output_ports: Vec<String>,
     input_port: Option<String>,
@@ -111,8 +112,7 @@ impl JackEngine {
                 one_shot_pos: AtomicUsize::new(0),
                 one_shot_active: AtomicBool::new(false),
             }),
-            ring_cons: None,
-            ring_ref_cons: Vec::new(),
+            rings: CaptureRings::new(),
             _async_client: None,
             output_ports: Vec::new(),
             input_port: None,
@@ -234,36 +234,37 @@ impl jack::NotificationHandler for Notifications {
 
 // -----------------------------------------------------------------------
 
-impl JackEngine {
-    /// Wait until the measurement ring holds at least `n` samples or timeout.
-    ///
-    /// Parks this thread and relies on the JACK process callback to unpark
-    /// us as soon as it pushes new samples. A 10 ms `park_timeout` is still
-    /// used as a safety net so a missed wake (e.g. waker slot cleared
-    /// between unpark attempts) can't deadlock.
-    fn wait_ring(&mut self, n: usize, duration: f64) -> Result<()> {
+/// Wait until the measurement ring holds at least `n` samples or timeout.
+///
+/// Parks this thread and relies on the JACK process callback to unpark us as
+/// soon as it pushes new samples. A 10 ms `park_timeout` is still used as a
+/// safety net so a missed wake (e.g. waker slot cleared between unpark
+/// attempts) can't deadlock.
+///
+/// Returned as a closure rather than a method so `CaptureRings` can own the
+/// clear/wait/pop ordering while the wait strategy stays backend-specific —
+/// the fake backend's ring-backed mode substitutes a synthetic-clock waiter
+/// here. Logic is unchanged from the former `JackEngine::wait_ring`.
+fn park_waiter(state: Arc<SharedState>) -> impl FnMut(&CaptureRings, usize, f64) -> Result<()> {
+    move |rings, n, duration| {
         let timeout = Instant::now() + Duration::from_secs_f64(duration + 2.0);
 
         // Fast path: data may already be present.
-        if let Some(ref c) = self.ring_cons {
-            if c.occupied_len() >= n {
-                return Ok(());
-            }
+        if rings.occupied() >= n {
+            return Ok(());
         }
 
-        *self.state.waker.lock().unwrap() = Some(std::thread::current());
+        *state.waker.lock().unwrap() = Some(std::thread::current());
         let result = loop {
-            if let Some(ref c) = self.ring_cons {
-                if c.occupied_len() >= n {
-                    break Ok(());
-                }
+            if rings.occupied() >= n {
+                break Ok(());
             }
             if Instant::now() > timeout {
                 break Err(anyhow::anyhow!("capture timeout after {duration:.1}s"));
             }
             std::thread::park_timeout(Duration::from_millis(10));
         };
-        *self.state.waker.lock().unwrap() = None;
+        *state.waker.lock().unwrap() = None;
         result
     }
 }
@@ -289,14 +290,14 @@ impl AudioEngine for JackEngine {
         // Split SPSC rings: producer → RT callback, consumer → worker thread.
         let rb = HeapRb::<f32>::new(RING_CAPACITY);
         let (ring_prod, ring_cons) = rb.split();
-        self.ring_cons = Some(ring_cons);
+        self.rings.set_meas(ring_cons);
 
         // Pre-allocated slots for on-demand ref inputs. No ports are
         // registered up front; `add_ref_input` ships a (port, prod) pair
         // through `ref_add_*` and the RT handler appends to these Vecs.
         let in_ref_ports: Vec<jack::Port<AudioIn>> = Vec::with_capacity(MAX_REF_INPUTS);
         let ring_ref_prods: Vec<HeapProd<f32>> = Vec::with_capacity(MAX_REF_INPUTS);
-        self.ring_ref_cons = Vec::with_capacity(MAX_REF_INPUTS);
+        self.rings.reserve_refs(MAX_REF_INPUTS);
         self.ref_ports = Vec::with_capacity(MAX_REF_INPUTS);
 
         let (ref_add_prod, ref_add_cons) = HeapRb::<RefAdd>::new(REF_ADD_QUEUE_CAPACITY).split();
@@ -346,8 +347,7 @@ impl AudioEngine for JackEngine {
 
     fn stop(&mut self) {
         self._async_client = None;
-        self.ring_cons = None;
-        self.ring_ref_cons.clear();
+        self.rings.teardown();
         self.ref_ports.clear();
         self.ref_add_prod = None;
     }
@@ -387,125 +387,54 @@ impl AudioEngine for JackEngine {
         self.state.one_shot_buf.store(Arc::new(samples.to_vec()));
         self.state.one_shot_pos.store(0, Ordering::Relaxed);
         self.state.silence.store(true, Ordering::Relaxed);
-        if let Some(ref mut c) = self.ring_cons {
-            c.clear();
-        }
+        // Not counted as a discard: this is the start of a one-shot
+        // measurement, not a per-tick splice.
+        self.rings.clear_meas_uncounted();
         self.state.one_shot_active.store(true, Ordering::Release);
 
         let duration_s = n_total as f64 / sr;
-        let wait = self.wait_ring(n_total, duration_s + 2.0);
+        let mut waiter = park_waiter(self.state.clone());
+        let wait = waiter(&self.rings, n_total, duration_s + 2.0);
 
         // Ensure RT stops consuming one-shot even if we bailed early.
         self.state.one_shot_active.store(false, Ordering::Release);
 
         wait?;
 
-        let mut out = vec![0.0f32; n_total];
-        let got = self
-            .ring_cons
-            .as_mut()
-            .map(|c| c.pop_slice(&mut out))
-            .unwrap_or(0);
-        out.truncate(got);
-        Ok(out)
+        Ok(self.rings.capture_available(n_total))
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
-
-        if let Some(ref mut c) = self.ring_cons {
-            c.clear();
-        }
-
-        self.wait_ring(n_needed, duration)?;
-
-        let mut samples = vec![0.0f32; n_needed];
-        let got = self
-            .ring_cons
-            .as_mut()
-            .map(|c| c.pop_slice(&mut samples))
-            .unwrap_or(0);
-        samples.truncate(got);
-        Ok(samples)
+        let mut waiter = park_waiter(self.state.clone());
+        self.rings.capture_block(n_needed, duration, &mut waiter)
     }
 
     fn capture_available(&mut self, max_samples: usize) -> Result<Vec<f32>> {
-        let mut samples = vec![0.0f32; max_samples];
-        let got = self
-            .ring_cons
-            .as_mut()
-            .map(|c| c.pop_slice(&mut samples))
-            .unwrap_or(0);
-        samples.truncate(got);
-        Ok(samples)
+        Ok(self.rings.capture_available(max_samples))
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
-
-        if let Some(ref mut c) = self.ring_cons {
-            c.clear();
-        }
-        if let Some(c) = self.ring_ref_cons.get_mut(0) {
-            c.clear();
-        }
-
-        self.wait_ring(n_needed, duration)?;
-
-        let mut meas = vec![0.0f32; n_needed];
-        let got_m = self
-            .ring_cons
-            .as_mut()
-            .map(|c| c.pop_slice(&mut meas))
-            .unwrap_or(0);
-        meas.truncate(got_m);
-
-        let mut refch = vec![0.0f32; n_needed];
-        let got_r = self
-            .ring_ref_cons
-            .get_mut(0)
-            .map(|c| c.pop_slice(&mut refch))
-            .unwrap_or(0);
-        // Pad if ref port was disconnected / silent.
-        for s in refch.iter_mut().skip(got_r) {
-            *s = 0.0;
-        }
-
-        Ok((meas, refch))
+        let mut waiter = park_waiter(self.state.clone());
+        self.rings.capture_stereo(n_needed, duration, &mut waiter)
     }
 
     fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
         let n_needed = (self.sample_rate as f64 * duration) as usize;
+        let mut waiter = park_waiter(self.state.clone());
+        self.rings.capture_multi(n_needed, duration, &mut waiter)
+    }
 
-        if let Some(ref mut c) = self.ring_cons {
-            c.clear();
-        }
-        for c in self.ring_ref_cons.iter_mut() {
-            c.clear();
-        }
+    fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
+        let n_needed = (self.sample_rate as f64 * duration) as usize;
+        let mut waiter = park_waiter(self.state.clone());
+        self.rings
+            .capture_multi_contiguous(n_needed, duration, &mut waiter)
+    }
 
-        self.wait_ring(n_needed, duration)?;
-
-        let mut out = Vec::with_capacity(1 + self.ring_ref_cons.len());
-
-        let mut meas = vec![0.0f32; n_needed];
-        let got = self
-            .ring_cons
-            .as_mut()
-            .map(|c| c.pop_slice(&mut meas))
-            .unwrap_or(0);
-        meas.truncate(got);
-        out.push(meas);
-
-        for c in self.ring_ref_cons.iter_mut() {
-            let mut buf = vec![0.0f32; n_needed];
-            let got = c.pop_slice(&mut buf);
-            for s in buf.iter_mut().skip(got) {
-                *s = 0.0;
-            }
-            out.push(buf);
-        }
-        Ok(out)
+    fn discarded_samples(&self) -> u64 {
+        self.rings.discarded_samples()
     }
 
     fn reconnect_input(&mut self, port: &str) -> Result<()> {
@@ -517,9 +446,10 @@ impl AudioEngine for JackEngine {
             ac.as_client()
                 .connect_ports_by_name(port, &in_name)
                 .context("reconnect_input")?;
-            if let Some(ref mut c) = self.ring_cons {
-                c.clear();
-            }
+            // Uncounted: routing switch, not a per-tick splice. Counting it
+            // here would make `discarded_samples` report input churn as
+            // capture discontinuity.
+            self.rings.clear_meas_uncounted();
             self.input_port = Some(port.to_string());
         }
         Ok(())
@@ -578,18 +508,15 @@ impl AudioEngine for JackEngine {
             .connect_ports_by_name(port, &full_name)
             .with_context(|| format!("add_ref_input[{idx}] {port} -> {full_name}"))?;
 
-        self.ring_ref_cons.push(cons);
+        self.rings.push_ref(cons);
         self.ref_ports.push(port.to_string());
         Ok(())
     }
 
     fn flush_capture(&mut self) {
-        if let Some(ref mut c) = self.ring_cons {
-            c.clear();
-        }
-        for c in self.ring_ref_cons.iter_mut() {
-            c.clear();
-        }
+        // Uncounted: an explicit caller-requested flush, not a per-tick
+        // discard. See `CaptureRings::clear_meas_uncounted`.
+        self.rings.flush_all_uncounted();
     }
 
     fn connect_output(&mut self, port: &str) -> Result<()> {
@@ -667,6 +594,9 @@ impl AudioEngine for JackEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Observer` is no longer needed at module scope (occupancy is polled
+    // through `CaptureRings`), but these tests still inspect raw consumers.
+    use ringbuf::traits::Observer;
     use ringbuf::HeapRb;
 
     // ---- fill_one_shot ----
@@ -794,6 +724,131 @@ mod tests {
         prod.push_slice(&[1.0, 2.0]);
         cons.clear();
         assert_eq!(cons.occupied_len(), 0);
+    }
+
+    // ---- Hardware runbook (capture-contiguity D4, partial) ----
+
+    /// Confirms on **real JACK** that `capture_multi`'s pre-wait `clear()`
+    /// discards live audio between ticks — the hardware half of
+    /// `handoff-capture-contiguity.md` H1, which the headless reproducer in
+    /// `audio/contiguity.rs` can only model.
+    ///
+    /// **Emits nothing.** Capture only: no output ports are connected and no
+    /// generator is started, so this is safe to run against an interface with
+    /// unknown equipment downstream and needs no stimulus consent.
+    ///
+    /// `#[ignore]`d — needs a running JACK server, same convention as
+    /// `tests/it_loopback_ir.rs`. Run with:
+    ///
+    /// ```text
+    /// AC_TEST_CAPTURE_PORT='Babyface Pro Pro:capture_1' \
+    ///   cargo test --bin ac-daemon -- --ignored --nocapture jack_capture_multi
+    /// ```
+    /// The #207 fix, on real JACK: `capture_multi_contiguous` must discard
+    /// nothing under the same conditions where `capture_multi` discards
+    /// 318 samples per tick, and must still keep up — so the audio it returns
+    /// covers the full elapsed wall time rather than a fixed slice.
+    ///
+    /// **Emits nothing.** Capture only, same as the runbook below.
+    #[test]
+    #[ignore = "requires a running JACK server; set AC_TEST_CAPTURE_PORT"]
+    fn jack_contiguous_drain_discards_nothing_and_keeps_up() {
+        const TICKS: u64 = 40;
+        const CHUNK_SECS: f64 = 0.05;
+        const PROCESS: Duration = Duration::from_millis(5);
+
+        let port = std::env::var("AC_TEST_CAPTURE_PORT")
+            .unwrap_or_else(|_| "system:capture_1".to_string());
+
+        let mut eng = JackEngine::new();
+        eng.start(&[], Some(&port)).expect("JACK start");
+        let sr = eng.sample_rate();
+
+        let _ = eng.capture_multi(0.2); // warm-up flush, as the worker does
+        let baseline = eng.discarded_samples();
+
+        let mut total: usize = 0;
+        for _ in 0..TICKS {
+            let bufs = eng
+                .capture_multi_contiguous(CHUNK_SECS)
+                .expect("capture_multi_contiguous");
+            total += bufs[0].len();
+            std::thread::sleep(PROCESS);
+        }
+        let discarded = eng.discarded_samples() - baseline;
+        eng.stop();
+
+        // Wall time actually elapsed per tick: the blocking wait plus the
+        // modelled processing. A drain that keeps up returns all of it.
+        let per_tick_wall = CHUNK_SECS + PROCESS.as_secs_f64();
+        let expected = (sr as f64 * per_tick_wall * TICKS as f64) as usize;
+        eprintln!(
+            "sr={sr} discarded={discarded} captured={total} samples ({:.2} s) \
+             vs {expected} expected from {TICKS} x {per_tick_wall:.3} s wall",
+            total as f64 / sr as f64
+        );
+
+        assert_eq!(
+            discarded, 0,
+            "the contiguous drain must not clear the ring — {discarded} discarded \
+             means the splice is back"
+        );
+        // Within 10%: the first tick has no accrued surplus, and JACK period
+        // quantisation moves a few hundred samples either way.
+        assert!(
+            total as f64 > expected as f64 * 0.9,
+            "returned {total} samples over {TICKS} ticks but {expected} of wall \
+             time elapsed — the drain is falling behind (#208 on this path)"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a running JACK server; set AC_TEST_CAPTURE_PORT"]
+    fn jack_capture_multi_discards_live_audio_between_ticks() {
+        const TICKS: u64 = 40;
+        const CHUNK_SECS: f64 = 0.05;
+        // Stands in for the transfer worker's per-tick compute (~5 ms with
+        // the delay cached). This is the interval during which the ring keeps
+        // filling and which the next `clear()` throws away.
+        const PROCESS: Duration = Duration::from_millis(5);
+
+        let port = std::env::var("AC_TEST_CAPTURE_PORT")
+            .unwrap_or_else(|_| "system:capture_1".to_string());
+
+        let mut eng = JackEngine::new();
+        eng.start(&[], Some(&port)).expect("JACK start");
+        let sr = eng.sample_rate();
+
+        // Warm up past the connect transient before measuring.
+        let _ = eng.capture_multi(0.2);
+        let baseline = eng.discarded_samples();
+
+        for _ in 0..TICKS {
+            eng.capture_multi(CHUNK_SECS).expect("capture_multi");
+            std::thread::sleep(PROCESS);
+        }
+
+        let discarded = eng.discarded_samples() - baseline;
+        let backend = eng.backend_name();
+        eng.stop();
+
+        let per_tick = discarded as f64 / TICKS as f64;
+        let expected_per_tick = sr as f64 * PROCESS.as_secs_f64();
+        eprintln!(
+            "backend={backend} sr={sr} port={port}\n\
+             discarded {discarded} samples over {TICKS} ticks \
+             = {per_tick:.0}/tick ({:.1} ms), expected ~{expected_per_tick:.0} \
+             from a {:.0} ms processing gap",
+            per_tick / sr as f64 * 1000.0,
+            PROCESS.as_secs_f64() * 1000.0,
+        );
+
+        assert!(
+            discarded > 0,
+            "pre-wait clear() discarded nothing on real JACK over {TICKS} ticks — \
+             either the ring never filled during the {PROCESS:?} gap, or H1 does \
+             not hold on this backend. Both are findings; do not delete this test."
+        );
     }
 
     // ---- Stereo ref-channel padding ----
