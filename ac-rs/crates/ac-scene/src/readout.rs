@@ -111,7 +111,7 @@ impl DriveLeg {
 /// Observed state of one drive leg (#205). Closed set, three positions and no
 /// others — the vocabulary shared with the data-link line (#193) so there is
 /// one health grammar rather than two ad-hoc warnings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DrivePathState {
     /// Observed to have an edge. Renders as **nothing at all** — the happy path
     /// costs zero pixels and the void stays void.
@@ -121,6 +121,10 @@ pub enum DrivePathState {
     /// The daemon cannot see its graph (`--fake-audio`, a pre-#205 daemon, a
     /// non-JACK backend). Lowercase, because an absence of information is not a
     /// fault and must never be mistaken for one.
+    ///
+    /// The `Default`, deliberately: a view that has not yet been told anything
+    /// must say so, not assume health.
+    #[default]
     Unknown,
     /// This session never opened the leg. Renders as nothing: a passive
     /// (`drivable = false`) session has no drive path to report on, and
@@ -143,6 +147,21 @@ fn elide_port_from_left(port: &str) -> String {
     let keep = HEALTH_PORT_MAX_COLS.saturating_sub(1);
     let tail: String = chars[chars.len() - keep..].iter().collect();
     format!("\u{2026}{tail}")
+}
+
+/// Map a wire `conn_tags` value to a display state (#205).
+///
+/// The one place the daemon's tag vocabulary becomes a display vocabulary. An
+/// absent tag, and any value this build does not recognise, both become
+/// [`DrivePathState::Unknown`] — never `Connected`. A forward-compatible
+/// vocabulary must degrade to "I cannot tell you", not to "everything is fine".
+pub fn drive_path_state_from_tag(tag: Option<&str>) -> DrivePathState {
+    match tag {
+        Some("on") => DrivePathState::Connected,
+        Some("off") => DrivePathState::NotConnected,
+        Some("none") => DrivePathState::NotApplicable,
+        _ => DrivePathState::Unknown,
+    }
 }
 
 /// One drive-path health line (#205), or `None` when there is nothing to say.

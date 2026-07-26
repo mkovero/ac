@@ -31,6 +31,19 @@
 
 use serde::Deserialize;
 
+/// Observed per-leg drive-path connection state (#205), echoed verbatim from
+/// the frame's `conn_tags`. Values use the same `"on" | "off" | "none"`
+/// vocabulary as `cal_tags`. Strings rather than an enum on purpose: this crate
+/// echoes the daemon's vocabulary and must not silently normalise a value it
+/// does not recognise into a healthy one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ConnTags {
+    #[serde(default)]
+    pub out: Option<String>,
+    #[serde(default)]
+    pub ref_out: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireFrame {
     pub sr: u32,
@@ -92,6 +105,15 @@ pub struct WireFrame {
     /// Same, reference channel.
     #[serde(default)]
     pub ref_peak_dbfs: Option<f64>,
+    /// Observed drive-path connection state per leg (#205).
+    ///
+    /// `None` — the field absent — means the daemon **cannot observe** its
+    /// graph (a non-JACK backend, `--fake-audio`, or a daemon predating #205).
+    /// Unlike `meas_peak_dbfs` above, this collapse is *not* to a healthy
+    /// default: unobservable and connected are different display truths, and
+    /// rendering the first as the second is the exact lie #205 exists to fix.
+    #[serde(default)]
+    pub conn_tags: Option<ConnTags>,
 }
 
 #[cfg(test)]

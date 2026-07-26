@@ -5,6 +5,7 @@
 //! view-agnostic; they call [`draw_view`], never a spectrum-specific
 //! drawing function directly.
 
+use ac_scene::readout::{DriveLeg, DrivePathState};
 use ac_scene::{Scene, Source};
 use egui::{Color32, Stroke, Ui};
 
@@ -262,6 +263,26 @@ pub struct TransferViewState {
     /// The open snapshot's stored delay (ms), fed to `DerotChoice::Snapshot`.
     /// M4c wires the open-snapshot flow; until then it stays 0.
     pub snapshot_delay_ms: f64,
+    /// Resolved drive-path target and its observed connection state (#205).
+    ///
+    /// Feeds **both** the ARMED/DRIVING banner and the health block, from one
+    /// place, so the two cannot name different outputs. The banner used to pass
+    /// a hardcoded `(0, None)`, which on the reference rig read `OUT 0` while
+    /// the stimulus actually left `playback_5`.
+    pub drive_path: DrivePathView,
+}
+
+/// What `ac-view` knows about the drive path: where it goes, and whether it
+/// arrives. Channel and port are session-static (config + launch reply); the
+/// states are refreshed per frame from `conn_tags`.
+#[derive(Clone, Debug, Default)]
+pub struct DrivePathView {
+    pub out_channel: u32,
+    pub out_port: Option<String>,
+    pub out_state: DrivePathState,
+    pub ref_out_channel: Option<u32>,
+    pub ref_out_port: Option<String>,
+    pub ref_out_state: DrivePathState,
 }
 
 impl Default for TransferViewState {
@@ -280,6 +301,7 @@ impl TransferViewState {
             prev_derot: DerotChoice::Session,
             stimulus: crate::stimulus::StimulusMachine::new(drive_max_dbfs, start_level_dbfs),
             snapshot_delay_ms: 0.0,
+            drive_path: DrivePathView::default(),
         }
     }
 
@@ -306,6 +328,71 @@ impl TransferViewState {
 /// log-f axis, gap rendering for masked columns, delay readout, input
 /// meters, and the stimulus banner — every string and coordinate from
 /// `ac-scene`, drawn verbatim.
+impl TransferViewState {
+    /// The verbatim `ac-scene` banner string for the current stimulus state,
+    /// or `None` when idle.
+    ///
+    /// Extracted from `draw_transfer` so the *arguments* are testable, not just
+    /// the string. F5 already pins the string; what regressed was what got
+    /// passed in — a hardcoded `(0, None)` naming the wrong output.
+    pub fn banner_line(&self) -> Option<String> {
+        let level = self.stimulus.level_dbfs();
+        let ch = self.drive_path.out_channel;
+        let port = self.drive_path.out_port.as_deref();
+        match self.stimulus.state() {
+            StimState::Idle => None,
+            StimState::Armed => Some(ac_scene::readout::format_armed_banner(ch, port, level)),
+            StimState::Driving => Some(ac_scene::readout::format_driving_banner(ch, port, level)),
+        }
+    }
+}
+
+impl DrivePathView {
+    /// The health block: zero or more lines, in signal-flow order, each drawn
+    /// verbatim from `ac-scene` (#205).
+    ///
+    /// Empty when every leg is healthy or not applicable — the happy path and
+    /// the passive session both render nothing, so the void stays void and a
+    /// line on screen always means something.
+    pub fn health_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(l) = ac_scene::readout::format_drive_path_health(
+            DriveLeg::Out,
+            self.out_channel,
+            self.out_port.as_deref(),
+            self.out_state,
+        ) {
+            lines.push(l);
+        }
+        // The reference leg only exists when it resolved to a different port;
+        // `ref_out_channel` is `None` otherwise and nothing is drawn.
+        if let Some(ch) = self.ref_out_channel {
+            if let Some(l) = ac_scene::readout::format_drive_path_health(
+                DriveLeg::RefOut,
+                ch,
+                self.ref_out_port.as_deref(),
+                self.ref_out_state,
+            ) {
+                lines.push(l);
+            }
+        }
+        lines
+    }
+
+    /// Colour for the health block. Text is identical in every state, so
+    /// colour only ever escalates an already-legible warning and never carries
+    /// it alone (UX: piped to a file, the words must still be enough).
+    pub fn health_color(&self, driving: bool) -> Color32 {
+        if driving {
+            // Restrained red while the stimulus is actually live.
+            Color32::from_rgb(0xd7, 0x5f, 0x5f)
+        } else {
+            // Dim orange idle/armed.
+            Color32::from_rgb(0xd7, 0xaf, 0x5f)
+        }
+    }
+}
+
 fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene::TransferScene>) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
@@ -326,23 +413,19 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
     // must not collide with the delay readout or the meter labels. Build
     // it first so its height carves the band out before anything else is
     // placed. DRIVING is louder than ARMED and uses the signal colour
-    // (never green); strings are verbatim ac-scene (F5). Channel/port
-    // come from config in M4c (#182) — placeholder channel for now, but
-    // the STRING is ac-scene's, which is what F5 checks.
-    let level = state.stimulus.level_dbfs();
-    let banner = match state.stimulus.state() {
-        StimState::Idle => None,
-        StimState::Armed => Some((
-            ac_scene::readout::format_armed_banner(0, None, level),
-            18.0,
-            COLOR_VALUE,
-        )),
-        StimState::Driving => Some((
-            ac_scene::readout::format_driving_banner(0, None, level),
-            24.0,
-            COLOR_SIGNAL,
-        )),
-    };
+    // (never green); strings are verbatim ac-scene (F5).
+    //
+    // Channel and port come from `state.drive_path` — the same values the
+    // health block below renders (#205). This used to pass a hardcoded
+    // `(0, None)`, so on the reference rig the safety banner read `OUT 0` with
+    // no port while the stimulus actually left `playback_5`: the operator's one
+    // visual confirmation of *where* the noise goes, naming the wrong thing.
+    let banner = state
+        .banner_line()
+        .map(|text| match state.stimulus.state() {
+            StimState::Driving => (text, 24.0, COLOR_SIGNAL),
+            _ => (text, 18.0, COLOR_VALUE),
+        });
     let banner_band = banner
         .as_ref()
         .map(|(_, size, _)| size + 8.0)
@@ -580,4 +663,112 @@ mod tests {
     // Stimulus transitions, level steps, arm-expiry, clamp, and keepalive
     // are the StimulusMachine's contract now (M4c) — exhaustively tested
     // in `stimulus.rs`, not duplicated here against a placeholder.
+}
+
+#[cfg(test)]
+mod drive_path_tests {
+    use super::*;
+    use ac_scene::readout::DrivePathState;
+
+    fn view_with(out_state: DrivePathState) -> TransferViewState {
+        let mut t = TransferViewState::new(-10.0, -40.0);
+        t.drive_path.out_channel = 4;
+        t.drive_path.out_port = Some("Babyface Pro Pro:playback_5".to_string());
+        t.drive_path.out_state = out_state;
+        t
+    }
+
+    /// **The #205 field state.** A disconnected drive path renders exactly the
+    /// UX-specified line, drawn verbatim from `ac-scene`.
+    #[test]
+    fn disconnected_drive_path_renders_the_fault_line() {
+        let t = view_with(DrivePathState::NotConnected);
+        assert_eq!(
+            t.drive_path.health_lines(),
+            vec!["  drive path   OUT 4 (Babyface Pro Pro:playback_5)   NOT CONNECTED"]
+        );
+    }
+
+    /// The happy path costs zero pixels.
+    #[test]
+    fn healthy_drive_path_renders_nothing() {
+        assert!(view_with(DrivePathState::Connected)
+            .drive_path
+            .health_lines()
+            .is_empty());
+    }
+
+    /// A passive session has no drive path and must not be flagged.
+    #[test]
+    fn passive_session_renders_nothing() {
+        assert!(view_with(DrivePathState::NotApplicable)
+            .drive_path
+            .health_lines()
+            .is_empty());
+    }
+
+    /// A view that has been told nothing says `unknown` — it does not assume
+    /// health. This is the default state, so it is what a fresh session shows
+    /// before its first frame.
+    #[test]
+    fn a_fresh_view_reports_unknown_not_healthy() {
+        let t = TransferViewState::new(-10.0, -40.0);
+        assert_eq!(t.drive_path.out_state, DrivePathState::Unknown);
+        assert_eq!(
+            t.drive_path.health_lines(),
+            vec!["  drive path   OUT 0   unknown"],
+            "an uninformed view must say so rather than render nothing"
+        );
+    }
+
+    /// Partial failure: main output fine, reference output not. One line per
+    /// leg, only the failing one drawn.
+    #[test]
+    fn only_the_failing_leg_is_drawn() {
+        let mut t = view_with(DrivePathState::Connected);
+        t.drive_path.ref_out_channel = Some(3);
+        t.drive_path.ref_out_port = Some("Babyface Pro Pro:playback_4".to_string());
+        t.drive_path.ref_out_state = DrivePathState::NotConnected;
+        assert_eq!(
+            t.drive_path.health_lines(),
+            vec!["  drive path   REF OUT 3 (Babyface Pro Pro:playback_4)   NOT CONNECTED"]
+        );
+    }
+
+    /// **The banner regression this issue exists to fix.** The banner must name
+    /// the *configured* output, not a hardcoded channel 0 with no port.
+    #[test]
+    fn banner_names_the_configured_output_not_out_zero() {
+        let mut t = view_with(DrivePathState::Connected);
+        t.stimulus.press_space(std::time::Instant::now());
+        let banner = t.banner_line().expect("armed banner");
+        assert!(
+            banner.contains("OUT 4 (Babyface Pro Pro:playback_5)"),
+            "banner must name the configured output, got: {banner}"
+        );
+        assert!(
+            !banner.contains("OUT 0"),
+            "the hardcoded placeholder must be gone, got: {banner}"
+        );
+    }
+
+    /// Banner and health line name the same output — by construction, since
+    /// both read `drive_path` and both format through `ac-scene`. Asserted so a
+    /// future refactor cannot reintroduce two sources of truth.
+    #[test]
+    fn banner_and_health_line_agree_on_the_output() {
+        let mut t = view_with(DrivePathState::NotConnected);
+        t.stimulus.press_space(std::time::Instant::now());
+        let banner = t.banner_line().expect("armed banner");
+        let health = t.drive_path.health_lines();
+        let token = "OUT 4 (Babyface Pro Pro:playback_5)";
+        assert!(banner.contains(token), "banner: {banner}");
+        assert!(health[0].contains(token), "health: {}", health[0]);
+    }
+
+    /// Idle draws no banner at all — the reserved band stays empty.
+    #[test]
+    fn idle_draws_no_banner() {
+        assert_eq!(view_with(DrivePathState::Connected).banner_line(), None);
+    }
 }

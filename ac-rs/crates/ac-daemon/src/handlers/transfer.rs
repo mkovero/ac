@@ -345,6 +345,10 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let out_port_r = out_port.clone();
+    // The reference *output* leg, so the view can name it in a drive-path
+    // health line (#205). `ref_port` below is the reference *input* — a
+    // different leg with a confusingly similar name.
+    let ref_out_port_r = ref_out_port.clone();
     let meas_port_r = unique_ports.first().cloned().unwrap_or_default();
     let ref_port_r = unique_ports
         .get(1)
@@ -1044,6 +1048,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     json!({
         "ok":           true,
         "out_port":     out_port_r,
+        "ref_out_port": ref_out_port_r,
         "meas_port":    meas_port_r,
         "ref_port":     ref_port_r,
         "pairs":        pairs_r,

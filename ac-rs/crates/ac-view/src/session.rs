@@ -33,6 +33,11 @@ pub struct Session {
     client: Client,
     launched: bool,
     last_frame_at: Option<Instant>,
+    /// Resolved drive-path port names from the launch reply (#205). Session-
+    /// static, so captured once here; the frame carries only the observed
+    /// connection *state*, never the names.
+    drive_out_port: Option<String>,
+    drive_ref_out_port: Option<String>,
 }
 
 impl Session {
@@ -41,11 +46,27 @@ impl Session {
             client,
             launched: false,
             last_frame_at: None,
+            drive_out_port: None,
+            drive_ref_out_port: None,
         }
     }
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// The main output port this session resolved at launch, if any.
+    pub fn drive_out_port(&self) -> Option<&str> {
+        self.drive_out_port.as_deref()
+    }
+
+    /// The reference output port, when it resolved to a different port from
+    /// the main output. `None` also covers "same as main output", where there
+    /// is no distinct leg to report on.
+    pub fn drive_ref_out_port(&self) -> Option<&str> {
+        self.drive_ref_out_port
+            .as_deref()
+            .filter(|p| Some(*p) != self.drive_out_port.as_deref())
     }
 
     /// Launch a single-pair `transfer_stream` session (M3's V1 scope —
@@ -76,6 +97,11 @@ impl Session {
                 reply["error"].as_str().unwrap_or("unknown error")
             );
         }
+        // Session-static routing, captured once from the launch reply rather
+        // than republished per frame (#205). The port names the health line and
+        // the banner display both come from here.
+        self.drive_out_port = reply["out_port"].as_str().map(str::to_string);
+        self.drive_ref_out_port = reply["ref_out_port"].as_str().map(str::to_string);
         self.launched = true;
         self.last_frame_at = None;
         Ok(())
@@ -85,6 +111,8 @@ impl Session {
         if self.launched {
             let _ = self.client.call(&json!({"cmd": "stop"}));
             self.launched = false;
+            self.drive_out_port = None;
+            self.drive_ref_out_port = None;
         }
     }
 

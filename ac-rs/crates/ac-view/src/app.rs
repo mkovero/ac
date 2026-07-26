@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use ac_core::visualize::weighting_curves::WeightingCurve;
+use ac_scene::readout::DrivePathState;
 use ac_scene::Scene;
 
 use crate::keys::{bindings_for, Action};
@@ -82,7 +83,14 @@ impl AcViewApp {
         // Seed the stimulus ceiling from config's `drive_max_dbfs` so the
         // client clamp matches the server's authoritative one.
         let cfg = ac_core::config::load(None).unwrap_or_default();
-        app.view = ViewKind::Transfer(TransferViewState::new(cfg.drive_max_dbfs, -30.0));
+        let mut t = TransferViewState::new(cfg.drive_max_dbfs, -30.0);
+        // Session-static half of the drive-path display (#205): the configured
+        // channel numbers. Port names arrive with the launch reply, connection
+        // state with each frame. Seeding the real channel here is what retires
+        // the banner's hardcoded `OUT 0`.
+        t.drive_path.out_channel = cfg.output_channel;
+        t.drive_path.ref_out_channel = cfg.reference_channel;
+        app.view = ViewKind::Transfer(t);
         app
     }
 
@@ -416,10 +424,31 @@ impl AcViewApp {
                 self.integration,
             );
         }
+        let routing = self
+            .session
+            .as_ref()
+            .map(|s| {
+                (
+                    s.drive_out_port().map(str::to_string),
+                    s.drive_ref_out_port().map(str::to_string),
+                )
+            })
+            .unwrap_or_default();
         if let ViewKind::Transfer(t) = &mut self.view {
             let cfg = ac_core::config::load(None).unwrap_or_default();
             t.stimulus =
                 crate::stimulus::StimulusMachine::new(cfg.drive_max_dbfs, applied.start_level_dbfs);
+            // Re-seed the drive-path display for the new session (#205): the
+            // channels may have changed, and the resolved port names come from
+            // the launch reply we just got. Reset the observed states to
+            // `Unknown` — carrying the old session's verdict across a relaunch
+            // would assert something about a routing that no longer exists.
+            t.drive_path.out_channel = cfg.output_channel;
+            t.drive_path.ref_out_channel = cfg.reference_channel;
+            t.drive_path.out_port = routing.0;
+            t.drive_path.ref_out_port = routing.1;
+            t.drive_path.out_state = DrivePathState::Unknown;
+            t.drive_path.ref_out_state = DrivePathState::Unknown;
         }
     }
 
@@ -509,6 +538,17 @@ impl eframe::App for AcViewApp {
             // survives — correct for a live display.
             while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
                 if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
+                    // Observed drive-path state, refreshed per frame (#205).
+                    // An absent `conn_tags` maps to `Unknown`, never to healthy.
+                    if let ViewKind::Transfer(t) = &mut self.view {
+                        let tags = wire_frame.conn_tags.as_ref();
+                        t.drive_path.out_state = ac_scene::readout::drive_path_state_from_tag(
+                            tags.and_then(|c| c.out.as_deref()),
+                        );
+                        t.drive_path.ref_out_state = ac_scene::readout::drive_path_state_from_tag(
+                            tags.and_then(|c| c.ref_out.as_deref()),
+                        );
+                    }
                     self.last_frame = Some(wire_frame);
                     got_new_frame = true;
                 }
@@ -572,6 +612,19 @@ impl eframe::App for AcViewApp {
             },
         };
         ui.label(status);
+
+        // Health block (#205): immediately under the status line, fixed
+        // position, one line per unhealthy link. Drawn here rather than inside
+        // `draw_view` so it is outside the banner's reserved top band and
+        // cannot be occluded by it. Lines are verbatim `ac-scene`.
+        if let ViewKind::Transfer(t) = &self.view {
+            let driving = matches!(t.stimulus.state(), crate::stimulus::StimState::Driving);
+            let color = t.drive_path.health_color(driving);
+            for line in t.drive_path.health_lines() {
+                ui.colored_label(color, line);
+            }
+        }
+
         draw_view(
             &self.view,
             ui,
