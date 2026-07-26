@@ -98,6 +98,41 @@ fn emit_scope_frame(
     send_pub(pub_tx, "data", &frame);
 }
 
+/// Samples to pull from the capture ring per tick, per channel.
+///
+/// **This must never be less than what arrives in the same wall-clock
+/// interval.** The ring fills at `sr` samples/second regardless of what the
+/// analysis does with them; if a tick drains less than `per_ch_budget · sr`,
+/// the shortfall accumulates in the JACK ring on every single tick and the
+/// displayed spectrum falls progressively further behind realtime — for as
+/// long as the monitor runs.
+///
+/// That is exactly what issue #208 was. The budget used to be
+/// `clamp(128, fft_n)`, and the upper clamp bit whenever
+/// `per_ch_budget · sr > fft_n` — which is the *default* configuration:
+/// `interval` 0.2 s at 96 kHz is 19 200 samples arriving per tick against an
+/// `fft_n` of 8192 drained, so the monitor consumed audio at 42.7% of
+/// realtime. Measured on hardware: 500 ms bursts emitted 10 s apart appeared
+/// in the published frames 23.2 s apart, at lags of 12.3 s, 25.3 s and
+/// 38.8 s — growing without bound. The reported symptom (a stimulus
+/// reappearing seconds later, then repeating with nothing happening in the
+/// room) was the daemon playing out that backlog.
+///
+/// It bit at 48 kHz too — 9600 arriving against 8192 drained, a lag growing
+/// at 0.147 s per second, so 3–5 s of lag after 20–34 s of monitoring. That
+/// matches the originally reported "three to five seconds" and is why the
+/// symptom survived the `ac-ui` → `ac-view` rewrite: it was never in either
+/// UI.
+///
+/// There is deliberately **no upper bound**. Reading more than `fft_n` is
+/// harmless — the sliding ring pops the excess straight back off — whereas
+/// any ceiling below the arrival rate reintroduces the defect. The 128-sample
+/// floor stays so a very short `interval` still gives JACK something to hand
+/// back.
+fn capture_budget_samples(per_ch_budget_secs: f64, sr: u32) -> usize {
+    ((per_ch_budget_secs * sr as f64) as usize).max(128)
+}
+
 /// Push captured samples to the loudness state, optionally filtering
 /// through the per-channel mic-curve FIR first (#104). When the FIR
 /// is bypassed (toggle off, or no curve loaded), pushes the raw
@@ -1117,15 +1152,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                 // FFT path. Each channel has its own sliding ring so refresh
                 // cadence (`cur_interval`) is decoupled from FFT window length
-                // (`cur_fft_n`). Per-tick per-channel budget = interval / n_ch,
-                // clamped to a sensible floor so JACK always has something to
-                // hand back. Single-channel uses `capture_available` (non-
+                // (`cur_fft_n`). Single-channel uses `capture_available` (non-
                 // clearing drain on JACK, falls back to capture_block
                 // elsewhere); multi-channel must use block capture because
                 // `reconnect_input` clears the ring on every switch.
                 let per_ch_budget = (cur_interval / channels_worker.len() as f64).max(0.002);
-                let budget_samples =
-                    ((per_ch_budget * sr as f64) as usize).clamp(128, cur_fft_n as usize);
+                let budget_samples = capture_budget_samples(per_ch_budget, sr);
                 let new = if single_channel {
                     match eng.capture_available(budget_samples) {
                         Ok(s) => s,
@@ -1577,5 +1609,57 @@ mod reconnect_state_tests {
 
         st.note_success();
         assert!(st.first_failure_at.is_none());
+    }
+}
+
+#[cfg(test)]
+mod drain_budget_tests {
+    use super::capture_budget_samples;
+
+    /// **The invariant that issue #208 violated.** A tick must drain at least
+    /// as many samples as arrive during the same interval. Anything less
+    /// accumulates in the JACK ring every tick, so the spectrum falls
+    /// progressively behind realtime and the daemon ends up replaying old
+    /// audio — the reported "response reappears with no stimulus present".
+    ///
+    /// Swept across every sample rate and interval the daemon accepts, and
+    /// across the full legal `fft_n` range, because the old bug was precisely
+    /// a ceiling that depended on `fft_n`.
+    #[test]
+    fn budget_never_drains_slower_than_the_ring_fills() {
+        for sr in [44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000] {
+            for interval in [0.002f64, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0] {
+                for n_ch in [1usize, 2, 4, 8] {
+                    let per_ch = (interval / n_ch as f64).max(0.002);
+                    let arriving = (per_ch * sr as f64) as usize;
+                    let budget = capture_budget_samples(per_ch, sr);
+                    assert!(
+                        budget >= arriving,
+                        "sr={sr} interval={interval} n_ch={n_ch}: drains {budget}                          but {arriving} arrive — backlog grows {} samples/tick",
+                        arriving - budget
+                    );
+                }
+            }
+        }
+    }
+
+    /// The exact configuration that shipped the defect: daemon defaults
+    /// (`interval` 0.2, `fft_n` 8192), single channel, at both rig rates.
+    /// The old `clamp(128, fft_n)` returned 8192 in both rows.
+    #[test]
+    fn default_monitor_config_keeps_up_at_both_rig_rates() {
+        // 96 kHz: 19 200 arrive per 0.2 s tick. Old budget 8192 = 42.7%.
+        assert_eq!(capture_budget_samples(0.2, 96_000), 19_200);
+        // 48 kHz: 9600 arrive. Old budget 8192 = 85.3%, a lag growing at
+        // 0.147 s/s — 3-5 s behind after 20-34 s.
+        assert_eq!(capture_budget_samples(0.2, 48_000), 9_600);
+    }
+
+    /// The floor survives: a very short interval must still ask JACK for
+    /// enough to be worth a round trip.
+    #[test]
+    fn short_interval_keeps_the_floor() {
+        assert_eq!(capture_budget_samples(0.002, 44_100), 128);
+        assert!(capture_budget_samples(0.0, 96_000) >= 128);
     }
 }
