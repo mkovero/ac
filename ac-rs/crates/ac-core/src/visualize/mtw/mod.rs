@@ -18,11 +18,13 @@
 //!    slow to appear as a 20 Hz reading. Here HF is analysed at full rate with
 //!    a 4096-point window — 43 ms at 96 kHz — while LF gets the long window it
 //!    genuinely needs.
-//! 3. **Transient ripple (#208).** A sliding, re-segmented Welch re-analyses
-//!    one impulse once per segment position. Here the pipeline **pushes**:
-//!    each input sample enters each stage's analysis exactly once, and the
-//!    averaging is an EMA over accumulated cross-spectra rather than a
-//!    re-scan of retained audio.
+//! 3. **Transient ripple (#208).** Today's code cuts analysis blocks from the
+//!    head of a buffer that slides by a variable amount each tick, so a
+//!    transient's position inside the block layout shifts and it is
+//!    re-analysed at a different weighting each time. Here the block grid is
+//!    **fixed to the sample stream**: block `k` always covers decimated
+//!    samples `[k·HOP, k·HOP + NFFT)`, whatever the drain hands over, so each
+//!    block of audio is analysed exactly once and the artifact cannot form.
 //!
 //! # Shape
 //!
@@ -33,10 +35,11 @@
 //!                  full rate         counter
 //!                                          |
 //!                                          v
-//!                                    Hann/50% segments -> Sxx,Syy,Sxy
-//!                                          |
+//!                                    Hann/50% blocks on a FIXED grid
+//!                                          |            -> Sxx,Syy,Sxy
 //!                                          v
-//!                                       BandEma (uniform N_eff)
+//!                                    BlockAverage (plain mean of last N,
+//!                                          |       N uniform across stages)
 //!                                          |
 //!                                          v
 //!                                       splice::assemble -> columns
@@ -53,16 +56,16 @@
 //! is the same fabrication this module exists to remove, in a new place.
 
 pub mod align;
+pub mod average;
 pub mod decimate;
-pub mod ema;
 pub mod ladder;
 pub mod splice;
 
 use realfft::RealFftPlanner;
 
 use align::PairAligner;
+use average::BlockAverage;
 use decimate::PairDecimator;
-use ema::{BandEma, HANN_50_RHO};
 use ladder::{Ladder, Stage, HOP, NFFT};
 use splice::{Column, StageSpectra};
 
@@ -79,7 +82,7 @@ struct Band {
     /// Decimated samples not yet consumed by a segment.
     buf_meas: Vec<f64>,
     buf_ref: Vec<f64>,
-    ema: BandEma,
+    avg: BlockAverage,
     /// Decimated samples still to be discarded while the filter settles.
     /// Analysing the transient would put a real, filter-shaped artifact into
     /// the first frames of every session.
@@ -103,7 +106,7 @@ pub struct MtwPair {
 impl MtwPair {
     /// `offset` is the pair's alignment offset in full-rate samples, signed —
     /// see [`align`].
-    pub fn new(sr: u32, offset: i64, n_target: f64) -> Result<Self, ladder::LadderError> {
+    pub fn new(sr: u32, offset: i64, n_blocks: usize) -> Result<Self, ladder::LadderError> {
         let ladder = ladder::layout(sr)?;
         let srf = f64::from(sr);
         let bins = NFFT / 2 + 1;
@@ -117,7 +120,7 @@ impl MtwPair {
                     decim,
                     buf_meas: Vec::with_capacity(NFFT * 2),
                     buf_ref: Vec::with_capacity(NFFT * 2),
-                    ema: BandEma::new(bins, n_target, HANN_50_RHO),
+                    avg: BlockAverage::new(bins, n_blocks),
                     warmup,
                 }
             })
@@ -139,10 +142,17 @@ impl MtwPair {
         &self.ladder
     }
 
-    /// Segments completed per stage so far — warmup progress, shallowest
-    /// first.
-    pub fn frames(&self) -> Vec<u64> {
-        self.bands.iter().map(|b| b.ema.frames()).collect()
+    /// Blocks analysed per stage so far — warmup progress, shallowest first.
+    pub fn blocks(&self) -> Vec<u64> {
+        self.bands.iter().map(|b| b.avg.total_blocks()).collect()
+    }
+
+    /// Blocks averaged per stage.
+    pub fn n_blocks(&self) -> usize {
+        self.bands
+            .first()
+            .map(|b| b.avg.n_blocks())
+            .unwrap_or_default()
     }
 
     /// Push one tick of captured audio.
@@ -177,14 +187,20 @@ impl MtwPair {
             band.buf_meas.extend_from_slice(&self.dec_meas[skip..]);
             band.buf_ref.extend_from_slice(&self.dec_ref[skip..]);
 
+            // Fixed block grid (criterion 5b). `buf` always begins at a whole
+            // multiple of HOP in the decimated stream, because the only thing
+            // ever removed from its front is a whole number of hops. The block
+            // boundaries are therefore a property of the stream, not of how
+            // the drain happened to chunk it — which is precisely what today's
+            // head-relative segmentation gets wrong.
             let mut pos = 0usize;
             while pos + NFFT <= band.buf_meas.len() {
-                accumulate_segment(
+                analyse_block(
                     &mut self.planner,
                     &self.window,
                     &band.buf_meas[pos..pos + NFFT],
                     &band.buf_ref[pos..pos + NFFT],
-                    &mut band.ema,
+                    &mut band.avg,
                 );
                 pos += HOP;
             }
@@ -195,42 +211,66 @@ impl MtwPair {
         }
     }
 
-    /// Assemble display columns. `None` until every stage has produced at
-    /// least one segment — a partially-warm ladder would show a crossover
-    /// between a live band and an empty one.
+    /// Assemble display columns. `None` until every stage holds a full `N`
+    /// blocks.
+    ///
+    /// Gating on the full `N` rather than on the first block is what makes the
+    /// reported `N` unambiguous — every column, at every frequency, is the
+    /// mean of the same number of blocks. The wait is the settling time the
+    /// design already states: `W + hop·(N−1)`, 2.56 s at the bottom stage.
     pub fn columns(&self, f_min: f64, f_max: f64, ppo: f64) -> Option<Vec<Column>> {
-        if self.bands.iter().any(|b| b.ema.frames() == 0) {
+        if self.bands.iter().any(|b| !b.avg.settled()) {
             return None;
         }
         let edges = ladder::column_edges(&self.ladder, f_min, f_max, ppo);
         if edges.len() < 2 {
             return None;
         }
-        let views: Vec<StageSpectra<'_>> = self
+        let means: Vec<StageMean> = self
             .bands
             .iter()
-            .map(|b| StageSpectra {
-                sxx: b.ema.sxx(),
-                syy: b.ema.syy(),
-                sxy: b.ema.sxy(),
-                n_eff: b.ema.n_eff(),
+            .map(|b| {
+                let (sxx, syy, sxy) = b.avg.mean().expect("settled implies at least one block");
+                StageMean {
+                    sxx,
+                    syy,
+                    sxy,
+                    n: b.avg.n_blocks(),
+                }
+            })
+            .collect();
+        let views: Vec<StageSpectra<'_>> = means
+            .iter()
+            .map(|m| StageSpectra {
+                sxx: &m.sxx,
+                syy: &m.syy,
+                sxy: &m.sxy,
+                n: m.n,
             })
             .collect();
         Some(splice::assemble(&self.ladder, &views, &edges))
     }
 }
 
-/// One Hann-windowed segment pair into the band's accumulator.
+/// Owned per-stage mean, so the splice can borrow it for the assemble call.
+struct StageMean {
+    sxx: Vec<f64>,
+    syy: Vec<f64>,
+    sxy: Vec<realfft::num_complex::Complex<f64>>,
+    n: usize,
+}
+
+/// One Hann-windowed block pair into the stage's average.
 ///
-/// Note what is *not* here: no dB, no magnitude, no division. The segment
+/// Note what is *not* here: no dB, no magnitude, no division. The block
 /// contributes raw `Sxx`, `Syy`, `Sxy`; everything derived comes later and
 /// once.
-fn accumulate_segment(
+fn analyse_block(
     planner: &mut RealFftPlanner<f64>,
     window: &[f64],
     meas: &[f64],
     reference: &[f64],
-    ema: &mut BandEma,
+    avg: &mut BlockAverage,
 ) {
     let fft = planner.plan_fft_forward(NFFT);
     let mut bm: Vec<f64> = meas.iter().zip(window).map(|(&s, &w)| s * w).collect();
@@ -253,17 +293,15 @@ fn accumulate_segment(
         syy.push(y.norm_sqr());
         sxy.push(x.conj() * y);
     }
-    ema.update(&sxx, &syy, &sxy);
+    avg.push_block(sxx, syy, sxy);
 }
 
-/// The wall-clock time constant a band's cadence implies for the
-/// configured `N_target`. Reported so a viewer can tell how long a band takes
-/// to settle without reverse-engineering it from the frame rate.
-pub fn tau_seconds(stage: &Stage, alpha: f64) -> f64 {
-    if alpha >= 1.0 {
-        return stage.hop_s;
-    }
-    stage.hop_s / -(1.0 - alpha).ln()
+/// Seconds of audio a stage needs before its average is full: `W + hop·(N−1)`.
+///
+/// Exposed so a viewer can say how long a band takes to settle without
+/// reverse-engineering it from the frame rate.
+pub fn settling_seconds(stage: &Stage, n_blocks: usize) -> f64 {
+    stage.window_s + stage.hop_s * (n_blocks.max(1) - 1) as f64
 }
 
 #[cfg(test)]
@@ -286,7 +324,7 @@ mod tests {
 
     /// Drive a pair through `secs` of a delayed, scaled copy of one source.
     fn run(sr: u32, gain: f32, dut_delay: i64, offset: i64, secs: f64) -> MtwPair {
-        let mut p = MtwPair::new(sr, offset, 4.0).unwrap();
+        let mut p = MtwPair::new(sr, offset, 4).unwrap();
         let n = (f64::from(sr) * secs) as i64;
         let block = 2_400usize;
         let mut i = 0i64;
@@ -391,53 +429,120 @@ mod tests {
         );
     }
 
-    /// #208: an impulse must be reported once, not once per segment position.
-    /// A sliding re-segmented Welch produces `n_averages` maxima as the
-    /// impulse crawls through the window; a push pipeline produces one.
+    /// Criterion 5b, the #208 fix: block boundaries are a property of the
+    /// sample stream, not of how the drain happened to chunk it.
+    ///
+    /// Today's code cuts blocks from the head of a buffer that slides by a
+    /// variable amount each tick, so a transient's position inside the block
+    /// layout shifts and it is re-analysed at a different weighting each time.
+    /// The direct test of the fix is that the *same audio*, delivered in
+    /// wildly different chunk sizes, produces bit-identical columns. Under
+    /// head-relative segmentation it could not.
     #[test]
-    fn an_impulse_is_analysed_once_not_once_per_segment_position() {
-        let sr = 48_000u32;
-        let mut p = MtwPair::new(sr, 0, 4.0).unwrap();
-        let mut trace: Vec<f64> = Vec::new();
-        let block = 2_400usize;
-        for tick in 0..200 {
-            let meas: Vec<f32> = (0..block)
-                .map(|k| {
-                    // One impulse, one tick, one sample.
-                    if tick == 60 && k == 0 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-            let refc = vec![0.0f32; block];
-            p.push(&meas, &refc);
-            // Stage 0's own accumulated energy is the observable: a re-scan
-            // would re-present the impulse on later ticks.
-            trace.push(p.bands[0].ema.syy().iter().sum::<f64>());
+    fn block_boundaries_do_not_move_with_the_drain() {
+        fn run_chunked(chunks: &[usize]) -> Vec<Column> {
+            let mut p = MtwPair::new(48_000, 0, 4).unwrap();
+            let n = 48_000i64 * 12;
+            let mut i = 0i64;
+            let mut c = 0usize;
+            while i < n {
+                let len = chunks[c % chunks.len()].min((n - i) as usize);
+                c += 1;
+                let meas: Vec<f32> = (0..len).map(|k| 0.5 * source_at(i + k as i64)).collect();
+                let refc: Vec<f32> = (0..len).map(|k| source_at(i + k as i64)).collect();
+                p.push(&meas, &refc);
+                i += len as i64;
+            }
+            p.columns(20.0, 24_000.0, 48.0).expect("warm")
         }
-        let peak = trace.iter().cloned().fold(0.0f64, f64::max);
-        assert!(peak > 0.0, "impulse never registered");
-        let peak_tick = trace.iter().position(|&v| v == peak).unwrap();
-        // After the peak the trace must decay monotonically: every later rise
-        // is the same impulse being counted again.
-        for w in trace[peak_tick..].windows(2) {
+
+        let steady = run_chunked(&[2_400]);
+        // Deliberately ragged, including chunks that straddle and undershoot a
+        // hop, which is what a real drain does under load.
+        let ragged = run_chunked(&[1, 4_801, 97, 12_000, 331, 2_048]);
+        assert_eq!(
+            steady.len(),
+            ragged.len(),
+            "column count moved with the drain"
+        );
+        for (a, b) in steady.iter().zip(ragged.iter()) {
             assert!(
-                w[1] <= w[0] + 1e-15,
-                "energy rose again after the impulse — it is being re-analysed"
+                (a.h1 - b.h1).norm() < 1e-9 && (a.coherence - b.coherence).abs() < 1e-9,
+                "column at {} Hz moved with the drain: {:?} vs {:?}",
+                a.freq,
+                a,
+                b
             );
         }
     }
 
+    /// #208's symptom: one transient must be reported once, not repeatedly.
+    ///
+    /// The observable is the stage's own averaged energy over time. A single
+    /// impulse must produce a single contiguous episode — rise, hold while it
+    /// sits inside the N-block window, fall as it is evicted — and then
+    /// nothing. A second rise after the trace has returned to the floor is the
+    /// recurrence the reporter saw.
     #[test]
-    fn tau_follows_each_bands_own_cadence() {
+    fn an_impulse_is_reported_once_and_does_not_recur() {
+        let mut p = MtwPair::new(48_000, 0, 4).unwrap();
+        let block = 2_400usize;
+        let mut trace: Vec<f64> = Vec::new();
+        for tick in 0..300 {
+            let meas: Vec<f32> = (0..block)
+                .map(|k| if tick == 80 && k == 0 { 1.0 } else { 0.0 })
+                .collect();
+            let refc = vec![0.0f32; block];
+            p.push(&meas, &refc);
+            let energy = p.bands[0]
+                .avg
+                .mean()
+                .map(|(_, syy, _)| syy.iter().sum::<f64>())
+                .unwrap_or(0.0);
+            trace.push(energy);
+        }
+        let peak = trace.iter().cloned().fold(0.0f64, f64::max);
+        assert!(peak > 0.0, "impulse never registered");
+
+        // One contiguous run above the floor, and nothing after it.
+        let floor = peak * 1e-9;
+        let first = trace.iter().position(|&v| v > floor).unwrap();
+        let last = trace.iter().rposition(|&v| v > floor).unwrap();
+        for (i, &v) in trace.iter().enumerate().take(last + 1).skip(first) {
+            assert!(
+                v > floor,
+                "energy returned to the floor at tick {i} and rose again — \
+                 the impulse is being re-analysed"
+            );
+        }
+        // It really did leave, rather than the run simply reaching the end.
+        assert!(last + 1 < trace.len(), "impulse never left the average");
+        // And it was single-peaked: no second maximum after the decay begins.
+        let peak_at = trace.iter().position(|&v| v == peak).unwrap();
+        for w in trace[peak_at..].windows(2) {
+            assert!(
+                w[1] <= w[0] + peak * 1e-12,
+                "energy rose again after the peak — recurrence"
+            );
+        }
+    }
+
+    /// Settling is `W + hop·(N−1)` per stage. The ratified figures at 96 kHz:
+    /// 0.11 s at the top, 0.85 s in the middle, 2.56 s at the bottom — the
+    /// last matching today's 2.5 s, so low frequency is not made slower.
+    #[test]
+    fn settling_matches_the_ratified_figures() {
         let l = ladder::layout(96_000).unwrap();
-        let alpha = ema::alpha_for_n_eff(4.0, HANN_50_RHO);
-        let taus: Vec<f64> = l.stages.iter().map(|s| tau_seconds(s, alpha)).collect();
-        // HF settles fast, LF slowly — the point of uniform N_eff.
-        assert!(taus[0] < 0.06, "stage 0 tau {}", taus[0]);
-        assert!(taus[2] > 1.0 && taus[2] < 2.5, "stage 2 tau {}", taus[2]);
-        assert!(taus[0] < taus[1] && taus[1] < taus[2]);
+        let s: Vec<f64> = l.stages.iter().map(|st| settling_seconds(st, 4)).collect();
+        assert!((s[0] - 0.106_667).abs() < 1e-4, "top {}", s[0]);
+        assert!((s[1] - 0.853_333).abs() < 1e-4, "middle {}", s[1]);
+        assert!((s[2] - 2.560_000).abs() < 1e-4, "bottom {}", s[2]);
+        assert!(
+            s[2] <= 2.6,
+            "the bottom must not get slower than today's 2.5 s: {}",
+            s[2]
+        );
+        // The top improves roughly twelvefold against today's 2.5 s.
+        assert!(2.5 / s[0] > 20.0, "top stage only {}x faster", 2.5 / s[0]);
     }
 }

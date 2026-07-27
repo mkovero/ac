@@ -209,16 +209,21 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .and_then(Value::as_f64)
         .filter(|v| *v > 0.0 && *v <= 384.0)
         .unwrap_or(ac_core::visualize::mtw::ladder::P_REF);
-    // Effective averages per band, held *uniform across bands* so the
-    // coherence bias `1/N_eff` is the same either side of every crossover.
-    // A uniform wall-clock time constant would instead give ~47 averages at
-    // stage 0 against ~1.5 at stage 2, putting a fixed-frequency step in the
-    // trust indicator that reads as a property of the DUT.
-    let mtw_n_target: f64 = cmd
-        .get("mtw_n_target")
-        .and_then(Value::as_f64)
-        .filter(|v| *v >= 1.0 && *v <= 256.0)
-        .unwrap_or(ac_core::visualize::mtw::ema::DEFAULT_N_TARGET);
+    // Blocks averaged per stage, held *uniform across stages* so the coherence
+    // bias `1/N` is the same either side of every crossover. A uniform
+    // wall-clock time constant would instead give ~47 averages at stage 0
+    // against ~1.5 at stage 2, putting a fixed-frequency step in the trust
+    // indicator that reads as a property of the DUT.
+    //
+    // Lowering it speeds the bottom stage up but raises the coherence floor
+    // across the whole display, since N is uniform: 0.33 at N = 3, 0.50 at
+    // N = 2, and at 0.50 a coherence reading has stopped meaning anything.
+    let mtw_n_blocks: usize = cmd
+        .get("mtw_n_blocks")
+        .and_then(Value::as_u64)
+        .filter(|v| *v >= 1 && *v <= 64)
+        .map(|v| v as usize)
+        .unwrap_or(ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS);
 
     let pairs = match parse_transfer_pairs(cmd) {
         Ok(p) => p,
@@ -466,10 +471,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     .iter()
                     .map(|s| {
                         json!({
+                            // `W + hop·(N−1)` — how long this rung takes to
+                            // fill its average. Shipped so a viewer can say
+                            // how stale a band is without deriving it from
+                            // the frame rate.
+                            "settling_s": ac_core::visualize::mtw::settling_seconds(s, mtw_n_blocks),
                             "decim":     s.decim,
                             "rate":      s.rate,
                             "df":        s.df,
                             "window_s":  s.window_s,
+                            "hop_s":     s.hop_s,
                             "f_valid":   s.f_valid,
                             "f_top":     s.f_top,
                             "blend_top": s.blend_top,
@@ -718,7 +729,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 let Some(delay) = pair_delays[i] else {
                     continue;
                 };
-                match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_target) {
+                match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
                     Ok(p) => *slot = Some(p),
                     Err(e) => {
                         // The ladder is additive, so a layout it cannot serve
@@ -952,15 +963,18 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         });
 
                         // Multi-time-window columns (additive; `null` until
-                        // every rung has produced a segment — the deepest
-                        // needs its 1.365 s window before it can say
-                        // anything, and a partly-warm ladder would show a
-                        // crossover between a live band and an empty one).
+                        // every rung holds a full N blocks — 2.56 s at the
+                        // bottom, which is the design's stated settling time
+                        // and matches what the full-rate estimator takes
+                        // today. Gating on the full N is what makes the
+                        // reported N unambiguous: every column is the mean of
+                        // the same number of blocks).
                         //
-                        // Every column ships the Δf, window and N_eff that
+                        // Every column ships the Δf, window and N that
                         // produced it. That is not decoration: neighbouring
-                        // columns can come from windows 16x apart, and without
-                        // those a screenshot of this display is not
+                        // columns can come from windows 12x apart, and
+                        // coherence from uncorrelated inputs floats near 1/N,
+                        // so without those a screenshot of this display is not
                         // interpretable. `bins` is criterion 1 made
                         // observable — it is never zero.
                         //
@@ -982,12 +996,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 "coherence":    cols.iter().map(|c| c.coherence).collect::<Vec<_>>(),
                                 "df":           cols.iter().map(|c| c.df).collect::<Vec<_>>(),
                                 "window_s":     cols.iter().map(|c| c.window_s).collect::<Vec<_>>(),
-                                "n_eff":        cols.iter().map(|c| c.n_eff).collect::<Vec<_>>(),
+                                "n":            cols.iter().map(|c| c.n).collect::<Vec<_>>(),
                                 "stage":        cols.iter().map(|c| c.stage).collect::<Vec<_>>(),
                                 "blend":        cols.iter().map(|c| c.blend).collect::<Vec<_>>(),
                                 "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
                                 "ppo":          mtw_ppo,
-                                "n_target":     mtw_n_target,
+                                "n_blocks":     mtw_n_blocks,
                                 "stages":       mtw_stages,
                             }),
                         };

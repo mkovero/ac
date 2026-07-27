@@ -2658,7 +2658,7 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
     let coh = f64s(m, "coherence");
     let df = f64s(m, "df");
     let window = f64s(m, "window_s");
-    let n_eff = f64s(m, "n_eff");
+    let n = f64s(m, "n");
     let bins = f64s(m, "bins");
     let stage = f64s(m, "stage");
     assert!(freqs.len() > 100, "only {} columns", freqs.len());
@@ -2667,7 +2667,7 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
         ("coherence", &coh),
         ("df", &df),
         ("window_s", &window),
-        ("n_eff", &n_eff),
+        ("n", &n),
         ("bins", &bins),
         ("stage", &stage),
     ] {
@@ -2735,22 +2735,31 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
         window[freqs.len() - 1]
     );
 
-    // Criterion 5: N_eff is present and near the configured target once warm.
-    // Reported per column rather than per session because the rungs warm at
-    // different rates.
-    assert!(n_eff.iter().all(|&n| n > 0.0), "N_eff must be reported");
-    let hf_n_eff = n_eff[freqs.len() - 1];
+    // Criterion 5: N is present and equals the configured value, in every
+    // column. Uniform across stages is the whole point — an N that varied with
+    // frequency would put a coherence step at a fixed frequency.
     assert!(
-        (hf_n_eff - 4.0).abs() < 0.5,
-        "top-of-band N_eff {hf_n_eff}, want the configured 4"
+        n.iter().all(|&v| v == 4.0),
+        "N must be the configured 4 in every column, got {:?}",
+        n.iter().take(8).collect::<Vec<_>>()
     );
+    assert_eq!(m["n_blocks"], json!(4));
 
     // The stage table ships alongside so `stage` is interpretable.
     let stages = m["stages"].as_array().expect("mtw.stages");
     assert_eq!(stages.len(), 3, "48 kHz ladder is three rungs");
     assert_eq!(stages[0]["decim"], json!(1), "stage 0 is always full rate");
     assert_eq!(stages[1]["decim"], json!(4));
-    assert_eq!(stages[2]["decim"], json!(16));
+    assert_eq!(stages[2]["decim"], json!(12));
+    // Settling: the bottom rung must not be slower than the full-rate
+    // estimator it replaces (2.5 s today), and the top must be far faster.
+    let settling = |i: usize| stages[i]["settling_s"].as_f64().unwrap();
+    assert!(
+        settling(2) < 2.6,
+        "bottom rung settles in {} s",
+        settling(2)
+    );
+    assert!(settling(0) < 0.25, "top rung settles in {} s", settling(0));
 }
 
 /// The ladder is additive. Everything the frame carried before it must be

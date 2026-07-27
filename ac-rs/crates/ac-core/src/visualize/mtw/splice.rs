@@ -4,7 +4,7 @@
 //!
 //! 1. **Within a stage**, bins are summed as cross-spectra and divided once,
 //!    per column. Summing `Sxx`, `Syy`, `Sxy` and dividing at the end is the
-//!    same discipline [`super::ema`] applies in time, applied in frequency:
+//!    same discipline [`super::average`] applies in time, applied in frequency:
 //!    a column's coherence is a statement about the bins it contains, and
 //!    averaging per-bin coherences would not be one.
 //! 2. **Across stages**, `H1` and `γ²` are blended. Not the cross-spectra:
@@ -27,9 +27,10 @@ use super::ladder::Ladder;
 
 /// One display column and everything needed to interpret it.
 ///
-/// The per-column `df` / `window_s` / `n_eff` are not decoration: without them
+/// The per-column `df` / `window_s` / `n` are not decoration: without them
 /// a screenshot of a multi-rate display is not interpretable, because
-/// neighbouring columns can come from windows 16x apart.
+/// neighbouring columns can come from windows 12x apart, and coherence from
+/// uncorrelated inputs floats near `1/n`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Column {
     /// Geometric centre of the column.
@@ -42,8 +43,8 @@ pub struct Column {
     pub df: f64,
     /// Analysis window of that stage, in seconds.
     pub window_s: f64,
-    /// Effective averages behind this column.
-    pub n_eff: f64,
+    /// Blocks averaged behind this column.
+    pub n: usize,
     /// Index of the deeper contributing stage.
     pub stage: usize,
     /// Weight of the shallower stage, `0.0` outside a crossover.
@@ -100,7 +101,7 @@ pub struct StageSpectra<'a> {
     pub sxx: &'a [f64],
     pub syy: &'a [f64],
     pub sxy: &'a [Complex<f64>],
-    pub n_eff: f64,
+    pub n: usize,
 }
 
 /// Assemble display columns from the ladder's per-stage accumulators.
@@ -148,7 +149,7 @@ pub fn assemble(ladder: &Ladder, stages: &[StageSpectra<'_>], edges: &[f64]) -> 
             // back and forth mid-blend and read as a data artifact.
             df: deep_stage.df,
             window_s: deep_stage.window_s,
-            n_eff: deep.n_eff,
+            n: deep.n,
             stage: src.deep,
             blend,
             bins,
@@ -166,20 +167,20 @@ mod tests {
         sxx: Vec<Vec<f64>>,
         syy: Vec<Vec<f64>>,
         sxy: Vec<Vec<Complex<f64>>>,
-        n_eff: Vec<f64>,
+        n: Vec<usize>,
     }
 
     impl Fixture {
         /// A flat, fully coherent `H1 = h` in every stage, plus enough
         /// uncorrelated power to bring coherence to `gamma2`.
-        fn new(ladder: &Ladder, h: Complex<f64>, gamma2: f64, n_eff: f64) -> Self {
+        fn new(ladder: &Ladder, h: Complex<f64>, gamma2: f64, n: usize) -> Self {
             let bins = NFFT / 2 + 1;
-            let n = ladder.stages.len();
+            let nstages = ladder.stages.len();
             Self {
-                sxx: vec![vec![1.0; bins]; n],
-                syy: vec![vec![h.norm_sqr() / gamma2; bins]; n],
-                sxy: vec![vec![h; bins]; n],
-                n_eff: vec![n_eff; n],
+                sxx: vec![vec![1.0; bins]; nstages],
+                syy: vec![vec![h.norm_sqr() / gamma2; bins]; nstages],
+                sxy: vec![vec![h; bins]; nstages],
+                n: vec![n; nstages],
             }
         }
 
@@ -189,7 +190,7 @@ mod tests {
                     sxx: &self.sxx[i],
                     syy: &self.syy[i],
                     sxy: &self.sxy[i],
-                    n_eff: self.n_eff[i],
+                    n: self.n[i],
                 })
                 .collect()
         }
@@ -201,7 +202,7 @@ mod tests {
     fn every_emitted_column_is_backed_by_bins() {
         for sr in [44_100u32, 48_000, 96_000, 192_000] {
             let l = ladder::layout(sr).unwrap();
-            let f = Fixture::new(&l, Complex::new(0.5, 0.0), 0.8, 4.0);
+            let f = Fixture::new(&l, Complex::new(0.5, 0.0), 0.8, 4);
             let edges = column_edges(&l, 20.0, f64::from(sr) / 2.0, 48.0);
             let cols = assemble(&l, &f.view(), &edges);
             assert_eq!(cols.len(), edges.len() - 1, "sr {sr}: columns were dropped");
@@ -218,7 +219,7 @@ mod tests {
     fn splice_is_continuous_in_magnitude() {
         let l = ladder::layout(96_000).unwrap();
         let h = Complex::new(0.5, -0.25);
-        let f = Fixture::new(&l, h, 0.6, 4.0);
+        let f = Fixture::new(&l, h, 0.6, 4);
         let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
         let cols = assemble(&l, &f.view(), &edges);
         for c in &cols {
@@ -240,7 +241,7 @@ mod tests {
     fn splice_is_continuous_in_coherence_under_a_partially_coherent_stimulus() {
         let l = ladder::layout(48_000).unwrap();
         let gamma2 = 0.55;
-        let f = Fixture::new(&l, Complex::new(1.0, 0.0), gamma2, 4.0);
+        let f = Fixture::new(&l, Complex::new(1.0, 0.0), gamma2, 4);
         let edges = column_edges(&l, 20.0, 24_000.0, 48.0);
         let cols = assemble(&l, &f.view(), &edges);
         assert!(cols.iter().any(|c| c.blend > 0.0), "no blend was exercised");
@@ -258,14 +259,14 @@ mod tests {
         assert!(gamma2 < 0.99);
     }
 
-    /// Unequal `N_eff` across a crossover is exactly what a uniform wall-clock
+    /// Unequal `N` across a crossover is exactly what a uniform wall-clock
     /// τ would produce, and it puts a fixed-frequency step in the trust
     /// indicator. The blend cannot repair that, so this pins that the ladder
     /// is fed matched variance rather than relying on the splice to hide it.
     #[test]
     fn a_coherence_step_appears_if_the_bands_are_not_variance_matched() {
         let l = ladder::layout(48_000).unwrap();
-        let mut f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.5, 4.0);
+        let mut f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.5, 4);
         // Stage 0 under-averaged: raise its uncorrelated floor, as a smaller
         // N_eff would.
         for v in f.syy[0].iter_mut() {
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn crossover_blends_rather_than_switches() {
         let l = ladder::layout(48_000).unwrap();
-        let mut f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.9, 4.0);
+        let mut f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.9, 4);
         // Give stage 0 a different H1 so the mix is observable.
         for v in f.sxy[0].iter_mut() {
             *v = Complex::new(2.0, 0.0);
@@ -320,7 +321,7 @@ mod tests {
     #[test]
     fn reported_window_is_monotone_across_the_ladder() {
         let l = ladder::layout(96_000).unwrap();
-        let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.7, 4.0);
+        let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.7, 4);
         let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
         let cols = assemble(&l, &f.view(), &edges);
         for w in cols.windows(2) {

@@ -28,7 +28,7 @@ use std::fmt;
 pub const NFFT: usize = 4096;
 
 /// Segment hop in samples — 50% overlap, matching the Hann window the
-/// estimator uses. [`crate::visualize::mtw::ema::HANN_50_RHO`] is the segment
+/// estimator uses. [`crate::visualize::mtw::average::HANN_50_RHO`] is the block
 /// correlation this overlap implies, and the two must move together.
 pub const HOP: usize = NFFT / 2;
 
@@ -51,7 +51,12 @@ pub const P_REF: f64 = 48.0;
 /// Fixed rates rather than fixed factors: stage 1 is 12 kHz whether the
 /// interface runs at 48 or 96 kHz, so its resolution, window and validity edge
 /// are identical at both.
-pub const TARGET_RATES: [f64; 2] = [12_000.0, 3_000.0];
+///
+/// The bottom rung is 4 kHz, giving 0.98 Hz resolution honest to 67.6 Hz — the
+/// same reach the full-rate estimator has today. Going deeper is bench mode's
+/// job: at 4 kHz the bottom settles in 2.56 s, matching today, and every step
+/// finer costs settling time in the one mode that cannot afford it.
+pub const TARGET_RATES: [f64; 2] = [12_000.0, 4_000.0];
 
 /// Width of the crossover blend, in octaves.
 pub const BLEND_OCTAVES: f64 = 1.0 / 3.0;
@@ -389,12 +394,12 @@ mod tests {
         for (sr, want_decims, want_rates) in [
             (
                 44_100u32,
-                vec![1usize, 4, 15],
-                vec![44_100.0, 11_025.0, 2_940.0],
+                vec![1usize, 4, 11],
+                vec![44_100.0, 11_025.0, 4_009.090_909_090_909],
             ),
-            (48_000, vec![1, 4, 16], vec![48_000.0, 12_000.0, 3_000.0]),
-            (96_000, vec![1, 8, 32], vec![96_000.0, 12_000.0, 3_000.0]),
-            (192_000, vec![1, 16, 64], vec![192_000.0, 12_000.0, 3_000.0]),
+            (48_000, vec![1, 4, 12], vec![48_000.0, 12_000.0, 4_000.0]),
+            (96_000, vec![1, 8, 24], vec![96_000.0, 12_000.0, 4_000.0]),
+            (192_000, vec![1, 16, 48], vec![192_000.0, 12_000.0, 4_000.0]),
         ] {
             let l = layout(sr).expect("layout");
             let decims: Vec<usize> = l.stages.iter().map(|s| s.decim).collect();
@@ -407,7 +412,7 @@ mod tests {
 
     /// The two deep stages are rate-independent by construction — that is the
     /// entire reason the ladder is specified by decimated rate. 44.1 kHz is
-    /// the accepted exception (2940 Hz, 2.0% off target).
+    /// the accepted exception (4009 Hz, 0.23% off target).
     #[test]
     fn deep_stages_are_identical_at_48_96_and_192_khz() {
         let mut seen: Vec<(f64, f64)> = Vec::new();
@@ -419,10 +424,15 @@ mod tests {
             assert!((w.0 - seen[0].0).abs() < 1e-12, "stage 1 window moved");
             assert!((w.1 - seen[0].1).abs() < 1e-12, "stage 2 window moved");
         }
-        // And the accepted 44.1 kHz variance, stated rather than discovered.
+        // And the accepted 44.1 kHz variance, stated rather than discovered:
+        // 4009 Hz against the 4000 Hz target, 0.23% off.
         let l = layout(44_100).unwrap();
-        assert!((l.stages[2].rate - 2_940.0).abs() < 1e-9);
-        assert!((l.stages[2].window_s - 1.393_197).abs() < 1e-5);
+        assert!(
+            (l.stages[2].rate - 4_009.090_9).abs() < 1e-3,
+            "{:?}",
+            l.stages[2]
+        );
+        assert!((l.stages[2].window_s - 1.021_678).abs() < 1e-5);
     }
 
     /// Independently re-derived validity edges and windows: `f_valid = κ·Δf`,
@@ -430,7 +440,7 @@ mod tests {
     #[test]
     fn validity_edges_and_windows_match_the_analytic_values() {
         let l = layout(48_000).unwrap();
-        let want = [(811.51, 0.085_333), (202.88, 0.341_333), (50.72, 1.365_333)];
+        let want = [(811.51, 0.085_333), (202.88, 0.341_333), (67.63, 1.024_000)];
         for (s, (f_valid, window)) in l.stages.iter().zip(want.iter()) {
             assert!((s.f_valid - f_valid).abs() < 0.02, "{s:?}");
             assert!((s.window_s - window).abs() < 1e-5, "{s:?}");
@@ -488,7 +498,7 @@ mod tests {
     fn low_rates_drop_degenerate_stages() {
         let l = layout(8_000).unwrap();
         let decims: Vec<usize> = l.stages.iter().map(|s| s.decim).collect();
-        assert_eq!(decims, vec![1, 3], "12 kHz target cannot deepen 8 kHz");
+        assert_eq!(decims, vec![1, 2], "12 kHz target cannot deepen 8 kHz");
         assert_eq!(layout(0), Err(LadderError::ZeroRate));
     }
 
@@ -596,11 +606,11 @@ mod tests {
         assert!(log_width < df, "premise: 48 ppo at 20 Hz is finer than Δf");
         assert!((edges[1] - edges[0] - df).abs() < 1e-9, "{:?}", &edges[..3]);
         let n_below: usize = edges.iter().filter(|&&f| f < l.f_valid_min()).count();
-        // ~(50.7 - 20)/0.732 columns, against the 64 a 1/48-octave grid would
+        // ~(67.6 - 20)/0.977 columns, against the 84 a 1/48-octave grid would
         // have claimed there.
         assert!(
-            (38..=46).contains(&n_below),
-            "expected ~42 honest columns below the validity edge, got {n_below}"
+            (44..=54).contains(&n_below),
+            "expected ~49 honest columns below the validity edge, got {n_below}"
         );
     }
 }
