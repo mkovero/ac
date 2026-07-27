@@ -75,8 +75,13 @@ pub struct MtwColumns {
     /// Analysis window behind each column, in seconds.
     #[serde(default)]
     pub window_s: Vec<f64>,
-    /// Blocks averaged behind each column — **nominal**, see
-    /// [`Self::variance_equivalent_n`].
+    /// Blocks actually averaged behind each column.
+    ///
+    /// This is a raw input, not a depth. The effective averaging depth is set
+    /// by blocks **and** by [`Self::bins`], and no validated model combines
+    /// them — see `design-mtw-ladder.md`. Do not derive a "corrected" figure
+    /// from this field; the last two attempts were both further from the
+    /// truth than the uncorrected value.
     #[serde(default)]
     pub n: Vec<f64>,
     #[serde(default)]
@@ -170,43 +175,6 @@ pub struct WireFrame {
 }
 
 impl MtwColumns {
-    /// Effective averages behind every column, corrected for block overlap.
-    ///
-    /// **The frame reports the nominal block count (4). That is not the number
-    /// a coherence reading should be judged against.** The blocks overlap 50%,
-    /// so the variance-equivalent count is 3.2 and the coherence floor on
-    /// uncorrelated inputs is 1/3.2 = 0.312, not 1/4 = 0.25. A reader working
-    /// from 4 would treat 0.28 as signal when it is floor.
-    ///
-    /// Computed here rather than hardcoded, from `ac-core`'s own function and
-    /// its own overlap constant, so this cannot drift from the estimator that
-    /// produced the numbers. **The daemon shipping this directly would be
-    /// better** — this crate has to assume an overlap the daemon knows — so
-    /// [`Self::overlap_premise_holds`] checks the assumption against the
-    /// frame instead of trusting it.
-    pub fn variance_equivalent_n(&self) -> Option<f64> {
-        if self.n_blocks == 0 {
-            return None;
-        }
-        Some(
-            ac_core::visualize::mtw::average::variance_equivalent_blocks(
-                self.n_blocks,
-                ac_core::visualize::mtw::average::HANN_50_RHO,
-            ),
-        )
-    }
-
-    /// Whether the frame's own stage table agrees with the 50%-overlap premise
-    /// [`Self::variance_equivalent_n`] encodes. False means the correction is
-    /// wrong and the value must not be shown.
-    pub fn overlap_premise_holds(&self) -> bool {
-        !self.stages.is_empty()
-            && self
-                .stages
-                .iter()
-                .all(|s| s.window_s > 0.0 && (s.hop_s / s.window_s - 0.5).abs() < 1e-9)
-    }
-
     /// Every parallel array is the same length as `freqs`.
     ///
     /// The arrays are independent JSON fields, so nothing guarantees a short

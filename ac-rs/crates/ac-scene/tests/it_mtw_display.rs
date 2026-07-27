@@ -7,7 +7,7 @@
 //! rule. A hand-written uniform grid would pass criterion 3 without ever
 //! exercising the case it exists for.
 
-use ac_core::visualize::mtw::{average, ladder};
+use ac_core::visualize::mtw::ladder;
 use ac_scene::transfer::{DerotMode, MeterState, TransferScene, COHERENCE_THRESHOLD};
 use ac_scene::{TransferInput, WireFrame};
 use serde_json::json;
@@ -214,48 +214,40 @@ fn variable_column_counts_render_at_every_supported_rate() {
     }
 }
 
-/// Deliverable 4. The frame reports the nominal block count; the display must
-/// carry the overlap-corrected one, because that is what the coherence floor
-/// is 1/N of.
+/// Deliverable 4. The averaging depth's raw inputs reach the scene: blocks
+/// actually averaged, and source bins per column.
+///
+/// Deliberately *not* combined into a single "effective depth". The coherence
+/// floor depends on both, sublinearly in bins, and no validated model exists —
+/// an earlier version of this crate shipped a Welch ρ = 1/6 correction that
+/// measured *further* from the truth than the uncorrected value. See
+/// `design-mtw-ladder.md`.
 #[test]
-fn n_reaching_the_scene_is_overlap_corrected_not_nominal() {
+fn the_depth_inputs_reach_the_scene_uncombined() {
     let frame = frame_with_mtw(48_000, 0.9);
     let input = TransferInput::from_wire_frame(&frame);
-
+    let n = input.freqs.len();
     assert_eq!(
-        frame.mtw.as_ref().unwrap().n_blocks,
-        4,
-        "frame ships nominal"
+        input.column_n.len(),
+        n,
+        "blocks-averaged must reach the scene"
     );
-    let n_eff = input
-        .n_effective
-        .expect("overlap-corrected N must reach the scene");
-    let want = average::variance_equivalent_blocks(4, average::HANN_50_RHO);
-    assert!((n_eff - want).abs() < 1e-9, "{n_eff} vs {want}");
-    assert!((n_eff - 3.2).abs() < 1e-9, "expected 3.2, got {n_eff}");
-    assert!(
-        (n_eff - 4.0).abs() > 0.5,
-        "corrected value must be distinguishable from the nominal one"
+    assert_eq!(
+        input.column_bins.len(),
+        n,
+        "bins-per-column must reach the scene"
     );
-    // The number a reader would judge coherence against.
-    assert!((1.0 / n_eff - 0.3125).abs() < 1e-9);
-}
 
-/// A wrong N is worse than no N: if the frame's own stage table contradicts
-/// the 50% overlap the correction assumes, the value is withheld.
-#[test]
-fn n_is_withheld_when_the_frames_stage_table_contradicts_the_overlap() {
-    let mut frame = frame_with_mtw(48_000, 0.9);
-    let m = frame.mtw.as_mut().unwrap();
-    // 75% overlap: the 1/6 lag-1 correlation no longer applies.
-    for s in m.stages.iter_mut() {
-        s.hop_s = s.window_s * 0.25;
-    }
-    let input = TransferInput::from_wire_frame(&frame);
+    // Blocks averaged is uniform across columns — that is the property the
+    // ladder's uniform-N decision buys, and it must survive the wire.
     assert!(
-        input.n_effective.is_none(),
-        "a contradicted premise must withhold N, not approximate it"
+        input.column_n.iter().all(|&v| (v - 4.0).abs() < 1e-9),
+        "blocks averaged is not uniform: {:?}",
+        input.column_n.iter().take(8).collect::<Vec<_>>()
     );
+    // Bins per column is NOT uniform — it is the other half of the depth, and
+    // the half that changes at a crossover.
+    assert!(input.column_bins.iter().any(|&b| b >= 1));
 }
 
 /// Deliverable 5, behaviourally: the Welch arrays are on the wire and are not
@@ -274,7 +266,7 @@ fn a_frame_without_mtw_draws_nothing_rather_than_the_welch_arrays() {
         "Welch freqs leaked into the display"
     );
     assert!(input.magnitude_db.is_empty());
-    assert!(input.n_effective.is_none());
+    assert!(input.column_n.is_empty() && input.column_bins.is_empty());
 
     let sc = scene(&frame);
     assert!(

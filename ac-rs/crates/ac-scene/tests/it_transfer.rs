@@ -45,7 +45,8 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         // Welch-derived fixture: no per-column provenance to carry.
         column_df: Vec::new(),
         column_window_s: Vec::new(),
-        n_effective: None,
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
     }
 }
 

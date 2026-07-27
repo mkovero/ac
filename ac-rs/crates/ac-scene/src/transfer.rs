@@ -238,12 +238,13 @@ pub struct TransferInput {
     /// Empty for a snapshot derivation, which is still Welch-derived (#221).
     pub column_df: Vec<f64>,
     pub column_window_s: Vec<f64>,
-    /// Effective averages behind every column, **overlap-corrected** — 3.2 for
-    /// the nominal 4 blocks. `None` when the frame did not carry enough to
-    /// compute it, or when its own stage table contradicts the overlap the
-    /// correction assumes. Never silently falls back to the nominal count:
-    /// showing 4 where 3.2 is true understates the coherence floor by 25%.
-    pub n_effective: Option<f64>,
+    /// Blocks averaged behind each column, and the source bins each column
+    /// spans. Raw inputs, deliberately not combined into a single "effective
+    /// depth": the coherence floor depends on both, sublinearly in bins, and
+    /// no validated model exists. Two successive models were wrong, one of
+    /// them shipped. See `design-mtw-ladder.md`.
+    pub column_n: Vec<f64>,
+    pub column_bins: Vec<usize>,
 }
 
 impl TransferInput {
@@ -261,26 +262,28 @@ impl TransferInput {
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
         let mtw = frame.mtw.as_ref().filter(|m| m.lengths_agree());
-        let (freqs, magnitude_db, phase_deg, coherence, column_df, column_window_s, n_effective) =
-            match mtw {
-                Some(m) => (
-                    m.freqs.clone(),
-                    m.magnitude_db.clone(),
-                    m.phase_deg.clone(),
-                    m.coherence.clone(),
-                    m.df.clone(),
-                    m.window_s.clone(),
-                    // Withheld rather than approximated if the frame's own
-                    // stage table disagrees with the overlap the correction
-                    // assumes — a wrong N is worse than no N, because the
-                    // whole point of shipping it is judging the coherence
-                    // floor against it.
-                    m.overlap_premise_holds()
-                        .then(|| m.variance_equivalent_n())
-                        .flatten(),
-                ),
-                None => Default::default(),
-            };
+        let (
+            freqs,
+            magnitude_db,
+            phase_deg,
+            coherence,
+            column_df,
+            column_window_s,
+            column_n,
+            column_bins,
+        ) = match mtw {
+            Some(m) => (
+                m.freqs.clone(),
+                m.magnitude_db.clone(),
+                m.phase_deg.clone(),
+                m.coherence.clone(),
+                m.df.clone(),
+                m.window_s.clone(),
+                m.n.clone(),
+                m.bins.clone(),
+            ),
+            None => Default::default(),
+        };
         TransferInput {
             freqs,
             magnitude_db,
@@ -294,7 +297,8 @@ impl TransferInput {
             sr: frame.sr,
             column_df,
             column_window_s,
-            n_effective,
+            column_n,
+            column_bins,
         }
     }
 
@@ -319,12 +323,13 @@ impl TransferInput {
             source: Source::Snapshot,
             sr,
             // A snapshot is still derived by the full-rate Welch path, so it
-            // has no per-column resolution to report and no block count to
-            // correct. That divergence from the live view is #221; this slice
-            // makes it visible rather than fixing it.
+            // has no per-column resolution or averaging depth to report. That
+            // divergence from the live view is #221; this slice makes it
+            // visible rather than fixing it.
             column_df: Vec::new(),
             column_window_s: Vec::new(),
-            n_effective: None,
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         }
     }
 
@@ -548,7 +553,8 @@ mod tests {
             // Welch-derived fixture: no per-column provenance to carry.
             column_df: Vec::new(),
             column_window_s: Vec::new(),
-            n_effective: None,
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
@@ -592,7 +598,8 @@ mod tests {
             // Welch-derived fixture: no per-column provenance to carry.
             column_df: Vec::new(),
             column_window_s: Vec::new(),
-            n_effective: None,
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
