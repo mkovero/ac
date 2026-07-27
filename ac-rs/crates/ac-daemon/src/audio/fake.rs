@@ -683,6 +683,20 @@ impl AudioEngine for FakeEngine {
             .unwrap_or(0)
     }
 
+    /// Per-ring occupancy from the last contiguous drain (#208 D1).
+    ///
+    /// Ring mode exists so ring-shaped capture defects are reproducible
+    /// without hardware; inheriting the trait's empty default here left the
+    /// telemetry blind in exactly that mode, so a test could read `occ=[]`
+    /// and conclude nothing was wrong. Empty off ring mode, where there is
+    /// genuinely no ring to report.
+    fn last_drain_occupancy(&self) -> Vec<usize> {
+        self.ring
+            .as_ref()
+            .map(|r| r.rings.last_drain_occupancy().to_vec())
+            .unwrap_or_default()
+    }
+
     fn enable_ring_mode(&mut self, process_secs: f64, n_refs: usize, period: usize) {
         self.enable_ring_mode_inner(process_secs, n_refs, period);
     }
