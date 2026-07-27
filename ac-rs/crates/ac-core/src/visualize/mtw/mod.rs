@@ -247,7 +247,13 @@ impl MtwPair {
                     sxx,
                     syy,
                     sxy,
-                    n: b.avg.n_blocks(),
+                    // Blocks actually averaged, not the configured target. If
+                    // the `settled()` gate above is ever loosened, the frame
+                    // must report the depth it really has rather than the one
+                    // it aimed for — a column averaged over one block that
+                    // claims four is the failure criterion 5c exists to catch,
+                    // and nothing downstream could detect it.
+                    n: b.avg.held(),
                 })
             })
             .collect();
@@ -624,5 +630,41 @@ mod tests {
         );
         assert!(lon < 25.0, "never reached the bottom rung: {lon} Hz");
         assert_eq!(p.settled_stages(), vec![true, true, true]);
+    }
+
+    /// Criterion 5c. Every emitted column reports the configured `N`, at every
+    /// point in warmup — not only once every rung has settled.
+    ///
+    /// Drives the real pipeline rather than a fixture, because the property
+    /// depends on the `settled()` gate actually filtering: an under-averaged
+    /// rung must contribute nothing, not a shallower average. It can only bite
+    /// because `n` is taken from blocks *held* — reporting the configured
+    /// target instead would let an under-averaged column claim a depth it does
+    /// not have, and no assertion could see it.
+    #[test]
+    fn every_emitted_column_reports_the_configured_n_throughout_warmup() {
+        let sr = 96_000u32;
+        let n_target = 4usize;
+        let mut p = MtwPair::new(sr, 0, n_target).unwrap();
+        let block = 4_800usize;
+        let mut sampled = 0usize;
+        for tick in 0..120 {
+            let i = (tick * block) as i64;
+            let meas: Vec<f32> = (0..block).map(|k| 0.5 * source_at(i + k as i64)).collect();
+            let refc: Vec<f32> = (0..block).map(|k| source_at(i + k as i64)).collect();
+            p.push(&meas, &refc);
+            let Some(cols) = p.columns(20.0, 48_000.0, 48.0) else {
+                continue;
+            };
+            sampled += 1;
+            let depths: std::collections::BTreeSet<usize> = cols.iter().map(|c| c.n).collect();
+            assert_eq!(
+                depths,
+                std::collections::BTreeSet::from([n_target]),
+                "tick {tick}: emitted columns average over {depths:?} blocks, \
+                 configured {n_target} — an under-averaged column reached the display"
+            );
+        }
+        assert!(sampled > 20, "warmup barely sampled: {sampled} frames");
     }
 }

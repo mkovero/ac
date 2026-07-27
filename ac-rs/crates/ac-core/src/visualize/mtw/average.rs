@@ -26,8 +26,13 @@
 //! 5.9 and 1.5 at 96 kHz. Since `E[γ̂²] ≈ γ² + (1−γ²)/N`, that is a coherence
 //! bias of 0.02 / 0.17 / 0.68 and so a ~0.5 step at a fixed frequency, which
 //! reads as a property of the DUT rather than of the analyser. Uniform `N = 4`
-//! puts the bias at 0.25 everywhere — the same figure the full-rate estimator
-//! has today, and no step at any crossover.
+//! puts the block contribution to the bias at 0.25 everywhere.
+//!
+//! That is the *block* contribution only. A display column sums several FFT
+//! bins, which averages further, and the bin count per column changes at a
+//! crossover — so the total effective depth is not uniform and a residual
+//! coherence step remains. Measured and accepted rather than modelled; see
+//! `design-mtw-ladder.md`. Nothing here derives a depth figure from `N`.
 //!
 //! # What N costs
 //!
@@ -46,23 +51,30 @@ use realfft::num_complex::Complex;
 /// Blocks averaged per stage.
 pub const DEFAULT_N_BLOCKS: usize = 4;
 
-/// Lag-1 correlation between adjacent Hann blocks at 50% overlap.
-///
-/// Not used by the estimator — a plain mean does not need it. It is the
-/// correction that turns the nominal block count `N` into the variance-
-/// equivalent count, and it is recorded here because the measured coherence
-/// bias on uncorrelated inputs sits at `1/N_variance`, slightly above `1/N`.
-/// Criterion 5's tolerance is that gap, not slop.
-pub const HANN_50_RHO: f64 = 1.0 / 6.0;
-
-/// Variance-equivalent block count for `n` overlapping Hann blocks.
-///
-/// `N / (1 + 2ρ(N−1)/N)`. At `N = 4`, ρ = 1/6 this is 3.2, so the coherence
-/// bias on uncorrelated inputs lands near 0.31 rather than exactly 0.25.
-pub fn variance_equivalent_blocks(n: usize, rho: f64) -> f64 {
-    let n = n.max(1) as f64;
-    n / (1.0 + 2.0 * rho * (n - 1.0) / n)
-}
+// A "variance-equivalent block count" using Welch's ρ = 1/6 overlap
+// correction used to live here, and the coherence floor was documented as
+// `1/3.2 = 0.312` rather than `1/N`. **That was wrong and is removed.**
+//
+// ρ = 1/6 corrects the *variance of a power-spectrum estimate* for 50%
+// overlapping Hann segments. The magnitude-squared coherence bias on
+// uncorrelated inputs is a different functional, and the correction does not
+// transfer to it. Measured on this pipeline — single-bin, non-blend columns,
+// 30 runs per point — the floor tracks the nominal `N`:
+//
+//   N       1/N      1/N_var(rho=1/6)   measured floor   implied N_eff
+//   2     0.5000            0.5833           0.5053            1.98
+//   4     0.2500            0.3125           0.2548            3.92
+//   8     0.1250            0.1615           0.1309            7.64
+//  16     0.0625            0.0820           0.0681           14.68
+//
+// Overlap costs under 10%, growing slowly with N — nothing like the 20% the
+// correction claimed, and in the same direction as no correction at all. The
+// "corrected" figure was further from the truth than the uncorrected one, so
+// shipping it was worse than shipping nothing.
+//
+// Do not reintroduce a correction here without measuring it against this
+// table. The per-column bin count is a *separate* and larger factor on the
+// effective depth; see `splice` and the note in `design-mtw-ladder.md`.
 
 /// Averaged cross-spectra: `(Sxx, Syy, Sxy)`, one entry per bin.
 pub type CrossSpectra = (Vec<f64>, Vec<f64>, Vec<Complex<f64>>);
@@ -254,10 +266,10 @@ mod tests {
     /// Criterion 5: coherence from uncorrelated inputs floats at `1/N` — the
     /// reason `N` ships in the frame. Measured, not asserted from the formula.
     ///
-    /// Blocks here are independent, so the figure is exactly `1/N`; the live
-    /// path overlaps its Hann blocks by 50%, which lifts it to
-    /// `1/variance_equivalent_blocks` (0.31 at N = 4). Both are checked so the
-    /// tolerance in the end-to-end test is a derived number rather than slop.
+    /// Blocks here are independent, so the figure is exactly `1/N`. The live
+    /// path overlaps its Hann blocks by 50%, which was once assumed to lift
+    /// the floor to 0.31 at N = 4; measurement puts it at 0.255, i.e. still
+    /// `1/N` within ~2%. See the note above the accumulator.
     #[test]
     fn uncorrelated_coherence_floats_at_one_over_n() {
         let mut state = 0xdead_beef_0bad_f00du64;
@@ -287,7 +299,6 @@ mod tests {
                 "N {n}: coherence floor {mean}, want ~{want}"
             );
         }
-        assert!((variance_equivalent_blocks(4, HANN_50_RHO) - 3.2).abs() < 1e-9);
     }
 
     /// A fully coherent pair must still read ~1 — the bias floor must not
