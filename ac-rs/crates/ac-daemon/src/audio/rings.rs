@@ -463,6 +463,87 @@ mod tests {
         assert_eq!(rings.discarded_samples(), 0);
     }
 
+    /// Issue #216, the mechanism. `capture_block` clears and pops the
+    /// measurement ring only, so any reference ring registered beforehand
+    /// keeps everything it holds and comes out of the call *ahead* of meas by
+    /// the full capture length.
+    ///
+    /// This asserts the hazard rather than a fix: `capture_block` is the
+    /// correct single-channel drain and is not changing. What changed is that
+    /// `transfer_stream`'s warmup no longer calls it — see
+    /// `capture_multi_leaves_every_ring_at_the_same_phase` for the property
+    /// the warmup now relies on, and the comment at its call site in
+    /// `handlers/transfer.rs`.
+    #[test]
+    fn capture_block_leaves_refs_ahead_of_meas() {
+        let mut rings = CaptureRings::new();
+        let (m, _mp) = loaded(1_000, 4096);
+        rings.set_meas(m);
+        let (r, _rp) = loaded(1_000, 4096);
+        rings.push_ref(r);
+
+        let mut wait = |_: &CaptureRings, _: usize, _: f64| Ok(());
+        let _ = rings.capture_block(0, 0.01, &mut wait).unwrap();
+
+        assert_eq!(rings.occupied(), 0, "meas was cleared");
+        assert_eq!(
+            rings.min_occupied(),
+            0,
+            "min is meas's, so the drain that follows cannot see the skew"
+        );
+        assert_eq!(
+            rings.refs[0].occupied_len(),
+            1_000,
+            "the ref kept everything — this 1000-sample offset is #216, and \
+             `capture_multi_contiguous` pops `min_occupied()` from both, which \
+             preserves it rather than correcting it"
+        );
+    }
+
+    /// The property `transfer_stream`'s warmup depends on (#216): every ring
+    /// leaves the call holding the same number of samples, so meas and ref are
+    /// sample-aligned when the contiguous streaming drain takes over and stops
+    /// clearing.
+    ///
+    /// Asserted with unequal starting occupancies *and* an unequal fill, so a
+    /// regression that dropped the ref clear could not pass by accident on
+    /// rings that happened to start level.
+    #[test]
+    fn capture_multi_leaves_every_ring_at_the_same_phase() {
+        let mut rings = CaptureRings::new();
+        let (m, mut mp) = loaded(300, 4096);
+        rings.set_meas(m);
+        let mut ref_prods = Vec::new();
+        for n in [900, 1_500] {
+            let (r, rp) = loaded(n, 4096);
+            rings.push_ref(r);
+            ref_prods.push(rp);
+        }
+
+        // The wait fills every ring in lockstep, as the RT callback does.
+        let mut wait = move |_: &CaptureRings, _: usize, _: f64| {
+            for i in 0..500 {
+                mp.try_push(i as f32).unwrap();
+                for p in ref_prods.iter_mut() {
+                    p.try_push(i as f32).unwrap();
+                }
+            }
+            Ok(())
+        };
+        let bufs = rings.capture_multi(200, 0.01, &mut wait).unwrap();
+        assert_eq!(bufs.len(), 3, "meas + 2 refs");
+
+        let occ: Vec<usize> = std::iter::once(rings.occupied())
+            .chain(rings.refs.iter().map(|c| c.occupied_len()))
+            .collect();
+        assert!(
+            occ.iter().all(|&n| n == occ[0]),
+            "warmup must leave every ring at the same phase, got {occ:?} — \
+             a ref left ahead of meas becomes a permanent skew (#216)"
+        );
+        assert_eq!(occ[0], 300, "500 filled minus the 200 popped from each");
+    }
+
     /// A failing wait must not leave the caller with a partially-drained
     /// ring silently presented as a good capture.
     #[test]
