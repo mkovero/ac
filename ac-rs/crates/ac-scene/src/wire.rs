@@ -31,6 +31,70 @@
 
 use serde::Deserialize;
 
+/// One ladder rung's parameters, echoed in every frame so a saved frame stays
+/// interpretable without knowing the daemon's layout rules.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MtwStage {
+    #[serde(default)]
+    pub decim: usize,
+    #[serde(default)]
+    pub rate: f64,
+    #[serde(default)]
+    pub df: f64,
+    #[serde(default)]
+    pub window_s: f64,
+    /// Segment hop. `window_s / 2` for the 50% overlap the estimator uses —
+    /// checked rather than assumed, see [`MtwColumns::variance_equivalent_n`].
+    #[serde(default)]
+    pub hop_s: f64,
+    #[serde(default)]
+    pub f_valid: f64,
+    #[serde(default)]
+    pub settling_s: f64,
+}
+
+/// The three-stage transfer columns — the display's actual source.
+///
+/// Column spacing is **not uniform** in log frequency: where the requested
+/// density exceeds what a rung resolves, the grid widens instead of
+/// interpolating. Anything consuming this must map each column by its own
+/// `freqs[i]` rather than by index (which `freq_to_x` already does).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MtwColumns {
+    pub freqs: Vec<f64>,
+    #[serde(default)]
+    pub f_lo: Vec<f64>,
+    #[serde(default)]
+    pub f_hi: Vec<f64>,
+    pub magnitude_db: Vec<f64>,
+    pub phase_deg: Vec<f64>,
+    pub coherence: Vec<f64>,
+    /// Bin width behind each column, in Hz.
+    #[serde(default)]
+    pub df: Vec<f64>,
+    /// Analysis window behind each column, in seconds.
+    #[serde(default)]
+    pub window_s: Vec<f64>,
+    /// Blocks averaged behind each column — **nominal**, see
+    /// [`Self::variance_equivalent_n`].
+    #[serde(default)]
+    pub n: Vec<f64>,
+    #[serde(default)]
+    pub stage: Vec<usize>,
+    #[serde(default)]
+    pub blend: Vec<f64>,
+    /// Source bins behind each column. Never zero on a conforming frame —
+    /// this is the honest-density guarantee made observable.
+    #[serde(default)]
+    pub bins: Vec<usize>,
+    #[serde(default)]
+    pub ppo: f64,
+    #[serde(default)]
+    pub n_blocks: usize,
+    #[serde(default)]
+    pub stages: Vec<MtwStage>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireFrame {
     pub sr: u32,
@@ -92,6 +156,72 @@ pub struct WireFrame {
     /// Same, reference channel.
     #[serde(default)]
     pub ref_peak_dbfs: Option<f64>,
+
+    // ---- three-stage transfer columns — the display's source ----
+    /// `None` until every ladder rung holds a full N blocks (2.56 s at the
+    /// bottom rung), and on any daemon predating the ladder.
+    ///
+    /// Absent is **not** a reason to fall back to the Welch arrays above: the
+    /// two are different measurements, and silently swapping between them
+    /// mid-session would make the display's resolution and settling change
+    /// without saying so. A frame without this contributes no transfer trace.
+    #[serde(default)]
+    pub mtw: Option<MtwColumns>,
+}
+
+impl MtwColumns {
+    /// Effective averages behind every column, corrected for block overlap.
+    ///
+    /// **The frame reports the nominal block count (4). That is not the number
+    /// a coherence reading should be judged against.** The blocks overlap 50%,
+    /// so the variance-equivalent count is 3.2 and the coherence floor on
+    /// uncorrelated inputs is 1/3.2 = 0.312, not 1/4 = 0.25. A reader working
+    /// from 4 would treat 0.28 as signal when it is floor.
+    ///
+    /// Computed here rather than hardcoded, from `ac-core`'s own function and
+    /// its own overlap constant, so this cannot drift from the estimator that
+    /// produced the numbers. **The daemon shipping this directly would be
+    /// better** — this crate has to assume an overlap the daemon knows — so
+    /// [`Self::overlap_premise_holds`] checks the assumption against the
+    /// frame instead of trusting it.
+    pub fn variance_equivalent_n(&self) -> Option<f64> {
+        if self.n_blocks == 0 {
+            return None;
+        }
+        Some(
+            ac_core::visualize::mtw::average::variance_equivalent_blocks(
+                self.n_blocks,
+                ac_core::visualize::mtw::average::HANN_50_RHO,
+            ),
+        )
+    }
+
+    /// Whether the frame's own stage table agrees with the 50%-overlap premise
+    /// [`Self::variance_equivalent_n`] encodes. False means the correction is
+    /// wrong and the value must not be shown.
+    pub fn overlap_premise_holds(&self) -> bool {
+        !self.stages.is_empty()
+            && self
+                .stages
+                .iter()
+                .all(|s| s.window_s > 0.0 && (s.hop_s / s.window_s - 0.5).abs() < 1e-9)
+    }
+
+    /// Every parallel array is the same length as `freqs`.
+    ///
+    /// The arrays are independent JSON fields, so nothing guarantees a short
+    /// one is a truncation rather than a misalignment. Same argument as the
+    /// Welch path's length check: a mismatched frame draws nothing rather than
+    /// drawing a guess.
+    pub fn lengths_agree(&self) -> bool {
+        let n = self.freqs.len();
+        self.magnitude_db.len() == n
+            && self.phase_deg.len() == n
+            && self.coherence.len() == n
+            && (self.df.is_empty() || self.df.len() == n)
+            && (self.window_s.is_empty() || self.window_s.len() == n)
+            && (self.bins.is_empty() || self.bins.len() == n)
+    }
 }
 
 #[cfg(test)]

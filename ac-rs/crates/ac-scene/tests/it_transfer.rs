@@ -42,6 +42,10 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         channel_role: "meas_0".to_string(),
         source: Source::Live,
         sr: SR,
+        // Welch-derived fixture: no per-column provenance to carry.
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        n_effective: None,
     }
 }
 
