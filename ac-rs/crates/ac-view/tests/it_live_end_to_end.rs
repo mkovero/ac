@@ -33,7 +33,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use ac_scene::Scene;
 use ac_view::app::connect_and_launch;
 use ac_view::session::{ConnectionState, Session};
-use ac_view::zmq_client::{Client, Endpoint};
+use ac_view::zmq_client::{Client, Endpoint, Recv};
 use egui_kittest::Harness;
 use serde_json::json;
 use support::DaemonProcess;
@@ -45,17 +45,19 @@ fn calibrate_spl(client: &Client) {
     assert_eq!(r["ok"], json!(true), "calibrate_spl: {r}");
     loop {
         match client.recv_frame(Duration::from_secs(3)) {
-            Some((t, _)) if t == "cal_prompt" => break,
-            Some(_) => continue,
-            None => panic!("no spl cal_prompt"),
+            Recv::Frame(t, _) if t == "cal_prompt" => break,
+            // A malformed frame is not an empty socket — keep waiting rather
+            // than failing the test on one bad payload (issue #219).
+            Recv::Frame(..) | Recv::Malformed(_) => continue,
+            Recv::Empty => panic!("no spl cal_prompt"),
         }
     }
     let _ = client.call(&json!({"cmd": "cal_reply", "vrms": serde_json::Value::Null}));
     loop {
         match client.recv_frame(Duration::from_secs(5)) {
-            Some((t, _)) if t == "cal_done" => break,
-            Some(_) => continue,
-            None => panic!("no spl cal_done"),
+            Recv::Frame(t, _) if t == "cal_done" => break,
+            Recv::Frame(..) | Recv::Malformed(_) => continue,
+            Recv::Empty => panic!("no spl cal_done"),
         }
     }
 }

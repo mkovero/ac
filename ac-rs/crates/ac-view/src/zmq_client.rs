@@ -23,6 +23,41 @@ impl Endpoint {
     }
 }
 
+/// One DATA read: a frame, a frame that could not be decoded, or nothing.
+///
+/// The three-way split exists because a drain loop has to tell "the socket is
+/// empty, stop" from "that one was unreadable, keep going". Collapsing them
+/// into `Option` — as this did — means a single malformed frame ends the drain
+/// silently and intermittently, which is the same symptom as issue #219 with a
+/// cause that is much harder to find.
+#[derive(Debug)]
+pub enum Recv {
+    Frame(String, Value),
+    /// A frame arrived but could not be decoded. Carries why, so the caller
+    /// can report it rather than silently treating it as an empty socket.
+    Malformed(&'static str),
+    /// Nothing available within the timeout.
+    Empty,
+}
+
+/// Decode one DATA payload. Split out from the socket read so the
+/// malformed-vs-empty distinction is testable without a live socket — `Empty`
+/// is a property of the socket and can never be produced here.
+///
+/// Wire format: a single frame `<topic> <json>` (ZMQ.md, DATA).
+fn parse_frame(bytes: &[u8]) -> Recv {
+    let Some(split) = bytes.iter().position(|&b| b == b' ') else {
+        return Recv::Malformed("no topic separator");
+    };
+    let Ok(topic) = String::from_utf8(bytes[..split].to_vec()) else {
+        return Recv::Malformed("topic is not utf-8");
+    };
+    match serde_json::from_slice(&bytes[split + 1..]) {
+        Ok(payload) => Recv::Frame(topic, payload),
+        Err(_) => Recv::Malformed("payload is not json"),
+    }
+}
+
 /// A connected CTRL+DATA pair. Reconnecting (e.g. after a daemon
 /// restart) means constructing a new `Client` — no hidden retry state
 /// here, so callers control exactly what "disconnected" means for
@@ -72,23 +107,30 @@ impl Client {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Non-blocking-with-timeout DATA frame receive. Returns `None` on
-    /// timeout — the caller decides what "no frame arrived" means
-    /// (still-connecting vs. disconnected), this layer doesn't guess.
-    pub fn recv_frame(&self, timeout: Duration) -> Option<(String, Value)> {
+    /// Non-blocking-with-timeout DATA frame receive.
+    ///
+    /// Returns [`Recv::Empty`] on timeout — the caller decides what "no frame
+    /// arrived" means (still-connecting vs. disconnected), this layer doesn't
+    /// guess. A frame that arrives but does not decode is [`Recv::Malformed`],
+    /// which is **not** the same thing and must not stop a drain.
+    pub fn recv_frame(&self, timeout: Duration) -> Recv {
         self.sub.set_rcvtimeo(timeout.as_millis() as i32).ok();
-        let bytes = self.sub.recv_bytes(0).ok()?;
-        let split = bytes.iter().position(|&b| b == b' ')?;
-        let topic = String::from_utf8(bytes[..split].to_vec()).ok()?;
-        let payload: Value = serde_json::from_slice(&bytes[split + 1..]).ok()?;
-        Some((topic, payload))
+        match self.sub.recv_bytes(0) {
+            Ok(bytes) => parse_frame(&bytes),
+            // The only route to `Empty`: the socket had nothing to give.
+            Err(_) => Recv::Empty,
+        }
     }
 
     /// Drain and discard whatever's currently buffered on DATA —
     /// used before starting a new session so a stale frame from a
     /// previous one can't be mistaken for the first live frame.
+    ///
+    /// Keeps going past a malformed frame: this runs before a session starts,
+    /// so leaving anything behind is exactly the staleness it exists to
+    /// prevent.
     pub fn drain_pending(&self) {
-        while self.recv_frame(Duration::from_millis(20)).is_some() {}
+        while !matches!(self.recv_frame(Duration::from_millis(20)), Recv::Empty) {}
     }
 
     /// `snapshot_fetch` reassembly loop: chunked read by offset, sha256
@@ -210,5 +252,53 @@ mod tests {
         };
         assert_eq!(e.ctrl_url(), "tcp://192.168.9.40:5556");
         assert_eq!(e.data_url(), "tcp://192.168.9.40:5557");
+    }
+
+    /// The distinction issue #219's fix rests on: a frame that cannot be
+    /// decoded is **not** an empty socket. Before the split these all
+    /// collapsed to `None`, so one corrupt payload ended a drain loop and
+    /// looked exactly like "nothing more queued" — the same symptom as the
+    /// type-filter bug, but intermittent and much harder to find.
+    ///
+    /// `Recv::Empty` is deliberately unreachable here: it is a property of the
+    /// socket, not of the bytes, and that is the whole point of the split.
+    #[test]
+    fn malformed_payloads_are_distinguishable_from_an_empty_socket() {
+        for (name, bytes) in [
+            ("no separator", &b"datanospacehere"[..]),
+            ("non-utf8 topic", &[0xff, 0xfe, b' ', b'{', b'}'][..]),
+            ("payload not json", &b"data {this is not json"[..]),
+            ("empty payload", &b"data "[..]),
+        ] {
+            match parse_frame(bytes) {
+                Recv::Malformed(why) => assert!(!why.is_empty(), "{name}"),
+                other => panic!("{name}: expected Malformed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_well_formed_frame_decodes_to_its_topic_and_payload() {
+        match parse_frame(br#"data {"type":"transfer_stream","sr":48000}"#) {
+            Recv::Frame(topic, v) => {
+                assert_eq!(topic, "data");
+                assert_eq!(v["type"], "transfer_stream");
+                assert_eq!(v["sr"], 48_000);
+            }
+            other => panic!("expected Frame, got {other:?}"),
+        }
+    }
+
+    /// A JSON payload containing a space must not be truncated at it — the
+    /// split is on the *first* space only.
+    #[test]
+    fn only_the_first_space_separates_topic_from_payload() {
+        match parse_frame(br#"data {"a": 1, "b": 2}"#) {
+            Recv::Frame(topic, v) => {
+                assert_eq!(topic, "data");
+                assert_eq!(v["b"], 2);
+            }
+            other => panic!("expected Frame, got {other:?}"),
+        }
     }
 }
