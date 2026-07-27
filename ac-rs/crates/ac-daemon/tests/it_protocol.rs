@@ -47,6 +47,21 @@ impl Daemon {
     /// sticky `*_port` keys whose interaction with `setup` is the regression
     /// guard for `setup_channel_clears_sticky_port`.
     fn spawn_with_config(config: Option<Value>) -> Self {
+        Self::spawn_with(config, &[])
+    }
+
+    /// Spawn with extra environment variables and the daemon's stderr
+    /// redirected to `<home>/daemon.stderr`, readable via [`Self::stderr`].
+    ///
+    /// Needed for the diagnostics the daemon writes to stderr rather than to
+    /// the wire — `AC_DRAIN_TELEMETRY` (#208 D1) is the only one today, and it
+    /// is deliberately not published, so reading the file is the only way a
+    /// test can assert on it.
+    fn spawn_with_env(env: &[(&str, &str)]) -> Self {
+        Self::spawn_with(None, env)
+    }
+
+    fn spawn_with(config: Option<Value>, extra_env: &[(&str, &str)]) -> Self {
         let (ctrl, data) = alloc_ports();
         let home = alloc_home();
         if let Some(cfg) = config {
@@ -55,8 +70,16 @@ impl Daemon {
                 .expect("write seeded config.json");
         }
         let bin = env!("CARGO_BIN_EXE_ac-daemon");
-        let child = Command::new(bin)
-            .env("HOME", &home)
+        let mut cmd = Command::new(bin);
+        cmd.env("HOME", &home);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        if !extra_env.is_empty() {
+            let f = fs::File::create(home.join("daemon.stderr")).expect("create stderr capture");
+            cmd.stderr(std::process::Stdio::from(f));
+        }
+        let child = cmd
             .args([
                 "--fake-audio",
                 "--local",
@@ -95,6 +118,12 @@ impl Daemon {
             data_port: data,
             home,
         }
+    }
+
+    /// Whatever the daemon has written to stderr so far. Empty unless the
+    /// daemon was started via [`Self::spawn_with_env`].
+    fn stderr(&self) -> String {
+        fs::read_to_string(self.home.join("daemon.stderr")).unwrap_or_default()
     }
 
     fn ctrl_endpoint(&self) -> String {
@@ -2866,5 +2895,93 @@ fn mtw_density_is_a_parameter_that_does_not_move_the_crossovers() {
         below(&base),
         below(&dense),
         "columns below the validity edge must not multiply with density"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #216 — warmup ring phase
+// ---------------------------------------------------------------------------
+
+/// Pull the per-ring `occ=[..]` list off one `AC_DRAIN_TELEMETRY` raw line
+/// (#208 D1). Returns `None` for anything that is not a per-tick record — the
+/// window summary lines and any other daemon stderr.
+///
+/// The list itself is parsed, not the pre-reduced `occ_min`/`occ_max` fields,
+/// so the test can tell "every ring agreed" from "no ring was reported at
+/// all": both give `occ_min == occ_max`, and only one of them means anything.
+fn parse_occ(line: &str) -> Option<Vec<usize>> {
+    if !line.starts_with("drain-tick ") {
+        return None;
+    }
+    let body = line.split_once("occ=[")?.1.split_once(']')?.0.trim();
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    body.split(',')
+        .map(|t| t.trim().parse::<usize>().ok())
+        .collect()
+}
+
+/// Issue #216: every capture ring must come out of the session's warmup flush
+/// holding the same number of samples.
+///
+/// The rig evidence was exactly this telemetry: `occ=[5120, 24320]` — each
+/// reference ring a constant 19200 samples (0.2 s at 96 kHz) above meas,
+/// unchanged across 929 ticks of two runs. The cause is the warmup
+/// `capture_block(0.2)`, which clears the measurement ring only. Nothing
+/// afterwards re-syncs: `capture_multi_contiguous` pops `min_occupied()` from
+/// every ring, and a constant offset survives that untouched. The skew is what
+/// put `delay_ms` 200 ms negative, coherence at ~0.64 and `magnitude_db` 2.5 dB
+/// out on every ring-backed session since #207.
+///
+/// `fake_ring` is what makes it reproducible without hardware — the default
+/// on-demand fake generator has no ring at all and is structurally incapable of
+/// holding a skew (see `FakeRings`' docs). The stimulus is left at the default
+/// on purpose: the defect lives in the capture path, not in the stimulus, and a
+/// correlated pair used to take a different warmup branch that hid it. This
+/// test therefore covers the branch that was actually broken.
+#[test]
+fn warmup_leaves_every_capture_ring_at_the_same_phase() {
+    let d = Daemon::spawn_with_env(&[("AC_DRAIN_TELEMETRY", "1")]);
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+        // Zero processing gap: this test is about the warmup's phase, not
+        // about the per-tick backlog `process_secs` exists to model.
+        "fake_ring": {"process_secs": 0.0},
+    }));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    thread::sleep(Duration::from_millis(600));
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    let log = d.stderr();
+    let ticks: Vec<Vec<usize>> = log.lines().filter_map(parse_occ).collect();
+    assert!(
+        ticks.len() >= 3,
+        "expected AC_DRAIN_TELEMETRY per-tick lines, parsed {} from:\n{log}",
+        ticks.len()
+    );
+    // Without this the whole test is vacuous: a backend that reports no
+    // occupancy at all trivially has no spread between its rings. This is how
+    // the test first passed against the unfixed daemon — `FakeEngine`
+    // inherited the trait's empty `last_drain_occupancy`.
+    assert!(
+        ticks.iter().all(|occ| occ.len() >= 2),
+        "telemetry must report meas + at least one ref per tick, got {:?}",
+        &ticks[..ticks.len().min(3)]
+    );
+
+    let skewed: Vec<&Vec<usize>> = ticks
+        .iter()
+        .filter(|occ| occ.iter().min() != occ.iter().max())
+        .collect();
+    assert!(
+        skewed.is_empty(),
+        "{} of {} ticks show a meas/ref ring skew: {:?} — the warmup flush \
+         must clear and pop meas and every ref together (#216)",
+        skewed.len(),
+        ticks.len(),
+        &skewed[..skewed.len().min(5)]
     );
 }

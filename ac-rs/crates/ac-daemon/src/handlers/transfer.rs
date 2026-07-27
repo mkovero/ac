@@ -543,23 +543,40 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
         // Warmup flush: discard whatever's buffered before the engine
         // started (real hardware) / prime the fake generator (fake
-        // backend). Must go through `capture_multi` — not the
-        // single-channel `capture_block` — whenever the fake correlated-
-        // pair stimulus is active: `capture_block` only reads the meas-
-        // role port, which would advance `FakeEngine`'s meas-side
-        // position counter with no matching ref-side advance, desyncing
-        // the pair's `gain`/`delay_samples` relationship before the main
-        // loop even starts (found by the M1.5 I-B parity test failing
-        // with a corrupted downstream FLAC encode — traced to meas and
-        // ref silently reading unrelated windows of the same generator).
-        // Harmless to do unconditionally, but scoped to the fake+
-        // correlated case to keep every other stimulus path byte-
-        // identical to before.
-        if fake && fake_correlated_pair.is_some() {
-            let _ = eng.capture_multi(0.2);
-        } else {
-            let _ = eng.capture_block(0.2);
-        }
+        // backend). Goes through `capture_multi`, never the
+        // single-channel `capture_block`, for two independent reasons.
+        //
+        // 1. Issue #216 — the ring skew. `capture_block` clears the
+        //    measurement ring only (`CaptureRings::capture_block` ->
+        //    `clear_meas`). The reference rings were registered above and
+        //    keep everything that accrued, so each one leaves warmup
+        //    exactly `0.2 s · sr` samples ahead of meas. Nothing in the
+        //    streaming loop re-syncs them: `capture_multi_contiguous`
+        //    pops `min_occupied()` from every ring, which is invariant
+        //    under a constant offset, and the per-tick
+        //    `clear_meas_and_refs` that used to destroy the offset went
+        //    away with #207. The skew is therefore permanent for the
+        //    session — measured on the rig as a constant 19200 samples
+        //    at 96 kHz across 929 ticks of two runs. It costs -200 ms on
+        //    the reported `delay_ms`, drags coherence to ~0.64 (0.2 s of
+        //    a 1 s Welch segment no longer shared, 0.8² = 0.64), and
+        //    moves `magnitude_db` by 2.5 dB mean / 32.6 dB worst bin.
+        //    `capture_multi` clears meas and every ref together and pops
+        //    the same count from each, so all rings leave warmup at the
+        //    same phase.
+        // 2. The fake correlated-pair stimulus. `capture_block` only
+        //    reads the meas-role port, which would advance
+        //    `FakeEngine`'s meas-side position counter with no matching
+        //    ref-side advance, desyncing the pair's `gain`/
+        //    `delay_samples` relationship before the main loop even
+        //    starts (found by the M1.5 I-B parity test failing with a
+        //    corrupted downstream FLAC encode — traced to meas and ref
+        //    silently reading unrelated windows of the same generator).
+        //
+        // Reason 2 was why this was already conditional; reason 1 is why
+        // the condition was the bug. Backends with no ref registered fall
+        // through to the same meas-only clear `capture_block` did.
+        let _ = eng.capture_multi(0.2);
 
         // Delay cache: ref↔meas propagation is constant during a streaming
         // session (fixed hardware path), so we estimate once per pair on
