@@ -141,6 +141,12 @@ pub fn assemble(
         };
         // Inside a crossover the shallower stage must be settled too, or the
         // blend would mix one settled estimate with nothing.
+        //
+        // `MtwPair` cannot currently produce this combination: a deeper rung
+        // has a longer window, so it always settles *later*, and `deep` is
+        // always the deeper index. This function does not assume that —
+        // it is a property of the caller's settling order, not of the splice —
+        // so the guard stays and is tested directly at this boundary.
         if src.shallow.is_some_and(|si| stages[si].is_none()) {
             continue;
         }
@@ -448,20 +454,36 @@ mod tests {
     /// A crossover needs both its contributors. A column blending a settled
     /// rung with an unsettled one must be dropped, not drawn from the settled
     /// half alone — that would be a visible seam that heals itself.
+    ///
+    /// Exercised with the *shallower* rung unsettled and the deeper one
+    /// settled. `MtwPair` cannot produce that ordering (a deeper rung has a
+    /// longer window, so it settles later), which is exactly why this is
+    /// asserted here at the `assemble` boundary rather than through the
+    /// pipeline: driving it from `MtwPair` would leave the deep guard doing
+    /// the work and this guard untested, which is how the previous version of
+    /// this test passed while the guard it named was removed.
     #[test]
     fn a_blend_column_needs_both_of_its_stages_settled() {
         let l = ladder::layout(96_000).unwrap();
         let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.9, 4);
         let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
-        let cols = assemble(&l, &f.view_settled(&[true, false, false]), &edges);
 
-        // The 0/1 crossover blend region is [f_top(1), blend_top(1)].
+        // Deep rung (1) settled, shallow rung (0) not — the combination the
+        // guard exists for.
+        let cols = assemble(&l, &f.view_settled(&[false, true, false]), &edges);
         let (lo, hi) = (l.stages[1].f_top, l.stages[1].blend_top);
         assert!(
             !cols.iter().any(|c| c.freq >= lo && c.freq <= hi),
-            "a half-settled crossover was drawn"
+            "a crossover was drawn with its shallower stage unsettled"
         );
-        // ...and it appears once the second rung settles.
+        // ...but the deeper rung's own exclusive band is still drawn, so the
+        // assertion above is not passing merely because nothing was emitted.
+        assert!(
+            cols.iter().any(|c| c.freq < lo && c.stage == 1),
+            "stage 1's exclusive band should still be drawn"
+        );
+
+        // And with both settled the crossover appears.
         let both = assemble(&l, &f.view_settled(&[true, true, false]), &edges);
         assert!(both.iter().any(|c| c.freq >= lo && c.freq <= hi));
     }
