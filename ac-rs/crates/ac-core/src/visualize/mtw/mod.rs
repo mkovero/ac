@@ -219,36 +219,58 @@ impl MtwPair {
     /// mean of the same number of blocks. The wait is the settling time the
     /// design already states: `W + hop·(N−1)`, 2.56 s at the bottom stage.
     pub fn columns(&self, f_min: f64, f_max: f64, ppo: f64) -> Option<Vec<Column>> {
-        if self.bands.iter().any(|b| !b.avg.settled()) {
+        // The display fills downward as the rungs settle rather than staying
+        // blank until the deepest one does. Only the bottom rung takes the
+        // full 2.56 s; the top is ready in 0.11 s at 96 kHz, and that is the
+        // band a rattle is hunted in. Waiting for all three would hide a live
+        // top band behind a settling bottom one for 2.4 s of every session.
+        //
+        // A stage that has not completed its `N` blocks contributes nothing —
+        // it is not drawn at a shallower average. Every emitted column is
+        // therefore backed by the same `N`, which is what keeps the coherence
+        // bias equal either side of a crossover; an under-averaged column
+        // would reintroduce that step at a frequency that drifts as the
+        // ladder warms.
+        if self.bands.iter().all(|b| !b.avg.settled()) {
             return None;
         }
         let edges = ladder::column_edges(&self.ladder, f_min, f_max, ppo);
         if edges.len() < 2 {
             return None;
         }
-        let means: Vec<StageMean> = self
+        let means: Vec<Option<StageMean>> = self
             .bands
             .iter()
             .map(|b| {
-                let (sxx, syy, sxy) = b.avg.mean().expect("settled implies at least one block");
-                StageMean {
+                let (sxx, syy, sxy) = b.avg.settled().then(|| b.avg.mean()).flatten()?;
+                Some(StageMean {
                     sxx,
                     syy,
                     sxy,
                     n: b.avg.n_blocks(),
-                }
+                })
             })
             .collect();
-        let views: Vec<StageSpectra<'_>> = means
+        let views: Vec<Option<StageSpectra<'_>>> = means
             .iter()
-            .map(|m| StageSpectra {
-                sxx: &m.sxx,
-                syy: &m.syy,
-                sxy: &m.sxy,
-                n: m.n,
+            .map(|m| {
+                m.as_ref().map(|m| StageSpectra {
+                    sxx: &m.sxx,
+                    syy: &m.syy,
+                    sxy: &m.sxy,
+                    n: m.n,
+                })
             })
             .collect();
-        Some(splice::assemble(&self.ladder, &views, &edges))
+        let cols = splice::assemble(&self.ladder, &views, &edges);
+        (!cols.is_empty()).then_some(cols)
+    }
+
+    /// Which rungs have settled, shallowest first. Exposed so a caller can
+    /// report warmup progress rather than inferring it from a shrinking
+    /// column list.
+    pub fn settled_stages(&self) -> Vec<bool> {
+        self.bands.iter().map(|b| b.avg.settled()).collect()
     }
 }
 
@@ -544,5 +566,63 @@ mod tests {
         );
         // The top improves roughly twelvefold against today's 2.5 s.
         assert!(2.5 / s[0] > 20.0, "top stage only {}x faster", 2.5 / s[0]);
+    }
+
+    /// End to end: the column set grows downward as the rungs settle, instead
+    /// of appearing all at once after the deepest one does.
+    ///
+    /// Drives real audio and samples the column list over time, so this
+    /// exercises the actual block accounting rather than a hand-set settled
+    /// flag.
+    #[test]
+    fn the_display_fills_downward_as_rungs_settle() {
+        let sr = 96_000u32;
+        let mut p = MtwPair::new(sr, 0, 4).unwrap();
+        let block = 4_800usize; // 50 ms
+        let mut first_seen_at: Option<f64> = None;
+        let mut samples: Vec<(f64, usize, f64)> = Vec::new(); // (t, n_cols, lowest_hz)
+
+        for tick in 0..120 {
+            let t = tick as f64 * 0.05;
+            let i = (tick * block) as i64;
+            let meas: Vec<f32> = (0..block).map(|k| 0.5 * source_at(i + k as i64)).collect();
+            let refc: Vec<f32> = (0..block).map(|k| source_at(i + k as i64)).collect();
+            p.push(&meas, &refc);
+            if let Some(cols) = p.columns(20.0, 48_000.0, 48.0) {
+                first_seen_at.get_or_insert(t);
+                samples.push((t, cols.len(), cols[0].freq));
+            }
+        }
+
+        let first = first_seen_at.expect("columns must appear");
+        assert!(
+            first < 0.5,
+            "first columns at {first} s — the top rung settles in 0.11 s and \
+             should not wait for the bottom one"
+        );
+
+        // Column count never shrinks, and the lowest drawn frequency never
+        // rises: the display fills, it does not flicker.
+        for w in samples.windows(2) {
+            assert!(w[1].1 >= w[0].1, "column count fell at {} s", w[1].0);
+            assert!(
+                w[1].2 <= w[0].2 + 1e-9,
+                "lowest column rose at {} s: {} -> {}",
+                w[1].0,
+                w[0].2,
+                w[1].2
+            );
+        }
+
+        // It genuinely grew, and reached the bottom rung by its settling time.
+        let (t0, n0, lo0) = samples[0];
+        let (tn, nn, lon) = *samples.last().unwrap();
+        assert!(nn > n0 * 2, "{n0} -> {nn} columns ({t0} s -> {tn} s)");
+        assert!(
+            lo0 > 200.0,
+            "first fill reached {lo0} Hz, too deep for one rung"
+        );
+        assert!(lon < 25.0, "never reached the bottom rung: {lon} Hz");
+        assert_eq!(p.settled_stages(), vec![true, true, true]);
     }
 }
