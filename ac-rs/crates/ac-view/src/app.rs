@@ -507,6 +507,17 @@ impl eframe::App for AcViewApp {
             // behind. `self.last_frame` is overwritten each iteration,
             // so the backlog is discarded and only the freshest frame
             // survives — correct for a live display.
+            //
+            // This claim is only true because `poll_frame` skips frame types
+            // this crate does not consume instead of reporting them as
+            // end-of-stream. It did the latter until issue #219, and the
+            // interleaved `visualize/ir` frame published behind every transfer
+            // frame ended this loop after exactly one, whatever the backlog:
+            // measured at 1 surfaced out of 75 available after a 2 s stall.
+            // The comment was accurate about intent and wrong about behaviour
+            // for as long as that held, so treat it as load-bearing rather
+            // than descriptive — if `poll_frame`'s contract changes back,
+            // this loop silently stops draining again.
             while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
                 if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
                     self.last_frame = Some(wire_frame);
