@@ -28,8 +28,7 @@ use std::fmt;
 pub const NFFT: usize = 4096;
 
 /// Segment hop in samples — 50% overlap, matching the Hann window the
-/// estimator uses. [`crate::visualize::mtw::average::HANN_50_RHO`] is the block
-/// correlation this overlap implies, and the two must move together.
+/// estimator uses.
 pub const HOP: usize = NFFT / 2;
 
 /// The density the ladder is **built** to support, in points per octave.
