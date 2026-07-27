@@ -2634,13 +2634,23 @@ fn f64s(v: &Value, key: &str) -> Vec<f64> {
         .collect()
 }
 
-/// Wait for a `transfer_stream` frame whose `mtw` block has warmed up.
+/// Wait for a frame in which every rung has settled, so the column set spans
+/// the whole ladder.
 ///
-/// The deepest rung needs its own 1.365 s window before it can say anything,
-/// and `mtw` is deliberately `null` until every rung has produced a segment —
-/// a partly-warm ladder would show a crossover between a live band and an
-/// empty one.
-fn wait_for_mtw(c: &Client, timeout: Duration) -> Value {
+/// The `mtw` block itself appears as soon as the *top* rung settles (0.11 s at
+/// 96 kHz) — the display fills downward rather than staying blank for the
+/// bottom rung's 2.56 s — so an assertion that needs the full band must key on
+/// the frame's own `settled_stages` rather than on the block's presence, and
+/// certainly not on elapsed time, which would be a race.
+fn wait_for_mtw_fully_settled(c: &Client, timeout: Duration) -> Value {
+    wait_for_mtw_where(c, timeout, |m| {
+        m["settled_stages"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty() && s.iter().all(|v| v == &json!(true)))
+    })
+}
+
+fn wait_for_mtw_where(c: &Client, timeout: Duration, ok: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let left = deadline
@@ -2648,7 +2658,7 @@ fn wait_for_mtw(c: &Client, timeout: Duration) -> Value {
             .as_millis() as i32;
         match c.recv_pub(left.max(1)) {
             Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
-                if v["mtw"].is_object() {
+                if v["mtw"].is_object() && ok(&v["mtw"]) {
                     return v;
                 }
             }
@@ -2656,7 +2666,7 @@ fn wait_for_mtw(c: &Client, timeout: Duration) -> Value {
             None => break,
         }
     }
-    panic!("no warm mtw block within {timeout:?}");
+    panic!("no matching mtw block within {timeout:?}");
 }
 
 /// End-to-end ground truth for the ladder: a known flat `H1` must come back
@@ -2678,7 +2688,7 @@ fn mtw_columns_are_backed_by_bins_and_carry_their_provenance() {
     }));
     assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
 
-    let frame = wait_for_mtw(&c, Duration::from_secs(20));
+    let frame = wait_for_mtw_fully_settled(&c, Duration::from_secs(30));
     let _ = c.call(json!({"cmd": "stop"}));
     let m = &frame["mtw"];
 
@@ -2805,7 +2815,7 @@ fn mtw_does_not_disturb_the_existing_frame() {
         "fake_correlated_pair": {"gain": 0.5, "delay_samples": 200},
     }));
     assert_eq!(r["ok"], json!(true), "{r}");
-    let frame = wait_for_mtw(&c, Duration::from_secs(20));
+    let frame = wait_for_mtw_fully_settled(&c, Duration::from_secs(30));
     let _ = c.call(json!({"cmd": "stop"}));
 
     for key in [
@@ -2870,7 +2880,7 @@ fn mtw_density_is_a_parameter_that_does_not_move_the_crossovers() {
         }
         let r = c.call(cmd);
         assert_eq!(r["ok"], json!(true), "{r}");
-        let f = wait_for_mtw(&c, Duration::from_secs(20));
+        let f = wait_for_mtw_fully_settled(&c, Duration::from_secs(30));
         let _ = c.call(json!({"cmd": "stop"}));
         f["mtw"].clone()
     }

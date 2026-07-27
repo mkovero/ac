@@ -775,6 +775,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     p.columns(spec_f_min, spec_f_max, mtw_ppo)
                 })
                 .collect();
+            // Sampled after the push, so it describes the frame being built.
+            let mtw_settled: Vec<Vec<bool>> = mtw
+                .iter()
+                .map(|slot| {
+                    slot.as_ref()
+                        .map(|p| p.settled_stages())
+                        .unwrap_or_default()
+                })
+                .collect();
 
             // Pairs are independent H1 estimates — fan out across the rayon
             // pool so multi-pair sessions (e.g. 4 mic positions against one
@@ -1019,6 +1028,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
                                 "ppo":          mtw_ppo,
                                 "n_blocks":     mtw_n_blocks,
+                                // Which rungs have settled, shallowest first.
+                                // Shipped so a consumer can distinguish "still
+                                // warming, more band coming" from "this is all
+                                // there is" — a short column list looks the
+                                // same either way, and the difference decides
+                                // whether a blank low end is a fault.
+                                "settled_stages": mtw_settled
+                                    .get(pos)
+                                    .cloned()
+                                    .unwrap_or_default(),
                                 "stages":       mtw_stages,
                             }),
                         };

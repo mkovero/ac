@@ -108,7 +108,24 @@ pub struct StageSpectra<'a> {
 ///
 /// `edges` comes from [`super::ladder::column_edges`], so every column already
 /// spans at least one bin of every stage that feeds it.
-pub fn assemble(ladder: &Ladder, stages: &[StageSpectra<'_>], edges: &[f64]) -> Vec<Column> {
+///
+/// A stage is `None` until it has settled — it has completed fewer than `N`
+/// blocks, so it has no estimate at the agreed averaging depth. Columns whose
+/// contributors are not **all** settled are omitted entirely rather than drawn
+/// from a shallower average. That is what keeps `N` uniform across every
+/// emitted column, which is the whole reason the coherence bias is the same
+/// either side of a crossover; emitting an under-averaged column would put
+/// back exactly the step this design exists to remove, and would do it at a
+/// frequency that moves as the ladder warms.
+///
+/// The consequence is that the display fills **downward** as the rungs come
+/// good — top band first, bottom band last — rather than staying blank until
+/// the deepest one settles.
+pub fn assemble(
+    ladder: &Ladder,
+    stages: &[Option<StageSpectra<'_>>],
+    edges: &[f64],
+) -> Vec<Column> {
     if edges.len() < 2 || stages.len() != ladder.stages.len() {
         return Vec::new();
     }
@@ -119,7 +136,14 @@ pub fn assemble(ladder: &Ladder, stages: &[StageSpectra<'_>], edges: &[f64]) -> 
         let src = ladder.source_at(freq);
 
         let deep_stage = &ladder.stages[src.deep];
-        let deep = &stages[src.deep];
+        let Some(deep) = stages[src.deep].as_ref() else {
+            continue;
+        };
+        // Inside a crossover the shallower stage must be settled too, or the
+        // blend would mix one settled estimate with nothing.
+        if src.shallow.is_some_and(|si| stages[si].is_none()) {
+            continue;
+        }
         let Some((h_deep, c_deep, n_deep)) = stage_column(deep, deep_stage.df, lo, hi) else {
             continue;
         };
@@ -128,7 +152,7 @@ pub fn assemble(ladder: &Ladder, stages: &[StageSpectra<'_>], edges: &[f64]) -> 
         let mut blend = 0.0;
         if let (Some(si), w_sh) = (src.shallow, src.w_shallow) {
             let sh_stage = &ladder.stages[si];
-            let sh = &stages[si];
+            let sh = stages[si].as_ref().expect("checked settled above");
             if let Some((h_sh, c_sh, n_sh)) = stage_column(sh, sh_stage.df, lo, hi) {
                 h1 = h_deep * (1.0 - w_sh) + h_sh * w_sh;
                 coherence = c_deep * (1.0 - w_sh) + c_sh * w_sh;
@@ -184,13 +208,29 @@ mod tests {
             }
         }
 
-        fn view(&self) -> Vec<StageSpectra<'_>> {
+        fn view(&self) -> Vec<Option<StageSpectra<'_>>> {
             (0..self.sxx.len())
-                .map(|i| StageSpectra {
-                    sxx: &self.sxx[i],
-                    syy: &self.syy[i],
-                    sxy: &self.sxy[i],
-                    n: self.n[i],
+                .map(|i| {
+                    Some(StageSpectra {
+                        sxx: &self.sxx[i],
+                        syy: &self.syy[i],
+                        sxy: &self.sxy[i],
+                        n: self.n[i],
+                    })
+                })
+                .collect()
+        }
+
+        /// Same, with the listed stages not yet settled.
+        fn view_settled(&self, settled: &[bool]) -> Vec<Option<StageSpectra<'_>>> {
+            (0..self.sxx.len())
+                .map(|i| {
+                    settled[i].then(|| StageSpectra {
+                        sxx: &self.sxx[i],
+                        syy: &self.syy[i],
+                        sxy: &self.sxy[i],
+                        n: self.n[i],
+                    })
                 })
                 .collect()
         }
@@ -334,5 +374,105 @@ mod tests {
             );
             assert!(w[1].df >= w[0].df - 1e-12, "Δf fell with frequency");
         }
+    }
+
+    /// The display fills downward as rungs settle. Only the bottom rung takes
+    /// the full 2.56 s; withholding everything until it does would hide a live
+    /// top band for most of that.
+    #[test]
+    fn unsettled_rungs_drop_their_columns_instead_of_blanking_the_display() {
+        let l = ladder::layout(96_000).unwrap();
+        let f = Fixture::new(&l, Complex::new(0.5, 0.0), 0.8, 4);
+        let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
+
+        let all = assemble(&l, &f.view(), &edges);
+        // Top rung only: everything above the 0/1 crossover blend, nothing below.
+        let top = assemble(&l, &f.view_settled(&[true, false, false]), &edges);
+        // Top two rungs.
+        let mid = assemble(&l, &f.view_settled(&[true, true, false]), &edges);
+
+        assert!(!top.is_empty(), "a settled top rung must draw something");
+        assert!(top.len() < mid.len(), "{} vs {}", top.len(), mid.len());
+        assert!(mid.len() < all.len(), "{} vs {}", mid.len(), all.len());
+
+        // Each partial set is a suffix of the full one: the display fills from
+        // the top down, it does not gain and lose columns in the middle.
+        let tail = |c: &[Column]| c.iter().map(|x| x.freq).collect::<Vec<_>>();
+        let (fa, ft, fm) = (tail(&all), tail(&top), tail(&mid));
+        assert_eq!(
+            ft,
+            fa[fa.len() - ft.len()..],
+            "top-rung columns are not the top of the band"
+        );
+        assert_eq!(
+            fm,
+            fa[fa.len() - fm.len()..],
+            "two-rung columns are not the top of the band"
+        );
+
+        // Nothing is drawn below the settled rungs' reach.
+        let lowest_top = ft[0];
+        assert!(
+            lowest_top > l.stages[1].f_top,
+            "top rung alone reached {lowest_top} Hz, below its own crossover"
+        );
+    }
+
+    /// The constraint that makes the partial fill safe: every emitted column is
+    /// backed by the same N, whichever rungs happen to be settled. An
+    /// under-averaged column would put the coherence step back, at a frequency
+    /// that moves as the ladder warms.
+    #[test]
+    fn every_emitted_column_carries_the_same_n_while_warming() {
+        let l = ladder::layout(96_000).unwrap();
+        let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.6, 4);
+        let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
+        for settled in [
+            [true, false, false],
+            [true, true, false],
+            [true, true, true],
+        ] {
+            let cols = assemble(&l, &f.view_settled(&settled), &edges);
+            assert!(!cols.is_empty(), "{settled:?}");
+            assert!(
+                cols.iter().all(|c| c.n == 4),
+                "{settled:?}: N varies across the emitted columns"
+            );
+            assert!(
+                cols.iter().all(|c| (c.coherence - 0.6).abs() < 1e-9),
+                "{settled:?}: coherence stepped while warming"
+            );
+        }
+    }
+
+    /// A crossover needs both its contributors. A column blending a settled
+    /// rung with an unsettled one must be dropped, not drawn from the settled
+    /// half alone — that would be a visible seam that heals itself.
+    #[test]
+    fn a_blend_column_needs_both_of_its_stages_settled() {
+        let l = ladder::layout(96_000).unwrap();
+        let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.9, 4);
+        let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
+        let cols = assemble(&l, &f.view_settled(&[true, false, false]), &edges);
+
+        // The 0/1 crossover blend region is [f_top(1), blend_top(1)].
+        let (lo, hi) = (l.stages[1].f_top, l.stages[1].blend_top);
+        assert!(
+            !cols.iter().any(|c| c.freq >= lo && c.freq <= hi),
+            "a half-settled crossover was drawn"
+        );
+        // ...and it appears once the second rung settles.
+        let both = assemble(&l, &f.view_settled(&[true, true, false]), &edges);
+        assert!(both.iter().any(|c| c.freq >= lo && c.freq <= hi));
+    }
+
+    /// No rung settled: nothing at all, rather than an empty-but-present set a
+    /// caller might render as a flat line.
+    #[test]
+    fn no_settled_rung_yields_no_columns() {
+        let l = ladder::layout(96_000).unwrap();
+        let f = Fixture::new(&l, Complex::new(1.0, 0.0), 0.9, 4);
+        let edges = column_edges(&l, 20.0, 48_000.0, 48.0);
+        assert!(assemble(&l, &f.view_settled(&[false, false, false]), &edges).is_empty());
     }
 }
