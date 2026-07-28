@@ -515,6 +515,51 @@ fn transfer_stream_ref_out_port_falls_back_to_main_output() {
     c.call(json!({"cmd":"stop"}));
 }
 
+/// A sticky port whose gating channel is unset is an explicitly configured
+/// value with no effect — the same class of silent misconfiguration as #225
+/// itself. Both gated legs refuse it instead of resolving past it.
+#[test]
+fn sticky_reference_ports_without_their_channel_are_refused() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "reference_output_port": "fake:playback_1",
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":1}));
+    assert_eq!(
+        r["ok"],
+        json!(false),
+        "reference_output_port without reference_output_channel must not resolve \
+         silently to the main output: {r}"
+    );
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("reference_output_port") && err.contains("reference_output_channel"),
+        "error must name both keys, got {err:?}"
+    );
+
+    // Same rule on the capture leg. `test_hardware`'s own guard passes on
+    // either field, so before this it fell through to `Ok(None)` and measured
+    // single-ended against the measurement input.
+    let d2 = Daemon::spawn_with_config(Some(json!({
+        "reference_port": "fake:capture_3",
+    })));
+    let c2 = Client::new(&d2);
+
+    let r2 = c2.call(json!({"cmd":"test_hardware"}));
+    assert_eq!(
+        r2["ok"],
+        json!(false),
+        "reference_port without reference_channel must not downgrade to \
+         single-ended: {r2}"
+    );
+    let err2 = r2["error"].as_str().unwrap_or_default();
+    assert!(
+        err2.contains("reference_port") && err2.contains("reference_channel"),
+        "error must name both keys, got {err2:?}"
+    );
+}
+
 #[test]
 fn busy_guard_blocks_duplicate() {
     let d = Daemon::spawn();

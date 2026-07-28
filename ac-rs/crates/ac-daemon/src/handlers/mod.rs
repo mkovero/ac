@@ -229,6 +229,19 @@ pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> Result<String,
         .ok_or_else(|| out_of_range("capture", cfg.input_channel, &ports))
 }
 
+/// Error for a sticky port name that is set but gated off by a missing
+/// channel, so it would be read, ignored, and never mentioned.
+///
+/// #225 was a configured value silently doing the wrong thing. Accepting an
+/// explicitly-set port that has no effect is the same failure in a new place,
+/// so both gated legs refuse it rather than resolving past it.
+fn orphaned_sticky(port_key: &str, channel_key: &str) -> String {
+    format!(
+        "{port_key} is set but {channel_key} is not, so the port would be ignored — \
+         set {channel_key}, or clear {port_key}"
+    )
+}
+
 /// Resolve the reference *input* port.
 ///
 /// `Ok(None)` means no reference channel is configured, which is a legitimate
@@ -241,6 +254,14 @@ pub(super) fn resolve_ref_input(
     state: &ServerState,
 ) -> Result<Option<String>, String> {
     let Some(ch) = cfg.reference_channel else {
+        // A sticky port with no channel is not "no reference configured" — it
+        // is a configured value with no effect. `test_hardware`/`test_dut`
+        // admit this config (their guard passes on either field) and would
+        // then measure single-ended against the measurement input while the
+        // operator believed the named port was wired in.
+        if cfg.reference_port.is_some() {
+            return Err(orphaned_sticky("reference_port", "reference_channel"));
+        }
         return Ok(None);
     };
     if let Some(p) = &cfg.reference_port {
@@ -264,11 +285,18 @@ pub(super) fn resolve_ref_input(
 /// reference leg stayed at digital silence (#225). The two index spaces are
 /// unrelated; neither is derived from the other in either direction.
 ///
-/// Only the *unconfigured* case falls back. A configured-but-out-of-range
-/// channel is an error: silently emitting the reference stimulus on the main
-/// output is a drive-path hazard, not a graceful degradation.
+/// Only the *fully* unconfigured case falls back. A configured-but-out-of-range
+/// channel is an error — silently emitting the reference stimulus on the main
+/// output is a drive-path hazard, not a graceful degradation — and so is a
+/// sticky port with no channel to gate it (see [`orphaned_sticky`]).
 pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> Result<String, String> {
     let Some(ch) = cfg.reference_output_channel else {
+        if cfg.reference_output_port.is_some() {
+            return Err(orphaned_sticky(
+                "reference_output_port",
+                "reference_output_channel",
+            ));
+        }
         return resolve_output(cfg, state);
     };
     if let Some(p) = &cfg.reference_output_port {
