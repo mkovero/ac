@@ -339,11 +339,16 @@ mod tests {
     /// Deterministic broadband source, seekable at any index so a delayed copy
     /// is exact.
     fn source_at(index: i64) -> f32 {
+        source_seeded(0xC0FF_EEC0_FFEE, index)
+    }
+
+    /// As `source_at`, with an explicit seed so two independent streams can be
+    /// built for partially-coherent and uncorrelated stimuli.
+    fn source_seeded(seed: u64, index: i64) -> f32 {
         if index < 0 {
             return 0.0;
         }
-        let mut z =
-            0xC0FF_EEC0_FFEEu64.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut z = seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
@@ -666,5 +671,131 @@ mod tests {
             );
         }
         assert!(sampled > 20, "warmup barely sampled: {sampled} frames");
+    }
+
+    /// Criterion 5. The coherence floor on uncorrelated inputs is `1/N` per
+    /// column **at one bin**.
+    ///
+    /// Single-bin columns only, because depth grows with bin count and a stage
+    /// average therefore runs below `1/N` — that is the bin effect, not an
+    /// estimator defect.
+    ///
+    /// The band deliberately **excludes 0.3125**, the figure a Welch ρ = 1/6
+    /// overlap correction would predict. That correction does not apply to
+    /// coherence bias (it corrects power-spectrum *variance*), it was once
+    /// applied here, and it shipped a value further from truth than the
+    /// uncorrected one. This test fails if it comes back.
+    #[test]
+    fn uncorrelated_floor_is_one_over_n_per_column_at_one_bin() {
+        let sr = 96_000u32;
+        let n = 4usize;
+        let mut acc: Vec<f64> = Vec::new();
+        for run in 0..8u64 {
+            let mut p = MtwPair::new(sr, 0, n).unwrap();
+            let blk = 4_800usize;
+            for t in 0..70i64 {
+                let i = t * blk as i64;
+                let m: Vec<f32> = (0..blk)
+                    .map(|k| source_seeded(0xAAA0 + run, i + k as i64))
+                    .collect();
+                let r: Vec<f32> = (0..blk)
+                    .map(|k| source_seeded(0x5550 + run, i + k as i64))
+                    .collect();
+                p.push(&m, &r);
+            }
+            if let Some(cols) = p.columns(20.0, 48_000.0, 48.0) {
+                acc.extend(
+                    cols.iter()
+                        .filter(|c| c.bins == 1 && c.blend == 0.0)
+                        .map(|c| c.coherence),
+                );
+            }
+        }
+        assert!(acc.len() > 300, "too few single-bin columns: {}", acc.len());
+        let mean = acc.iter().sum::<f64>() / acc.len() as f64;
+        let want = 1.0 / n as f64;
+        assert!(
+            (mean - want).abs() < 0.05,
+            "floor {mean:.4} over {} columns, expected 1/N = {want:.4}",
+            acc.len()
+        );
+        assert!(
+            mean < 0.29,
+            "floor {mean:.4} is at the 1/3.2 = 0.3125 an overlap correction \
+             would predict — that correction does not apply to coherence bias"
+        );
+    }
+
+    /// Criterion 3. The coherence step at a crossover is **present, of the
+    /// documented magnitude, and does not move as the ladder warms**.
+    ///
+    /// The step is structural, not a defect: crossovers sit at the
+    /// reference-density validity edge, which pins the upper side at exactly
+    /// one bin per column, while the lower side is deeper by the decimation
+    /// ratio. It is accepted and documented (`design-mtw-ladder.md`), so this
+    /// asserts it stays put rather than asserting it away.
+    ///
+    /// A step that *moved* during warmup would read as a wandering DUT feature
+    /// — strictly worse than a fixed one. It cannot move here because a
+    /// crossover column is withheld until both its stages have settled, and
+    /// this pins that.
+    ///
+    /// If a future change genuinely reduces the step, this test fails and the
+    /// documented figure should be updated — deliberately, not silently.
+    #[test]
+    fn the_crossover_coherence_step_is_stable_across_warmup() {
+        let sr = 96_000u32;
+        let l = ladder::layout(sr).unwrap();
+        let (x, bt) = (l.stages[1].f_top, l.stages[1].blend_top);
+        let blk = 4_800usize;
+
+        // gamma^2 = 0.5: meas = source + an equal, independent noise.
+        let step_at = |ticks: i64| -> f64 {
+            let (mut sb, mut sa, mut nb, mut na) = (0.0, 0.0, 0usize, 0usize);
+            for run in 0..6u64 {
+                let (s0, s1) = (0xC0FF_0000 + run * 7919, 0xD00D_0000 + run * 6271);
+                let mut p = MtwPair::new(sr, 0, 4).unwrap();
+                for t in 0..ticks {
+                    let i = t * blk as i64;
+                    let m: Vec<f32> = (0..blk)
+                        .map(|k| source_seeded(s0, i + k as i64) + source_seeded(s1, i + k as i64))
+                        .collect();
+                    let r: Vec<f32> = (0..blk).map(|k| source_seeded(s0, i + k as i64)).collect();
+                    p.push(&m, &r);
+                }
+                let Some(cols) = p.columns(20.0, 48_000.0, 48.0) else {
+                    continue;
+                };
+                for c in &cols {
+                    if c.freq > x * 0.6 && c.freq < x {
+                        sb += c.coherence;
+                        nb += 1;
+                    }
+                    if c.freq > bt && c.freq < bt * 1.7 {
+                        sa += c.coherence;
+                        na += 1;
+                    }
+                }
+            }
+            assert!(nb > 0 && na > 0, "crossover not drawn at {ticks} ticks");
+            (sb / nb as f64 - sa / na as f64).abs()
+        };
+
+        // Both stages of this crossover settle by ~0.85 s; 30 ticks = 1.5 s is
+        // the first point at which it exists at all.
+        let early = step_at(30);
+        let late = step_at(110);
+        for (name, v) in [("early", early), ("late", late)] {
+            assert!(
+                (0.01..0.10).contains(&v),
+                "{name} step {v:.4} is outside the documented ~0.05 — either it \
+                 vanished (update the doc) or it grew (a regression)"
+            );
+        }
+        assert!(
+            (early - late).abs() < 0.03,
+            "step moved with warmup: {early:.4} -> {late:.4}. A step that drifts \
+             reads as a wandering DUT feature, which is worse than a fixed one"
+        );
     }
 }
