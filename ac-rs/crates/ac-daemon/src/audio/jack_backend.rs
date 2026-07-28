@@ -498,6 +498,10 @@ impl AudioEngine for JackEngine {
         self.rings.discarded_samples()
     }
 
+    fn last_drain_occupancy(&self) -> Vec<usize> {
+        self.rings.last_drain_occupancy().to_vec()
+    }
+
     fn reconnect_input(&mut self, port: &str) -> Result<()> {
         if let Some(ref ac) = self._async_client {
             let in_name = ac.as_client().name().to_string() + ":in";

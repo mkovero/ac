@@ -2,6 +2,8 @@
 
 pub mod fake;
 
+pub(crate) mod drain_telemetry;
+
 pub(crate) mod rings;
 
 /// Capture-contiguity evidence (`handoff-capture-contiguity.md`, D3).
@@ -173,6 +175,23 @@ pub trait AudioEngine: Send + 'static {
     /// reads as positive evidence of contiguity.
     fn discarded_samples(&self) -> u64 {
         0
+    }
+
+    /// Per-ring occupancy sampled inside the most recent
+    /// `capture_multi_contiguous`, immediately before it popped — measurement
+    /// channel first, then each reference in registration order.
+    ///
+    /// Instrumentation for the triple-recurrence investigation (#208, D1):
+    /// what the drain rate cannot distinguish on its own is a consumer that
+    /// keeps up from one whose rings are already deep, and the occupancy the
+    /// pop was taken from is the number that separates them. It is sampled
+    /// inside the drain rather than polled from the worker because the only
+    /// interesting moment is after the wait and before the pop, which the
+    /// caller cannot observe.
+    ///
+    /// Empty for backends with no ring, and before the first contiguous drain.
+    fn last_drain_occupancy(&self) -> Vec<usize> {
+        Vec::new()
     }
 
     /// List of available playback port names.

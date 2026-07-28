@@ -10,7 +10,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use anyhow::{bail, Result};
 use serde_json::json;
 
-use crate::zmq_client::Client;
+use crate::zmq_client::{Client, Recv};
 
 /// A frame stale enough that the UI should stop assuming the session
 /// is still healthy and show a disconnected state instead of quietly
@@ -29,6 +29,11 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+/// Malformed frames logged before going quiet. A corrupt publisher must not
+/// turn into an unbounded log stream, but the first few have to be visible or
+/// the failure is as silent as the bug this replaced.
+const MALFORMED_LOG_LIMIT: u64 = 5;
+
 pub struct Session {
     client: Client,
     launched: bool,
@@ -38,6 +43,7 @@ pub struct Session {
     /// connection *state*, never the names.
     drive_out_port: Option<String>,
     drive_ref_out_port: Option<String>,
+    malformed_frames: u64,
 }
 
 impl Session {
@@ -48,6 +54,7 @@ impl Session {
             last_frame_at: None,
             drive_out_port: None,
             drive_ref_out_port: None,
+            malformed_frames: 0,
         }
     }
 
@@ -143,14 +150,49 @@ impl Session {
     /// beyond `timeout`. Records arrival time for [`Self::connection_state`]
     /// — this is the only place "are we still connected" gets decided,
     /// so the rest of the app doesn't each invent its own guess.
+    ///
+    /// **`None` means the socket is empty, not "the next frame wasn't mine"**
+    /// (issue #219). The DATA socket is interleaved: a live session publishes
+    /// `keepalive`, `data`/`transfer_stream` and `data`/`visualize/ir`, the
+    /// last of these once per transfer frame and immediately behind it. This
+    /// used to return `None` for any of those, which ended the caller's drain
+    /// loop after exactly one transfer frame however deep the backlog was —
+    /// measured at 1 surfaced out of 75 available after a 2 s stall against a
+    /// real daemon. So non-matching frames are skipped here rather than
+    /// reported as end-of-stream.
+    ///
+    /// Discarding them costs nothing: `ac-view` has no consumer for any other
+    /// frame type, so they were already being thrown away one call later.
     pub fn poll_frame(&mut self, timeout: Duration) -> Option<serde_json::Value> {
-        let frame = self.client.recv_frame(timeout).and_then(|(topic, v)| {
-            (topic == "data" && v["type"] == "transfer_stream").then_some(v)
-        });
-        if frame.is_some() {
-            self.last_frame_at = Some(Instant::now());
+        loop {
+            match self.client.recv_frame(timeout) {
+                Recv::Empty => return None,
+                // Not end-of-stream. Report it and keep draining — a frame we
+                // could not read says nothing about whether more are queued.
+                Recv::Malformed(why) => {
+                    self.malformed_frames += 1;
+                    if self.malformed_frames <= MALFORMED_LOG_LIMIT {
+                        eprintln!(
+                            "ac-view: discarding malformed DATA frame ({why}); \
+                             {} so far",
+                            self.malformed_frames
+                        );
+                    }
+                }
+                Recv::Frame(topic, v) => {
+                    if topic == "data" && v["type"] == "transfer_stream" {
+                        self.last_frame_at = Some(Instant::now());
+                        return Some(v);
+                    }
+                }
+            }
         }
-        frame
+    }
+
+    /// Malformed DATA frames seen this session. Exposed so a test can assert
+    /// they were counted rather than mistaken for an empty socket.
+    pub fn malformed_frames(&self) -> u64 {
+        self.malformed_frames
     }
 
     pub fn connection_state(&self) -> ConnectionState {

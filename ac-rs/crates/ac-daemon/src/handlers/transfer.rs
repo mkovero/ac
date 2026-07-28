@@ -227,6 +227,32 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(1024) as usize;
 
+    // Multi-time-window ladder parameters. Display density is a **parameter**,
+    // not a constant — where it exceeds what a stage can resolve the column
+    // grid widens rather than interpolating, so asking for more here buys
+    // resolution only where the ladder can back it. It does not move the
+    // ladder's crossovers, which are anchored to `mtw::ladder::P_REF`.
+    let mtw_ppo: f64 = cmd
+        .get("mtw_ppo")
+        .and_then(Value::as_f64)
+        .filter(|v| *v > 0.0 && *v <= 384.0)
+        .unwrap_or(ac_core::visualize::mtw::ladder::P_REF);
+    // Blocks averaged per stage, held *uniform across stages* so the coherence
+    // bias `1/N` is the same either side of every crossover. A uniform
+    // wall-clock time constant would instead give ~47 averages at stage 0
+    // against ~1.5 at stage 2, putting a fixed-frequency step in the trust
+    // indicator that reads as a property of the DUT.
+    //
+    // Lowering it speeds the bottom stage up but raises the coherence floor
+    // across the whole display, since N is uniform: 0.33 at N = 3, 0.50 at
+    // N = 2, and at 0.50 a coherence reading has stopped meaning anything.
+    let mtw_n_blocks: usize = cmd
+        .get("mtw_n_blocks")
+        .and_then(Value::as_u64)
+        .filter(|v| *v >= 1 && *v <= 64)
+        .map(|v| v as usize)
+        .unwrap_or(ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS);
+
     let pairs = match parse_transfer_pairs(cmd) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -483,6 +509,37 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let spec_n_columns =
             ac_core::visualize::aggregate::transfer_spectrum_n_columns(spec_f_min, spec_f_max);
 
+        // Ladder description, session-static (it derives from `sr`, which does
+        // not change mid-session). Shipped with every frame so a consumer can
+        // interpret the per-column `stage` index without knowing the layout
+        // rules, and so a saved frame stays interpretable if those rules
+        // change later.
+        let mtw_stages: Value = match ac_core::visualize::mtw::ladder::layout(sr) {
+            Ok(l) => Value::Array(
+                l.stages
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            // `W + hop·(N−1)` — how long this rung takes to
+                            // fill its average. Shipped so a viewer can say
+                            // how stale a band is without deriving it from
+                            // the frame rate.
+                            "settling_s": ac_core::visualize::mtw::settling_seconds(s, mtw_n_blocks),
+                            "decim":     s.decim,
+                            "rate":      s.rate,
+                            "df":        s.df,
+                            "window_s":  s.window_s,
+                            "hop_s":     s.hop_s,
+                            "f_valid":   s.f_valid,
+                            "f_top":     s.f_top,
+                            "blend_top": s.blend_top,
+                        })
+                    })
+                    .collect(),
+            ),
+            Err(_) => Value::Null,
+        };
+
         // Snapshot ring (handoff: snapshot-backend M1, deliverable 1):
         // raw pre-processing samples for every unique session channel,
         // capped at `snapshot_ring_s` seconds. Crash-safety: wipe any
@@ -535,23 +592,40 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
         // Warmup flush: discard whatever's buffered before the engine
         // started (real hardware) / prime the fake generator (fake
-        // backend). Must go through `capture_multi` — not the
-        // single-channel `capture_block` — whenever the fake correlated-
-        // pair stimulus is active: `capture_block` only reads the meas-
-        // role port, which would advance `FakeEngine`'s meas-side
-        // position counter with no matching ref-side advance, desyncing
-        // the pair's `gain`/`delay_samples` relationship before the main
-        // loop even starts (found by the M1.5 I-B parity test failing
-        // with a corrupted downstream FLAC encode — traced to meas and
-        // ref silently reading unrelated windows of the same generator).
-        // Harmless to do unconditionally, but scoped to the fake+
-        // correlated case to keep every other stimulus path byte-
-        // identical to before.
-        if fake && fake_correlated_pair.is_some() {
-            let _ = eng.capture_multi(0.2);
-        } else {
-            let _ = eng.capture_block(0.2);
-        }
+        // backend). Goes through `capture_multi`, never the
+        // single-channel `capture_block`, for two independent reasons.
+        //
+        // 1. Issue #216 — the ring skew. `capture_block` clears the
+        //    measurement ring only (`CaptureRings::capture_block` ->
+        //    `clear_meas`). The reference rings were registered above and
+        //    keep everything that accrued, so each one leaves warmup
+        //    exactly `0.2 s · sr` samples ahead of meas. Nothing in the
+        //    streaming loop re-syncs them: `capture_multi_contiguous`
+        //    pops `min_occupied()` from every ring, which is invariant
+        //    under a constant offset, and the per-tick
+        //    `clear_meas_and_refs` that used to destroy the offset went
+        //    away with #207. The skew is therefore permanent for the
+        //    session — measured on the rig as a constant 19200 samples
+        //    at 96 kHz across 929 ticks of two runs. It costs -200 ms on
+        //    the reported `delay_ms`, drags coherence to ~0.64 (0.2 s of
+        //    a 1 s Welch segment no longer shared, 0.8² = 0.64), and
+        //    moves `magnitude_db` by 2.5 dB mean / 32.6 dB worst bin.
+        //    `capture_multi` clears meas and every ref together and pops
+        //    the same count from each, so all rings leave warmup at the
+        //    same phase.
+        // 2. The fake correlated-pair stimulus. `capture_block` only
+        //    reads the meas-role port, which would advance
+        //    `FakeEngine`'s meas-side position counter with no matching
+        //    ref-side advance, desyncing the pair's `gain`/
+        //    `delay_samples` relationship before the main loop even
+        //    starts (found by the M1.5 I-B parity test failing with a
+        //    corrupted downstream FLAC encode — traced to meas and ref
+        //    silently reading unrelated windows of the same generator).
+        //
+        // Reason 2 was why this was already conditional; reason 1 is why
+        // the condition was the bug. Backends with no ref registered fall
+        // through to the same meas-only clear `capture_block` did.
+        let _ = eng.capture_multi(0.2);
 
         // Delay cache: ref↔meas propagation is constant during a streaming
         // session (fixed hardware path), so we estimate once per pair on
@@ -581,6 +655,27 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .collect();
         let mut spl_last_ts: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
+        // Drain telemetry (#208 D1). Off unless `AC_DRAIN_TELEMETRY` is set:
+        // this slice adds no behaviour, and a streaming session must log
+        // nothing new by default.
+        let mut drain_telemetry = crate::audio::drain_telemetry::DrainTelemetry::from_env(sr);
+
+        // Multi-time-window ladder, one per pair.
+        //
+        // Purely **additive**: it runs alongside the full-rate Welch estimator
+        // above and replaces nothing. That is not caution, it is required —
+        // `spl` is derived from the same `gyy` the Welch path produces and has
+        // to stay bit-identical, and `meas_spectrum` / `ref_spectrum` are
+        // calibrated absolute levels, which `Gxy/Gxx`'s cancellation of
+        // `|Hdec|²` does not cover (see `visualize::mtw`'s fence).
+        //
+        // Fed the fresh per-tick `bufs`, never the `rings` sliding window: the
+        // ladder is a push pipeline, and pushing a re-segmented sliding buffer
+        // into it would reproduce #208's re-analysis one level down.
+        let mut mtw: Vec<Option<ac_core::visualize::mtw::MtwPair>> =
+            (0..pairs.len()).map(|_| None).collect();
+        let mut mtw_failed = false;
+
         while !stop.load(Ordering::Relaxed) {
             // Contiguous drain (#207). `capture_multi` would clear the ring
             // before waiting, discarding whatever accrued while the previous
@@ -599,6 +694,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             };
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // #208 D1: samples popped per tick against wall clock. Logged
+            // before any of this tick's processing so the interval it reports
+            // is the loop's own period, not a partial one. `bufs[0]` is the
+            // measurement channel and every other channel is popped to the
+            // same length by `capture_multi_contiguous`.
+            if drain_telemetry.enabled() {
+                let n = bufs.first().map(|b| b.len()).unwrap_or(0);
+                if let Some(t) = drain_telemetry.tick(
+                    n,
+                    &eng.last_drain_occupancy(),
+                    eng.discarded_samples(),
+                    std::time::Instant::now(),
+                ) {
+                    eprintln!("{}", t.raw);
+                    if let Some(summary) = t.summary {
+                        eprintln!("{summary}");
+                    }
+                }
             }
 
             // Dead-man + drive poll, once per capture tick. The timeout
@@ -682,6 +797,55 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // simpler than trying to push incrementally from inside the
             // loop above.
             snapshot_ring.lock().unwrap().delay_samples = pair_delays.clone();
+
+            // Build each pair's ladder once its alignment offset is known —
+            // the offset is applied at full rate, before decimation, so it has
+            // to exist before the first sample enters.
+            for (i, slot) in mtw.iter_mut().enumerate() {
+                if slot.is_some() || mtw_failed {
+                    continue;
+                }
+                let Some(delay) = pair_delays[i] else {
+                    continue;
+                };
+                match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
+                    Ok(p) => *slot = Some(p),
+                    Err(e) => {
+                        // The ladder is additive, so a layout it cannot serve
+                        // (an unsupported rate) must degrade to "no ladder",
+                        // not to a dead session. Logged once.
+                        eprintln!("transfer_stream: MTW ladder unavailable at {sr} Hz: {e}");
+                        mtw_failed = true;
+                    }
+                }
+            }
+
+            // Push this tick into every ladder and assemble its columns.
+            // Sequential rather than folded into the per-pair rayon fan-out
+            // below: the ladders are `&mut` and the fan-out borrows `rings`
+            // immutably, and one 4096-point FFT pair per stage per tick is not
+            // what makes this loop expensive.
+            let mtw_columns: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = mtw
+                .iter_mut()
+                .enumerate()
+                .map(|(i, slot)| {
+                    let p = slot.as_mut()?;
+                    let (mi, ri) = pair_idx[i];
+                    let meas = bufs.get(mi)?;
+                    let refb = bufs.get(ri)?;
+                    p.push(meas, refb);
+                    p.columns(spec_f_min, spec_f_max, mtw_ppo)
+                })
+                .collect();
+            // Sampled after the push, so it describes the frame being built.
+            let mtw_settled: Vec<Vec<bool>> = mtw
+                .iter()
+                .map(|slot| {
+                    slot.as_ref()
+                        .map(|p| p.settled_stages())
+                        .unwrap_or_default()
+                })
+                .collect();
 
             // Pairs are independent H1 estimates — fan out across the rayon
             // pool so multi-pair sessions (e.g. 4 mic positions against one
@@ -886,9 +1050,64 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             },
                         });
 
+                        // Multi-time-window columns (additive; `null` until
+                        // every rung holds a full N blocks — 2.56 s at the
+                        // bottom, which is the design's stated settling time
+                        // and matches what the full-rate estimator takes
+                        // today. Gating on the full N is what makes the
+                        // reported N unambiguous: every column is the mean of
+                        // the same number of blocks).
+                        //
+                        // Every column ships the Δf, window and N that
+                        // produced it. That is not decoration: neighbouring
+                        // columns can come from windows 12x apart, and
+                        // coherence from uncorrelated inputs floats near 1/N,
+                        // so without those a screenshot of this display is not
+                        // interpretable. `bins` is criterion 1 made
+                        // observable — it is never zero.
+                        //
+                        // dB is applied here, daemon-side, per the display-
+                        // truth rule: `ac-view` plots what it is given and
+                        // does no `log10` of its own.
+                        let mtw_msg = match mtw_columns.get(pos).and_then(|c| c.as_ref()) {
+                            None => Value::Null,
+                            Some(cols) => json!({
+                                "freqs":        cols.iter().map(|c| c.freq).collect::<Vec<_>>(),
+                                "f_lo":         cols.iter().map(|c| c.lo).collect::<Vec<_>>(),
+                                "f_hi":         cols.iter().map(|c| c.hi).collect::<Vec<_>>(),
+                                "magnitude_db": cols.iter()
+                                    .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
+                                    .collect::<Vec<_>>(),
+                                "phase_deg":    cols.iter()
+                                    .map(|c| c.h1.arg().to_degrees())
+                                    .collect::<Vec<_>>(),
+                                "coherence":    cols.iter().map(|c| c.coherence).collect::<Vec<_>>(),
+                                "df":           cols.iter().map(|c| c.df).collect::<Vec<_>>(),
+                                "window_s":     cols.iter().map(|c| c.window_s).collect::<Vec<_>>(),
+                                "n":            cols.iter().map(|c| c.n).collect::<Vec<_>>(),
+                                "stage":        cols.iter().map(|c| c.stage).collect::<Vec<_>>(),
+                                "blend":        cols.iter().map(|c| c.blend).collect::<Vec<_>>(),
+                                "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
+                                "ppo":          mtw_ppo,
+                                "n_blocks":     mtw_n_blocks,
+                                // Which rungs have settled, shallowest first.
+                                // Shipped so a consumer can distinguish "still
+                                // warming, more band coming" from "this is all
+                                // there is" — a short column list looks the
+                                // same either way, and the difference decides
+                                // whether a blank low end is a fault.
+                                "settled_stages": mtw_settled
+                                    .get(pos)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                "stages":       mtw_stages,
+                            }),
+                        };
+
                         let mut transfer_msg = json!({
                             "type":            "transfer_stream",
                             "cmd":             "transfer_stream",
+                            "mtw":             mtw_msg,
                             "freqs":           freqs,
                             "magnitude_db":    mag,
                             "phase_deg":       phase,

@@ -569,6 +569,17 @@ impl eframe::App for AcViewApp {
             // behind. `self.last_frame` is overwritten each iteration,
             // so the backlog is discarded and only the freshest frame
             // survives — correct for a live display.
+            //
+            // This claim is only true because `poll_frame` skips frame types
+            // this crate does not consume instead of reporting them as
+            // end-of-stream. It did the latter until issue #219, and the
+            // interleaved `visualize/ir` frame published behind every transfer
+            // frame ended this loop after exactly one, whatever the backlog:
+            // measured at 1 surfaced out of 75 available after a 2 s stall.
+            // The comment was accurate about intent and wrong about behaviour
+            // for as long as that held, so treat it as load-bearing rather
+            // than descriptive — if `poll_frame`'s contract changes back,
+            // this loop silently stops draining again.
             while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
                 if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
                     // Observed drive-path state, refreshed per frame (#205).
@@ -974,6 +985,28 @@ mod tests {
         // Session (τ_derot 0) differs from the other modes — otherwise
         // cycling would be a no-op and the test could not fail on the bug
         // it names.
+        // Built separately: one `json!` deep enough to hold the stage
+        // table blows the macro's recursion limit.
+        let stages = serde_json::Value::Array(vec![
+            serde_json::json!({"decim": 1, "rate": 96000.0, "df": 23.4375, "window_s": 0.042666666666666665, "hop_s": 0.021333333333333333, "f_valid": 1623.0, "settling_s": 0.10666666666666667}),
+            serde_json::json!({"decim": 8, "rate": 12000.0, "df": 2.9296875, "window_s": 0.3413333333333333, "hop_s": 0.17066666666666666, "f_valid": 202.88, "settling_s": 0.8533333333333333}),
+            serde_json::json!({"decim": 24, "rate": 4000.0, "df": 0.9765625, "window_s": 1.024, "hop_s": 0.512, "f_valid": 67.63, "settling_s": 2.56}),
+        ]);
+        let mtw = serde_json::json!({
+            "freqs": [100.0, 1000.0, 10000.0],
+            "magnitude_db": [-6.0, -6.0, -6.0],
+            "phase_deg": [-18.0, -180.0, 60.0],
+            "coherence": [0.9, 0.9, 0.9],
+            "df": [0.9765625, 2.9296875, 23.4375],
+            "window_s": [1.024, 0.3413333333333333, 0.042666666666666665],
+            "n": [4, 4, 4],
+            "stage": [2, 1, 0],
+            "blend": [0.0, 0.0, 0.0],
+            "bins": [1, 3, 21],
+            "ppo": 48.0,
+            "n_blocks": 4,
+            "stages": stages,
+        });
         let json = serde_json::json!({
             "type": "transfer_stream",
             "sr": 48000,
@@ -985,14 +1018,21 @@ mod tests {
             "spl": null,
             "spl_weighting": "Z",
             "spl_integration": "fast",
+            // Full-rate Welch arrays. Still on the wire, deliberately NOT
+            // the display's source since the three-stage switch — kept here
+            // so this fixture stays a realistic frame, and so a regression
+            // that started reading them again would show up as these values
+            // appearing on screen instead of the `mtw` ones below.
             "freqs": [100.0, 1000.0, 10000.0],
-            "magnitude_db": [-6.0, -6.0, -6.0],
-            "phase_deg": [-18.0, -180.0, 60.0],
+            "magnitude_db": [-99.0, -99.0, -99.0],
+            "phase_deg": [11.0, 22.0, 33.0],
             "coherence": [0.9, 0.9, 0.9],
             "delay_samples": 96,
             "delay_ms": 2.0,
             "meas_peak_dbfs": -6.0,
-            "ref_peak_dbfs": -12.0
+            "ref_peak_dbfs": -12.0,
+            // What the display actually draws (built above).
+            "mtw": mtw
         });
         serde_json::from_value(json).expect("wire frame")
     }
