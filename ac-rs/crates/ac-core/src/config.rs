@@ -65,9 +65,11 @@ pub struct Config {
     #[serde(default)]
     pub reference_output_channel: Option<u32>,
 
-    /// Sticky JACK port name for the reference output leg. Only consulted when
-    /// [`Config::reference_output_channel`] is set, mirroring how
-    /// `reference_port` is gated on `reference_channel`.
+    /// Sticky JACK port name for the reference output leg. Gated on
+    /// [`Config::reference_output_channel`], mirroring how `reference_port` is
+    /// gated on `reference_channel` — and set without it, the daemon refuses
+    /// to resolve rather than ignoring it, since a configured value that
+    /// quietly does nothing is the failure #225 was.
     #[serde(default)]
     pub reference_output_port: Option<String>,
 
