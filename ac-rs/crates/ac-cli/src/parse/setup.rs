@@ -6,6 +6,7 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
     let mut output = None;
     let mut input = None;
     let mut reference = None;
+    let mut reference_output: Option<Option<u32>> = None;
     let mut device = None;
     let mut dbu_ref_vrms = None;
     let mut dmm_host = None;
@@ -49,6 +50,19 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                     }
                 }
             }
+            // A playback index, unrelated to `reference` (a capture index) —
+            // see #225. `none` clears it back to "use the main output".
+            "reference-output" | "refout" | "ref-out" => {
+                let lower = val.to_lowercase();
+                if matches!(lower.as_str(), "none" | "off" | "disable" | "disabled") {
+                    reference_output = Some(None);
+                } else {
+                    let n: u32 = val.parse().map_err(|_| {
+                        format!("setup {key:?} value must be an integer or 'none', got {val:?}")
+                    })?;
+                    reference_output = Some(Some(n));
+                }
+            }
             "dmm" => dmm_host = Some(val.to_string()),
             "gpio" => {
                 let lower = val.to_lowercase();
@@ -79,8 +93,8 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
             _ => {
                 return Err(format!(
                     "setup: unknown key {key:?}  \
-                     (output | input | reference | device | dburef | dmm | gpio | range | \
-                     server-timeout)"
+                     (output | input | reference | refout | device | dburef | dmm | gpio | \
+                     range | server-timeout)"
                 ))
             }
         }
@@ -91,6 +105,7 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
             output,
             input,
             reference,
+            reference_output,
             device,
             dbu_ref_vrms,
             dmm_host,
@@ -192,6 +207,43 @@ mod tests {
         }
     }
 
+    fn ref_out_of(s: &str) -> (Option<u32>, Option<Option<u32>>) {
+        let p = parse(&args(s)).unwrap();
+        match p.cmd {
+            CommandKind::Setup {
+                reference,
+                reference_output,
+                ..
+            } => (reference, reference_output),
+            other => panic!("expected Setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_setup_reference_output_is_separate_from_reference() {
+        // #225: `reference` is a capture index, `refout` a playback one.
+        // Setting either must leave the other untouched.
+        assert_eq!(ref_out_of("setup refout 1"), (None, Some(Some(1))));
+        assert_eq!(ref_out_of("setup reference 2"), (Some(2), None));
+        assert_eq!(
+            ref_out_of("setup reference 2 refout 1"),
+            (Some(2), Some(Some(1)))
+        );
+        assert_eq!(ref_out_of("setup ref-out 3"), (None, Some(Some(3))));
+    }
+
+    #[test]
+    fn test_setup_reference_output_none_clears() {
+        assert_eq!(ref_out_of("setup refout none"), (None, Some(None)));
+        assert_eq!(ref_out_of("setup refout off"), (None, Some(None)));
+    }
+
+    #[test]
+    fn test_setup_reference_output_rejects_garbage() {
+        let e = parse(&args("setup refout wat")).unwrap_err();
+        assert!(e.contains("integer"), "unhelpful error: {e}");
+    }
+
     fn timeout_of(s: &str) -> Option<Option<u64>> {
         let p = parse(&args(s)).unwrap();
         match p.cmd {
@@ -248,6 +300,7 @@ mod tests {
                 output,
                 input,
                 reference,
+                reference_output,
                 device,
                 dbu_ref_vrms,
                 dmm_host,
@@ -257,6 +310,7 @@ mod tests {
                 server_idle_timeout_secs,
             } => {
                 assert!(output.is_none() && input.is_none() && reference.is_none());
+                assert!(reference_output.is_none());
                 assert!(device.is_none() && dbu_ref_vrms.is_none() && dmm_host.is_none());
                 assert!(gpio_port.is_none() && range_start.is_none() && range_stop.is_none());
                 assert_eq!(server_idle_timeout_secs, Some(Some(300)));

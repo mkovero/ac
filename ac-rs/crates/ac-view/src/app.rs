@@ -89,7 +89,7 @@ impl AcViewApp {
         // state with each frame. Seeding the real channel here is what retires
         // the banner's hardcoded `OUT 0`.
         t.drive_path.out_channel = cfg.output_channel;
-        t.drive_path.ref_out_channel = cfg.reference_channel;
+        t.drive_path.ref_out_channel = cfg.reference_output_channel;
         app.view = ViewKind::Transfer(t);
         app
     }
@@ -473,7 +473,7 @@ impl AcViewApp {
             // `Unknown` — carrying the old session's verdict across a relaunch
             // would assert something about a routing that no longer exists.
             t.drive_path.out_channel = cfg.output_channel;
-            t.drive_path.ref_out_channel = cfg.reference_channel;
+            t.drive_path.ref_out_channel = cfg.reference_output_channel;
             t.drive_path.out_state = DrivePathState::Unknown;
             t.drive_path.ref_out_state = DrivePathState::Unknown;
         }

@@ -752,9 +752,15 @@ Lists available JACK/PortAudio ports.
   "output_port":       "<sticky-name>" | null,
   "input_port":        "<sticky-name>" | null,
   "reference_channel": <int> | null,
-  "reference_port":    "<sticky-name>" | null
+  "reference_port":    "<sticky-name>" | null,
+  "reference_output_channel": <int> | null,
+  "reference_output_port":    "<sticky-name>" | null
 }
 ```
+
+`reference_channel` / `reference_port` index the **capture** list;
+`reference_output_channel` / `reference_output_port` index the **playback**
+list. They are independent settings — neither is derived from the other.
 
 On error (e.g. JACK not running):
 ```json
@@ -779,7 +785,9 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
   "update": {
     "output_channel":    <int>,     // optional
     "input_channel":     <int>,     // optional
-    "reference_channel": <int>,     // optional
+    "reference_channel": <int>,     // optional — capture index
+    "reference_output_channel": <int> | null,  // optional — playback index;
+                                    //   null = reference leaves on the main output
     "dbu_ref_vrms":      <float>,   // optional
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
@@ -790,8 +798,11 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 }
 ```
 
-When `output_channel`, `input_channel`, or `reference_channel` is updated,
-the server resolves and stores the sticky port name automatically.
+When `output_channel`, `input_channel`, `reference_channel`, or
+`reference_output_channel` is updated, the server clears that leg's sticky
+port name so the new channel takes effect; the port is re-resolved on next
+use. Updating `reference_channel` never moves the reference *output* leg, and
+vice versa.
 
 **Reply**
 ```json

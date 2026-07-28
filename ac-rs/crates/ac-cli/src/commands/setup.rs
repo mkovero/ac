@@ -7,6 +7,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         output,
         input,
         reference,
+        reference_output,
         device,
         dbu_ref_vrms,
         dmm_host,
@@ -19,6 +20,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             output,
             input,
             reference,
+            reference_output,
             device,
             dbu_ref_vrms,
             dmm_host,
@@ -30,6 +32,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             output,
             input,
             reference,
+            reference_output,
             device,
             dbu_ref_vrms,
             dmm_host,
@@ -50,6 +53,12 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     }
     if let Some(v) = reference {
         update.insert("reference_channel".into(), (*v).into());
+    }
+    if let Some(v) = reference_output {
+        match v {
+            Some(ch) => update.insert("reference_output_channel".into(), (*ch).into()),
+            None => update.insert("reference_output_channel".into(), serde_json::Value::Null),
+        };
     }
     if let Some(v) = device {
         update.insert("device".into(), (*v).into());
@@ -122,6 +131,26 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             print!("  ->  {rport}");
         }
         println!();
+    }
+
+    // Always shown, even when unset: a reference output that silently
+    // followed the main output is what #225 cost a rig session to find.
+    match srv_cfg
+        .get("reference_output_channel")
+        .and_then(|v| v.as_u64())
+    {
+        Some(rout) => {
+            let rport = srv_cfg
+                .get("reference_output_port")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            print!("  Ref output ch:  {rout}");
+            if !rport.is_empty() {
+                print!("  ->  {rport}");
+            }
+            println!();
+        }
+        None => println!("  Ref output ch:  (main output)"),
     }
 
     println!(

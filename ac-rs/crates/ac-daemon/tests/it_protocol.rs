@@ -442,6 +442,97 @@ fn setup_clearing_reference_channel_clears_reference_port() {
     assert!(r["config"]["reference_port"].is_null());
 }
 
+/// #225 — the reference *output* leg is configured on its own playback index.
+/// Moving the capture-side `reference_channel` must not move it, and each leg
+/// clears only its own sticky port.
+#[test]
+fn setup_reference_output_channel_is_independent_of_reference_channel() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "reference_channel":        2,
+        "reference_port":           "system:capture_9",
+        "reference_output_channel": 1,
+        "reference_output_port":    "system:playback_9",
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"setup","update":{ "reference_channel": 3 }}));
+    assert_eq!(r["ok"], json!(true), "setup: {r}");
+    assert_eq!(r["config"]["reference_channel"], json!(3));
+    assert!(r["config"]["reference_port"].is_null());
+    assert_eq!(
+        r["config"]["reference_output_channel"],
+        json!(1),
+        "reference_channel must not move the reference output leg"
+    );
+    assert_eq!(
+        r["config"]["reference_output_port"],
+        json!("system:playback_9")
+    );
+
+    let r2 = c.call(json!({"cmd":"setup","update":{ "reference_output_channel": 5 }}));
+    assert_eq!(r2["config"]["reference_output_channel"], json!(5));
+    assert!(
+        r2["config"]["reference_output_port"].is_null(),
+        "reference_output_channel must clear its own sticky port"
+    );
+    assert_eq!(
+        r2["config"]["reference_channel"],
+        json!(3),
+        "reference_output_channel must not move the capture leg"
+    );
+
+    let r3 = c.call(json!({"cmd":"setup","update":{ "reference_output_channel": null }}));
+    assert!(r3["config"]["reference_output_channel"].is_null());
+    assert!(r3["config"]["reference_output_port"].is_null());
+}
+
+/// #225 — the regression itself: the resolved reference output port comes from
+/// `reference_output_channel`. It used to come from `reference_channel`, a
+/// *capture* index, so on a rig where the two differ the daemon drove a
+/// playback port nothing was patched to and the reference leg stayed at
+/// digital silence while the session believed it had a reference.
+#[test]
+fn transfer_stream_ref_out_port_resolves_from_reference_output_channel() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "output_channel":           4,
+        "reference_channel":        2,
+        "reference_output_channel": 1,
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":2}));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    assert_eq!(r["out_port"], json!("fake:playback_4"));
+    assert_eq!(
+        r["ref_out_port"],
+        json!("fake:playback_1"),
+        "reference output must resolve from reference_output_channel; \
+         resolving from reference_channel would give fake:playback_2"
+    );
+    c.call(json!({"cmd":"stop"}));
+}
+
+/// With no reference output configured the leg falls back to the main output,
+/// as it always did — and a configured `reference_channel` alone does not
+/// change that.
+#[test]
+fn transfer_stream_ref_out_port_falls_back_to_main_output() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "output_channel":    4,
+        "reference_channel": 2,
+    })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":2}));
+    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    assert_eq!(
+        r["ref_out_port"],
+        json!("fake:playback_4"),
+        "unconfigured reference output must follow the main output"
+    );
+    c.call(json!({"cmd":"stop"}));
+}
+
 #[test]
 fn busy_guard_blocks_duplicate() {
     let d = Daemon::spawn();
