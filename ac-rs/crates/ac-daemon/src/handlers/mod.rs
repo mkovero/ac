@@ -255,15 +255,25 @@ pub(super) fn resolve_ref_input(
 }
 
 /// Resolve the reference *output* port, falling back to the main output when
-/// no reference channel is configured.
+/// no reference output channel is configured.
+///
+/// Resolves from `reference_output_channel`, a playback index. It used to
+/// resolve from `reference_channel` — a *capture* index — so on any rig where
+/// the loopback source and the reference capture sat at different indices, the
+/// daemon opened and drove a playback port nothing was patched to and the
+/// reference leg stayed at digital silence (#225). The two index spaces are
+/// unrelated; neither is derived from the other in either direction.
 ///
 /// Only the *unconfigured* case falls back. A configured-but-out-of-range
-/// reference channel is an error: silently emitting the reference stimulus on
-/// the main output is a drive-path hazard, not a graceful degradation.
+/// channel is an error: silently emitting the reference stimulus on the main
+/// output is a drive-path hazard, not a graceful degradation.
 pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> Result<String, String> {
-    let Some(ch) = cfg.reference_channel else {
+    let Some(ch) = cfg.reference_output_channel else {
         return resolve_output(cfg, state);
     };
+    if let Some(p) = &cfg.reference_output_port {
+        return Ok(p.clone());
+    }
     let ports = cached_playback_ports(state);
     ports
         .get(ch as usize)

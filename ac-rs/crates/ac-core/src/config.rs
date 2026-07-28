@@ -55,6 +55,22 @@ pub struct Config {
     /// Sticky JACK port name for reference channel.
     pub reference_port: Option<String>,
 
+    /// Playback port index for the reference **output** leg — the port that
+    /// feeds the reference loopback. A separate index space from
+    /// [`Config::reference_channel`], which is a capture index: on a rig where
+    /// the loopback source and the reference capture sit at different indices,
+    /// deriving one from the other drives a port nothing is connected to and
+    /// the reference stays silent (#225). `None` means the reference stimulus
+    /// leaves on the main output.
+    #[serde(default)]
+    pub reference_output_channel: Option<u32>,
+
+    /// Sticky JACK port name for the reference output leg. Only consulted when
+    /// [`Config::reference_output_channel`] is set, mirroring how
+    /// `reference_port` is gated on `reference_channel`.
+    #[serde(default)]
+    pub reference_output_port: Option<String>,
+
     #[serde(default = "default_dbu_ref")]
     pub dbu_ref_vrms: f64,
 
@@ -121,6 +137,8 @@ impl Default for Config {
             input_port: None,
             reference_channel: None,
             reference_port: None,
+            reference_output_channel: None,
+            reference_output_port: None,
             dbu_ref_vrms: DBU_REF_EXACT,
             drive_max_dbfs: default_drive_max_dbfs(),
             dmm_host: None,

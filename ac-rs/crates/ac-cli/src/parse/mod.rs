@@ -286,6 +286,8 @@ pub enum CommandKind {
         output: Option<u32>,
         input: Option<u32>,
         reference: Option<u32>,
+        /// Reference *output* (playback) channel — `Some(None)` clears it.
+        reference_output: Option<Option<u32>>,
         device: Option<u32>,
         dbu_ref_vrms: Option<f64>,
         dmm_host: Option<String>,
