@@ -31,6 +31,75 @@
 
 use serde::Deserialize;
 
+/// One ladder rung's parameters, echoed in every frame so a saved frame stays
+/// interpretable without knowing the daemon's layout rules.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MtwStage {
+    #[serde(default)]
+    pub decim: usize,
+    #[serde(default)]
+    pub rate: f64,
+    #[serde(default)]
+    pub df: f64,
+    #[serde(default)]
+    pub window_s: f64,
+    /// Segment hop. `window_s / 2` for the 50% overlap the estimator uses —
+    /// checked rather than assumed, see [`MtwColumns::variance_equivalent_n`].
+    #[serde(default)]
+    pub hop_s: f64,
+    #[serde(default)]
+    pub f_valid: f64,
+    #[serde(default)]
+    pub settling_s: f64,
+}
+
+/// The three-stage transfer columns — the display's actual source.
+///
+/// Column spacing is **not uniform** in log frequency: where the requested
+/// density exceeds what a rung resolves, the grid widens instead of
+/// interpolating. Anything consuming this must map each column by its own
+/// `freqs[i]` rather than by index (which `freq_to_x` already does).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MtwColumns {
+    pub freqs: Vec<f64>,
+    #[serde(default)]
+    pub f_lo: Vec<f64>,
+    #[serde(default)]
+    pub f_hi: Vec<f64>,
+    pub magnitude_db: Vec<f64>,
+    pub phase_deg: Vec<f64>,
+    pub coherence: Vec<f64>,
+    /// Bin width behind each column, in Hz.
+    #[serde(default)]
+    pub df: Vec<f64>,
+    /// Analysis window behind each column, in seconds.
+    #[serde(default)]
+    pub window_s: Vec<f64>,
+    /// Blocks actually averaged behind each column.
+    ///
+    /// This is a raw input, not a depth. The effective averaging depth is set
+    /// by blocks **and** by [`Self::bins`], and no validated model combines
+    /// them — see `design-mtw-ladder.md`. Do not derive a "corrected" figure
+    /// from this field; the last two attempts were both further from the
+    /// truth than the uncorrected value.
+    #[serde(default)]
+    pub n: Vec<f64>,
+    #[serde(default)]
+    pub stage: Vec<usize>,
+    #[serde(default)]
+    pub blend: Vec<f64>,
+    /// Source bins behind each column. Never zero on a conforming frame —
+    /// this is the honest-density guarantee made observable.
+    #[serde(default)]
+    pub bins: Vec<usize>,
+    #[serde(default)]
+    pub ppo: f64,
+    #[serde(default)]
+    pub n_blocks: usize,
+    #[serde(default)]
+    pub stages: Vec<MtwStage>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WireFrame {
     pub sr: u32,
@@ -92,6 +161,35 @@ pub struct WireFrame {
     /// Same, reference channel.
     #[serde(default)]
     pub ref_peak_dbfs: Option<f64>,
+
+    // ---- three-stage transfer columns — the display's source ----
+    /// `None` until every ladder rung holds a full N blocks (2.56 s at the
+    /// bottom rung), and on any daemon predating the ladder.
+    ///
+    /// Absent is **not** a reason to fall back to the Welch arrays above: the
+    /// two are different measurements, and silently swapping between them
+    /// mid-session would make the display's resolution and settling change
+    /// without saying so. A frame without this contributes no transfer trace.
+    #[serde(default)]
+    pub mtw: Option<MtwColumns>,
+}
+
+impl MtwColumns {
+    /// Every parallel array is the same length as `freqs`.
+    ///
+    /// The arrays are independent JSON fields, so nothing guarantees a short
+    /// one is a truncation rather than a misalignment. Same argument as the
+    /// Welch path's length check: a mismatched frame draws nothing rather than
+    /// drawing a guess.
+    pub fn lengths_agree(&self) -> bool {
+        let n = self.freqs.len();
+        self.magnitude_db.len() == n
+            && self.phase_deg.len() == n
+            && self.coherence.len() == n
+            && (self.df.is_empty() || self.df.len() == n)
+            && (self.window_s.is_empty() || self.window_s.len() == n)
+            && (self.bins.is_empty() || self.bins.len() == n)
+    }
 }
 
 #[cfg(test)]

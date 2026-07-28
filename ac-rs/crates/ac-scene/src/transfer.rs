@@ -234,6 +234,17 @@ pub struct TransferInput {
     pub channel_role: String,
     pub source: Source,
     pub sr: u32,
+    /// Per-column provenance, present only on the live three-stage path.
+    /// Empty for a snapshot derivation, which is still Welch-derived (#221).
+    pub column_df: Vec<f64>,
+    pub column_window_s: Vec<f64>,
+    /// Blocks averaged behind each column, and the source bins each column
+    /// spans. Raw inputs, deliberately not combined into a single "effective
+    /// depth": the coherence floor depends on both, sublinearly in bins, and
+    /// no validated model exists. Two successive models were wrong, one of
+    /// them shipped. See `design-mtw-ladder.md`.
+    pub column_n: Vec<f64>,
+    pub column_bins: Vec<usize>,
 }
 
 impl TransferInput {
@@ -241,17 +252,53 @@ impl TransferInput {
     /// through as-is — it is already session-compensated (see the module
     /// doc), and `delay_ms` is τ_sess for this session.
     pub fn from_wire_frame(frame: &WireFrame) -> TransferInput {
+        // The three-stage columns are the display's source. The frame still
+        // carries the full-rate Welch arrays, and this deliberately does not
+        // read them: they are a different measurement (1 Hz flat, sliding
+        // re-segmentation, uniform density with interpolation below 69 Hz),
+        // and falling back to them when the ladder is not yet warm would
+        // change the display's resolution and settling mid-session without
+        // saying so. No trace is the honest state for the ~2.56 s the bottom
+        // rung takes to settle; the meters and delay readout stay live
+        // throughout, which is what gain staging needs.
+        let mtw = frame.mtw.as_ref().filter(|m| m.lengths_agree());
+        let (
+            freqs,
+            magnitude_db,
+            phase_deg,
+            coherence,
+            column_df,
+            column_window_s,
+            column_n,
+            column_bins,
+        ) = match mtw {
+            Some(m) => (
+                m.freqs.clone(),
+                m.magnitude_db.clone(),
+                m.phase_deg.clone(),
+                m.coherence.clone(),
+                m.df.clone(),
+                m.window_s.clone(),
+                m.n.clone(),
+                m.bins.clone(),
+            ),
+            None => Default::default(),
+        };
         TransferInput {
-            freqs: frame.freqs.clone(),
-            magnitude_db: frame.magnitude_db.clone(),
-            phase_deg: frame.phase_deg.clone(),
-            coherence: frame.coherence.clone(),
+            freqs,
+            magnitude_db,
+            phase_deg,
+            coherence,
             delay_ms: frame.delay_ms,
             meas_peak_dbfs: frame.meas_peak_dbfs,
             ref_peak_dbfs: frame.ref_peak_dbfs,
             channel_role: format!("meas_{}", frame.meas_channel),
             source: Source::Live,
             sr: frame.sr,
+            column_df,
+            column_window_s,
+            column_n,
+            column_bins,
         }
     }
 
@@ -275,6 +322,14 @@ impl TransferInput {
             channel_role: channel_role.to_string(),
             source: Source::Snapshot,
             sr,
+            // A snapshot is still derived by the full-rate Welch path, so it
+            // has no per-column resolution or averaging depth to report. That
+            // divergence from the live view is #221; this slice makes it
+            // visible rather than fixing it.
+            column_df: Vec::new(),
+            column_window_s: Vec::new(),
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         }
     }
 
@@ -495,6 +550,11 @@ mod tests {
             channel_role: "meas_0".to_string(),
             source: Source::Live,
             sr: 48_000,
+            // Welch-derived fixture: no per-column provenance to carry.
+            column_df: Vec::new(),
+            column_window_s: Vec::new(),
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
@@ -535,6 +595,11 @@ mod tests {
             channel_role: "meas_0".to_string(),
             source: Source::Live,
             sr: 48_000,
+            // Welch-derived fixture: no per-column provenance to carry.
+            column_df: Vec::new(),
+            column_window_s: Vec::new(),
+            column_n: Vec::new(),
+            column_bins: Vec::new(),
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(

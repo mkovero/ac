@@ -36,6 +36,11 @@ fn masked_scene() -> TransferScene {
         channel_role: "meas_0".to_string(),
         source: Source::Live,
         sr: 48_000,
+        // Welch-derived fixture: no per-column provenance to carry.
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
