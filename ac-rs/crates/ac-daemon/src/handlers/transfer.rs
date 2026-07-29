@@ -684,6 +684,30 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 engine_level = want_level;
             }
 
+            // Observed drive state (#228). Built from `engine_on`/`engine_level`
+            // — what was actually applied to the engine on this tick, after the
+            // dead-man above and after `set_drive`'s clamp to `drive_max_dbfs`
+            // — not from what a client last asked for. A fault indicator fed by
+            // commanded state would show `NO REFERENCE` while the daemon had
+            // already dead-manned the drive, or show nothing while the drive
+            // was live at a clamped level; reporting belief rather than
+            // observation is the defect class #228 exists to make visible.
+            //
+            // `level_dbfs` is null while off, so there is no stale number to
+            // misread, and carries the applied (clamped) value while on: drive
+            // on but clamped to something inaudible is a real measurement with
+            // a bad SNR, which is a different fault from either on or off.
+            //
+            // `drivable` distinguishes "this session could drive and is not"
+            // (the indicator's idle row) from "this session never drives" —
+            // an external-DUT session, where silence from the daemon says
+            // nothing about whether signal is present.
+            let drive_msg = json!({
+                "on":         engine_on,
+                "level_dbfs": if engine_on { json!(engine_level) } else { Value::Null },
+                "drivable":   drivable,
+            });
+
             // Raw capture peaks (§4.2), per unique-port index, from
             // THIS tick's blocks — before any calibration, weighting, or
             // aggregation. Deliberately not derived from `rings` (a
@@ -1068,6 +1092,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "spl_weighting":   weighting.tag(),
                             "spl_integration": integration_tag.as_str(),
                             "cal_tags":        cal_tags,
+                            "drive":           drive_msg.clone(),
                         });
                         // Phase 4b: IR sidecar from full-resolution
                         // complex H (NOT the downsampled re/im above —

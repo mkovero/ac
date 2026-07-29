@@ -1672,9 +1672,30 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
       "mic_curve": "none"                // always "none" — a ref-channel mic
                                           // curve is refused at request time
     }
+  },
+  "drive": {                             // observed stimulus state (#228)
+    "on":         <bool>,                // what is applied to the engine on this
+                                          // tick, after the dead-man and clamp
+    "level_dbfs": <float> | null,        // applied (clamped) level; null while off
+    "drivable":   <bool>                 // session opened output ports at launch
   }
 }
 ```
+
+**`drive` is observed, not commanded.** It is built from the values applied
+to the engine on that tick — after the `set_drive` dead-man (1.5 s) has
+expired a stale drive, and after the clamp to `drive_max_dbfs`. A client that
+rendered its own last `set_drive` instead would show the drive live while the
+daemon had already silenced it, or show the requested level while a lower one
+was being emitted. `level_dbfs` is `null` while off so there is no stale
+number to misread, and carries the applied value while on — a drive clamped
+to something inaudible is a real measurement with a bad SNR, which is neither
+"on" nor "off" as a fault.
+
+`drivable` is `false` for a fully passive session (external-DUT workflow, no
+output ports opened). `drivable: true, on: false` is a session that could
+drive and is not — the difference matters to a consumer deciding whether
+silence on the inputs is expected.
 
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB
