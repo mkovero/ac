@@ -586,6 +586,16 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // ~8.5 Hz to the capture-interval-limited ~10 Hz.
         let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
 
+        // A pair whose delay estimate was *refused* (no prominent correlation
+        // peak — #227) stays unlocked and is retried, because the cause is
+        // usually transient from the software's point of view: an unpatched
+        // reference leg or a muted source that the operator then fixes. Retry
+        // is rate-limited because each attempt is the same full-ring
+        // FFT+IFFT the cache above exists to avoid, and the inputs it reads
+        // only turn over on the ring's own timescale.
+        const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut next_delay_attempt: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
+
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
         // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
         // channel has no SPL calibration layer; `spl` stays `null` for
@@ -722,13 +732,20 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 if pair_delays[i].is_some() {
                     continue;
                 }
+                let now = std::time::Instant::now();
+                if next_delay_attempt[i].is_some_and(|t| now < t) {
+                    continue;
+                }
                 let (mi, ri) = pair_idx[i];
                 if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
-                    pair_delays[i] = Some(ac_core::visualize::transfer::estimate_delay_samples(
+                    pair_delays[i] = ac_core::visualize::transfer::estimate_delay_samples(
                         refb.as_slice(),
                         meas.as_slice(),
                         sr,
-                    ));
+                    );
+                    if pair_delays[i].is_none() {
+                        next_delay_attempt[i] = Some(now + RELOCK_RETRY);
+                    }
                 }
             }
             // Keep the ring's copy in sync — cheap (small Vec), and
