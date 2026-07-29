@@ -150,10 +150,19 @@ struct Client {
 
 impl Client {
     fn new(d: &Daemon) -> Self {
+        Self::with_ctrl_timeout(d, 3_000)
+    }
+
+    /// A client whose CTRL receive timeout is not the 3 s default. Needed for
+    /// commands whose reply is slower than that: `test_hardware` replies only
+    /// after its worker thread is spawned, which has been measured past 3 s
+    /// here. The timeout is set before `connect`, which is where ZMQ latches
+    /// it for this socket.
+    fn with_ctrl_timeout(d: &Daemon, ctrl_timeout_ms: i32) -> Self {
         let ctx = zmq::Context::new();
         let req = ctx.socket(zmq::REQ).unwrap();
         req.set_linger(0).unwrap();
-        req.set_rcvtimeo(3_000).unwrap();
+        req.set_rcvtimeo(ctrl_timeout_ms).unwrap();
         req.set_sndtimeo(3_000).unwrap();
         req.connect(&d.ctrl_endpoint()).unwrap();
 
@@ -473,17 +482,23 @@ fn setup_reference_output_channel_is_independent_of_reference_channel() {
 /// *capture* index, so on a rig where the two differ the daemon drove a
 /// playback port nothing was patched to and the reference leg stayed at
 /// digital silence while the session believed it had a reference.
+///
+/// Asserted through `test_hardware` rather than `transfer_stream` because
+/// `transfer_stream`'s start reply does not carry `ref_out_port` on `main` —
+/// that field arrives with #205 (PR #214). Both commands resolve the leg
+/// through the same `resolve_ref_output`, so this covers the fix without
+/// taking a dependency on an unmerged branch.
 #[test]
-fn transfer_stream_ref_out_port_resolves_from_reference_output_channel() {
+fn ref_out_port_resolves_from_reference_output_channel() {
     let d = Daemon::spawn_with_config(Some(json!({
         "output_channel":           4,
         "reference_channel":        2,
         "reference_output_channel": 1,
     })));
-    let c = Client::new(&d);
+    let c = Client::with_ctrl_timeout(&d, 15_000);
 
-    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":2}));
-    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let r = c.call(json!({"cmd":"test_hardware"}));
+    assert_eq!(r["ok"], json!(true), "test_hardware start: {r}");
     assert_eq!(r["out_port"], json!("fake:playback_4"));
     assert_eq!(
         r["ref_out_port"],
@@ -498,15 +513,15 @@ fn transfer_stream_ref_out_port_resolves_from_reference_output_channel() {
 /// as it always did — and a configured `reference_channel` alone does not
 /// change that.
 #[test]
-fn transfer_stream_ref_out_port_falls_back_to_main_output() {
+fn ref_out_port_falls_back_to_main_output() {
     let d = Daemon::spawn_with_config(Some(json!({
         "output_channel":    4,
         "reference_channel": 2,
     })));
-    let c = Client::new(&d);
+    let c = Client::with_ctrl_timeout(&d, 15_000);
 
-    let r = c.call(json!({"cmd":"transfer_stream","meas_channel":0,"ref_channel":2}));
-    assert_eq!(r["ok"], json!(true), "transfer_stream start: {r}");
+    let r = c.call(json!({"cmd":"test_hardware"}));
+    assert_eq!(r["ok"], json!(true), "test_hardware start: {r}");
     assert_eq!(
         r["ref_out_port"],
         json!("fake:playback_4"),
