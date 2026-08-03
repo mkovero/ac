@@ -27,7 +27,8 @@ Create a worktree on disk (not /tmp — tmpfs is too small for cargo):
 A worktree at /home/mui/src/ac-wt-228 already exists at the same branch tip; use it
 instead of a second one if it is free.
 
-Read, in this order, from main (commit f9aeff9):
+Read, in this order, from the main tip (git fetch origin first — these documents are
+still being added to):
 
   1. state-live-spectrum.md          — current state of the live spectrum path
   2. handoff-issue-strategy.md       — how the issues relate and what order they land in,
@@ -41,7 +42,7 @@ Four facts not yet in those documents:
   1. Deliverable 1 has already landed. Commit 1f78729, "feat(daemon): publish observed
      drive state on transfer_stream frames", is on issue-228-fault-indicator. It was
      branched from bd40ed4 — main *before* the #233 merge — so your first task is to
-     rebase it onto current main (f9aeff9, which contains a14ee4a, the #233 merge).
+     rebase it onto the current main tip, which contains a14ee4a, the #233 merge.
      #233 is the #225 reference-output fix and it touches
      ac-rs/crates/ac-daemon/src/handlers/transfer.rs, the same file deliverable 1
      edits. Expect to resolve that overlap by hand; do not resolve it by dropping
