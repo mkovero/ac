@@ -30,6 +30,11 @@ pub struct AcViewApp {
     /// `None` then, and vice versa.
     transfer_scene: Option<ac_scene::TransferScene>,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
+    /// The fault indicator's cross-frame state (#228) — the refusal clock
+    /// and the lock-acquired transient. Lives beside `meters` for the same
+    /// reason: it is time-dependent, so it cannot be rebuilt from the last
+    /// frame alone.
+    fault: ac_scene::FaultState,
     help_open: bool,
     /// The settings overlay (`G`, transfer view). `None` = closed.
     settings: Option<crate::settings::SettingsOverlay>,
@@ -64,6 +69,7 @@ impl AcViewApp {
                 ac_scene::MeterState::default(),
                 ac_scene::MeterState::default(),
             ),
+            fault: ac_scene::FaultState::default(),
             help_open: false,
             settings: None,
             weighting: WeightingCurve::Z,
@@ -135,6 +141,7 @@ impl AcViewApp {
                         freq_range,
                         (-80.0, 20.0),
                         &mut self.meters,
+                        &mut self.fault,
                         now_s,
                     ));
                 }
@@ -560,6 +567,7 @@ impl eframe::App for AcViewApp {
                         freq_range,
                         db_range,
                         &mut self.meters,
+                        &mut self.fault,
                         now_s,
                     ));
                 }
@@ -1000,5 +1008,99 @@ mod tests {
         app.press_for_test(Action::CycleDerotReference, 0.1);
         let after = &app.current_transfer_scene().unwrap().magnitude.segments;
         assert_eq!(&before, after, "de-rotation moved the magnitude pane");
+    }
+
+    /// A refusing frame, built from the healthy fixture so only the fields
+    /// the indicator reads differ.
+    fn refusing_frame() -> ac_scene::WireFrame {
+        let mut f = transfer_frame();
+        f.drive = Some(ac_scene::WireDrive {
+            on: true,
+            level_dbfs: Some(-30.0),
+            drivable: true,
+        });
+        f.delay_locked = Some(false);
+        f
+    }
+
+    /// #228: the refusal clock lives on the app, not on the frame, so a
+    /// persistent refusal must be reachable by feeding identical frames as
+    /// scene time advances. A per-frame implementation would show LOST LOCK
+    /// forever and the operator would never be told to move the mic.
+    #[test]
+    fn a_refusal_becomes_persistent_as_scene_time_advances() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+
+        app.ingest_frame_for_test(refusing_frame(), 0.0);
+        assert_eq!(
+            app.current_transfer_scene().expect("scene built").fault,
+            Some(ac_scene::Fault::LostLock)
+        );
+
+        // Same frame, later. Nothing on the wire changed — only the clock.
+        app.ingest_frame_for_test(refusing_frame(), ac_scene::fault::PERSISTENT_REFUSAL_S);
+        assert_eq!(
+            app.current_transfer_scene().expect("scene rebuilt").fault,
+            Some(ac_scene::Fault::NoLock)
+        );
+    }
+
+    /// And a lock ends it, with the transient confirmation on the way past.
+    #[test]
+    fn a_lock_clears_the_refusal_and_confirms_itself() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(refusing_frame(), 0.0);
+
+        let mut locked = refusing_frame();
+        locked.delay_locked = Some(true);
+        app.ingest_frame_for_test(locked.clone(), 1.0);
+        assert_eq!(
+            app.current_transfer_scene().unwrap().fault,
+            Some(ac_scene::Fault::LockAcquired)
+        );
+
+        app.ingest_frame_for_test(locked, 1.0 + ac_scene::fault::LOCK_ACQUIRED_HOLD_S);
+        assert_eq!(app.current_transfer_scene().unwrap().fault, None);
+    }
+
+    /// The #225 session in one test: driving, reference leg dead, and the
+    /// screen says which leg rather than leaving the operator to infer it
+    /// from a wrong-looking top end.
+    #[test]
+    fn a_dead_reference_leg_names_itself_on_the_transfer_scene() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        let mut frame = refusing_frame();
+        frame.delay_locked = Some(true);
+        frame.ref_peak_dbfs = None;
+        app.ingest_frame_for_test(frame, 0.0);
+        assert_eq!(
+            app.current_transfer_scene().unwrap().fault,
+            Some(ac_scene::Fault::NoReference)
+        );
+    }
+
+    /// Today's daemon sends neither field. The indicator must stay silent
+    /// rather than read absent levels as silence.
+    #[test]
+    fn a_frame_without_drive_state_shows_no_indicator() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(transfer_frame(), 0.0);
+        assert_eq!(app.current_transfer_scene().unwrap().fault, None);
     }
 }

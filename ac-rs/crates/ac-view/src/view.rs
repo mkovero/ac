@@ -416,6 +416,40 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
     // is rightmost and M (idx 1) sits to its left.
     draw_meter(painter, content, 0, &scene.ref_meter, "R");
     draw_meter(painter, content, 1, &scene.meas_meter, "M");
+
+    // Fault indicator (#228), last so it is over the traces rather than
+    // under them. Centred on the magnitude pane: the delay readout owns
+    // the content band's top-left corner, the meters own the right edge,
+    // and the stimulus banner owns its own reserved band above all of
+    // this, so nothing collides. Both strings are verbatim ac-scene.
+    if let Some(fault) = scene.fault {
+        let color = match fault.severity() {
+            // Never green, and never the trace colour: a fault must not
+            // read as measurement.
+            ac_scene::Severity::Fault => COLOR_SIGNAL,
+            ac_scene::Severity::Confirmation => COLOR_VALUE,
+        };
+        let centre = egui::pos2(
+            mag_vp.x + mag_vp.width / 2.0,
+            mag_vp.y + mag_vp.height / 2.0,
+        );
+        painter.text(
+            centre,
+            egui::Align2::CENTER_CENTER,
+            fault.label(),
+            egui::FontId::proportional(28.0),
+            color,
+        );
+        if let Some(detail) = fault.detail() {
+            painter.text(
+                egui::pos2(centre.x, centre.y + 22.0),
+                egui::Align2::CENTER_CENTER,
+                detail,
+                egui::FontId::proportional(14.0),
+                COLOR_LABEL,
+            );
+        }
+    }
 }
 
 /// Draw a pane's horizontal gridlines + left-edge labels from an

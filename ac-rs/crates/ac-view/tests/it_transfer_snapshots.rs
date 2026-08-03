@@ -25,7 +25,9 @@
 //! readout), the ARMED and DRIVING banners, and the ref-trace toggle on
 //! versus off.
 
-use ac_scene::{DerotMode, MeterState, Scene, SceneInput, Source, TransferInput, TransferScene};
+use ac_scene::{
+    DerotMode, FaultState, MeterState, Scene, SceneInput, Source, TransferInput, TransferScene,
+};
 use ac_view::view::{draw_view, SpectrumViewState, StimState, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
@@ -66,6 +68,7 @@ fn transfer_scene() -> TransferScene {
         column_window_s: Vec::new(),
         column_n: Vec::new(),
         column_bins: Vec::new(),
+        fault: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
@@ -74,6 +77,7 @@ fn transfer_scene() -> TransferScene {
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
+        &mut FaultState::default(),
         0.0,
     )
 }

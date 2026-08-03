@@ -50,6 +50,7 @@
 
 use ac_core::visualize::pair_derivation::PairDerivation;
 
+use crate::fault::{Fault, FaultFrame, FaultInput, FaultState};
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
 use crate::wire::WireFrame;
@@ -216,6 +217,10 @@ pub struct TransferScene {
     pub delay_readout: String,
     pub meas_meter: Meter,
     pub ref_meter: Meter,
+    /// The fault indicator (#228), or `None` for "show nothing" — which is
+    /// the correct display for an idle session, a warming-up one, and a
+    /// healthy one alike. See [`crate::fault`] for the table.
+    pub fault: Option<Fault>,
 }
 
 /// The transfer-view analogue of [`crate::scene::SceneInput`]: the
@@ -245,6 +250,10 @@ pub struct TransferInput {
     /// them shipped. See `design-mtw-ladder.md`.
     pub column_n: Vec<f64>,
     pub column_bins: Vec<usize>,
+    /// The fault indicator's frame-derived inputs (#228). `None` disables
+    /// the indicator: a snapshot derivation has no live drive or lock state
+    /// to report, and neither does a daemon predating the field.
+    pub fault: Option<FaultFrame>,
 }
 
 impl TransferInput {
@@ -299,6 +308,7 @@ impl TransferInput {
             column_window_s,
             column_n,
             column_bins,
+            fault: FaultFrame::from_wire_frame(frame),
         }
     }
 
@@ -330,6 +340,10 @@ impl TransferInput {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            // A snapshot is a static capture. There is no drive to observe
+            // and no lock being maintained, so there is nothing for the
+            // indicator to say — the same reason its meters are `None`.
+            fault: None,
         }
     }
 
@@ -341,14 +355,15 @@ impl TransferInput {
 }
 
 impl TransferScene {
-    /// Build the scene. `derot` selects the phase mode; `meters` carries
-    /// the cross-frame hold/latch state; `now_s` is scene time.
+    /// Build the scene. `derot` selects the phase mode; `meters` and `fault`
+    /// carry the cross-frame state; `now_s` is scene time.
     pub fn from_input(
         input: &TransferInput,
         derot: DerotMode,
         freq_range: (f64, f64),
         db_range: (f64, f64),
         meters: &mut (MeterState, MeterState),
+        fault: &mut FaultState,
         now_s: f64,
     ) -> TransferScene {
         let (f_min, f_max) = freq_range;
@@ -422,6 +437,22 @@ impl TransferScene {
             delay_readout: format_delay_readout(input.delay_ms),
             meas_meter: meters.0.update(input.meas_peak_dbfs, now_s),
             ref_meter: meters.1.update(input.ref_peak_dbfs, now_s),
+            // Reads `input.coherence` — the same columns the mask above
+            // drew from, so `CHECK ROUTING` cannot claim the legs are
+            // unrelated while the panes still show a trace. A
+            // length-mismatched frame leaves that array empty, which the
+            // indicator reads as an unsettled ladder rather than a dead
+            // one: a malformed frame must no more fabricate a fault than
+            // it may fabricate a trace.
+            fault: fault.update(
+                &FaultInput {
+                    frame: input.fault,
+                    meas_peak_dbfs: input.meas_peak_dbfs,
+                    ref_peak_dbfs: input.ref_peak_dbfs,
+                    coherence: if lengths_agree { &input.coherence } else { &[] },
+                },
+                now_s,
+            ),
         }
     }
 }
@@ -555,6 +586,7 @@ mod tests {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            fault: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
@@ -563,6 +595,7 @@ mod tests {
             (20.0, 20_000.0),
             (-80.0, 20.0),
             &mut meters,
+            &mut FaultState::default(),
             0.0,
         );
         let ys: Vec<f64> = s.phase.segments[0].iter().map(|p| p.1).collect();
@@ -600,6 +633,7 @@ mod tests {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            fault: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
@@ -608,6 +642,7 @@ mod tests {
             (20.0, 20_000.0),
             (-80.0, 20.0),
             &mut meters,
+            &mut FaultState::default(),
             0.0,
         );
         // No segments on either pane — the frame drew nothing, no panic.
