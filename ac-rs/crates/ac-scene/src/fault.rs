@@ -299,6 +299,22 @@ fn at_floor(peak_dbfs: Option<f64>) -> bool {
 /// 10% sits between the two measured cases with room on both sides: unrelated
 /// legs put 4.4% over the line, and a healthy acoustic measurement clears it
 /// nearly everywhere (0.715–0.755 on stage 0, 0.92+ below).
+///
+/// # What this costs
+///
+/// The columns are `mtw::ladder::P_REF` = 48 per octave, so 10% of a 504-
+/// column frame is **about one octave**. A measurement that is genuinely
+/// coherent over less than an octave and incoherent everywhere else — a
+/// narrow bandpass DUT, a driver measured well outside its passband — reads
+/// as `CHECK ROUTING`. That is a real false positive and it is the price of
+/// the state firing at all; the strict rule had the opposite failure and was
+/// worse, because it was silent.
+///
+/// It is also the shape a fraction cannot distinguish: 50 coherent columns
+/// are 50 coherent columns whether they are one contiguous passband or
+/// scattered accidents. If the rig produces the narrow-passband false
+/// positive, contiguity is the discriminator to reach for, not a smaller
+/// fraction.
 const COHERENCE_ALIVE_FRACTION: f64 = 0.10;
 
 /// Almost no column clears the display's coherence mask.

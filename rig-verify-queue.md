@@ -76,6 +76,14 @@ sources, as in session 2 (that run put 22 of 504 columns over the mask and the
 banner stayed dark). Pass: `CHECK ROUTING` appears. Then confirm the other
 side: a healthy 3 m measurement must **never** show it.
 
+The gate is now "fewer than 10% of columns clear the mask", which at 48 points
+per octave is **about one octave** of coherent band. Worth one deliberate
+check while the rig is set up: measure something coherent over less than an
+octave — a driver well outside its passband is the easy version — and see
+whether it reads `CHECK ROUTING`. If it does, the discriminator to reach for
+is contiguity of the coherent columns, not a smaller fraction; a fraction
+cannot tell one passband from scattered accidents.
+
 ### What this branch does *not* fix — do not read these as regressions
 
 - **`LOST LOCK` / `NO LOCK` are still unreachable.** Finding 3 of `handover.md`

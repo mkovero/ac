@@ -174,8 +174,8 @@ const DIRECT_PEAK_FRACTION: f64 = 0.5;
 /// session-2.md` Run C asks for this range by name.
 const CANDIDATE_CAPTURE_FRACTION: f64 = 0.251_188_6; // 10^(-12/20)
 
-/// Most candidates reported *by rank*. Two further lags are added
-/// unconditionally, so a list may hold `MAX_CANDIDATES + 2`.
+/// Most candidates reported *by rank*. Three further lags are added
+/// unconditionally, so a list may hold `MAX_CANDIDATES + 3`.
 ///
 /// The **strongest** are kept, then reported in lag order. Keeping the
 /// earliest instead is the obvious reading of "the direct arrival is first"
@@ -190,9 +190,11 @@ const CANDIDATE_CAPTURE_FRACTION: f64 = 0.251_188_6; // 10^(-12/20)
 /// list kept the cluster and dropped the arrival: **in every position-3
 /// session the accepted lag was absent from its own evidence**, and replaying
 /// the accept rule offline returned a different lag than the daemon chose at
-/// every constant. Rank-by-strength *plus* unconditional inclusion of the two
-/// decision-relevant lags — the accepted one and the global maximum — is the
-/// shape that survives both failures. See [`ensure_candidate`].
+/// every constant. Rank-by-strength *plus* unconditional inclusion of the
+/// decision-relevant lags — the accepted one, the strongest causal peak, and
+/// the strongest non-causal peak — is the shape that survives both failures.
+/// See [`ensure_candidate`], which inserts only what the cut dropped, so the
+/// three never appear twice.
 const MAX_CANDIDATES: usize = 32;
 
 /// One competing peak in the cross-correlation.
@@ -286,9 +288,11 @@ pub struct DelayEstimate {
     /// `0.0` when the search range holds no negative lags.
     pub negative_lag_median: f64,
     /// Every local maximum within [`CANDIDATE_CAPTURE_FRACTION`] of the
-    /// strongest, in lag order, ranked to [`MAX_CANDIDATES`] — plus
-    /// [`Self::lag`] and [`Self::peak_lag`], which are always present
-    /// whatever their rank.
+    /// strongest causal peak, in lag order, ranked to [`MAX_CANDIDATES`] —
+    /// plus [`Self::lag`], [`Self::peak_lag`] and
+    /// [`Self::noncausal_peak_lag`], which are always present whatever their
+    /// rank. Lags are unique and strictly ascending, so a replay may sum or
+    /// histogram the list without double-counting.
     ///
     /// This is what makes [`DIRECT_PEAK_FRACTION`] settleable. Prominence
     /// alone fixes the noise floor but says nothing about where the direct
@@ -490,6 +494,12 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
         (0, 0.0)
     };
     if !peak_val.is_finite() || peak_val <= 0.0 {
+        // No correlation at any causal lag. In practice this means one leg
+        // carries no signal at all -- any live pair correlates *somewhere*
+        // after the reference, if only in the ripple -- so there is nothing
+        // to report about either half of the range. A skewed pair, which does
+        // have something to say, refuses further down on prominence and keeps
+        // its evidence.
         return DelayEstimate::refused_without_evidence();
     }
     // A zero median means the correlation is zero almost everywhere — a
@@ -1409,10 +1419,51 @@ mod tests {
             e.prominence
         );
 
-        // A silent leg forms no correlation at all, so there is no ratio.
+        // A silent leg forms no correlation at all, so there is no ratio,
+        // and nothing to say about either half of the lag range.
         let e = estimate_delay_detailed(&sig, &vec![0.0f32; N], SR);
         assert_eq!(e.lag, None);
         assert_eq!(e.prominence, 0.0);
+        assert_eq!(e.noncausal_peak_value, 0.0);
+        assert!(e.candidates.is_empty());
+    }
+
+    /// A refusal with *no causal correlation at all* must still carry the
+    /// non-causal evidence, or the diagnosis it was added for is thrown away
+    /// at exactly the point it becomes unambiguous.
+    ///
+    /// A pair skewed far enough that the arrival falls outside the search
+    /// window is the shape: nothing after the reference, something clear
+    /// before it. That is a crossed or skewed pair, and it must not read the
+    /// same as a dead leg.
+    #[test]
+    fn a_refusal_with_no_causal_peak_still_reports_the_noncausal_one() {
+        let sig = white_noise(N, 0.5, 42);
+        let delay = 4_800usize; // 100 ms of skew at 48 kHz
+
+        // The measurement leg is the stimulus; the reference carries it
+        // `delay` later, and the causal half holds nothing but the tail of
+        // the ring, deliberately zeroed.
+        let mut ref_sig = vec![0.0f32; N];
+        add_delayed(&mut ref_sig, &sig, delay, 1.0);
+        let mut meas = sig.clone();
+        meas[N - delay..].fill(0.0);
+
+        let e = estimate_delay_detailed(&ref_sig, &meas, SR);
+        assert_eq!(e.lag, None);
+        assert!(
+            e.noncausal_peak_value > 0.0,
+            "the skew must be reported, not discarded with the refusal"
+        );
+        assert!(
+            e.noncausal_peak_lag < 0,
+            "noncausal_peak_lag {} should sit before the reference",
+            e.noncausal_peak_lag
+        );
+        assert!(
+            e.candidates.iter().any(|c| c.lag == e.noncausal_peak_lag),
+            "the non-causal peak must appear in the evidence"
+        );
     }
 
     /// `DIRECT_PEAK_FRACTION` must be settleable from a capture alone.
