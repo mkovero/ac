@@ -229,13 +229,40 @@ pub struct DelayEstimate {
     ///
     /// `0.0` when the correlation could not be formed at all (a silent leg).
     pub prominence: f64,
-    /// Lag of the strongest peak — the answer the old global-maximum rule
-    /// would have given. Differs from [`Self::lag`] exactly when the
-    /// earliest-peak rule moved the estimate off a reflection, so the pair
-    /// is the direct measure of how often that rule fires in a real room.
+    /// Lag of the strongest **causal** peak — the answer a global-maximum
+    /// rule would give over the range this estimator is allowed to select
+    /// from. Differs from [`Self::lag`] exactly when the earliest-peak rule
+    /// moved the estimate off a reflection, so the pair is the direct measure
+    /// of how often that rule fires in a real room.
+    ///
+    /// Every threshold is measured against this, not against the strongest
+    /// peak overall: see [`Self::noncausal_peak_lag`].
     pub peak_lag: i64,
     /// |ρ| at [`Self::peak_lag`].
     pub peak_value: f64,
+    /// Lag of the strongest peak among the **negative** lags, where nothing
+    /// physical can arrive — and `0.0` in [`Self::noncausal_peak_value`] when
+    /// the search range holds no negative lags.
+    ///
+    /// Not selectable, and no threshold is measured against it. It is here
+    /// because a peak at a negative lag is a real observation about the
+    /// capture, and one that has cost this project a session before: #216's
+    /// ring skew put every session 0.2 s negative, and a stimulus onset
+    /// inside the correlation window throws ripples across the whole lag
+    /// range. Both are recognisable from `noncausal_peak_value` standing
+    /// clear of [`Self::negative_lag_median`], and neither is recognisable at
+    /// all if the estimator reports only what it was willing to select.
+    ///
+    /// When this exceeds [`Self::peak_value`] the correlation is dominated by
+    /// something non-causal. That is *not* by itself a refusal — the arrival
+    /// is often still there and still recoverable, which is exactly what rig
+    /// session 2's −826 ms lock hid: its own evidence put the true arrival at
+    /// +4.52 ms. Whether the causal peak is good enough remains the
+    /// prominence gate's question, decided the same way it is decided for
+    /// every other capture.
+    pub noncausal_peak_lag: i64,
+    /// |ρ| at [`Self::noncausal_peak_lag`].
+    pub noncausal_peak_value: f64,
     /// Median |ρ| over the searched lags — the noise floor
     /// [`Self::prominence`] is measured against. Published separately so a
     /// capture can be re-thresholded offline without refitting the ratio.
@@ -280,6 +307,8 @@ impl DelayEstimate {
             prominence: 0.0,
             peak_lag: 0,
             peak_value: 0.0,
+            noncausal_peak_lag: 0,
+            noncausal_peak_value: 0.0,
             median_value: 0.0,
             negative_lag_median: 0.0,
             candidates: Vec::new(),
@@ -330,10 +359,12 @@ pub fn estimate_delay_detailed(ref_sig: &[f32], meas: &[f32], sr: u32) -> DelayE
 ///    correlation magnitude by [`MIN_PROMINENCE`]. This is what rejects
 ///    uncorrelated inputs, and it covers both causes seen on the rig: a
 ///    poor direct-to-reverberant ratio and a low electrical SNR.
-/// 2. **Causal** — only non-negative lags may be selected. The microphone
-///    cannot lead the electrical reference, so a negative lag is a ripple,
-///    not a path (rig session 2: a −826 ms lock at prominence 31.8 where the
-///    arrival was +4.52 ms).
+/// 2. **Causal** — the search runs over non-negative lags only, and every
+///    threshold is measured against the strongest peak in that range. The
+///    microphone cannot lead the electrical reference, so a negative lag is a
+///    ripple or a skew, not a path (rig session 2: a −826 ms lock at
+///    prominence 31.8 where the arrival was +4.52 ms). A peak outside the
+///    range is reported, never selected.
 /// 3. **Earliest, not largest** — among non-negative peaks within
 ///    [`DIRECT_PEAK_FRACTION`] of the strongest, the one at the smallest lag
 ///    wins. The direct sound is by definition the first arrival; a later
@@ -424,16 +455,40 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
         0.0
     };
 
-    let (peak_idx, peak_val) =
-        mag.iter()
-            .enumerate()
-            .fold((0usize, f64::NEG_INFINITY), |(bi, bv), (i, &v)| {
-                if v > bv {
-                    (i, v)
-                } else {
-                    (bi, bv)
-                }
-            });
+    // The searched range for *selection* is the causal half. Nothing can
+    // arrive at the microphone before it leaves the electrical reference, so
+    // a negative lag is not a path delay, and a correlation peak sitting at
+    // one is a fact about the capture rather than an answer: ring skew (#216,
+    // fixed in the daemon) or a ripple thrown up by the stimulus onset.
+    //
+    // Rig session 2 accepted a **−826 ms** lock at prominence 31.8 and
+    // painted LOCK ACQUIRED, while its own evidence put the arrival at
+    // +4.52 ms. That arrival is recoverable — scanning from lag 0 finds it —
+    // so the estimator narrows its search rather than refusing the capture.
+    // Every threshold below is therefore measured against the strongest
+    // *causal* peak, which is the strongest peak that could be an answer.
+    //
+    // The negative lags are not discarded. They stay in `mag`, in the median,
+    // in `negative_lag_median`, and in the candidate list, and the strongest
+    // of them is reported in its own right — see
+    // `DelayEstimate::noncausal_peak_lag`. A skew that returns is only
+    // diagnosable from a capture if the capture still shows it.
+    let zero_idx = max_lag;
+    let strongest = |range: std::ops::Range<usize>| {
+        range.fold((0usize, f64::NEG_INFINITY), |(bi, bv), i| {
+            if mag[i] > bv {
+                (i, mag[i])
+            } else {
+                (bi, bv)
+            }
+        })
+    };
+    let (peak_idx, peak_val) = strongest(zero_idx..mag.len());
+    let (noncausal_idx, noncausal_val) = if zero_idx > 0 {
+        strongest(0..zero_idx)
+    } else {
+        (0, 0.0)
+    };
     if !peak_val.is_finite() || peak_val <= 0.0 {
         return DelayEstimate::refused_without_evidence();
     }
@@ -466,48 +521,31 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
         candidates.truncate(MAX_CANDIDATES);
     }
     candidates.sort_unstable_by_key(|c| c.lag);
-    // The global maximum is decision-relevant whatever its rank — it is the
-    // answer the old rule would have given, and a capture that omits it
-    // cannot be replayed against that rule. It outranks everything by
-    // construction, so this only fires when the capture floor excluded it,
-    // but the guarantee is what the offline replay depends on.
+    // Both reported peaks are decision-relevant whatever their rank, and a
+    // capture that omits either cannot be replayed. The causal peak is the
+    // answer a global-maximum rule would give under the causality rule; the
+    // non-causal one is the evidence that says *why* a refusal happened when
+    // it is the larger of the two. `ensure_candidate` is a no-op when the
+    // rank cut already kept them, so the list holds no duplicates.
     let peak_lag = peak_idx as i64 - max_lag as i64;
     ensure_candidate(&mut candidates, peak_lag, peak_val);
+    let noncausal_peak_lag = noncausal_idx as i64 - max_lag as i64;
+    if noncausal_val > 0.0 {
+        ensure_candidate(&mut candidates, noncausal_peak_lag, noncausal_val);
+    }
     let evidence = DelayEstimate {
         lag: None,
         prominence,
         peak_lag,
         peak_value: peak_val,
+        noncausal_peak_lag,
+        noncausal_peak_value: noncausal_val,
         median_value: median,
         negative_lag_median,
         candidates,
     };
 
     if median > 0.0 && prominence < MIN_PROMINENCE {
-        return evidence;
-    }
-
-    // Nothing physical can arrive at the microphone before it leaves the
-    // electrical reference, so a negative lag is never a path delay. Rig
-    // session 2 accepted a **−826 ms** lock at prominence 31.8 and painted
-    // LOCK ACQUIRED, while its own evidence put the true arrival at +4.52 ms:
-    // the earliest-peak scan started at −1 s and took a ripple thrown up by
-    // the stimulus onset, at a moment when the reference leg had only just
-    // come alive. That is a regression the earliest-peak rule introduced —
-    // the global maximum it replaced would have returned +4.52 ms.
-    //
-    // Two consequences, both here:
-    //   * the earliest-peak scan starts at lag 0, not at −max_lag;
-    //   * a global maximum that itself sits at a negative lag is refused
-    //     outright rather than pulled forward to the first non-negative peak
-    //     — the correlation is dominated by something non-causal, which is
-    //     evidence about the capture, not a delay to lock onto.
-    //
-    // The negative lags stay in `mag`, in the median, and in the candidate
-    // list: they are what `negative_lag_median` is measured over, and the
-    // refusals they explain are only diagnosable if they are visible.
-    let zero_idx = max_lag;
-    if peak_idx < zero_idx {
         return evidence;
     }
 
@@ -1118,12 +1156,16 @@ mod tests {
     /// stimulus onset, which is what put a −826 ms lock at prominence 31.8 on
     /// screen in rig session 2 while the true arrival sat at +4.52 ms.
     ///
-    /// So the estimate is refused. What must **not** happen is the refusal
-    /// being silent about why: `peak_lag` still names the negative lag the
-    /// correlation actually favours, which is what makes a recurrence of the
-    /// skew diagnosable from a capture instead of from the rig.
+    /// Here there is nothing else in the capture: the only correlation is the
+    /// non-causal one, so the causal range holds ripple, the prominence gate
+    /// refuses on its own terms, and no separate causality refusal is needed
+    /// to reach the right answer.
+    ///
+    /// What must **not** happen is the refusal being silent about why.
+    /// `noncausal_peak_lag` names the skew, which is what keeps a recurrence
+    /// diagnosable from a capture instead of from another rig session.
     #[test]
-    fn negative_lag_is_refused_but_still_reported() {
+    fn a_skewed_pair_is_refused_and_the_skew_is_named() {
         let sig = white_noise(N, 0.5, 42);
         let delay = 300;
 
@@ -1134,20 +1176,107 @@ mod tests {
         let e = estimate_delay_detailed(&ref_sig, &sig, SR);
         assert_eq!(e.lag, None, "a non-causal lag must not be locked onto");
         assert!(
-            e.prominence > MIN_PROMINENCE,
-            "the refusal is on causality, not prominence — got {}",
+            e.prominence < MIN_PROMINENCE,
+            "the causal range holds only ripple, so the prominence gate is \
+             what refuses — got {}",
             e.prominence
         );
         assert!(
-            (e.peak_lag + delay as i64).abs() < SUB_MS,
-            "peak_lag {} should still name the skew at {}",
-            e.peak_lag,
+            (e.noncausal_peak_lag + delay as i64).abs() < SUB_MS,
+            "noncausal_peak_lag {} should name the skew at {}",
+            e.noncausal_peak_lag,
             -(delay as i64)
         );
         assert!(
-            e.candidates.iter().any(|c| c.lag == e.peak_lag),
-            "the global peak must be in its own evidence"
+            e.noncausal_peak_value > e.peak_value,
+            "the skew {} should dominate the causal ripple {}",
+            e.noncausal_peak_value,
+            e.peak_value
         );
+        assert!(
+            e.candidates.iter().any(|c| c.lag == e.noncausal_peak_lag),
+            "the non-causal peak must be in its own evidence"
+        );
+    }
+
+    /// A non-causal peak must not cost a measurement that is still there.
+    ///
+    /// This is rig session 2's −826 ms lock in miniature: a large peak at a
+    /// negative lag, and a genuine arrival at a small positive one. The old
+    /// rule scanned from −1 s and took the ripple. Refusing the whole capture
+    /// instead would be the opposite error — the arrival is recoverable, and
+    /// the session that produced this had a clean measurement in it
+    /// (HF coherence 0.877).
+    #[test]
+    fn a_noncausal_peak_does_not_cost_the_causal_arrival() {
+        let sig = white_noise(N, 0.5, 42);
+        let arrival = 217usize;
+
+        // The arrival, plus a stronger correlation at a negative lag — as if
+        // the reference leg carried a copy of the measurement leg early.
+        let mut meas = vec![0.0f32; N];
+        add_delayed(&mut meas, &sig, arrival, 0.60);
+        let mut ref_sig = sig.clone();
+        add_delayed(&mut ref_sig, &sig, 900, 0.95);
+
+        let e = estimate_delay_detailed(&ref_sig, &meas, SR);
+        let lag = e.lag.expect("the causal arrival is prominent on its own");
+        assert!(
+            (lag - arrival as i64).abs() < SUB_MS,
+            "locked to {lag}, expected the arrival at {arrival}"
+        );
+        assert!(
+            e.noncausal_peak_value > 0.0 && e.noncausal_peak_lag < 0,
+            "the fixture must actually put a peak at a negative lag — got \
+             {} at {}",
+            e.noncausal_peak_value,
+            e.noncausal_peak_lag
+        );
+    }
+
+    /// The two guaranteed entries are not independent of the ranked 32: the
+    /// accepted lag is usually already among them, and on a clean single-peak
+    /// capture it *is* the peak. A duplicate would double-count in any
+    /// offline replay that sums or histograms the candidates.
+    #[test]
+    fn the_candidate_list_never_holds_a_duplicate_lag() {
+        let sig = white_noise(N, 0.5, 42);
+
+        let mut single = vec![0.0f32; N];
+        add_delayed(&mut single, &sig, 512, 1.0);
+
+        let mut cluster = white_noise(N, 0.02, 77);
+        for k in 0..(MAX_CANDIDATES + 8) {
+            let gain = 0.55 + 0.45 * (k as f32) / (MAX_CANDIDATES as f32 + 7.0);
+            add_delayed(&mut cluster, &sig, 400 + k * 60, gain);
+        }
+
+        let mut skewed = vec![0.0f32; N];
+        add_delayed(&mut skewed, &sig, 300, 1.0);
+
+        for (name, meas) in [
+            ("single arrival", &single),
+            ("reverberant cluster", &cluster),
+            ("uncorrelated", &white_noise(N, 0.5, 99)),
+        ] {
+            let e = estimate_delay_detailed(&sig, meas, SR);
+            let mut lags: Vec<i64> = e.candidates.iter().map(|c| c.lag).collect();
+            let before = lags.len();
+            lags.dedup();
+            assert_eq!(before, lags.len(), "{name}: duplicate lag in candidates");
+            assert!(
+                lags.windows(2).all(|w| w[0] < w[1]),
+                "{name}: not in lag order"
+            );
+        }
+
+        // And the skew case, where the guaranteed entries are three: the
+        // accepted lag (none here), the causal peak, and the non-causal one.
+        let e = estimate_delay_detailed(&skewed, &sig, SR);
+        let mut lags: Vec<i64> = e.candidates.iter().map(|c| c.lag).collect();
+        let before = lags.len();
+        lags.dedup();
+        assert_eq!(before, lags.len(), "skewed: duplicate lag in candidates");
     }
 
     /// Degrading SNR must move the estimator from *correct* straight to

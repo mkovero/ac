@@ -37,20 +37,39 @@ anything larger).
 
 **Fix 1 — no negative lock.** Pass: `delay_locked` is never true with a
 negative `delay_ms`. A −826 ms lock painted `LOCK ACQUIRED` last session; that
-must now be a refusal. If the same session refuses *everywhere* where it
-previously locked at 3 m, that is a **failure**, not a pass — capture
-`delay_evidence` and stop.
+must now be a refusal or a correct positive lock. If the same session refuses
+*everywhere* where it previously locked at 3 m, that is a **failure**, not a
+pass — capture `delay_evidence` and stop.
 
-**Fix 1, daemon half — no lock across the stimulus onset.** Start
-`transfer_stream` first, then start the stimulus, which is the order that
-produced the −826 ms lock. Pass: the first lock lands after the stimulus has
-been running, at a plausible positive lag, with no refusal record published
-for the ring that straddled the onset.
+Note what the fix does **not** do: a non-causal peak is not itself a refusal.
+The estimator now searches the causal half only and measures every threshold
+against the strongest peak in it, so the −826 ms capture would return the
++4.52 ms arrival its own evidence contained, not a refusal. The negative peak
+is still published, as `noncausal_peak_lag` / `noncausal_peak_value`.
+
+**Fix 1, the onset case — UNRESOLVED, and the one thing here that needs the
+rig to answer.** The −826 ms lock happened when `transfer_stream` was started
+before the stimulus, so the correlation ring straddled the silence→signal
+transition. A daemon-side guard that skipped the lock attempt while a ring
+straddled an onset was written and then **dropped before this branch shipped**,
+for two reasons: no synthetic onset ring could be built where the causal-only
+search still returns a wrong answer (the guard had nothing left to prevent),
+and the guard would fire indefinitely on a legitimately gated stimulus — Run D
+below is a 50 ms burst, whose ring is silent for most of its length — which
+would suppress locking outright on that session.
+
+So: **start the stream before the stimulus, deliberately, and see what
+happens.** Pass: the first lock lands at a plausible positive lag once the
+stimulus is running. Fail: a confident wrong lock at a positive lag, which is
+the one case causality cannot catch. If it fails, the guard is the fix and its
+shape is in this branch's history — but it must then also handle gated
+stimuli.
 
 **Fix 2 — the capture can reproduce its own decision.** Pass: for every frame
 where `delay_locked` is true, `delay_samples` appears in
-`delay_evidence.candidates`, and so does `peak_lag`. This is the one that
-unblocks offline tuning; it failed in **every** position-3 session last round.
+`delay_evidence.candidates`, and so do `peak_lag` and `noncausal_peak_lag`,
+each exactly once. This is the one that unblocks offline tuning; it failed in
+**every** position-3 session last round.
 
 **Fix 5 — `CHECK ROUTING` fires.** Point the two legs at genuinely unrelated
 sources, as in session 2 (that run put 22 of 504 columns over the mask and the
@@ -64,9 +83,16 @@ side: a healthy 3 m measurement must **never** show it.
   window with no indicator. That is the known state, not a new one.
 - **The prominence gate still refuses valid measurements at 1 m.** Finding 4 is
   a data question, not a constant, and nothing here moves it. Expect roughly
-  the session-2 hit rate (1/12 at 1 m). Fix 1 may lower it further, since a
-  negative lag that used to be accepted is now a refusal — that is the fix
-  working.
+  the session-2 hit rate (1/12 at 1 m).
+
+  **A lower hit rate than session 2 is an expected outcome of this branch, not
+  a regression.** Some of what session 2 counted as a lock was a non-causal
+  peak accepted at high prominence, and those are now either refused or moved
+  onto the causal arrival. A refusal that replaces a −826 ms "lock" is the fix
+  working. Judge the branch on whether the locks it *does* return are
+  physically plausible — positive, and consistent with the geometry as the
+  microphone moves — not on how many it returns. Session 2's 3 m position
+  locked 7/7 and **2 of those 7 were wrong**; a count is not the measure.
 
 ---
 
