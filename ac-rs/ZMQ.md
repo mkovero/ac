@@ -1616,6 +1616,19 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
 
+  "delay_prominence": <float> | null,    // peak-to-median ratio of the normalized
+                                          // cross-correlation the lock decision was
+                                          // made on. Reported whether the estimate
+                                          // was accepted or refused — a refusal's
+                                          // value is how far short it fell, which is
+                                          // the difference between "move the mic"
+                                          // and "the threshold is wrong".
+                                          //
+                                          // Accepted at >= 24. `null` before the
+                                          // first attempt. Diagnostic only: nothing
+                                          // downstream may gate on it, since the
+                                          // threshold is the estimator's to own.
+
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
   "meas_peak_dbfs":  <float> | null,     // 20*log10(max|sample|) over this frame's

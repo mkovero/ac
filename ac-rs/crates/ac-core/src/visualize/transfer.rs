@@ -164,6 +164,27 @@ const MIN_PROMINENCE: f64 = NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION;
 /// the two so the fraction always binds. See `estimate_delay`.
 const DIRECT_PEAK_FRACTION: f64 = 0.5;
 
+/// A delay estimate together with the evidence behind it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DelayEstimate {
+    /// The chosen lag, or `None` if no peak qualified.
+    pub lag: Option<i64>,
+    /// Peak-to-median ratio of the normalized cross-correlation — the
+    /// quantity both thresholds are expressed in. Reported whether or not
+    /// the estimate was accepted, because a refusal's prominence is what
+    /// says how far short it fell.
+    ///
+    /// This is the estimator's single empirical constant made observable.
+    /// [`NOISE_FLOOR_PROMINENCE`] is set 1.55x above a ripple ceiling
+    /// measured on synthetic noise; only captures from a real acoustic path
+    /// can say whether that is comfortable or lucky, and publishing this
+    /// turns any session — including one that refuses at every position —
+    /// into the distribution needed to set it from data.
+    ///
+    /// `0.0` when the correlation could not be formed at all (a silent leg).
+    pub prominence: f64,
+}
+
 /// Delay estimation via FFT-based cross-correlation. Exposed so callers that
 /// drive `h1_estimate` in a tight loop (e.g. `transfer_stream`) can estimate
 /// once on warmup and reuse the result via [`h1_estimate_with_delay`] — the
@@ -174,7 +195,15 @@ const DIRECT_PEAK_FRACTION: f64 = 0.5;
 /// inputs carrying unrelated sources. Refusing is the point: the previous
 /// global-maximum rule returned a confident lag for uncorrelated inputs
 /// (#227), and the caller caches the lock for the session.
+///
+/// Use [`estimate_delay_detailed`] when the reason matters as well as the
+/// answer.
 pub fn estimate_delay_samples(ref_sig: &[f32], meas: &[f32], sr: u32) -> Option<i64> {
+    estimate_delay_detailed(ref_sig, meas, sr).lag
+}
+
+/// [`estimate_delay_samples`] plus the prominence the decision was made on.
+pub fn estimate_delay_detailed(ref_sig: &[f32], meas: &[f32], sr: u32) -> DelayEstimate {
     let r: Vec<f64> = ref_sig.iter().map(|&x| x as f64).collect();
     let m: Vec<f64> = meas.iter().map(|&x| x as f64).collect();
     estimate_delay(&r, &m, sr)
@@ -198,7 +227,7 @@ pub fn estimate_delay_samples(ref_sig: &[f32], meas: &[f32], sr: u32) -> Option<
 /// A plausibility window on lag is deliberately *not* used: it would need a
 /// source-to-microphone distance the software does not have, and the gain
 /// sweep in #227 produced the same failure at fixed geometry.
-fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
+fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
     let corr_len = ref_sig.len().min(meas.len()).min(4 * sr as usize);
     let r = &ref_sig[..corr_len];
     let m = &meas[..corr_len];
@@ -241,7 +270,10 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
     let denom = (energy_r * energy_m).sqrt();
     if !denom.is_finite() || denom <= 0.0 {
         // One leg is silent — there is nothing to correlate against.
-        return None;
+        return DelayEstimate {
+            lag: None,
+            prominence: 0.0,
+        };
     }
 
     // Magnitude over the full ±max_lag search range, in ascending lag order
@@ -278,10 +310,20 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
                 }
             });
     if !peak_val.is_finite() || peak_val <= 0.0 {
-        return None;
+        return DelayEstimate {
+            lag: None,
+            prominence: 0.0,
+        };
     }
-    if median > 0.0 && peak_val / median < MIN_PROMINENCE {
-        return None;
+    // A zero median means the correlation is zero almost everywhere — a
+    // degenerate input rather than a clean lock, so there is no ratio to
+    // report and the peak is not evidence of anything.
+    let prominence = if median > 0.0 { peak_val / median } else { 0.0 };
+    if median > 0.0 && prominence < MIN_PROMINENCE {
+        return DelayEstimate {
+            lag: None,
+            prominence,
+        };
     }
 
     // Earliest local maximum within DIRECT_PEAK_FRACTION of the strongest —
@@ -307,7 +349,10 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
         })
         .unwrap_or(peak_idx);
 
-    Some(direct_idx as i64 - max_lag as i64)
+    DelayEstimate {
+        lag: Some(direct_idx as i64 - max_lag as i64),
+        prominence,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +372,7 @@ pub fn h1_estimate(ref_sig: &[f32], meas: &[f32], sr: u32) -> TransferResult {
     // path did before any delay was measurable, and a wrong lag is worse
     // than none. Callers that must know a lock failed use
     // [`estimate_delay_samples`] directly.
-    let delay_samples = estimate_delay(&r, &m, sr).unwrap_or(0);
+    let delay_samples = estimate_delay(&r, &m, sr).lag.unwrap_or(0);
     h1_estimate_core(&r, &m, sr, delay_samples)
 }
 
@@ -997,6 +1042,41 @@ mod tests {
             any_refusal,
             "the sweep never refused — it does not reach the noise-limited end"
         );
+    }
+
+    /// A refusal must still report the prominence it refused on. A bare
+    /// "refused" cannot distinguish "move the microphone" from "the
+    /// threshold is wrong", and the rig session is what sets that threshold
+    /// — so a session that never locks still has to yield the measurement.
+    #[test]
+    fn refusal_reports_the_prominence_it_refused_on() {
+        let sig = white_noise(N, 0.5, 42);
+
+        // Uncorrelated: refused, and the prominence is the ripple ceiling —
+        // the quantity NOISE_FLOOR_PROMINENCE is set against.
+        let e = estimate_delay_detailed(&sig, &white_noise(N, 0.5, 99), SR);
+        assert!(e.lag.is_none(), "expected a refusal, got {:?}", e.lag);
+        assert!(
+            e.prominence > 1.0 && e.prominence < MIN_PROMINENCE,
+            "uncorrelated prominence {} should sit above 1 and below the {MIN_PROMINENCE} gate",
+            e.prominence
+        );
+
+        // A clean arrival: locked, and far above the gate.
+        let mut meas = vec![0.0f32; N];
+        add_delayed(&mut meas, &sig, 512, 1.0);
+        let e = estimate_delay_detailed(&sig, &meas, SR);
+        assert_eq!(e.lag, Some(512));
+        assert!(
+            e.prominence > MIN_PROMINENCE,
+            "clean arrival prominence {} should clear the {MIN_PROMINENCE} gate",
+            e.prominence
+        );
+
+        // A silent leg forms no correlation at all, so there is no ratio.
+        let e = estimate_delay_detailed(&sig, &vec![0.0f32; N], SR);
+        assert_eq!(e.lag, None);
+        assert_eq!(e.prominence, 0.0);
     }
 
     /// The clean single-peak case the whole existing suite is made of must

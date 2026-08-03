@@ -596,6 +596,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
         let mut next_delay_attempt: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
+        // Peak-to-median prominence from the most recent attempt, locked or
+        // refused. Published so a session that never locks still says how far
+        // short it fell — the estimator's one empirical constant is set from
+        // this distribution, and a bare "refused" would not measure it.
+        let mut pair_prominence: Vec<Option<f64>> = vec![None; pairs.len()];
+
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
         // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
         // channel has no SPL calibration layer; `spl` stays `null` for
@@ -738,12 +744,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 }
                 let (mi, ri) = pair_idx[i];
                 if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
-                    pair_delays[i] = ac_core::visualize::transfer::estimate_delay_samples(
+                    let est = ac_core::visualize::transfer::estimate_delay_detailed(
                         refb.as_slice(),
                         meas.as_slice(),
                         sr,
                     );
-                    if pair_delays[i].is_none() {
+                    pair_delays[i] = est.lag;
+                    pair_prominence[i] = Some(est.prominence);
+                    if est.lag.is_none() {
                         next_delay_attempt[i] = Some(now + RELOCK_RETRY);
                     }
                 }
@@ -818,11 +826,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .enumerate()
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
+                .zip(pair_prominence.par_iter())
                 .zip(pair_meas_curves.par_iter())
                 .zip(pair_meas_cals.par_iter())
                 .zip(pair_ref_cals.par_iter())
                 .filter_map(
-                    |((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
+                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), &prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -1080,6 +1089,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
+                            "delay_prominence": prom_opt,
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,
