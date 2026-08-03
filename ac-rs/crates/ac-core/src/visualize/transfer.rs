@@ -114,18 +114,40 @@ fn welch_all(
     (gxx, gyy, gxy)
 }
 
-/// Minimum peak-to-median ratio of the normalized cross-correlation for a
-/// lock to be accepted (#227).
+/// Peak-to-median ratio below which a correlation peak is indistinguishable
+/// from noise, so no lag may be *selected* at or under it (#227).
 ///
 /// For two uncorrelated signals the global maximum of |ρ| over `L` lags sits
 /// at roughly `sqrt(2·ln 2L) / 0.6745 ≈ 7×` the median — near-independent of
 /// capture length, because peak and median both scale as `1/√N`. Measured
 /// over 40 independent uncorrelated pairs at this capture length the worst
-/// case was 7.73, so 12 clears the observed ceiling by 1.55× while staying
-/// far below what any genuinely correlated path produces: the reverberant
-/// fixture below, whose direct arrival loses the global maximum to a
-/// reflection, still reaches 380×.
-const MIN_PROMINENCE: f64 = 12.0;
+/// case was 7.73, so 12 clears the observed ceiling by 1.55×.
+const NOISE_FLOOR_PROMINENCE: f64 = 12.0;
+
+/// Prominence the strongest peak must reach for the estimate to be accepted
+/// at all (#227).
+///
+/// This is **not** the same question as [`NOISE_FLOOR_PROMINENCE`], and the
+/// two were briefly conflated, which cost a silent reintroduction of the bug
+/// this function exists to fix. Accepting a lock requires more than "the peak
+/// is not noise": it requires enough headroom that the earliest-peak rule
+/// below can still *operate*. The candidate floor is
+/// `max(DIRECT_PEAK_FRACTION x peak, NOISE_FLOOR_PROMINENCE x median)`, so
+/// whenever the peak's prominence falls under
+/// `NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION` the noise term wins, the
+/// floor climbs above the fraction, and only the global maximum itself can
+/// qualify — silently degenerating to exactly the global-maximum rule this
+/// change replaced. Measured in that zone: a direct arrival at 0.625 of the
+/// reflection that beats it, prominence 14.95, floor 0.803 x peak, and the
+/// estimator returned the reflection.
+///
+/// Setting the gate to `NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION`
+/// removes the zone by construction — above it the fraction always binds and
+/// the earliest-peak rule always has authority. The cost is refusing in a
+/// band where a correct lock was sometimes available; that trade is the
+/// issue's own acceptance criterion, which demands a correct lock or an
+/// explicit refusal and admits nothing in between.
+const MIN_PROMINENCE: f64 = NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION;
 
 /// Fraction of the strongest correlation peak that an *earlier* peak must
 /// reach to be taken as the direct arrival instead (#227).
@@ -136,10 +158,10 @@ const MIN_PROMINENCE: f64 = 12.0;
 /// reverberant fixture's direct arrival sits at 0.69 of the reflection that
 /// beats it.
 ///
-/// This fraction alone does **not** keep noise out: at the [`MIN_PROMINENCE`]
-/// gate, half the peak is 6× the median while uncorrelated ripple reaches
-/// ~7.7×. The candidate is therefore gated on the absolute floor as well —
-/// see `estimate_delay`.
+/// This fraction alone does **not** keep noise out — half of a barely-
+/// prominent peak still lands in the ripple — so the candidate is gated on
+/// [`NOISE_FLOOR_PROMINENCE`] as well, and [`MIN_PROMINENCE`] is derived from
+/// the two so the fraction always binds. See `estimate_delay`.
 const DIRECT_PEAK_FRACTION: f64 = 0.5;
 
 /// Delay estimation via FFT-based cross-correlation. Exposed so callers that
@@ -267,16 +289,16 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
     // strongest peak itself otherwise.
     //
     // The candidate must clear *both* bars: within 6 dB of the strongest
-    // peak, and prominent against the noise floor in its own right. The
-    // second is not redundant. `peak_val * DIRECT_PEAK_FRACTION` alone drops
-    // below the uncorrelated ripple ceiling (~7x the median) whenever the
-    // global peak's own prominence is under ~14, so a lock accepted at the
-    // 12x gate could still select a noise ripple that happened to fall
-    // earlier than the true arrival — reintroducing exactly the confident
-    // wrong lag this function exists to prevent, in a narrow SNR band.
-    // Gating the candidate on the same absolute floor decouples the two
-    // constants: no admissible value of one can undermine the other.
-    let threshold = (peak_val * DIRECT_PEAK_FRACTION).max(median * MIN_PROMINENCE);
+    // peak, and above the noise floor in its own right. Neither is redundant.
+    // Without the second, `peak_val * DIRECT_PEAK_FRACTION` drops into the
+    // uncorrelated ripple for a barely-prominent peak, and a noise ripple
+    // falling earlier than the true arrival wins the search. Without the
+    // first, a reflection is indistinguishable from the direct sound.
+    //
+    // The `MIN_PROMINENCE` gate above guarantees the fraction is the binding
+    // term here — see its doc comment for why the reverse case degenerates to
+    // a plain global maximum.
+    let threshold = (peak_val * DIRECT_PEAK_FRACTION).max(median * NOISE_FLOOR_PROMINENCE);
     let direct_idx = (0..=peak_idx)
         .find(|&i| {
             mag[i] >= threshold
@@ -915,6 +937,61 @@ mod tests {
         assert!(
             any_lock,
             "the sweep never locked — it does not test the gate"
+        );
+        assert!(
+            any_refusal,
+            "the sweep never refused — it does not reach the noise-limited end"
+        );
+    }
+
+    /// Reflection rejection must not quietly switch itself off as SNR falls.
+    ///
+    /// Geometry is held fixed — the direct arrival always sits at 0.625 of
+    /// the reflection that beats it — and only the noise floor is swept. The
+    /// earlier `max(0.5 x peak, 12 x median)` candidate floor rose above that
+    /// 0.625 ratio once the global peak's prominence fell under ~19, so the
+    /// direct arrival stopped qualifying and the estimator returned the
+    /// reflection: prominence 14.95, floor 0.803 x peak, lock at 1455 instead
+    /// of 283. That is #227's original failure, reappearing silently at the
+    /// low-SNR end, and it is why `MIN_PROMINENCE` is derived from the other
+    /// two constants rather than chosen.
+    ///
+    /// The invariant is the issue's own acceptance criterion: a correct lock
+    /// or an explicit refusal, never a third thing.
+    #[test]
+    fn reflection_rejection_survives_falling_snr() {
+        let sig = white_noise(N, 0.5, 42);
+        let direct = 283usize;
+        let reflection = 1_455usize;
+
+        let mut any_lock = false;
+        let mut any_refusal = false;
+        for noise_scale in [0.0_f32, 4.0, 8.0, 16.0, 24.0, 32.0, 40.0, 64.0] {
+            let mut meas = if noise_scale > 0.0 {
+                white_noise(N, (0.5 * noise_scale) as f64, 77)
+            } else {
+                vec![0.0f32; N]
+            };
+            add_delayed(&mut meas, &sig, direct, 0.50);
+            add_delayed(&mut meas, &sig, reflection, 0.80);
+
+            match estimate_delay_samples(&sig, &meas, SR) {
+                Some(d) => {
+                    any_lock = true;
+                    assert!(
+                        (d - direct as i64).abs() < SUB_MS,
+                        "noise x{noise_scale}: locked to {d} samples — the direct \
+                         arrival is at {direct} and the reflection at {reflection}; \
+                         returning the reflection is the failure #227 exists to fix, \
+                         and refusing would have been correct"
+                    );
+                }
+                None => any_refusal = true,
+            }
+        }
+        assert!(
+            any_lock,
+            "the sweep never locked — it does not test the rule"
         );
         assert!(
             any_refusal,
