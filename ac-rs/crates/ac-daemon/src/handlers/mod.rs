@@ -229,6 +229,19 @@ pub(super) fn resolve_input(cfg: &Config, state: &ServerState) -> Result<String,
         .ok_or_else(|| out_of_range("capture", cfg.input_channel, &ports))
 }
 
+/// Error for a sticky port name that is set but gated off by a missing
+/// channel, so it would be read, ignored, and never mentioned.
+///
+/// #225 was a configured value silently doing the wrong thing. Accepting an
+/// explicitly-set port that has no effect is the same failure in a new place,
+/// so both gated legs refuse it rather than resolving past it.
+fn orphaned_sticky(port_key: &str, channel_key: &str) -> String {
+    format!(
+        "{port_key} is set but {channel_key} is not, so the port would be ignored — \
+         set {channel_key}, or clear {port_key}"
+    )
+}
+
 /// Resolve the reference *input* port.
 ///
 /// `Ok(None)` means no reference channel is configured, which is a legitimate
@@ -241,6 +254,14 @@ pub(super) fn resolve_ref_input(
     state: &ServerState,
 ) -> Result<Option<String>, String> {
     let Some(ch) = cfg.reference_channel else {
+        // A sticky port with no channel is not "no reference configured" — it
+        // is a configured value with no effect. `test_hardware`/`test_dut`
+        // admit this config (their guard passes on either field) and would
+        // then measure single-ended against the measurement input while the
+        // operator believed the named port was wired in.
+        if cfg.reference_port.is_some() {
+            return Err(orphaned_sticky("reference_port", "reference_channel"));
+        }
         return Ok(None);
     };
     if let Some(p) = &cfg.reference_port {
@@ -254,16 +275,76 @@ pub(super) fn resolve_ref_input(
         .ok_or_else(|| out_of_range("capture", ch, &ports))
 }
 
-/// Resolve the reference *output* port, falling back to the main output when
-/// no reference channel is configured.
+/// Fires the stderr half of [`ref_output_migration_warning`] once per process.
+static REF_OUTPUT_MIGRATION_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Warning for a config whose *meaning* changed with #225: one that sets
+/// `reference_channel` and nothing else.
 ///
-/// Only the *unconfigured* case falls back. A configured-but-out-of-range
-/// reference channel is an error: silently emitting the reference stimulus on
-/// the main output is a drive-path hazard, not a graceful degradation.
+/// Before #225, that config drove the reference stimulus out
+/// `playback[reference_channel]`. Now it leaves on the main output, because the
+/// reference output leg has its own index and this one is unset. On a rig where
+/// the loopback source happened to sit at that playback index, the old code was
+/// accidentally right, and the upgrade moves the drive off it — the loopback
+/// goes silent, which is the very failure #225 exists to fix.
+///
+/// Defaulting the output index from the input index is not available as a
+/// remedy: deriving one from the other *is* the bug. So the change is announced
+/// instead.
+///
+/// **The warning is a stopgap, not the fix.** It reaches a CLI user through the
+/// reply's `warnings` array and a daemon operator through stderr — and an
+/// `ac-view` user through neither. What catches this condition at runtime is
+/// #228's `NO REFERENCE` state (driving, reference leg at the floor), which
+/// observes the symptom instead of predicting it from config shape. Do not read
+/// the presence of this warning as the case being covered.
+///
+/// The text is returned on every call, so a client that connects later still
+/// receives it; only the stderr line is deduplicated, so a long-running daemon
+/// does not repeat it for every session.
+pub(super) fn ref_output_migration_warning(cfg: &Config) -> Option<String> {
+    let ref_ch = cfg.reference_channel?;
+    if cfg.reference_output_channel.is_some() {
+        return None;
+    }
+    let text = format!(
+        "reference_output_channel is not set, so the reference stimulus leaves on the main \
+         output. Before #225 this config drove it out playback[{ref_ch}] — if that is where \
+         the loopback source is wired, run: ac setup refout {ref_ch}"
+    );
+    if !REF_OUTPUT_MIGRATION_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("warning: {text}");
+    }
+    Some(text)
+}
+
+/// Resolve the reference *output* port, falling back to the main output when
+/// no reference output channel is configured.
+///
+/// Resolves from `reference_output_channel`, a playback index. It used to
+/// resolve from `reference_channel` — a *capture* index — so on any rig where
+/// the loopback source and the reference capture sat at different indices, the
+/// daemon opened and drove a playback port nothing was patched to and the
+/// reference leg stayed at digital silence (#225). The two index spaces are
+/// unrelated; neither is derived from the other in either direction.
+///
+/// Only the *fully* unconfigured case falls back. A configured-but-out-of-range
+/// channel is an error — silently emitting the reference stimulus on the main
+/// output is a drive-path hazard, not a graceful degradation — and so is a
+/// sticky port with no channel to gate it (see [`orphaned_sticky`]).
 pub(super) fn resolve_ref_output(cfg: &Config, state: &ServerState) -> Result<String, String> {
-    let Some(ch) = cfg.reference_channel else {
+    let Some(ch) = cfg.reference_output_channel else {
+        if cfg.reference_output_port.is_some() {
+            return Err(orphaned_sticky(
+                "reference_output_port",
+                "reference_output_channel",
+            ));
+        }
         return resolve_output(cfg, state);
     };
+    if let Some(p) = &cfg.reference_output_port {
+        return Ok(p.clone());
+    }
     let ports = cached_playback_ports(state);
     ports
         .get(ch as usize)
