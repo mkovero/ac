@@ -163,6 +163,16 @@ Falsify any fix against Run 1's data shape: it must turn the 22.8 / 30.3 /
 
 ### #228 — becomes load-bearing, and gains the full state set
 
+> **Built as PR #234, 2026-08-03.** Two things below changed in the building.
+> The `LOST LOCK` row's discriminator is **superseded**: it reads #227's
+> `delay_locked` rather than "HF collapsed, LF fine", so the 0.715/0.05
+> figures are no longer a threshold (they remain the evidence that motivated
+> the issue). And the drive gate turned out to cover the two level rows only —
+> a refusal on a `drivable: false` session is still a fault, and less
+> recoverable than one on a driving session. Everything else in this section
+> was implemented as ratified. Full record: `state-live-spectrum.md`, "The
+> fault indicator (#228), as built".
+
 It now drives the indicator rather than being advisory, so its thresholds
 matter more. It **no longer needs a PPO input**, because PPO is fixed
 (decision 3).

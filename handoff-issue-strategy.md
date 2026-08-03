@@ -38,7 +38,7 @@ Both halves are done. Close it.
 
 ## The cluster, in order
 
-### 1. #225 — reference output leg
+### 1. #225 — reference output leg — **LANDED** (#233, `a14ee4a`)
 
 `resolve_ref_output` resolves the reference **output** from
 `cfg.reference_channel`, which is the reference **input** index everywhere
@@ -50,7 +50,7 @@ lock that cost a whole rig session.
 
 Can run in parallel with anything.
 
-### 2. #228 — the six-state indicator
+### 2. #228 — the six-state indicator — **IMPLEMENTED, GATED** (PR #234)
 
 **Most value per unit of work in the whole set.** It fixes nothing; it makes
 four invisible failures visible.
@@ -68,13 +68,31 @@ Thresholds are specified in `handoff-lock-and-smoothing.md`: absolute
 −80 dBFS floor, never relative between legs, and no coherence threshold
 derived from an electrical loopback.
 
+**Built. Do not merge #234 ahead of #232** — the gate is stated under item 3
+and the design decisions are in `state-live-spectrum.md`, "The fault
+indicator (#228), as built". The short version: `LOST LOCK` reads
+`delay_locked` rather than top-stage coherence, so the issue's own
+0.715/0.05 discriminator is superseded as a threshold while surviving as
+the evidence that motivated the issue.
+
 ### 3. #227 — peak picking
 
 Reduces how often a bad lock happens at all, rather than detecting or
 recovering from one.
 
-Independent of #226 and #228 — different crate, different code — so it can run
-in parallel with them.
+~~Independent of #226 and #228 — different crate, different code — so it can
+run in parallel with them.~~
+
+**Superseded 2026-08-03. #228 waits on #227 landing.** The implementation and
+the rebase can proceed in parallel — and did — but the *merge* cannot. #227
+converts silent wrong locks into refusals, and a refusal is invisible without
+#228: `h1_estimate` falls back to unaligned zero, which collapses HF exactly
+like a bad lock did. A refusing session presents as a blank top end, arguably
+worse for an operator than the confident wrong answer it replaced. #228 is
+what makes #227's improvement legible, so it must be on screen first.
+
+This reverses nothing else in this document: #228 still comes before #226, and
+#227 is still independent of #226.
 
 **It needs new fixtures before it needs a fix.** Every existing headless test
 feeds one unambiguous correlation peak, so none of them can fail on this. At
@@ -127,10 +145,20 @@ under-states high-frequency sensitivity by roughly an order of magnitude.
 
 Disjoint code, safe to run at once:
 
-- **#225** — daemon routing
+- **#225** — daemon routing *(landed, #233)*
 - **#227** — `ac-core` estimator
 - **#229** — `ac-core` + `ac-scene`
 - **#224** — `ac-scene`
+
+Parallel *work* is not parallel *merging*: #227 and #228 touch different
+crates and were built at the same time, but #228 must reach main second. See
+item 3.
+
+**#229 and #224 now collide with #228 in `ac-scene`.** #234 adds a `fault`
+module, one field to `TransferInput`, one to `TransferScene`, and one argument
+to `TransferScene::from_input`. Nothing in the mask, the ticks, or the
+column path moved, so the collision is textual rather than semantic — but
+whichever of the three lands second rebases.
 
 **#226 and #228 are not independent.** Same gates, same indicator, same state.
 Either one work item or strictly sequential — #228 first. Splitting them
