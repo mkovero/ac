@@ -1599,6 +1599,23 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "delay_samples":   <int>,
   "delay_ms":        <float>,
 
+  // Additive (#227) — whether `delay_samples` is a measured lock.
+  "delay_locked":    <bool>,             // false while the pair is still warming
+                                          // up, and when the estimator refused to
+                                          // lock (no sufficiently prominent
+                                          // cross-correlation peak: unpatched
+                                          // reference, dead mic, or two inputs
+                                          // carrying unrelated sources).
+                                          //
+                                          // When false, `delay_samples` is 0 and
+                                          // the pair is measured UNALIGNED — the
+                                          // frame is still valid H₁, just not
+                                          // delay-compensated. Consumers must not
+                                          // read `delay_ms == 0.0` as "no delay":
+                                          // a digital loopback legitimately reads
+                                          // 0.0 (#216), so this flag is the only
+                                          // thing separating the two.
+
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
   "meas_peak_dbfs":  <float> | null,     // 20*log10(max|sample|) over this frame's
@@ -1714,7 +1731,11 @@ toggled on/off in the UI without re-issuing the transfer command.
   "ref_channel":   <int>,
   "meas_channel":  <int>,
   "delay_samples": <int>,
-  "delay_ms":      <float>
+  "delay_ms":      <float>,
+  "delay_locked":  <bool>            // #227 — see transfer_stream above. When
+                                     // false the IR is UNALIGNED, so the peak
+                                     // sits at the true path delay rather than
+                                     // at t=0.
 }
 ```
 

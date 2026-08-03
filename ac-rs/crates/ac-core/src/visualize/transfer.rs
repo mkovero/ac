@@ -119,21 +119,27 @@ fn welch_all(
 ///
 /// For two uncorrelated signals the global maximum of |ρ| over `L` lags sits
 /// at roughly `sqrt(2·ln 2L) / 0.6745 ≈ 7×` the median — near-independent of
-/// capture length, because peak and median both scale as `1/√N`. 12 leaves
-/// margin above that while staying far below what any genuinely correlated
-/// path produces: a reverberant microphone at a poor direct-to-reverberant
-/// ratio still clears it by an order of magnitude.
+/// capture length, because peak and median both scale as `1/√N`. Measured
+/// over 40 independent uncorrelated pairs at this capture length the worst
+/// case was 7.73, so 12 clears the observed ceiling by 1.55× while staying
+/// far below what any genuinely correlated path produces: the reverberant
+/// fixture below, whose direct arrival loses the global maximum to a
+/// reflection, still reaches 380×.
 const MIN_PROMINENCE: f64 = 12.0;
 
 /// Fraction of the strongest correlation peak that an *earlier* peak must
 /// reach to be taken as the direct arrival instead (#227).
 ///
 /// In a live room a reflection can exceed the direct sound, so the global
-/// maximum is the wrong pick — but correlation ripple must not be mistaken
-/// for an early arrival either. 0.5 means "within 6 dB of the strongest
-/// peak", which admits a direct sound losing to its own reverberation while
-/// rejecting the noise floor (which sits ~17 dB below the peak at the
-/// prominence threshold above).
+/// maximum is the wrong pick. 0.5 means "within 6 dB of the strongest peak",
+/// which admits a direct sound losing to its own reverberation — the
+/// reverberant fixture's direct arrival sits at 0.69 of the reflection that
+/// beats it.
+///
+/// This fraction alone does **not** keep noise out: at the [`MIN_PROMINENCE`]
+/// gate, half the peak is 6× the median while uncorrelated ripple reaches
+/// ~7.7×. The candidate is therefore gated on the absolute floor as well —
+/// see `estimate_delay`.
 const DIRECT_PEAK_FRACTION: f64 = 0.5;
 
 /// Delay estimation via FFT-based cross-correlation. Exposed so callers that
@@ -259,7 +265,18 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> Option<i64> {
     // Earliest local maximum within DIRECT_PEAK_FRACTION of the strongest —
     // the direct arrival when a reflection wins the global maximum, and the
     // strongest peak itself otherwise.
-    let threshold = peak_val * DIRECT_PEAK_FRACTION;
+    //
+    // The candidate must clear *both* bars: within 6 dB of the strongest
+    // peak, and prominent against the noise floor in its own right. The
+    // second is not redundant. `peak_val * DIRECT_PEAK_FRACTION` alone drops
+    // below the uncorrelated ripple ceiling (~7x the median) whenever the
+    // global peak's own prominence is under ~14, so a lock accepted at the
+    // 12x gate could still select a noise ripple that happened to fall
+    // earlier than the true arrival — reintroducing exactly the confident
+    // wrong lag this function exists to prevent, in a narrow SNR band.
+    // Gating the candidate on the same absolute floor decouples the two
+    // constants: no admissible value of one can undermine the other.
+    let threshold = (peak_val * DIRECT_PEAK_FRACTION).max(median * MIN_PROMINENCE);
     let direct_idx = (0..=peak_idx)
         .find(|&i| {
             mag[i] >= threshold
@@ -856,6 +873,52 @@ mod tests {
             (d + delay as i64).abs() < SUB_MS,
             "locked to {d} samples, expected {}",
             -(delay as i64)
+        );
+    }
+
+    /// Degrading SNR must move the estimator from *correct* straight to
+    /// *refusing* — never through a band where it returns a confident wrong
+    /// lag. That band is not hypothetical: gating the earliest-peak search on
+    /// `0.5 x peak` alone, the arrival at gain 0.02 (prominence 13.1, just
+    /// inside the 12x accept gate) put the selection floor at 6.5x the median
+    /// while the uncorrelated ripple reached 7.1x, and the estimator locked to
+    /// noise at -11065 samples — a worse answer than the global maximum this
+    /// change replaced, which still had the arrival at 512.
+    ///
+    /// One arrival, fixed geometry, only the level swept: this is the gain
+    /// sweep from the issue, where lock reliability tracked SNR while the
+    /// acoustics were unchanged.
+    #[test]
+    fn degrading_snr_refuses_rather_than_locking_wrong() {
+        let sig = white_noise(N, 0.5, 42);
+        let delay = 512;
+
+        let mut any_lock = false;
+        let mut any_refusal = false;
+        for gain in [0.05_f32, 0.03, 0.025, 0.02, 0.018, 0.015, 0.01, 0.005] {
+            let mut meas = white_noise(N, 0.5, 77);
+            add_delayed(&mut meas, &sig, delay, gain);
+            match estimate_delay_samples(&sig, &meas, SR) {
+                Some(d) => {
+                    any_lock = true;
+                    assert!(
+                        (d - delay as i64).abs() < SUB_MS,
+                        "gain {gain}: locked to {d} samples ({:.1} ms) — a confident \
+                         wrong lag is the failure this estimator exists to prevent; \
+                         refusing would have been correct",
+                        d as f64 / SR as f64 * 1000.0
+                    );
+                }
+                None => any_refusal = true,
+            }
+        }
+        assert!(
+            any_lock,
+            "the sweep never locked — it does not test the gate"
+        );
+        assert!(
+            any_refusal,
+            "the sweep never refused — it does not reach the noise-limited end"
         );
     }
 

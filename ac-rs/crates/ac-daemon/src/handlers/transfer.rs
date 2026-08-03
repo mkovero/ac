@@ -841,6 +841,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             .flatten()
                             .map(Value::from)
                             .unwrap_or(Value::Null);
+                        // An unlocked pair (still warming up, or refused by the
+                        // prominence gate — #227) is measured unaligned rather
+                        // than aligned to a guess. `delay_locked` below is what
+                        // keeps that distinguishable on the wire: a refused pair
+                        // and a genuine 0-sample digital loopback both report
+                        // `delay_ms` 0.0, and #216 established that the loopback
+                        // case is legitimately 0.0, so the number alone cannot
+                        // carry the difference.
                         let delay = delay_opt.unwrap_or(0);
                         let result = ac_core::visualize::transfer::h1_estimate_with_delay(
                             refb, meas, sr, delay,
@@ -1071,6 +1079,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "im":              im,
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
+                            "delay_locked":    delay_opt.is_some(),
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,
@@ -1130,6 +1139,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 "meas_channel": meas_ch,
                                 "delay_samples": result.delay_samples,
                                 "delay_ms":     result.delay_ms,
+                                "delay_locked": delay_opt.is_some(),
                             }))
                         };
                         let mut out = vec![transfer_msg];
