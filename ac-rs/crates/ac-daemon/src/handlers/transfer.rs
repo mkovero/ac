@@ -109,6 +109,41 @@ fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
     Some(20.0 * (peak as f64).log10())
 }
 
+/// Leading fraction of a lock ring that must already carry signal before the
+/// ring is worth correlating. See [`ring_straddles_an_onset`].
+const ONSET_GUARD_FRACTION: f64 = 0.125;
+
+/// "Carrying signal" for the onset guard, in dBFS. The same absolute,
+/// generous floor the fault indicator uses — this is separating a leg that is
+/// digitally silent from one that is running, not judging level.
+const ONSET_GUARD_FLOOR_DBFS: f64 = -80.0;
+
+/// Whether a ring still contains the moment the stimulus started.
+///
+/// A correlation taken across a silence→signal transition is not a
+/// correlation of two running legs: the onset is a broadband transient that
+/// throws ripples across the whole lag range, and it enters the two legs at
+/// different points in the ring. Rig session 2 locked to one of those ripples
+/// at −826 ms, at prominence 31.8, while the true arrival sat at +4.52 ms —
+/// the estimator now refuses that lag on causality, but refusing late is
+/// worse than not attempting: the attempt burns a retry and, if a ripple
+/// happens to fall at a positive lag, causality will not catch it.
+///
+/// The test is deliberately crude. It asks only whether the *oldest* part of
+/// the ring is digitally silent while the ring as a whole is not, which is
+/// exactly the shape of a stimulus that started mid-ring. A leg that is
+/// simply quiet sits far above this floor, and a leg that is silent
+/// throughout is a `NO REFERENCE` / `NO SIGNAL` condition the estimator's own
+/// refusal already reports.
+fn ring_straddles_an_onset(ring: &[f32]) -> bool {
+    let lead = ((ring.len() as f64) * ONSET_GUARD_FRACTION) as usize;
+    if lead == 0 {
+        return false;
+    }
+    let live = |b: &[f32]| raw_peak_dbfs(b).is_some_and(|p| p > ONSET_GUARD_FLOOR_DBFS);
+    live(ring) && !live(&ring[..lead])
+}
+
 pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
     let drive = {
         let slot = state.drive_state.lock().unwrap();
@@ -769,6 +804,17 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 }
                 let (mi, ri) = pair_idx[i];
                 if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
+                    // Not across a stimulus onset — wait for a ring made
+                    // entirely of running signal, and retry on the normal
+                    // cadence. Nothing is published for this attempt: it did
+                    // not happen, and a refusal record would say the
+                    // correlation was tried and failed.
+                    if ring_straddles_an_onset(refb.as_slice())
+                        || ring_straddles_an_onset(meas.as_slice())
+                    {
+                        next_delay_attempt[i] = Some(now + RELOCK_RETRY);
+                        continue;
+                    }
                     let est = ac_core::visualize::transfer::estimate_delay_detailed(
                         refb.as_slice(),
                         meas.as_slice(),
@@ -784,6 +830,10 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         "peak_lag":     est.peak_lag,
                         "peak_value":   est.peak_value,
                         "median_value": est.median_value,
+                        // Uncontaminated noise floor for the offline
+                        // re-thresholding experiment; see
+                        // DelayEstimate::negative_lag_median.
+                        "negative_lag_median": est.negative_lag_median,
                         "candidates":   est.candidates.iter()
                             .map(|c| json!({"lag": c.lag, "value": c.value}))
                             .collect::<Vec<_>>(),
@@ -1462,6 +1512,42 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guard fires on the shape it names — silence, then signal — and on
+    /// nothing else. A quiet-but-running leg and a leg silent throughout are
+    /// both other people's conditions.
+    #[test]
+    fn the_onset_guard_fires_only_while_a_ring_straddles_the_onset() {
+        let n = 8000;
+        let tone = |i: usize, amp: f32| amp * ((i as f32) * 0.1).sin();
+
+        // Stimulus starts a quarter of the way in — past the leading eighth
+        // this looks like a running session, which is why the guard reads the
+        // oldest part and not the whole.
+        let mut straddling = vec![0.0f32; n];
+        for (i, s) in straddling.iter_mut().enumerate().skip(n / 4) {
+            *s = tone(i, 0.5);
+        }
+        assert!(ring_straddles_an_onset(&straddling));
+
+        // Running throughout, and 60 dB down: quiet is not an onset.
+        let quiet: Vec<f32> = (0..n).map(|i| tone(i, 0.001)).collect();
+        assert!(!ring_straddles_an_onset(&quiet));
+
+        // Silent throughout: the estimator refuses on its own evidence and
+        // the fault indicator names the dead leg. Not this guard's call.
+        assert!(!ring_straddles_an_onset(&vec![0.0f32; n]));
+
+        // Onset already older than the ring's leading eighth — the ring is
+        // all running signal now, so the lock may proceed.
+        let mut settled = vec![0.0f32; n];
+        for (i, s) in settled.iter_mut().enumerate().skip(n / 16) {
+            *s = tone(i, 0.5);
+        }
+        assert!(!ring_straddles_an_onset(&settled));
+
+        assert!(!ring_straddles_an_onset(&[]));
+    }
 
     #[test]
     fn parse_pairs_multi() {

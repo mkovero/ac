@@ -1631,6 +1631,16 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // reference, dead mic, or two inputs
                                           // carrying unrelated sources).
                                           //
+                                          // Also false when the correlation is
+                                          // strongest at a NEGATIVE lag. The mic
+                                          // cannot lead the electrical reference,
+                                          // so that is ring skew (#216) or a
+                                          // stimulus-onset ripple, not a path — and
+                                          // `delay_samples` is never negative on an
+                                          // accepted lock. `peak_lag` in the
+                                          // evidence below still names it, so the
+                                          // cause stays diagnosable from a capture.
+                                          //
                                           // When false, `delay_samples` is 0 and
                                           // the pair is measured UNALIGNED — the
                                           // frame is still valid H₁, just not
@@ -1667,10 +1677,29 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // off a reflection.
     "peak_value":   <float>,             // |rho| at peak_lag
     "median_value": <float>,             // median |rho| over the searched lags
+    "negative_lag_median": <float>,      // median |rho| over the NEGATIVE lags only,
+                                          // where a causal path puts no signal at
+                                          // all. `median_value` is taken over every
+                                          // lag, and on a reverberant path most lags
+                                          // hold reverberation — so the floor
+                                          // `prominence` divides by is contaminated
+                                          // by the thing it discriminates against.
+                                          // This one is not. Published so the next
+                                          // session can re-threshold offline; it
+                                          // decides nothing today. 0.0 when the
+                                          // search range holds no negative lags.
     "candidates": [                      // local maxima within 12 dB of the peak,
-      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept.
-    ]                                    // 12 dB is wider than the 6 dB the
-  },                                     // estimator accepts, on purpose: the
+      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept — PLUS
+    ]                                    // `delay_samples` and `peak_lag`, which are
+  },                                     // always present whatever their rank, so a
+                                          // list may hold 34. Rank alone dropped the
+                                          // accepted arrival at 3 m, where it was
+                                          // weaker than 32 peaks of the reverberant
+                                          // cluster: the capture then could not
+                                          // reproduce the daemon's own decision,
+                                          // which is the whole point of recording it.
+                                          // 12 dB is wider than the 6 dB the
+                                          // estimator accepts, on purpose: the
                                           // arrivals that say whether 6 dB is too
                                           // generous are the ones it rejects.
                                           // Sets DIRECT_PEAK_FRACTION — prominence
