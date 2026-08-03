@@ -42,6 +42,14 @@ something stops serving it, cut it.
 - **#225–#230 filed** from the 2026-07-28 acoustic session. #225–#228 are the
   cluster standing between "works with workarounds" and "works"; see
   `handoff-issue-strategy.md` for order.
+- **PR #233 — merged** (`a14ee4a`). #225, the reference output leg. Resolves it
+  from its own playback index instead of `reference_channel`, an input index.
+  Sessions no longer need hand-patching, and the launch reply carries a
+  migration warning for configs written against the old meaning.
+- **PR #234 — open.** #228, the fault indicator. **Must not merge ahead of
+  #232** — see the gate below. New `ac-scene::fault` module holds the
+  six-state table; `TransferScene` carries the row and `ac-view` draws it
+  verbatim. Workspace green, 826 tests.
 
 ## What #218 changed in the rework
 
@@ -175,6 +183,82 @@ documented**, not engineered away — moving crossovers cannot help.
 bins-per-column. Two models of their combination have been wrong. Tables and
 reasoning: `design-mtw-ladder.md`, "coherence depth — measured, not modelled".
 
+## The fault indicator (#228), as built
+
+PR #234. `ac-scene::fault` holds the table as a pure state machine plus a
+little carried time state; `TransferScene.fault` carries the row out and
+`ac-view` draws label and detail verbatim, so `computes_nothing` still holds.
+
+**Merge order is a gate, not a preference. #234 must not land before #232.**
+#227 converts silent wrong locks into refusals, and a refusal is invisible
+without #228: `h1_estimate` falls back to unaligned zero, which collapses HF
+exactly like a bad lock did. Landing #227 alone turns a confident wrong answer
+into a blank top end, which is arguably worse for an operator. #234 is built
+on `main`, not on #232 — only the order is gated.
+
+**A lock fault is read, not inferred.** The issue's own discriminator — "both
+legs live, HF collapsed, LF fine", stage 0 at 0.05 against 0.715–0.755 —
+is **superseded**, along with those figures as thresholds. They were derived
+when refusal did not exist and the only evidence of a bad lock was its
+downstream effect. #227 makes the estimator say so itself, so the indicator
+reads `delay_locked`: coherence is the symptom, the flag is the cause. This
+also removes the hardest threshold in the set, since stage 0 sits at 0.755
+legitimately in a live room (Run 7).
+
+The figures stay valid as *evidence* — they are what established that a bad
+lock is diagnosable at all. They are no longer what the code keys on.
+
+**The dead-DUT ambiguity dissolves rather than being solved.** The issue asks
+how to separate "your alignment is wrong" from "your device has no high end",
+and proposes re-estimating the delay. Reading `delay_locked` sidesteps it
+entirely: a low-passed DUT still produces a prominent correlation peak, so it
+locks, so no lock row fires. Nothing in #228 needs the re-estimate, which
+leaves it to #226 to build for its own reasons.
+
+| quantity | value | why |
+|---|---|---|
+| "at the floor" | −80 dBFS, absolute | Never relative — the rig's own legs differ by 15 dB on a valid session. |
+| "coherence dead" | every column < 0.5 | Reuses the display's own `COHERENCE_THRESHOLD` (D5). Not loopback-derived, not a second tunable. |
+| ladder settled | observed | `mtw` presence, not a timer. 2.560 s is recorded as the design figure only. |
+| persistent refusal | 10 s past settle | ~10 of #227's 1 Hz retries. Desk number, **not yet on the rig**. |
+| lock-acquired hold | 3 s | Matches the clip latch's existing hold. |
+
+**Drive state gates the level rows and nothing else.** `NO REFERENCE` and
+`NO SIGNAL` need to know signal should be arriving; the lock rows do not. Two
+legs above the floor are carrying signal whoever put it there, so a refusal on
+a passive external-DUT session (`drivable: false`) is as real as one on a
+driving session and *less* recoverable — the operator cannot resolve it by
+starting the stimulus. The table's first row is about a drivable session
+sitting silent, not about non-drivable sessions generally.
+
+**A detail may name what to check; it may not assert a cause.** A refusal
+means no sufficiently prominent peak, which is equally consistent with an
+off-axis mic, with unrelated sources, and with a path that has nothing to
+correlate. `NO LOCK` therefore reads "check mic placement and routing", not
+"move the mic closer". This matters more after #227 lands, because unrelated
+sources will then arrive through `NO LOCK` rather than through `CHECK ROUTING`
+— which is correct (there genuinely is nothing to correlate) but makes a
+diagnosis-shaped message wrong for that case.
+
+**`CHECK ROUTING` narrows once #232 merges**, to "valid lock, dead coherence
+everywhere". Accepted, not a defect. Before then it is the only routing
+indicator, since `delay_locked` is absent.
+
+**Nothing gates on `delay_prominence`.** `ZMQ.md` reserves its threshold to
+the estimator. Warmup and refusal are separated by observed settling instead,
+which is also why a timer from t=0 was rejected: it would fire the persistent
+message on healthy sessions.
+
+**`delay_locked` is `Option` on the consumer side.** It exists only on #232's
+branch — `ZMQ.md` on `main` does not document it, and a search of `main` finds
+it only in `brief-228-fault-indicator.md`. #234 reads it as an optional field,
+so the lock rows stay dark on today's daemon and light up when #232 merges,
+with no follow-up change. An absent `drive` object disables the indicator
+outright rather than defaulting to "not driving": a daemon that does not
+report its own drive gives no ground for any claim about whether signal should
+be present, and it also predates the capture peaks, whose absence would
+otherwise read as silence.
+
 ## Next
 
 1. **#218 and #222 are MERGED** (`3c73af6`, `bd40ed4`). Main green at 780
@@ -190,6 +274,9 @@ reasoning: `design-mtw-ladder.md`, "coherence depth — measured, not modelled".
    reasoning: `handoff-issue-strategy.md`. In short: #225 (reference output
    leg) and #227 (peak picking) run in parallel; #228 before #226 because it
    builds the gates #226 consumes.
+
+   **#225 has landed** (#233). **#228 is implemented** (#234) and gated on
+   #227 landing first — see below. #226 and #227 remain.
 
    Emission rules unchanged: explicit per-run consent, and the daemon run from
    an isolated `HOME` with a server-side `drive_max_dbfs` clamp. The −40 dBFS
