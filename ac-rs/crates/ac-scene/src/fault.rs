@@ -18,6 +18,19 @@
 //! | both legs live, coherence low everywhere | [`Fault::CheckRouting`] | legs carry different sources |
 //! | after a successful lock | [`Fault::LockAcquired`] | transient confirmation |
 //!
+//! # Drive state gates the level rows and nothing else
+//!
+//! Only the two level rows read the drive: a leg at the floor is a fault
+//! only when something should have been reaching it, which is why the first
+//! row exists and why a session that never drives reports neither of them.
+//!
+//! The lock rows do not read it. Two legs above the floor are carrying
+//! signal whoever put it there, so a refusal on a fully passive external-DUT
+//! session is as real as one on a driving session — and less recoverable,
+//! since the operator cannot resolve it by starting the stimulus. Row 1's
+//! "idle, expected" is about a drivable session sitting silent, not about
+//! non-drivable sessions in general.
+//!
 //! # A lock fault is read, not inferred
 //!
 //! The original table discriminated a bad lock by "both legs live, HF
@@ -117,9 +130,10 @@ pub enum Fault {
     /// succeed, so this says what is happening and no more.
     LostLock,
     /// The estimator has been refusing for longer than
-    /// [`PERSISTENT_REFUSAL_S`]. A mic at 3 m off-axis may never lock, and
-    /// the operator needs to be told to move it rather than left watching a
-    /// message that reads as a passing glitch.
+    /// [`PERSISTENT_REFUSAL_S`]. A mic at 3 m off-axis may never lock, so
+    /// the operator needs somewhere to go rather than a message that reads
+    /// as a passing glitch. See [`Fault::detail`] for why that is a list of
+    /// things to check rather than a diagnosis.
     NoLock,
     /// A lock was just acquired. Held for [`LOCK_ACQUIRED_HOLD_S`].
     LockAcquired,
@@ -141,17 +155,29 @@ impl Fault {
 
     /// The action, where the label alone does not imply one. `None` where
     /// it does, or where there is nothing for the operator to do yet.
+    ///
+    /// **A detail may name what to check; it may not assert a cause.** The
+    /// level rows can afford to be specific — the frame says which leg is at
+    /// the floor, and the table's causes for that leg are established. The
+    /// refusal rows cannot: a refusal means the estimator found no
+    /// sufficiently prominent peak, which is equally consistent with a mic
+    /// too far off-axis, with legs carrying unrelated sources, and with a
+    /// path that genuinely has nothing to correlate. Naming one of those
+    /// would send the operator to the wrong end of the room with the
+    /// display's authority behind it.
     pub fn detail(&self) -> Option<&'static str> {
         match self {
             Fault::NoReference => Some("reference leg silent — check the output patch"),
-            Fault::NoSignal => Some("measurement leg silent — check the mic and its input"),
+            Fault::NoSignal => {
+                Some("measurement leg silent — check the mic, the DUT, and the input")
+            }
             Fault::CheckRouting => Some("the two legs carry unrelated sources"),
-            // Transient by construction: #227 is still retrying, and telling
-            // the operator to move something that is about to lock on its own
-            // is worse than saying nothing. `NoLock` is where the instruction
-            // lives.
+            // Transient by construction: #227 is still retrying, and sending
+            // the operator to check something that is about to lock on its
+            // own is worse than saying nothing. `NoLock` is where the
+            // instruction lives.
             Fault::LostLock => None,
-            Fault::NoLock => Some("move the mic closer or on-axis, or check routing"),
+            Fault::NoLock => Some("check mic placement and routing"),
             Fault::LockAcquired => None,
         }
     }
@@ -327,10 +353,17 @@ impl FaultState {
         }
 
         if ref_dead || meas_dead {
-            // Not driving, and a leg is quiet: idle and expected. This is
-            // also the whole of a non-drivable external-DUT session's
-            // behaviour, which must never be reported as a fault — daemon
-            // silence there says nothing about the inputs.
+            // A quiet leg is only a fault when something should be reaching
+            // it. Not driving: idle and expected — and for a session that is
+            // not drivable at all, daemon silence says nothing about the
+            // inputs, so there is nothing to report either way.
+            //
+            // This gate covers the two level rows and **only** them. Drive
+            // state is not evidence about the lock: two legs both above the
+            // floor are carrying signal whoever put it there, so an
+            // external-DUT session below still gets its lock rows. Arguably
+            // it needs them more than a driving one does, since the operator
+            // cannot resolve it by starting the stimulus.
             if !frame.drive.on {
                 return None;
             }
@@ -503,10 +536,10 @@ mod tests {
         assert_eq!(st.update(&inp, 0.0), None);
     }
 
-    /// A fully passive external-DUT session never drives, so its silence is
-    /// expected and must not be reported as a fault.
+    /// A fully passive external-DUT session never drives, so silence on its
+    /// inputs says nothing and neither level row may fire.
     #[test]
-    fn a_non_drivable_session_is_never_a_fault() {
+    fn a_non_drivable_session_gets_no_level_row() {
         let mut st = FaultState::default();
         let inp = FaultInput {
             frame: Some(FaultFrame {
@@ -522,6 +555,81 @@ mod tests {
             coherence: &[],
         };
         assert_eq!(st.update(&inp, 0.0), None);
+    }
+
+    /// But the lock rows are not about driving. An external-DUT session with
+    /// both legs live and the estimator refusing is a real fault, and one the
+    /// operator cannot resolve by starting the stimulus — so suppressing it
+    /// on `drivable: false` would hide the case that needs it most.
+    #[test]
+    fn a_non_drivable_session_still_gets_its_lock_rows() {
+        let coh = [0.755, 0.92];
+        let mut st = FaultState::default();
+        let inp = FaultInput {
+            frame: Some(FaultFrame {
+                drive: DriveState {
+                    on: false,
+                    drivable: false,
+                },
+                delay_locked: Some(false),
+                settled: true,
+            }),
+            ..healthy(&coh)
+        };
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&inp, PERSISTENT_REFUSAL_S), Some(Fault::NoLock));
+    }
+
+    /// The same for the other two both-legs-live rows: neither reads drive.
+    #[test]
+    fn a_non_drivable_session_still_gets_check_routing_and_the_confirmation() {
+        let dead = [0.1, 0.08];
+        let passive = |delay_locked| FaultFrame {
+            drive: DriveState {
+                on: false,
+                drivable: false,
+            },
+            delay_locked,
+            settled: true,
+        };
+        let mut st = FaultState::default();
+        let inp = FaultInput {
+            frame: Some(passive(Some(true))),
+            ..healthy(&dead)
+        };
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::CheckRouting));
+
+        let coh = [0.755, 0.92];
+        let mut st = FaultState::default();
+        let refusing = FaultInput {
+            frame: Some(passive(Some(false))),
+            ..healthy(&coh)
+        };
+        let locked = FaultInput {
+            frame: Some(passive(Some(true))),
+            ..healthy(&coh)
+        };
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&locked, 1.0), Some(Fault::LockAcquired));
+    }
+
+    /// The refusal rows must not name a cause. A refusal is equally
+    /// consistent with an off-axis mic, with unrelated sources, and with a
+    /// path that has nothing to correlate — which matters more once #227
+    /// lands and unrelated sources reach the operator through `NO LOCK`
+    /// rather than through `CHECK ROUTING`.
+    #[test]
+    fn the_refusal_rows_name_what_to_check_not_why() {
+        let detail = Fault::NoLock.detail().expect("has an instruction");
+        for asserted in ["closer", "on-axis", "unrelated", "too far", "unplugged"] {
+            assert!(
+                !detail.contains(asserted),
+                "NO LOCK's detail asserts a cause it cannot know: {detail:?}"
+            );
+        }
+        // It still has to send the operator somewhere.
+        assert!(detail.contains("mic") && detail.contains("routing"));
+        assert_eq!(Fault::LostLock.detail(), None);
     }
 
     /// The whole reason lock states wait for the ladder: `delay_locked:
