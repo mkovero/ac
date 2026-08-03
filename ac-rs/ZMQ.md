@@ -752,9 +752,28 @@ Lists available JACK/PortAudio ports.
   "output_port":       "<sticky-name>" | null,
   "input_port":        "<sticky-name>" | null,
   "reference_channel": <int> | null,
-  "reference_port":    "<sticky-name>" | null
+  "reference_port":    "<sticky-name>" | null,
+  "reference_output_channel": <int> | null,
+  "reference_output_port":    "<sticky-name>" | null
 }
 ```
+
+`reference_channel` / `reference_port` index the **capture** list;
+`reference_output_channel` / `reference_output_port` index the **playback**
+list. They are independent settings — neither is derived from the other.
+
+### `warnings` (optional, any reply)
+
+A successful reply may carry `"warnings": ["<text>", ...]` — advisories that do
+not make the command fail. `transfer_stream`, `test_hardware` and `test_dut`
+emit one when `reference_channel` is set and `reference_output_channel` is not:
+before #225 that config drove the reference stimulus out
+`playback[reference_channel]`, and it now leaves on the main output, so a rig
+whose loopback sat at that index worked before and does not now.
+
+The field is absent, never an empty array, when there is nothing to say. It is
+repeated on every reply rather than sent once, so a client connecting to an
+already-running daemon still receives it.
 
 On error (e.g. JACK not running):
 ```json
@@ -779,7 +798,9 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
   "update": {
     "output_channel":    <int>,     // optional
     "input_channel":     <int>,     // optional
-    "reference_channel": <int>,     // optional
+    "reference_channel": <int>,     // optional — capture index
+    "reference_output_channel": <int> | null,  // optional — playback index;
+                                    //   null = reference leaves on the main output
     "dbu_ref_vrms":      <float>,   // optional
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
@@ -790,8 +811,11 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
 }
 ```
 
-When `output_channel`, `input_channel`, or `reference_channel` is updated,
-the server resolves and stores the sticky port name automatically.
+When `output_channel`, `input_channel`, `reference_channel`, or
+`reference_output_channel` is updated, the server clears that leg's sticky
+port name so the new channel takes effect; the port is re-resolved on next
+use. Updating `reference_channel` never moves the reference *output* leg, and
+vice versa.
 
 **Reply**
 ```json

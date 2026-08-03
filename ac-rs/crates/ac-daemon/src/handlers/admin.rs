@@ -81,6 +81,8 @@ pub fn devices(state: &ServerState) -> Value {
         "input_port":        cfg.input_port,
         "reference_channel": cfg.reference_channel,
         "reference_port":    cfg.reference_port,
+        "reference_output_channel": cfg.reference_output_channel,
+        "reference_output_port":    cfg.reference_output_port,
     })
 }
 
@@ -112,6 +114,18 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
         } else if let Some(n) = v.as_u64() {
             cfg.reference_channel = Some(n as u32);
             cfg.reference_port = None;
+        }
+    }
+    // The reference *output* leg is a playback index and is configured
+    // separately from `reference_channel` (#225) — updating one must never
+    // move the other.
+    if let Some(v) = update.get("reference_output_channel") {
+        if v.is_null() {
+            cfg.reference_output_channel = None;
+            cfg.reference_output_port = None;
+        } else if let Some(n) = v.as_u64() {
+            cfg.reference_output_channel = Some(n as u32);
+            cfg.reference_output_port = None;
         }
     }
     if let Some(v) = update.get("dbu_ref_vrms").and_then(Value::as_f64) {

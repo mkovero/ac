@@ -128,6 +128,15 @@ pub fn check_ack(ack: Option<serde_json::Value>, context: &str) -> serde_json::V
                 eprintln!("  error: {err}");
                 std::process::exit(1);
             }
+            // A successful reply may still carry advisories — a config whose
+            // meaning changed under it, say (#225). Printed generically here
+            // rather than per command, so a handler that adds one does not
+            // also have to remember to display it.
+            if let Some(ws) = v.get("warnings").and_then(|w| w.as_array()) {
+                for w in ws.iter().filter_map(|w| w.as_str()) {
+                    eprintln!("  warning: {w}");
+                }
+            }
             v
         }
     }

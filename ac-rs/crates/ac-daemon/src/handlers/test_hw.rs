@@ -13,9 +13,9 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output,
-    resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, std_dev,
-    TestResult,
+    analyze_mono, busy_guard, capture_rms, read_dmm_vrms, ref_output_migration_warning,
+    resolve_input, resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
+    spawn_worker, std_dev, TestResult,
 };
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
@@ -190,13 +190,20 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("test_hardware".to_string(), worker);
     }
-    json!({
+    let mut reply = json!({
         "ok": true,
         "out_port":     out_port_r,
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
-    })
+    });
+    // #225 migration notice — present on every reply, not just the first, so a
+    // client that connects later still sees it. Omitted entirely when it does
+    // not apply, so `warnings` is never an empty array a reader must interpret.
+    if let Some(w) = ref_output_migration_warning(&cfg) {
+        reply["warnings"] = json!([w]);
+    }
+    reply
 }
 
 // ---- Hardware tests ----

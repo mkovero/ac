@@ -29,6 +29,8 @@ pub fn run(client: &mut AcClient) {
     let in_sticky = ack.get("input_port").and_then(|v| v.as_str());
     let ref_ch = ack.get("reference_channel").and_then(|v| v.as_u64());
     let ref_sticky = ack.get("reference_port").and_then(|v| v.as_str());
+    let ref_out_ch = ack.get("reference_output_channel").and_then(|v| v.as_u64());
+    let ref_out_sticky = ack.get("reference_output_port").and_then(|v| v.as_str());
 
     let port_str = |arr: &[serde_json::Value], i: usize| -> String {
         arr.get(i)
@@ -79,6 +81,16 @@ pub fn run(client: &mut AcClient) {
             _ => String::new(),
         };
         println!("               ref    ch {rch}  ->  {ref_name}{ref_suf}");
+    }
+    // The reference *output* is a playback index (#225): it is listed against
+    // the playback ports, never against the capture list `ref` resolves in.
+    if let Some(roch) = ref_out_ch {
+        let ref_out_name = port_str(&playback, roch as usize);
+        let ref_out_suf = match ref_out_sticky {
+            Some(s) if s != ref_out_name.as_str() => format!("  ->  {s}"),
+            _ => String::new(),
+        };
+        println!("               refout ch {roch}  ->  {ref_out_name}{ref_out_suf}");
     }
 
     println!("\n  Playback:");

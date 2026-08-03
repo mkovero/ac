@@ -13,7 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, read_dmm_vrms, resolve_output, resolve_ref_output, send_pub, spawn_worker,
+    busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output, resolve_ref_output,
+    send_pub, spawn_worker,
 };
 
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
@@ -1243,7 +1244,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("transfer_stream".to_string(), worker);
     }
-    json!({
+    let mut reply = json!({
         "ok":           true,
         "out_port":     out_port_r,
         "meas_port":    meas_port_r,
@@ -1252,7 +1253,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // Legacy fields — filled with the first pair so old clients keep working.
         "meas_channel": pairs_r.first().map(|p| p.0).unwrap_or(0),
         "ref_channel":  pairs_r.first().map(|p| p.1).unwrap_or(0),
-    })
+    });
+    // #225 migration notice — see `ref_output_migration_warning`. Repeated on
+    // every launch reply rather than once, so a client that connects to an
+    // already-running daemon still sees it.
+    if let Some(w) = ref_output_migration_warning(&cfg) {
+        reply["warnings"] = json!([w]);
+    }
+    reply
 }
 
 pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
