@@ -32,13 +32,15 @@
 //! rather than re-deriving it from the window coefficients again.
 
 pub mod dbfs;
+pub mod fault;
 pub mod readout;
 pub mod scene;
 pub mod ticks;
 pub mod transfer;
 pub mod wire;
 
+pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use ticks::{Axis, Tick};
 pub use transfer::{DerotMode, Meter, MeterState, TransferInput, TransferScene};
-pub use wire::WireFrame;
+pub use wire::{WireDrive, WireFrame};

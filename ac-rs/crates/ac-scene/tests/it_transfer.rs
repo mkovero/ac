@@ -11,7 +11,7 @@
 use ac_scene::transfer::{
     derotate_deg, meter_height, DerotMode, MeterState, TransferInput, TransferScene,
 };
-use ac_scene::Source;
+use ac_scene::{FaultState, Source};
 
 const SR: u32 = 48_000;
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -47,12 +47,21 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         column_window_s: Vec::new(),
         column_n: Vec::new(),
         column_bins: Vec::new(),
+        fault: None,
     }
 }
 
 fn scene(inp: &TransferInput, derot: DerotMode) -> TransferScene {
     let mut meters = (MeterState::default(), MeterState::default());
-    TransferScene::from_input(inp, derot, FREQ_RANGE, DB_RANGE, &mut meters, 0.0)
+    TransferScene::from_input(
+        inp,
+        derot,
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    )
 }
 
 /// Recover the de-rotated phase in degrees from a normalized phase-pane

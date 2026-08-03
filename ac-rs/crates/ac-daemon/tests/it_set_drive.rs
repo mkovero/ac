@@ -578,3 +578,110 @@ fn legacy_launch_time_drive_is_not_killed_by_the_dead_man() {
         "legacy launch-time drive was silenced by the dead-man: {p} dBFS"
     );
 }
+
+// ---------------------------------------------------------------------
+// Observed drive state on the wire (#228)
+//
+// The indicator #228 builds needs to know whether the daemon is emitting.
+// A client's own last `set_drive` is not that: the dead-man can silence a
+// drive the client still believes is up, and the clamp can lower a level
+// the client still believes it set. These assert the published state
+// follows the engine, not the request.
+// ---------------------------------------------------------------------
+
+fn drive_state(frame: &Value) -> &Value {
+    &frame["drive"]
+}
+
+#[test]
+fn frames_report_the_applied_drive_level_not_the_requested_one() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast", "drivable": true,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+
+    let idle = c.frame_after(Duration::from_millis(900));
+    assert_eq!(drive_state(&idle)["on"], json!(false));
+    assert_eq!(
+        drive_state(&idle)["level_dbfs"],
+        Value::Null,
+        "level must be null while off, not a stale number to misread"
+    );
+    assert_eq!(
+        drive_state(&idle)["drivable"],
+        json!(true),
+        "a drivable session that is silent must be distinguishable from one \
+         that never drives"
+    );
+
+    // Ask for 6 dB above the ceiling. The frame must carry what the engine
+    // was given, not what the client asked for — a drive clamped to
+    // something inaudible is a real measurement with a bad SNR, and an
+    // indicator reading the request would call it healthy.
+    let requested = CEILING_DBFS + 6.0;
+    assert_eq!(
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": requested}))["ok"],
+        json!(true)
+    );
+    let driving = c.frame_after(Duration::from_millis(900));
+    assert_eq!(drive_state(&driving)["on"], json!(true));
+    let applied = drive_state(&driving)["level_dbfs"]
+        .as_f64()
+        .expect("level_dbfs while driving");
+    assert!(
+        (applied - CEILING_DBFS).abs() < 1e-9,
+        "frame must report the applied (clamped) level {CEILING_DBFS}, got {applied}"
+    );
+}
+
+#[test]
+fn the_published_drive_state_follows_the_dead_man_not_the_last_request() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast", "drivable": true,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let _ = c.frame_after(Duration::from_millis(900));
+
+    assert_eq!(
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        json!(true)
+    );
+    assert_eq!(
+        drive_state(&c.frame_after(Duration::from_millis(900)))["on"],
+        json!(true)
+    );
+
+    // No keepalive for longer than the dead-man window. The client's last
+    // request still says "on"; the engine is silent. The frame must say
+    // silent, or an indicator built on it reports a drive that is not there.
+    thread::sleep(Duration::from_millis(1_600));
+    let after = c.frame_after(Duration::from_millis(600));
+    assert_eq!(
+        drive_state(&after)["on"],
+        json!(false),
+        "published drive state still says on after the dead-man expired it"
+    );
+    assert_eq!(drive_state(&after)["level_dbfs"], Value::Null);
+}
+
+#[test]
+fn a_passive_session_reports_that_it_cannot_drive() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    assert_eq!(start_transfer(&c)["ok"], json!(true));
+
+    let f = c.frame_after(Duration::from_millis(900));
+    assert_eq!(
+        drive_state(&f)["drivable"],
+        json!(false),
+        "an external-DUT session opens no output ports; silence from the \
+         daemon says nothing about whether signal is present"
+    );
+    assert_eq!(drive_state(&f)["on"], json!(false));
+}

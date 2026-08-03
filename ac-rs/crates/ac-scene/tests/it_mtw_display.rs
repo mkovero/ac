@@ -9,7 +9,7 @@
 
 use ac_core::visualize::mtw::ladder;
 use ac_scene::transfer::{DerotMode, MeterState, TransferScene, COHERENCE_THRESHOLD};
-use ac_scene::{TransferInput, WireFrame};
+use ac_scene::{FaultState, TransferInput, WireFrame};
 use serde_json::json;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 24_000.0);
@@ -114,6 +114,7 @@ fn scene(frame: &WireFrame) -> TransferScene {
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
+        &mut FaultState::default(),
         0.0,
     )
 }

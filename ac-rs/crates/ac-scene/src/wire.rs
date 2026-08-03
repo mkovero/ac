@@ -31,6 +31,30 @@
 
 use serde::Deserialize;
 
+/// Observed stimulus state (#228) — what the daemon applied to its engine
+/// on this frame's tick, after the `set_drive` dead-man expired a stale
+/// drive and after the clamp to `drive_max_dbfs`.
+///
+/// **Observed, not commanded.** A consumer that read its own last
+/// `set_drive` instead would believe the drive was live while the daemon
+/// had already silenced it — which is precisely the belief-versus-
+/// observation gap the fault indicator exists to close.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireDrive {
+    /// Applied on this tick.
+    #[serde(default)]
+    pub on: bool,
+    /// The applied (clamped) level; `null` while off, so there is no stale
+    /// number to misread.
+    #[serde(default)]
+    pub level_dbfs: Option<f64>,
+    /// The session opened and connected output ports at launch. `false` is
+    /// a fully passive external-DUT session, where daemon silence says
+    /// nothing about whether signal is present on the inputs.
+    #[serde(default)]
+    pub drivable: bool,
+}
+
 /// One ladder rung's parameters, echoed in every frame so a saved frame stays
 /// interpretable without knowing the daemon's layout rules.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -145,6 +169,17 @@ pub struct WireFrame {
     /// mapping is written in terms of.
     #[serde(default)]
     pub delay_ms: f64,
+    /// Whether [`Self::delay_samples`] is a measured lock (#227).
+    ///
+    /// `None` is a daemon that predates #227 and says nothing either way —
+    /// distinct from `Some(false)`, which is a positive statement that the
+    /// pair is measured UNALIGNED, either because it is still warming up or
+    /// because the estimator refused to lock. The three-way distinction is
+    /// load-bearing: [`crate::fault`] may only report a lock fault on
+    /// `Some(false)`, never on absence, and `delay_ms == 0.0` cannot stand
+    /// in for it (a digital loopback legitimately reads 0.0 — #216).
+    #[serde(default)]
+    pub delay_locked: Option<bool>,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's
@@ -172,6 +207,18 @@ pub struct WireFrame {
     /// without saying so. A frame without this contributes no transfer trace.
     #[serde(default)]
     pub mtw: Option<MtwColumns>,
+
+    // ---- fault indicator (#228) ----
+    /// Observed stimulus state. `None` on a daemon predating #228.
+    ///
+    /// Absence disables the fault indicator entirely rather than defaulting
+    /// to "not driving": every state in the table is a claim about whether
+    /// signal *should* be present, and a daemon that does not report its own
+    /// drive gives no ground for that claim. The same daemon version gates
+    /// [`Self::meas_peak_dbfs`], so this also keeps an older daemon's absent
+    /// peaks from reading as silence.
+    #[serde(default)]
+    pub drive: Option<WireDrive>,
 }
 
 impl MtwColumns {
