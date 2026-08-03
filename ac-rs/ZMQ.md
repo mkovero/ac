@@ -1631,6 +1631,15 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // reference, dead mic, or two inputs
                                           // carrying unrelated sources).
                                           //
+                                          // `delay_samples` is never negative on an
+                                          // accepted lock: the mic cannot lead the
+                                          // electrical reference, so the estimator
+                                          // selects over non-negative lags only. A
+                                          // peak outside that range is reported —
+                                          // `noncausal_peak_lag` below — but never
+                                          // selected, and it does not by itself
+                                          // cause a refusal.
+                                          //
                                           // When false, `delay_samples` is 0 and
                                           // the pair is measured UNALIGNED — the
                                           // frame is still valid H₁, just not
@@ -1660,17 +1669,60 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "delay_evidence": {
     "prominence":   <float>,             // peak_value / median_value. Accepted at
                                           // >= 24. Sets NOISE_FLOOR_PROMINENCE.
-    "peak_lag":     <int>,               // lag of the STRONGEST peak — what the old
-                                          // global-maximum rule would have returned.
+    "peak_lag":     <int>,               // lag of the strongest CAUSAL peak — what a
+                                          // global-maximum rule would return over the
+                                          // range the estimator may select from.
                                           // Differs from `delay_samples` exactly
                                           // when earliest-peak moved the estimate
-                                          // off a reflection.
+                                          // off a reflection. Every threshold is
+                                          // measured against this.
     "peak_value":   <float>,             // |rho| at peak_lag
+    "noncausal_peak_lag":   <int>,       // lag of the strongest peak among the
+    "noncausal_peak_value": <float>,     // NEGATIVE lags, and |rho| there. Nothing
+                                          // physical arrives before the reference
+                                          // carries it, so this is never selected
+                                          // and no threshold is measured against it.
+                                          // It is published because a peak there is
+                                          // a real observation: #216's ring skew put
+                                          // every session 0.2 s negative, and a
+                                          // stimulus onset inside the correlation
+                                          // window throws ripples across the lag
+                                          // range. Both show as this standing clear
+                                          // of `negative_lag_median`. Exceeding
+                                          // `peak_value` is NOT a refusal on its own
+                                          // — rig session 2's -826 ms lock had the
+                                          // true arrival at +4.52 ms, still there
+                                          // and still recoverable. 0.0 when the
+                                          // search range holds no negative lags.
     "median_value": <float>,             // median |rho| over the searched lags
+    "negative_lag_median": <float>,      // median |rho| over the NEGATIVE lags only,
+                                          // where a causal path puts no signal at
+                                          // all. `median_value` is taken over every
+                                          // lag, and on a reverberant path most lags
+                                          // hold reverberation — so the floor
+                                          // `prominence` divides by is contaminated
+                                          // by the thing it discriminates against.
+                                          // This one is not. Published so the next
+                                          // session can re-threshold offline; it
+                                          // decides nothing today. 0.0 when the
+                                          // search range holds no negative lags.
     "candidates": [                      // local maxima within 12 dB of the peak,
-      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept.
-    ]                                    // 12 dB is wider than the 6 dB the
-  },                                     // estimator accepts, on purpose: the
+      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept — PLUS
+    ]                                    // `delay_samples`, `peak_lag` and
+  },                                     // `noncausal_peak_lag`, always present
+                                          // whatever their rank, so a list may hold
+                                          // up to 35. Lags are unique: the extras are
+                                          // inserted only when the rank cut dropped
+                                          // them, so a replay may sum or histogram
+                                          // the list without double-counting. Rank
+                                          // alone dropped the
+                                          // accepted arrival at 3 m, where it was
+                                          // weaker than 32 peaks of the reverberant
+                                          // cluster: the capture then could not
+                                          // reproduce the daemon's own decision,
+                                          // which is the whole point of recording it.
+                                          // 12 dB is wider than the 6 dB the
+                                          // estimator accepts, on purpose: the
                                           // arrivals that say whether 6 dB is too
                                           // generous are the ones it rejects.
                                           // Sets DIRECT_PEAK_FRACTION — prominence

@@ -47,9 +47,12 @@
 //! flag a healthy acoustic measurement as faulty.
 //!
 //! [`Fault::CheckRouting`] still reads coherence, but on a different
-//! question: *every* column below the display's own mask threshold, which is
-//! two legs carrying unrelated sources rather than a misaligned one. A bad
-//! lock does not trip it — stage 2 reads 0.93 either way.
+//! question: all but a handful of columns below the display's own mask
+//! threshold, which is two legs carrying unrelated sources rather than a
+//! misaligned one. A bad lock does not trip it — stage 2 reads 0.93 either
+//! way. "All but a handful" and not "every": unrelated legs still put 22 of
+//! 504 columns over the mask at low frequency, and demanding every one made
+//! the state unreachable. See [`COHERENCE_ALIVE_FRACTION`].
 //!
 //! # Nothing here gates on `delay_prominence`
 //!
@@ -122,8 +125,9 @@ pub enum Fault {
     NoReference,
     /// Driving, and the measurement leg is at the floor.
     NoSignal,
-    /// Both legs live, and not one column clears the display's coherence
-    /// mask — the legs are carrying unrelated sources.
+    /// Both legs live, and almost no column clears the display's coherence
+    /// mask — the legs are carrying unrelated sources. See
+    /// [`COHERENCE_ALIVE_FRACTION`] for how much "almost" is.
     CheckRouting,
     /// The estimator is refusing to lock, and has been for less than
     /// [`PERSISTENT_REFUSAL_S`]. Retries are still plausibly going to
@@ -281,7 +285,39 @@ fn at_floor(peak_dbfs: Option<f64>) -> bool {
     }
 }
 
-/// Not one column clears the display's coherence mask.
+/// Fraction of columns that may clear [`COHERENCE_THRESHOLD`] while the
+/// display is still, in substance, drawing nothing.
+///
+/// The original test demanded that **not one** of the columns clear the mask,
+/// and that turns out to be unreachable: on the genuinely unrelated legs of
+/// rig session 2, 22 of 504 columns cleared it (max 0.844, at 37–71 Hz), so
+/// `CHECK ROUTING` never fired on the exact condition it was written for. Low
+/// frequencies are where a room, a mains hum, or a shared noise source will
+/// correlate two otherwise unrelated legs, and one narrow band of accidental
+/// agreement is not a measurement.
+///
+/// 10% sits between the two measured cases with room on both sides: unrelated
+/// legs put 4.4% over the line, and a healthy acoustic measurement clears it
+/// nearly everywhere (0.715–0.755 on stage 0, 0.92+ below).
+///
+/// # What this costs
+///
+/// The columns are `mtw::ladder::P_REF` = 48 per octave, so 10% of a 504-
+/// column frame is **about one octave**. A measurement that is genuinely
+/// coherent over less than an octave and incoherent everywhere else — a
+/// narrow bandpass DUT, a driver measured well outside its passband — reads
+/// as `CHECK ROUTING`. That is a real false positive and it is the price of
+/// the state firing at all; the strict rule had the opposite failure and was
+/// worse, because it was silent.
+///
+/// It is also the shape a fraction cannot distinguish: 50 coherent columns
+/// are 50 coherent columns whether they are one contiguous passband or
+/// scattered accidents. If the rig produces the narrow-passband false
+/// positive, contiguity is the discriminator to reach for, not a smaller
+/// fraction.
+const COHERENCE_ALIVE_FRACTION: f64 = 0.10;
+
+/// Almost no column clears the display's coherence mask.
 ///
 /// Reuses [`COHERENCE_THRESHOLD`] rather than introducing a second, tunable
 /// number: the condition being named is "the display can draw nothing at
@@ -289,8 +325,18 @@ fn at_floor(peak_dbfs: Option<f64>) -> bool {
 /// belongs here. It is also not loopback-derived — a healthy acoustic
 /// measurement sits at 0.715-0.755 on stage 0 and 0.92+ below, an order of
 /// magnitude clear.
+///
+/// "Almost", not "none": see [`COHERENCE_ALIVE_FRACTION`] for why the strict
+/// reading made this structurally unreachable.
 fn coherence_dead(coherence: &[f64]) -> bool {
-    !coherence.is_empty() && coherence.iter().all(|c| *c < COHERENCE_THRESHOLD)
+    if coherence.is_empty() {
+        return false;
+    }
+    let alive = coherence
+        .iter()
+        .filter(|c| **c >= COHERENCE_THRESHOLD)
+        .count();
+    (alive as f64) < COHERENCE_ALIVE_FRACTION * coherence.len() as f64
 }
 
 /// The time-dependent part of the indicator, carried across frames the same
@@ -855,6 +901,39 @@ mod tests {
     #[test]
     fn no_columns_is_not_check_routing() {
         assert!(!coherence_dead(&[]));
+    }
+
+    /// The measured case the strict "not one column" rule could not fire on.
+    ///
+    /// Rig session 2 pointed the two legs at genuinely unrelated sources and
+    /// 22 of 504 columns still cleared the mask — max 0.844, at 37-71 Hz,
+    /// where a room and a shared noise floor correlate anything. `CHECK
+    /// ROUTING` stayed dark for the whole session, on the exact condition it
+    /// names.
+    #[test]
+    fn a_few_low_frequency_columns_do_not_keep_check_routing_dark() {
+        // The observed shape: 22 low bins over the mask, the strongest 0.844.
+        let mut coh = vec![0.05_f64; 504];
+        for c in coh.iter_mut().take(22) {
+            *c = 0.6;
+        }
+        coh[0] = 0.844;
+        assert!(
+            coherence_dead(&coh),
+            "22/504 columns over the mask is still a display drawing nothing"
+        );
+
+        // And the other side of the line: a healthy acoustic measurement
+        // clears the mask nearly everywhere and must never be called dead.
+        let healthy_coh = vec![0.92_f64; 504];
+        assert!(!coherence_dead(&healthy_coh));
+
+        // A measurement alive only in part of the band is a measurement.
+        let mut partial = vec![0.05_f64; 504];
+        for c in partial.iter_mut().take(200) {
+            *c = 0.80;
+        }
+        assert!(!coherence_dead(&partial));
     }
 
     #[test]
