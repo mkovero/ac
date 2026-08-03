@@ -263,8 +263,12 @@ re-deriving it.
 - **#221** — snapshot parity. Real now that the live view runs the ladder.
 - **#219 Part B** — injection seam, mixed-stream requirement recorded.
 - **Set the interface clock to Internal** before the next rig session.
-- **`conn_tags` absent** from this daemon's frames — confirm the field reads
-  as *unknown* rather than healthy.
+- **`conn_tags` absent** from this daemon's frames. The follow-up that stood
+  here — "confirm the field reads as *unknown* rather than healthy" — is not
+  actionable against main as of 2026-08-03: `conn_tags` has zero occurrences
+  anywhere in `ac-rs/`, and the reader that maps absent to *unknown* ships
+  only on #214 (issue #205), still open. The six-state indicator (#228, merged
+  as `ab3d236`) does not consult it. Reinstate this check when #214 lands.
 - **Stage 0's 0.755 is reverberation-limited.** Record durably; it is not a
   defect and gain cannot improve it.
 - **#208's positive control was never obtained.** The A/B used a 6 s level
