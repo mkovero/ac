@@ -530,6 +530,54 @@ fn ref_out_port_falls_back_to_main_output() {
     c.call(json!({"cmd":"stop"}));
 }
 
+/// #225 changed what an existing config *means*: `reference_channel: N` alone
+/// used to drive the reference out `playback[N]` and now leaves it on the main
+/// output. A rig where the loopback happened to sit at that index worked before
+/// and silently does not now, so the reply says so.
+///
+/// The warning is a stopgap for that migration, not a fault detector — #228's
+/// `NO REFERENCE` observes the symptom instead of predicting it from config.
+#[test]
+fn a_config_whose_meaning_changed_carries_a_migration_warning() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "output_channel":    4,
+        "reference_channel": 2,
+    })));
+    let c = Client::with_ctrl_timeout(&d, 15_000);
+
+    let r = c.call(json!({"cmd":"test_hardware"}));
+    assert_eq!(r["ok"], json!(true), "test_hardware: {r}");
+    let warnings = r["warnings"]
+        .as_array()
+        .expect("warnings on a migrated config");
+    let text = warnings[0].as_str().unwrap_or_default();
+    assert!(
+        text.contains("playback[2]") && text.contains("ac setup refout 2"),
+        "warning must name the old port and the exact fix, got {text:?}"
+    );
+    c.call(json!({"cmd":"stop"}));
+}
+
+/// ...and is absent once the leg is configured either way, so it cannot become
+/// background noise the operator learns to skip.
+#[test]
+fn a_configured_reference_output_carries_no_migration_warning() {
+    let d = Daemon::spawn_with_config(Some(json!({
+        "output_channel":           4,
+        "reference_channel":        2,
+        "reference_output_channel": 1,
+    })));
+    let c = Client::with_ctrl_timeout(&d, 15_000);
+
+    let r = c.call(json!({"cmd":"test_hardware"}));
+    assert_eq!(r["ok"], json!(true), "test_hardware: {r}");
+    assert!(
+        r.get("warnings").is_none(),
+        "an explicitly configured reference output must not warn: {r}"
+    );
+    c.call(json!({"cmd":"stop"}));
+}
+
 /// A sticky port whose gating channel is unset is an explicitly configured
 /// value with no effect — the same class of silent misconfiguration as #225
 /// itself. Both gated legs refuse it instead of resolving past it.

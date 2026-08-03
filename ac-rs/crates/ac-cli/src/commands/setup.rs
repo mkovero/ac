@@ -2,6 +2,43 @@ use super::check_ack;
 use crate::client::AcClient;
 use crate::parse::CommandKind;
 
+/// Print one reference leg's `channel  ->  sticky port` line.
+///
+/// `unset_note` is what to print when the channel is absent — `None` prints
+/// nothing at all (the historical behaviour of the capture leg).
+///
+/// The sticky-without-a-channel case is called out rather than skipped: the
+/// daemon refuses to resolve that config, and this display is where an
+/// operator looks to understand the error it just returned. Printing the
+/// channel line alone would show nothing wrong (#225 review, finding 2).
+fn print_leg(
+    cfg: &serde_json::Value,
+    label: &str,
+    channel_key: &str,
+    port_key: &str,
+    unset_note: Option<&str>,
+) {
+    let channel = cfg.get(channel_key).and_then(|v| v.as_u64());
+    let port = cfg.get(port_key).and_then(|v| v.as_str()).unwrap_or("");
+    match channel {
+        Some(ch) => {
+            print!("{label} {ch}");
+            if !port.is_empty() {
+                print!("  ->  {port}");
+            }
+            println!();
+        }
+        None if !port.is_empty() => {
+            println!("{label} (none) — {port_key} is set to {port:?} but {channel_key} is not, so it is ignored");
+        }
+        None => {
+            if let Some(note) = unset_note {
+                println!("{label} {note}");
+            }
+        }
+    }
+}
+
 pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     let (
         output,
@@ -121,37 +158,22 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             .unwrap_or(0)
     );
 
-    if let Some(rch) = srv_cfg.get("reference_channel").and_then(|v| v.as_u64()) {
-        let rport = srv_cfg
-            .get("reference_port")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        print!("  Reference ch:   {rch}");
-        if !rport.is_empty() {
-            print!("  ->  {rport}");
-        }
-        println!();
-    }
-
-    // Always shown, even when unset: a reference output that silently
+    print_leg(
+        &srv_cfg,
+        "  Reference ch:  ",
+        "reference_channel",
+        "reference_port",
+        None,
+    );
+    // The output leg prints even when unset: a reference output that silently
     // followed the main output is what #225 cost a rig session to find.
-    match srv_cfg
-        .get("reference_output_channel")
-        .and_then(|v| v.as_u64())
-    {
-        Some(rout) => {
-            let rport = srv_cfg
-                .get("reference_output_port")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            print!("  Ref output ch:  {rout}");
-            if !rport.is_empty() {
-                print!("  ->  {rport}");
-            }
-            println!();
-        }
-        None => println!("  Ref output ch:  (main output)"),
-    }
+    print_leg(
+        &srv_cfg,
+        "  Ref output ch: ",
+        "reference_output_channel",
+        "reference_output_port",
+        Some("(main output)"),
+    );
 
     println!(
         "  dBu reference: {:.4} mVrms  ({:.8} V)",

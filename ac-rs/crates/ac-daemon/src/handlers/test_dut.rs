@@ -13,8 +13,9 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, median, resolve_input, resolve_output,
-    resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
+    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, median, ref_output_migration_warning,
+    resolve_input, resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
+    spawn_worker, TestResult,
 };
 
 pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
@@ -222,13 +223,20 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("test_dut".to_string(), worker);
     }
-    json!({
+    let mut reply = json!({
         "ok": true,
         "out_port":     out_port_r,
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
-    })
+    });
+    // #225 migration notice — present on every reply, not just the first, so a
+    // client that connects later still sees it. Omitted entirely when it does
+    // not apply, so `warnings` is never an empty array a reader must interpret.
+    if let Some(w) = ref_output_migration_warning(&cfg) {
+        reply["warnings"] = json!([w]);
+    }
+    reply
 }
 
 pub fn dut_reply(state: &ServerState) -> Value {

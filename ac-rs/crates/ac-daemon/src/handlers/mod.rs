@@ -275,6 +275,49 @@ pub(super) fn resolve_ref_input(
         .ok_or_else(|| out_of_range("capture", ch, &ports))
 }
 
+/// Fires the stderr half of [`ref_output_migration_warning`] once per process.
+static REF_OUTPUT_MIGRATION_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Warning for a config whose *meaning* changed with #225: one that sets
+/// `reference_channel` and nothing else.
+///
+/// Before #225, that config drove the reference stimulus out
+/// `playback[reference_channel]`. Now it leaves on the main output, because the
+/// reference output leg has its own index and this one is unset. On a rig where
+/// the loopback source happened to sit at that playback index, the old code was
+/// accidentally right, and the upgrade moves the drive off it — the loopback
+/// goes silent, which is the very failure #225 exists to fix.
+///
+/// Defaulting the output index from the input index is not available as a
+/// remedy: deriving one from the other *is* the bug. So the change is announced
+/// instead.
+///
+/// **The warning is a stopgap, not the fix.** It reaches a CLI user through the
+/// reply's `warnings` array and a daemon operator through stderr — and an
+/// `ac-view` user through neither. What catches this condition at runtime is
+/// #228's `NO REFERENCE` state (driving, reference leg at the floor), which
+/// observes the symptom instead of predicting it from config shape. Do not read
+/// the presence of this warning as the case being covered.
+///
+/// The text is returned on every call, so a client that connects later still
+/// receives it; only the stderr line is deduplicated, so a long-running daemon
+/// does not repeat it for every session.
+pub(super) fn ref_output_migration_warning(cfg: &Config) -> Option<String> {
+    let ref_ch = cfg.reference_channel?;
+    if cfg.reference_output_channel.is_some() {
+        return None;
+    }
+    let text = format!(
+        "reference_output_channel is not set, so the reference stimulus leaves on the main \
+         output. Before #225 this config drove it out playback[{ref_ch}] — if that is where \
+         the loopback source is wired, run: ac setup refout {ref_ch}"
+    );
+    if !REF_OUTPUT_MIGRATION_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("warning: {text}");
+    }
+    Some(text)
+}
+
 /// Resolve the reference *output* port, falling back to the main output when
 /// no reference output channel is configured.
 ///
