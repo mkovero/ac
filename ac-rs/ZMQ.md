@@ -1625,6 +1625,14 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // captures instead of another physical rig session (handoff-rig-session-2
   // Run C). A refusal's evidence is the valuable case — it is what separates
   // "move the microphone" from "the threshold is wrong".
+  //
+  // REPEATED EVERY FRAME even though it only changes when a lock is
+  // attempted. That is deliberate, not an oversight to optimise away: DATA
+  // is a PUB socket, the lock happens once at warmup, and a subscriber that
+  // attaches a second later would never see a once-published value. A
+  // capture script or a reconnecting viewer must get the evidence from the
+  // next frame it receives. Measured cost is 1220 bytes against a ~190 kB
+  // frame — 0.64%, against six 2000-point float arrays that dominate it.
   "delay_evidence": {
     "prominence":   <float>,             // peak_value / median_value. Accepted at
                                           // >= 24. Sets NOISE_FLOOR_PROMINENCE.
