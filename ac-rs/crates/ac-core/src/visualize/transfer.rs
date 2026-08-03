@@ -164,8 +164,44 @@ const MIN_PROMINENCE: f64 = NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION;
 /// the two so the fraction always binds. See `estimate_delay`.
 const DIRECT_PEAK_FRACTION: f64 = 0.5;
 
-/// A delay estimate together with the evidence behind it.
+/// Range, as a fraction of the strongest peak, over which competing
+/// correlation peaks are reported in [`DelayEstimate::candidates`].
+///
+/// 12 dB, deliberately wider than [`DIRECT_PEAK_FRACTION`]'s 6 dB. Reporting
+/// only what the current fraction accepts would make the fraction
+/// unfalsifiable from captures: the arrivals that say whether 6 dB is too
+/// generous are precisely the ones it currently rejects. `handoff-rig-
+/// session-2.md` Run C asks for this range by name.
+const CANDIDATE_CAPTURE_FRACTION: f64 = 0.251_188_6; // 10^(-12/20)
+
+/// Most candidates reported.
+///
+/// The **strongest** are kept, then reported in lag order. Keeping the
+/// earliest instead is the obvious reading of "the direct arrival is first"
+/// and it is wrong: at the low SNR where a capture matters most, the 12 dB
+/// floor admits thousands of noise ripples, and the earliest of those fill
+/// the budget long before any real arrival — leaving a candidate list that
+/// contains no arrivals at all. Ranking by strength keeps the arrivals,
+/// which outrank the ripple by construction.
+const MAX_CANDIDATES: usize = 32;
+
+/// One competing peak in the cross-correlation.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DelayCandidate {
+    /// Lag in samples, signed the same way as [`DelayEstimate::lag`].
+    pub lag: i64,
+    /// Normalized correlation magnitude |ρ| at that lag.
+    pub value: f64,
+}
+
+/// A delay estimate together with the evidence behind it.
+///
+/// The non-`lag` fields exist so the estimator's thresholds can be set from
+/// recorded captures rather than from another physical session — see
+/// `handoff-rig-session-2.md` Run C, which calls these the artifacts that
+/// cannot be reconstructed afterwards. They are diagnostics: nothing in the
+/// measurement path may branch on them.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DelayEstimate {
     /// The chosen lag, or `None` if no peak qualified.
     pub lag: Option<i64>,
@@ -183,6 +219,39 @@ pub struct DelayEstimate {
     ///
     /// `0.0` when the correlation could not be formed at all (a silent leg).
     pub prominence: f64,
+    /// Lag of the strongest peak — the answer the old global-maximum rule
+    /// would have given. Differs from [`Self::lag`] exactly when the
+    /// earliest-peak rule moved the estimate off a reflection, so the pair
+    /// is the direct measure of how often that rule fires in a real room.
+    pub peak_lag: i64,
+    /// |ρ| at [`Self::peak_lag`].
+    pub peak_value: f64,
+    /// Median |ρ| over the searched lags — the noise floor
+    /// [`Self::prominence`] is measured against. Published separately so a
+    /// capture can be re-thresholded offline without refitting the ratio.
+    pub median_value: f64,
+    /// Every local maximum within [`CANDIDATE_CAPTURE_FRACTION`] of the
+    /// strongest, earliest first, capped at [`MAX_CANDIDATES`].
+    ///
+    /// This is what makes [`DIRECT_PEAK_FRACTION`] settleable. Prominence
+    /// alone fixes the noise floor but says nothing about where the direct
+    /// arrival sits relative to the reflection that beats it — that ratio is
+    /// only recoverable if the competing peaks are recorded alongside it.
+    pub candidates: Vec<DelayCandidate>,
+}
+
+impl DelayEstimate {
+    /// The degenerate result: no correlation could be formed.
+    fn refused_without_evidence() -> Self {
+        Self {
+            lag: None,
+            prominence: 0.0,
+            peak_lag: 0,
+            peak_value: 0.0,
+            median_value: 0.0,
+            candidates: Vec::new(),
+        }
+    }
 }
 
 /// Delay estimation via FFT-based cross-correlation. Exposed so callers that
@@ -270,10 +339,7 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
     let denom = (energy_r * energy_m).sqrt();
     if !denom.is_finite() || denom <= 0.0 {
         // One leg is silent — there is nothing to correlate against.
-        return DelayEstimate {
-            lag: None,
-            prominence: 0.0,
-        };
+        return DelayEstimate::refused_without_evidence();
     }
 
     // Magnitude over the full ±max_lag search range, in ascending lag order
@@ -310,20 +376,48 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
                 }
             });
     if !peak_val.is_finite() || peak_val <= 0.0 {
-        return DelayEstimate {
-            lag: None,
-            prominence: 0.0,
-        };
+        return DelayEstimate::refused_without_evidence();
     }
     // A zero median means the correlation is zero almost everywhere — a
     // degenerate input rather than a clean lock, so there is no ratio to
     // report and the peak is not evidence of anything.
     let prominence = if median > 0.0 { peak_val / median } else { 0.0 };
+
+    // Competing peaks, gathered before the accept gate so that a refusal
+    // still carries them. A position that never locks is the one whose
+    // candidates matter most: they are the evidence for whether the
+    // threshold is wrong or the microphone is.
+    let capture_floor = peak_val * CANDIDATE_CAPTURE_FRACTION;
+    let mut candidates: Vec<DelayCandidate> = (0..mag.len())
+        .filter(|&i| {
+            mag[i] >= capture_floor
+                && (i == 0 || mag[i] >= mag[i - 1])
+                && (i + 1 >= mag.len() || mag[i] >= mag[i + 1])
+        })
+        .map(|i| DelayCandidate {
+            lag: i as i64 - max_lag as i64,
+            value: mag[i],
+        })
+        .collect();
+    // Rank by strength to survive truncation, then report in lag order —
+    // see MAX_CANDIDATES for why keeping the earliest instead loses every
+    // real arrival at exactly the SNR where the capture is needed.
+    if candidates.len() > MAX_CANDIDATES {
+        candidates.select_nth_unstable_by(MAX_CANDIDATES, |a, b| b.value.total_cmp(&a.value));
+        candidates.truncate(MAX_CANDIDATES);
+    }
+    candidates.sort_unstable_by_key(|c| c.lag);
+    let evidence = DelayEstimate {
+        lag: None,
+        prominence,
+        peak_lag: peak_idx as i64 - max_lag as i64,
+        peak_value: peak_val,
+        median_value: median,
+        candidates,
+    };
+
     if median > 0.0 && prominence < MIN_PROMINENCE {
-        return DelayEstimate {
-            lag: None,
-            prominence,
-        };
+        return evidence;
     }
 
     // Earliest local maximum within DIRECT_PEAK_FRACTION of the strongest —
@@ -351,7 +445,7 @@ fn estimate_delay(ref_sig: &[f64], meas: &[f64], sr: u32) -> DelayEstimate {
 
     DelayEstimate {
         lag: Some(direct_idx as i64 - max_lag as i64),
-        prominence,
+        ..evidence
     }
 }
 
@@ -1077,6 +1171,78 @@ mod tests {
         let e = estimate_delay_detailed(&sig, &vec![0.0f32; N], SR);
         assert_eq!(e.lag, None);
         assert_eq!(e.prominence, 0.0);
+    }
+
+    /// `DIRECT_PEAK_FRACTION` must be settleable from a capture alone.
+    ///
+    /// Prominence fixes the noise floor but says nothing about where the
+    /// direct arrival sits relative to the reflection that beats it, so the
+    /// competing peaks have to be recorded alongside it. This asserts the
+    /// recorded evidence is sufficient to recover that ratio offline —
+    /// including on a **refusal**, which is the case the rig session is most
+    /// likely to produce at the positions that matter.
+    #[test]
+    fn candidates_make_the_direct_to_reflection_ratio_recoverable() {
+        let sig = white_noise(N, 0.5, 42);
+        let direct = 283usize;
+        let reflection = 1_455usize;
+
+        // Loud enough to lock, and again buried enough to refuse. The
+        // tolerance widens with the noise: an uncorrelated floor lifts the
+        // weaker peak proportionally more, so a ratio recovered from a
+        // marginal capture reads slightly *high*. That bias is the safe
+        // direction — it overstates the direct arrival, so a fraction set
+        // from it errs strict — but it means a refusing capture pins the
+        // ratio to about 10%, not to the 2% a clean one gives.
+        for (noise_scale, expect_lock, tol) in [(0.0_f32, true, 0.02), (32.0, false, 0.10)] {
+            let mut meas = if noise_scale > 0.0 {
+                white_noise(N, (0.5 * noise_scale) as f64, 77)
+            } else {
+                vec![0.0f32; N]
+            };
+            add_delayed(&mut meas, &sig, direct, 0.50);
+            add_delayed(&mut meas, &sig, reflection, 0.80);
+
+            let e = estimate_delay_detailed(&sig, &meas, SR);
+            assert_eq!(e.lag.is_some(), expect_lock, "noise x{noise_scale}");
+
+            // The reflection is the strongest peak in both cases.
+            assert!(
+                (e.peak_lag - reflection as i64).abs() < SUB_MS,
+                "noise x{noise_scale}: peak_lag {} should be the reflection at {reflection}",
+                e.peak_lag
+            );
+
+            // Both arrivals must appear among the candidates, so the ratio
+            // between them is recoverable without another rig session.
+            let find = |want: usize| {
+                e.candidates
+                    .iter()
+                    .find(|c| (c.lag - want as i64).abs() < SUB_MS)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "noise x{noise_scale}: no candidate near {want}; got {:?}",
+                            e.candidates.iter().map(|c| c.lag).collect::<Vec<_>>()
+                        )
+                    })
+            };
+            let d = find(direct);
+            let r = find(reflection);
+
+            // The synthesised ratio is 0.50/0.80 = 0.625. Recovering it is
+            // what lets DIRECT_PEAK_FRACTION be set from captures rather
+            // than guessed.
+            let ratio = d.value / r.value;
+            assert!(
+                (ratio - 0.625).abs() < tol,
+                "noise x{noise_scale}: recovered direct/reflection ratio {ratio:.3}, \
+                 synthesised 0.625, tolerance {tol}"
+            );
+
+            // And the noise floor the thresholds are measured against.
+            assert!(e.median_value > 0.0);
+            assert_relative_eq!(e.prominence, e.peak_value / e.median_value, epsilon = 1e-9);
+        }
     }
 
     /// The clean single-peak case the whole existing suite is made of must

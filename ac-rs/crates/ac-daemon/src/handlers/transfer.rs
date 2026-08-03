@@ -600,7 +600,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // refused. Published so a session that never locks still says how far
         // short it fell — the estimator's one empirical constant is set from
         // this distribution, and a bare "refused" would not measure it.
-        let mut pair_prominence: Vec<Option<f64>> = vec![None; pairs.len()];
+        let mut pair_prominence: Vec<Option<serde_json::Value>> = vec![None; pairs.len()];
 
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
         // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
@@ -750,7 +750,19 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         sr,
                     );
                     pair_delays[i] = est.lag;
-                    pair_prominence[i] = Some(est.prominence);
+                    // Full lock evidence, not just the ratio: the competing
+                    // peaks are what make DIRECT_PEAK_FRACTION settleable
+                    // offline, and they cannot be reconstructed from a
+                    // finished session.
+                    pair_prominence[i] = Some(json!({
+                        "prominence":   est.prominence,
+                        "peak_lag":     est.peak_lag,
+                        "peak_value":   est.peak_value,
+                        "median_value": est.median_value,
+                        "candidates":   est.candidates.iter()
+                            .map(|c| json!({"lag": c.lag, "value": c.value}))
+                            .collect::<Vec<_>>(),
+                    }));
                     if est.lag.is_none() {
                         next_delay_attempt[i] = Some(now + RELOCK_RETRY);
                     }
@@ -831,7 +843,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .zip(pair_meas_cals.par_iter())
                 .zip(pair_ref_cals.par_iter())
                 .filter_map(
-                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), &prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
+                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -1089,7 +1101,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
-                            "delay_prominence": prom_opt,
+                            "delay_evidence":  prom_opt,
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,

@@ -1616,18 +1616,35 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
 
-  "delay_prominence": <float> | null,    // peak-to-median ratio of the normalized
-                                          // cross-correlation the lock decision was
-                                          // made on. Reported whether the estimate
-                                          // was accepted or refused — a refusal's
-                                          // value is how far short it fell, which is
-                                          // the difference between "move the mic"
-                                          // and "the threshold is wrong".
-                                          //
-                                          // Accepted at >= 24. `null` before the
-                                          // first attempt. Diagnostic only: nothing
-                                          // downstream may gate on it, since the
-                                          // threshold is the estimator's to own.
+  // Additive (#227) — the evidence the lock decision was made on, present
+  // whether the estimate was accepted or refused. `null` before the first
+  // attempt. DIAGNOSTIC ONLY: nothing downstream may gate on any of it, the
+  // thresholds are the estimator's to own.
+  //
+  // This exists so the estimator's thresholds can be set from recorded
+  // captures instead of another physical rig session (handoff-rig-session-2
+  // Run C). A refusal's evidence is the valuable case — it is what separates
+  // "move the microphone" from "the threshold is wrong".
+  "delay_evidence": {
+    "prominence":   <float>,             // peak_value / median_value. Accepted at
+                                          // >= 24. Sets NOISE_FLOOR_PROMINENCE.
+    "peak_lag":     <int>,               // lag of the STRONGEST peak — what the old
+                                          // global-maximum rule would have returned.
+                                          // Differs from `delay_samples` exactly
+                                          // when earliest-peak moved the estimate
+                                          // off a reflection.
+    "peak_value":   <float>,             // |rho| at peak_lag
+    "median_value": <float>,             // median |rho| over the searched lags
+    "candidates": [                      // local maxima within 12 dB of the peak,
+      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept.
+    ]                                    // 12 dB is wider than the 6 dB the
+  },                                     // estimator accepts, on purpose: the
+                                          // arrivals that say whether 6 dB is too
+                                          // generous are the ones it rejects.
+                                          // Sets DIRECT_PEAK_FRACTION — prominence
+                                          // alone cannot, since it says nothing
+                                          // about where the direct arrival sits
+                                          // relative to the reflection beating it.
 
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
