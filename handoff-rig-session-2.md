@@ -111,6 +111,22 @@ that behaviour should now be gone.
 lock correctly, what fraction refuse, and what fraction still lock wrong. A
 refusal at position 4 is acceptable; a wrong lock is not.
 
+**Which position sets which constant.** There are two dials, not one, and
+they are measured at opposite ends of this position list — so record what
+each position is *for* rather than pooling all five:
+
+| dial | set from | why |
+|---|---|---|
+| `DIRECT_PEAK_FRACTION` (6 dB) | positions **1–2** | needs the direct arrival's own value against the reflection's. Recoverable only where both are well above the noise, i.e. where sessions lock. |
+| `NOISE_FLOOR_PROMINENCE` (12) | positions **3–5** | needs the ripple ceiling on a real path, which only the marginal and refusing positions show. |
+
+The accept gate is `NOISE_FLOOR_PROMINENCE / DIRECT_PEAK_FRACTION` = 24, so
+it follows from the two and is not measured separately. Note the fraction is
+the cheaper dial: tightening it lowers the gate proportionally (0.707 gives
+17, 0.8 gives 15) without moving anything closer to the noise. If the
+positions that matter show direct arrivals are never a full 6 dB below the
+reflection, that is the lever to reach for first.
+
 **Second question, same data:** the 6 dB candidate window fixes
 reflection-comparable-to-direct. It does not fix reflection-well-above-direct,
 which is what positions 4 and 5 produce. The recorded candidate list shows
@@ -153,3 +169,17 @@ constant that currently rests on theory.
   defect, and gain cannot improve it.
 - **Refusals are a success, not a failure.** #227 is meant to refuse rather
   than lock wrong. A `LOST LOCK` at position 4 is the system working.
+- **There will be more refusals than the last session would suggest.** The
+  accept gate is now 24, not 12 — it is derived from the other two constants
+  so that reflection rejection cannot silently switch itself off at low SNR.
+  That is deliberately more conservative, and positions 3–5 may refuse
+  routinely. It is the correct failure direction, and it is why those
+  positions are the ones that set the noise floor.
+- **The direct-to-reflection ratio will read ~9% high at refusing SNR.**
+  Systematic, not a measurement problem: an uncorrelated floor lifts the
+  weaker peak proportionally more than the stronger one. Verified against a
+  synthesised 0.625 ratio, which recovers to within 2% on a clean capture and
+  to 0.682 on one that refuses. The bias **overstates** the direct arrival,
+  so a fraction set from noisy captures errs strict rather than permissive —
+  the safe direction, but the reason the fraction is set from positions 1–2
+  and only sanity-checked against 3–5.

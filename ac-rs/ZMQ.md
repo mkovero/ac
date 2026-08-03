@@ -1623,6 +1623,61 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "delay_samples":   <int>,
   "delay_ms":        <float>,
 
+  // Additive (#227) — whether `delay_samples` is a measured lock.
+  "delay_locked":    <bool>,             // false while the pair is still warming
+                                          // up, and when the estimator refused to
+                                          // lock (no sufficiently prominent
+                                          // cross-correlation peak: unpatched
+                                          // reference, dead mic, or two inputs
+                                          // carrying unrelated sources).
+                                          //
+                                          // When false, `delay_samples` is 0 and
+                                          // the pair is measured UNALIGNED — the
+                                          // frame is still valid H₁, just not
+                                          // delay-compensated. Consumers must not
+                                          // read `delay_ms == 0.0` as "no delay":
+                                          // a digital loopback legitimately reads
+                                          // 0.0 (#216), so this flag is the only
+                                          // thing separating the two.
+
+  // Additive (#227) — the evidence the lock decision was made on, present
+  // whether the estimate was accepted or refused. `null` before the first
+  // attempt. DIAGNOSTIC ONLY: nothing downstream may gate on any of it, the
+  // thresholds are the estimator's to own.
+  //
+  // This exists so the estimator's thresholds can be set from recorded
+  // captures instead of another physical rig session (handoff-rig-session-2
+  // Run C). A refusal's evidence is the valuable case — it is what separates
+  // "move the microphone" from "the threshold is wrong".
+  //
+  // REPEATED EVERY FRAME even though it only changes when a lock is
+  // attempted. That is deliberate, not an oversight to optimise away: DATA
+  // is a PUB socket, the lock happens once at warmup, and a subscriber that
+  // attaches a second later would never see a once-published value. A
+  // capture script or a reconnecting viewer must get the evidence from the
+  // next frame it receives. Measured cost is 1220 bytes against a ~190 kB
+  // frame — 0.64%, against six 2000-point float arrays that dominate it.
+  "delay_evidence": {
+    "prominence":   <float>,             // peak_value / median_value. Accepted at
+                                          // >= 24. Sets NOISE_FLOOR_PROMINENCE.
+    "peak_lag":     <int>,               // lag of the STRONGEST peak — what the old
+                                          // global-maximum rule would have returned.
+                                          // Differs from `delay_samples` exactly
+                                          // when earliest-peak moved the estimate
+                                          // off a reflection.
+    "peak_value":   <float>,             // |rho| at peak_lag
+    "median_value": <float>,             // median |rho| over the searched lags
+    "candidates": [                      // local maxima within 12 dB of the peak,
+      {"lag": <int>, "value": <float>}   // lag order, strongest 32 kept.
+    ]                                    // 12 dB is wider than the 6 dB the
+  },                                     // estimator accepts, on purpose: the
+                                          // arrivals that say whether 6 dB is too
+                                          // generous are the ones it rejects.
+                                          // Sets DIRECT_PEAK_FRACTION — prominence
+                                          // alone cannot, since it says nothing
+                                          // about where the direct arrival sits
+                                          // relative to the reflection beating it.
+
   // Additive (handoff: field-transfer M4d, #183) — raw input peaks for
   // the transfer view's input-level meters.
   "meas_peak_dbfs":  <float> | null,     // 20*log10(max|sample|) over this frame's
@@ -1738,7 +1793,11 @@ toggled on/off in the UI without re-issuing the transfer command.
   "ref_channel":   <int>,
   "meas_channel":  <int>,
   "delay_samples": <int>,
-  "delay_ms":      <float>
+  "delay_ms":      <float>,
+  "delay_locked":  <bool>            // #227 — see transfer_stream above. When
+                                     // false the IR is UNALIGNED, so the peak
+                                     // sits at the true path delay rather than
+                                     // at t=0.
 }
 ```
 

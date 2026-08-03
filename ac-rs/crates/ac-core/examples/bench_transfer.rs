@@ -42,7 +42,7 @@ fn main() {
         let per_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
         // Simulate the transfer_stream hot loop: delay pre-computed once.
-        let d = estimate_delay_samples(&r, &m, sr);
+        let d = estimate_delay_samples(&r, &m, sr).unwrap_or(0);
         let _ = h1_estimate_with_delay(&r, &m, sr, d);
         let t0 = Instant::now();
         for _ in 0..iters {

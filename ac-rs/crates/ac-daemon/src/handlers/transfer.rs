@@ -587,6 +587,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // ~8.5 Hz to the capture-interval-limited ~10 Hz.
         let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
 
+        // A pair whose delay estimate was *refused* (no prominent correlation
+        // peak — #227) stays unlocked and is retried, because the cause is
+        // usually transient from the software's point of view: an unpatched
+        // reference leg or a muted source that the operator then fixes. Retry
+        // is rate-limited because each attempt is the same full-ring
+        // FFT+IFFT the cache above exists to avoid, and the inputs it reads
+        // only turn over on the ring's own timescale.
+        const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+        let mut next_delay_attempt: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
+
+        // Peak-to-median prominence from the most recent attempt, locked or
+        // refused. Published so a session that never locks still says how far
+        // short it fell — the estimator's one empirical constant is set from
+        // this distribution, and a bare "refused" would not measure it.
+        let mut pair_prominence: Vec<Option<serde_json::Value>> = vec![None; pairs.len()];
+
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
         // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
         // channel has no SPL calibration layer; `spl` stays `null` for
@@ -723,13 +739,34 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 if pair_delays[i].is_some() {
                     continue;
                 }
+                let now = std::time::Instant::now();
+                if next_delay_attempt[i].is_some_and(|t| now < t) {
+                    continue;
+                }
                 let (mi, ri) = pair_idx[i];
                 if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
-                    pair_delays[i] = Some(ac_core::visualize::transfer::estimate_delay_samples(
+                    let est = ac_core::visualize::transfer::estimate_delay_detailed(
                         refb.as_slice(),
                         meas.as_slice(),
                         sr,
-                    ));
+                    );
+                    pair_delays[i] = est.lag;
+                    // Full lock evidence, not just the ratio: the competing
+                    // peaks are what make DIRECT_PEAK_FRACTION settleable
+                    // offline, and they cannot be reconstructed from a
+                    // finished session.
+                    pair_prominence[i] = Some(json!({
+                        "prominence":   est.prominence,
+                        "peak_lag":     est.peak_lag,
+                        "peak_value":   est.peak_value,
+                        "median_value": est.median_value,
+                        "candidates":   est.candidates.iter()
+                            .map(|c| json!({"lag": c.lag, "value": c.value}))
+                            .collect::<Vec<_>>(),
+                    }));
+                    if est.lag.is_none() {
+                        next_delay_attempt[i] = Some(now + RELOCK_RETRY);
+                    }
                 }
             }
             // Keep the ring's copy in sync — cheap (small Vec), and
@@ -802,11 +839,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .enumerate()
                 .zip(pair_idx.par_iter())
                 .zip(pair_delays.par_iter())
+                .zip(pair_prominence.par_iter())
                 .zip(pair_meas_curves.par_iter())
                 .zip(pair_meas_cals.par_iter())
                 .zip(pair_ref_cals.par_iter())
                 .filter_map(
-                    |((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
+                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -825,6 +863,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             .flatten()
                             .map(Value::from)
                             .unwrap_or(Value::Null);
+                        // An unlocked pair (still warming up, or refused by the
+                        // prominence gate — #227) is measured unaligned rather
+                        // than aligned to a guess. `delay_locked` below is what
+                        // keeps that distinguishable on the wire: a refused pair
+                        // and a genuine 0-sample digital loopback both report
+                        // `delay_ms` 0.0, and #216 established that the loopback
+                        // case is legitimately 0.0, so the number alone cannot
+                        // carry the difference.
                         let delay = delay_opt.unwrap_or(0);
                         let result = ac_core::visualize::transfer::h1_estimate_with_delay(
                             refb, meas, sr, delay,
@@ -1055,6 +1101,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "im":              im,
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
+                            "delay_locked":    delay_opt.is_some(),
+                            "delay_evidence":  prom_opt,
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,
@@ -1114,6 +1162,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 "meas_channel": meas_ch,
                                 "delay_samples": result.delay_samples,
                                 "delay_ms":     result.delay_ms,
+                                "delay_locked": delay_opt.is_some(),
                             }))
                         };
                         let mut out = vec![transfer_msg];
