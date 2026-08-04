@@ -616,6 +616,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // A count, not a verdict. It says the estimator ran; it says nothing
         // about how close the result came, which is the estimator's own
         // business (`delay_evidence`, diagnostic-only).
+        //
+        // MONOTONE for the life of the session — never reset, including when
+        // #226 adds re-locking. Resetting it would make a pair that locked and
+        // then started refusing read as one that has not been asked yet, and
+        // the fault indicator answers "nothing to report" to that.
         let mut pair_delay_attempts: Vec<u32> = vec![0; pairs.len()];
 
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —

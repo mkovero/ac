@@ -190,6 +190,13 @@ pub struct WireFrame {
     /// been asked the question yet. A count only — nothing here says how close
     /// the estimate came, which is `delay_evidence`'s business and gates
     /// nothing.
+    ///
+    /// **Monotone for the life of the pair, and it must stay that way.** A
+    /// re-lock (#226) adds attempts; it must never reset the count. If it
+    /// did, [`crate::fault::FaultFrame::estimator_attempted`] would go back to
+    /// false and a pair that locked and then started refusing would read as a
+    /// pair that has not been asked yet — silence, exactly the blank window
+    /// #238 fixed, and reachable only in the sessions #226 exists for.
     #[serde(default)]
     pub delay_attempts: u32,
 

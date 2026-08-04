@@ -14,7 +14,8 @@
 //! | not driving, legs quiet | *(nothing)* | idle, expected |
 //! | driving, reference leg at floor | [`Fault::NoReference`] | #225, misrouted or unpatched |
 //! | driving, measurement leg at floor | [`Fault::NoSignal`] | mic unplugged, DUT off, wrong input |
-//! | both legs live, estimator refusing | [`Fault::LostLock`] / [`Fault::NoLock`] | delay fault |
+//! | both legs live, estimator refusing, lock held earlier | [`Fault::LostLock`] | delay fault |
+//! | both legs live, estimator refusing, never locked | [`Fault::NoLockYet`] / [`Fault::NoLock`] | delay fault |
 //! | both legs live, coherence low everywhere | [`Fault::CheckRouting`] | legs carry different sources |
 //! | after a successful lock | [`Fault::LockAcquired`] | transient confirmation |
 //!
@@ -138,21 +139,45 @@ pub const SIGNAL_FLOOR_DBFS: f64 = -80.0;
 /// How long the ladder takes to settle, in seconds: four independent 1.024 s
 /// windows at the bottom rung (`design-mtw-ladder.md`, stage 2).
 ///
-/// Recorded because [`PERSISTENT_REFUSAL_S`] is reasoned from it. It is not
-/// used as a timer — see [`FaultInput::settled`].
+/// Recorded because [`PERSISTENT_REFUSAL_S`]'s original anchor was reasoned
+/// from it, and because the size of the anchor change is this number. Not
+/// used as a timer — see [`FaultFrame::settled`].
 pub const LADDER_SETTLE_S: f64 = 2.560;
 
-/// A refusal still standing this many seconds **after the ladder settles** is
-/// persistent rather than transient.
+/// A refusal still standing this many seconds **after the estimator first
+/// refused** is persistent rather than transient.
 ///
 /// #227 retries at 1 Hz, so this is roughly ten retries past the first point
 /// at which a lock was even possible, and anything past a handful of retries
-/// is genuinely persistent. The clock starts at settle, not at session start:
-/// a timer started at t=0 would fire on healthy sessions, since warmup is
-/// indistinguishable from refusal on the wire.
+/// is genuinely persistent. The clock does not start at session start: a timer
+/// from t=0 would fire on healthy sessions, since warmup is indistinguishable
+/// from refusal on the wire.
+///
+/// # The anchor moved, deliberately (#238)
+///
+/// The original wording was "10 s **after the ladder settles**". That anchor
+/// is undefined in the case it was written for: a pair that never locks never
+/// builds a ladder, which is the defect #238 fixes. It survived review because
+/// settle was the only observable that stood in for "a lock was possible by
+/// now".
+///
+/// [`WireFrame::delay_attempts`] observes that directly, so the clock is now
+/// anchored on the first refused attempt. The consequences, both accepted:
+///
+/// - **A pair that never locks** reaches [`Fault::NoLock`] at 10 s from its
+///   first refused attempt — [`LADDER_SETTLE_S`] earlier than the settle-
+///   anchored text implied, since the first attempt lands on the first
+///   published frame and settle would have been 2.56 s after it. Ten retries
+///   past the first possible lock is what the paragraph above actually asks
+///   for, and this delivers it; the settle anchor was the proxy, not the
+///   intent.
+/// - **A pair that locks, settles, then refuses** is anchored on that
+///   refusal, which is later than either reading of the original text and is
+///   the only sensible origin for a lock that was held and lost.
 ///
 /// The number is arguable — argue it against the rig. What is not open is
-/// leaving it unset, which decides it silently and re-litigates it later.
+/// leaving either the number or the anchor unset, which decides them silently
+/// and re-litigates them later.
 pub const PERSISTENT_REFUSAL_S: f64 = 10.0;
 
 /// How long [`Fault::LockAcquired`] stays up, in scene seconds. It is a
@@ -180,10 +205,24 @@ pub enum Fault {
     /// Both legs live, and not one column clears the display's coherence
     /// mask — the legs are carrying unrelated sources.
     CheckRouting,
-    /// The estimator is refusing to lock, and has been for less than
-    /// [`PERSISTENT_REFUSAL_S`]. Retries are still plausibly going to
-    /// succeed, so this says what is happening and no more.
+    /// The estimator is refusing to lock **after having held a lock**, and
+    /// has been for less than [`PERSISTENT_REFUSAL_S`]. Retries are still
+    /// plausibly going to succeed, so this says what is happening and no
+    /// more.
+    ///
+    /// Requires a lock to have existed. A pair that has never locked gets
+    /// [`Fault::NoLockYet`] instead — see its docs.
     LostLock,
+    /// The estimator has refused every attempt so far, and the session has
+    /// never held a lock, for less than [`PERSISTENT_REFUSAL_S`].
+    ///
+    /// Exists because [`Fault::LostLock`] asserts something untrue about a
+    /// pair that never locked: nothing was lost. It is a transient row like
+    /// `LostLock` — retries may still succeed — so it carries no instruction,
+    /// and it shares the `NO LOCK` label with [`Fault::NoLock`] deliberately.
+    /// The two rows make the same true statement about the pair; what
+    /// escalation adds is the instruction, not a different claim.
+    NoLockYet,
     /// The estimator has been refusing for longer than
     /// [`PERSISTENT_REFUSAL_S`]. A mic at 3 m off-axis may never lock, so
     /// the operator needs somewhere to go rather than a message that reads
@@ -203,7 +242,10 @@ impl Fault {
             Fault::NoSignal => "NO SIGNAL",
             Fault::CheckRouting => "CHECK ROUTING",
             Fault::LostLock => "LOST LOCK",
-            Fault::NoLock => "NO LOCK",
+            // Same words as `NoLock`, on purpose: both say the pair has no
+            // lock, which is true of each. The escalation carries an
+            // instruction, not a different claim.
+            Fault::NoLockYet | Fault::NoLock => "NO LOCK",
             Fault::LockAcquired => "LOCK ACQUIRED",
         }
     }
@@ -232,6 +274,10 @@ impl Fault {
             // own is worse than saying nothing. `NoLock` is where the
             // instruction lives.
             Fault::LostLock => None,
+            // Transient for the same reason `LostLock` is: #227 is still
+            // retrying, and the first seconds of a session that has not
+            // locked yet are not evidence that it never will.
+            Fault::NoLockYet => None,
             Fault::NoLock => Some("check mic placement and routing"),
             Fault::LockAcquired => None,
         }
@@ -284,6 +330,11 @@ pub struct FaultFrame {
     /// yet". False on a daemon predating #238, which leaves such a daemon's
     /// refusals as unreachable as they were — absence is not evidence that
     /// the estimator ran.
+    ///
+    /// Once true, true for the session: the count behind it is monotone
+    /// (`ZMQ.md`), and #226's re-locking must not change that. A count that
+    /// reset would take a locked-then-refusing pair back to "warming up",
+    /// and warmup paints nothing.
     pub estimator_attempted: bool,
 }
 
@@ -312,7 +363,15 @@ pub struct FaultInput<'a> {
     pub frame: Option<FaultFrame>,
     pub meas_peak_dbfs: Option<f64>,
     pub ref_peak_dbfs: Option<f64>,
-    /// The display's own columns. Empty before the ladder settles.
+    /// The display's own columns — the ladder's, and **only** the ladder's.
+    /// Empty before it settles, and empty for a pair that never locks.
+    ///
+    /// Do not fall back to [`WireFrame::coherence`] to fill it. See the
+    /// module's `CHECK ROUTING` section: the Welch array is a different
+    /// measurement with a different bin count and bias floor, and
+    /// [`coherence_dead`]'s threshold was measured against the ladder's 504
+    /// columns. Substituting the other array keeps the name and changes the
+    /// test. `no_welch_fallback_fills_the_coherence_columns` pins this.
     pub coherence: &'a [f64],
 }
 
@@ -320,6 +379,9 @@ impl<'a> FaultInput<'a> {
     /// Read one live frame. The coherence columns come from `mtw` — the
     /// display's source — and their presence is what marks the ladder
     /// settled, so both fall out of one lookup.
+    ///
+    /// `mtw` absent means no columns, full stop. The frame's own `coherence`
+    /// is deliberately not consulted here — see [`Self::coherence`].
     pub fn from_wire_frame(frame: &'a WireFrame) -> FaultInput<'a> {
         FaultInput {
             frame: FaultFrame::from_wire_frame(frame),
@@ -372,6 +434,9 @@ pub struct FaultState {
     acquired_at_s: Option<f64>,
     /// Last observed `delay_locked`, to detect that transition.
     prev_locked: Option<bool>,
+    /// Whether this pair has ever reported a lock. Picks the words for a
+    /// refusal: nothing was *lost* by a pair that never had one.
+    ever_locked: bool,
 }
 
 impl FaultState {
@@ -419,8 +484,11 @@ impl FaultState {
         } else {
             self.refusing_since_s = None;
         }
-        if frame.delay_locked == Some(true) && self.prev_locked == Some(false) {
-            self.acquired_at_s = Some(now_s);
+        if frame.delay_locked == Some(true) {
+            self.ever_locked = true;
+            if self.prev_locked == Some(false) {
+                self.acquired_at_s = Some(now_s);
+            }
         }
         if frame.delay_locked.is_some() {
             self.prev_locked = frame.delay_locked;
@@ -454,10 +522,17 @@ impl FaultState {
         // Both legs live from here.
 
         if let Some(since) = self.refusing_since_s {
-            return Some(if now_s - since >= PERSISTENT_REFUSAL_S {
-                Fault::NoLock
-            } else {
+            if now_s - since >= PERSISTENT_REFUSAL_S {
+                return Some(Fault::NoLock);
+            }
+            // The transient row's words follow the history, not the clock.
+            // `LOST LOCK` on a pair that never locked asserts something
+            // untrue, and the whole premise of #228 is that the words name
+            // the fault.
+            return Some(if self.ever_locked {
                 Fault::LostLock
+            } else {
+                Fault::NoLockYet
             });
         }
 
@@ -657,7 +732,7 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&inp, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::NoLockYet));
         assert_eq!(st.update(&inp, PERSISTENT_REFUSAL_S), Some(Fault::NoLock));
     }
 
@@ -691,7 +766,7 @@ mod tests {
             frame: Some(passive(Some(true))),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         assert_eq!(st.update(&locked, 1.0), Some(Fault::LockAcquired));
     }
 
@@ -758,7 +833,7 @@ mod tests {
             coherence: &[],
             ..healthy(&[])
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         assert_eq!(
             st.update(&refusing, PERSISTENT_REFUSAL_S),
             Some(Fault::NoLock)
@@ -814,9 +889,62 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&refusing, 30.0), Some(Fault::LostLock));
-        assert_eq!(st.update(&refusing, 39.9), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 30.0), Some(Fault::NoLockYet));
+        assert_eq!(st.update(&refusing, 39.9), Some(Fault::NoLockYet));
         assert_eq!(st.update(&refusing, 40.0), Some(Fault::NoLock));
+    }
+
+    /// The transient row's words follow the history. `LOST LOCK` on a pair
+    /// that never locked asserts something untrue, and a fault indicator
+    /// whose words are wrong is what #228 exists to replace.
+    #[test]
+    fn a_pair_that_never_locked_is_not_told_it_lost_a_lock() {
+        let coh = [0.755, 0.92];
+        let refusing = |st: &mut FaultState, t: f64| {
+            let inp = FaultInput {
+                frame: Some(FaultFrame {
+                    delay_locked: Some(false),
+                    ..driving()
+                }),
+                ..healthy(&coh)
+            };
+            st.update(&inp, t)
+        };
+
+        // Never locked: the transient row says NO LOCK, without the
+        // instruction the persistent row carries.
+        let mut fresh = FaultState::default();
+        assert_eq!(refusing(&mut fresh, 0.0), Some(Fault::NoLockYet));
+        assert_eq!(Fault::NoLockYet.label(), "NO LOCK");
+        assert_eq!(Fault::NoLockYet.detail(), None);
+        assert_eq!(
+            refusing(&mut fresh, PERSISTENT_REFUSAL_S),
+            Some(Fault::NoLock)
+        );
+
+        // Locked earlier, refusing now: LOST LOCK is true, and only here.
+        let mut held = FaultState::default();
+        assert_eq!(held.update(&healthy(&coh), 0.0), None);
+        assert_eq!(refusing(&mut held, 1.0), Some(Fault::LostLock));
+        assert_eq!(Fault::LostLock.label(), "LOST LOCK");
+    }
+
+    /// A lock earlier in the session is what licenses `LOST LOCK` later. The
+    /// history is carried, not re-read from the current frame.
+    #[test]
+    fn the_words_follow_the_history_not_the_current_frame() {
+        let coh = [0.755, 0.92];
+        let mut st = FaultState::default();
+        let refusing = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                ..driving()
+            }),
+            ..healthy(&coh)
+        };
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
+        assert_eq!(st.update(&healthy(&coh), 1.0), Some(Fault::LockAcquired));
+        assert_eq!(st.update(&refusing, 5.0), Some(Fault::LostLock));
     }
 
     /// The settled gate still stands on its own, for the case the attempt
@@ -850,15 +978,18 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         assert_eq!(
             st.update(&refusing, PERSISTENT_REFUSAL_S),
             Some(Fault::NoLock)
         );
         // The transient one deliberately carries no instruction; the
         // persistent one carries the one the operator needs.
-        assert_eq!(Fault::LostLock.detail(), None);
+        assert_eq!(Fault::NoLockYet.detail(), None);
         assert!(Fault::NoLock.detail().is_some());
+        // The escalation adds the instruction; it does not change the claim,
+        // so the two rows share their label on purpose.
+        assert_eq!(Fault::NoLockYet.label(), Fault::NoLock.label());
         assert_ne!(Fault::LostLock.label(), Fault::NoLock.label());
     }
 
@@ -875,7 +1006,7 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         // Reference leg drops out, then comes back.
         let dead_ref = FaultInput {
             ref_peak_dbfs: None,
@@ -902,7 +1033,7 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         assert_eq!(st.update(&healthy(&coh), 1.0), Some(Fault::LockAcquired));
         assert_eq!(
             st.update(&healthy(&coh), 1.0 + LOCK_ACQUIRED_HOLD_S - 0.1),
@@ -955,7 +1086,7 @@ mod tests {
             }),
             ..healthy(&coh)
         };
-        assert_eq!(st.update(&inp, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::NoLockYet));
     }
 
     /// `CHECK ROUTING` is a post-lock state, and #238 does not change that:
@@ -978,7 +1109,7 @@ mod tests {
             coherence: &[],
             ..healthy(&[])
         };
-        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::NoLockYet));
         assert_eq!(
             st.update(&refusing, PERSISTENT_REFUSAL_S),
             Some(Fault::NoLock)
@@ -1041,6 +1172,71 @@ mod tests {
         assert!(!coherence_dead(&[]));
     }
 
+    /// The decision that `CHECK ROUTING` stays post-lock, pinned in code
+    /// rather than in a PR body. A frame with no ladder contributes no
+    /// coherence columns even when it carries a full Welch array — the
+    /// threshold was measured against the ladder's columns, and quietly
+    /// feeding it the other array would keep the name while changing the
+    /// test.
+    #[test]
+    fn no_welch_fallback_fills_the_coherence_columns() {
+        let json = r#"{
+            "type": "transfer_stream",
+            "delay_locked": false,
+            "delay_attempts": 3,
+            "meas_peak_dbfs": -30.0,
+            "ref_peak_dbfs": -14.5,
+            "meas_channel": 0,
+            "ref_channel": 1,
+            "sr": 48000,
+            "coherence": [0.02, 0.03, 0.01, 0.04],
+            "spec_freqs": [],
+            "meas_spectrum": [],
+            "ref_spectrum": [],
+            "spl": null,
+            "spl_weighting": "Z",
+            "spl_integration": "fast",
+            "drive": {"on": true, "level_dbfs": -30.0, "drivable": true}
+        }"#;
+        let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(frame.coherence.len(), 4, "the Welch array is on the frame");
+        let inp = FaultInput::from_wire_frame(&frame);
+        assert!(
+            inp.coherence.is_empty(),
+            "the Welch array reached the indicator: {:?}",
+            inp.coherence
+        );
+
+        // And the refusal is what the operator gets, not CHECK ROUTING.
+        let mut st = FaultState::default();
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::NoLockYet));
+        assert_eq!(st.update(&inp, PERSISTENT_REFUSAL_S), Some(Fault::NoLock));
+    }
+
+    /// #226 will add re-locking. If a re-lock ever resets `delay_attempts`,
+    /// a pair that locked and then started refusing reads as one that has
+    /// not been asked yet — and warmup paints nothing, which is the blank
+    /// window this issue removed.
+    #[test]
+    fn a_relocking_pair_never_falls_back_to_warmup() {
+        let coh = [0.755, 0.92];
+        let mut st = FaultState::default();
+        assert_eq!(st.update(&healthy(&coh), 0.0), None);
+        // The wire contract says the count is monotone, so a pair that has
+        // locked can only report more attempts, never zero.
+        let refusing_after_lock = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                settled: false,
+                estimator_attempted: true,
+                ..driving()
+            }),
+            coherence: &[],
+            ..healthy(&[])
+        };
+        assert_eq!(st.update(&refusing_after_lock, 1.0), Some(Fault::LostLock));
+    }
+
     #[test]
     fn reads_a_live_frame_end_to_end() {
         let json = r#"{
@@ -1074,11 +1270,11 @@ mod tests {
         assert!(f.drive.on);
         assert_eq!(inp.coherence.len(), 3);
         let mut st = FaultState::default();
-        assert_eq!(st.update(&inp, 0.0), Some(Fault::LostLock));
+        assert_eq!(st.update(&inp, 0.0), Some(Fault::NoLockYet));
         assert_eq!(
             st.update(&inp, PERSISTENT_REFUSAL_S),
             Some(Fault::NoLock),
-            "a refusal standing 10 s past settle is persistent"
+            "a refusal standing 10 s past the first refused attempt is persistent"
         );
     }
 

@@ -1660,6 +1660,18 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // moment a lock was possible — not
                                           // from session start.
                                           //
+                                          // MONOTONE FOR THE LIFE OF THE
+                                          // PAIR. A re-lock (#226) adds
+                                          // attempts and must never reset the
+                                          // count: a consumer that reads
+                                          // "has the estimator answered" from
+                                          // it would see a locked-then-
+                                          // refusing pair fall back to
+                                          // "warming up", which is silence on
+                                          // the fault indicator — the blank
+                                          // window #238 removed, reappearing
+                                          // only in the sessions #226 is for.
+                                          //
                                           // WHY THIS IS NOT `delay_evidence`
                                           // BY ANOTHER NAME. The rule below
                                           // forbids gating on the evidence,
