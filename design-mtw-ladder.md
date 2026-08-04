@@ -470,6 +470,14 @@ difference is 0.24%, which is invisible in a smoothing window and is not the
 point — the point is that the next person to unify them finds two written
 refusals instead of one.
 
+**Window shape, decided with it.** Hann in log frequency, not rectangular. A
+boxcar average puts small ripples either side of a deep narrow notch — content
+the measurement does not have, at the frequency the operator is looking hardest
+at. Hann's taper costs width, so the full width carries the 1.5x ENBW
+correction (`(∫w)²/∫w² = 2/3`) and the half-width is `2^(1.5/(2·bpo))`. Without
+that correction "1/6 octave" would smooth like 1/9 and the caption would
+overstate what was done.
+
 **Where the code is.** `ac-core/src/visualize/smoothing.rs` holds the maths
 (magnitude in dB, phase unwrapped then wrapped by the caller, coherence never
 touched, masked columns excluded from every window);

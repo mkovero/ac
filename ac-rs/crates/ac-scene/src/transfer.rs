@@ -502,11 +502,15 @@ impl TransferScene {
             && input.freqs.len() == input.coherence.len();
 
         let (mag_segments, phase_segments) = if lengths_agree {
-            // De-rotate first, then smooth. The two orders do not commute:
-            // de-rotation adds 360·f·τ, which is not constant across a
-            // smoothing window, so smoothing the wire phase and de-rotating
-            // afterwards averages a curve nobody is looking at. This order
-            // averages exactly what the pane draws.
+            // De-rotate first, then smooth. The two orders do not commute,
+            // and this one is right for a reason, not by accident:
+            // de-rotation removes a linear phase ramp, so what smoothing then
+            // averages is a curve that is already flat where the response is
+            // flat, and its detail survives. Smoothing the wire phase first
+            // would average across a steep 360·f·τ ramp — the ramp is not
+            // constant across a window, so the average would flatten real
+            // structure along with it, and the de-rotation applied afterwards
+            // could not put back what the averaging had already removed.
             let phase_derot: Vec<f64> = (0..input.freqs.len())
                 .map(|i| derotate_deg(input.phase_deg[i], input.freqs[i], tau))
                 .collect();
