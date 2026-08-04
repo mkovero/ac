@@ -192,7 +192,10 @@ fn a_fault_row_is_painted_verbatim_from_ac_scene() {
             drivable: true,
         },
         delay_locked: Some(false),
-        settled: true,
+        // The field case #238 unblocked: no lock, so no ladder, so never
+        // settled — the state the display used to paint nothing for.
+        settled: false,
+        estimator_attempted: true,
     };
     let scene = scene_with(Some(refusing), 0.0);
     assert_eq!(scene.fault, Some(ac_scene::Fault::LostLock));
@@ -215,7 +218,10 @@ fn the_persistent_row_paints_its_instruction() {
             drivable: true,
         },
         delay_locked: Some(false),
-        settled: true,
+        // The field case #238 unblocked: no lock, so no ladder, so never
+        // settled — the state the display used to paint nothing for.
+        settled: false,
+        estimator_attempted: true,
     };
     // One FaultState, two frames: the clock has to run for the row to
     // change, so this cannot be built from a single scene call.
@@ -286,6 +292,7 @@ fn a_healthy_session_paints_no_indicator() {
         },
         delay_locked: Some(true),
         settled: true,
+        estimator_attempted: true,
     };
     let scene = scene_with(Some(healthy), 0.0);
     assert_eq!(scene.fault, None);

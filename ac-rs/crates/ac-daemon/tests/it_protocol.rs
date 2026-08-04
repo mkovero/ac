@@ -1598,6 +1598,66 @@ fn transfer_stream_frame_v2_fields_present_and_spec_freqs_stable() {
     );
 }
 
+/// #238: every published frame carries `delay_attempts`, and it is already
+/// non-zero on the first one.
+///
+/// Both halves matter. The field is what lets a consumer separate a refusing
+/// pair from a warming-up one — `delay_locked` is false for both — and the
+/// fault indicator's two refusal states were unreachable without it. And
+/// "non-zero on the first frame" is what makes the refusal clock honest: the
+/// daemon publishes nothing until the rings hold a full Welch segment, which
+/// is also when the first estimate runs, so a consumer counting from its first
+/// frame counts from the first moment a lock was possible — not from session
+/// start.
+#[test]
+fn transfer_stream_reports_delay_attempts_from_the_first_frame() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":          "transfer_stream",
+        "meas_channel": 0,
+        "ref_channel":  1,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut frames: Vec<Value> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while frames.len() < 2 && Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                frames.push(v);
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    assert!(
+        frames.len() >= 2,
+        "need >=2 transfer_stream frames, got {}",
+        frames.len()
+    );
+
+    for f in &frames {
+        let attempts = f["delay_attempts"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("delay_attempts missing or not an integer: {f}"));
+        assert!(
+            attempts >= 1,
+            "a frame was published before the estimator answered: {f}"
+        );
+        // The count says the estimator ran; `delay_locked` says what it
+        // decided. Neither is inferred from the other.
+        assert!(
+            f["delay_locked"].is_boolean(),
+            "delay_locked missing alongside delay_attempts: {f}"
+        );
+    }
+}
+
 /// AC #2 (amplitude truth): fake channel 0's default stimulus is a 1 kHz
 /// sine at 0.1 peak amplitude (audio/fake.rs) = -20 dBFS, exactly bin-
 /// aligned (nperseg=sr=48000 ⇒ Δf=1 Hz). `meas_spectrum`'s peak column

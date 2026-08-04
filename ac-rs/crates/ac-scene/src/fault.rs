@@ -54,19 +54,74 @@
 //! # Nothing here gates on `delay_prominence`
 //!
 //! `ZMQ.md` documents it "Diagnostic only: nothing downstream may gate on it,
-//! since the threshold is the estimator's to own." Warmup and refusal are
-//! separated by [`FaultInput::settled`] — an observed property of the frame —
-//! rather than by reading prominence null-versus-present. Silently gating on
-//! a value the estimator owns is how the two ends drift apart.
+//! since the threshold is the estimator's to own." Silently gating on a value
+//! the estimator owns — including reading its null-versus-present to separate
+//! warmup from refusal — is how the two ends drift apart.
+//!
+//! [`WireFrame::delay_attempts`] is the field this module reads instead, and
+//! the distinction is worth stating because it is not self-evident. A count
+//! of completed estimates carries no threshold: it says the estimator has
+//! answered, not how close the answer came. The estimator can change
+//! `NOISE_FLOOR_PROMINENCE`, its search range, its peak rule, or refuse for a
+//! reason not yet invented, and every statement this module makes stays true.
+//! Inferring the same thing from `delay_evidence` being non-null would couple
+//! the indicator to *when the estimator chooses to publish evidence*, which is
+//! exactly the internal the rule protects. See `ZMQ.md`'s `delay_attempts`
+//! entry, which carries the same argument next to the rule itself.
 //!
 //! # Warmup must not cry wolf
 //!
 //! `delay_locked: false` is also what a pair publishes while warming up. A
 //! fault indicator that fires on every healthy startup gets ignored, which
-//! defeats the point of having one, so every lock-derived state waits for the
-//! ladder to settle. Settling is *observed* — the frame's `mtw` columns are
-//! absent until every rung holds a full N blocks — not timed from session
-//! start, so it cannot drift from what the display is actually showing.
+//! defeats the point of having one, so no lock-derived state paints until the
+//! pair has been asked the question at least once.
+//!
+//! Originally that gate was [`FaultFrame::settled`] alone — the frame's `mtw`
+//! columns, absent until every rung holds a full N blocks. **That made both
+//! refusal states unreachable** (#238): the daemon builds the ladder only
+//! *after* a lock, so a refusing pair never settles, and a locked pair never
+//! returns `delay_locked: false`. A refusing session rendered a blank window
+//! with no indicator at all — the exact failure the module exists to prevent,
+//! and it survived because "settled" was assumed to be a property of the
+//! session rather than of the lock.
+//!
+//! So the gate is now "settled **or** the estimator has completed an attempt".
+//! Both are observed, neither is timed from session start:
+//!
+//! - a locked pair settles when its ladder does, unchanged;
+//! - a refusing pair is gated by [`FaultFrame::estimator_attempted`], which
+//!   turns true on the first completed estimate. That estimate runs only once
+//!   the rings hold a full Welch segment, so the refusal clock still starts
+//!   from the first moment a lock was *possible*, not from t=0.
+//!
+//! # `CHECK ROUTING` remains a post-lock state, deliberately
+//!
+//! Unrelated legs make the estimator refuse, so they never produce a ladder,
+//! so [`Fault::CheckRouting`] cannot fire on the session that most obviously
+//! deserves it. That is a known gap, not an oversight — and it is **not**
+//! closed by falling back to the frame's Welch `coherence` when `mtw` is
+//! absent. Those two arrays are different measurements: three ladder stages
+//! with per-stage block counts against a single Welch path with a different
+//! bin count and a different bias floor. [`coherence_dead`]'s threshold was
+//! measured against the ladder's columns; applied to the other array it is a
+//! different test wearing the same name, and a silently-selected source for a
+//! displayed quantity is the shape that let the original display defect
+//! survive a rewrite.
+//!
+//! A refusing session reaches the operator through [`Fault::NoLock`], whose
+//! instruction is "check mic placement and routing" — which sends them to the
+//! same place. Closing the gap properly means validating the threshold against
+//! both sources, and that is a rig measurement, not a code change.
+//!
+//! # Why the daemon does not simply build the ladder unaligned
+//!
+//! Recorded so it is not revisited as the obvious simplification: building the
+//! ladder at delay 0 before a lock would make `settled` true for a refusing
+//! pair with no new wire field. It would also publish a transfer curve
+//! computed against an unaligned reference, which at any real acoustic delay
+//! collapses the top end to nothing. That is a confident wrong display — the
+//! failure mode three rig sessions have gone into removing — and a blank
+//! window under a `NO LOCK` banner is the honest alternative.
 
 use crate::transfer::COHERENCE_THRESHOLD;
 use crate::wire::WireFrame;
@@ -215,9 +270,21 @@ pub struct FaultFrame {
     pub delay_locked: Option<bool>,
     /// Whether the ladder has settled, observed from the frame rather than
     /// timed: the daemon withholds the `mtw` columns until every rung holds
-    /// a full N blocks. Before this, `delay_locked: false` is warmup and
-    /// nothing lock-derived may paint.
+    /// a full N blocks.
+    ///
+    /// True only after a lock, since the daemon builds the ladder from the
+    /// alignment offset — which is why this cannot be the only warmup gate.
+    /// See [`Self::estimator_attempted`].
     pub settled: bool,
+    /// Whether the estimator has completed at least one delay estimate on
+    /// this pair, accepted or refused (`delay_attempts > 0`).
+    ///
+    /// The refusing pair's equivalent of [`Self::settled`]: it is what makes
+    /// `delay_locked: false` mean "asked and refused" rather than "not asked
+    /// yet". False on a daemon predating #238, which leaves such a daemon's
+    /// refusals as unreachable as they were — absence is not evidence that
+    /// the estimator ran.
+    pub estimator_attempted: bool,
 }
 
 impl FaultFrame {
@@ -234,6 +301,7 @@ impl FaultFrame {
             // Same `lengths_agree` filter the display applies, so "settled"
             // and "there are columns on screen" cannot disagree.
             settled: frame.mtw.as_ref().filter(|m| m.lengths_agree()).is_some(),
+            estimator_attempted: frame.delay_attempts > 0,
         })
     }
 }
@@ -339,7 +407,13 @@ impl FaultState {
         // refusal that spans a period of silence is still one unbroken
         // refusal, and the acquisition transient must not be missed because
         // a louder row was showing when it happened.
-        let refusing = frame.settled && frame.delay_locked == Some(false);
+        // Either gate is enough, and each covers a case the other cannot:
+        // `settled` is the only one a locked-then-lost pair can satisfy (the
+        // ladder outlives the lock), and `estimator_attempted` is the only one
+        // a pair that has never locked can satisfy (there is no ladder without
+        // an offset). Requiring both is what made this unreachable — #238.
+        let asked = frame.settled || frame.estimator_attempted;
+        let refusing = asked && frame.delay_locked == Some(false);
         if refusing {
             self.refusing_since_s.get_or_insert(now_s);
         } else {
@@ -417,6 +491,7 @@ mod tests {
             },
             delay_locked: Some(true),
             settled: true,
+            estimator_attempted: true,
         }
     }
 
@@ -528,6 +603,7 @@ mod tests {
                 },
                 delay_locked: None,
                 settled: false,
+                estimator_attempted: false,
             }),
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
@@ -549,6 +625,10 @@ mod tests {
                 },
                 delay_locked: Some(false),
                 settled: false,
+                // The estimator has run and refused, so the suppression
+                // below is the drive gate doing its job, not the warmup
+                // gate hiding the case by accident.
+                estimator_attempted: true,
             }),
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
@@ -573,6 +653,7 @@ mod tests {
                 },
                 delay_locked: Some(false),
                 settled: true,
+                estimator_attempted: true,
             }),
             ..healthy(&coh)
         };
@@ -591,6 +672,7 @@ mod tests {
             },
             delay_locked,
             settled: true,
+            estimator_attempted: true,
         };
         let mut st = FaultState::default();
         let inp = FaultInput {
@@ -632,9 +714,10 @@ mod tests {
         assert_eq!(Fault::LostLock.detail(), None);
     }
 
-    /// The whole reason lock states wait for the ladder: `delay_locked:
-    /// false` during warmup is indistinguishable from a refusal, and an
-    /// indicator that fires on every healthy startup gets ignored.
+    /// The whole reason lock states wait: `delay_locked: false` before the
+    /// estimator has run is warmup, indistinguishable from a refusal on the
+    /// flag alone, and an indicator that fires on every healthy startup gets
+    /// ignored.
     #[test]
     fn warmup_does_not_paint_a_lock_fault() {
         let mut st = FaultState::default();
@@ -642,6 +725,9 @@ mod tests {
             frame: Some(FaultFrame {
                 delay_locked: Some(false),
                 settled: false,
+                // Rings not yet full: no estimate has been attempted, so
+                // there is nothing to call a refusal.
+                estimator_attempted: false,
                 ..driving()
             }),
             coherence: &[],
@@ -653,17 +739,64 @@ mod tests {
         assert_eq!(st.update(&warming, 30.0), None);
     }
 
-    /// And the refusal clock starts at settle, not at session start: a timer
-    /// from t=0 would fire NO LOCK the instant a slow-settling session
-    /// produced its first columns.
+    /// #238's regression test. A pair that never locks never gets a ladder,
+    /// so `settled` is false forever — and gating on it alone left `LOST
+    /// LOCK` and `NO LOCK` unreachable, which is what put a blank window in
+    /// front of an operator for a whole rig session.
     #[test]
-    fn the_refusal_clock_starts_at_settle_not_at_session_start() {
+    fn a_refusal_that_never_settles_still_paints() {
+        let mut st = FaultState::default();
+        let refusing = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                // No lock, so no ladder, so no columns — for the whole
+                // session.
+                settled: false,
+                estimator_attempted: true,
+                ..driving()
+            }),
+            coherence: &[],
+            ..healthy(&[])
+        };
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(
+            st.update(&refusing, PERSISTENT_REFUSAL_S),
+            Some(Fault::NoLock)
+        );
+    }
+
+    /// A daemon predating #238 publishes no attempt count, and absence is not
+    /// evidence that the estimator ran. Such a session stays as silent as it
+    /// was — a wrong banner on an old daemon would be worse than the gap.
+    #[test]
+    fn a_daemon_without_the_attempt_count_paints_no_refusal() {
+        let mut st = FaultState::default();
+        let old = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                settled: false,
+                estimator_attempted: false,
+                ..driving()
+            }),
+            coherence: &[],
+            ..healthy(&[])
+        };
+        assert_eq!(st.update(&old, 0.0), None);
+        assert_eq!(st.update(&old, 100.0), None);
+    }
+
+    /// And the refusal clock starts when the estimator first answers, not at
+    /// session start: a timer from t=0 would fire NO LOCK on a session that
+    /// was still filling its rings.
+    #[test]
+    fn the_refusal_clock_starts_at_the_first_attempt_not_at_session_start() {
         let coh = [0.755, 0.92];
         let mut st = FaultState::default();
         let warming = FaultInput {
             frame: Some(FaultFrame {
                 delay_locked: Some(false),
                 settled: false,
+                estimator_attempted: false,
                 ..driving()
             }),
             coherence: &[],
@@ -672,7 +805,8 @@ mod tests {
         for t in 0..30 {
             assert_eq!(st.update(&warming, t as f64), None);
         }
-        // The first settled frame, at t=30, is where the clock starts.
+        // The first frame carrying a completed attempt, at t=30, is where
+        // the clock starts — here on a pair that goes on to lock and settle.
         let refusing = FaultInput {
             frame: Some(FaultFrame {
                 delay_locked: Some(false),
@@ -683,6 +817,26 @@ mod tests {
         assert_eq!(st.update(&refusing, 30.0), Some(Fault::LostLock));
         assert_eq!(st.update(&refusing, 39.9), Some(Fault::LostLock));
         assert_eq!(st.update(&refusing, 40.0), Some(Fault::NoLock));
+    }
+
+    /// The settled gate still stands on its own, for the case the attempt
+    /// count cannot cover: a pair that locked, settled, and then lost the
+    /// lock keeps its ladder, and its refusal must still paint.
+    #[test]
+    fn a_settled_pair_that_loses_its_lock_still_paints() {
+        let coh = [0.755, 0.92];
+        let mut st = FaultState::default();
+        assert_eq!(st.update(&healthy(&coh), 0.0), None);
+        let lost = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                settled: true,
+                estimator_attempted: false,
+                ..driving()
+            }),
+            ..healthy(&coh)
+        };
+        assert_eq!(st.update(&lost, 1.0), Some(Fault::LostLock));
     }
 
     #[test]
@@ -802,6 +956,36 @@ mod tests {
             ..healthy(&coh)
         };
         assert_eq!(st.update(&inp, 0.0), Some(Fault::LostLock));
+    }
+
+    /// `CHECK ROUTING` is a post-lock state, and #238 does not change that:
+    /// a refusing pair has no ladder, so it has no coherence columns to
+    /// evaluate, and the Welch array on the frame is a different measurement
+    /// with a different bias floor — reading the threshold against it would
+    /// be a different test under the same name. The operator still gets
+    /// routing in `NO LOCK`'s instruction.
+    #[test]
+    fn a_refusing_session_reaches_routing_through_no_lock() {
+        let mut st = FaultState::default();
+        let refusing = FaultInput {
+            frame: Some(FaultFrame {
+                delay_locked: Some(false),
+                settled: false,
+                estimator_attempted: true,
+                ..driving()
+            }),
+            // No ladder, so no columns, whatever the legs are carrying.
+            coherence: &[],
+            ..healthy(&[])
+        };
+        assert_eq!(st.update(&refusing, 0.0), Some(Fault::LostLock));
+        assert_eq!(
+            st.update(&refusing, PERSISTENT_REFUSAL_S),
+            Some(Fault::NoLock)
+        );
+        assert!(Fault::NoLock
+            .detail()
+            .is_some_and(|d| d.contains("routing")));
     }
 
     /// Before #227 lands, `delay_locked` is absent. Every other row still
