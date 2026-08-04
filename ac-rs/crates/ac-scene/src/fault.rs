@@ -222,6 +222,11 @@ pub enum Fault {
     /// and it shares the `NO LOCK` label with [`Fault::NoLock`] deliberately.
     /// The two rows make the same true statement about the pair; what
     /// escalation adds is the instruction, not a different claim.
+    ///
+    /// The words are confirmed operator-side (Markus, 2026-08-04): `NO LOCK`
+    /// states both the status and the target, and is what a refusing session
+    /// should read from its first second. Not open unless the rig says
+    /// otherwise.
     NoLockYet,
     /// The estimator has been refusing for longer than
     /// [`PERSISTENT_REFUSAL_S`]. A mic at 3 m off-axis may never lock, so
