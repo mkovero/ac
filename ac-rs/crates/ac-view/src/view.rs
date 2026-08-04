@@ -264,10 +264,13 @@ pub struct TransferViewState {
     pub snapshot_delay_ms: f64,
     /// Fractional-octave smoothing of the trace (#229), cycled by `N`.
     ///
-    /// Starts off, and is not persisted: smoothing is a reading aid applied to
-    /// the session in front of the operator, and one that started already on
-    /// would understate the instrument's own resolution from the first frame
-    /// of every session after it was last used.
+    /// Starts off, and is deliberately **not persisted**. A setting that
+    /// survives a restart is a setting someone forgets is on: they measure
+    /// next week, screenshot it, and the caption is the only thing standing
+    /// between that screenshot and a resolution claim the data does not
+    /// support. Non-persistence means every session opens at the honest
+    /// default. The cost is one keypress, on a control the operator changes
+    /// while looking at the screen anyway.
     pub smoothing: ac_scene::Smoothing,
 }
 

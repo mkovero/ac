@@ -503,6 +503,13 @@ mod tests {
         }
     }
 
+    /// A **contract-level** claim, deliberately not mirrored at acceptance
+    /// level: it is invisible in the pane by construction. Running the unwrap
+    /// through a gap can only offset the following run by a multiple of 360°,
+    /// the smoothed mean of a run shifts by that same multiple, and
+    /// `wrap_deg` is 360-periodic — so the drawn phase is identical either
+    /// way. The restart is here for the callers this function promises
+    /// unwrapped output to, not for the transfer view.
     #[test]
     fn unwrap_restarts_at_a_masked_gap() {
         // Left run ends mid-turn, right run starts on the other side of a
