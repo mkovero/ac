@@ -131,6 +131,13 @@ Four facts not yet in those documents:
      session that never locked asserts something untrue, which is the failure this
      brief exists to prevent.
 
+     **What #238 does not make reachable: LOST LOCK.** It needs `delay_locked` to
+     go true and then false, and today's daemon estimates a pair's delay once and
+     caches it, so the flag is monotone for the life of a session. The row is
+     written and tested against #226's producer, not this one. A rig tester should
+     expect NO LOCK from a refusing session and should not read the absence of
+     LOST LOCK as a defect in #238.
+
 Constraint on stimulus, if any part of this reaches the rig: -40 dBFS maximum, and
 never emit without explicit per-run consent from Markus.
 

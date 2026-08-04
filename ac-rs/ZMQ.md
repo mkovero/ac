@@ -1653,6 +1653,12 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   // accepted or refused. 0 before the first attempt, and absent entirely on
   // a daemon predating #238 (consumers must default it to 0, never to "it
   // ran": absence is not evidence that the estimator answered).
+  //
+  // 0 is not observable from a #238 daemon: the same full-ring condition
+  // gates the first estimate and the first published frame, so every frame a
+  // subscriber receives already carries >= 1 (asserted in it_protocol.rs).
+  // It is the default for the field's absence, not a state to build a warmup
+  // display around.
   "delay_attempts":  <int>,              // the estimator has answered N times
                                           //
                                           // This is what separates warming up

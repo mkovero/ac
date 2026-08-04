@@ -1020,8 +1020,11 @@ mod tests {
             drivable: true,
         });
         f.delay_locked = Some(false);
-        // The estimator has answered and refused. Without this the pair reads
-        // as still warming up, and warmup paints nothing (#238).
+        // The estimator has answered and refused (#238), so this is a frame a
+        // current daemon could publish. It is not what makes the row paint
+        // here — `transfer_frame` carries `mtw`, so the settled gate already
+        // covers it. The field-reachable no-ladder shape is pinned in
+        // `ac-scene::fault` and in `it_transfer_geometry`.
         f.delay_attempts = 3;
         f
     }

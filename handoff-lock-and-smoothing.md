@@ -172,6 +172,19 @@ Falsify any fix against Run 1's data shape: it must turn the 22.8 / 30.3 /
 > recoverable than one on a driving session. Everything else in this section
 > was implemented as ratified. Full record: `state-live-spectrum.md`, "The
 > fault indicator (#228), as built".
+>
+> **Amended by #238, 2026-08-04.** As built, both refusal rows were
+> unreachable: they required the ladder to have settled, and the daemon builds
+> the ladder only after a lock, so a refusing pair never satisfied the gate.
+> The daemon now publishes `delay_attempts` and the gate is "settled **or**
+> the estimator has answered". Two consequences for the table below. The
+> `LOST LOCK` row now covers **only** a pair that held a lock and lost it — a
+> pair that never locked reads `NO LOCK` from its first second, since nothing
+> was lost. And the persistent-refusal clock is anchored on the first refused
+> attempt rather than on settle, which is undefined for a pair with no ladder;
+> the 10 s number is unchanged. `LOST LOCK` itself stays unreachable in the
+> field until **#226** — today's daemon caches a pair's delay and never
+> re-estimates, so `delay_locked` never returns to false.
 
 It now drives the indicator rather than being advisory, so its thresholds
 matter more. It **no longer needs a PPO input**, because PPO is fixed

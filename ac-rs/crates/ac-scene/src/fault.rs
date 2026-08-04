@@ -98,6 +98,16 @@
 //!   the rings hold a full Welch segment, so the refusal clock still starts
 //!   from the first moment a lock was *possible*, not from t=0.
 //!
+//! **Only the second half fires today, and that is not a defect in the gate.**
+//! The daemon estimates a pair's delay once and caches it
+//! (`handlers/transfer.rs` — `pair_delays[i].is_some()` skips the retry), so
+//! `delay_locked` is monotone false-then-true for the life of a session and a
+//! settled pair never reports a refusal. [`Fault::LostLock`] and the `settled`
+//! half of this gate are therefore dormant until #226 makes the lock a
+//! maintained quantity; they are written and tested now so that landing #226
+//! does not also have to invent the display state for what it unblocks. What
+//! #238 fixes is the half that *is* reachable: a pair that never locks.
+//!
 //! # `CHECK ROUTING` remains a post-lock state, deliberately
 //!
 //! Unrelated legs make the estimator refuse, so they never produce a ladder,
@@ -216,6 +226,13 @@ pub enum Fault {
     ///
     /// Requires a lock to have existed. A pair that has never locked gets
     /// [`Fault::NoLockYet`] instead — see its docs.
+    ///
+    /// **Unreachable against today's daemon**, which caches a pair's delay
+    /// after the first successful estimate and never re-runs it, so
+    /// `delay_locked` never returns to false. #226 makes the lock a
+    /// maintained quantity and this becomes live; until then it is behaviour
+    /// written and tested ahead of its producer, not a state the rig can
+    /// reach.
     LostLock,
     /// The estimator has refused every attempt so far, and the session has
     /// never held a lock, for less than [`PERSISTENT_REFUSAL_S`].
@@ -528,6 +545,9 @@ impl FaultState {
         // ladder outlives the lock), and `estimator_attempted` is the only one
         // a pair that has never locked can satisfy (there is no ladder without
         // an offset). Requiring both is what made this unreachable — #238.
+        // Only the second gate fires against today's daemon: it caches a
+        // pair's delay, so no settled pair ever reports a refusal. The first
+        // is written for #226 — see the module docs.
         let asked = frame.settled || frame.estimator_attempted;
         let refusing = asked && frame.delay_locked == Some(false);
         if refusing {
@@ -1001,6 +1021,14 @@ mod tests {
     /// The settled gate still stands on its own, for the case the attempt
     /// count cannot cover: a pair that locked, settled, and then lost the
     /// lock keeps its ladder, and its refusal must still paint.
+    ///
+    /// The frame below is one **no daemon publishes today** — the delay is
+    /// cached after the first success, so `delay_locked` never returns to
+    /// false, and `estimator_attempted: false` after a lock would violate the
+    /// monotone contract besides. It is written against #226's producer, not
+    /// against the current one, and it is the only test that pins the
+    /// `settled` half of the gate. Read it as a specification, not as
+    /// evidence that the half is exercised.
     #[test]
     fn a_settled_pair_that_loses_its_lock_still_paints() {
         let coh = [0.755, 0.92];
@@ -1321,12 +1349,20 @@ mod tests {
         assert!(!coherence_dead(&partial));
     }
 
+    /// A whole frame through deserialisation, `FaultInput`, and the clock.
+    ///
+    /// The `mtw`-present-and-refusing shape is a composite, not a capture:
+    /// today's daemon builds the ladder from a lock it then caches, so it
+    /// never emits both together. It is here to exercise the full read path
+    /// in one test, and it no longer stands in for the `settled` half of the
+    /// gate — `delay_attempts` is what carries it, as it would on the wire.
     #[test]
     fn reads_a_live_frame_end_to_end() {
         let json = r#"{
             "type": "transfer_stream",
             "delay_ms": 5.9,
             "delay_locked": false,
+            "delay_attempts": 3,
             "meas_peak_dbfs": -30.0,
             "ref_peak_dbfs": -14.5,
             "meas_channel": 0,
