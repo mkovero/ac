@@ -262,6 +262,13 @@ pub struct TransferViewState {
     /// The open snapshot's stored delay (ms), fed to `DerotChoice::Snapshot`.
     /// M4c wires the open-snapshot flow; until then it stays 0.
     pub snapshot_delay_ms: f64,
+    /// Fractional-octave smoothing of the trace (#229), cycled by `N`.
+    ///
+    /// Starts off, and is not persisted: smoothing is a reading aid applied to
+    /// the session in front of the operator, and one that started already on
+    /// would understate the instrument's own resolution from the first frame
+    /// of every session after it was last used.
+    pub smoothing: ac_scene::Smoothing,
 }
 
 impl Default for TransferViewState {
@@ -280,11 +287,18 @@ impl TransferViewState {
             prev_derot: DerotChoice::Session,
             stimulus: crate::stimulus::StimulusMachine::new(drive_max_dbfs, start_level_dbfs),
             snapshot_delay_ms: 0.0,
+            smoothing: ac_scene::Smoothing::Off,
         }
     }
 
     pub fn cycle_derot(&mut self) {
         self.derot = self.derot.next();
+    }
+
+    /// `N`: cycle smoothing. The order and the labels are `ac-scene`'s — this
+    /// crate holds the choice, it does not define what any setting means.
+    pub fn cycle_smoothing(&mut self) {
+        self.smoothing = self.smoothing.next();
     }
 
     /// `P`: force raw phase, or restore the previous non-raw choice.
@@ -409,6 +423,20 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
         egui::FontId::default(),
         COLOR_VALUE,
     );
+
+    // Smoothing state (#229), one line under the delay readout and in the
+    // structural colour: it describes how the trace was drawn, it is not a
+    // measured value. Absent when smoothing is off — an unaltered trace is
+    // the resting state and needs no caption. The string is ac-scene's.
+    if let Some(label) = scene.smoothing_readout {
+        painter.text(
+            content.left_top() + egui::vec2(0.0, 16.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::default(),
+            COLOR_LABEL,
+        );
+    }
 
     // Input-level meters: two thin bars at the right edge, M left of R
     // (UX standing requirement), heights normalized by ac-scene. Always

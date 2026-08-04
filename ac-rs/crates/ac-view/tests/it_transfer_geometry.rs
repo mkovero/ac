@@ -5,7 +5,10 @@
 //! segment-split unit test: this proves the split survives to the
 //! painted polyline.
 
-use ac_scene::{DerotMode, FaultState, MeterState, Source, TransferInput, TransferScene};
+use ac_scene::{
+    DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
+    TransferScene,
+};
 use ac_view::view::{draw_view, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
@@ -46,7 +49,7 @@ fn masked_scene() -> TransferScene {
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
         &inp,
-        DerotMode::Session,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
@@ -159,7 +162,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
         &inp,
-        DerotMode::Session,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
@@ -242,7 +245,7 @@ fn the_persistent_row_paints_its_instruction() {
         };
         TransferScene::from_input(
             &inp,
-            DerotMode::Session,
+            DisplayModes::new(DerotMode::Session, Smoothing::Off),
             FREQ_RANGE,
             DB_RANGE,
             meters,

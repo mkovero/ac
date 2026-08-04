@@ -55,6 +55,10 @@ pub enum Action {
     ToggleRawPhase,
     /// Cycle the de-rotation reference: session / snapshot / raw (D3).
     CycleDerotReference,
+    /// Cycle fractional-octave smoothing of the trace: off / 1/24 / 1/12 /
+    /// 1/6 / 1/3 / 1/1 (#229). Display-only — it does not change the column
+    /// density, which is fixed (`design-mtw-ladder.md`, decision 3).
+    CycleSmoothing,
     /// Open the settings overlay (channels + start level). M4b binds it;
     /// M4c (#182) implements the overlay itself.
     OpenSettings,
@@ -93,7 +97,7 @@ pub struct Binding {
 ///
 /// Key ledger (so the single-pass assignment is auditable at a glance):
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
-/// `W` `T` `V`; transfer `P` `R` `G` + stimulus `Space` `Enter` `Esc`
+/// `W` `T` `V`; transfer `P` `R` `N` `G` + stimulus `Space` `Enter` `Esc`
 /// `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
@@ -200,6 +204,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::CycleDerotReference,
         scope: Scope::Transfer,
         description: "Cycle de-rotation reference (session / snapshot / raw)",
+    },
+    Binding {
+        key: Key::N,
+        action: Action::CycleSmoothing,
+        scope: Scope::Transfer,
+        description: "Cycle 1/N-octave smoothing (off / 24 / 12 / 6 / 3 / 1)",
     },
     Binding {
         key: Key::G,

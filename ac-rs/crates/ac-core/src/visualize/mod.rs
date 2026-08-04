@@ -9,6 +9,7 @@ pub mod fractional_octave;
 pub mod mtw;
 pub mod pair_derivation;
 pub mod reassigned;
+pub mod smoothing;
 pub mod spectrum;
 pub mod spl_level;
 pub mod time_integration;

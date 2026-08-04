@@ -8,7 +8,9 @@
 //! exercising the case it exists for.
 
 use ac_core::visualize::mtw::ladder;
-use ac_scene::transfer::{DerotMode, MeterState, TransferScene, COHERENCE_THRESHOLD};
+use ac_scene::transfer::{
+    DerotMode, DisplayModes, MeterState, Smoothing, TransferScene, COHERENCE_THRESHOLD,
+};
 use ac_scene::{FaultState, TransferInput, WireFrame};
 use serde_json::json;
 
@@ -110,7 +112,7 @@ fn scene(frame: &WireFrame) -> TransferScene {
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
         &input,
-        DerotMode::Session,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,

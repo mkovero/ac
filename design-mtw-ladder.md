@@ -445,6 +445,44 @@ indicator (#228) needs no density input because this number is fixed.
 
 ---
 
+## design decision 4 — smoothing's band geometry is base-2
+
+Recorded with #229's implementation, which the issue required to decide this
+rather than inherit it.
+
+**Display smoothing uses `2^(1/(2·bpo))` as its half-band factor, not IEC
+61260-1's `G = 10^(3/10)`.** The reasons, in order of weight:
+
+- the columns being averaged sit on this ladder's `2^(1/P)` grid (deliverable
+  7, above). A window specified in base-2 octaves therefore spans a fixed
+  number of columns across the axis; a base-ten window would breathe against
+  the grid it slides over, for no gain;
+- smoothing is Tier 2 and claims no conformance, so it has no call on the
+  normative ratio. `visualize/fractional_octave.rs`'s `ioct_band_centers` /
+  `ioct_band_edges` — which *do* use `G_OCTAVE`, because they aggregate into
+  named bands that are reported as such — are deliberately **not** reused by
+  `visualize/smoothing.rs`.
+
+This is the two-conventions problem in its third place, and the answer is the
+same as deliverable 7's: the constants are not two spellings of one thing, and
+unifying them would look like a tidy-up while moving a window edge. The
+difference is 0.24%, which is invisible in a smoothing window and is not the
+point — the point is that the next person to unify them finds two written
+refusals instead of one.
+
+**Where the code is.** `ac-core/src/visualize/smoothing.rs` holds the maths
+(magnitude in dB, phase unwrapped then wrapped by the caller, coherence never
+touched, masked columns excluded from every window);
+`ac-scene::transfer::Smoothing` owns the designators and the on-screen label;
+`ac-view` holds the operator's choice (`N`) and draws that label verbatim.
+
+**What did not change.** The daemon still does not smooth, and
+`ProcessingChain.smoothing_bpo` on the wire still reports that truthfully.
+Display smoothing is applied after the frame, in the view, and is announced on
+screen so a screenshot cannot claim a resolution the measurement did not have.
+
+---
+
 ## affected modules
 
 - `ac-core/src/visualize/mtw/ladder.rs` — stage layout from `sr`; fallible,

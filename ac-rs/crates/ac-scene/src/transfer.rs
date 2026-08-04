@@ -49,6 +49,7 @@
 //! daemon-shaped frames specifically to catch that.
 
 use ac_core::visualize::pair_derivation::PairDerivation;
+use ac_core::visualize::smoothing::{smooth_db, smooth_unwrapped_phase_deg};
 
 use crate::fault::{Fault, FaultFrame, FaultInput, FaultState};
 use crate::scene::{Provenance, Source, Trace};
@@ -80,9 +81,12 @@ pub const PEAK_HOLD_S: f64 = 1.5;
 /// what the operator selects; [`DerotMode::tau_derot_ms`] converts that
 /// choice into the τ_derot the maths needs, given a wire that is already
 /// session-compensated.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum DerotMode {
-    /// This session's delay. τ_derot = 0 — the wire already is this.
+    /// This session's delay. τ_derot = 0 — the wire already is this. The
+    /// default: a session opens showing its own compensation, which is the
+    /// only reference it has measured for itself.
+    #[default]
     Session,
     /// Undo the session's compensation and show measured phase.
     Raw,
@@ -100,6 +104,103 @@ impl DerotMode {
             DerotMode::Raw => -session_delay_ms,
             DerotMode::Snapshot { snapshot_delay_ms } => snapshot_delay_ms - session_delay_ms,
         }
+    }
+}
+
+/// Fractional-octave smoothing of the displayed transfer curve (#229).
+///
+/// The designator set is closed on purpose — 1/1, 1/3, 1/6, 1/12, 1/24 and
+/// off, the standard ladder, in the same vocabulary
+/// `ProcessingChain.smoothing_bpo` and both report writers already use. A
+/// free `u32` would let the view ask for 1/7 octave, which no operator means
+/// and no report renders.
+///
+/// What this is **not**: a column-density control. Points-per-octave stays
+/// fixed at 48 (`design-mtw-ladder.md`, decision 3) because coarser columns
+/// tighten the delay tolerance eightfold. Smoothing runs after coherence is
+/// formed and therefore cannot do that, however heavy it is set.
+///
+/// Coherence is never smoothed: the mask that gaps the trace is computed from
+/// the raw `coherence` array either way, so a smoothed magnitude cannot make
+/// an untrusted column look trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Smoothing {
+    #[default]
+    Off,
+    Oct1,
+    Oct3,
+    Oct6,
+    Oct12,
+    Oct24,
+}
+
+impl Smoothing {
+    /// Bands per octave, or `None` for off — the shape
+    /// `ProcessingChain.smoothing_bpo` is declared in.
+    pub fn bpo(self) -> Option<u32> {
+        match self {
+            Smoothing::Off => None,
+            Smoothing::Oct1 => Some(1),
+            Smoothing::Oct3 => Some(3),
+            Smoothing::Oct6 => Some(6),
+            Smoothing::Oct12 => Some(12),
+            Smoothing::Oct24 => Some(24),
+        }
+    }
+
+    /// The operator-facing string, or `None` when nothing is applied.
+    ///
+    /// `None` rather than `"off"`: the readout exists to say that the trace
+    /// has been altered, and an unaltered trace is the resting state of the
+    /// instrument. Wording matches the report writers' `"1/6 octave"` so a
+    /// screenshot and a report name the same setting the same way.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Smoothing::Off => None,
+            Smoothing::Oct1 => Some("smoothing 1/1 octave"),
+            Smoothing::Oct3 => Some("smoothing 1/3 octave"),
+            Smoothing::Oct6 => Some("smoothing 1/6 octave"),
+            Smoothing::Oct12 => Some("smoothing 1/12 octave"),
+            Smoothing::Oct24 => Some("smoothing 1/24 octave"),
+        }
+    }
+
+    /// Cycle order: off, then narrowest to widest, then back to off.
+    ///
+    /// Successive presses smooth *more*, so the key reads as one direction of
+    /// travel rather than as a menu, and the state after a full cycle is the
+    /// unaltered trace rather than the heaviest setting.
+    pub fn next(self) -> Smoothing {
+        match self {
+            Smoothing::Off => Smoothing::Oct24,
+            Smoothing::Oct24 => Smoothing::Oct12,
+            Smoothing::Oct12 => Smoothing::Oct6,
+            Smoothing::Oct6 => Smoothing::Oct3,
+            Smoothing::Oct3 => Smoothing::Oct1,
+            Smoothing::Oct1 => Smoothing::Off,
+        }
+    }
+}
+
+/// The operator's display-only choices, grouped because that is what they
+/// have in common: neither changes the measurement, only how it is drawn.
+///
+/// They travel together into [`TransferScene::from_input`] so that adding the
+/// next one is not another positional argument on a constructor that already
+/// carries the ranges, the cross-frame state and the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayModes {
+    /// Which delay the phase pane is de-rotated by (D3).
+    pub derot: DerotMode,
+    /// Fractional-octave smoothing of both panes (#229).
+    pub smoothing: Smoothing,
+}
+
+impl DisplayModes {
+    /// The defaults an opening session gets: session de-rotation, no
+    /// smoothing.
+    pub fn new(derot: DerotMode, smoothing: Smoothing) -> DisplayModes {
+        DisplayModes { derot, smoothing }
     }
 }
 
@@ -215,6 +316,13 @@ pub struct TransferScene {
     pub phase_axis: crate::ticks::Axis,
     /// `"2.50 ms  (0.86 m)"`.
     pub delay_readout: String,
+    /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
+    /// (#229).
+    ///
+    /// Present whenever smoothing is on, and not optional chrome: a smoothed
+    /// trace is smoother than the measurement, and a screenshot that does not
+    /// say so is a claim about resolution the instrument did not make.
+    pub smoothing_readout: Option<&'static str>,
     pub meas_meter: Meter,
     pub ref_meter: Meter,
     /// The fault indicator (#228), or `None` for "show nothing" — which is
@@ -359,7 +467,7 @@ impl TransferScene {
     /// carry the cross-frame state; `now_s` is scene time.
     pub fn from_input(
         input: &TransferInput,
-        derot: DerotMode,
+        modes: DisplayModes,
         freq_range: (f64, f64),
         db_range: (f64, f64),
         meters: &mut (MeterState, MeterState),
@@ -368,7 +476,7 @@ impl TransferScene {
     ) -> TransferScene {
         let (f_min, f_max) = freq_range;
         let (db_min, db_max) = db_range;
-        let tau = derot.tau_derot_ms(input.delay_ms);
+        let tau = modes.derot.tau_derot_ms(input.delay_ms);
 
         let provenance = Provenance {
             channel_role: input.channel_role.clone(),
@@ -394,6 +502,42 @@ impl TransferScene {
             && input.freqs.len() == input.coherence.len();
 
         let (mag_segments, phase_segments) = if lengths_agree {
+            // De-rotate first, then smooth. The two orders do not commute:
+            // de-rotation adds 360·f·τ, which is not constant across a
+            // smoothing window, so smoothing the wire phase and de-rotating
+            // afterwards averages a curve nobody is looking at. This order
+            // averages exactly what the pane draws.
+            let phase_derot: Vec<f64> = (0..input.freqs.len())
+                .map(|i| derotate_deg(input.phase_deg[i], input.freqs[i], tau))
+                .collect();
+
+            let (magnitude_db, phase_deg) = match modes.smoothing.bpo() {
+                None => (input.magnitude_db.clone(), phase_derot),
+                Some(bpo) => {
+                    // The smoother's mask is the drawn mask: a column the
+                    // display refuses to show may not move one it does show.
+                    // `input.coherence` itself goes to `split_on_mask`
+                    // untouched — smoothing it would let a heavy setting
+                    // un-gap the trace, which is the one direction this
+                    // control must not be able to fail in.
+                    let valid: Vec<bool> = input
+                        .coherence
+                        .iter()
+                        .map(|&c| c >= COHERENCE_THRESHOLD)
+                        .collect();
+                    (
+                        smooth_db(&input.freqs, &input.magnitude_db, &valid, bpo),
+                        // The smoother returns unwrapped degrees by
+                        // contract; `wrap_deg` is this crate's one wrap site
+                        // and stays the only one.
+                        smooth_unwrapped_phase_deg(&input.freqs, &phase_derot, &valid, bpo)
+                            .into_iter()
+                            .map(wrap_deg)
+                            .collect(),
+                    )
+                }
+            };
+
             let mag_points = |i: usize| {
                 // db_to_y is the crate's one dB→y mapping — do not
                 // re-implement it, and do not clamp: an over-range
@@ -403,11 +547,11 @@ impl TransferScene {
                 // not lie about.
                 (
                     freq_to_x(input.freqs[i], f_min, f_max),
-                    db_to_y(input.magnitude_db[i], db_min, db_max),
+                    db_to_y(magnitude_db[i], db_min, db_max),
                 )
             };
             let phase_points = |i: usize| {
-                let phi = derotate_deg(input.phase_deg[i], input.freqs[i], tau);
+                let phi = phase_deg[i];
                 // phase_to_y is the crate's one phase→y mapping — the same
                 // function the phase axis ticks use, so a gridline and a
                 // trace point at the same degrees agree by construction
@@ -435,6 +579,7 @@ impl TransferScene {
             mag_axis: crate::ticks::db_axis(db_min, db_max),
             phase_axis: crate::ticks::phase_axis(),
             delay_readout: format_delay_readout(input.delay_ms),
+            smoothing_readout: modes.smoothing.label(),
             meas_meter: meters.0.update(input.meas_peak_dbfs, now_s),
             ref_meter: meters.1.update(input.ref_peak_dbfs, now_s),
             // Reads `input.coherence` — the same columns the mask above
@@ -591,7 +736,7 @@ mod tests {
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
             &inp,
-            DerotMode::Session,
+            DisplayModes::new(DerotMode::Session, Smoothing::Off),
             (20.0, 20_000.0),
             (-80.0, 20.0),
             &mut meters,
@@ -638,7 +783,7 @@ mod tests {
         let mut meters = (MeterState::default(), MeterState::default());
         let s = TransferScene::from_input(
             &inp,
-            DerotMode::Session,
+            DisplayModes::new(DerotMode::Session, Smoothing::Off),
             (20.0, 20_000.0),
             (-80.0, 20.0),
             &mut meters,

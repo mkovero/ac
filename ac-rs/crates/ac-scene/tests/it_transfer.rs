@@ -9,7 +9,8 @@
 //! corrected §6, independently of the implementation.
 
 use ac_scene::transfer::{
-    derotate_deg, meter_height, DerotMode, MeterState, TransferInput, TransferScene,
+    derotate_deg, meter_height, DerotMode, DisplayModes, MeterState, Smoothing, TransferInput,
+    TransferScene,
 };
 use ac_scene::{FaultState, Source};
 
@@ -55,7 +56,7 @@ fn scene(inp: &TransferInput, derot: DerotMode) -> TransferScene {
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
         inp,
-        derot,
+        DisplayModes::new(derot, Smoothing::Off),
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
