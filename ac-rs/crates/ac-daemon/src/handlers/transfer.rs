@@ -808,7 +808,17 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         "prominence":   est.prominence,
                         "peak_lag":     est.peak_lag,
                         "peak_value":   est.peak_value,
+                        // The strongest peak the estimator is not allowed to
+                        // select. Published so ring skew (#216) and
+                        // stimulus-onset ripples stay diagnosable from a
+                        // capture rather than needing another rig session.
+                        "noncausal_peak_lag":   est.noncausal_peak_lag,
+                        "noncausal_peak_value": est.noncausal_peak_value,
                         "median_value": est.median_value,
+                        // Uncontaminated noise floor for the offline
+                        // re-thresholding experiment; see
+                        // DelayEstimate::negative_lag_median.
+                        "negative_lag_median": est.negative_lag_median,
                         "candidates":   est.candidates.iter()
                             .map(|c| json!({"lag": c.lag, "value": c.value}))
                             .collect::<Vec<_>>(),
