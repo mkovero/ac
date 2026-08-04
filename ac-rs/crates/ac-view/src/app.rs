@@ -137,7 +137,7 @@ impl AcViewApp {
                     let input = ac_scene::TransferInput::from_wire_frame(f);
                     self.transfer_scene = Some(ac_scene::TransferScene::from_input(
                         &input,
-                        state.derot_mode(),
+                        ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing),
                         freq_range,
                         (-80.0, 20.0),
                         &mut self.meters,
@@ -228,6 +228,11 @@ impl AcViewApp {
             Action::CycleDerotReference => {
                 if let ViewKind::Transfer(t) = &mut self.view {
                     t.cycle_derot()
+                }
+            }
+            Action::CycleSmoothing => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.cycle_smoothing()
                 }
             }
             Action::OpenSettings => self.open_settings(),
@@ -563,7 +568,7 @@ impl eframe::App for AcViewApp {
                     let input = ac_scene::TransferInput::from_wire_frame(wire_frame);
                     self.transfer_scene = Some(ac_scene::TransferScene::from_input(
                         &input,
-                        state.derot_mode(),
+                        ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing),
                         freq_range,
                         db_range,
                         &mut self.meters,
@@ -1008,6 +1013,86 @@ mod tests {
         app.press_for_test(Action::CycleDerotReference, 0.1);
         let after = &app.current_transfer_scene().unwrap().magnitude.segments;
         assert_eq!(&before, after, "de-rotation moved the magnitude pane");
+    }
+
+    /// A frame whose columns are close enough together for a smoothing
+    /// window to hold more than one of them (#229). `transfer_frame`'s three
+    /// decade-apart columns cannot exercise smoothing: at 1/24 octave each is
+    /// alone in its own window, so a real bug would pass.
+    fn dense_transfer_frame() -> ac_scene::WireFrame {
+        let n = 24;
+        // 1/48-octave spacing, stepped by repeated multiplication with the
+        // ratio written out as a literal. Raising two to a fractional power
+        // here would trip this crate's own AC1 guard, which scans `src/`
+        // including test code and is right to — the exception would be the
+        // crack that lets real arithmetic back in.
+        const RATIO: f64 = 1.014_545_334_9; // 2^(1/48)
+        let freqs: Vec<f64> = (0..n)
+            .scan(1000.0, |f, _| {
+                let out = *f;
+                *f *= RATIO;
+                Some(out)
+            })
+            .collect();
+        let mag: Vec<f64> = (0..n)
+            .map(|i| if i % 2 == 0 { -14.0 } else { -26.0 })
+            .collect();
+        let mtw = serde_json::json!({
+            "freqs": freqs,
+            "magnitude_db": mag,
+            "phase_deg": vec![0.0_f64; n],
+            "coherence": vec![0.9_f64; n],
+            "df": vec![1.0_f64; n],
+            "window_s": vec![1.0_f64; n],
+            "n": vec![4_u32; n],
+            "stage": vec![0_usize; n],
+            "blend": vec![0.0_f64; n],
+            "bins": vec![1_u32; n],
+            "ppo": 48.0,
+            "n_blocks": 4,
+            "stages": [],
+        });
+        let mut f = transfer_frame();
+        f.mtw = serde_json::from_value(mtw).expect("mtw columns");
+        f
+    }
+
+    // Scene-accessor AC, the same rule the derot keys are held to: the
+    // smoothing key must change the BUILT magnitude pane, not merely the
+    // state field.
+    #[test]
+    fn cycling_smoothing_changes_the_built_transfer_magnitude() {
+        let mut app = AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_frame_for_test(dense_transfer_frame(), 0.0);
+
+        let before = app
+            .current_transfer_scene()
+            .expect("scene built")
+            .magnitude
+            .segments
+            .clone();
+        assert_eq!(
+            app.current_transfer_scene().unwrap().smoothing_readout,
+            None,
+            "a session must open unsmoothed"
+        );
+
+        app.press_for_test(Action::CycleSmoothing, 0.1);
+
+        let after = app.current_transfer_scene().expect("scene rebuilt");
+        assert_ne!(
+            &before, &after.magnitude.segments,
+            "cycling smoothing did not change the built magnitude pane"
+        );
+        assert_eq!(
+            after.smoothing_readout,
+            Some("smoothing 1/24 octave"),
+            "the smoothed trace must say so on screen"
+        );
     }
 
     /// A refusing frame, built from the healthy fixture so only the fields

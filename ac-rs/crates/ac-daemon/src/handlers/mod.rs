@@ -439,9 +439,15 @@ pub(super) fn snapshot_from_cal(
 pub(super) struct Tier1Ctx<'a> {
     pub mic_correction: &'a str, // "on" | "off" | "none"
     pub spl_offset_db: Option<f64>,
-    pub weighting: &'a str,         // "off" | "a" | "c" | "z"
-    pub time_integration: &'a str,  // "off" | "fast" | "slow" | "leq"
-    pub smoothing_bpo: Option<u32>, // reserved; daemon doesn't smooth today
+    pub weighting: &'a str,        // "off" | "a" | "c" | "z"
+    pub time_integration: &'a str, // "off" | "fast" | "slow" | "leq"
+    /// Still reserved: the daemon does not smooth, and `None` says so
+    /// truthfully. #229's fractional-octave smoothing is a *display*
+    /// operation applied in `ac-scene` after the frame and captioned on
+    /// screen, so it must not be reported here — a Tier 1 measurement that
+    /// claimed a smoothing it never applied would be worse than one that
+    /// claimed none.
+    pub smoothing_bpo: Option<u32>,
 }
 
 impl Default for Tier1Ctx<'_> {

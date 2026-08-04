@@ -26,7 +26,8 @@
 //! versus off.
 
 use ac_scene::{
-    DerotMode, FaultState, MeterState, Scene, SceneInput, Source, TransferInput, TransferScene,
+    DerotMode, DisplayModes, FaultState, MeterState, Scene, SceneInput, Smoothing, Source,
+    TransferInput, TransferScene,
 };
 use ac_view::view::{draw_view, SpectrumViewState, StimState, TransferViewState, ViewKind};
 use egui_kittest::Harness;
@@ -73,7 +74,7 @@ fn transfer_scene() -> TransferScene {
     let mut meters = (MeterState::default(), MeterState::default());
     TransferScene::from_input(
         &inp,
-        DerotMode::Session,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
         FREQ_RANGE,
         DB_RANGE,
         &mut meters,
