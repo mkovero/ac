@@ -117,6 +117,27 @@ Four facts not yet in those documents:
      indicator that cries wolf on startup gets ignored, which defeats the point of
      having one.
 
+     **SUPERSEDED BY #238 — the anchor, not the number.** "After the ladder settles"
+     is undefined for the case it was written for: a pair that never locks never
+     builds a ladder, so both refusal states were unreachable as shipped. Settle was
+     standing in for "a lock was possible by now"; the daemon now publishes
+     `delay_attempts`, which observes that directly, and the clock is anchored on the
+     first refused attempt. For a never-locked pair that fires 2.56 s earlier than
+     this text implies. The 10 s number is unchanged, and so is the reasoning for it.
+
+     **Also superseded: LOST LOCK's scope.** It is now only for a pair that held a
+     lock and lost it. A pair that has never locked shows NO LOCK from the start,
+     without the instruction, which the persistent row adds at 10 s. LOST LOCK on a
+     session that never locked asserts something untrue, which is the failure this
+     brief exists to prevent.
+
+     **What #238 does not make reachable: LOST LOCK.** It needs `delay_locked` to
+     go true and then false, and today's daemon estimates a pair's delay once and
+     caches it, so the flag is monotone for the life of a session. The row is
+     written and tested against #226's producer, not this one. A rig tester should
+     expect NO LOCK from a refusing session and should not read the absence of
+     LOST LOCK as a defect in #238.
+
 Constraint on stimulus, if any part of this reaches the rig: -40 dBFS maximum, and
 never emit without explicit per-run consent from Markus.
 

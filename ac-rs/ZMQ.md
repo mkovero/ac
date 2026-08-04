@@ -1649,6 +1649,65 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
 
+  // Additive (#238) — how many delay estimates this pair has completed,
+  // accepted or refused. 0 before the first attempt, and absent entirely on
+  // a daemon predating #238 (consumers must default it to 0, never to "it
+  // ran": absence is not evidence that the estimator answered).
+  //
+  // 0 is not observable from a #238 daemon: the same full-ring condition
+  // gates the first estimate and the first published frame, so every frame a
+  // subscriber receives already carries >= 1 (asserted in it_protocol.rs).
+  // It is the default for the field's absence, not a state to build a warmup
+  // display around.
+  "delay_attempts":  <int>,              // the estimator has answered N times
+                                          //
+                                          // This is what separates warming up
+                                          // from refusing. `delay_locked` is
+                                          // false for both, so the flag alone
+                                          // cannot carry it, and a fault
+                                          // indicator that paints on warmup
+                                          // gets ignored (#228, #238).
+                                          //
+                                          // The first attempt runs only once
+                                          // the rings hold a full Welch
+                                          // segment, so a clock started from
+                                          // this field starts from the first
+                                          // moment a lock was possible — not
+                                          // from session start.
+                                          //
+                                          // MONOTONE FOR THE LIFE OF THE
+                                          // PAIR. A re-lock (#226) adds
+                                          // attempts and must never reset the
+                                          // count: a consumer that reads
+                                          // "has the estimator answered" from
+                                          // it would see a locked-then-
+                                          // refusing pair fall back to
+                                          // "warming up", which is silence on
+                                          // the fault indicator — the blank
+                                          // window #238 removed, reappearing
+                                          // only in the sessions #226 is for.
+                                          //
+                                          // WHY THIS IS NOT `delay_evidence`
+                                          // BY ANOTHER NAME. The rule below
+                                          // forbids gating on the evidence,
+                                          // including reading its
+                                          // null-versus-present to infer that
+                                          // an attempt happened. That rule
+                                          // protects the estimator's
+                                          // thresholds and its choice of what
+                                          // to publish. A count carries no
+                                          // threshold: it says the estimator
+                                          // answered, not how close the answer
+                                          // came. The estimator may change
+                                          // NOISE_FLOOR_PROMINENCE, its search
+                                          // range, its peak rule, or refuse
+                                          // for a reason not yet invented, and
+                                          // every consumer of this field stays
+                                          // correct. Anything that wants to
+                                          // know *why* it refused is gating,
+                                          // and belongs on the estimator's
+                                          // side of the line.
+
   // Additive (#227) — the evidence the lock decision was made on, present
   // whether the estimate was accepted or refused. `null` before the first
   // attempt. DIAGNOSTIC ONLY: nothing downstream may gate on any of it, the

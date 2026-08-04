@@ -1020,6 +1020,12 @@ mod tests {
             drivable: true,
         });
         f.delay_locked = Some(false);
+        // The estimator has answered and refused (#238), so this is a frame a
+        // current daemon could publish. It is not what makes the row paint
+        // here — `transfer_frame` carries `mtw`, so the settled gate already
+        // covers it. The field-reachable no-ladder shape is pinned in
+        // `ac-scene::fault` and in `it_transfer_geometry`.
+        f.delay_attempts = 3;
         f
     }
 
@@ -1038,7 +1044,9 @@ mod tests {
         app.ingest_frame_for_test(refusing_frame(), 0.0);
         assert_eq!(
             app.current_transfer_scene().expect("scene built").fault,
-            Some(ac_scene::Fault::LostLock)
+            // Never locked in this session, so nothing was lost — the
+            // transient row says NO LOCK without the instruction.
+            Some(ac_scene::Fault::NoLockYet)
         );
 
         // Same frame, later. Nothing on the wire changed — only the clock.

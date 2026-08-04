@@ -603,6 +603,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // this distribution, and a bare "refused" would not measure it.
         let mut pair_prominence: Vec<Option<serde_json::Value>> = vec![None; pairs.len()];
 
+        // How many delay estimates this pair has completed, accepted or
+        // refused. Published as `delay_attempts` (#238).
+        //
+        // This is the only thing on the wire that separates "warming up" from
+        // "refusing": both publish `delay_locked: false`, and until an attempt
+        // has run there is no statement to make about the pair at all. The
+        // consumer that needs it is the fault indicator, which may not paint
+        // `LOST LOCK` on a session that has simply not been asked a question
+        // yet — see `ac-scene::fault`.
+        //
+        // A count, not a verdict. It says the estimator ran; it says nothing
+        // about how close the result came, which is the estimator's own
+        // business (`delay_evidence`, diagnostic-only).
+        //
+        // MONOTONE for the life of the session — never reset, including when
+        // #226 adds re-locking. Resetting it would make a pair that locked and
+        // then started refusing read as one that has not been asked yet, and
+        // the fault indicator answers "nothing to report" to that.
+        let mut pair_delay_attempts: Vec<u32> = vec![0; pairs.len()];
+
         // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
         // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
         // channel has no SPL calibration layer; `spl` stays `null` for
@@ -775,6 +795,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         sr,
                     );
                     pair_delays[i] = est.lag;
+                    // Counted here rather than at the top of the loop: this is
+                    // the branch where an estimate actually ran on full rings,
+                    // so the count means "the estimator has answered", not
+                    // "the loop reached the retry site".
+                    pair_delay_attempts[i] = pair_delay_attempts[i].saturating_add(1);
                     // Full lock evidence, not just the ratio: the competing
                     // peaks are what make DIRECT_PEAK_FRACTION settleable
                     // offline, and they cannot be reconstructed from a
@@ -1136,6 +1161,10 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
+                            // Read by position rather than zipped into the
+                            // chain above: it is a scalar the closure only
+                            // reads, and the zip is already seven deep.
+                            "delay_attempts":  pair_delay_attempts.get(pos).copied().unwrap_or(0),
                             "delay_evidence":  prom_opt,
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,

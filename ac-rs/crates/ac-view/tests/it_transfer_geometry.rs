@@ -192,14 +192,21 @@ fn a_fault_row_is_painted_verbatim_from_ac_scene() {
             drivable: true,
         },
         delay_locked: Some(false),
-        settled: true,
+        // The field case #238 unblocked: no lock, so no ladder, so never
+        // settled — the state the display used to paint nothing for.
+        settled: false,
+        estimator_attempted: true,
     };
+    // Never locked in this session, so the transient row is NO LOCK rather
+    // than LOST LOCK: nothing was lost.
     let scene = scene_with(Some(refusing), 0.0);
-    assert_eq!(scene.fault, Some(ac_scene::Fault::LostLock));
+    assert_eq!(scene.fault, Some(ac_scene::Fault::NoLockYet));
 
     let texts = painted_texts(&scene);
     assert!(
-        texts.iter().any(|t| t == ac_scene::Fault::LostLock.label()),
+        texts
+            .iter()
+            .any(|t| t == ac_scene::Fault::NoLockYet.label()),
         "the fault label was not painted; texts on screen: {texts:?}"
     );
 }
@@ -215,8 +222,13 @@ fn the_persistent_row_paints_its_instruction() {
             drivable: true,
         },
         delay_locked: Some(false),
-        settled: true,
+        // The field case #238 unblocked: no lock, so no ladder, so never
+        // settled — the state the display used to paint nothing for.
+        settled: false,
+        estimator_attempted: true,
     };
+    // Never locked in this session, so the transient row is NO LOCK rather
+    // than LOST LOCK: nothing was lost.
     // One FaultState, two frames: the clock has to run for the row to
     // change, so this cannot be built from a single scene call.
     let inp_fault = Some(refusing);
@@ -252,7 +264,7 @@ fn the_persistent_row_paints_its_instruction() {
     };
     assert_eq!(
         build(0.0, &mut meters, &mut fault).fault,
-        Some(ac_scene::Fault::LostLock)
+        Some(ac_scene::Fault::NoLockYet)
     );
     let scene = build(
         ac_scene::fault::PERSISTENT_REFUSAL_S,
@@ -286,6 +298,7 @@ fn a_healthy_session_paints_no_indicator() {
         },
         delay_locked: Some(true),
         settled: true,
+        estimator_attempted: true,
     };
     let scene = scene_with(Some(healthy), 0.0);
     assert_eq!(scene.fault, None);
@@ -296,6 +309,7 @@ fn a_healthy_session_paints_no_indicator() {
         ac_scene::Fault::NoSignal,
         ac_scene::Fault::CheckRouting,
         ac_scene::Fault::LostLock,
+        ac_scene::Fault::NoLockYet,
         ac_scene::Fault::NoLock,
         ac_scene::Fault::LockAcquired,
     ] {
