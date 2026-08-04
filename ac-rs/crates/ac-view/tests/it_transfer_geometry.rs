@@ -44,6 +44,7 @@ fn masked_scene() -> TransferScene {
         column_window_s: Vec::new(),
         column_n: Vec::new(),
         column_bins: Vec::new(),
+        stages: Vec::new(),
         fault: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());
@@ -157,6 +158,7 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         column_window_s: Vec::new(),
         column_n: Vec::new(),
         column_bins: Vec::new(),
+        stages: Vec::new(),
         fault,
     };
     let mut meters = (MeterState::default(), MeterState::default());
@@ -253,6 +255,7 @@ fn the_persistent_row_paints_its_instruction() {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            stages: Vec::new(),
             fault: inp_fault,
         };
         TransferScene::from_input(
@@ -322,4 +325,254 @@ fn a_healthy_session_paints_no_indicator() {
             row.label()
         );
     }
+}
+
+/// Every text shape painted by the transfer view, with the horizontal
+/// centre of its galley — `Align2::CENTER_TOP` puts the shape's `pos` at
+/// the galley's top-left, so the centre has to be recovered from the
+/// laid-out width.
+fn painted_text_centres(scene: &TransferScene) -> Vec<(String, f32)> {
+    let view = ViewKind::Transfer(TransferViewState::default());
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(960.0, 420.0));
+        draw_view(&view, ui, None, Some(scene));
+    });
+    harness.run();
+    harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) => Some((
+                t.galley.text().to_string(),
+                t.pos.x + t.galley.size().x / 2.0,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every text shape painted by the transfer view, with its laid-out
+/// rectangle — the whole rectangle, because a collision is an overlap of
+/// areas and a centre cannot show one.
+fn painted_text_rects(scene: &TransferScene) -> Vec<(String, egui::Rect)> {
+    let view = ViewKind::Transfer(TransferViewState::default());
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(960.0, 420.0));
+        draw_view(&view, ui, None, Some(scene));
+    });
+    harness.run();
+    harness
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) => Some((
+                t.galley.text().to_string(),
+                egui::Rect::from_min_size(t.pos, t.galley.size()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A scene whose ladder is the real 96 kHz one — the rate the ratified
+/// figures (0.98 / 2.93 / 23.4 Hz) are quoted at.
+///
+/// `delay_ms` is a parameter because the delay readout's laid-out width is
+/// what the label row has to clear, and that width is a function of the
+/// number's digits. A fixture fixed at 0.00 ms is the friendly case.
+fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
+    let stages = ac_core::visualize::mtw::ladder::layout(96_000)
+        .expect("layout")
+        .stages
+        .iter()
+        .map(|s| ac_scene::MtwStage {
+            decim: s.decim,
+            rate: s.rate,
+            df: s.df,
+            window_s: s.window_s,
+            hop_s: s.hop_s,
+            f_valid: s.f_valid,
+            settling_s: ac_core::visualize::mtw::settling_seconds(s, 4),
+        })
+        .collect();
+    let inp = TransferInput {
+        freqs: freqs(),
+        magnitude_db: vec![0.0; N],
+        phase_deg: vec![0.0; N],
+        coherence: vec![0.9; N],
+        delay_ms,
+        meas_peak_dbfs: Some(-30.0),
+        ref_peak_dbfs: Some(-14.5),
+        channel_role: "meas_0".to_string(),
+        source: Source::Live,
+        sr: 96_000,
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
+        stages,
+        fault: None,
+    };
+    let mut meters = (MeterState::default(), MeterState::default());
+    TransferScene::from_input(
+        &inp,
+        DisplayModes::new(DerotMode::Session, smoothing),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    )
+}
+
+/// #224 AC: the three band labels reach the painted output verbatim, and
+/// at the scene's positions rather than at eyeballed ones.
+///
+/// The pane origin and width are not reconstructed here: the check is that
+/// the painted centres are an affine image of the scene's normalized
+/// positions, which is exactly the mapping the renderer is allowed to
+/// apply and nothing more. A renderer that placed the labels at equal
+/// spacing — the obvious wrong implementation, and the one a screenshot
+/// would not obviously contradict — fails it, because the scene's
+/// positions are not equally spaced.
+#[test]
+fn band_labels_are_painted_verbatim_at_the_scenes_band_centres() {
+    let scene = scene_with_bands(0.0, Smoothing::Off);
+    assert_eq!(scene.band_labels.len(), 3, "{:?}", scene.band_labels);
+
+    let painted = painted_text_centres(&scene);
+    let mut centres = Vec::new();
+    for band in &scene.band_labels {
+        let hit = painted
+            .iter()
+            .find(|(text, _)| text == &band.text)
+            .unwrap_or_else(|| {
+                panic!(
+                    "band label {:?} was not painted; texts on screen: {:?}",
+                    band.text,
+                    painted.iter().map(|(t, _)| t).collect::<Vec<_>>()
+                )
+            });
+        centres.push(hit.1 as f64);
+    }
+
+    // Two-point affine fit from the outer two labels, then the middle one
+    // is a prediction, not an input.
+    let (p0, p2) = (scene.band_labels[0].position, scene.band_labels[2].position);
+    let (c0, c2) = (centres[0], centres[2]);
+    let predicted = c0 + (scene.band_labels[1].position - p0) / (p2 - p0) * (c2 - c0);
+    assert!(
+        (centres[1] - predicted).abs() < 2.0,
+        "middle band painted at {} px, the log axis puts it at {predicted} px",
+        centres[1]
+    );
+
+    // The rejected placement, computed here rather than assumed: the
+    // band's *arithmetic* centre. Only the geometric centre is the
+    // midpoint of a span on a log axis — over the middle band's
+    // 202.9–1623 Hz the two are two thirds of an octave apart, and the
+    // arithmetic one would sit to the right of the frequencies it labels.
+    // Both are "the centre of the band" in prose, which is why this is
+    // measured rather than left to review.
+    let l = ac_core::visualize::mtw::ladder::layout(96_000).expect("layout");
+    let (lo, hi) = (l.stages[1].f_valid, l.stages[0].f_valid);
+    let arithmetic = ac_scene::ticks::freq_to_x((lo + hi) / 2.0, FREQ_RANGE.0, FREQ_RANGE.1);
+    let arithmetic_px = c0 + (arithmetic - p0) / (p2 - p0) * (c2 - c0);
+    assert!(
+        (arithmetic_px - predicted).abs() > 10.0,
+        "the geometric and arithmetic centres are indistinguishable at this \
+         width ({predicted} vs {arithmetic_px} px) — the test proves nothing"
+    );
+    assert!(
+        (centres[1] - arithmetic_px).abs() > 10.0,
+        "the middle band was painted at its arithmetic centre ({arithmetic_px} px), \
+         not its geometric one ({predicted} px)"
+    );
+}
+
+/// The collision this layout exists to remove, pinned at a delay that shows
+/// it.
+///
+/// #224 originally painted the delay readout on the band-label row and
+/// checked the clearance with `delay_ms = 0.0`, where the gap is ~8 px and
+/// the arrangement looks fine. It is not: the readout's laid-out width is a
+/// function of the number's digits, and at three digits it runs under the
+/// deepest band label. 123.45 ms is 42 m of flight — an ordinary far-mic
+/// distance in a live room, and less than a misrouted loopback produces.
+///
+/// The x-overlap is asserted first, so this test cannot pass by accident on
+/// a build where the strings happen to be narrow: it proves the two would
+/// collide on one row, and then proves the rows are what keeps them apart.
+#[test]
+fn the_delay_readout_never_shares_a_row_with_a_band_label() {
+    for smoothing in [Smoothing::Off, Smoothing::Oct6] {
+        for delay_ms in [0.0, 12.34, 123.45] {
+            let scene = scene_with_bands(delay_ms, smoothing);
+            let painted = painted_text_rects(&scene);
+            let find = |want: &str| -> egui::Rect {
+                painted
+                    .iter()
+                    .find(|(text, _)| text == want)
+                    .unwrap_or_else(|| panic!("{want:?} was not painted"))
+                    .1
+            };
+
+            let delay = find(&scene.delay_readout);
+            for band in &scene.band_labels {
+                let label = find(&band.text);
+                assert!(
+                    !delay.intersects(label),
+                    "{delay_ms} ms, {smoothing:?}: delay readout {delay:?} overlaps \
+                     band label {:?} at {label:?}",
+                    band.text
+                );
+                assert!(
+                    delay.min.y >= label.max.y,
+                    "{delay_ms} ms, {smoothing:?}: delay readout is not below the \
+                     band row ({:?} against {:?})",
+                    delay.min.y,
+                    label.max.y
+                );
+            }
+
+            // The caption, when present, sits between them — the two
+            // resolution statements adjacent, the measured value below.
+            if let Some(caption) = scene.smoothing_readout {
+                let caption = find(caption);
+                let deepest = find(&scene.band_labels.last().expect("bands").text);
+                assert!(
+                    caption.min.y >= deepest.max.y && delay.min.y >= caption.max.y,
+                    "{delay_ms} ms: rows out of order — bands {:?}, caption {:?}, \
+                     delay {:?}",
+                    deepest,
+                    caption,
+                    delay
+                );
+            }
+        }
+    }
+
+    // The rejected layout, measured here rather than argued: on one shared
+    // row these two DO overlap horizontally at a 3-digit delay, so the row
+    // separation above is what is holding them apart, not luck with widths.
+    let scene = scene_with_bands(123.45, Smoothing::Off);
+    let painted = painted_text_rects(&scene);
+    let x_range = |want: &str| -> (f32, f32) {
+        let r = painted
+            .iter()
+            .find(|(text, _)| text == want)
+            .expect("painted")
+            .1;
+        (r.min.x, r.max.x)
+    };
+    let (delay_x0, delay_x1) = x_range(&scene.delay_readout);
+    let (band_x0, band_x1) = x_range(&scene.band_labels.last().expect("bands").text);
+    assert!(
+        delay_x1 > band_x0 && band_x1 > delay_x0,
+        "the fixture no longer reproduces the collision: delay spans \
+         {delay_x0}–{delay_x1} px, deepest band label {band_x0}–{band_x1} px — \
+         at these widths a shared row would pass and prove nothing"
+    );
 }

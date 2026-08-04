@@ -417,29 +417,63 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
         Stroke::new(1.5, COLOR_SIGNAL),
     );
 
-    // Delay readout: verbatim ac-scene string, top-left of the content
-    // band (below the banner).
-    painter.text(
-        content.left_top(),
-        egui::Align2::LEFT_TOP,
-        &scene.delay_readout,
-        egui::FontId::default(),
-        COLOR_VALUE,
-    );
+    // The top of the magnitude pane carries three rows, in this order and
+    // for this reason (#224 + #229, ruled on when the two were reviewed as
+    // a pair):
+    //
+    //   row 0   band labels        what the ANALYSER resolved, per rung
+    //   row 1   smoothing caption  what is actually ON SCREEN
+    //   row 2   delay readout      a measured value
+    //
+    // Rows 0 and 1 are both statements about resolution and are adjacent
+    // with nothing between them, so the pane reads as one statement rather
+    // than two competing ones. The caption is authoritative for the drawn
+    // trace: at 1/1 octave the curve is smoothed far wider than any band's
+    // Δf, and a screenshot showing "0.98 Hz" over it would overclaim.
+    //
+    // The delay readout is on row 2 rather than sharing row 0, which is not
+    // cosmetic: at a 3-digit delay its laid-out width runs past the deepest
+    // band label's left edge, and the two overlap. Moving it down removes
+    // the collision outright, with no width arbitration to re-verify when
+    // the ladder or the font changes. Anchoring the caption *on* row 0 was
+    // rejected for the same class of reason — the only gaps wide enough sit
+    // between band labels, and those move with sample rate and zoom.
+    const ROW_H: f32 = 16.0;
 
-    // Smoothing state (#229), one line under the delay readout and in the
-    // structural colour: it describes how the trace was drawn, it is not a
-    // measured value. Absent when smoothing is off — an unaltered trace is
-    // the resting state and needs no caption. The string is ac-scene's.
+    // Positions and strings are verbatim ac-scene; this crate maps the
+    // normalized x and draws, as with every other label. Structural grey
+    // with no rule or box: findable when sought, invisible when not.
+    for band in &scene.band_labels {
+        let (x, _) = scene_to_screen((band.position, 0.0), mag_vp);
+        painter.text(
+            egui::pos2(x, mag_vp.y),
+            egui::Align2::CENTER_TOP,
+            &band.text,
+            egui::FontId::default(),
+            COLOR_STRUCTURAL,
+        );
+    }
+
+    // Absent when smoothing is off — an unaltered trace is the resting
+    // state and needs no caption. The string is ac-scene's.
     if let Some(label) = scene.smoothing_readout {
         painter.text(
-            content.left_top() + egui::vec2(0.0, 16.0),
+            content.left_top() + egui::vec2(0.0, ROW_H),
             egui::Align2::LEFT_TOP,
             label,
             egui::FontId::default(),
             COLOR_LABEL,
         );
     }
+
+    // Delay readout: verbatim ac-scene string.
+    painter.text(
+        content.left_top() + egui::vec2(0.0, 2.0 * ROW_H),
+        egui::Align2::LEFT_TOP,
+        &scene.delay_readout,
+        egui::FontId::default(),
+        COLOR_VALUE,
+    );
 
     // Input-level meters: two thin bars at the right edge, M left of R
     // (UX standing requirement), heights normalized by ac-scene. Always
