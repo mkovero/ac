@@ -152,8 +152,9 @@ fitted; the rest are predictions made before the capture and compared after.
 | A, asymmetric position | 1.8 m | 614 | **628** (6.5417 ms) | 1.851 m | **+5.1 cm** |
 | B, asymmetric position | ~2.5 m | 808 | **762** (7.9375 ms) | 2.334 m | **−16.6 cm** |
 | A, 3 m on axis | **3.000 m** | 947 | **938** (`peak_lag`, refused) | 2.968 m | **−3.2 cm** |
+| A, #242 re-glance | **1.5 m** | 531 | **527** (5.4896 ms) | 1.487 m | **−1.3 cm** |
 
-Six of seven predictions land within 5 cm of a tape figure the operator gave
+Seven of eight predictions land within 5 cm of a tape figure the operator gave
 to one decimal or as "roughly" — including the 3 m position, where the figure
 comes from the peak the estimator *refused* to report. The one position where
 the model does not describe the measurement at all is the near-wall one
@@ -465,21 +466,38 @@ misfire once it can be reached.
 
 ## #242 — the delay readout over a live trace
 
-`ac-view --transfer` on the rig's own X session (NVIDIA, `DISPLAY=:0`,
-`XAUTHORITY=/home/mui/.Xauthority` — the isolated `HOME` hides the X cookie,
-which is what made the first two launches fail), A alone at 1.000 m, 96 kHz,
-screenshots `~/s3-242-magnitude{,-2}.png`.
+**First attempt tested the wrong build, and is recorded here because the
+mistake is easy to repeat.** The rig runs `main`; #242 is the unmerged branch
+`issue-224-band-resolution-labels`, and *it* is the change that moves the
+readout. A screenshot of the installed build shows main's layout and says
+nothing about #242. The glance was redone on a worktree build of the branch
+(`18db1cd`), run straight from `~/target-242/release/ac-view` rather than
+installed over `/usr/local/bin`.
 
-**Grey-on-ember is not the problem.** The readout sits at the top of the plot
-area at the +20 dB gridline; the trace at this position runs 0 to −20 dB, well
-below it. Contrast is white-on-black and the text is entirely legible with the
-trace live and settled.
+Conditions for the real glance: A alone, mic **1.5 m on axis** (lock 527
+samples = 5.4896 ms → 1.487 m implied, 1.3 cm from tape — a seventh geometry
+point), 96 kHz, stage 0 settled. Screenshots `~/s3-242-branch{,-2}.png`;
+main's, for comparison, `~/s3-242-magnitude{,-2}.png`.
 
-**What it does collide with is the topmost y-axis label.** `4.08 ms (1.40 m)`
-is drawn straight through the `20` tick label — the digits overlap. At this
-window size the 32 px move traded a trace collision for an axis-label
-collision. It is legible enough to read, so this is not a hold on #242, but
-the label overlap should be recorded.
+**#242 passes.** Its layout is:
+
+| row | content | colour |
+|---|---|---|
+| banner | `live — 127.0.0.1:5556` | grey |
+| row 0 | band labels `0.98 Hz / 2.56 s`, `2.93 Hz / 0.85 s`, `23.4 Hz / 0.11 s`, `MR` | grey |
+| row 2 | **`5.49 ms (1.88 m)`** | white |
+
+The readout sits in clear space between the band-label row and the 0 dB
+gridline. The trace runs 0 to −25 dB, well below it, so **grey-on-ember never
+arises** — the question the handoff held the merge for does not occur in this
+layout. It collides with neither the band labels (which are indented past the
+axis gutter) nor the `20` axis tick.
+
+**One overlap does exist and is not #242's.** The `20` tick label is drawn
+through by the connection banner — visible identically in main's screenshot,
+so it predates this branch. Worth a separate cosmetic issue, not a hold.
+
+Merged 2026-08-05.
 
 **The metres figure is wrong for the operator, and by a lot.** The display
 reads `1.40 m` with the mic tape-measured at **1.000 m**. Two things compound:
@@ -597,7 +615,10 @@ correctly, at per-frame prominence 2.5–6.8.
    metres. `1.40 m` on screen at a taped 1.000 m is the instrument reporting
    its own latency as distance. The constant is measurable in-session — this
    report measured it in every session at zero cost.
-4. **#242 can ship**; log the axis-label overlap separately.
+4. **#242 shipped** (merged 2026-08-05, after a re-glance on its own build —
+   the first screenshot was of `main` and proved nothing about it). The
+   banner-over-axis-tick overlap it revealed belongs to `main` and wants its
+   own cosmetic issue.
 5. **#226's automatic-refresh half is not needed for lock stability.**
    Eighty-eight sessions produced zero unstable locks; every repeat at a fixed
    position agreed to the sample, including the one wrong lock. What #226 is
