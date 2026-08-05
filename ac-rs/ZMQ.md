@@ -1649,6 +1649,26 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
 
+  // Additive (#243) — the speed of sound the delay readout's ms → m
+  // conversion must use, in m/s. Derived daemon-side from the configured
+  // room temperature (`config.temperature_c`) as 331.3 + 0.606·T, once at
+  // session start: a room does not change temperature mid-session, so
+  // every frame in a session carries the same constant.
+  //
+  // Shipped already derived rather than as a temperature, so a consumer
+  // holds one number instead of two that have to agree. Absent on a daemon
+  // predating #243, and consumers must default it to 343.0 — the constant
+  // the readout used unconditionally before, so absence reproduces the old
+  // behaviour rather than inventing a new one.
+  //
+  // Note what this does NOT license. The metres figure only means anything
+  // when the reference leg leaves through the same converter as the
+  // stimulus and is looped back (README.md, "Reference wiring"): only then
+  // are transport and DAC latency common-mode, leaving the locked delay
+  // equal to the acoustic arrival. Under any other wiring the residual is a
+  // fixed offset the instrument cannot see, and no field here reports it.
+  "speed_of_sound_m_s": <float>,         // e.g. 345.8 at 24 °C
+
   // Additive (#238) — how many delay estimates this pair has completed,
   // accepted or refused. 0 before the first attempt, and absent entirely on
   // a daemon predating #238 (consumers must default it to 0, never to "it

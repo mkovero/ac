@@ -127,6 +127,24 @@ pub struct Config {
     /// `snapshot` reply carries an opaque `id`, never a path (D6).
     #[serde(default)]
     pub snapshot_spool_dir: Option<PathBuf>,
+
+    /// Room air temperature in °C, the one input to the delay readout's
+    /// ms → m conversion (#243). `None` falls back to
+    /// [`crate::shared::conversions::SPEED_OF_SOUND_DEFAULT_M_S`].
+    ///
+    /// Stored as a temperature rather than as a speed on purpose. The
+    /// temperature is the quantity an operator can read off a thermometer
+    /// standing in the room; the speed is derived from it by
+    /// [`crate::shared::conversions::speed_of_sound_at`] at one site. Storing
+    /// both would be two constants that are only correct when written
+    /// together — the coupling this repo has already paid for.
+    ///
+    /// It is a room property, not a session one, which is why it lives here
+    /// and not in a per-measurement argument: a rig's room does not change
+    /// temperature between `ac transfer` invocations, and re-typing it every
+    /// time is how it ends up untyped.
+    #[serde(default)]
+    pub temperature_c: Option<f64>,
 }
 
 impl Default for Config {
@@ -155,6 +173,7 @@ impl Default for Config {
             server_idle_timeout_secs: None,
             snapshot_ring_s: 30.0,
             snapshot_spool_dir: None,
+            temperature_c: None,
         }
     }
 }

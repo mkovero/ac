@@ -160,6 +160,16 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
             cfg.snapshot_spool_dir = Some(std::path::PathBuf::from(s));
         }
     }
+    // Room temperature for the delay readout's ms → m conversion (#243).
+    // `null` clears it back to the conventional 343 m/s, which is a
+    // different statement from any temperature the operator could type.
+    if let Some(v) = update.get("temperature_c") {
+        if v.is_null() {
+            cfg.temperature_c = None;
+        } else if let Some(t) = v.as_f64() {
+            cfg.temperature_c = Some(t);
+        }
+    }
 
     let cfg_value = serde_json::to_value(&*cfg).unwrap_or_default();
     if let Err(e) = ac_core::config::save(&cfg, None) {

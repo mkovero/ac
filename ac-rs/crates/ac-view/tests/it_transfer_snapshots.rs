@@ -59,6 +59,11 @@ fn transfer_scene() -> TransferScene {
         phase_deg,
         coherence,
         delay_ms: 2.5,
+        // Locked with no frame-supplied speed, so the readout is the same
+        // "2.50 ms  (0.86 m)" these reference images were taken against —
+        // #243 changes what an *unlocked* pair renders, not this one.
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: Some(-6.0),
         ref_peak_dbfs: Some(-14.0),
         channel_role: "meas_0".to_string(),

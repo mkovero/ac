@@ -60,9 +60,23 @@ use crate::wire::{MtwStage, WireFrame};
 /// fixed threshold, no tuning UI).
 pub const COHERENCE_THRESHOLD: f64 = 0.5;
 
-/// Speed of sound used for the delay readout's metres conversion —
-/// exactly 343 m/s (D2), not a temperature-dependent estimate.
-pub const SPEED_OF_SOUND_M_S: f64 = 343.0;
+/// Speed of sound for the delay readout's metres conversion when the frame
+/// carries none — 343 m/s, the conventional 20 °C figure.
+///
+/// D2 originally fixed this "exactly 343 m/s, not a temperature-dependent
+/// estimate". #243 reverses that half of the decision: the rooms this
+/// instrument measures in run 24–26 °C, where c ≈ 346 m/s, and over 1 m the
+/// disagreement is larger than one sample at 96 kHz — so the constant was
+/// wrong by more than the estimator could resolve, which is the bar for
+/// whether a physical constant may be baked in at all. The speed is now a
+/// parameter, derived daemon-side from a configured room temperature and
+/// carried on [`WireFrame::speed_of_sound_m_s`].
+///
+/// This value survives as the fallback for a frame that names no speed —
+/// an older daemon, or a room whose temperature nobody recorded — where it
+/// reproduces the previous behaviour exactly rather than inventing one.
+pub const SPEED_OF_SOUND_DEFAULT_M_S: f64 =
+    ac_core::shared::conversions::SPEED_OF_SOUND_DEFAULT_M_S;
 
 /// Meter floor: −60 dBFS maps to a zero-height bar (§6).
 pub const METER_FLOOR_DBFS: f64 = -60.0;
@@ -226,9 +240,67 @@ pub fn derotate_deg(phase_wire_deg: f64, freq_hz: f64, tau_derot_ms: f64) -> f64
     wrap_deg(phase_wire_deg + 360.0 * freq_hz * tau_derot_ms / 1000.0)
 }
 
-/// `"{delay_ms:.2} ms  ({metres:.2} m)"`, c = 343 m/s exactly (D2).
-pub fn format_delay_readout(delay_ms: f64) -> String {
-    let metres = delay_ms * SPEED_OF_SOUND_M_S / 1000.0;
+/// The distance a locked delay corresponds to, in metres.
+///
+/// The whole delay is flight: under the supported wiring both legs traverse
+/// the same converter, so everything ahead of the converter's analogue
+/// output is common-mode and cancels in the correlation, and what survives
+/// is only what the acoustic branch genuinely adds — amplifier, speaker DSP,
+/// driver origin, air, microphone. There is no instrument constant to
+/// subtract, and subtracting one would quietly remove the DUT's own latency
+/// along with it. See `README.md`'s "Reference wiring" for the topology this
+/// depends on, and what the readout means without it.
+pub fn distance_m(delay_ms: f64, speed_of_sound_m_s: f64) -> f64 {
+    delay_ms / 1000.0 * speed_of_sound_m_s
+}
+
+/// `"{delay_ms:.2} ms  ({metres:.2} m)"` — or milliseconds alone when the
+/// delay is not a measured lock (#243).
+///
+/// `speed_of_sound_m_s` comes from [`WireFrame::speed_of_sound_m_s`],
+/// falling back to [`SPEED_OF_SOUND_DEFAULT_M_S`].
+///
+/// # Why the lock gates the metres and not the milliseconds
+///
+/// `delay_locked` follows [`WireFrame::delay_locked`]'s three-way meaning,
+/// and only `Some(true)` earns metres. Before a lock the frame's `delay_ms`
+/// is `0.0` — a placeholder, not a measurement — and the readout used to
+/// paint `"0.00 ms  (0.00 m)"` from it: a distance claim about a room,
+/// stated in the unit an operator acts on, derived from a delay the
+/// estimator had not yet produced. That is on screen for the first seconds
+/// of every session and for the whole of a refusing one.
+///
+/// Milliseconds stay because they are the frame's own field reported back
+/// unchanged, and `0.00 ms` alongside a `NO LOCK` indicator reads as the
+/// placeholder it is. Metres go because the conversion is an inference about
+/// physical space, and an inference from a placeholder is worse than
+/// silence. An unlocked pair is already named by [`crate::fault`]'s
+/// `NO LOCK` / `LOST LOCK` states, so nothing new has to say why.
+///
+/// # The non-negative guard is dormant, deliberately
+///
+/// A negative delay would mean the microphone heard the source before the
+/// reference did, which is the sign-reversed misroute. It cannot arrive from
+/// today's estimator: `estimate_delay` searches `zero_idx..` and selects
+/// `direct_idx ∈ zero_idx..=peak_idx`, so a lock is causal by construction
+/// and that misroute surfaces as a refusal (`NO LOCK`) instead. The guard is
+/// here so the conversion is total rather than because the branch is live —
+/// the same standing [`crate::fault::Fault::LostLock`] has until #226 — and
+/// it is written and tested now so that relaxing the causal rule does not
+/// also have to invent the display state for what it lets through.
+// `!(delay_ms >= 0.0)` rather than `delay_ms < 0.0` is the NaN-aware guard,
+// as in `ticks::freq_axis` and `band_labels`: a NaN delay must take the
+// no-metres branch too, and `<` would let it through into `format!`.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn format_delay_readout(
+    delay_ms: f64,
+    delay_locked: Option<bool>,
+    speed_of_sound_m_s: f64,
+) -> String {
+    if delay_locked != Some(true) || !(delay_ms >= 0.0) {
+        return format!("{delay_ms:.2} ms");
+    }
+    let metres = distance_m(delay_ms, speed_of_sound_m_s);
     format!("{delay_ms:.2} ms  ({metres:.2} m)")
 }
 
@@ -458,6 +530,14 @@ pub struct TransferInput {
     pub coherence: Vec<f64>,
     /// τ_sess, this session's frozen estimate.
     pub delay_ms: f64,
+    /// Whether [`Self::delay_ms`] is a measured lock, with
+    /// [`WireFrame::delay_locked`]'s three-way meaning. Only `Some(true)`
+    /// earns a metres figure in the delay readout — see
+    /// [`format_delay_readout`].
+    pub delay_locked: Option<bool>,
+    /// Speed of sound for that conversion, in m/s. `None` falls back to
+    /// [`SPEED_OF_SOUND_DEFAULT_M_S`].
+    pub speed_of_sound_m_s: Option<f64>,
     pub meas_peak_dbfs: Option<f64>,
     pub ref_peak_dbfs: Option<f64>,
     pub channel_role: String,
@@ -535,6 +615,8 @@ impl TransferInput {
             phase_deg,
             coherence,
             delay_ms: frame.delay_ms,
+            delay_locked: frame.delay_locked,
+            speed_of_sound_m_s: frame.speed_of_sound_m_s,
             meas_peak_dbfs: frame.meas_peak_dbfs,
             ref_peak_dbfs: frame.ref_peak_dbfs,
             channel_role: format!("meas_{}", frame.meas_channel),
@@ -564,6 +646,20 @@ impl TransferInput {
             phase_deg: d.h1.phase_deg.clone(),
             coherence: d.h1.coherence.clone(),
             delay_ms: d.h1.delay_ms,
+            // A `PairDerivation` records no lock verdict — `derive_pair`
+            // takes a `delay_samples` it is handed and asks no questions, so
+            // a snapshot of a session that never locked carries the same
+            // `0` as one that did. `None` is the honest value, and it reads
+            // through `format_delay_readout` as milliseconds without metres:
+            // an offline derivation states the delay it was built with and
+            // makes no claim about the room it came from.
+            delay_locked: None,
+            // A snapshot carries no room temperature either — it predates
+            // the field or was captured elsewhere — so the readout falls
+            // back to the conventional speed. Moot while the metres are
+            // gated off above, and set explicitly so it stays correct if a
+            // future snapshot format does record a lock.
+            speed_of_sound_m_s: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: channel_role.to_string(),
@@ -716,7 +812,13 @@ impl TransferScene {
             freq_axis: crate::ticks::freq_axis(f_min, f_max),
             mag_axis: crate::ticks::db_axis(db_min, db_max),
             phase_axis: crate::ticks::phase_axis(),
-            delay_readout: format_delay_readout(input.delay_ms),
+            delay_readout: format_delay_readout(
+                input.delay_ms,
+                input.delay_locked,
+                input
+                    .speed_of_sound_m_s
+                    .unwrap_or(SPEED_OF_SOUND_DEFAULT_M_S),
+            ),
             smoothing_readout: modes.smoothing.label(),
             // Derived from the ladder alone, never from the frame's columns:
             // the same session yields the same labels on every frame, so
@@ -916,6 +1018,8 @@ mod tests {
                 phase_deg: vec![0.0; 3],
                 coherence: vec![coh; 3],
                 delay_ms: 0.0,
+                delay_locked: Some(true),
+                speed_of_sound_m_s: None,
                 meas_peak_dbfs: Some(-20.0),
                 ref_peak_dbfs: Some(-20.0),
                 channel_role: "meas_0".to_string(),
@@ -997,9 +1101,81 @@ mod tests {
     }
 
     #[test]
-    fn delay_readout_uses_343_metres_per_second_exactly() {
-        assert_eq!(format_delay_readout(2.5), "2.50 ms  (0.86 m)");
-        assert_eq!(format_delay_readout(0.0), "0.00 ms  (0.00 m)");
+    fn a_locked_delay_converts_with_the_speed_it_is_given() {
+        // D2's 343 m/s survives only as the fallback constant, and the
+        // conversion now takes whatever the frame names.
+        assert_eq!(
+            format_delay_readout(2.5, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            "2.50 ms  (0.86 m)"
+        );
+        assert_eq!(
+            format_delay_readout(0.0, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            "0.00 ms  (0.00 m)"
+        );
+    }
+
+    #[test]
+    fn the_room_temperature_moves_the_metres() {
+        // #243's second error. The same 4.08 ms lock reads 1.40 m at the
+        // hardcoded 343 and 1.41 m at the 24 °C the rig room ran — and the
+        // test states both, so a regression to the literal is a diff in the
+        // expected string rather than a silent 1 % drift.
+        let warm = ac_core::shared::conversions::speed_of_sound_at(24.0);
+        assert_eq!(
+            format_delay_readout(4.08, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            "4.08 ms  (1.40 m)"
+        );
+        assert_eq!(
+            format_delay_readout(4.08, Some(true), warm),
+            "4.08 ms  (1.41 m)"
+        );
+    }
+
+    #[test]
+    fn metres_need_a_lock() {
+        // The reachable defect: before a lock the frame's delay_ms is 0.0, a
+        // placeholder, and the readout used to convert it into "(0.00 m)" —
+        // a claim about the room from a delay the estimator had not made.
+        for unlocked in [None, Some(false)] {
+            assert_eq!(
+                format_delay_readout(0.0, unlocked, SPEED_OF_SOUND_DEFAULT_M_S),
+                "0.00 ms",
+                "an unlocked pair must not state a distance"
+            );
+        }
+        // Milliseconds are still the frame's own field, reported unchanged.
+        assert_eq!(
+            format_delay_readout(4.08, Some(false), SPEED_OF_SOUND_DEFAULT_M_S),
+            "4.08 ms"
+        );
+    }
+
+    #[test]
+    fn a_negative_or_nan_delay_states_no_distance() {
+        // Dormant against today's causal-only estimator — see
+        // `format_delay_readout`'s doc — so this is what keeps the branch
+        // honest rather than a claim that it fires.
+        assert_eq!(
+            format_delay_readout(-0.5, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            "-0.50 ms"
+        );
+        assert_eq!(
+            format_delay_readout(f64::NAN, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            "NaN ms"
+        );
+    }
+
+    #[test]
+    fn the_fallback_speed_is_the_pre_243_constant() {
+        // Not `speed_of_sound_at(20.0)` (343.42): a frame that names no
+        // speed must reproduce the old behaviour exactly, not a nearby
+        // derived value.
+        assert!((SPEED_OF_SOUND_DEFAULT_M_S - 343.0).abs() < 1e-12);
+        assert!(
+            (SPEED_OF_SOUND_DEFAULT_M_S - ac_core::shared::conversions::speed_of_sound_at(20.0))
+                .abs()
+                > 0.4
+        );
     }
 
     #[test]
@@ -1064,6 +1240,8 @@ mod tests {
             phase_deg: vec![-180.0, 0.0, 180.0],
             coherence: vec![0.9; 3],
             delay_ms: 0.0,
+            delay_locked: Some(true),
+            speed_of_sound_m_s: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: "meas_0".to_string(),
@@ -1112,6 +1290,8 @@ mod tests {
             // Longer than the rest — a malformed frame.
             coherence: vec![0.9, 0.9, 0.9, 0.9],
             delay_ms: 0.0,
+            delay_locked: Some(true),
+            speed_of_sound_m_s: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: "meas_0".to_string(),

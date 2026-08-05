@@ -343,6 +343,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let fake = state.fake_audio;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
+    // Speed of sound for the delay readout's ms → m conversion (#243),
+    // resolved from config here rather than per frame: the room's
+    // temperature does not change during a session, and reading it once
+    // means every frame in a session converts with the same constant.
+    let speed_of_sound_m_s =
+        ac_core::shared::conversions::speed_of_sound_from_config(cfg.temperature_c);
+
     let out_port_r = out_port.clone();
     let meas_port_r = unique_ports.first().cloned().unwrap_or_default();
     let ref_port_r = unique_ports
@@ -1161,6 +1168,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
+                            // Derived once at worker start from the
+                            // configured room temperature (#243). Shipped
+                            // per frame rather than left to the view so the
+                            // display converts with the same constant a
+                            // report writer would, and so a captured frame
+                            // records what it was converted with.
+                            "speed_of_sound_m_s": speed_of_sound_m_s,
                             // Read by position rather than zipped into the
                             // chain above: it is a scalar the closure only
                             // reads, and the zip is already seven deep.

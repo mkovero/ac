@@ -14,6 +14,7 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
     let mut range_start = None;
     let mut range_stop = None;
     let mut server_idle_timeout_secs: Option<Option<u64>> = None;
+    let mut temperature_c: Option<Option<f64>> = None;
 
     let mut remaining: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -90,11 +91,19 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
                         .map_err(|e| format!("setup {key}: {e} (got {val:?})"))?,
                 );
             }
+            // Room air temperature, in °C — the delay readout's ms → m
+            // conversion (#243). `none` clears it back to 343 m/s.
+            "temp" | "temperature" => {
+                temperature_c = Some(
+                    parse_temperature_c(val)
+                        .map_err(|e| format!("setup {key}: {e} (got {val:?})"))?,
+                );
+            }
             _ => {
                 return Err(format!(
                     "setup: unknown key {key:?}  \
                      (output | input | reference | refout | device | dburef | dmm | gpio | \
-                     range | server-timeout)"
+                     range | temp | server-timeout)"
                 ))
             }
         }
@@ -113,9 +122,40 @@ pub(super) fn parse_setup(args: &[String]) -> Result<ParsedCommand, String> {
             range_start,
             range_stop,
             server_idle_timeout_secs,
+            temperature_c,
         },
         show_plot: false,
     })
+}
+
+/// Parse a room temperature in °C — a bare number, optionally suffixed
+/// `c`/`°c`, or one of `off | none` meaning "no temperature recorded".
+///
+/// Rejects anything outside −50…+60 °C. Not taste: the value is only ever a
+/// room's air temperature, and the two mistakes worth catching are a
+/// Fahrenheit reading typed straight in (72 °F, which parses as a plausible
+/// number and gives c = 375 m/s, a 9 % error) and a transposed digit. A
+/// speed of sound is not recoverable from the readout by eye, so an
+/// implausible temperature must fail at the point it is typed.
+fn parse_temperature_c(s: &str) -> Result<Option<f64>, String> {
+    let lower = s.to_lowercase();
+    if matches!(lower.as_str(), "off" | "none" | "unset" | "clear") {
+        return Ok(None);
+    }
+    let num = lower
+        .trim_end_matches('c')
+        .trim_end_matches('°')
+        .trim_end_matches("deg")
+        .trim();
+    let t: f64 = num
+        .parse()
+        .map_err(|_| "expected a temperature in °C like 24, 24.5, 24c, or 'none'".to_string())?;
+    if !t.is_finite() || !(-50.0..=60.0).contains(&t) {
+        return Err(format!(
+            "{t} °C is outside −50…60 °C — if that is a Fahrenheit reading, convert it first"
+        ));
+    }
+    Ok(Some(t))
 }
 
 /// Parse a short duration spec — accepts bare integer seconds, an integer
@@ -244,6 +284,67 @@ mod tests {
         assert!(e.contains("integer"), "unhelpful error: {e}");
     }
 
+    fn temp_of(s: &str) -> Option<Option<f64>> {
+        let p = parse(&args(s)).unwrap();
+        match p.cmd {
+            CommandKind::Setup { temperature_c, .. } => temperature_c,
+            other => panic!("expected Setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_setup_temp_accepts_bare_and_suffixed() {
+        assert_eq!(temp_of("setup temp 24"), Some(Some(24.0)));
+        assert_eq!(temp_of("setup temp 24.5"), Some(Some(24.5)));
+        assert_eq!(temp_of("setup temp 24c"), Some(Some(24.0)));
+        assert_eq!(temp_of("setup temperature -5"), Some(Some(-5.0)));
+    }
+
+    #[test]
+    fn test_setup_temp_none_clears() {
+        assert_eq!(temp_of("setup temp none"), Some(None));
+        assert_eq!(temp_of("setup temp off"), Some(None));
+    }
+
+    #[test]
+    fn test_setup_temp_rejects_a_fahrenheit_reading() {
+        // 72 °F parses as a plausible number and would give c = 375 m/s, a
+        // 9 % error in a figure nobody can eyeball. It has to fail here.
+        let e = parse(&args("setup temp 72")).unwrap_err();
+        assert!(e.contains("Fahrenheit"), "unhelpful error: {e}");
+        assert!(parse(&args("setup temp -80")).is_err());
+        assert!(parse(&args("setup temp banana")).is_err());
+    }
+
+    #[test]
+    fn test_setup_temp_does_not_touch_other_fields() {
+        let p = parse(&args("setup temp 24")).unwrap();
+        match p.cmd {
+            CommandKind::Setup {
+                output,
+                input,
+                reference,
+                reference_output,
+                device,
+                dbu_ref_vrms,
+                dmm_host,
+                gpio_port,
+                range_start,
+                range_stop,
+                server_idle_timeout_secs,
+                temperature_c,
+            } => {
+                assert!(output.is_none() && input.is_none() && reference.is_none());
+                assert!(reference_output.is_none() && device.is_none());
+                assert!(dbu_ref_vrms.is_none() && dmm_host.is_none() && gpio_port.is_none());
+                assert!(range_start.is_none() && range_stop.is_none());
+                assert!(server_idle_timeout_secs.is_none());
+                assert_eq!(temperature_c, Some(Some(24.0)));
+            }
+            other => panic!("expected Setup, got {other:?}"),
+        }
+    }
+
     fn timeout_of(s: &str) -> Option<Option<u64>> {
         let p = parse(&args(s)).unwrap();
         match p.cmd {
@@ -308,11 +409,13 @@ mod tests {
                 range_start,
                 range_stop,
                 server_idle_timeout_secs,
+                temperature_c,
             } => {
                 assert!(output.is_none() && input.is_none() && reference.is_none());
                 assert!(reference_output.is_none());
                 assert!(device.is_none() && dbu_ref_vrms.is_none() && dmm_host.is_none());
                 assert!(gpio_port.is_none() && range_start.is_none() && range_stop.is_none());
+                assert!(temperature_c.is_none());
                 assert_eq!(server_idle_timeout_secs, Some(Some(300)));
             }
             other => panic!("expected Setup, got {other:?}"),

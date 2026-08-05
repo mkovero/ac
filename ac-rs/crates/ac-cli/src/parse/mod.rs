@@ -295,6 +295,9 @@ pub enum CommandKind {
         range_start: Option<f64>,
         range_stop: Option<f64>,
         server_idle_timeout_secs: Option<Option<u64>>,
+        /// Room air temperature in °C for the delay readout's ms → m
+        /// conversion (#243) — `Some(None)` clears it back to 343 m/s.
+        temperature_c: Option<Option<f64>>,
     },
     Stop,
     SweepLevel {
@@ -644,9 +647,9 @@ ac — audio measurement CLI
 Commands:
   devices                                                             list audio ports
   probe                                                               auto-detect analog ports and loopback pairs
-  setup           [output <N>] [input <N>] [reference <N>] [device <N>]
-                  [range <freqStart freqStop>] [dburef <vrms>]
-                  [dmm <host>] [gpio <serialDevice>|off]
+  setup           [output <N>] [input <N>] [reference <N>] [refout <N>|none]
+                  [device <N>] [range <freqStart freqStop>] [dburef <vrms>]
+                  [temp <°C>|none] [dmm <host>] [gpio <serialDevice>|off]
                   [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
   calibrate       [output <N>] [input <N>] [level] [show]             level calibration (default: -10dBFS)
   generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
