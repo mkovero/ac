@@ -1098,6 +1098,13 @@ mod tests {
     /// A refusing frame, built from the healthy fixture so only the fields
     /// the indicator reads differ.
     fn refusing_frame() -> ac_scene::WireFrame {
+        refusing_frame_at_attempt(3)
+    }
+
+    /// The same, with the attempt count set: escalation is the later of
+    /// `PERSISTENT_REFUSAL_S` and `PERSISTENT_REFUSAL_ATTEMPTS` (#247), so a
+    /// test that advances the clock has to advance the count with it.
+    fn refusing_frame_at_attempt(attempts: u32) -> ac_scene::WireFrame {
         let mut f = transfer_frame();
         f.drive = Some(ac_scene::WireDrive {
             on: true,
@@ -1110,7 +1117,7 @@ mod tests {
         // here — `transfer_frame` carries `mtw`, so the settled gate already
         // covers it. The field-reachable no-ladder shape is pinned in
         // `ac-scene::fault` and in `it_transfer_geometry`.
-        f.delay_attempts = 3;
+        f.delay_attempts = attempts;
         f
     }
 
@@ -1134,8 +1141,24 @@ mod tests {
             Some(ac_scene::Fault::NoLockYet)
         );
 
-        // Same frame, later. Nothing on the wire changed — only the clock.
-        app.ingest_frame_for_test(refusing_frame(), ac_scene::fault::PERSISTENT_REFUSAL_S);
+        // The same refusal, retried at the daemon's 1 Hz, until both the
+        // clock and the attempt count have passed their thresholds. The
+        // frames still say nothing new — the row changes because the app
+        // carries the state, which is what this test is for.
+        let first = 3;
+        for n in 1..ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS {
+            app.ingest_frame_for_test(refusing_frame_at_attempt(first + n), n as f64);
+            assert_eq!(
+                app.current_transfer_scene().expect("scene rebuilt").fault,
+                Some(ac_scene::Fault::NoLockYet),
+                "escalated at attempt {n} of the refusal, before either \
+                 threshold was reached"
+            );
+        }
+        app.ingest_frame_for_test(
+            refusing_frame_at_attempt(first + ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS),
+            ac_scene::fault::PERSISTENT_REFUSAL_S,
+        );
         assert_eq!(
             app.current_transfer_scene().expect("scene rebuilt").fault,
             Some(ac_scene::Fault::NoLock)

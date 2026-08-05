@@ -204,7 +204,7 @@ fn a_fault_row_is_painted_verbatim_from_ac_scene() {
         // The field case #238 unblocked: no lock, so no ladder, so never
         // settled — the state the display used to paint nothing for.
         settled: false,
-        estimator_attempted: true,
+        delay_attempts: 1,
     };
     // Never locked in this session, so the transient row is NO LOCK rather
     // than LOST LOCK: nothing was lost.
@@ -234,16 +234,23 @@ fn the_persistent_row_paints_its_instruction() {
         // The field case #238 unblocked: no lock, so no ladder, so never
         // settled — the state the display used to paint nothing for.
         settled: false,
-        estimator_attempted: true,
+        delay_attempts: 1,
     };
     // Never locked in this session, so the transient row is NO LOCK rather
     // than LOST LOCK: nothing was lost.
-    // One FaultState, two frames: the clock has to run for the row to
-    // change, so this cannot be built from a single scene call.
-    let inp_fault = Some(refusing);
+    // One FaultState, a frame per retry: escalation is the later of
+    // PERSISTENT_REFUSAL_S and PERSISTENT_REFUSAL_ATTEMPTS (#247), so the
+    // attempt count has to advance with the clock rather than sit at 1.
     let mut meters = (MeterState::default(), MeterState::default());
     let mut fault = FaultState::default();
-    let build = |now_s: f64, meters: &mut (MeterState, MeterState), fault: &mut FaultState| {
+    let build = |now_s: f64,
+                 attempts: u32,
+                 meters: &mut (MeterState, MeterState),
+                 fault: &mut FaultState| {
+        let inp_fault = Some(ac_scene::fault::FaultFrame {
+            delay_attempts: attempts,
+            ..refusing
+        });
         let inp = TransferInput {
             freqs: freqs(),
             magnitude_db: vec![0.0; N],
@@ -275,11 +282,20 @@ fn the_persistent_row_paints_its_instruction() {
         )
     };
     assert_eq!(
-        build(0.0, &mut meters, &mut fault).fault,
+        build(0.0, 1, &mut meters, &mut fault).fault,
         Some(ac_scene::Fault::NoLockYet)
     );
+    // The daemon's 1 Hz retry: attempt n lands at t = n - 1.
+    for n in 2..ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS {
+        assert_eq!(
+            build(n as f64 - 1.0, n, &mut meters, &mut fault).fault,
+            Some(ac_scene::Fault::NoLockYet),
+            "escalated at attempt {n}, before either threshold was reached"
+        );
+    }
     let scene = build(
         ac_scene::fault::PERSISTENT_REFUSAL_S,
+        ac_scene::fault::PERSISTENT_REFUSAL_ATTEMPTS,
         &mut meters,
         &mut fault,
     );
@@ -310,7 +326,7 @@ fn a_healthy_session_paints_no_indicator() {
         },
         delay_locked: Some(true),
         settled: true,
-        estimator_attempted: true,
+        delay_attempts: 1,
     };
     let scene = scene_with(Some(healthy), 0.0);
     assert_eq!(scene.fault, None);
