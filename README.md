@@ -82,6 +82,8 @@ jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2
 ac devices                          # list available audio ports
 ac setup output 11 input 0          # tell ac which channels to use
 ac setup reference 1                # loopback reference leg — required by ac-view
+ac setup refout 6                   # reference stimulus leg — same converter as the main output
+ac setup temp 24                    # room °C — sets the delay readout's speed of sound
 ac calibrate                        # interactive level cal (enables dBu)
 ac calibrate spl input 0            # pistonphone SPL cal — readouts in dB SPL
 ac calibrate mic-curve mic.frd input 0   # attach mic frequency-response curve
@@ -97,12 +99,66 @@ ac monitor cwt                      # live Morlet-CWT waterfall (terminal)
 `ac-view` views run on a measurement/reference pair and exit with an
 explicit error if the reference channel is unset.
 
+## Reference wiring
+
+**Send the reference out through the same converter as the stimulus, and
+loop its analogue output back into an interface input.**
+
+The transfer view locks a delay by correlating the measurement leg against
+the reference leg, so what it reports is the *difference* between the two
+paths. Anything the acoustic path passes through that the reference does not
+survives in that difference and is indistinguishable from distance.
+
+```
+              ┌─ stimulus ─→ converter ─→ amp ─→ speaker ─→ air ─→ mic ─┐
+   interface ─┤                                                          ├─→ correlate
+              └─ reference ─→ same converter ─→ loopback cable ─────────┘
+```
+
+Wired this way, everything up to the converter's analogue output is
+common-mode and cancels: interface, transport (ADAT/MADI/USB), converter
+DAC, sample rate, buffer size. What is left in the delay is only what the
+acoustic branch genuinely adds — amplifier, speaker DSP, driver origin,
+flight through air, microphone and preamp — so the delay *is* the arrival
+time and the metres figure means what it says. This is also how REW, Open
+Sound Meter and Smaart expect to be wired.
+
+Take the reference from a *different* converter than the stimulus and the
+transport and DAC of the acoustic leg stay in the residual. On the rig
+behind #243 — reference out the interface's own DAC, stimulus out over ADAT
+through an external converter — that residual was **1.1931 ms**, which the
+readout paints as **41 cm of room that is not there**, with a mic taped at
+1.000 m reading 1.40 m. Nothing on screen says so: the number is plausible,
+stable, and wrong. Only the wiring fixes it.
+
+Deliberately *not* subtracted, under any wiring: **speaker DSP latency
+belongs to the device under test, not to the instrument.** Correct wiring
+leaves it in the measurement, which is what an operator aligning a system
+wants to see. A stored instrument constant would have removed it silently
+along with the transport delay.
+
+The metres figure appears only once the pair has a measured lock. Before
+that the readout shows milliseconds alone rather than converting the
+placeholder `0.00 ms` into a distance; an unlocked pair is named by the
+view's `NO LOCK` indicator.
+
+Set the room temperature so the conversion uses the right speed of sound:
+
+```bash
+ac setup temp 24          # °C; c = 331.3 + 0.606·T = 345.8 m/s
+ac setup temp none        # clear — falls back to 343 m/s (the 20 °C figure)
+```
+
+At 24–26 °C the speed of sound is ~346 m/s against the 343 m/s default, a
+1 % error — about 25 µs at 1 m, which is 2.4 samples at 96 kHz and therefore
+larger than the delay estimate's own resolution.
+
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
 | `devices` | List audio ports |
-| `setup` | Configure hardware — device, output, input, reference, dburef, range, dmm, gpio, server-timeout |
+| `setup` | Configure hardware — device, output, input, reference, refout, dburef, range, temp, dmm, gpio, server-timeout |
 | `calibrate` | Voltage cal (sine + DMM); `calibrate spl` adds 94 dB SPL pistonphone reference; `calibrate mic-curve <path>` attaches a mic response correction; `calibrate show` lists stored entries |
 | `generate` | Play a sine or pink noise tone |
 | `sweep` | Level ramp, frequency chirp, or `sweep ir` (Farina log-sweep impulse response) |

@@ -86,6 +86,54 @@ pub fn fmt_vpp(vrms: f64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Speed of sound — the delay readout's ms → m conversion (#243)
+// ---------------------------------------------------------------------------
+
+/// Speed of sound in dry air at 0 °C, in m/s — the intercept of
+/// [`speed_of_sound_at`].
+pub const SPEED_OF_SOUND_0C_M_S: f64 = 331.3;
+
+/// Rate of change of the speed of sound with air temperature, in m/s per °C.
+pub const SPEED_OF_SOUND_PER_C: f64 = 0.606;
+
+/// The speed of sound assumed when no room temperature is configured:
+/// exactly 343 m/s, the conventional 20 °C figure the delay readout used
+/// unconditionally before #243.
+///
+/// Deliberately the round textbook value rather than
+/// `speed_of_sound_at(20.0)` (343.42 m/s). An unset temperature is not a
+/// claim that the room is at 20 °C, it is the absence of a claim, and the
+/// conventional figure says that more honestly than a derived one carrying
+/// two decimals it has not earned.
+pub const SPEED_OF_SOUND_DEFAULT_M_S: f64 = 343.0;
+
+/// Speed of sound in dry air at `temperature_c`, in m/s.
+///
+/// The standard linear approximation, `331.3 + 0.606·T`, good to better
+/// than 0.1 % over any temperature a measurement room is in.
+///
+/// The error this replaces is not academic. A room at 24–26 °C runs
+/// c ≈ 346 m/s against the hardcoded 343 — 1 %, which at 1 m is 25 µs, and
+/// 25 µs is 2.4 samples at 96 kHz. The conversion was therefore wrong by
+/// more than the measurement's own resolution, which is the bar for whether
+/// a constant may be baked in.
+pub fn speed_of_sound_at(temperature_c: f64) -> f64 {
+    SPEED_OF_SOUND_0C_M_S + SPEED_OF_SOUND_PER_C * temperature_c
+}
+
+/// The speed of sound a configured room temperature implies, falling back
+/// to [`SPEED_OF_SOUND_DEFAULT_M_S`] when none is set.
+///
+/// The single place `Option<temperature>` becomes a speed, so the daemon
+/// and any report writer cannot disagree about what an unset temperature
+/// means.
+pub fn speed_of_sound_from_config(temperature_c: Option<f64>) -> f64 {
+    temperature_c
+        .map(speed_of_sound_at)
+        .unwrap_or(SPEED_OF_SOUND_DEFAULT_M_S)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +159,59 @@ mod tests {
     fn fmt_vrms_scales() {
         assert!(fmt_vrms(0.001).contains("mVrms"));
         assert!(fmt_vrms(1.5).contains("Vrms"));
+    }
+
+    // ── speed of sound (#243) ─────────────────────────────────────────
+
+    #[test]
+    fn speed_of_sound_tracks_temperature() {
+        // The two figures #243 names: ~343 m/s at 20 °C, ~346 at the
+        // 24–26 °C the rig room actually runs.
+        assert_relative_eq!(speed_of_sound_at(20.0), 343.42, epsilon = 0.01);
+        assert_relative_eq!(speed_of_sound_at(25.0), 346.45, epsilon = 0.01);
+        // Linear, so a 1 °C error is a 0.606 m/s error — the property that
+        // makes a temperature typo cheap and a hardcoded constant not.
+        assert_relative_eq!(
+            speed_of_sound_at(21.0) - speed_of_sound_at(20.0),
+            0.606,
+            epsilon = 1e-9
+        );
+    }
+
+    #[test]
+    fn unset_temperature_is_the_conventional_speed_not_a_derived_one() {
+        // Distinct from speed_of_sound_at(20.0) = 343.42 on purpose: an
+        // absent temperature is an absent claim, not a 20 °C claim.
+        assert_relative_eq!(
+            speed_of_sound_from_config(None),
+            SPEED_OF_SOUND_DEFAULT_M_S,
+            epsilon = 1e-12
+        );
+        assert_ne!(speed_of_sound_from_config(None), speed_of_sound_at(20.0));
+    }
+
+    #[test]
+    fn a_configured_temperature_wins_over_the_default() {
+        assert_relative_eq!(
+            speed_of_sound_from_config(Some(25.0)),
+            346.45,
+            epsilon = 0.01
+        );
+    }
+
+    #[test]
+    fn the_temperature_error_exceeds_the_estimators_resolution() {
+        // Why this is a defect and not a rounding preference. At 96 kHz one
+        // sample is 10.4 µs; over 1 m the 343-vs-346 disagreement is larger
+        // than that, so the old constant was wrong by more than the
+        // measurement could resolve.
+        let sample_period_s = 1.0 / 96_000.0;
+        let t_at_343 = 1.0 / SPEED_OF_SOUND_DEFAULT_M_S;
+        let t_at_25c = 1.0 / speed_of_sound_at(25.0);
+        assert!(
+            (t_at_343 - t_at_25c).abs() > sample_period_s,
+            "the constant's error is below one sample; it would not be worth parameterising"
+        );
     }
 
     // ── dBV ───────────────────────────────────────────────────────────

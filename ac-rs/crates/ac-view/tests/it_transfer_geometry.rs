@@ -34,6 +34,8 @@ fn masked_scene() -> TransferScene {
         phase_deg: vec![0.0; N],
         coherence,
         delay_ms: 0.0,
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: None,
         ref_peak_dbfs: None,
         channel_role: "meas_0".to_string(),
@@ -149,6 +151,8 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         phase_deg: vec![0.0; N],
         coherence: vec![0.9; N],
         delay_ms: 0.0,
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -246,6 +250,8 @@ fn the_persistent_row_paints_its_instruction() {
             phase_deg: vec![0.0; N],
             coherence: vec![0.9; N],
             delay_ms: 0.0,
+            delay_locked: Some(true),
+            speed_of_sound_m_s: None,
             meas_peak_dbfs: Some(-30.0),
             ref_peak_dbfs: Some(-14.5),
             channel_role: "meas_0".to_string(),
@@ -403,6 +409,12 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         phase_deg: vec![0.0; N],
         coherence: vec![0.9; N],
         delay_ms,
+        // Locked, because the collision this fixture reproduces is between
+        // the band row and the readout at its *widest* — and the metres
+        // figure is what makes it wide. An unlocked fixture would silently
+        // narrow the string and the layout test would stop proving anything.
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),

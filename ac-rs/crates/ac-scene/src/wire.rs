@@ -169,6 +169,20 @@ pub struct WireFrame {
     /// mapping is written in terms of.
     #[serde(default)]
     pub delay_ms: f64,
+    /// Speed of sound for the delay readout's ms → m conversion, in m/s
+    /// (#243) — derived daemon-side from the configured room temperature.
+    ///
+    /// `None` is a daemon predating the field, and falls back to
+    /// [`crate::transfer::SPEED_OF_SOUND_DEFAULT_M_S`], which is the 343 m/s
+    /// the readout used unconditionally before. Absence is therefore not a
+    /// reason to suppress metres: it reproduces the previous behaviour
+    /// exactly, and the thing #243 suppresses metres for is an unmeasured
+    /// delay, not an unconfigured room.
+    ///
+    /// Shipped already derived rather than as a temperature so the display
+    /// holds one number instead of two that have to agree.
+    #[serde(default)]
+    pub speed_of_sound_m_s: Option<f64>,
     /// Whether [`Self::delay_samples`] is a measured lock (#227).
     ///
     /// `None` is a daemon that predates #227 and says nothing either way —
@@ -296,5 +310,26 @@ mod tests {
         assert_eq!(frame.spl, Some(-6.75));
         assert_eq!(frame.spl_weighting, "Z");
         assert_eq!(frame.spl_integration, "fast");
+        // A daemon predating #243 names no speed of sound. Absence must be
+        // distinguishable from a value, so the fallback lives at the one
+        // conversion site rather than being invented here.
+        assert_eq!(frame.speed_of_sound_m_s, None);
+    }
+
+    #[test]
+    fn carries_the_speed_of_sound_when_the_daemon_names_one() {
+        let json = r#"{
+            "sr": 96000,
+            "meas_channel": 0,
+            "ref_channel": 3,
+            "spec_freqs": [], "meas_spectrum": [], "ref_spectrum": [],
+            "spl": null, "spl_weighting": "Z", "spl_integration": "fast",
+            "delay_ms": 4.08,
+            "delay_locked": true,
+            "speed_of_sound_m_s": 345.844
+        }"#;
+        let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(frame.speed_of_sound_m_s, Some(345.844));
+        assert_eq!(frame.delay_locked, Some(true));
     }
 }

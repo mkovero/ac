@@ -52,6 +52,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         range_start,
         range_stop,
         server_idle_timeout_secs,
+        temperature_c,
     ) = match cmd {
         CommandKind::Setup {
             output,
@@ -65,6 +66,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             range_start,
             range_stop,
             server_idle_timeout_secs,
+            temperature_c,
         } => (
             output,
             input,
@@ -77,6 +79,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             range_start,
             range_stop,
             server_idle_timeout_secs,
+            temperature_c,
         ),
         _ => unreachable!(),
     };
@@ -122,6 +125,12 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         match v {
             Some(secs) => update.insert("server_idle_timeout_secs".into(), (*secs).into()),
             None => update.insert("server_idle_timeout_secs".into(), serde_json::Value::Null),
+        };
+    }
+    if let Some(v) = temperature_c {
+        match v {
+            Some(t) => update.insert("temperature_c".into(), (*t).into()),
+            None => update.insert("temperature_c".into(), serde_json::Value::Null),
         };
     }
 
@@ -196,6 +205,17 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         .and_then(|v| v.as_f64())
         .unwrap_or(20000.0);
     println!("  Range:         {r_start:.0} – {r_stop:.0} Hz");
+
+    // Both the temperature and the speed it implies (#243). The derived
+    // figure is printed because it, not the temperature, is what the delay
+    // readout converts with — and because an unset temperature reads as a
+    // different speed from any temperature that could be typed.
+    let temp = srv_cfg.get("temperature_c").and_then(|v| v.as_f64());
+    let c = ac_core::shared::conversions::speed_of_sound_from_config(temp);
+    match temp {
+        Some(t) => println!("  Room temp:     {t:.1} °C  (c = {c:.1} m/s)"),
+        None => println!("  Room temp:     (not set — c = {c:.1} m/s assumed)"),
+    }
 
     let timeout = srv_cfg
         .get("server_idle_timeout_secs")

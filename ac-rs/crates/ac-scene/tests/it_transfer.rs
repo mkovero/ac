@@ -38,6 +38,11 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         phase_deg,
         coherence: vec![0.9; n],
         delay_ms,
+        // These fixtures stipulate a delay the estimator locked — that is
+        // what makes the de-rotation cases meaningful — so the readout is
+        // entitled to state a distance for them.
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: Some(-6.0206),
         ref_peak_dbfs: Some(-6.0206),
         channel_role: "meas_0".to_string(),
