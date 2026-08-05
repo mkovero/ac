@@ -90,6 +90,21 @@ pub fn draw_view(
     scene: Option<&Scene>,
     transfer: Option<&ac_scene::TransferScene>,
 ) {
+    // Reserve the half line the top y-axis tick label hangs into (#245).
+    // Every pane's tick labels are drawn vertically centred on their
+    // gridline, so the topmost one — the tick sitting exactly on the pane's
+    // top edge — puts half its glyph height above the rect the view was
+    // given. egui's item spacing is narrower than that, so the shell's
+    // connection banner on the row above ended up struck through by the
+    // `20` of the +20 dB tick. Taking the space here, before either view
+    // reads `available_rect_before_wrap`, keeps the whole of every view
+    // inside its own rect without the panes needing to know why.
+    let tick_line_h = ui
+        .painter()
+        .layout_no_wrap("0".to_string(), egui::FontId::default(), COLOR_LABEL)
+        .size()
+        .y;
+    ui.add_space(tick_line_h / 2.0);
     match kind {
         ViewKind::Spectrum(state) => draw_spectrum(state, ui, scene),
         ViewKind::Transfer(state) => draw_transfer(state, ui, transfer),
