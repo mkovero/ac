@@ -43,6 +43,6 @@ pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use ticks::{Axis, Tick};
 pub use transfer::{
-    DerotMode, DisplayModes, Meter, MeterState, Smoothing, TransferInput, TransferScene,
+    BandLabel, DerotMode, DisplayModes, Meter, MeterState, Smoothing, TransferInput, TransferScene,
 };
-pub use wire::{WireDrive, WireFrame};
+pub use wire::{MtwStage, WireDrive, WireFrame};

@@ -69,6 +69,7 @@ fn transfer_scene() -> TransferScene {
         column_window_s: Vec::new(),
         column_n: Vec::new(),
         column_bins: Vec::new(),
+        stages: Vec::new(),
         fault: None,
     };
     let mut meters = (MeterState::default(), MeterState::default());

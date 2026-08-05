@@ -54,7 +54,7 @@ use ac_core::visualize::smoothing::{smooth_db, smooth_unwrapped_phase_deg};
 use crate::fault::{Fault, FaultFrame, FaultInput, FaultState};
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
-use crate::wire::WireFrame;
+use crate::wire::{MtwStage, WireFrame};
 
 /// Columns below this coherence are masked out of both panes (D5 —
 /// fixed threshold, no tuning UI).
@@ -232,6 +232,108 @@ pub fn format_delay_readout(delay_ms: f64) -> String {
     format!("{delay_ms:.2} ms  ({metres:.2} m)")
 }
 
+/// One band's resolution-and-settling label (#224): where it sits on the
+/// shared log-frequency axis, and the exact string to draw there.
+///
+/// Both fields are contract, as with [`crate::ticks::Tick`] — a renderer
+/// positions and draws, and must never reformat the text or recompute the
+/// position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandLabel {
+    /// Normalized `[0,1]` x — the geometric centre of the band's **visible**
+    /// span, mapped by [`freq_to_x`], the same mapping the traces and the
+    /// frequency ticks use.
+    pub position: f64,
+    /// `"0.98 Hz / 2.56 s"` — this band's bin width and settling time.
+    pub text: String,
+}
+
+/// `"{Δf} Hz / {settling} s"`, both figures to [`band_figure`]'s precision.
+///
+/// The settling figure is the ladder's own `W + hop·(N−1)` (the wire's
+/// `settling_s`), **not** the raw analysis window: at the bottom rung the
+/// window is 1.02 s while the average does not fill for 2.56 s, so a
+/// window-derived label would understate the wait by 2.5x — which is the
+/// one number an operator acts on after an EQ change.
+pub fn format_band_label(df_hz: f64, settling_s: f64) -> String {
+    format!("{} Hz / {} s", band_figure(df_hz), band_figure(settling_s))
+}
+
+/// Two decimals below 10, one at or above it.
+///
+/// Fixed by the ratified label set rather than by a significant-figure
+/// rule: `0.98`, `2.56`, `2.93`, `0.85`, `23.4`, `0.11` are the strings the
+/// UX review drew, and a plain 2- or 3-significant-figure rule reproduces
+/// neither the `23.4` nor the `0.98` end of that list. Both quantities are
+/// context for reading the curve, not readings themselves, so the display
+/// precision is capped here — the underlying `f64`s are untouched.
+fn band_figure(v: f64) -> String {
+    if v >= 10.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+/// The per-band labels for one ladder, over the caller's frequency axis.
+///
+/// A stage serves from its own validity edge up to the shallower stage's:
+/// the ladder builds `f_top_i` as `f_valid_{i−1}`, so the band edges follow
+/// from `f_valid` alone and no second wire field is needed. The deepest
+/// stage runs down to the bottom of the axis — below its validity edge the
+/// column grid is Δf-limited and thins out, but it is still that stage's
+/// measurement at that stage's resolution — and the shallowest runs to the
+/// top. Each label is placed at the **geometric** centre of what remains
+/// after clamping to `[f_min, f_max]`, which is the midpoint of the span it
+/// governs on a log axis.
+///
+/// Emits nothing rather than a placeholder for a stage the frame does not
+/// describe: a `df` or `settling_s` the daemon did not send arrives as
+/// `0.0`, and `"0.00 Hz / 0.00 s"` would be a claim about the measurement
+/// that no field on the wire supports. A band clamped off the visible axis
+/// is dropped for the same reason — it labels frequencies not on screen.
+// Negated `>` comparisons are intentional NaN-aware guards, as in
+// `ticks::freq_axis`: `!(f_min > 0.0)` is true for NaN as well as for zero
+// and negative inputs, all of which must short-circuit.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn band_labels(stages: &[MtwStage], f_min: f64, f_max: f64) -> Vec<BandLabel> {
+    if !(f_min > 0.0) || !(f_max > f_min) {
+        return Vec::new();
+    }
+    // The band edges are read off neighbouring stages, so the order is load
+    // bearing: shallowest first, `f_valid` strictly descending. A ladder that
+    // arrived in any other order would make `hi <= lo` and the label would
+    // vanish — a silent drop, which is the failure class this repo keeps
+    // finding. Named here so a future producer change trips a debug build
+    // instead of quietly emptying the row. Release builds keep the drop: a
+    // missing label is survivable, a panicking display is not.
+    debug_assert!(
+        stages
+            .windows(2)
+            .all(|w| w[0].f_valid > w[1].f_valid || w[1].f_valid <= 0.0),
+        "ladder stages must be shallowest-first with descending f_valid: {:?}",
+        stages.iter().map(|s| s.f_valid).collect::<Vec<_>>()
+    );
+    let deepest = stages.len().saturating_sub(1);
+    let mut out = Vec::new();
+    for (i, stage) in stages.iter().enumerate() {
+        if !(stage.df > 0.0) || !(stage.settling_s > 0.0) {
+            continue;
+        }
+        let lo = if i == deepest { f_min } else { stage.f_valid };
+        let hi = if i == 0 { f_max } else { stages[i - 1].f_valid };
+        let (lo, hi) = (lo.max(f_min), hi.min(f_max));
+        if !(lo > 0.0) || !(hi > lo) {
+            continue;
+        }
+        out.push(BandLabel {
+            position: freq_to_x((lo * hi).sqrt(), f_min, f_max),
+            text: format_band_label(stage.df, stage.settling_s),
+        });
+    }
+    out
+}
+
 /// One input-level meter's display state. Heights are normalized
 /// `[0,1]`, ready for the affine viewport map and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -322,7 +424,21 @@ pub struct TransferScene {
     /// Present whenever smoothing is on, and not optional chrome: a smoothed
     /// trace is smoother than the measurement, and a screenshot that does not
     /// say so is a claim about resolution the instrument did not make.
+    ///
+    /// Read together with [`Self::band_labels`], which state the *measurement's*
+    /// resolution: those say what the analyser resolved, this says what is on
+    /// screen, and this one is authoritative for the drawn trace.
     pub smoothing_readout: Option<&'static str>,
+    /// Per-band resolution and settling labels for the top of the magnitude
+    /// pane (#224). Empty when the frame carries no ladder description —
+    /// resolution and settling vary 24x across one screen, and a screen that
+    /// cannot say by how much says nothing at all rather than guessing.
+    ///
+    /// These describe the measurement, not the drawn curve: with smoothing on,
+    /// [`Self::smoothing_readout`] is what the trace's resolution actually is.
+    /// The renderer places the two adjacently so they are read as one
+    /// statement.
+    pub band_labels: Vec<BandLabel>,
     pub meas_meter: Meter,
     pub ref_meter: Meter,
     /// The fault indicator (#228), or `None` for "show nothing" — which is
@@ -358,6 +474,13 @@ pub struct TransferInput {
     /// them shipped. See `design-mtw-ladder.md`.
     pub column_n: Vec<f64>,
     pub column_bins: Vec<usize>,
+    /// The ladder description behind those columns, shallowest rung first.
+    ///
+    /// Session-static: it derives from `sr`, which does not change
+    /// mid-session, so everything built from it is fixed for the session's
+    /// lifetime and cannot shift frame to frame. Empty for a snapshot
+    /// derivation, which is Welch-derived and has no ladder (#221).
+    pub stages: Vec<MtwStage>,
     /// The fault indicator's frame-derived inputs (#228). `None` disables
     /// the indicator: a snapshot derivation has no live drive or lock state
     /// to report, and neither does a daemon predating the field.
@@ -401,6 +524,11 @@ impl TransferInput {
             ),
             None => Default::default(),
         };
+        // Carried from the same filtered `mtw`: a length-mismatched frame
+        // draws no trace, and labelling the resolution of a curve that is
+        // not on screen would describe a measurement the operator cannot
+        // see.
+        let stages = mtw.map(|m| m.stages.clone()).unwrap_or_default();
         TransferInput {
             freqs,
             magnitude_db,
@@ -416,6 +544,7 @@ impl TransferInput {
             column_window_s,
             column_n,
             column_bins,
+            stages,
             fault: FaultFrame::from_wire_frame(frame),
         }
     }
@@ -448,6 +577,11 @@ impl TransferInput {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            // No ladder either, for the same reason — and so no per-band
+            // labels: a Welch derivation has one resolution and one settling
+            // time across the whole axis, and three labels claiming otherwise
+            // would be the divergence in #221 dressed as a feature.
+            stages: Vec::new(),
             // A snapshot is a static capture. There is no drive to observe
             // and no lock being maintained, so there is nothing for the
             // indicator to say — the same reason its meters are `None`.
@@ -584,6 +718,10 @@ impl TransferScene {
             phase_axis: crate::ticks::phase_axis(),
             delay_readout: format_delay_readout(input.delay_ms),
             smoothing_readout: modes.smoothing.label(),
+            // Derived from the ladder alone, never from the frame's columns:
+            // the same session yields the same labels on every frame, so
+            // they sit still while the curve moves.
+            band_labels: band_labels(&input.stages, f_min, f_max),
             meas_meter: meters.0.update(input.meas_peak_dbfs, now_s),
             ref_meter: meters.1.update(input.ref_peak_dbfs, now_s),
             // Reads `input.coherence` — the same columns the mask above
@@ -655,6 +793,207 @@ mod tests {
             .tau_derot_ms(tau_sess),
             0.5
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Per-band resolution and settling labels (#224)
+    // ---------------------------------------------------------------
+
+    /// The wire's stage list for `sr`, as the daemon builds it — the same
+    /// `settling_seconds(stage, N)` it puts on the wire, with `N = 4`
+    /// (`mtw_n_blocks`, the ratified depth the 2.56 s bottom figure is
+    /// derived from).
+    fn wire_stages(sr: u32) -> Vec<MtwStage> {
+        use ac_core::visualize::mtw::{ladder, settling_seconds};
+        ladder::layout(sr)
+            .expect("layout")
+            .stages
+            .iter()
+            .map(|s| MtwStage {
+                decim: s.decim,
+                rate: s.rate,
+                df: s.df,
+                window_s: s.window_s,
+                hop_s: s.hop_s,
+                f_valid: s.f_valid,
+                settling_s: settling_seconds(s, 4),
+            })
+            .collect()
+    }
+
+    // The ratified figures, end to end: the three labels at 96 kHz and the
+    // three positions the UX review derived from the log axis. Positions
+    // are hand-derived here (`ln(f/20)/ln(1000)` at the geometric centres
+    // 63.7 / 573.8 / 5697 Hz) rather than recomputed with the
+    // implementation's own expression, which would assert nothing.
+    #[test]
+    fn band_labels_carry_the_ratified_strings_and_positions_at_96k() {
+        let labels = band_labels(&wire_stages(96_000), 20.0, 20_000.0);
+        let got: Vec<(f64, &str)> = labels
+            .iter()
+            .map(|b| (b.position, b.text.as_str()))
+            .collect();
+        // Shallowest rung first, matching the ladder's own order: the top
+        // band is the coarse-resolution/fast-settling one.
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0].1, "23.4 Hz / 0.11 s");
+        assert_eq!(got[1].1, "2.93 Hz / 0.85 s");
+        assert_eq!(got[2].1, "0.98 Hz / 2.56 s");
+        for (got, want) in got.iter().zip([0.818, 0.486, 0.168]) {
+            assert!(
+                (got.0 - want).abs() < 5e-4,
+                "position {} for {}, want {want}",
+                got.0,
+                got.1
+            );
+        }
+    }
+
+    // The rejected implementation, computed inside the test: labelling the
+    // raw analysis window instead of `W + hop·(N−1)`. At the bottom rung
+    // the two differ by 2.5x, and the window is the one an operator would
+    // wait out and conclude the instrument had stalled.
+    #[test]
+    fn settling_is_the_filled_average_not_the_analysis_window() {
+        let stages = wire_stages(96_000);
+        let bottom = stages.last().expect("three rungs");
+        // The rejected figure, derived here rather than assumed: 1.02 s.
+        let window_label = format_band_label(bottom.df, bottom.window_s);
+        assert_eq!(window_label, "0.98 Hz / 1.02 s");
+        let labels = band_labels(&stages, 20.0, 20_000.0);
+        let bottom_label = &labels.last().expect("three labels").text;
+        assert_ne!(bottom_label, &window_label);
+        assert_eq!(bottom_label, "0.98 Hz / 2.56 s");
+        // And the gap is the 2.5x the issue names, not a rounding
+        // difference.
+        assert!(bottom.settling_s / bottom.window_s > 2.4);
+    }
+
+    // Three labels at every supported rate, all distinct — the claim the
+    // UX review makes about the whole rate set, not just 96 kHz. 44.1 kHz
+    // is the rate where the deep rungs are 0.23% off target, so its
+    // strings are checked explicitly.
+    #[test]
+    fn three_distinct_labels_at_every_supported_rate() {
+        for sr in [44_100u32, 48_000, 96_000, 192_000] {
+            let labels = band_labels(&wire_stages(sr), 20.0, 20_000.0);
+            assert_eq!(labels.len(), 3, "sr {sr}: {labels:?}");
+            let texts: Vec<&str> = labels.iter().map(|b| b.text.as_str()).collect();
+            assert!(
+                texts[0] != texts[1] && texts[1] != texts[2],
+                "sr {sr}: adjacent bands read the same: {texts:?}"
+            );
+            // Positions stay in axis order and separated — the labels must
+            // not stack up on one another at any rate.
+            for w in labels.windows(2) {
+                assert!(
+                    w[0].position - w[1].position > 0.1,
+                    "sr {sr}: bands {} and {} are {:.3} apart",
+                    w[0].text,
+                    w[1].text,
+                    w[0].position - w[1].position
+                );
+            }
+        }
+        // The 44.1 kHz deep rungs run 0.23% slow, which the labels round
+        // away at the bottom and show in the middle's settling figure.
+        let at_44k = band_labels(&wire_stages(44_100), 20.0, 20_000.0);
+        assert_eq!(at_44k[2].text, "0.98 Hz / 2.55 s");
+    }
+
+    // The label content is a function of the ladder alone. Two frames of
+    // the same session differ in every column and in the fault state, and
+    // must produce byte-identical labels — they describe the measurement's
+    // geometry, not its values, and a label that twitched with the data
+    // would read as one.
+    #[test]
+    fn labels_do_not_move_or_change_between_frames_of_one_session() {
+        let stages = wire_stages(48_000);
+        let scene_for = |mag: f64, coh: f64| {
+            let inp = TransferInput {
+                freqs: vec![100.0, 1_000.0, 10_000.0],
+                magnitude_db: vec![mag; 3],
+                phase_deg: vec![0.0; 3],
+                coherence: vec![coh; 3],
+                delay_ms: 0.0,
+                meas_peak_dbfs: Some(-20.0),
+                ref_peak_dbfs: Some(-20.0),
+                channel_role: "meas_0".to_string(),
+                source: Source::Live,
+                sr: 48_000,
+                column_df: Vec::new(),
+                column_window_s: Vec::new(),
+                column_n: Vec::new(),
+                column_bins: Vec::new(),
+                stages: stages.clone(),
+                fault: None,
+            };
+            let mut meters = (MeterState::default(), MeterState::default());
+            TransferScene::from_input(
+                &inp,
+                DisplayModes::new(DerotMode::Session, Smoothing::Off),
+                (20.0, 20_000.0),
+                (-80.0, 20.0),
+                &mut meters,
+                &mut FaultState::default(),
+                0.0,
+            )
+            .band_labels
+        };
+        assert_eq!(scene_for(-6.0, 0.9), scene_for(40.0, 0.1));
+        assert_eq!(scene_for(-6.0, 0.9).len(), 3);
+    }
+
+    // A frame with no ladder description labels nothing. That covers the
+    // warm-up (no `mtw` yet), a snapshot derivation, and a daemon
+    // predating the ladder — in all three the display has no per-band
+    // resolution to report, and inventing one would be the failure the
+    // labels exist to prevent.
+    #[test]
+    fn no_ladder_means_no_labels() {
+        assert!(band_labels(&[], 20.0, 20_000.0).is_empty());
+        // A stage the daemon described only partially — `df`/`settling_s`
+        // absent arrive as 0.0 — is skipped rather than drawn as
+        // "0.00 Hz / 0.00 s".
+        let partial = vec![MtwStage {
+            f_valid: 67.6,
+            ..Default::default()
+        }];
+        assert!(band_labels(&partial, 20.0, 20_000.0).is_empty());
+    }
+
+    // Zoom is a display range, and a band that has left the visible axis
+    // is dropped rather than pinned to the edge: its label would name
+    // frequencies not on screen. The bands still on screen keep their
+    // geometric centres over what remains visible.
+    #[test]
+    fn bands_clamped_off_a_zoomed_axis_are_dropped() {
+        let stages = wire_stages(96_000);
+        // Zoomed into the top band alone (stage 0 runs upward from its
+        // 1623 Hz validity edge).
+        let labels = band_labels(&stages, 2_000.0, 20_000.0);
+        assert_eq!(labels.len(), 1, "{labels:?}");
+        assert_eq!(labels[0].text, "23.4 Hz / 0.11 s");
+        // sqrt(2000·20000) = 6324.6 Hz — the centre of what is visible,
+        // not of the band's full span.
+        assert!((labels[0].position - 0.5).abs() < 1e-9, "{labels:?}");
+        // A degenerate range labels nothing rather than producing NaN
+        // positions, as `ticks::freq_axis` does.
+        assert!(band_labels(&stages, 0.0, 20_000.0).is_empty());
+        assert!(band_labels(&stages, 20_000.0, 20.0).is_empty());
+        assert!(band_labels(&stages, f64::NAN, 20_000.0).is_empty());
+    }
+
+    // The precision rule, pinned at both sides of its threshold — a
+    // significant-figure rule would round 23.4375 to 23 and 0.9766 to
+    // 0.98, and only one of those matches the ratified set.
+    #[test]
+    fn band_figures_are_two_decimals_below_ten_and_one_above() {
+        assert_eq!(format_band_label(0.976_562_5, 2.56), "0.98 Hz / 2.56 s");
+        assert_eq!(format_band_label(23.4375, 0.106_667), "23.4 Hz / 0.11 s");
+        // Exactly at the threshold, and above it in both figures.
+        assert_eq!(format_band_label(10.0, 9.99), "10.0 Hz / 9.99 s");
+        assert_eq!(format_band_label(46.875, 12.34), "46.9 Hz / 12.3 s");
     }
 
     #[test]
@@ -735,6 +1074,7 @@ mod tests {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            stages: Vec::new(),
             fault: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
@@ -782,6 +1122,7 @@ mod tests {
             column_window_s: Vec::new(),
             column_n: Vec::new(),
             column_bins: Vec::new(),
+            stages: Vec::new(),
             fault: None,
         };
         let mut meters = (MeterState::default(), MeterState::default());
