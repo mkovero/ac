@@ -1,0 +1,43 @@
+  runD-A s1 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=93.54  att=1  meas=-22.1 dBFS
+  runD-A s1 0-3: 240/259 locked  delay=6.5417 ms (628 smp, spread 0)  prom=25.85  att=2  meas=-38.1 dBFS
+  runD-A s2 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=78.04  att=1  meas=-22.3 dBFS
+  runD-A s2 0-3: 239/258 locked  delay=6.5417 ms (628 smp, spread 0)  prom=25.56  att=2  meas=-37.9 dBFS
+  runD-A s3 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=112.73  att=1  meas=-22.4 dBFS
+  runD-A s3 0-3: 239/258 locked  delay=6.5417 ms (628 smp, spread 0)  prom=24.08  att=2  meas=-38.1 dBFS
+  runD-A s4 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=78.89  att=1  meas=-22.4 dBFS
+  runD-A s4 0-3: 239/258 locked  delay=6.5417 ms (628 smp, spread 0)  prom=29.59  att=2  meas=-38.5 dBFS
+  runD-A s5 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=77.78  att=1  meas=-22.3 dBFS
+  runD-A s5 0-3: 239/258 locked  delay=6.5417 ms (628 smp, spread 0)  prom=27.66  att=2  meas=-38.3 dBFS
+  runD-A s6 3-3: 258/258 locked  delay=0.0000 ms (0 smp, spread 0)  prom=89.88  att=1  meas=-22.3 dBFS
+  runD-A s6 0-3: 239/258 locked  delay=6.5417 ms (628 smp, spread 0)  prom=29.56  att=2  meas=-38.2 dBFS
+  saved 6 sessions to runD-A.pkl
+  runD-B s1 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=92.97  att=1  meas=-22.4 dBFS
+  runD-B s1 0-3: 521/540 locked  delay=7.9375 ms (762 smp, spread 0)  prom=25.47  att=2  meas=-39.2 dBFS
+  runD-B s2 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=74.62  att=1  meas=-22.4 dBFS
+  runD-B s2 0-3: 521/540 locked  delay=7.9375 ms (762 smp, spread 0)  prom=26.07  att=2  meas=-39.0 dBFS
+  runD-B s3 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=113.22  att=1  meas=-22.4 dBFS
+  runD-B s3 0-3: 520/539 locked  delay=7.9375 ms (762 smp, spread 0)  prom=28.56  att=2  meas=-39.0 dBFS
+  runD-B s4 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=53.35  att=1  meas=-22.3 dBFS
+  runD-B s4 0-3: 501/539 locked  delay=7.9375 ms (762 smp, spread 0)  prom=24.00  att=3  meas=-39.3 dBFS
+  runD-B s5 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=74.90  att=1  meas=-22.2 dBFS
+  runD-B s5 0-3: 502/540 locked  delay=7.9375 ms (762 smp, spread 0)  prom=25.32  att=3  meas=-39.0 dBFS
+  runD-B s6 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=79.93  att=1  meas=-22.3 dBFS
+  runD-B s6 0-3: 521/540 locked  delay=7.9375 ms (762 smp, spread 0)  prom=31.16  att=2  meas=-39.3 dBFS
+  saved 6 sessions to runD-B.pkl
+  runD-AB s1 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=73.16  att=1  meas=-22.6 dBFS
+  runD-AB s1 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=28.16  att=2  meas=-36.3 dBFS
+  runD-AB s2 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=83.15  att=1  meas=-22.4 dBFS
+  runD-AB s2 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=27.30  att=2  meas=-36.2 dBFS
+  runD-AB s3 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=77.77  att=1  meas=-22.3 dBFS
+  runD-AB s3 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=24.74  att=2  meas=-36.3 dBFS
+  runD-AB s4 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=71.38  att=1  meas=-22.3 dBFS
+  runD-AB s4 0-3: 502/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=31.12  att=3  meas=-36.3 dBFS
+  runD-AB s5 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=92.15  att=1  meas=-22.1 dBFS
+  runD-AB s5 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=28.67  att=2  meas=-36.3 dBFS
+  runD-AB s6 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=63.47  att=1  meas=-22.5 dBFS
+  runD-AB s6 0-3: 502/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=27.98  att=3  meas=-36.1 dBFS
+  runD-AB s7 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=85.60  att=1  meas=-22.4 dBFS
+  runD-AB s7 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=27.27  att=2  meas=-36.1 dBFS
+  runD-AB s8 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=70.97  att=1  meas=-22.4 dBFS
+  runD-AB s8 0-3: 521/540 locked  delay=6.5417 ms (628 smp, spread 0)  prom=31.86  att=2  meas=-36.3 dBFS
+  saved 8 sessions to runD-AB.pkl

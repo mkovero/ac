@@ -1,0 +1,17 @@
+  runF-wall s1 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=80.07  att=1  meas=-22.3 dBFS
+  runF-wall s1 0-3: 0/540 locked  REFUSED  prom med=17.47 max=22.37  att=29  meas=-40.0 dBFS  peak_lag=995
+  runF-wall s2 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=85.03  att=1  meas=-22.3 dBFS
+  runF-wall s2 0-3: 0/539 locked  REFUSED  prom med=15.32 max=20.58  att=29  meas=-39.5 dBFS  peak_lag=997
+  runF-wall s3 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=87.16  att=1  meas=-22.3 dBFS
+  runF-wall s3 0-3: 0/540 locked  REFUSED  prom med=18.27 max=22.13  att=29  meas=-40.1 dBFS  peak_lag=1006
+  runF-wall s4 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=83.74  att=1  meas=-22.5 dBFS
+  runF-wall s4 0-3: 0/540 locked  REFUSED  prom med=16.89 max=23.17  att=29  meas=-40.1 dBFS  peak_lag=1006
+  runF-wall s5 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=57.62  att=1  meas=-22.4 dBFS
+  runF-wall s5 0-3: 0/540 locked  REFUSED  prom med=14.48 max=21.33  att=29  meas=-39.8 dBFS  peak_lag=998
+  runF-wall s6 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=100.65  att=1  meas=-22.4 dBFS
+  runF-wall s6 0-3: 0/540 locked  REFUSED  prom med=18.85 max=23.25  att=29  meas=-39.8 dBFS  peak_lag=998
+  runF-wall s7 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=58.00  att=1  meas=-22.5 dBFS
+  runF-wall s7 0-3: 0/540 locked  REFUSED  prom med=16.24 max=20.68  att=29  meas=-40.0 dBFS  peak_lag=990
+  runF-wall s8 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=62.44  att=1  meas=-22.4 dBFS
+  runF-wall s8 0-3: 350/540 locked  delay=9.6354 ms (925 smp, spread 0)  prom=24.15  att=11  meas=-40.1 dBFS
+  saved 8 sessions to runF-wall.pkl

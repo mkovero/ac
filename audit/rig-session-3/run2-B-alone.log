@@ -1,0 +1,17 @@
+  run2-B-alone s1 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=98.71  att=1  meas=-22.4 dBFS
+  run2-B-alone s1 0-3: 0/540 locked  REFUSED  prom med=18.89 max=22.53  att=29  meas=-39.5 dBFS  peak_lag=988
+  run2-B-alone s2 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=90.29  att=1  meas=-22.4 dBFS
+  run2-B-alone s2 0-3: 0/540 locked  REFUSED  prom med=14.97 max=18.25  att=29  meas=-39.1 dBFS  peak_lag=1059
+  run2-B-alone s3 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=93.89  att=1  meas=-22.2 dBFS
+  run2-B-alone s3 0-3: 425/539 locked  delay=10.2917 ms (988 smp, spread 0)  prom=24.07  att=7  meas=-39.4 dBFS
+  run2-B-alone s4 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=93.36  att=1  meas=-22.3 dBFS
+  run2-B-alone s4 0-3: 0/540 locked  REFUSED  prom med=13.63 max=18.07  att=29  meas=-39.5 dBFS  peak_lag=988
+  run2-B-alone s5 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=83.11  att=1  meas=-22.1 dBFS
+  run2-B-alone s5 0-3: 0/540 locked  REFUSED  prom med=13.17 max=21.00  att=29  meas=-39.1 dBFS  peak_lag=988
+  run2-B-alone s6 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=65.01  att=1  meas=-22.5 dBFS
+  run2-B-alone s6 0-3: 0/540 locked  REFUSED  prom med=16.88 max=21.32  att=29  meas=-39.4 dBFS  peak_lag=988
+  run2-B-alone s7 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=68.30  att=1  meas=-22.4 dBFS
+  run2-B-alone s7 0-3: 0/540 locked  REFUSED  prom med=12.73 max=17.05  att=29  meas=-39.3 dBFS  peak_lag=988
+  run2-B-alone s8 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=83.57  att=1  meas=-22.2 dBFS
+  run2-B-alone s8 0-3: 0/540 locked  REFUSED  prom med=17.16 max=22.52  att=29  meas=-39.3 dBFS  peak_lag=988
+  saved 8 sessions to run2-B-alone.pkl

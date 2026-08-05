@@ -1,0 +1,17 @@
+  runC-2m-B s1 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=59.60  att=1  meas=-22.3 dBFS
+  runC-2m-B s1 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=25.78  att=2  meas=-38.3 dBFS
+  runC-2m-B s2 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=80.26  att=1  meas=-22.4 dBFS
+  runC-2m-B s2 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=29.03  att=2  meas=-38.3 dBFS
+  runC-2m-B s3 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=65.09  att=1  meas=-22.3 dBFS
+  runC-2m-B s3 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=25.45  att=2  meas=-38.4 dBFS
+  runC-2m-B s4 3-3: 539/539 locked  delay=0.0000 ms (0 smp, spread 0)  prom=81.96  att=1  meas=-22.3 dBFS
+  runC-2m-B s4 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=28.44  att=2  meas=-38.0 dBFS
+  runC-2m-B s5 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=78.10  att=1  meas=-22.3 dBFS
+  runC-2m-B s5 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=26.88  att=2  meas=-38.3 dBFS
+  runC-2m-B s6 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=80.23  att=1  meas=-22.4 dBFS
+  runC-2m-B s6 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=30.15  att=2  meas=-38.2 dBFS
+  runC-2m-B s7 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=81.60  att=1  meas=-22.3 dBFS
+  runC-2m-B s7 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=25.68  att=2  meas=-38.2 dBFS
+  runC-2m-B s8 3-3: 540/540 locked  delay=0.0000 ms (0 smp, spread 0)  prom=76.51  att=1  meas=-22.2 dBFS
+  runC-2m-B s8 0-3: 521/540 locked  delay=6.8646 ms (659 smp, spread 0)  prom=27.22  att=2  meas=-38.3 dBFS
+  saved 8 sessions to runC-2m-B.pkl
