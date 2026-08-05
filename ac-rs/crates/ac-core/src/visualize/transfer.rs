@@ -182,7 +182,15 @@ fn welch_all(
 ///
 /// Numbers and replays: `audit/rig-session-3/` — `silence-ceiling.md` is the
 /// argument, `early_ripple.py` and `floor_rule.py` are the scoring.
-const NOISE_FLOOR_PROMINENCE: f64 = 12.0;
+///
+/// Public because it decides something outside this crate: how many attempts a
+/// correct-but-distant position needs before it locks, and therefore whether
+/// `ac-scene`'s persistent-refusal advice fires first. `ac-scene::fault` reads
+/// it in `the_admission_constant_leaves_room_before_the_advice_fires`, so
+/// changing the number here fails a test there rather than silently moving an
+/// operator instruction (#247). Not a tuning knob for callers — nothing may
+/// gate on it, see `ZMQ.md` on `delay_prominence`.
+pub const NOISE_FLOOR_PROMINENCE: f64 = 12.0;
 
 /// Fraction of the strongest correlation peak that an *earlier* peak must
 /// reach to be taken as the direct arrival instead (#227).
