@@ -21,11 +21,10 @@ something stops serving it, cut it.
   stopped at the first non-`transfer_stream` frame, so it surfaced one frame
   out of 75 after a 2 s stall. Cause was the type filter, not libzmq and not
   EAGAIN — falsified against a real daemon.
-- **PR #222 — open, stacked on #218.** Switches `ac-view` to draw the
-  three-stage columns. Until it lands, #218 changes nothing on screen.
-- **PR #218 — open, reworked to revision 3, then to fill downward.** Bottom stage 4000 Hz, plain
-  average of the last 4 blocks, N uniform, fixed block boundaries. No `τ`,
-  no `α`, no `n_eff` left in the tree. Workspace green, 758 tests.
+- **PR #222 — merged.** Switches `ac-view` to draw the three-stage columns.
+- **PR #218 — merged**, after rework to revision 3 and then to fill downward.
+  Bottom stage 4000 Hz, plain average of the last 4 blocks, N uniform, fixed
+  block boundaries. No `τ`, no `α`, no `n_eff` left in the tree.
 - **#208 — closed.** Cause: analysis blocks are cut from the head of a sliding
   buffer, so a transient gets re-analysed at a shifting weighting. Criterion 10
   run on the rig 2026-07-28: no recurrence on the new build, and none on the
@@ -33,7 +32,7 @@ something stops serving it, cut it.
   control** — the 6 s level step is longer than the analysis window, so its
   edge gives a monotone ramp on both builds and could not excite the symptom.
   Closed on other evidence; the gap is recorded rather than assumed discharged.
-- **#216 — both halves done, ready to close.** Cheap half landed in #217
+- **#216 — closed.** Both halves done. Cheap half landed in #217
   (occupancy equal across rings, `delay_ms` 0.0 on a digital loopback where the
   skew gave −200 ms). General half confirmed in Run 3 of the acoustic session:
   top stage 0.755 against a real 5.9 ms acoustic delay, versus 0.05 when the
@@ -46,10 +45,25 @@ something stops serving it, cut it.
   from its own playback index instead of `reference_channel`, an input index.
   Sessions no longer need hand-patching, and the launch reply carries a
   migration warning for configs written against the old meaning.
-- **PR #234 — open.** #228, the fault indicator. **Must not merge ahead of
-  #232** — see the gate below. New `ac-scene::fault` module holds the
-  six-state table; `TransferScene` carries the row and `ac-view` draws it
-  verbatim. Workspace green, 826 tests.
+- **PR #234 — merged**, behind #232 as the gate required. #228, the fault
+  indicator. New `ac-scene::fault` module holds the six-state table;
+  `TransferScene` carries the row and `ac-view` draws it verbatim.
+- **PR #232 — merged.** #227, earliest prominent correlation peak instead of
+  the global maximum. #227 is closed.
+- **Since, and not covered below** (all merged): #237 causal-only delay search
+  with captures that reproduce their own decision; #239, which made
+  `LOST LOCK` / `NO LOCK` reachable by publishing `delay_attempts` (#238);
+  #250, admit on the noise floor and select in a fixed 6 dB window (#246);
+  #253, escalate on attempts as well as seconds (#247); #240 smoothing; #242
+  per-band resolution and settling labels; #252 banner/tick overlap (#245);
+  #248, which made the metres readout conditional on a measured lock and put
+  the speed of sound behind `ac setup temp`.
+
+> **Updated 2026-08-06.** Everything above through #234 is `main`. The section
+> below (**"What #218 changed in the rework"** onward) describes the state at
+> the time of writing and has **not** been re-verified against `main` —
+> read it as history unless it is one of the paragraphs the "Corrected, and
+> worth not re-deriving" section marks as durable.
 
 ## What #218 changed in the rework
 
@@ -152,11 +166,31 @@ reference, speakers on ADAT. Full record in `rig-session-results.md`.
 
 Noticed during the acoustic session, unexplained, none blocking:
 
-1. **Frame cadence contradicts `ZMQ.md`.** The doc says one frame per
-   iteration, ≈2.5 s at 48 kHz. Measured ~18 frames/s per pair — 901 frames in
-   25 s across two pairs, inter-frame gaps 12–50 ms. Two orders out. Either
-   the doc is stale or the worker publishes far more often than one frame per
-   capture window. Desk check; no rig needed.
+1. ~~**Frame cadence contradicts `ZMQ.md`.**~~ **Resolved 2026-08-06 by
+   measurement — the doc was wrong, the worker was right.** `ZMQ.md` gave the
+   H1 *window* (`capture_duration(4, sr)`, 2.5 s at 48 kHz) as if it were the
+   frame interval. The publish interval is the loop tick: `chunk_secs` = 0.05 s
+   plus per-tick processing. Measured **16.6 frames/s per pair** on
+   `--fake-audio` at 48 kHz over 30 s, median gap 60.3 ms, which is consistent
+   with the rig's 17.5–18/s at 96 kHz. `ZMQ.md` and the `transfer.rs` comment
+   (which still claimed ~10 Hz from when `chunk_secs` was 0.2) are both
+   corrected.
+
+   Two things this turned up on the way:
+
+   - The `≈2.5 s` sentence **is** in `ZMQ.md` — `handoff-doc-maintenance.md`
+     says it is not and calls the attribution here a doc error. That part of
+     the handoff is itself wrong; the attribution was correct and the source
+     was the thing at fault.
+   - **`--fake-audio` cannot run a transfer session over more than two
+     distinct channels, and fails silently.** `pairs: [[0,1],[2,3]]` replies
+     `ok: true` and then publishes **nothing at all** — no frames, no error
+     frame, indefinitely. Three or more distinct channels is the trigger; pair
+     count is not (`[[0,1],[1,0]]` streams fine). `FakeEngine::capture_multi`
+     returns exactly two buffers via `capture_stereo` regardless of what the
+     session asked for. Not filed yet; it is why session 3's `pairs=[[3,3],
+     [0,3]]` worked, and it means any desk check of a genuinely multi-channel
+     session is silently untestable today. Related to but distinct from #204.
 2. **Per-pair settling offset.** Run 6, same session, same rings, same
    iteration: pair 0 settled at 0.079 / 0.828 / 2.532 s, pair 1 at 0.574 /
    1.317 / 3.027 s — a near-constant 0.5 s later on all three rungs. Only pair
@@ -261,37 +295,57 @@ otherwise read as silence.
 
 ## Next
 
-1. **#218 and #222 are MERGED** (`3c73af6`, `bd40ed4`). Main green at 780
-   tests, fmt and clippy clean. The live display now draws the three-stage
-   columns — #221's snapshot divergence is live from here, and criterion 10
-   is finally checkable.
-2. **Criterion 10 is done** (2026-07-28, acoustic rig). No recurrence on the
-   new build; the pre-#218 control showed none either, so the A/B had no
-   positive control — see the #208 entry above. **Close #216.**
+**Rewritten 2026-08-06 against `main`.** The #225–#228 cluster is closed:
+#225 landed in #233, #227 in #232, #228 in #234, and #226 is the only member
+still open. Items 1, 2 and 4 of the previous list are done and are kept below
+under "Discharged" for their reasoning, not as work.
 
-   The remaining gap to "works for someone who is not Markus" is the
-   **#225–#228 cluster**, and nothing else open is on that path. Order and
-   reasoning: `handoff-issue-strategy.md`. In short: #225 (reference output
-   leg) and #227 (peak picking) run in parallel; #228 before #226 because it
-   builds the gates #226 consumes.
-
-   **#225 has landed** (#233). **#228 is implemented** (#234) and gated on
-   #227 landing first — see below. #226 and #227 remain.
-
-   Emission rules unchanged: explicit per-run consent, and the daemon run from
-   an isolated `HOME` with a server-side `drive_max_dbfs` clamp. The −40 dBFS
-   electrical ceiling was raised to −30 dBFS **for that session only**, by
-   explicit operator decision, because the acoustic path needs the mic SNR.
-   That does not carry forward.
-3. #219 Part B stays open: the deterministic drain test + injection seam. The
+1. **#226 — the last of the cluster.** `transfer_stream` locks delay against
+   silence at warmup and never re-estimates. Session 3 narrowed what it is
+   for: **the automatic-refresh half is not needed for lock stability** —
+   88 sessions produced zero unstable locks, and every repeat at a fixed
+   position agreed to the sample, *including the one wrong lock*. What #226 is
+   still needed for is the **stimulus-before-session ordering**, which remains
+   a real trap.
+2. **The gate is the open question, and it is no longer one-directional.**
+   Session 3 produced both sides: prominence 24 is too high for a clean 3 m
+   measurement (refused 8/8 with `peak_lag` right to 3 cm) and *only just*
+   high enough to exclude a near-wall one (7/8 refused, one accepted at 24.15
+   and 52 cm wrong). A single threshold is being asked to separate two
+   situations that differ in **where the peaks are**, not in how prominent
+   they are. #251 is the capture that scores the selection half.
+3. **#221 — snapshot parity divergence, now real rather than latent.** The
+   live display draws the `mtw` columns, so a snapshot no longer matches the
+   screen. This was the trigger condition the previous entry named.
+4. #219 Part B stays open: the deterministic drain test + injection seam. The
    seam must carry a **mixed** stream (`keepalive` + `transfer_stream` +
    `visualize/ir`) or it will not reproduce Part A's behaviour at all.
-4. #224 — per-band Δf/settling labels on the transfer view. UX design is
-   settled; implementation is hours. **Should land before the ladder is used
-   to tune a real system**: resolution and settling vary 24x across the screen
-   and the 2.5 s low-frequency lag reads as a fault otherwise.
-5. #221 — snapshot parity divergence. Not a blocker for #218; **it is a blocker
-   for the UX switch to the `mtw` columns**, which is the point at which a
-   snapshot stops matching the screen. Latent until then: the frame is
-   additive, `ac-view` still draws the Welch arrays, and the existing parity
-   test still passes.
+5. **Not filed, and should be: the discarded second arrival.** On a two-source
+   measurement the estimator locks the nearest arrival — correctly and
+   confidently — and never tells the operator a comparable second arrival
+   1.4 ms later was passed over. Disclosure gap, not a correctness bug. The
+   shape of a fix is in `rig-session-3-results.md`: **arrival clusters, not
+   peak counts** (the count version is recorded there as a dead end, censored
+   at `MAX_CANDIDATES`).
+
+Emission rules unchanged: explicit per-run consent, and the daemon run from
+an isolated `HOME` with a server-side `drive_max_dbfs` clamp. The −40 dBFS
+electrical ceiling was raised to −30 dBFS **for the 2026-07-28 session only**,
+by explicit operator decision, because the acoustic path needs the mic SNR.
+That does not carry forward.
+
+<details><summary>Discharged — kept for the reasoning</summary>
+
+- **#218 and #222 merged** (`3c73af6`, `bd40ed4`). The live display draws the
+  three-stage columns, which is what made #221 live and criterion 10
+  checkable.
+- **Criterion 10 done** (2026-07-28, acoustic rig). No recurrence on the new
+  build; the pre-#218 control showed none either, so **the A/B had no positive
+  control** — see the #208 entry above. #216 closed on that basis, with the
+  gap recorded rather than assumed discharged. Run D is still the positive
+  control that was never run.
+- **#224** — per-band Δf/settling labels — landed in #242. The reason it
+  mattered: resolution and settling vary 24x across the screen, and the 2.5 s
+  low-frequency lag reads as a fault without a label saying otherwise.
+
+</details>

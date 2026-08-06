@@ -1,5 +1,33 @@
 # Candidate gate rules, scored against the rig-verify-125 captures
 
+> **Superseded in part, 2026-08-06 — read "What would settle it" as done.**
+>
+> Rig session 3 (2026-08-04) constructed the ambiguous case this file calls
+> for. See `rig-session-3-results.md`, Run 2, third position: A at 1.8 m and
+> B at ~2.5 m, 1.1 dB apart at the capsule, 134 samples of separation.
+>
+> | condition | locked | lag | median prominence |
+> |---|---|---|---|
+> | A alone | 6/6 | 628 | 26.75 |
+> | B alone | 6/6 | 762 | 25.77 |
+> | A + B | 8/8 | 628 | **28.07** |
+>
+> Prominence **rises** when the case turns ambiguous: a second correlated
+> source moves the median slower than it moves the peak. Neither candidate
+> rule refuses it, and **no threshold on that statistic can** — the direction
+> is wrong, not the value. The candidate-count alternative is separately dead:
+> 23 → 32, censored at `MAX_CANDIDATES`.
+>
+> Session 3 also disposed of the repeatability rule on its own terms: at the
+> near-wall position, successive independent estimates agreed to 9 samples
+> (3.2 cm) around an answer 52 cm from the truth. Agreement measures whether
+> the room is stable, not whether the answer is right.
+>
+> **The scoring below stands and is not superseded.** The two rules still
+> differ on the single-source data, which is where the choice between them has
+> to be made, and this is the only record of that ranking. What is superseded
+> is the closing section's call for a trip that has now happened.
+
 Desk work item 2 (`handover-desk-work.md`). Reproduce with
 `python3 gate_rules.py` in this directory; `--csv` adds machine-readable rows.
 

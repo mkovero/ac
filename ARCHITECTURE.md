@@ -139,6 +139,26 @@ ac-core/src/
   config.rs                # orthogonal
 ```
 
+### The display-truth boundary — `ac-scene` vs `ac-view`
+
+The tier split above decides where a *measurement* belongs. A second split
+decides where a *displayed* number belongs, and it is the one to apply when
+adding anything the operator reads off a screen.
+
+```
+ac-scene/     # every number and string the view shows, as plain data:
+              # trace geometry, axis ticks, readout strings, fault state.
+              # No egui, no wgpu, no ZMQ — enforced by its dependency list.
+ac-view/      # egui/eframe shell. Paints ac-scene's output and handles keys.
+              # No numeric computation of its own.
+```
+
+The rule: **if a value can be wrong, it belongs in `ac-scene`, where a test
+can assert it without a window.** `ac-view` may decide where a glyph lands,
+never what it says. A layout constant that has to clear real glyphs is tested
+by composition in `ac-view` (`tests/it_banner_clearance.rs`) rather than by
+asserting the constant, because asserting the constant passes on any value.
+
 ### Transfer — Tier 2 today, Tier 1 TBD
 
 `visualize/transfer.rs` is the live H1 estimator used by `ac transfer`

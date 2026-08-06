@@ -1,5 +1,24 @@
 # ac-rs — Rust server
 
+> **Superseded 2026-08-06. Kept as a record of a finished migration; do not
+> maintain it and do not read it as current.**
+>
+> This was the plan for replacing the Python server with a Rust daemon. That
+> migration completed. Everything below describes the state of the world
+> during it, and several claims are no longer true — notably the non-goals
+> list, which says `ac-cli` + `ac-daemon` "are the product now" (there are now
+> five crates, including `ac-scene` and `ac-view`), and the known-limitations
+> list, which still carries items since closed (#29's `handlers.rs` split
+> landed; it is `handlers/` now).
+>
+> **Current sources of truth:** `ac-rs/CLAUDE.md` for the crate and module
+> map, `../ARCHITECTURE.md` for the Tier 1 / Tier 2 decision, `ZMQ.md` for the
+> wire protocol. The design reasoning in "Key design decisions" and "Why this
+> split" below is still the reasoning the code follows, which is why this file
+> is archived rather than deleted.
+
+---
+
 `ac/server/` has been fully replaced by the Rust daemon. The Python client, ZMQ wire protocol, and port numbers are unchanged. `ac-daemon` is the only server implementation.
 
 ---

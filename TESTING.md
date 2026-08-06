@@ -2,14 +2,19 @@
 
 Run all tests:
 ```bash
-cd ac-rs && cargo test            # ~485 tests + 1 #[ignore]'d JACK-loopback runbook
+cd ac-rs && cargo test --workspace # ~900 tests, 14 #[ignore]'d
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
-The `#[ignore]`'d test (`it_loopback_ir`) drives a Farina sweep
-through real JACK port-to-port loopback and is run manually after
-starting `jackd -d dummy` — see ARCHITECTURE.md → "Loopback IR
-runbook".
+**Counts in this file are an order of magnitude, not a figure to check
+against** — they rot silently. Run the command. `--workspace` matters: two
+branches that each pass `cargo test -p <crate>` can still break the build
+together, and with no CI here that is the only check.
+
+Among the `#[ignore]`'d, `it_loopback_ir` drives a Farina sweep through real
+JACK port-to-port loopback and is run manually after starting `jackd -d dummy`
+— see ARCHITECTURE.md → "Loopback IR runbook". The rest need real hardware, a
+live daemon, or a real GPU adapter.
 
 No JACK daemon or audio hardware required for the default suite — pytest spawns `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connects via ZMQ.
 
@@ -17,16 +22,23 @@ No JACK daemon or audio hardware required for the default suite — pytest spawn
 
 ```bash
 cd ac-rs
-cargo test -p ac-core             # 243 unit tests — Tier 1 measurement (THD, filterbank, weighting,
-                                  #   noise, sweep IR, loudness), Tier 2 visualize (spectrum, CWT,
-                                  #   CQT, reassigned, fractional-octave, time integration), and
-                                  #   shared (3-layer calibration, conversions, generator, config)
-cargo test -p ac-cli              # 74 parse + 53 cmd tests — all commands, abbreviations, defaults,
+cargo test -p ac-core             # Tier 1 measurement (THD, filterbank, weighting, noise, sweep IR,
+                                  #   loudness), Tier 2 visualize (spectrum, CWT, CQT, reassigned,
+                                  #   fractional-octave, time integration), shared (3-layer
+                                  #   calibration, conversions, generator, config)
+cargo test -p ac-cli              # parse + command tests — all commands, abbreviations, defaults,
                                   #   error cases (incl. SPL / mic-curve subcommands)
-cargo test -p ac-daemon           # 34 integration tests + 1 #[ignore]'d loopback runbook —
-                                  #   ZMQ protocol, sweep IR, calibrate flows, monitor frame shapes
-cargo test                        # all crates
+cargo test -p ac-daemon           # ZMQ protocol, sweep IR, calibrate flows, monitor frame shapes,
+                                  #   plus the #[ignore]'d loopback runbook
+cargo test -p ac-scene            # scene/data layer: wire-frame parse, transfer scene, MTW display,
+                                  #   smoothing, fault table, fixtures
+cargo test -p ac-view             # egui shell: geometry, live/snapshot end-to-end, banner clearance,
+                                  #   trace distinction (egui_kittest snapshots)
+cargo test --workspace            # all five crates — the only check that catches a cross-crate break
 ```
+
+Rough shape as of 2026-08-06 (899 passed, 14 ignored): `ac-core` 396,
+`ac-daemon` 214, `ac-scene` 115, `ac-cli` 97, `ac-view` the remainder.
 
 ## Build
 
@@ -75,36 +87,46 @@ runtime dependency — the pyzmq client lives inline in `conftest.py`.
 
 ### Rust unit tests
 
-#### ac-core (43 tests)
+Where they live, by crate. Per-module counts are deliberately not listed —
+they were wrong within weeks last time, and `cargo test -p <crate>` answers
+the question directly.
 
-| Module | Tests | What it covers |
-|--------|-------|----------------|
-| `analysis` | 16 | FFT analysis port: THD, THD+N, harmonics, fundamental detection, noise floor, clipping, ac_coupled |
-| `cwt` | 6 | Morlet CWT: log-spaced freqs, magnitude peaks, energy conservation |
-| `calibration` | 5 | Save/load roundtrip, missing key, load_all, out_vrms computation |
-| `generator` | 4 | Sine RMS, phase start, dBFS→amplitude, pink noise length and crest factor |
-| `transfer` | 4 | H1 estimator: coherence, delay, magnitude/phase from known signals |
-| `gpio` | 4 | Frame parser: button events, LED commands, checksum validation |
-| `config` | 2 | JSON round-trip, missing keys use defaults |
-| `conversions` | 2 | dBu↔Vrms, format helpers |
+#### ac-core
 
-#### ac-cli (50 tests)
+Unit tests sit in `#[cfg(test)]` modules beside the code:
 
-| Module | Tests | What it covers |
-|--------|-------|----------------|
-| `parse` | 50 | All commands: sweep, plot, monitor, generate, calibrate, setup, devices, transfer, test, probe, session, stop, server, gpio, dmm, config. Abbreviations, defaults, error cases. |
+- `measurement/` — `thd`, `filterbank`, `weighting`, `ccir468`, `noise`,
+  `sweep`, `loudness`, `report`, `report_html`, `report_pdf`
+- `visualize/` — `spectrum`, `cwt`, `cqt`, `reassigned`, `aggregate`,
+  `fractional_octave`, `smoothing`, `spl_level`, `time_integration`,
+  `transfer`, `pair_derivation`, `weighting_curves`, `mtw/`
+- `shared/` — `calibration`, `conversions`, `constants`, `generator`,
+  `mic_curve_filter`, `reference_levels`, `time`, `types`, `fft_cache`
 
-#### ac-daemon (53 tests)
+#### ac-cli
 
-| Module | Tests | What it covers |
-|--------|-------|----------------|
-| `audio::cpal_backend` | 11 | CPAL I/O: fill/drain buffers, format conversion (i16/i32/f32), silence flag, routing |
-| `audio::jack_backend` | 8 | JACK I/O: tone fill, ring buffer FIFO, stereo padding, xrun counter |
-| `gpio` | 10 | USB2GPIO frame parser: sync, partial frames, button events, garbage handling |
-| `audio::fake` | 3 | Fake engine: channel index parsing, reroute, stereo independence |
-| `handlers::transfer` | 6 | transfer_stream request parser: pairs, dedup, legacy single-pair, error cases |
-| other handler unit tests | 5 | misc unit coverage inside `ac-daemon` |
-| integration (`it_protocol`) | 10 | ZMQ protocol: status, devices, generate/stop, sweep, calibration cycle, busy guard, monitor-params live updates |
+`parse/` (one module per command group) and `commands/`. Covers every
+command, its abbreviations, defaults and error cases.
+
+#### ac-daemon
+
+Unit tests in `audio::{jack_backend, cpal_backend, fake}`, `gpio`, and the
+`handlers/` modules. Integration binaries in `tests/`: `it_protocol`,
+`it_snapshot`, `it_set_drive`, `it_scene_fixture`, `it_cross_tier_parity`,
+and the `#[ignore]`'d `it_loopback_ir`.
+
+#### ac-scene
+
+`tests/`: `it_transfer`, `it_live_frame`, `it_mtw_display`, `it_smoothing`,
+`it_fixtures`. This is where a displayed *value* is asserted — no window
+needed, which is the point of the crate split.
+
+#### ac-view
+
+`tests/`: `it_geometry`, `it_transfer_geometry`, `it_banner_clearance`,
+`it_trace_distinction`, `it_live_end_to_end`, `it_snapshot_end_to_end`,
+`it_stimulus_live`, `it_remote`, plus `egui_kittest` snapshots under
+`tests/snapshots/`. Layout and composition only.
 
 ## What is verified numerically
 
@@ -235,7 +257,8 @@ Expected results: gain ≈ 0 dB, flat frequency response (±0 dB), coherence = 1
 
 ## Adding tests
 
-- **Parser tests**: add to `ac-rs/crates/ac-cli/src/parse.rs` (`#[cfg(test)]` module). Pure function input/output.
-- **Analysis tests**: add to `ac-rs/crates/ac-core/src/analysis.rs`. Build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
+- **Parser tests**: add to the matching module under `ac-rs/crates/ac-cli/src/parse/` (`#[cfg(test)]` module). Pure function input/output.
+- **Analysis tests**: add beside the code — `ac-rs/crates/ac-core/src/measurement/` for Tier 1 (THD lives in `thd.rs`), `visualize/` for Tier 2. Build synthetic signals with known properties. Always assert exact numerical values, not just ranges.
+- **Displayed-value tests**: add to `ac-rs/crates/ac-scene/`, not `ac-view`. If a number or string can be wrong, it must be assertable without a window.
 - **Black-box protocol tests**: add to `tests/test_server_client.py`. Use the session-scoped `server_client` fixture. Must drain to `done`/`error` before returning so the server is idle for the next test.
 - **Daemon integration tests**: add to `ac-rs/crates/ac-daemon/tests/it_protocol.rs` for scenarios needing fine-grained control over daemon state.

@@ -1,27 +1,48 @@
-# Rig verification queue — everything that needs 192.168.9.25 and cannot be run yet
+# Rig verification queue — what still needs 192.168.9.25
 
 Written 2026-08-03 alongside branch `rig2-fixes-125` (findings 1, 2 and 5 of
-`handover.md`). Nothing here has been run: the operator is off site. This file
-exists so the next session at the rig does one trip, not three.
+`handover.md`). **Updated 2026-08-06: session 3 ran on 2026-08-04 and executed
+blocks 1, 2 and 3.** Their results are in `rig-session-3-results.md`, which
+supersedes the expectations written here — where this file and that one
+disagree, the session is right. What survives is one block, promoted below.
 
-Order matters below. Each block states what it verifies and what a pass looks
-like, so a run that produces a surprise can be told apart from a run that
-produces a failure.
+Each block states what it verifies and what a pass looks like, so a run that
+produces a surprise can be told apart from a run that produces a failure.
+
+---
+
+## Still to run
+
+**Run D — #208's positive control.** 50 ms gated burst against `cda40ef`.
+Dropped for time in session 2, dropped again in session 3; the gap is
+unchanged. Independent of everything else here. Full statement in block 4.
+
+Two things session 3 raised that no block here covers yet:
+
+- **The electrical constant.** `arrival(d) = 1.1931 ms + d/346 m/s`. Measure it
+  in-session at zero cost with `pairs=[[3,3],[0,3]]`. Until it is subtracted,
+  a metres readout shows the instrument's own latency as distance.
+- **The discarded second arrival.** On a two-source measurement the estimator
+  locks the nearest arrival and never says a comparable second one 1.4 ms
+  later was passed over. Disclosure gap, not a correctness bug; shape of a fix
+  is in `rig-session-3-results.md` (arrival clusters, not peak counts).
 
 ---
 
 ## Before anything: the rig's own defects
 
-Neither is caused by this branch. Both cost a session's time last round.
+Not caused by any branch. Each cost a session's time.
 
 1. **`~/.config/ac/config.json` has `reference_channel: 2`**, which points at
    `capture_3` — digitally silent on this wiring. Anything run as the
    operator's own user reports `NO REFERENCE`. Correct values for the current
    loopback (playback_2/AN2 → capture_4/IN4): `reference_channel: 3`,
    `reference_output_channel: 1`. Left to Markus deliberately; it is his file.
-2. **`install.sh` does not ship `ac-view`.** Copied by hand twice now. Verify
-   every installed binary by **sha256**, not size and mtime — both matched on
-   a stale binary last session.
+2. ~~**`install.sh` does not ship `ac-view`.**~~ **Fixed 2026-08-06** (`fa6ee27`):
+   the script installs all three binaries and prints their sha256. Read that
+   output — it is now the hash check. The instruction it replaces existed
+   because size *and* mtime both matched on a stale binary; neither is
+   evidence of which build is installed.
 3. **Clock stays `AutoSync`** (`numid=320 = 0`). The external master clocks the
    card over ADAT and ADAT carries playback_5, the stimulus leg. Any older
    instruction to set Internal is wrong.
@@ -29,6 +50,16 @@ Neither is caused by this branch. Both cost a session's time last round.
 ---
 
 ## 1. Fixes 1, 2 and 5 — does the branch do what it claims
+
+> **Executed, session 3 (2026-08-04).** Fix 1 and fix 2 pass. Fix 5 does not:
+> `CHECK ROUTING` is **confirmed unreachable** (Run 4) — no lock means no
+> `mtw`, so the routing check and `LOST LOCK`/`NO LOCK` cannot be reached
+> together. The onset case was run and did not reproduce a wrong positive
+> lock. What the session changed about the *gate* is in
+> `rig-session-3-results.md` "What this session says should happen next": 24
+> is simultaneously too high for the clean 3 m case and only just high enough
+> to exclude the near-wall case, so it is not a threshold problem. Read the
+> rest of this block as the expectation that was tested, not as work to do.
 
 Build `rig2-fixes-125`, install, confirm by sha256. One session at **3 m on
 axis** and one at **1 m on axis**, both at the drive level session 2 used
@@ -106,6 +137,13 @@ cannot tell one passband from scattered accidents.
 
 ## 2. The negative-lag floor — the experiment finding 4 waits on
 
+> **Executed, session 3.** `negative_lag_median` was collected at every
+> position, locking or refusing, and the captures are in
+> `audit/rig-session-3/*.json.gz`, one record per session. The 1 m / 3 m
+> back-to-back comparison asked for below was also run — and it inverted the
+> session-2 result: 8/8 at 1.000 m, 0/8 at 3.000 m. The offline question is
+> answerable from those files without further rig time.
+
 `delay_evidence.negative_lag_median` is new on this branch, published every
 frame, and **decides nothing**. It is the noise floor measured over lags a
 causal path puts no signal into, as against `median_value`, which is taken
@@ -134,6 +172,15 @@ time**, with a contemporaneous silent baseline at each.
 
 ## 3. Run C positions 2, 4 and 5 — now unblocked
 
+> **Partly executed, session 3.** Position 5 (near a wall) was run as Run 6
+> and is the session's most valuable negative: at 2.4 m with the capsule 28 cm
+> from a wall it refused 7/8 and **accepted once at prominence 24.15, 52 cm
+> wrong** — while successive estimates there agreed to 9 samples (3.2 cm), the
+> tightest agreement of the session, around that wrong answer. Positions 2 and
+> 4 as written (1 m and 3 m *off axis*) were not run; the session ran 3.000 m
+> **on** axis instead, plus two two-source geometries. Whether the off-axis
+> pair is still worth a trip is a live question, not a scheduled one.
+
 1 m off axis, 3 m off axis, near a wall. `NOISE_FLOOR_PROMINENCE` has no data
 from the marginal end, which is where it is decided.
 
@@ -145,17 +192,37 @@ build.
 
 ## 4. Run D — #208's positive control
 
-50 ms gated burst against `cda40ef`. Dropped for time last session; the gap is
-unchanged. Independent of everything above, so it is the first thing to cut if
-the session runs short.
+> **Not run.** Dropped for time in session 2 and again in session 3. This is
+> the one block here that is still work.
+
+50 ms gated burst against `cda40ef`. Independent of everything above, so it is
+the first thing to cut if the session runs short — which is how it has now
+survived two sessions unrun. If it is cut a third time, that is a decision to
+close #208's verification unproven, and it should be recorded as one rather
+than deferred again.
 
 ---
 
-## Rig state left behind after session 2
+## Rig state left behind
+
+**After session 3 (2026-08-04) — this is the current state.** No emission in
+progress, all workers stopped, `ac-view` closed. Clock `AutoSync`
+(`numid=320` = 0); mic preamp `numid=301` = 36, found at 36 and left there;
+48 V on, PAD off; no mixer route written. `/usr/local/bin/{ac,ac-daemon,
+ac-view}` are a sha256-verified build of `4659b25` — **older than `main`**, so
+reinstall and re-read the hashes `install.sh` now prints before any block. A
+daemon runs under `HOME=/home/mui/rig2-home` (`drive_max_dbfs: -30.0`,
+`reference_channel: 3`, `reference_output_channel: 1`). Build dir
+`~/target-rig3` (447 MB). **The mic is at the near-wall position** — 2.4 m
+from A, 28 cm off the wall, off axis — so anything that assumes 1 m on axis
+must move it first.
+
+<details><summary>After session 2 — historical</summary>
 
 Clock `AutoSync`, mic preamp `numid=301` at 36 (found at 0), 48 V on, PAD off,
 no mixer route written. No emission in progress. `/usr/local/bin/{ac,ac-daemon,
-ac-view}` match a build of `7f0dd5e` by sha256 — **these predate this branch**;
-reinstall and re-verify before block 1. A daemon runs under
+ac-view}` match a build of `7f0dd5e` by sha256. A daemon runs under
 `HOME=/home/mui/rig2-home` with `drive_max_dbfs: -30.0`. Build dir
 `~/target-rig2` (~1 GB), screenshots in `~/runB/`.
+
+</details>
