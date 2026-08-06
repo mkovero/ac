@@ -101,7 +101,26 @@ captured alongside it so no screenshot is scored on its own.
 | unplug the mic, drive on | `NO SIGNAL` | ✓ "measurement leg silent — check the mic, the DUT, and the input" |
 | feed the two legs from different sources | `CHECK ROUTING` | **✗ did not fire** |
 | force a bad lock | `LOST LOCK` | **✗ structurally unreachable** |
-| re-lock | `LOCK ACQUIRED` | ✓ — and it confirmed a wrong lock |
+| ~~re-lock~~ **drive on after a silent start** | `LOCK ACQUIRED` | ✓ — and it confirmed a wrong lock |
+
+> **Induce column corrected 2026-08-06.** "re-lock" reads as an operator
+> action, and there is no manual re-lock path — `grep -rn 'relock\|re-lock'
+> ac-rs/crates/ac-view/src/` returns nothing on `main`, and returned nothing on
+> this session's build. What was done was enabling drive on a session that had
+> come up silent; the lock followed 0.14 s later, on the first attempt that saw
+> a live reference. The scoring was right and the state does render — only the
+> word for what produced it was wrong.
+>
+> **A mechanism this capture cannot settle.** A tempting reading is that the
+> pair refused and the daemon's 1 Hz `RELOCK_RETRY` landed the lock. The frames
+> below cannot show that: `pair_prominence` is a *cached* value republished on
+> every ~16 Hz frame and only updated when an attempt actually runs, so frame
+> timestamps do not date attempts. The field that would date them,
+> `delay_attempts`, **did not exist on this build** — it has zero occurrences
+> in `handlers/transfer.rs` and `ac-scene/src/fault.rs` at `7f0dd5e`, and
+> arrived with #239 (`0a4d033`) afterwards. Either route reaches the state
+> without a key, which is the load-bearing point; the route itself is unproven
+> and should not be asserted.
 
 The `conn_tags` row was correctly dropped from the plan by #236 before the
 session; it has zero occurrences in `ac-rs/` and nothing on screen answers to
