@@ -234,7 +234,7 @@ Format spec: [`ac-rs/SNAPSHOT.md`](ac-rs/SNAPSHOT.md). Wire commands
 
 > The format, the daemon side, and offline derivation are complete and
 > tested. In `ac-view`, `S` triggers and fetches a snapshot but does not
-> yet display it, and `F` is a stub pending the file-picker UX.
+> yet display it, and `F` is a stub pending the file-picker UX — **#256**.
 
 ## Units
 

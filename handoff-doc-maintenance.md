@@ -361,9 +361,17 @@ judgement:**
    commit.
 4. **Every verification the sweep relies on must be able to fail — ask what
    would make it go red.** If nobody can answer, the check is decoration and
-   the sweep should record it as unverified rather than as passing. Added
-   2026-08-06 after three instances in one week, none of them careless, all
-   of them structurally incapable of failing:
+   the sweep should record it as unverified rather than as passing.
+
+   **This is a running tally, not a fresh count.** The class was already
+   established with at least five named instances — among them
+   `FakeEngine::last_drain_occupancy` passing against an unfixed daemon, and a
+   `cycling_derot_*` sibling passing on two empty panes. It is also *not* the
+   coupled-constants class, which separately has exactly three instances
+   (`settled` vs the three stages, `MIN_PROMINENCE` vs `DIRECT_PEAK_FRACTION`,
+   the admission/refusal timer). Two classes, two counts; conflating them
+   makes both look like they contradict a prior tally. Added 2026-08-06, none
+   of them careless, all structurally incapable of failing:
 
    | green signal | what it actually touched | why it could not go red |
    |---|---|---|
