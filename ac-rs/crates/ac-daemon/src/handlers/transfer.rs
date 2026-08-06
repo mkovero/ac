@@ -591,7 +591,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // warmup and reuse the result. Skipping `estimate_delay` per tick
         // (a 262 k-point FFT+IFFT at 2.5 s ring / 48 kHz) cuts the hot-loop
         // work from ~17 ms → ~3 ms and takes the refresh rate from choppy
-        // ~8.5 Hz to the capture-interval-limited ~10 Hz.
+        // ~8.5 Hz to the capture-interval-limited rate.
+        //
+        // That rate is now ~16.6 Hz, not the ~10 Hz this comment used to
+        // claim: the limit is `chunk_secs` (0.05 s) plus per-tick work, and
+        // `chunk_secs` was 0.2 when the ~10 Hz figure was written. Measured
+        // 2026-08-06 on `--fake-audio` at 48 kHz over 30 s, two pairs, median
+        // inter-frame gap 60.3 ms; the rig sees 17.5–18 Hz at 96 kHz.
         let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
 
         // A pair whose delay estimate was *refused* (no prominent correlation

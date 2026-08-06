@@ -1534,9 +1534,21 @@ Returns current listen mode and connected client endpoints.
 ### `transfer_stream`
 
 Streaming H1 transfer function estimator. Captures the selected measurement
-+ reference input channels and publishes a new `transfer_stream` frame each
-iteration (every `ac_core::visualize::transfer::capture_duration(4, sr)` seconds,
-≈ 2.5 s at 48 kHz) until stopped. Runs in the `TRANSFER` concurrency group:
++ reference input channels and publishes a new `transfer_stream` frame per
+pair per iteration until stopped.
+
+**Two different durations, and they are not the same number.** The H1 estimate
+is taken over a sliding window of
+`ac_core::visualize::transfer::capture_duration(4, sr)` — ≈ 2.5 s at 48 kHz —
+but a *new frame is published every loop tick*, which is the 0.05 s drain
+(`chunk_secs`) plus that tick's processing. **Measured 16.6 frames/s per pair**
+on `--fake-audio` at 48 kHz over 30 s (median inter-frame gap 60.3 ms), and
+17.5–18 frames/s per pair on the rig at 96 kHz. Earlier revisions of this
+paragraph gave the 2.5 s window as the frame interval; that was wrong by a
+factor of ~40 and was carried into two rig sessions as though it were the
+contract. Consumers must not assume a frame rate — read the clock.
+
+Runs in the `TRANSFER` concurrency group:
 only one `transfer_stream` at a time, but coexists with `monitor_spectrum`
 (`INPUT`) and any `OUTPUT` worker (each owns its own JACK client).
 
