@@ -1,7 +1,6 @@
 # .agents/
 
-Agent specs for the `ac` repo. Each file defines a role, its inputs,
-what it must produce, and its hard constraints.
+Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constraints.
 
 ## agents
 
@@ -16,7 +15,7 @@ what it must produce, and its hard constraints.
 ## invocation
 
 ### claude code (manual)
-Pass the agent file as context alongside the issue or PR:
+Pass agent file as context beside issue or PR:
 
 ```bash
 # full audit (run specialists in sequence, then coordinator)
@@ -34,14 +33,14 @@ claude --context .agents/qa.md \
   "review PR #43: https://github.com/mkovero/ac/pull/43"
 ```
 
-Claude Code needs the GitHub MCP server connected for issue/PR read-write:
+Claude Code need GitHub MCP server connected for issue/PR read-write:
 ```bash
 claude mcp add github -- npx -y @modelcontextprotocol/server-github
 export GITHUB_TOKEN=your_pat
 ```
 
 ### github actions (automated)
-Use the agent file contents as the system prompt in a workflow step.
+Use agent file contents as system prompt in workflow step.
 Example trigger: label applied → run triage or developer agent.
 See `.github/workflows/` for workflow definitions (if present).
 
@@ -58,11 +57,11 @@ ambiguous issue
 ```
 
 PRs touching stimulus/drive (`set_drive`, arm/fire state machine, keepalive):
-  apply `drive-path` → qa uses the drive-path safety checklist; wire-protocol side
-  routes to architect as usual.
+  apply `drive-path` → qa use drive-path safety checklist; wire-protocol side
+  route to architect as usual.
 
 ## human gates
-These actions are always human-only:
+Always human-only:
 - Merging PRs to main
 - Closing issues
 - Deleting branches
@@ -88,6 +87,4 @@ These actions are always human-only:
 | `agent:qa` | qa | audit trail |
 
 ## updating specs
-Agent specs are code. Change them via PR like anything else. When a spec
-produces bad output, the fix is in the spec — improve the constraints or
-add a concrete example of the bad behavior to the relevant section.
+Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.
