@@ -230,6 +230,23 @@ the full #226 scope now.
 > manual-only #226 has to be chosen knowing that, not by dropping the automatic
 > half and assuming the rest is a feature preference.
 >
+> **Narrowed 2026-08-06 — the two states separate, and only one of them needs
+> the key.** `LOCK ACQUIRED` is already reachable with no operator action:
+> session 2's Run B induced it by enabling drive on a session that came up
+> silent, `delay_locked` went false→true, and the transient painted. (Run B's
+> induce column said "re-lock", which was the wrong word — no manual path
+> exists; corrected in `18993a7`.) So the fault table's *confirmation* half is
+> testable today.
+>
+> `LOST LOCK` is the half that is genuinely stuck: it needs a held lock to be
+> invalidated, and `pair_delays` is never cleared (`handlers/transfer.rs:810`
+> sets it; `:796`, `:847`, `:856`, `:913` read it; nothing resets it, on
+> `set_drive` or otherwise). A key is one of the few things that would produce
+> that transition. **Read the priority bump above as applying to `LOST LOCK`
+> only** — manual-only #226 is still legitimate, but the reason is that it
+> gives `LOST LOCK` a producer, not that it makes the fault table testable in
+> general.
+>
 > Whichever shape it takes, `delay_attempts` must stay monotone across a
 > re-lock. A count that resets puts a locked-then-refusing pair back into
 > "warming up", which paints nothing — the exact defect #239 closed.
