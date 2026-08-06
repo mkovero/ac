@@ -2,7 +2,7 @@
 
 Authoritative reference for the `.acsnap` binary format (handoff:
 snapshot-backend M1, D4/D5). For the 4 CTRL commands that create and
-transfer these files, see `ZMQ.md`'s `snapshot` / `snapshot_fetch` /
+transfer these files, see `ac-rs/ZMQ.md`'s `snapshot` / `snapshot_fetch` /
 `snapshot_list` / `snapshot_delete` sections.
 
 ---

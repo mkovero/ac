@@ -1,6 +1,6 @@
 # handoff-transfer-frame-v2 — M0: extend `transfer_stream` for the new UI
 
-Parent plan: `ui-plan.md` (decisions D2, D3, D9, D18; invariant I-C).
+Parent plan: `work/planning/ui-plan.md` (decisions D2, D3, D9, D18; invariant I-C).
 One PR. No UI code exists yet; this milestone is daemon + core only.
 
 ## Goal
@@ -69,7 +69,7 @@ validation style.
    is a red flag, not a fixup.
 6. **Wire economy:** frame size measured and recorded in the PR
    description (K=480 f64 × 2 channels ≈ 8 KB/pair/frame — confirm).
-7. `ZMQ.md` updated with the new fields, marked additive, with the
+7. `ac-rs/ZMQ.md` updated with the new fields, marked additive, with the
    linear-amplitude contract stated explicitly ("dB conversion happens in
    the receiver, nowhere else").
 
@@ -123,7 +123,7 @@ anyway.)
 
 `spectrum_to_columns_wire` is already linear-in/linear-out. Only remaining
 work is decision 0 (getting a correctly-normalized linear amplitude out of
-`h1_estimate_core` at all) plus stating the contract in `ZMQ.md` per AC #7.
+`h1_estimate_core` at all) plus stating the contract in `ac-rs/ZMQ.md` per AC #7.
 
 ### decision 3 — helper location + scope correction
 

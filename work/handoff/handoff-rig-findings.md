@@ -6,7 +6,7 @@
 > below and the corrections are inline. F is not filed — its central claim
 > did not survive a repeat.
 
-Source: `rig-session-results.md`, plus two operator observations after it:
+Source: `work/rig/rig-session-results.md`, plus two operator observations after it:
 
 - Pink noise driven from `ac transfer` does not reach the loopback output
   (output 0) at all.
@@ -46,7 +46,7 @@ because it locked on silence before the stimulus arrived. Fixing A alone does
 not fix the operator's symptom.
 
 **The 66.96 ms figure** is the operator's own later run, not from
-`rig-session-results.md`. Attribution added at their confirmation.
+`work/rig/rig-session-results.md`. Attribution added at their confirmation.
 
 **Established.** The installed daemon has no separate reference-output leg:
 the start reply carries no `ref_out_port` and frames carry no `conn_tags`
@@ -254,7 +254,7 @@ Worth one repeat before anything is concluded: same position, same drive,
   20 dB of gain (Run 7). Not a defect, and gain cannot improve it. Worth
   stating somewhere durable so it is not re-investigated.
 - **Run 2's A/B had no positive control**, and the reason is a specification
-  error in `handoff-rig-session.md`: it asked for a level step rather than a
+  error in `work/handoff/handoff-rig-session.md`: it asked for a level step rather than a
   finger snap, on the grounds that a count needs a repeatable stimulus. But
   the mechanism needs a *short* transient — the four maxima come from a delta
   traversing the analysis window, and a 6 s step is longer than the window, so

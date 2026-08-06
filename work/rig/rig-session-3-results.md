@@ -1,6 +1,6 @@
 # rig-session-3-results — 2026-08-04, 192.168.9.25
 
-Executes `handoff-rig-session-3.md`. Rig: RME Babyface Pro, 96 kHz native both
+Executes `work/handoff/handoff-rig-session-3.md`. Rig: RME Babyface Pro, 96 kHz native both
 directions, external master clock over ADAT. Build under test: `main` @
 `4659b25` (#237 + #239 + #240 + #241), built on the rig into `~/target-rig3`
 and installed after stopping the daemon.
@@ -558,8 +558,8 @@ correctly, at per-frame prominence 2.5–6.8.
   the pre-wait ring clear; the analysis window is not contiguous` for the whole
   life of every session. It did not visibly disturb any result here — the
   locks are sample-identical across sessions — but it is one period per
-  occurrence and it is constant. See `handoff-capture-contiguity.md`.
-- **Frame rate ~17.5/s**, matching session 2's ~18/s and not `ZMQ.md`'s
+  occurrence and it is constant. See `work/handoff/handoff-capture-contiguity.md`.
+- **Frame rate ~17.5/s**, matching session 2's ~18/s and not `ac-rs/ZMQ.md`'s
   documented one frame per iteration ≈ 2.5 s. Unchanged and still unexplained.
 - **`transfer_stream` accepts `pairs`, and that is what made this session
   possible.** Carrying the electrical loopback alongside the acoustic path in

@@ -1,6 +1,6 @@
 # rig-session-results — 2026-07-28, 192.168.9.25
 
-Executes `handoff-rig-session.md`. Rig: RME Babyface Pro, 96 kHz native both
+Executes `work/handoff/handoff-rig-session.md`. Rig: RME Babyface Pro, 96 kHz native both
 directions (`hw_params` rate 96000, period 1024, buffer 4096 — **no
 resampling anywhere in the path**), PipeWire graph `clock.rate 96000`,
 `clock.quantum 1024`. Build under test: `main` @ `bd40ed4` (#218 + #222),
@@ -160,7 +160,7 @@ delay lock is wrong. **#216's general half holds on hardware.**
 
 ## Run 4 — the documented coherence step at the crossovers
 
-`design-mtw-ladder.md` records ~0.05 at the crossovers, measured headlessly
+`docs/design/design-mtw-ladder.md` records ~0.05 at the crossovers, measured headlessly
 at γ² = 0.5. Measured live, median over frames in each window:
 
 | window | xo 2064.53 Hz (stage 1→0) | xo 258.05 Hz (stage 2→1) |

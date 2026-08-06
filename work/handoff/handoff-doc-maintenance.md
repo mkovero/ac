@@ -3,7 +3,7 @@
 > **DELETE THIS FILE when item 5 of "Suggested order" has landed** — the `gh`
 > triage of the older open-issue population. That is the only thing left in
 > here. Handoffs in this repo do not expire on their own — that is how
-> `rig-verify-queue.md` came to open with "nothing here has been run" on the
+> `work/rig/rig-verify-queue.md` came to open with "nothing here has been run" on the
 > day after all of it was run — so the condition is written down rather than
 > left to judgement.
 >
@@ -98,12 +98,12 @@ from a Python server that finished months ago.
 
 ## ~~2. Docs that would send someone to the rig for data that already exists~~ — DONE (`9fd8436`)
 
-> All three edited as specified. `state-live-spectrum.md`'s "Corrected, and
-> worth not re-deriving" is untouched; `gate-rules-offline.md` keeps its rule
-> ranking and gained a superseded header only; `rig-verify-queue.md` marks each
+> All three edited as specified. `work/planning/state-live-spectrum.md`'s "Corrected, and
+> worth not re-deriving" is untouched; `audit/rig-verify-125/gate-rules-offline.md` keeps its rule
+> ranking and gained a superseded header only; `work/rig/rig-verify-queue.md` marks each
 > block executed or not with Run D promoted to the top.
 
-**`state-live-spectrum.md`** — the file whose first line is "Read this first
+**`work/planning/state-live-spectrum.md`** — the file whose first line is "Read this first
 after a gap". It says #234 is open and gated on #232, and that "#226 and #227
 remain". #227, #232 and #234 are all in the tree. Of its five-item `## Next`
 list, items 1, 2 and 4 are done and item 5 (#221) has changed status from
@@ -131,12 +131,12 @@ source moves the median slower than the peak. Neither candidate rule refuses
 it, and no threshold on that statistic can. The candidate-count alternative is
 separately dead: 23 → 32, censored at `MAX_CANDIDATES`.
 
-> Pass: a "superseded" header pointing at `rig-session-3-results.md` Run 2.
+> Pass: a "superseded" header pointing at `work/rig/rig-session-3-results.md` Run 2.
 > **Do not delete the scoring.** The two rules still differ on the
 > single-source data, which is where the choice between them has to be made,
 > and that ranking is the only record of it.
 
-**`rig-verify-queue.md`** — opens "Nothing here has been run: the operator is
+**`work/rig/rig-verify-queue.md`** — opens "Nothing here has been run: the operator is
 off site", dated 2026-08-03. Session 3 ran the next day and covered blocks 1
 through 3. Run D (#208's positive control) is the one block still unrun, and
 was already flagged as the first thing to cut.
@@ -153,19 +153,19 @@ was already flagged as the first thing to cut.
 > closing comment so the residual is not lost. **PR #236 — merged.**
 > **PR #214 — closed**, #205 carries it; `conn_tags` survives only on
 > `feat-205-drive-path-health`, verified still on origin at `4bf6336`.
-> `handoff-issue-strategy.md:137`, which repeated #230's two dead references,
+> `work/handoff/handoff-issue-strategy.md:137`, which repeated #230's two dead references,
 > is fixed in `4b2e603`.
 >
 > **Correction to this section.** It states that #230's two cited files are not
 > in the tree. Both exist in the working checkout as untracked copies, and
-> their line references resolve (`qa-brief-218-222.md` at `:52`, not `:51`).
+> their line references resolve (`work/qa/qa-brief-218-222.md` at `:52`, not `:51`).
 > They are absent from a *clone*, which is the reading that makes both
 > statements true — and the distinction matters, because it is the difference
 > between "the issue is stale" and "the issue is unfixable from a clone".
 
-**#230** names `handoff-mtw-live-spectrum.md:239` and `qa-brief-218-222.md:51`.
+**#230** names `work/handoff/handoff-mtw-live-spectrum.md:239` and `work/qa/qa-brief-218-222.md:51`.
 Neither file is in the tree. The surviving occurrence of the `((W−D)/W)²`
-model is `handoff-rig-findings.md:71`, and it already carries a `[revised]`
+model is `work/handoff/handoff-rig-findings.md:71`, and it already carries a `[revised]`
 correction immediately below it.
 
 > Action: re-point at the surviving occurrence, or close as done-in-place
@@ -204,7 +204,7 @@ path that landed around #231.
 > The script now installs `ac-view` and **prints the sha256 of all three
 > binaries**, which answers this section's open question: the queue's
 > verify-by-hash instruction collapses into reading the install output, and
-> `rig-verify-queue.md` item 2 is struck accordingly. The session record's
+> `work/rig/rig-verify-queue.md` item 2 is struck accordingly. The session record's
 > wording is unchanged, as this section asked.
 
 `ac-view` now ships. Not visible in the 2026-08-05 snapshot, so the fix
@@ -212,16 +212,16 @@ postdates it; nothing below assumes otherwise.
 
 What remains is that three documents still tell the operator it does not:
 
-- `rig-verify-queue.md`, "Before anything: the rig's own defects", item 2 —
+- `work/rig/rig-verify-queue.md`, "Before anything: the rig's own defects", item 2 —
   "**`install.sh` does not ship `ac-view`.** Copied by hand twice now."
-- `rig-session-3-results.md`, Pre-flight — "All three binaries copied by hand
+- `work/rig/rig-session-3-results.md`, Pre-flight — "All three binaries copied by hand
   — `install.sh` does not ship `ac-view`."
 - Section 1 of this file's own priority list, before this edit.
 
 The session record is history and should keep its wording; the queue is an
 instruction and should not.
 
-> Pass: `rig-verify-queue.md` no longer lists this as a defect to work around.
+> Pass: `work/rig/rig-verify-queue.md` no longer lists this as a defect to work around.
 >
 > One thing to confirm while editing it: does the script print the sha256 of
 > each installed file? The queue's verify-by-hash instruction exists because
@@ -283,7 +283,7 @@ re-derives it. **The discarded second arrival.**
 Run 2 established that on a two-source measurement the estimator locks on the
 nearest arrival, correctly and confidently, and never tells the operator that
 a comparable second arrival 1.4 ms later was passed over. It is a disclosure
-gap, not a correctness bug, and `rig-session-3-results.md` names the shape a
+gap, not a correctness bug, and `work/rig/rig-session-3-results.md` names the shape a
 fix would need (arrival clusters, not peak counts — the count version is
 recorded there as a dead end). It currently lives in one results file.
 
@@ -294,14 +294,14 @@ recorded there as a dead end). It currently lives in one results file.
 > **Measured: 16.56 frames/s per pair**, `--fake-audio`, 48 kHz, 30 s, two
 > pairs, median inter-frame gap 60.3 ms. Falsified against 0.4 and 10;
 > consistent with the rig's 17.5–18/s at 96 kHz. The code was right and both
-> docs were wrong: `ZMQ.md` gave the H1 sliding window
+> docs were wrong: `ac-rs/ZMQ.md` gave the H1 sliding window
 > (`capture_duration(4, sr)` = 2.5 s) as if it were the publish interval, and
 > `transfer.rs`'s "~10 Hz" was correct when `chunk_secs` was 0.2 and was not
 > revisited when it became 0.05. Both corrected.
 >
 > **Correction to this section.** It states that the "≈2.5 s at 48 kHz"
-> sentence is not in `ZMQ.md` and calls `state-live-spectrum.md`'s attribution
-> a doc error carried through two sessions. The sentence is at `ZMQ.md:1539`.
+> sentence is not in `ac-rs/ZMQ.md` and calls `work/planning/state-live-spectrum.md`'s attribution
+> a doc error carried through two sessions. The sentence is at `ac-rs/ZMQ.md:1539`.
 > The attribution was correct; the source was the thing at fault.
 >
 > **Found while measuring, and it is the more important result:** the desk
@@ -316,12 +316,12 @@ Frame cadence, unexplained across two rig sessions:
 
 | source | figure |
 |---|---|
-| `ZMQ.md:1611` | one frame per pair per iteration — **no rate stated** |
+| `ac-rs/ZMQ.md:1611` | one frame per pair per iteration — **no rate stated** |
 | `handlers/transfer.rs:585–594` | capture interval 0.2 s; comment claims "capture-interval-limited ~10 Hz" |
 | measured, sessions 2 and 3 | ~17.5–18 frames/s per pair |
 
-Note that `state-live-spectrum.md` attributes "≈2.5 s at 48 kHz" to `ZMQ.md`.
-That sentence is not in `ZMQ.md`. The attribution is itself a doc error, and
+Note that `work/planning/state-live-spectrum.md` attributes "≈2.5 s at 48 kHz" to `ac-rs/ZMQ.md`.
+That sentence is not in `ac-rs/ZMQ.md`. The attribution is itself a doc error, and
 it has been carried forward through two sessions as though it were the
 documented contract.
 
@@ -392,7 +392,7 @@ instead of commits, it has failed — this file included.
 
 **One rule this project keeps rediscovering, worth writing down: when a
 measurement supersedes a written expectation, the superseded doc gets a
-header, not a delete.** `gate-rules-offline.md` is the case in point — its
+header, not a delete.** `audit/rig-verify-125/gate-rules-offline.md` is the case in point — its
 ranking of the two candidate rules is still the only such record, while its
 closing section now sends the reader on a trip that has already happened. Both
 of those facts have to survive the edit. The same applies to the #208 positive
@@ -404,10 +404,10 @@ wrong, and a sweep that tidies those away is worse than no sweep.
 
 ## Suggested order
 
-1. ~~The three `CLAUDE.md` / `PLAN.md` files.~~ **Done**, `9fd8436`.
-2. ~~`rig-verify-queue.md`.~~ **Done**, `9fd8436`.
+1. ~~The three `CLAUDE.md` / `ac-rs/PLAN.md` files.~~ **Done**, `9fd8436`.
+2. ~~`work/rig/rig-verify-queue.md`.~~ **Done**, `9fd8436`.
 3. ~~#230, #243, PR #236, PR #214 — decisions, not work.~~ **Done.**
-4. ~~`state-live-spectrum.md`, `rig-verify-queue.md`, `gate-rules-offline.md`
+4. ~~`work/planning/state-live-spectrum.md`, `work/rig/rig-verify-queue.md`, `audit/rig-verify-125/gate-rules-offline.md`
    headers.~~ **Done**, `9fd8436`.
 5. The `gh` sweep of the older open issues — **the only item still open.** The
    arrival-disclosure filing half is done (#255); the per-issue triage of

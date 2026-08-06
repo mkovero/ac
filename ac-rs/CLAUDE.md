@@ -71,7 +71,7 @@ shared `workers` map, and returns the CTRL reply immediately.
 
 ## Protocol reference
 
-See `ZMQ.md` — authoritative for both Python and Rust implementations.
+See `ac-rs/ZMQ.md` — authoritative for both Python and Rust implementations.
 
 ## Backend status
 

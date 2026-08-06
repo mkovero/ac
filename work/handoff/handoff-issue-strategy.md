@@ -1,6 +1,6 @@
 # handoff-issue-strategy — order of work, and why
 
-Read with `STATE-live-spectrum.md` and `handoff-lock-and-smoothing.md`.
+Read with `work/planning/state-live-spectrum.md` and `work/handoff/handoff-lock-and-smoothing.md`.
 This says what to do next and in what order; those say what the work is.
 
 ---
@@ -64,12 +64,12 @@ a distinct cause with a distinct action, where today all four present as
 It also builds the signal-presence gates that #226 needs, which is the second
 reason it comes before it rather than after.
 
-Thresholds are specified in `handoff-lock-and-smoothing.md`: absolute
+Thresholds are specified in `work/handoff/handoff-lock-and-smoothing.md`: absolute
 −80 dBFS floor, never relative between legs, and no coherence threshold
 derived from an electrical loopback.
 
 **Built. Do not merge #234 ahead of #232** — the gate is stated under item 3
-and the design decisions are in `state-live-spectrum.md`, "The fault
+and the design decisions are in `work/planning/state-live-spectrum.md`, "The fault
 indicator (#228), as built". The short version: `LOST LOCK` reads
 `delay_locked` rather than top-stage coherence, so the issue's own
 0.715/0.05 discriminator is superseded as a threshold while surviving as
@@ -135,9 +135,9 @@ explicitly and write down which; do not inherit it.
 Schedule when they start hurting, not before.
 
 **#230** — ~~correct the `((W−D)/W)²` model in
-`handoff-mtw-live-spectrum.md:239` and `qa-brief-218-222.md:51`.~~ **Closed
+`work/handoff/handoff-mtw-live-spectrum.md:239` and `work/qa/qa-brief-218-222.md:51`.~~ **Closed
 2026-08-06 as done in place.** The tracked occurrence,
-`handoff-rig-findings.md:71`, already carries a `[revised]` correction naming
+`work/handoff/handoff-rig-findings.md:71`, already carries a `[revised]` correction naming
 intra-band phase dispersion as the dominant HF mechanism. The two files cited
 above exist only as untracked working copies — a clone has neither — and the
 criteria they carry are criterion 6/7 for #218 and #222, both merged, so no QA
@@ -182,7 +182,7 @@ re-discovered, and because two of them are the same instrumented session.
 
 **Desk work, no rig:**
 
-- **Frame cadence contradicts `ZMQ.md`.** Doc says one frame per iteration,
+- **Frame cadence contradicts `ac-rs/ZMQ.md`.** Doc says one frame per iteration,
   ≈2.5 s at 48 kHz. Measured ~18 frames/s per pair, inter-frame gaps 12–50 ms.
   Two orders out. Either the doc is stale or the worker publishes far more
   often than one frame per capture window. Read the publish path and correct

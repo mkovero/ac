@@ -3,7 +3,7 @@
 > **Superseded in part, 2026-08-06 — read "What would settle it" as done.**
 >
 > Rig session 3 (2026-08-04) constructed the ambiguous case this file calls
-> for. See `rig-session-3-results.md`, Run 2, third position: A at 1.8 m and
+> for. See `work/rig/rig-session-3-results.md`, Run 2, third position: A at 1.8 m and
 > B at ~2.5 m, 1.1 dB apart at the capsule, 134 samples of separation.
 >
 > | condition | locked | lag | median prominence |
@@ -28,7 +28,7 @@
 > to be made, and this is the only record of that ranking. What is superseded
 > is the closing section's call for a trip that has now happened.
 
-Desk work item 2 (`handover-desk-work.md`). Reproduce with
+Desk work item 2 (`work/handoff/handover-desk-work.md`). Reproduce with
 `python3 gate_rules.py` in this directory; `--csv` adds machine-readable rows.
 
 The captures themselves (`*-evidence.pkl.gz`, 2.1 MB, slimmed to

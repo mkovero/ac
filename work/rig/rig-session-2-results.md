@@ -1,6 +1,6 @@
 # rig-session-2-results — 2026-08-03, 192.168.9.25
 
-Executes `handoff-rig-session-2.md`. Rig: RME Babyface Pro, 96 kHz native both
+Executes `work/handoff/handoff-rig-session-2.md`. Rig: RME Babyface Pro, 96 kHz native both
 directions, PipeWire `clock.rate 96000` / `clock.quantum 1024`. Build under
 test: `main` @ `7f0dd5e` (#233 + #232 + #234), built on the rig and installed
 20:14, daemon restarted against it.
@@ -327,7 +327,7 @@ The gap it addresses stays open and is unchanged.
 
 ## Cross-cutting notes
 
-- **The frame rate is not what `ZMQ.md` documents.** Sessions published ~18
+- **The frame rate is not what `ac-rs/ZMQ.md` documents.** Sessions published ~18
   frames/s (737 frames in 40 s), against the documented "one frame per
   iteration, ≈ 2.5 s at 48 kHz". Not investigated; recorded because every
   per-frame cost in the protocol was reasoned against the slower figure.

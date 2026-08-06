@@ -389,7 +389,7 @@ Counterpart should verify file/line references before editing — they may have 
 # Out of scope for the entire RC pass
 
 - `app.rs` god-object split (#29).
-- New analysis features (Phase 4 unified.md items beyond what is already merged).
+- New analysis features (Phase 4 docs/superseded/unified.md items beyond what is already merged).
 - Multi-channel daemon protocol changes.
 - Daemon-side handlers refactor.
 - Real-hardware verification (manual at office/workshop).

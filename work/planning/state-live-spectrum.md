@@ -40,7 +40,7 @@ something stops serving it, cut it.
   being live.
 - **#225–#230 filed** from the 2026-07-28 acoustic session. #225–#228 are the
   cluster standing between "works with workarounds" and "works"; see
-  `handoff-issue-strategy.md` for order.
+  `work/handoff/handoff-issue-strategy.md` for order.
 - **PR #233 — merged** (`a14ee4a`). #225, the reference output leg. Resolves it
   from its own playback index instead of `reference_channel`, an input index.
   Sessions no longer need hand-patching, and the launch reply carries a
@@ -90,7 +90,7 @@ Criterion 5b now has a direct test: the same audio delivered in ragged chunks
 (1, 4801, 97, 12000, 331, 2048 samples) must produce bit-identical columns.
 Head-relative segmentation could not pass it.
 
-`design-mtw-ladder.md` updated to revision 3 — it previously carried the stale
+`docs/design/design-mtw-ladder.md` updated to revision 3 — it previously carried the stale
 `τ`/`α`/3000 Hz markers.
 
 ## The design, in one paragraph
@@ -140,7 +140,7 @@ measurement ring only (named in PR #217, not folded in).
 ## Verified on hardware (192.168.9.25, 96 kHz, 2026-07-28 — acoustic)
 
 First session with a real acoustic path: mic on IN1, electrical loopback as
-reference, speakers on ADAT. Full record in `rig-session-results.md`.
+reference, speakers on ADAT. Full record in `work/rig/rig-session-results.md`.
 
 - **Delay tracks distance.** 4.5938 ms → 5.44/5.92 ms for a 34 cm axial move,
   against a 1.00 ms prediction. Baseline repeatable to **one sample** over
@@ -166,19 +166,19 @@ reference, speakers on ADAT. Full record in `rig-session-results.md`.
 
 Noticed during the acoustic session, unexplained, none blocking:
 
-1. ~~**Frame cadence contradicts `ZMQ.md`.**~~ **Resolved 2026-08-06 by
-   measurement — the doc was wrong, the worker was right.** `ZMQ.md` gave the
+1. ~~**Frame cadence contradicts `ac-rs/ZMQ.md`.**~~ **Resolved 2026-08-06 by
+   measurement — the doc was wrong, the worker was right.** `ac-rs/ZMQ.md` gave the
    H1 *window* (`capture_duration(4, sr)`, 2.5 s at 48 kHz) as if it were the
    frame interval. The publish interval is the loop tick: `chunk_secs` = 0.05 s
    plus per-tick processing. Measured **16.6 frames/s per pair** on
    `--fake-audio` at 48 kHz over 30 s, median gap 60.3 ms, which is consistent
-   with the rig's 17.5–18/s at 96 kHz. `ZMQ.md` and the `transfer.rs` comment
+   with the rig's 17.5–18/s at 96 kHz. `ac-rs/ZMQ.md` and the `transfer.rs` comment
    (which still claimed ~10 Hz from when `chunk_secs` was 0.2) are both
    corrected.
 
    Two things this turned up on the way:
 
-   - The `≈2.5 s` sentence **is** in `ZMQ.md` — `handoff-doc-maintenance.md`
+   - The `≈2.5 s` sentence **is** in `ac-rs/ZMQ.md` — `work/handoff/handoff-doc-maintenance.md`
      says it is not and calls the attribution here a doc error. That part of
      the handoff is itself wrong; the attribution was correct and the source
      was the thing at fault.
@@ -210,7 +210,7 @@ documented**, not engineered away — moving crossovers cannot help.
 
 **Ship the inputs, not a derived depth.** The frame carries blocks-held and
 bins-per-column. Two models of their combination have been wrong. Tables and
-reasoning: `design-mtw-ladder.md`, "coherence depth — measured, not modelled".
+reasoning: `docs/design/design-mtw-ladder.md`, "coherence depth — measured, not modelled".
 
 ## The fault indicator (#228), as built
 
@@ -273,14 +273,14 @@ diagnosis-shaped message wrong for that case.
 everywhere". Accepted, not a defect. Before then it is the only routing
 indicator, since `delay_locked` is absent.
 
-**Nothing gates on `delay_prominence`.** `ZMQ.md` reserves its threshold to
+**Nothing gates on `delay_prominence`.** `ac-rs/ZMQ.md` reserves its threshold to
 the estimator. Warmup and refusal are separated by observed settling instead,
 which is also why a timer from t=0 was rejected: it would fire the persistent
 message on healthy sessions.
 
 **`delay_locked` is `Option` on the consumer side.** It exists only on #232's
-branch — `ZMQ.md` on `main` does not document it, and a search of `main` finds
-it only in `brief-228-fault-indicator.md`. #234 reads it as an optional field,
+branch — `ac-rs/ZMQ.md` on `main` does not document it, and a search of `main` finds
+it only in `docs/design/brief-228-fault-indicator.md`. #234 reads it as an optional field,
 so the lock rows stay dark on today's daemon and light up when #232 merges,
 with no follow-up change. An absent `drive` object disables the indicator
 outright rather than defaulting to "not driving": a daemon that does not

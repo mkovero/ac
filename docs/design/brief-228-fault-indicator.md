@@ -11,7 +11,7 @@ falls back to unaligned zero, which collapses HF exactly like a bad lock did. So
 refusing session presents as a blank top end — arguably worse for an operator than the
 confident wrong answer it replaced. #228 is what makes #227's improvement legible.
 
-This overrides handoff-issue-strategy.md, which you are about to read: that document
+This overrides work/handoff/handoff-issue-strategy.md, which you are about to read: that document
 says #227 is "Independent of #226 and #228 — different crate, different code — so it
 can run in parallel with them" (line 76), and sequences #228 as item 2 and #227 as
 item 3. That line is superseded. Everything else in the document still stands.
@@ -30,10 +30,10 @@ instead of a second one if it is free.
 Read, in this order, from the main tip (git fetch origin first — these documents are
 still being added to):
 
-  1. state-live-spectrum.md          — current state of the live spectrum path
-  2. handoff-issue-strategy.md       — how the issues relate and what order they land in,
+  1. work/planning/state-live-spectrum.md          — current state of the live spectrum path
+  2. work/handoff/handoff-issue-strategy.md       — how the issues relate and what order they land in,
                                        subject to the gate above
-  3. handoff-lock-and-smoothing.md, the "#228 — becomes load-bearing, and gains the
+  3. work/handoff/handoff-lock-and-smoothing.md, the "#228 — becomes load-bearing, and gains the
      full state set" section only (currently lines 164-203). The rest of that file is
      ratified decisions for #226/#227; read them only if #228 turns out to depend on one.
 
@@ -101,7 +101,7 @@ Four facts not yet in those documents:
      refusing state, not off prominence — see the constraint above.
 
      **Threshold: no lock 10 seconds after the ladder settles.** The ladder settles at
-     2.560 s (design-mtw-ladder.md, stage 2 — four independent 1.024 s windows need
+     2.560 s (docs/design/design-mtw-ladder.md, stage 2 — four independent 1.024 s windows need
      2.56 s of audio), and #227 retries at 1 Hz, so 10 s is roughly ten retries past
      the first point at which a lock was even possible. Anything past a handful of
      retries is genuinely persistent.

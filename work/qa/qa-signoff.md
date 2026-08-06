@@ -1,6 +1,6 @@
 # qa-signoff-m0 — transfer frame v2 (branch `m0-transfer-frame-v2`)
 
-Blocking gate per `ui-plan.md` §3: this sign-off precedes merge. QA owns
+Blocking gate per `work/planning/ui-plan.md` §3: this sign-off precedes merge. QA owns
 whether the values are true. Every item is pass/fail against the **diff
 and the tests as written** — not the implementation summary.
 

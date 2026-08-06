@@ -979,7 +979,7 @@ Append-only. Each entry: `(YYYY-MM-DD) Decision — Rationale.`
 
 - `(2026-05-05) Phase 2.5 — BodePhase + GroupDelay on the
   substrate.` — Round out Phase 2's frequency-domain set with the
-  remaining pair from `unified.md` §6. Same `transfer_stream`
+  remaining pair from `docs/superseded/unified.md` §6. Same `transfer_stream`
   data, same auto-pair convention. BodePhase: wrapped phase in
   [-180°, +180°] (matches the daemon's TransferFrame; no unwrap
   applied at view time so the trace stays on a familiar axis).
@@ -1204,7 +1204,7 @@ Append-only. Each entry: `(YYYY-MM-DD) — Summary.`
   weighted deposition + substrate decay. Press `K` to cycle
   off/k=1/k=2/k=4 and watch the noise floor lift or drop.
 
-- `(2026-04-30) Initial draft of unified.md.` — Document created,
+- `(2026-04-30) Initial draft of docs/superseded/unified.md.` — Document created,
   current state inventoried against ac-rs codebase, view catalog
   drafted, rendering substrate spec drafted, phasing plan
   established, open questions enumerated. No code written.

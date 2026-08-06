@@ -1,8 +1,8 @@
 # Rig verification queue — what still needs 192.168.9.25
 
 Written 2026-08-03 alongside branch `rig2-fixes-125` (findings 1, 2 and 5 of
-`handover.md`). **Updated 2026-08-06: session 3 ran on 2026-08-04 and executed
-blocks 1, 2 and 3.** Their results are in `rig-session-3-results.md`, which
+`work/handoff/handover.md`). **Updated 2026-08-06: session 3 ran on 2026-08-04 and executed
+blocks 1, 2 and 3.** Their results are in `work/rig/rig-session-3-results.md`, which
 supersedes the expectations written here — where this file and that one
 disagree, the session is right. What survives is one block, promoted below.
 
@@ -95,7 +95,7 @@ Not caused by any branch. Each cost a session's time.
 > `mtw`, so the routing check and `LOST LOCK`/`NO LOCK` cannot be reached
 > together. The onset case was run and did not reproduce a wrong positive
 > lock. What the session changed about the *gate* is in
-> `rig-session-3-results.md` "What this session says should happen next": 24
+> `work/rig/rig-session-3-results.md` "What this session says should happen next": 24
 > is simultaneously too high for the clean 3 m case and only just high enough
 > to exclude the near-wall case, so it is not a threshold problem. Read the
 > rest of this block as the expectation that was tested, not as work to do.
@@ -156,7 +156,7 @@ cannot tell one passband from scattered accidents.
 
 ### What this branch does *not* fix — do not read these as regressions
 
-- **`LOST LOCK` / `NO LOCK` are still unreachable.** Finding 3 of `handover.md`
+- **`LOST LOCK` / `NO LOCK` are still unreachable.** Finding 3 of `work/handoff/handover.md`
   is untouched here. A session that refuses for 14 s still renders a blank
   window with no indicator. That is the known state, not a new one.
 - **The prominence gate still refuses valid measurements at 1 m.** Finding 4 is

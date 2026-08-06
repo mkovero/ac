@@ -441,7 +441,7 @@ steps — nothing is broken en route.
 - [ ] Add `ac monitor <mode>` CLI parsing. Keep `ac monitor spectrum`
       and `ac monitor cwt` as subcommands; default is spectrum.
 - [ ] Add tiered `type` prefixes to wire frames, emitting both old and
-      new types during transition. Note a deprecation date in `ZMQ.md`.
+      new types during transition. Note a deprecation date in `ac-rs/ZMQ.md`.
 - [x] Build `measurement/filterbank.rs` (IEC 61260-1). Class 1 via
       6th-order Butterworth BP SOS, bpo ∈ {1, 3, 6, 12, 24}; emits
       per-band dBFS suitable for `MeasurementData::SpectrumBands`.

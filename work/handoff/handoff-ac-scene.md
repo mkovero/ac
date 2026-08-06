@@ -1,6 +1,6 @@
 # handoff-ac-scene — M2: the pure scene layer
 
-Parent plan: `ui-plan.md` (D12, D13, D14, D15, D18; invariant I-A).
+Parent plan: `work/planning/ui-plan.md` (D12, D13, D14, D15, D18; invariant I-A).
 Base: `main` post M0+M1+M1.5, fixture frozen (`a10688c7…`). One PR.
 First UI-side milestone — and still **zero rendering**: no egui, no wgpu,
 no window. If it can't run headless in CI, it doesn't belong in this
@@ -121,7 +121,7 @@ type structure — it is the contract every future view builds on.
 Grounded against current `main` post-M1.5: `ac-rs/Cargo.toml` (`members
 = ["crates/ac-core", "crates/ac-daemon", "crates/ac-cli"]`),
 `ac-core::visualize::pair_derivation::PairDerivation`, `WeightingCurve`,
-`ZMQ.md`'s `transfer_stream` v2 frame (lines ~1572-1627). `.agents/
+`ac-rs/ZMQ.md`'s `transfer_stream` v2 frame (lines ~1572-1627). `.agents/
 architect.md`'s module map is stale, same caveat as every prior review
 in this stack.
 
@@ -273,7 +273,7 @@ only.
 <!-- agent: ux -->
 
 Reviewed `ac-scene/src/readout.rs` and `ac-scene/src/ticks.rs` as
-implemented (`qa-signoff-m2.md`: approved). Scope per the handoff's own
+implemented (`work/qa/qa-signoff-m2.md`: approved). Scope per the handoff's own
 routing note: digits, labels, tick style — not whether the numbers are
 true, which QA already covered.
 

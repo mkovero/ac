@@ -1,6 +1,6 @@
 # qa-signoff-m1 — snapshot backend (branch `m1-snapshot-backend`)
 
-Reviewed against `handoff-snapshot-backend.md` (8 acceptance criteria)
+Reviewed against `work/handoff/handoff-snapshot-backend.md` (8 acceptance criteria)
 and its architect addendum (6 decisions). `.agents/qa.md`'s module map
 is stale (pre-`ac-rs` workspace), same caveat as M0/M1's architect
 reviews — reviewed against actual current crates instead.
@@ -18,7 +18,7 @@ pushed) plus this review's fixes on top, not yet committed.
 | AC4 FLAC round-trip | ✓ | `flac::tests` — bit-exact on-grid (4ch/24-bit), ≤1 LSB off-grid, empirically measured not just asserted |
 | AC5 ring correctness | ✓ | `ring_wraparound_keeps_newest_samples_in_order` — content-correctness (FIFO order under wraparound), not just length |
 | AC6 edges | ✓ | No-session, unknown-id (fetch + delete), format_version reject — all exercised |
-| AC7 docs | ✓ | `SNAPSHOT.md` (new) + `ZMQ.md` (4 commands + `setup` fields) |
+| AC7 docs | ✓ | `ac-rs/SNAPSHOT.md` (new) + `ac-rs/ZMQ.md` (4 commands + `setup` fields) |
 | AC8 suite integrity | ✓ | 533 passed, 2 ignored (JACK runbook, fixture regenerator), 0 failed — 3 consecutive full-workspace runs. Zero deletions in any pre-existing file except one additive derive-attribute line (`Calibration` gains `Serialize`/`Deserialize`/`PartialEq` — capability addition, not a behavior change) |
 
 ## correctness issues
@@ -35,7 +35,7 @@ pushed) plus this review's fixes on top, not yet committed.
 ## test coverage gaps
 
 - **Found and filled this pass**: no test previously verified the retention policy actually works — added `snapshot_spool_cleared_on_session_stop` (clean-stop path) and `snapshot_spool_wiped_at_next_session_start_after_a_crash` (crash-safety fallback — genuinely kills the daemon process via `SIGKILL` mid-session, skips its `Drop`-based cleanup via `mem::forget` to simulate a real crash rather than a clean exit, then confirms a second daemon instance against the same `HOME` wipes the leftover file). Both pass.
-- **Found and filled this pass**: `setup`'s two new fields (`snapshot_ring_s`, `snapshot_spool_dir`) were wired into the handler but had no test and — more importantly — were referenced in `ZMQ.md` as settable before they were actually wired into `setup`'s allowlist at all (a real doc/code mismatch, not just a missing test). Fixed both; `setup_updates_snapshot_ring_and_spool_dir` covers write, persistence-across-a-second-read, non-positive-value rejection, and null-clears-to-default.
+- **Found and filled this pass**: `setup`'s two new fields (`snapshot_ring_s`, `snapshot_spool_dir`) were wired into the handler but had no test and — more importantly — were referenced in `ac-rs/ZMQ.md` as settable before they were actually wired into `setup`'s allowlist at all (a real doc/code mismatch, not just a missing test). Fixed both; `setup_updates_snapshot_ring_and_spool_dir` covers write, persistence-across-a-second-read, non-positive-value rejection, and null-clears-to-default.
 - Not filled, not blocking: no test exercises `derive_pair` reprocessing a snapshot under a *different* weighting than the one recorded at capture time (D10/D11's "edit-time freedom" — the API supports it, `WeightingCurve` is a plain caller-supplied argument, but nothing currently proves reprocessing under `A` when capture used `Z` produces the expected offset). Low risk (the underlying `weighted_broadband_dbfs` function is already unit-tested against A/C/Z independently in M0), but a real, named gap for a fast follow rather than silently omitted.
 
 ## scope issues
@@ -52,6 +52,6 @@ Not applicable — this milestone adds no new measurement/weighting/display logi
 
 ## verdict
 
-**approve**, with two fixes landed during this review (not rubber-stamped): the ring-lock-held-across-encode stall (a real live-cadence bug, not a style nit) and the `setup`/`ZMQ.md` mismatch for the two new config fields. Both are fixed, tested, and re-verified. Full workspace suite green across 3 consecutive runs (533 passed, 2 ignored, 0 failed), clippy and fmt clean, zero edits to any pre-existing assertion. One test-coverage gap (cross-weighting reprocessing) documented as a fast-follow, not blocking.
+**approve**, with two fixes landed during this review (not rubber-stamped): the ring-lock-held-across-encode stall (a real live-cadence bug, not a style nit) and the `setup`/`ac-rs/ZMQ.md` mismatch for the two new config fields. Both are fixed, tested, and re-verified. Full workspace suite green across 3 consecutive runs (533 passed, 2 ignored, 0 failed), clippy and fmt clean, zero edits to any pre-existing assertion. One test-coverage gap (cross-weighting reprocessing) documented as a fast-follow, not blocking.
 
 Fixes from this review are staged but **not yet committed** — recommend one commit for the QA-pass fixes (mirroring the M0 pattern: `feat` commit, then a separate `test:`-prefixed QA-pass commit), then the same merge/push decision as M0.

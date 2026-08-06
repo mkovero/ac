@@ -1,6 +1,6 @@
 # handoff-snapshot-backend — M1: ring, `.acsnap`, offline derivation
 
-Parent plan: `ui-plan.md` (D4–D8, D11, D17; invariant I-B).
+Parent plan: `work/planning/ui-plan.md` (D4–D8, D11, D17; invariant I-B).
 Base: `m0-transfer-frame-v2` post-QA-merge. One PR. Daemon + core only —
 no UI, no scene.
 
@@ -97,7 +97,7 @@ Single zip: `meta.json` + `audio.flac`.
 6. **Edges:** `snapshot` with no session → `{"ok": false}`; fetch of
    unknown id → error; `format_version` present and = 1.
 7. **Docs:** ZMQ.md gains `snapshot` / `snapshot_fetch` / `snapshot_list`
-   / `snapshot_delete`; `.acsnap` schema documented (new `SNAPSHOT.md` or
+   / `snapshot_delete`; `.acsnap` schema documented (new `ac-rs/SNAPSHOT.md` or
    ZMQ.md section — implementer's choice, architect confirms placement).
 8. Workspace test/clippy/fmt clean; zero edits to existing assertions.
 
@@ -212,7 +212,7 @@ pure-Rust only for the FLAC path, no system lib.**
 
 AC #1 requires derived values to "match the live frames covering the
 same time window" — but `transfer_stream` frames carry no timestamp or
-sample-position field (confirmed against M0's frozen `ZMQ.md` shape),
+sample-position field (confirmed against M0's frozen `ac-rs/ZMQ.md` shape),
 and this handoff's own out-of-scope fence forbids changing M0 frame
 fields. Without *some* correlation mechanism, "the same time window" is
 unverifiable — the test would be comparing two arbitrary, unrelated
@@ -255,10 +255,10 @@ field is needed for AC #1's capture-time reproduction. Don't add one.
   need its own copies — it calls into `ac-core::snapshot` for writing
   too, per "ac-core owns read/write" in deliverable 4).
 - `ac-core/Cargo.toml`, `ac-daemon/Cargo.toml` — new deps.
-- `ZMQ.md` or new `SNAPSHOT.md` — per AC #7; recommend `SNAPSHOT.md` for
-  the `.acsnap` binary schema (mirrors nothing else in `ZMQ.md`, which
-  is JSON-wire-only) with `ZMQ.md` linking to it, and the 4 new CTRL
-  commands documented in `ZMQ.md` itself (consistent with every other
+- `ac-rs/ZMQ.md` or new `ac-rs/SNAPSHOT.md` — per AC #7; recommend `ac-rs/SNAPSHOT.md` for
+  the `.acsnap` binary schema (mirrors nothing else in `ac-rs/ZMQ.md`, which
+  is JSON-wire-only) with `ac-rs/ZMQ.md` linking to it, and the 4 new CTRL
+  commands documented in `ac-rs/ZMQ.md` itself (consistent with every other
   command).
 - `tests/fixtures/` (repo root) — new checked-in `.acsnap`, matching the
   `fixtures-spectrum-hf-garbage` precedent's location.

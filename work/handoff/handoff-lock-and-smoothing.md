@@ -98,7 +98,7 @@ Tier 2 and does not need conformant band edges, but it must not silently share
 a constant that is about to change meaning underneath it. Decide up front
 whether smoothing uses its own base-2 geometry or the conformant helper, and
 write down which. This is the two-conventions problem in a third place; the
-ladder's version is already recorded in `design-mtw-ladder.md`.
+ladder's version is already recorded in `docs/design/design-mtw-ladder.md`.
 
 ### 5. Delay accuracy: about 12 cycles at the top of the band
 
@@ -170,7 +170,7 @@ Falsify any fix against Run 1's data shape: it must turn the 22.8 / 30.3 /
 > the issue). And the drive gate turned out to cover the two level rows only —
 > a refusal on a `drivable: false` session is still a fault, and less
 > recoverable than one on a driving session. Everything else in this section
-> was implemented as ratified. Full record: `state-live-spectrum.md`, "The
+> was implemented as ratified. Full record: `work/planning/state-live-spectrum.md`, "The
 > fault indicator (#228), as built".
 >
 > **Amended by #238, 2026-08-04.** As built, both refusal rows were
@@ -236,9 +236,9 @@ a blocker, still independent.
 
 > **A** → **#229** (fractional-octave smoothing).
 > **B** → **#230** (correct the `((W−D)/W)²` model). One correction: the model
-> is **not** in `design-mtw-alignment.md` — zero occurrences, checked. It is in
-> `handoff-mtw-live-spectrum.md:239` and `qa-brief-218-222.md:51` only.
-> **C** → written up as *design decision 3* in `design-mtw-ladder.md`, not an
+> is **not** in `docs/design/design-mtw-alignment.md` — zero occurrences, checked. It is in
+> `work/handoff/handoff-mtw-live-spectrum.md:239` and `work/qa/qa-brief-218-222.md:51` only.
+> **C** → written up as *design decision 3* in `docs/design/design-mtw-ladder.md`, not an
 > issue.
 > Scope changes for **#226**, **#227**, **#228** posted as issue comments.
 >
@@ -255,7 +255,7 @@ dB; phase unwrapped first; coherence unsmoothed or labelled. Records the
 base-2 versus `G_OCTAVE` decision explicitly rather than inheriting it.
 
 **B — correct the `((W−D)/W)²` model where it is documented.** It appears in
-`design-mtw-alignment.md`, `handoff-mtw-live-spectrum.md`, and QA's criterion
+`docs/design/design-mtw-alignment.md`, `work/handoff/handoff-mtw-live-spectrum.md`, and QA's criterion
 6, which tells a reviewer the top stage should "collapse toward" that ceiling
 under mutation. It collapses much further — the mutation test still passes but
 against a wrong expected value, and anyone reading it would badly
@@ -263,7 +263,7 @@ under-estimate high-frequency delay sensitivity. The model is correct for the
 window-overlap term at low frequency; keep that form, add the dispersion term.
 
 **C — record that PPO is fixed, and why.** A decision note in
-`design-mtw-ladder.md` rather than an issue, if that fits better. The point is
+`docs/design/design-mtw-ladder.md` rather than an issue, if that fits better. The point is
 that the next person to propose exposing PPO finds the reasoning rather than
 re-deriving it.
 

@@ -29,7 +29,7 @@ them. #228 in particular never existed as a PR.
 branch — the merge was gated on a local `cargo fmt --check` + `cargo clippy
 --all-targets -- -D warnings` + full `cargo test`, run twice: once on #232
 merged with main, and again on #234 merged with the *post-#232* main, because
-the two share `handlers/transfer.rs` and `ZMQ.md` and GitHub's `MERGEABLE`
+the two share `handlers/transfer.rs` and `ac-rs/ZMQ.md` and GitHub's `MERGEABLE`
 only means textually clean. Both passes were clean, 0 failed. If the rig
 session finds a regression, that is the verification depth it got — not a
 green pipeline.

@@ -1,6 +1,6 @@
 # qa-signoff-m2 — ac-scene (branch `m2-ac-scene`)
 
-Reviewed against `handoff-ac-scene.md`'s 7 acceptance criteria, the
+Reviewed against `work/handoff/handoff-ac-scene.md`'s 7 acceptance criteria, the
 architect review's 7 decisions + addendum (3a/3b), and the two QA
 follow-up items raised on the developer's first pass. `.agents/qa.md`'s
 module map is stale, same caveat as every prior review in this stack.
@@ -85,7 +85,7 @@ follow-up's own resolution.
 | AC4 wire/snapshot scene equivalence | ✓ | `ac4_wire_and_snapshot_scenes_are_equivalent_except_the_integration_tag` — trace coordinates, axis ticks exact; SPL value asserted equal (3b), integration clause asserted to differ by construction (3a), both directions checked explicitly (not just "readouts differ, skip"). |
 | AC5 reference-label correctness, both directions | ✓ | `ac5_reference_label_decided_only_by_spl_cal_presence` — calibrated→`dB SPL`, uncalibrated→`dBFS`, both live and snapshot paths. |
 | AC6 no forbidden deps | ✓ | `cargo tree -p ac-scene` re-run in this review: `ac-core`, `serde`, `serde_json` and their transitive deps only. No egui/wgpu/zmq. (One dependency, `zmij` under `serde_json`, looked like a possible supply-chain anomaly on first glance — checked the registry-cached `Cargo.toml` directly: real crate, `dtolnay/zmij`, same author as `ryu`. Not a finding, noted so a future reviewer doesn't re-spend the time.) |
-| AC7 headless CI, workspace green, clippy/fmt clean, zero pre-existing assertion edits | ✓ | `cargo test --workspace` run 3× in this review: 2 clean (487 passed, 0 failed, 4 ignored — regenerators + the pre-existing JACK runbook), 1 hit the pre-existing `handlers::test_software::tests` flake (see `issues.md` § Known flaky tests, updated in this review with this pass's specific failing test name) — isolated and retried per that entry's own policy, passed both times, no new investigation warranted. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` both clean across all runs. `git status`/`git diff --stat` confirm the only touched pre-existing files are `Cargo.toml`/`Cargo.lock` (crate registration), `calibration.rs`/`pair_derivation.rs` (doc comments only, zero code/assertion changes), and `it_cross_tier_parity.rs` (one new test function appended, zero existing assertions edited). |
+| AC7 headless CI, workspace green, clippy/fmt clean, zero pre-existing assertion edits | ✓ | `cargo test --workspace` run 3× in this review: 2 clean (487 passed, 0 failed, 4 ignored — regenerators + the pre-existing JACK runbook), 1 hit the pre-existing `handlers::test_software::tests` flake (see `work/planning/issues.md` § Known flaky tests, updated in this review with this pass's specific failing test name) — isolated and retried per that entry's own policy, passed both times, no new investigation warranted. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` both clean across all runs. `git status`/`git diff --stat` confirm the only touched pre-existing files are `Cargo.toml`/`Cargo.lock` (crate registration), `calibration.rs`/`pair_derivation.rs` (doc comments only, zero code/assertion changes), and `it_cross_tier_parity.rs` (one new test function appended, zero existing assertions edited). |
 
 ## correctness issues
 

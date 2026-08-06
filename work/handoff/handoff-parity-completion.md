@@ -1,7 +1,7 @@
 # handoff-parity-completion — M1.5: correlated stimulus, full I-B, cross-weighting
 
-Parent plan: `ui-plan.md` (invariant I-B, D10). Closes the three items
-left open by `qa-signoff-m1.md`. Base: `main` post M0+M1 merge. One
+Parent plan: `work/planning/ui-plan.md` (invariant I-B, D10). Closes the three items
+left open by `work/qa/qa-signoff-m1.md`. Base: `main` post M0+M1 merge. One
 small PR — mostly test work plus one fake-engine addition. Must land
 **before M2**, because it regenerates the fixture M2's display-truth
 tests will be written against.

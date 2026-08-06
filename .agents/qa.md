@@ -292,7 +292,7 @@ wrong without any test catching it. These are the highest priority.}
     `it_snapshot_end_to_end` (the on-screen string equals `ac-scene`'s
     output for the same frame, asserted at harness level), `it_remote`,
     `it_trace_distinction` — plus, per the A3 resolution
-    (`handoff-ac-view.md`, accepted at M2/M3 signoff), **one manual
+    (`work/handoff/handoff-ac-view.md`, accepted at M2/M3 signoff), **one manual
     real-adapter run with a screenshot attached to the PR** as the
     pixel-level evidence. That run is documented, not CI-blocking (sandbox
     lavapipe segfaults — standing policy); QA judges its adequacy. Pixel

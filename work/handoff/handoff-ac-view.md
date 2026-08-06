@@ -1,6 +1,6 @@
 # handoff-ac-view — M3: the shell
 
-Parent plan: `ui-plan.md` (D6, D10, D12, D13, D16; invariant I-A
+Parent plan: `work/planning/ui-plan.md` (D6, D10, D12, D13, D16; invariant I-A
 geometry half). Base: `main` post-M2 (d954148). One PR. This is the
 first milestone where anything is drawn — and by design the *last*
 place a numeric bug can hide, so the fence around what this crate may
@@ -139,12 +139,12 @@ paint M4 into a corner.
 
 ## Architect review (approved, one wording fix required, two design notes)
 
-Grounded against `ui-plan.md` D6/D10/D12/D13/D16, `ZMQ.md`, and
+Grounded against `work/planning/ui-plan.md` D6/D10/D12/D13/D16, `ac-rs/ZMQ.md`, and
 `attic/ac-ui`'s (the pre-Rust-rewrite, now-detached crate's) dependency
 choices — not taken on the handoff's own claims.
 
 **1. Zero-wire-changes claim: confirmed, not just asserted.**
-`ZMQ.md` already defines all six commands this crate needs:
+`ac-rs/ZMQ.md` already defines all six commands this crate needs:
 `transfer_stream` (:1510), `stop` (:703), `snapshot` (:1719),
 `snapshot_fetch` (:1759), `snapshot_list` (:1798), `snapshot_delete`
 (:1819). Every deliverable (session launch, snapshot fetch/open,
@@ -155,7 +155,7 @@ itself is client-side (D8, no new command). No objection.
 "known environment limitation, unchanged" framing is not accurate as
 written.** Checked the whole repo for `lavapipe`: it appears exactly
 once, right here (line 76 of this handoff). It is not in
-`qa-signoff-m2.md`'s own A3 discussion (which raised the same gate and
+`work/qa/qa-signoff-m2.md`'s own A3 discussion (which raised the same gate and
 never mentions lavapipe), not in `ARCHITECTURE.md`, not in any prior
 handoff or QA sign-off, not in `attic/ac-ui`'s history. "Known...
 unchanged" reads as citing established precedent; there is none to
@@ -225,7 +225,7 @@ an assertion too).
 <!-- agent: ux -->
 
 Reviewed `ac-view/src/view.rs`, `app.rs`, `keys.rs` as implemented
-(`qa-signoff-m3.md`: approve). Scope per routing: keyboard scheme, help
+(`work/qa/qa-signoff-m3.md`: approve). Scope per routing: keyboard scheme, help
 overlay, trace distinction, layout minimalism — not the numeric/
 network correctness QA already covered.
 

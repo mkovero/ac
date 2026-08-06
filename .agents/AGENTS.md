@@ -8,9 +8,9 @@ what it must produce, and its hard constraints.
 | file | role | trigger |
 |---|---|---|
 | `triage.md` | PM — writes specs, routes issues | new issue opened |
-| `architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
-| `developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
-| `qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
+| `.agents/architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
+| `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
+| `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `audit.md` | audit coordinator — orchestrates full codebase audit | manual invocation |
 
 ## invocation

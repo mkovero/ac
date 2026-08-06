@@ -150,14 +150,14 @@ fourth QA sign-off re-justifying the same retry from scratch.
   e.g. `/tmp/ac_self_test_<pid>_cal.json` — plausible contention when
   the workspace's other test binaries run concurrently) rather than a
   logic bug in the module itself. Observed across four independent QA
-  passes on unrelated diffs: M0 (`qa-signoff.md`), M1
-  (`qa-signoff-m1.md`), M1.5 (`qa-signoff-m1.5.md`) all saw
-  `every_self_test_passes`; M2 (`qa-signoff-m2.md`) saw a *different*
+  passes on unrelated diffs: M0 (`work/qa/qa-signoff.md`), M1
+  (`work/qa/qa-signoff-m1.md`), M1.5 (`work/qa/qa-signoff-m1.5.md`) all saw
+  `every_self_test_passes`; M2 (`work/qa/qa-signoff-m2.md`) saw a *different*
   test in the same module,
   `handler_returns_results_array_and_all_pass_true` — same symptom
   (passes in isolation, passes on retry), different specific test name,
   which supports the shared-resource-race theory over a per-test logic
-  bug. M3's QA pass (`qa-signoff-m3.md`) saw `every_self_test_passes`
+  bug. M3's QA pass (`work/qa/qa-signoff-m3.md`) saw `every_self_test_passes`
   again, twice across roughly four full-workspace runs (up from
   "usually once" in prior passes) — both clean on isolated retry.
   M3 adds several new daemon-spawning integration tests to the

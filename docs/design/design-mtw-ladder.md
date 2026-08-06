@@ -10,11 +10,11 @@ exponential one. Bottom stage is 4000 Hz, not 3000. If you find `τ = 1 s`,
 `α = 0.3401` or a 3000 Hz bottom stage below, that is a section I missed —
 stop and check against the handoff.
 
-Scope: the two items `handoff-mtw-live-spectrum.md` routes to architect —
+Scope: the two items `work/handoff/handoff-mtw-live-spectrum.md` routes to architect —
 **ladder crossover placement**, and **the decimator phase-lock mechanism
 (deliverable 1), "where the alignment guarantee is actually won or lost".**
 
-Companion to `design-mtw-alignment.md`, which settled alignment (option A:
+Companion to `docs/design/design-mtw-alignment.md`, which settled alignment (option A:
 one signed integer offset per pair, applied at full rate before decimation).
 That decision is taken as given here and is load-bearing throughout.
 
@@ -80,7 +80,7 @@ does not move.
 
 **Option C.** It keeps option A's `sr`-adaptivity (crossovers derive from
 `Δf_b`, which derives from `sr`) and option B's PPO-independence, and it
-reproduces the boundaries already tabulated in `design-mtw-alignment.md`'s
+reproduces the boundaries already tabulated in `docs/design/design-mtw-alignment.md`'s
 phase-error table (811 / 203 Hz at 48 kHz) rather than inventing a
 second set. `P_ref` is the ladder's *design* density and belongs next to
 NFFT 4096 and the target rates; display PPO belongs in the frame.
@@ -175,7 +175,7 @@ across the crossover, which reads as a data artifact.
 **What structure makes it impossible for the two channels of a pair to
 decimate out of phase?**
 
-Per `design-mtw-alignment.md`, `H1 = G_xy/G_xx` is transparent to the decimator
+Per `docs/design/design-mtw-alignment.md`, `H1 = G_xy/G_xx` is transparent to the decimator
 — *provided both channels traverse identical chains*. That proviso is the entire
 justification for there being no per-band offset. Two decimators with
 independent sample counters can drift by up to `M−1` samples: 20 ms at
@@ -210,7 +210,7 @@ not a comment.
 
 Scope it to the **pair**, not to unique channels. A shared reference feeding two
 pairs cannot be decimated once, because alignment is applied at full rate and
-each pair has its own offset; `design-mtw-alignment.md` already accepted this
+each pair has its own offset; `docs/design/design-mtw-alignment.md` already accepted this
 ("one aligned read per band from a shared history"). Quantising the offset to a
 common multiple to allow sharing was considered and is rejected: at 44.1 kHz
 `lcm(4,15) = 60` samples leaves up to 0.68 ms of residual delay — harmless for
@@ -263,7 +263,7 @@ than of how the drain chunked it — that is criterion 5b, and it is the #208
 fix.
 
 Consequence for retention: streaming needs only `|offset| + taps` (~0.3 s), not
-`W_deepest + |offset|` (~2 s). The 2 s figure in `design-mtw-alignment.md`
+`W_deepest + |offset|` (~2 s). The 2 s figure in `docs/design/design-mtw-alignment.md`
 still stands — it sizes the history the snapshot path re-reads — but the live
 ladder is not what consumes it.
 
@@ -573,5 +573,5 @@ not transfer frames.
   the coherence-continuity assertion should fail if `N` differs across a
   crossover, independently of the measured γ².
 - **Criterion 6 cannot detect #216** — carried over from
-  `design-mtw-alignment.md`. Verify skew from per-ring occupancy
+  `docs/design/design-mtw-alignment.md`. Verify skew from per-ring occupancy
   (`AC_DRAIN_TELEMETRY`, #215), never from coherence, magnitude or delay.

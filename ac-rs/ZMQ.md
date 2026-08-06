@@ -304,7 +304,7 @@ the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
 (not instead of it). Carries raw f32 audio samples — no calibration,
 no mic-curve, just the unmodified per-tick capture truncated to the
 newest 2048 samples. Intended for a client-side goniometer / trajectory
-view (`unified.md` Phase 0b, resolves §9 OQ7); no current client
+view (`docs/superseded/unified.md` Phase 0b, resolves §9 OQ7); no current client
 subscribes to it since the ac-ui detach (see `attic/ac-ui`).
 
 ```json
@@ -1630,7 +1630,7 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "magnitude_db":    [<float>, ...],
   "phase_deg":       [<float>, ...],
   "coherence":       [<float>, ...],
-  "re":              [<float>, ...],     // unified.md Phase 3: complex H, real part
+  "re":              [<float>, ...],     // docs/superseded/unified.md Phase 3: complex H, real part
   "im":              [<float>, ...],     // complex H, imaginary part
   "delay_samples":   <int>,
   "delay_ms":        <float>,
@@ -2084,7 +2084,7 @@ UI-driven session goes through `set_drive`, so the UI is always covered.
 Freezes the active `transfer_stream` session's raw capture ring into a
 self-contained `.acsnap` file (handoff: snapshot-backend M1). Valid only
 while a `transfer_stream` session is running — the ring lives inside that
-session's worker. See `SNAPSHOT.md` for the full `.acsnap` binary schema.
+session's worker. See `ac-rs/SNAPSHOT.md` for the full `.acsnap` binary schema.
 
 Ungated by the busy guard (below) — reads shared state and writes a spool
 file, doesn't spawn a worker or touch audio I/O, so it runs regardless of

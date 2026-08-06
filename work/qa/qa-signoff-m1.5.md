@@ -1,6 +1,6 @@
 # qa-signoff-m1.5 — parity completion (branch `m1_5-parity-completion`)
 
-Reviewed against `handoff-parity-completion.md`'s 5 acceptance criteria
+Reviewed against `work/handoff/handoff-parity-completion.md`'s 5 acceptance criteria
 and the architect ack (mode-selection surface + two implementation
 notes). `.agents/qa.md`'s module map is stale, same caveat as every
 prior review in this stack.
@@ -12,7 +12,7 @@ not pushed).
 
 | criterion | covered | notes |
 |---|---|---|
-| AC1 Full workspace green, zero edits to pre-existing assertions (fixture-expectation update sanctioned) | ✓ | 543 passed, 2 ignored (JACK runbook, fixture regenerator), 0 failed — 3 consecutive full-workspace runs (one transient flake in the unrelated, untouched `test_software` module reproduced as green on isolation + 3 retries — third consecutive QA pass to see it; now filed in `issues.md` § Known flaky tests with its symptom, so this is the last sign-off that re-justifies the retry from scratch). `git diff main` confirms the *only* deletions are inside `generate_snapshot_fixture`/`t3_checked_in_fixture_reprocesses_with_no_daemon` (fixture content + its hand-derived expectation) plus two small non-assertion edits in `fake.rs` (a doc comment and an or-pattern match arm extending exhaustiveness for the new enum variant) — no other test assertion touched anywhere. |
+| AC1 Full workspace green, zero edits to pre-existing assertions (fixture-expectation update sanctioned) | ✓ | 543 passed, 2 ignored (JACK runbook, fixture regenerator), 0 failed — 3 consecutive full-workspace runs (one transient flake in the unrelated, untouched `test_software` module reproduced as green on isolation + 3 retries — third consecutive QA pass to see it; now filed in `work/planning/issues.md` § Known flaky tests with its symptom, so this is the last sign-off that re-justifies the retry from scratch). `git diff main` confirms the *only* deletions are inside `generate_snapshot_fixture`/`t3_checked_in_fixture_reprocesses_with_no_daemon` (fixture content + its hand-derived expectation) plus two small non-assertion edits in `fake.rs` (a doc comment and an or-pattern match arm extending exhaustiveness for the new enum variant) — no other test assertion touched anywhere. |
 | AC2 I-B test asserts all 6 quantities + 2 ground-truth checks, tolerances derived per term | ✓ | `full_ib_parity_under_correlated_stimulus` checks `meas_spectrum`, `ref_spectrum`, `spl`, `\|H1\|`, phase, coherence live-vs-derived, plus `\|H1\|=gain` and coherence≥0.99 independently on both sides. Tolerances are stated per-term (i24 floor, Welch alignment, estimator variance at achieved coherence) and then verified against real measured deltas (~0.1 dB, ~0.0001 coherence) printed by the test's own diagnostic `eprintln!` — not asserted blind. |
 | AC3 Cross-weighting test, hand-derived expected offset | ✓ | `derive_pair_reprocesses_correctly_under_a_different_weighting_than_capture_time` — A-vs-Z offset at a bin-exact 100 Hz tone, compared to IEC 61672-1 Table 2's `A(100 Hz) = -19.1 dB` (cited from an already-standards-verified, already-passing test — `weighting_curves::tests::a_weighting_standard_table_values` — re-confirmed passing in this review, not re-derived). Measured 0.042 dB off. |
 | AC4 Fixture reprocesses standalone; regenerator run twice → identical sha256 | ✓ | `t3_checked_in_fixture_reprocesses_with_no_daemon` (no daemon/audio backend/config). Determinism independently re-verified in this review: regenerated the fixture a second time outside the test suite, byte-for-byte identical sha256 (`a10688c7…`), `git status` reports the file unchanged after regeneration. |
@@ -25,7 +25,7 @@ not pushed).
    - Role dispatch (`port == self.ref_port.as_deref()`) is `None`-safe — before `add_ref_input` is called, `ref_port` is `None`, so no port can spuriously match it; every call correctly falls through to the meas branch.
    - `PairDerivation`'s new `spl_weighting` field is additive only — the struct isn't `Serialize` (checked), so nothing wire-facing changes; the one existing call site (`Snapshot::derive_pair`) was the only constructor and is updated.
    - Fixture regeneration is genuinely deterministic (independently re-verified in this review, not just re-trusted from the M1.5 commit's own claim).
-   - `qa-signoff-m1.md`'s original English claim ("H1/coherence parity not asserted") is now literally false, and `SNAPSHOT.md`'s M1 honesty paragraph is updated to say so accurately, with the new stimulus and gate named — checked side by side with the current test, no stale claims left (grepped for the old "not asserted"/"unverified" phrasing — zero hits).
+   - `work/qa/qa-signoff-m1.md`'s original English claim ("H1/coherence parity not asserted") is now literally false, and `ac-rs/SNAPSHOT.md`'s M1 honesty paragraph is updated to say so accurately, with the new stimulus and gate named — checked side by side with the current test, no stale claims left (grepped for the old "not asserted"/"unverified" phrasing — zero hits).
 3. No new correctness issues found on a fresh line-by-line read of the `fake.rs`/`transfer.rs` diff.
 
 ## fixture expectation — independent re-derivation
@@ -80,7 +80,7 @@ confirmed correct, not merely re-read.
 
 ## scope issues
 
-None. `git diff main --stat` (excluding `Cargo.lock` and the fixture binary) touches exactly: `fake.rs`, `audio/mod.rs` (trait method), `handlers/transfer.rs`, `ac-core`'s `snapshot/mod.rs` and `visualize/pair_derivation.rs`, `SNAPSHOT.md`, and the new `it_snapshot.rs` tests — matches the handoff and architect ack's named surfaces exactly. No `monitor.rs`, no UI/`ac-scene`/`ac-view` code (none exists yet).
+None. `git diff main --stat` (excluding `Cargo.lock` and the fixture binary) touches exactly: `fake.rs`, `audio/mod.rs` (trait method), `handlers/transfer.rs`, `ac-core`'s `snapshot/mod.rs` and `visualize/pair_derivation.rs`, `ac-rs/SNAPSHOT.md`, and the new `it_snapshot.rs` tests — matches the handoff and architect ack's named surfaces exactly. No `monitor.rs`, no UI/`ac-scene`/`ac-view` code (none exists yet).
 
 ## gate check — A3 pause (qa.md pending-gate clauses)
 

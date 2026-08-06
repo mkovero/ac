@@ -12,7 +12,7 @@
 > landed; it is `handlers/` now).
 >
 > **Current sources of truth:** `ac-rs/CLAUDE.md` for the crate and module
-> map, `../ARCHITECTURE.md` for the Tier 1 / Tier 2 decision, `ZMQ.md` for the
+> map, `../ARCHITECTURE.md` for the Tier 1 / Tier 2 decision, `ac-rs/ZMQ.md` for the
 > wire protocol. The design reasoning in "Key design decisions" and "Why this
 > split" below is still the reasoning the code follows, which is why this file
 > is archived rather than deleted.
