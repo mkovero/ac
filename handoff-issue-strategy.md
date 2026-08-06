@@ -207,6 +207,25 @@ practice, #226's automatic refresh loses most of its value and could drop to
 manual-key-only. Worth re-checking after #227 lands rather than committing to
 the full #226 scope now.
 
+> **Amended 2026-08-04, after #239 (issue #238).** "May not be worth building"
+> was framed on measurement quality alone, and that was too casual: it missed
+> that #226 is also the **producer** two fault states need. `LOST LOCK` and
+> `CHECK ROUTING` both require a pair to return from locked to unlocked —
+> today's daemon estimates a delay once and caches it, so `delay_locked` is
+> monotone false→true for a session's life and neither state has a live path.
+>
+> This does not settle the scope question, and it is not an argument for the
+> automatic half specifically: **the manual re-lock key produces the same
+> transition**, so both states become reachable with manual-key-only. What
+> changes is that the key is no longer an optional convenience — it is the
+> minimum #226 must ship for the fault table to be testable at all, and a
+> manual-only #226 has to be chosen knowing that, not by dropping the automatic
+> half and assuming the rest is a feature preference.
+>
+> Whichever shape it takes, `delay_attempts` must stay monotone across a
+> re-lock. A count that resets puts a locked-then-refusing pair back into
+> "warming up", which paints nothing — the exact defect #239 closed.
+
 Conversely if #225 alone makes the reference reliable and locks stop failing,
 the whole cluster shrinks. Neither is likely, but both are cheap to check and
 would save the largest item in the set.
