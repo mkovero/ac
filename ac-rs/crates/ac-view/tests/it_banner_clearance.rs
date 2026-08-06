@@ -33,6 +33,8 @@ fn transfer_scene() -> TransferScene {
         phase_deg: vec![0.0; N],
         coherence: vec![0.9; N],
         delay_ms: 0.0,
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
