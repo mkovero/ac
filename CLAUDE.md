@@ -6,6 +6,13 @@ first user message.
 
 Repo structure: ac-rs/ (cargo workspace, five crates) — stddocs/ docs/ tests/
 
+Documents: root holds only the entry points (this file, README, ARCHITECTURE,
+HARDWARE, TESTING). `docs/` is durable reference — `docs/design/` for design
+notes and briefs, `docs/superseded/` for kept-but-dead plans. `work/` is
+in-flight and expiring — `work/handoff/`, `work/rig/`, `work/qa/`,
+`work/planning/`. A handoff that has been executed belongs under `work/` with
+its expiry condition written in, not at root where it reads as current.
+
 | crate | binary | role |
 |-------|--------|------|
 | `ac-core` | — | Measurement library. Tier 1 (`measurement/`) and Tier 2 (`visualize/`), plus `shared/` calibration, config, generator. No sockets. |
