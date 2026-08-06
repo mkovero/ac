@@ -26,6 +26,19 @@ Two things session 3 raised that no block here covers yet:
   session 3's captures are in `audit/rig-session-3/` and the ambiguous case is
   reproducible on demand (two of the room's three speakers energised).
 
+**Rides along with block 1, does not justify a trip:** what actually produced
+session 2's `LOCK ACQUIRED`. The capture bounds it but cannot identify it —
+`delay_attempts` did not exist on `7f0dd5e` (it arrived with #239), and
+`pair_prominence` is cached and republished every frame, so frame timestamps
+never dated the attempts. On a current build `delay_attempts` dates them, and
+one session settles whether the transition came from the 1 Hz `RELOCK_RETRY`
+or from the first attempt that saw a live reference.
+
+Pair it with **block 1's unresolved onset case** — start the stream before the
+stimulus, deliberately. Same session shape, and `delay_attempts` now dates the
+attempts in both, so one run answers two questions that were previously
+separate trips.
+
 One thing to know before a session, not a block: **#254.** A `transfer_stream`
 over three or more distinct channels stalls silently under `--fake-audio` —
 `ok: true`, then no frames, indefinitely. `pairs=[[3,3],[0,3]]`, the
