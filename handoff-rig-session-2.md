@@ -6,20 +6,33 @@ playback_1 → capture_3 (electrical reference), playback_5 → external convert
 
 ---
 
-## Do not go until
+## Do not go until — **satisfied, 2026-08-03**
 
-- **#231 merged** (#225 — reference output leg).
-- **#232 merged** (#227 — earliest prominent peak).
-- **#228 merged** (six-state indicator).
+All three merged, in the order the interlock required:
 
-The order matters because they interlock: #227's refusals are *invisible*
+- **#233 merged** (#225 — reference output leg). Supersedes #231, which was
+  closed unmerged.
+- **#232 merged** (#227 — earliest prominent peak) — `5887621`.
+- **#234 merged** (#228 — six-state indicator) — `ab3d236`.
+
+The order mattered because they interlock: #227's refusals are *invisible*
 without #228 — `h1_estimate` falls back to unaligned zero, and an unaligned
 measurement collapses HF exactly like a bad lock does. Testing #227 without
 #228 means staring at a dead top end unable to tell refusal from failure.
 
-If #228 slips, **Run C's data capture can still be done independently** — it
-records correlation functions and needs no indicator. Everything else should
-wait.
+Note the issue-versus-PR numbering, since this document was written against
+the issues and the merge order was carried out against the PRs: #225/#227/#228
+are *issues* (now closed by merge); #233/#232/#234 are the PRs that closed
+them. #228 in particular never existed as a PR.
+
+**These branches carry no CI.** `gh pr checks` reported no checks on either
+branch — the merge was gated on a local `cargo fmt --check` + `cargo clippy
+--all-targets -- -D warnings` + full `cargo test`, run twice: once on #232
+merged with main, and again on #234 merged with the *post-#232* main, because
+the two share `handlers/transfer.rs` and `ZMQ.md` and GitHub's `MERGEABLE`
+only means textually clean. Both passes were clean, 0 failed. If the rig
+session finds a regression, that is the verification depth it got — not a
+green pipeline.
 
 ## Before the drive is armed
 
@@ -68,8 +81,33 @@ from `engine_on`/`engine_level` — observed, post-dead-man, post-clamp — so
 check the idle case both ways: drive genuinely off, and drive commanded on but
 dead-manned. They must read differently.
 
-**Also confirm `conn_tags` absent reads as *unknown*, never healthy.** It was
-absent from every frame last session, which disabled #205's check silently.
+**Do not look for the `conn_tags` check — it is not in this build.** The
+instruction that stood here ("confirm `conn_tags` absent reads as *unknown*,
+never healthy") cannot be carried out against the merged tree, and following
+it would cost bench time hunting for a display element that does not exist.
+
+`conn_tags` has **zero occurrences anywhere in `ac-rs/` on main.** It lives
+only on #214 (issue #205), still open. The six-state indicator does not read
+it and never did: `ac-rs/crates/ac-scene/src/fault.rs` derives every state
+from exactly five inputs — `frame.drive`, `meas_peak_dbfs`, `ref_peak_dbfs`,
+`delay_locked`, and `mtw` presence (as `settled`). The absent-reads-as-unknown
+mapping is #214's `drive_path_state_from_tag` in `ac-scene/src/readout.rs`,
+feeding a *separate* drive-path health line with its own vocabulary
+(`NOT CONNECTED` in caps, `unknown` lowercase).
+
+So Run B's six-state table is unaffected by whether #214 lands, and the table
+above stands as written. Two things to know if #214 lands **before** the
+session rather than after:
+
+- A second operator-facing element appears alongside the first. Row 2
+  (`disconnect the reference edge`) would then produce both `NO REFERENCE` and
+  `drive path   REF OUT 3 (…)   NOT CONNECTED`. That is corroboration, not
+  contradiction — but "confirm the indicator names it" becomes ambiguous about
+  *which* indicator is being scored. Decide that before the run, not during.
+- The unknown path still cannot be exercised here. The rig is real JACK, so
+  `conn_tags` is populated and the observable values are `on`/`off`. Omission
+  is the `--fake-audio` path only — see
+  `ac-daemon/tests/it_protocol.rs::fake_backend_omits_conn_tags_rather_than_claiming_connected`.
 
 ## Run C — #227, the prominence threshold (the long one)
 
