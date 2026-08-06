@@ -19,9 +19,29 @@ unchanged. Independent of everything else here. Full statement in block 4.
 
 Two things session 3 raised that no block here covers yet:
 
+- **The cable change, and the one measurement that verifies it — #243.** Move
+  the reference out to **playback_6**, through the same external converter as
+  the stimulus, analogue output looped back to a Babyface input. Both legs then
+  traverse Babyface → ADAT → external converter DAC → analogue, and everything
+  up to that point is common-mode.
+
+  > **Pass: the 1.1931 ms residual collapses to ~0.** Measure it the same way
+  > it was measured in session 3 — `pairs=[[3,3],[0,3]]`, zero extra cost.
+  > **Fail is informative:** a residual that does not collapse means the
+  > reference is not traversing what it should, and **its size says which
+  > stage was missed.** Until this runs, the metres readout shows the
+  > instrument's own latency as distance — 1.40 m at a taped 1.000 m.
+
+- **#251 — rides along with the cable change, deliberately.** 20 s captures at
+  3.000 m and 1.000 m with full `delay_evidence.candidates`, to score the
+  **selection** half of #246. It is the last unscored half of a change three
+  sessions went into, and it was queued to ride along so it does not get lost
+  behind the wiring work. Do not let the cable change consume the session
+  without it.
+
 - **The electrical constant.** `arrival(d) = 1.1931 ms + d/346 m/s`. Measure it
-  in-session at zero cost with `pairs=[[3,3],[0,3]]`. Until it is subtracted,
-  a metres readout shows the instrument's own latency as distance.
+  in-session at zero cost with `pairs=[[3,3],[0,3]]` — the same call as the
+  #243 verification above, so one measurement serves both.
 - **The discarded second arrival — #255.** No rig time needed to decide it;
   session 3's captures are in `audit/rig-session-3/` and the ambiguous case is
   reproducible on demand (two of the room's three speakers energised).
