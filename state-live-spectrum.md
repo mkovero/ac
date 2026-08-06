@@ -183,14 +183,9 @@ Noticed during the acoustic session, unexplained, none blocking:
      the handoff is itself wrong; the attribution was correct and the source
      was the thing at fault.
    - **`--fake-audio` cannot run a transfer session over more than two
-     distinct channels, and fails silently.** `pairs: [[0,1],[2,3]]` replies
-     `ok: true` and then publishes **nothing at all** — no frames, no error
-     frame, indefinitely. Three or more distinct channels is the trigger; pair
-     count is not (`[[0,1],[1,0]]` streams fine). `FakeEngine::capture_multi`
-     returns exactly two buffers via `capture_stereo` regardless of what the
-     session asked for. Not filed yet; it is why session 3's `pairs=[[3,3],
-     [0,3]]` worked, and it means any desk check of a genuinely multi-channel
-     session is silently untestable today. Related to but distinct from #204.
+     distinct channels, and fails silently — now #254 (`blocker`).** It is why
+     the measurement above had to substitute `[[0,1],[1,0]]` for the specified
+     call. Evidence and mechanism live in the issue, not here.
 2. **Per-pair settling offset.** Run 6, same session, same rings, same
    iteration: pair 0 settled at 0.079 / 0.828 / 2.532 s, pair 1 at 0.574 /
    1.317 / 3.027 s — a near-constant 0.5 s later on all three rungs. Only pair
@@ -320,13 +315,12 @@ under "Discharged" for their reasoning, not as work.
 4. #219 Part B stays open: the deterministic drain test + injection seam. The
    seam must carry a **mixed** stream (`keepalive` + `transfer_stream` +
    `visualize/ir`) or it will not reproduce Part A's behaviour at all.
-5. **Not filed, and should be: the discarded second arrival.** On a two-source
-   measurement the estimator locks the nearest arrival — correctly and
-   confidently — and never tells the operator a comparable second arrival
-   1.4 ms later was passed over. Disclosure gap, not a correctness bug. The
-   shape of a fix is in `rig-session-3-results.md`: **arrival clusters, not
-   peak counts** (the count version is recorded there as a dead end, censored
-   at `MAX_CANDIDATES`).
+5. **#255 — the discarded second arrival** (`needs-design`). On a two-source
+   measurement the estimator locks the nearest arrival, correctly, and never
+   tells the operator a comparable one 1.4 ms later was passed over.
+   Disclosure gap, not a correctness bug, and **not gateable** — prominence
+   rises in the ambiguous case. The dead end (candidate count, censored at
+   `MAX_CANDIDATES`) is recorded in the issue body.
 
 Emission rules unchanged: explicit per-run consent, and the daemon run from
 an isolated `HOME` with a server-side `drive_max_dbfs` clamp. The −40 dBFS

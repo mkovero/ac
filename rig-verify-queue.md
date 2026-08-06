@@ -22,10 +22,16 @@ Two things session 3 raised that no block here covers yet:
 - **The electrical constant.** `arrival(d) = 1.1931 ms + d/346 m/s`. Measure it
   in-session at zero cost with `pairs=[[3,3],[0,3]]`. Until it is subtracted,
   a metres readout shows the instrument's own latency as distance.
-- **The discarded second arrival.** On a two-source measurement the estimator
-  locks the nearest arrival and never says a comparable second one 1.4 ms
-  later was passed over. Disclosure gap, not a correctness bug; shape of a fix
-  is in `rig-session-3-results.md` (arrival clusters, not peak counts).
+- **The discarded second arrival — #255.** No rig time needed to decide it;
+  session 3's captures are in `audit/rig-session-3/` and the ambiguous case is
+  reproducible on demand (two of the room's three speakers energised).
+
+One thing to know before a session, not a block: **#254.** A `transfer_stream`
+over three or more distinct channels stalls silently under `--fake-audio` —
+`ok: true`, then no frames, indefinitely. `pairs=[[3,3],[0,3]]`, the
+converter-constant measurement, is two channels and is unaffected. Adding a
+second measurement position — `[[0,3],[1,3]]` — is three, and cannot be
+rehearsed off the rig until #254 lands.
 
 ---
 
