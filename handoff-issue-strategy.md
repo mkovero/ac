@@ -134,10 +134,18 @@ explicitly and write down which; do not inherit it.
 **#221** (snapshot parity) and **#219 Part B** (injection seam) are debt.
 Schedule when they start hurting, not before.
 
-**#230** — correct the `((W−D)/W)²` model in `handoff-mtw-live-spectrum.md:239`
-and `qa-brief-218-222.md:51`. Ten minutes. Do it opportunistically, but do it
-**before anyone sets a delay tolerance from the wrong model** — it
-under-states high-frequency sensitivity by roughly an order of magnitude.
+**#230** — ~~correct the `((W−D)/W)²` model in
+`handoff-mtw-live-spectrum.md:239` and `qa-brief-218-222.md:51`.~~ **Closed
+2026-08-06 as done in place.** The tracked occurrence,
+`handoff-rig-findings.md:71`, already carries a `[revised]` correction naming
+intra-band phase dispersion as the dominant HF mechanism. The two files cited
+above exist only as untracked working copies — a clone has neither — and the
+criteria they carry are criterion 6/7 for #218 and #222, both merged, so no QA
+gate is still checking against the wrong ceiling.
+
+The substance is still worth knowing and is why this was filed: the model
+**under-states high-frequency sensitivity by roughly an order of magnitude**,
+so do not set a delay tolerance from it.
 
 ---
 
