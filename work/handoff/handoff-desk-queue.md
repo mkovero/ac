@@ -160,9 +160,11 @@ it — the caveat names #261 and was written to be deleted by it.
 
 **`flush-2026-08-05.md` is released**: both documents exist in the tree, so it
 is no longer the only copy of their substance.
-`work/handoff/handoff-flush-reconciliation.md` still cannot be deleted — items
-9 and 10 are `.agents/` changes awaiting Markus's ratification and it is their
-only lodging.
+`work/handoff/handoff-flush-reconciliation.md` becomes deletable as soon as
+both land — its items 9 and 10 are **already discharged**, in
+`.agents/AGENTS.md`'s evidence-discipline section (`edc22cf`, PR #260),
+verified against `main` by content. That handoff's own top note claimed they
+were still pending and was stale.
 
 ### 3.5 Item 4 — the `#[ignore]` audit
 

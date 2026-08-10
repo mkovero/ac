@@ -1,12 +1,19 @@
 # handoff-flush-reconciliation — moving `flush-2026-08-05` into the tree
 
 > **DELETE THIS FILE when items 1–8 below have landed.** Handoffs in this repo
-> do not expire on their own. Items 9 **and 10** are what must outlive the
-> deletion: both are `.agents/` changes under Markus's ratification, and until
-> that happens this file is their temporary lodging. If you are about to
-> delete this file and either is still only here, move it first. They go
-> together — one adds a rule to a spec, the other repairs the specs that rule
-> would be read alongside.
+> do not expire on their own.
+>
+> **Items 9 and 10 are discharged — verified against `main` 2026-08-10, by
+> content rather than by report.** Both rules are in `.agents/AGENTS.md`'s
+> "evidence discipline — every role" section, landed by `edc22cf` (PR #260)
+> along with the spec repair item 10 asked for: the hypothesis-with-a-test
+> rule with its ten-inference provenance and the `ρ = 1/6` path it closes, the
+> check-that-cannot-fail corollary, and the independent-specification-input
+> rule naming `work/qa/qa-brief-218-222.md:10`. Nothing in items 9 or 10 is
+> lodged only here any more, so the caveat that used to stand in this
+> paragraph is retired.
+>
+> That leaves items 1–8 as the whole delete condition.
 
 > ~~**Do not delete `flush-2026-08-05.md` on the grounds that this file
 > exists.**~~ **Released 2026-08-10.** Items 7 and 8 are written:
@@ -15,9 +22,9 @@
 > longer the only other copy of that material and the single-copy state item
 > 10's `acoustic-analyze-v1.md` was rescued from no longer applies to it.
 >
-> **This file is still not deletable**, for the reason stated above rather
-> than this one: items 9 and 10 are `.agents/` changes under Markus's
-> ratification and this is their only lodging. Move them first.
+> **This file becomes deletable once items 7 and 8 land on `main`** — the last
+> two of the delete condition. Items 9 and 10 no longer hold it open; see the
+> note above.
 
 Written 2026-08-10 against the `ac-main` snapshot taken 2026-08-06. Its input
 is `flush-2026-08-05.md`, a context dump of material that existed only in
