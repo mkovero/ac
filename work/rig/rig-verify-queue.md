@@ -155,12 +155,19 @@ stimulus, deliberately. Same session shape, and `delay_attempts` now dates the
 attempts in both, so one run answers two questions that were previously
 separate trips.
 
-One thing to know before a session, not a block: **#254.** A `transfer_stream`
-over three or more distinct channels stalls silently under `--fake-audio` —
-`ok: true`, then no frames, indefinitely. `pairs=[[3,3],[0,3]]`, the
-converter-constant measurement, is two channels and is unaffected. Adding a
-second measurement position — `[[0,3],[1,3]]` — is three, and cannot be
-rehearsed off the rig until #254 lands.
+One thing to know before a session, not a block: **#254**, the three-channel
+stall. A `transfer_stream` over three or more distinct channels used to reply
+`ok: true` and then publish nothing, indefinitely, under `--fake-audio`.
+`pairs=[[3,3],[0,3]]`, the converter-constant measurement, is two channels and
+was never affected; a second measurement position — `[[0,3],[1,3]]` — is three.
+
+**A fix is in the tree** (`audio/fake.rs` returns one buffer per registered
+port; `handlers/transfer.rs` errors instead of warming up forever when capture
+returns fewer buffers than the session has channels), so three-channel sessions
+are rehearsable off the rig — build first and check `gh issue view 254` for
+where the issue itself stands rather than trusting this line. **Ring mode is
+not the way to rehearse it**: `fake_ring` still points every ref ring at one
+channel, which is #204.
 
 ---
 
