@@ -318,18 +318,35 @@ pub struct DelayEstimate {
     /// Median |ρ| over the **negative** lags only, where a causal path puts
     /// no signal at all — no direct arrival and no reflection, so only noise.
     ///
-    /// Diagnostic, and deliberately not used by any decision here. It exists
-    /// to settle an untested proposal from rig session 2: [`Self::prominence`]
-    /// divides by a median taken over *all* lags, and on a reverberant path
-    /// most lags hold reverberation, so the statistic is contaminated by the
-    /// thing it is meant to discriminate against. A negative-lag floor would
-    /// be uncontaminated, measured on the same data at the same moment, and
-    /// self-normalising against the ~10 dB room-floor drift a session
-    /// records across an evening.
+    /// Diagnostic, and deliberately not used by any decision here.
     ///
-    /// That is reasoning, not measurement. Publishing it costs one number per
-    /// lock attempt and lets the next rig session decide it offline, from
-    /// captures, instead of from another argument.
+    /// It was published to settle a proposal from rig session 2: that
+    /// [`Self::prominence`] divides by a median over *all* lags, most of which
+    /// hold reverberation on a real path, so an uncontaminated negative-lag
+    /// floor would separate valid locks from noise where the all-lag one does
+    /// not. **That proposal is closed, measured twice** —
+    /// `audit/rig-verify-125/gate-rules-offline.md` §2 (12 captures, ≤8%) and
+    /// `audit/rig-session-3/negative-lag-rule.md` (843 attempts, 3.5% against
+    /// ±17.5% per-attempt noise). Re-basing prominence on this field widens
+    /// nothing and admits three times as many near-wall wrong locks.
+    ///
+    /// **The contradiction sat in this file the whole time.** The comment
+    /// where `median` is actually computed — search for "Robust noise floor",
+    /// about 170 lines below — says the median is unmoved by the peak and by a
+    /// reverberant tail, *both of which occupy a small fraction of the lags*.
+    /// That is the direct refutation of the paragraph above it, it was written
+    /// first, and it is the one that measured true: a median over a 34 ms scan
+    /// is not moved by a room. The proposal was settleable by reading before it
+    /// was settleable by scoring. Do not raise it again.
+    ///
+    /// **What it is for now** is ring composition, not the room: a ring that
+    /// straddles the stimulus onset is mostly silence, so `median_value`
+    /// collapses while this holds. Observed `median_value / negative_lag_median`
+    /// = 0.364 there, against 0.720 as the lowest of 843 steady-state
+    /// attempts — and the inflated all-lag prominence that produced is the
+    /// only false-confidence lock either rig session recorded. Reading that
+    /// requires both floors on the same frame, which is why this is published
+    /// rather than dropped.
     ///
     /// `0.0` when the search range holds no negative lags.
     pub negative_lag_median: f64,
