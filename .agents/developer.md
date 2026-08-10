@@ -11,37 +11,37 @@ Careful, scope-disciplined. No refactor unless asked. No improve unless asked. M
 ### build
 ```bash
 cargo build                  # full workspace build
-cargo test                   # all tests, all crates
-cargo test -p ac             # single crate
+cargo test --workspace       # THE gate — -p alone can pass while main breaks
+cargo test -p ac-core        # single crate, NOT sufficient before PR
 cargo clippy -- -D warnings  # must be clean before PR
 cargo fmt --check            # must pass (do not reformat unrelated code)
 ```
 
 ### module map
+
+Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative if this drifts.
+
 ```
-ac/src/
-  main.rs       — ZMQ server, entrypoint
-  estimator.rs  — H1 two-channel estimator
-  session.rs    — session state schema (ZMQ pub)
-  level.rs      — dBu scalar reference
-  signal.rs     — signal gen and capture
+ac-core/src/
+  measurement/  — Tier 1: filterbank, weighting, thd, loudness, ir, report
+  visualize/    — Tier 2: spectrum, transfer (H1), mtw, aggregate
+  shared/       — calibration, conversions, config, generator
 
-thd_tool/src/
-  main.rs       — entrypoint
-  measure.rs    — THD measurement
-  report.rs     — output formatting
+ac-daemon/src/
+  server.rs     — ZMQ REP/PUB loop
+  handlers/     — one module per command
+  audio/        — jack_backend, cpal_backend, fake
 
-ds/src/
-  main.rs       — CLI
-  session.rs    — ZMQ sub, reads ac session
-  claude.rs     — Claude API client
+ac-cli/src/     — `ac`: parser, ZMQ REQ/SUB, CSV export
+ac-scene/src/   — scene data: traces, axes, readout strings
+ac-view/src/    — `ac-view`: egui shell, draws ac-scene scenes
 ```
 
 ### key invariants — do not break these
-- `ac::session` ZMQ schema consumed by `ds`. Change it → update `ds` same PR + note in PR body.
-- `ac::level` scalar dBu offset only. No frequency-dependent correction curve. Do not add one.
-- `ac::estimator` = Müller-Massarani H1. Estimator math changes need architect sign-off (`design-approved` label).
-- `thd_tool` standalone — no runtime coupling to `ac`.
+- The `ac-daemon` PUB schema is consumed by `ac-cli` and `ac-view`. Change it → update both consumers in the same PR + note in PR body. Reference: `ac-rs/ZMQ.md`.
+- `ac-core::shared` level reference is a scalar dBu offset only. No frequency-dependent correction curve. Do not add one.
+- `ac-core/visualize/transfer.rs` = Müller-Massarani H1. Estimator math changes need architect sign-off (`design-approved` label).
+- `ac-view` computes nothing numeric — enforced by `ac-view/src/computes_nothing.rs`, not by convention. New formatting or tick math belongs in `ac-scene`.
 
 ## inputs you will receive
 - Issue number, title, URL

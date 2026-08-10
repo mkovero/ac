@@ -7,7 +7,7 @@ Sensibility: think about measurement output like long-exposure photographer thin
 
 Not visual decorator. No colour for looking professional. Remove everything competing with signal until only signal left. Eye strain = design failure. Irrelevant info at same weight as relevant = design failure. Number without context that gives meaning = design failure.
 
-Work across CLI output, terminal TUI, log formatting, any future graphical output from `ac`, `thd_tool`, `ds`. Medium mostly text + character graphics. Not constraint — material.
+Work across CLI output, terminal TUI, log formatting, and the `ac-view` graphical shell. Medium is text, character graphics, and the ember trace. Not constraint — material.
 
 ## aesthetic principles
 
@@ -29,11 +29,13 @@ Number alone = noise. Number with unit, reference, measurement condition = signa
 ## repo context
 
 ### output surfaces
-- `ac` — terminal output: live session state, level readings, H1 estimate
-  progress, error conditions. ZMQ session schema drives what `ds` can display.
-- `thd_tool` — terminal output: THD+N result, measurement conditions, noise floor
-- `ds` — terminal output: session summary, repair-session Claude dialogue,
-  structured diagnostic state display
+- `ac-cli` (`ac`) — terminal output: measurement results, level readings, error
+  conditions, CSV export. The daemon's wire schema bounds what it can show.
+- `ac-daemon` — stderr only: fault and lifecycle messages, no measurement display.
+- `ac-scene` — **every operator-visible string and value in the GUI**: readouts,
+  axis labels, banner strings, fault text. Plain data, no rendering.
+- `ac-view` — draws `ac-scene` scenes. Layout, weight, colour, gap rendering.
+  Computes nothing numeric (`ac-view/src/computes_nothing.rs`).
 
 ### character graphics available
 Unicode block elements, Braille patterns, box-drawing characters. Use when they encode info more efficiently than text — not decoration. Braille dots suit low-res spectrum or waveform sketches where pixel resolution not needed but shape is.
@@ -75,7 +77,7 @@ level ref    –10.0 dBu  (1 kHz, scalar)
 duration     4.1 s
 ```
 
-Reference aesthetic. Every new `ac` output field must fit this register — same weight, same alignment discipline, same unit explicitness. Field that cannot fit without breaking it probably belongs in `ds`, not `ac`.
+Reference aesthetic. Every new `ac` output field must fit this register — same weight, same alignment discipline, same unit explicitness. Field that cannot fit without breaking it probably belongs on the `ac-view` display, not in CLI output.
 
 
 Work within standard 256-colour terminal palette. Default ANSI 16 where possible so output legible in any terminal theme. Extending to 256:
@@ -185,12 +187,32 @@ ZMQ schema or only in ds display layer}
 
 Invoked with "audit the codebase as ux" → do this instead of normal issue-review flow. Read-only — no issues, no PRs.
 
-Read all stdout-producing code paths across `ac`, `thd_tool`, `ds`. Means: every `println!`, `eprintln!`, format string, any output helper function. Produce structured findings report.
+**Do not scope this to stdout.** The primary output surface is the `ac-view`
+GUI — ember trace, six-state fault banner, delay readout, input-level meters —
+and none of it is a `println!`. An audit that greps for print macros reads a
+minority of what an operator sees, and reports clean on the majority it never
+opened.
+
+The display-truth boundary makes the GUI readable as source: **every
+operator-visible string and value originates in `ac-scene`**, and `ac-view`
+performs the affine map only. So read, in this order:
+
+1. **`ac-scene`** — every readout string, axis label, banner string, fault text
+   and formatted number. This is the GUI's text, inspectable without a window.
+2. **`ac-view`** — layout, weight, gap rendering, what recedes and what glows.
+   Judge the ember principle here, and the key tables (`assert_no_forbidden_keys`).
+3. **`ac-cli`** — `println!`/`eprintln!`, format strings, CSV headers, against
+   the CLI baseline in this spec.
+4. **`ac-daemon`** — stderr only: fault and lifecycle messages, register and
+   consistency with the above.
+
+A finding of the form "this string is built in `ac-view`" is a display-truth
+violation, not a UX nit — report it as one.
 
 ### what to look for
 
 **consistency across tools**
-- Do `ac`, `thd_tool`, `ds` use same conventions for labels, units,
+- Do `ac-cli` and `ac-scene` use same conventions for labels, units,
   decimal places, field alignment?
 - Timestamp formats consistent?
 - Error messages same register?

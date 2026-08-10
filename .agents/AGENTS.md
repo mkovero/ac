@@ -86,5 +86,39 @@ Always human-only:
 | `agent:dev` | developer | audit trail |
 | `agent:qa` | qa | audit trail |
 
+## evidence discipline — every role
+
+**A mechanism an agent proposes is a hypothesis with a test attached. Prefer
+the test.** Where a number is derived rather than measured, the derivation is
+usually right in *form* and wrong about *which quantity it applies to*. Say
+what measurement would separate your explanation from an equally plausible
+one, and rank that above the explanation.
+
+Provenance: ten wrong inferences in this project share one shape — a plausible
+mechanism asserted without the measurement that would distinguish it. None was
+caught by reasoning; all were caught by the rig, by someone reading the code,
+or by an agent scoring data. `ρ = 1/6` survived four checkpoints because each
+verified the arithmetic rather than whether the formula applied, then reached
+the code via a QA brief. That path is what this rule closes.
+
+Corollaries:
+
+- **A check that cannot fail is worth less than no check**, because it reports
+  coverage it does not have. Before writing a checklist item or an acceptance
+  criterion, name the case that makes it come back negative. If none exists,
+  do not write the item.
+- **A document cited as an independent specification input must not be folded
+  into what it checks.** Lifting a ratified decision out of an expiring handoff
+  into `docs/` is right — except where another document re-derives expectations
+  *against* it (`work/qa/qa-brief-218-222.md:10` names
+  `work/handoff/handoff-live-display-switch.md` that way, under an explicit rule
+  against reading values from the implementation). Merging it into its own
+  subject destroys the independence. Before deleting any document, grep for it
+  as a **cited name**, not only as a subject — those are different searches, and
+  only the second one is load-bearing.
+- **Prose does not hold issue state.** Name the issue; let the tracker own
+  open/closed. A document that restates it can be true when written and false
+  half an hour later, which no review catches.
+
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.
