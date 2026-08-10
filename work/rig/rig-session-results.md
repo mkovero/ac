@@ -308,8 +308,11 @@ artifact, not a finding.
   routed to any output in use.
 - **Clock source is `AutoSync`, not `Internal`.** No drift was observed —
   eight sessions over a minute agreed to one sample, which a free-running
-  converter would not do — but setting it to Internal would make that
-  airtight.
+  converter would not do. ~~Setting it to Internal would make that
+  airtight.~~ **It would not — Internal breaks the stimulus path** (session 2,
+  2026-08-03): the external master clocks the card over ADAT, and ADAT carries
+  `playback_5`. The clock stays `AutoSync` (`numid=320` = 0), which is what
+  this observation was made under. See `work/rig/rig-session-2-results.md:21`.
 - Mic level −30 dBFS peak against a reference at −14.5 dBFS. The mismatch is
   harmless: H1 and coherence are ratios — confirmed empirically by Run 7,
   where 20 dB of input gain moved stage 0 coherence by 0.006.

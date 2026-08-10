@@ -275,7 +275,14 @@ re-deriving it.
   before the ladder is used to tune a real system.
 - **#221** — snapshot parity. Real now that the live view runs the ladder.
 - **#219 Part B** — injection seam, mixed-stream requirement recorded.
-- **Set the interface clock to Internal** before the next rig session.
+- ~~**Set the interface clock to Internal** before the next rig session.~~
+  **Wrong — do not do this.** Session 2 (2026-08-03) established that the
+  external master clocks the card over ADAT, and ADAT carries `playback_5`,
+  the stimulus leg: setting the card to Internal makes it master and the
+  speaker path stops working. The clock stays `AutoSync` (`numid=320` = 0).
+  The no-drift evidence this instruction was meant to make airtight was
+  obtained under `AutoSync` and needs no change. See
+  `work/rig/rig-session-2-results.md:21`.
 - **`conn_tags` absent** from this daemon's frames. The follow-up that stood
   here — "confirm the field reads as *unknown* rather than healthy" — is not
   actionable against main as of 2026-08-03: `conn_tags` has zero occurrences

@@ -97,8 +97,14 @@ pub fn draw_view(
     // given. egui's item spacing is narrower than that, so the shell's
     // connection banner on the row above ended up struck through by the
     // `20` of the +20 dB tick. Taking the space here, before either view
-    // reads `available_rect_before_wrap`, keeps the whole of every view
-    // inside its own rect without the panes needing to know why.
+    // reads `available_rect_before_wrap`, keeps the top edge clear without
+    // the panes needing to know why.
+    //
+    // It reserves the top only. The frequency labels are drawn at
+    // `rect.max.y` with `Align2::CENTER_TOP`, so a full line still hangs
+    // below the rect; nothing is drawn under a view today, so it overlaps
+    // nothing. Anything stacked below one needs the same reserve at the
+    // bottom.
     let tick_line_h = ui
         .painter()
         .layout_no_wrap("0".to_string(), egui::FontId::default(), COLOR_LABEL)

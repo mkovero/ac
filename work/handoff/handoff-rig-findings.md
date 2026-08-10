@@ -248,8 +248,12 @@ Worth one repeat before anything is concluded: same position, same drive,
   drive-path check was unavailable all session. Per the field's own contract
   that must read as *unknown*, never as healthy. Confirm that is what happens.
 - **Clock source is `AutoSync`, not `Internal`.** No drift observed — eight
-  sessions agreed to one sample — but set it to Internal before the next
-  session to remove it from consideration.
+  sessions agreed to one sample. ~~Set it to Internal before the next session
+  to remove it from consideration.~~ **Do not — Internal breaks the stimulus
+  path** (session 2, 2026-08-03): the external master clocks the card over
+  ADAT, and ADAT carries `playback_5`. The clock stays `AutoSync`
+  (`numid=320` = 0), which is what the no-drift observation was made under.
+  See `work/rig/rig-session-2-results.md:21`.
 - **Stage 0's 0.755 is reverberation-limited, settled.** Flat to 0.006 across
   20 dB of gain (Run 7). Not a defect, and gain cannot improve it. Worth
   stating somewhere durable so it is not re-investigated.

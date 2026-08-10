@@ -36,8 +36,14 @@ green pipeline.
 
 ## Before the drive is armed
 
-- **Set the interface clock to `Internal`.** No drift was observed last time
-  (eight sessions to one sample) but it costs nothing to remove.
+- ~~**Set the interface clock to `Internal`.** No drift was observed last time
+  (eight sessions to one sample) but it costs nothing to remove.~~
+  **Wrong, and it cost part of this session — do not do this.** The external
+  master clocks the card over ADAT, and ADAT carries `playback_5`, the
+  stimulus leg; Internal makes the card master and the speaker path stops
+  working. The clock stays `AutoSync` (`numid=320` = 0). The no-drift evidence
+  was obtained under `AutoSync` and needs no change. Diagnosed in
+  `work/rig/rig-session-2-results.md:21`.
 - **Verify `install.sh` actually shipped the binaries.** Check timestamps, not
   build output. This silently failed once and the symptom was the old display
   with all its faults, which reads as "the fix didn't work."
