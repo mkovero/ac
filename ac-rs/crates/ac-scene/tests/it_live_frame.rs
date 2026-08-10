@@ -8,6 +8,25 @@
 //! verbatim bytes off a real `ac-daemon --fake-audio` session's ZMQ PUB
 //! socket, full cal stack loaded (voltage + SPL + mic curve) so every
 //! tag vocabulary branch is exercised, not just the "none" defaults.
+//!
+//! **This is the only test that joins the two halves, and that is the whole
+//! reason it exists.** `ac-daemon`'s `it_protocol.rs` asserts the daemon
+//! *emits* given fields; `wire.rs`'s unit tests and the other `ac-scene`
+//! tests assert `WireFrame` *parses* them — from hand-built JSON. Both halves
+//! can pass while the pair is broken: a field the daemon emits as
+//! `speed_of_sound_ms` and a hand-written fixture that misspells it the same
+//! way satisfies each side and fails only here.
+//!
+//! That property is only as good as the fixture is current. #271 found this
+//! one **eight wire fields out of date** — `mtw`, `delay_evidence`,
+//! `delay_locked`, `delay_attempts`, `drive`, `meas_peak_dbfs`,
+//! `ref_peak_dbfs`, `speed_of_sound_m_s` — so for a long stretch this file
+//! proved `WireFrame` could parse a frame from before the ladder existed, and
+//! every consumer stayed green because none of them was sensitive to those
+//! fields. The check that keeps it honest is
+//! `live_fixture_on_disk_has_the_shape_the_daemon_still_produces` in
+//! `ac-daemon/tests/it_scene_fixture.rs`; if it goes red, this file's claim is
+//! what is at stake.
 
 use ac_scene::{Scene, WireFrame};
 use std::path::PathBuf;

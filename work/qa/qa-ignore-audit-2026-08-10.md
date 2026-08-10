@@ -183,3 +183,27 @@ Three things are worth acting on eventually, in descending order of value:
 3. **Two stale justifications.** `it_stimulus_live`'s header (finding 4) is
    **corrected**; the fixture-regeneration entries sharing an attribute with
    real coverage is noted as out of scope in #271, being cosmetic.
+
+---
+
+## Addendum, 2026-08-10 — what #271's implementation turned up
+
+Finding 1 was filed as #271 and implemented the same day. Two things came out
+of it that the audit did not predict and that outlive it:
+
+- **The live fixture was eight wire fields stale**, so `ac-scene`'s
+  `it_live_frame.rs` — the only test joining "the daemon emits X" to
+  "`WireFrame` parses X" — had been asserting against a frame from before the
+  `mtw` ladder existed. Every consumer was green before and after the
+  regeneration, which is the point: nothing was sensitive to those fields, so
+  the check had silently narrowed rather than broken.
+- **A residual gap remains, narrower than the original.** `speed_of_sound_m_s`
+  and `delay_evidence` still have **no assertion on their values from a live
+  daemon** anywhere in the suite. The shape check now guarantees they are
+  present and typed, and the join guarantees `WireFrame` accepts them, but
+  nothing says the numbers are sane end-to-end. `delay_evidence` is the one
+  that matters — the gate scoring that closed rig block 2 ran entirely on
+  committed captures, never on the wire. Not filed: it is a narrow gap with no
+  known failure mode, and filing it without one would be a checklist item that
+  cannot come back negative.
+

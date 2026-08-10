@@ -12,7 +12,7 @@ cargo build --release             # optimized
 cargo test --workspace            # ~900 tests, 14 #[ignore]'d
 ```
 
-Count = order of magnitude, not check target. Measured 899 passed / 14 ignored on 2026-08-06 (`main`, first commit where `cargo test --workspace` compiled again — see note below). Need number? Run command. Don't cite this line.
+Count = order of magnitude, not check target. Measured 908 passed / 14 ignored on 2026-08-10 (`main` at `06e8ccc`). Need number? Run command. Don't cite this line — and don't read it through a pipe, see TESTING.md.
 
 **`cargo test -p <crate>` not enough before merge.** Two branches merge clean, still break build together: `it_banner_clearance.rs` (#252) did not compile against `TransferInput` fields added by #243 branch, both landed on `main`. No CI here — `--workspace` is check.
 
