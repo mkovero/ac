@@ -179,7 +179,7 @@ Detail is in `work/rig/rig-verify-queue.md`; this is the scheduling shape only.
 | 3c — `install.sh` under a running daemon | **no** | file copy question |
 | post-lock `CHECK ROUTING` | yes, **where it is** | no position change |
 | cable change (#243) + #251 | yes — **move to 1 m on axis** | |
-| Run D — #208's positive control | yes | competes for time, legitimately |
+| Run D — #208's control, **and block 1's** | yes | competes for time — now for two answers |
 
 **3a and 3c compete with nothing.** They need no microphone and no position
 change, which is why cutting them for time is a category error — that
@@ -188,6 +188,14 @@ emission path, per-run consent and the `cda40ef` A/B, so dropping it is a real
 trade. It has now survived two sessions unrun; a third cut should be recorded
 as a decision to close #208's verification unproven rather than deferred
 again.
+
+**Run D's side of that trade got more expensive to skip** (2026-08-10). It is
+the only planned run producing a legitimately gated ring, so it is the control
+for block 1's onset guard as well as #208's — the case where `R = median_value
+/ negative_lag_median` must *not* collapse. Both answers come off one setup at
+no extra rig time, and an inconclusive #208 episode count does not take the
+floors down with it. Weigh it as two answers competing for the session, not
+one.
 
 **The mic was left at the near-wall position** after session 3 — 2.4 m from A,
 28 cm off the wall, off axis. Anything assuming 1 m on axis moves it first.

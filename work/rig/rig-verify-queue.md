@@ -13,9 +13,12 @@ produces a surprise can be told apart from a run that produces a failure.
 
 ## Still to run
 
-**Run D — #208's positive control.** 50 ms gated burst against `cda40ef`.
-Dropped for time in session 2, dropped again in session 3; the gap is
-unchanged. Independent of everything else here. Full statement in block 4.
+**Run D — #208's positive control, and now block 1's control too.** 50 ms gated
+burst against `cda40ef`. Dropped for time in session 2, dropped again in
+session 3; the gap is unchanged. **It is no longer independent** — it is the
+only planned run producing a legitimately gated ring, which is the case the
+dropped onset guard must not suppress, so it carries per-frame
+`median_value` / `negative_lag_median` as well. Full statement in block 4.
 
 Two things session 3 raised that no block here covers yet:
 
@@ -127,13 +130,17 @@ Two things session 3 raised that no block here covers yet:
   is a file copy over a running daemon and happens during the install every
   session already begins with.
 
-**The distinction that keeps these two off the cut list.** Run D has been
-dropped twice for being independent of everything else, and it *is* the right
-thing to cut when time runs short: it needs the emission path, drive-level
-consent, and an A/B against `cda40ef`, so it genuinely competes with the
-acoustic blocks for the session. Snapshot regeneration and the `install.sh`
-question compete with nothing. Cutting them for time is a category error —
-there is no acoustic measurement they are taking time away from.
+**The distinction that keeps these two off the cut list.** Run D still competes
+for session time — it needs the emission path, drive-level consent, and an A/B
+against `cda40ef` — so it is a real trade in a way the two blocks above are
+not. Snapshot regeneration and the `install.sh` question compete with nothing;
+cutting them for time is a category error, because there is no acoustic
+measurement they are taking time away from.
+
+**What has changed is the price of Run D's side of that trade.** It was cut
+twice as the self-contained block, and it is not self-contained any more: block
+1 needs a legitimately gated ring to score the onset guard, and this is the only
+run that produces one. Weigh it as two answers competing for the time, not one.
 
 **Rides along with block 1, does not justify a trip:** what actually produced
 session 2's `LOCK ACQUIRED`. The capture bounds it but cannot identify it —
@@ -365,11 +372,15 @@ build.
 > **Not run.** Dropped for time in session 2 and again in session 3. This is
 > the one block here that is still work.
 
-50 ms gated burst against `cda40ef`. Independent of everything above, so it is
-the first thing to cut if the session runs short — which is how it has now
-survived two sessions unrun. If it is cut a third time, that is a decision to
-close #208's verification unproven, and it should be recorded as one rather
-than deferred again.
+50 ms gated burst against `cda40ef`. **It is no longer independent of the rest
+of this queue, and that changes what cutting it costs.** It was cut twice for
+being self-contained, and that reasoning was right at the time. Block 1 now
+makes it the control for the onset guard as well as #208's positive control,
+because it is the **only planned run that produces a legitimately gated ring** —
+the case the guard must not suppress. Cutting it now drops two answers.
+
+If it is cut a third time, that is a decision to close #208's verification
+unproven, and it should be recorded as one rather than deferred again.
 
 **The trap in this run, recorded before it is set up.** Feeding the digital
 loopback to *both* legs makes H1 ≡ 1 with a flat magnitude, so the check
@@ -388,6 +399,16 @@ is the control for block 1's onset capture — the case where `R` must *not*
 collapse. Same capture, no extra rig time, and it is the difference between
 being able to score the guard's shape and arguing about it for a fourth
 session. Do not record counters here.
+
+**Those floors survive an inconclusive #208 result.** The level-step A/B can
+come back unreadable — a transient that does not excite the symptom on either
+build is exactly what session 3's control did, and it is a real possibility
+again. That outcome says nothing about the guard: `R` on a gated ring is a
+different measurement on the same capture, and it is still answered. **Do not
+discard the run's per-frame floors along with an inconclusive episode count**,
+and do not let the risk of an inconclusive A/B argue for cutting the run —
+those are now two questions riding one setup, and only one of them can come
+back empty.
 
 ---
 
