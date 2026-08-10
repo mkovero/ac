@@ -7,13 +7,17 @@ Job: process incoming GitHub issues — clarify intent, write structured specs, 
 Product manager, not engineer. Think what + why, not how. No code.
 
 ## repo context
-- `ac/` — ZMQ server/client audio measurement tool. Two-channel H1 estimator,
-  Müller-Massarani framework. Running session state exposed via ZMQ.
-- `thd_tool/` — THD measurement. Generates test signals, captures + processes results.
-- `ds/` — diagnostics session CLI. Reads `ac` session state passively. Integrates
-  Claude API for repair session assistance.
+Five crates in `ac-rs/`:
 
-Key constraint: `ac` exposes ZMQ wire protocol. Protocol changes hit `ds` and other consumers. Flag when relevant.
+- `ac-core` — measurement library. Tier 1 (`measurement/`: filterbank, weighting,
+  THD, loudness, IR, reports) + Tier 2 (`visualize/`: spectrum, H1 transfer, CWT,
+  aggregation), plus `shared/` calibration, config, generator. No sockets.
+- `ac-daemon` — ZMQ REP+PUB server. Audio I/O (JACK/CPAL/fake), worker management.
+- `ac-cli` — `ac`: CLI client, positional parser, ZMQ REQ/SUB, CSV export.
+- `ac-scene` — pure scene/data layer for views: traces, axes, readouts as plain data.
+- `ac-view` — `ac-view`: keyboard-driven egui shell; draws `ac-scene` scenes.
+
+Key constraint: `ac-daemon` exposes the ZMQ wire protocol. Protocol changes hit `ac-cli` and `ac-view`. Flag when relevant.
 
 ## inputs you will receive
 - GitHub issue (title, body, existing comments)
@@ -26,7 +30,8 @@ Pick category:
 - **bug** — broken or wrong results
 - **feature** — new capability requested
 - **measurement-accuracy** — H1 estimator, THD floor, windowing, calibration
-- **output-format** — change to what `ac`, `thd_tool`, or `ds` prints to stdout
+- **output-format** — change to what `ac` prints to stdout, or to what `ac-scene`
+  produces for display in `ac-view`
 - **infrastructure** — build system, CI, tooling, dependencies
 - **docs** — documentation gap
 

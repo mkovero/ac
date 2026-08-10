@@ -9,10 +9,10 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 ## repo context
 
 ### what correctness means in this codebase
-- `ac` implement two-channel H1 estimator (Müller-Massarani). Transfer function estimates must be numerically stable + unbiased given windowing assumptions.
-- `thd_tool` produce THD figures. Results in expected dynamic range for device under test. Gross outliers (e.g. THD > 10% for known-good amp) mean measurement error in code.
-- `ds` is CLI consumer of `ac` session state. Correctness = correct ZMQ message parsing, correct session data display, correct Claude API usage.
-- Level reference in `ac` is scalar dBu offset. Any change making it frequency-dependent = regression.
+- `ac-core/visualize/transfer.rs` implement two-channel H1 estimator (Müller-Massarani). Transfer function estimates must be numerically stable + unbiased given windowing assumptions.
+- `ac-core/measurement/thd.rs` produce THD figures. Results in expected dynamic range for device under test. Gross outliers (e.g. THD > 10% for known-good amp) mean measurement error in code.
+- `ac-cli` and `ac-view` are consumers of the `ac-daemon` wire schema. Correctness = correct frame parsing, correct display of what the frame carries.
+- Level reference in `ac-core/shared` is scalar dBu offset. Any change making it frequency-dependent = regression.
 
 ### build and test
 ```bash
@@ -51,11 +51,11 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 |---|---|---|
 | Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
 | Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
-| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac/src/estimator.rs` |
+| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac-core/visualize/transfer.rs` |
 
 ### how to use them during review
 
-**AES-17** = primary normative reference for `thd_tool`. Read relevant clause — no paraphrase. Check:
+**AES-17** = primary normative reference for `ac-core/measurement/thd.rs`. Read relevant clause — no paraphrase. Check:
 - THD+N residual computed after fundamental removal, not as ratio to total RMS
 - Measurement bandwidth explicitly stated or match standard default
 - Notch filter attenuation at fundamental sufficient before residual capture
@@ -63,7 +63,7 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 
 **AES-17-2020** supersede 2015 for any digital signal path. PR touch digital I/O, sampling, or dithering → use 2020 doc.
 
-**IEC 60268-3** govern frequency response + S/N display in `ac`. Check:
+**IEC 60268-3** govern frequency response + S/N display in `ac-cli`. Check:
 - Frequency response referenced to 1 kHz level unless otherwise stated (§12)
 - S/N expressed as dB relative to rated output, weighting stated (§14)
 - Measurement conditions (source impedance, load impedance) present in output if logged
@@ -116,7 +116,7 @@ Each one: addressed by diff? Note gaps.
 Check:
 - **correctness** — implementation do what spec says?
 - **numerical correctness** — estimator/measurement code: window sizes, normalization factors, array indices correct?
-- **ZMQ schema** — session.rs in `ac` changed → does `ds/src/session.rs` match?
+- **wire schema** — `ac-daemon`'s published frame changed → do `ac-cli` and `ac-view` match? (`ac-rs/ZMQ.md`)
 - **error handling** — Results propagated, not silently unwrapped?
 - **test coverage** — new code paths exercised by tests?
 - **scope discipline** — dev touch files outside spec? Yes → flag.
@@ -190,9 +190,9 @@ Each module, list:
 - Tests asserting too weakly (runs without panic vs. asserts value)
 
 Watch close:
-- Numerical results from `ac::estimator` and `thd_tool::measure` — assertions tight enough to catch wrong normalization factor?
+- Numerical results from `ac-core/visualize/transfer.rs` and `ac-core/measurement/thd.rs` — assertions tight enough to catch wrong normalization factor?
 - Error paths — hardware fault conditions tested at all?
-- ZMQ session schema — test that `ds` correctly parse what `ac` publish?
+- Wire schema — test that `ac-cli` and `ac-view` correctly parse what `ac-daemon` publish?
 
 ### standards conformance scan
 Each output value in `ac`, `thd_tool`, `ds` — check against applicable standard from `stddocs/` (use standards table in this spec). Flag any value that is:
@@ -209,17 +209,17 @@ Uncertain → not definite violation. Use `? — needs verification` for anythin
 ### test coverage map
 | module | what is tested | what is missing | weak assertions |
 |---|---|---|---|
-| ac::estimator | ... | ... | ... |
-| ac::session | | | |
-| thd_tool::measure | | | |
-| thd_tool::report | | | |
-| ds::session | | | |
-| ds::claude | | | |
+| ac-core/visualize/transfer.rs | ... | ... | ... |
+| ac-core/measurement/thd.rs | | | |
+| ac-core/measurement/loudness.rs | | | |
+| ac-daemon/handlers | | | |
+| ac-scene | | | |
+| ac-view | | | |
 
 ### standards conformance
-| output value | tool | standard | clause | status | notes |
+| output value | module | standard | clause | status | notes |
 |---|---|---|---|---|---|
-| THD+N % | thd_tool | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
+| THD+N % | ac-core/measurement/thd.rs | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
 
 ### critical gaps
 {Test coverage or standards issues that could cause a measurement to be

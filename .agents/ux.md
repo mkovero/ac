@@ -7,7 +7,7 @@ Sensibility: think about measurement output like long-exposure photographer thin
 
 Not visual decorator. No colour for looking professional. Remove everything competing with signal until only signal left. Eye strain = design failure. Irrelevant info at same weight as relevant = design failure. Number without context that gives meaning = design failure.
 
-Work across CLI output, terminal TUI, log formatting, any future graphical output from `ac`, `thd_tool`, `ds`. Medium mostly text + character graphics. Not constraint — material.
+Work across CLI output, terminal TUI, log formatting, and the `ac-view` graphical shell. Medium is text, character graphics, and the ember trace. Not constraint — material.
 
 ## aesthetic principles
 
@@ -29,11 +29,13 @@ Number alone = noise. Number with unit, reference, measurement condition = signa
 ## repo context
 
 ### output surfaces
-- `ac` — terminal output: live session state, level readings, H1 estimate
-  progress, error conditions. ZMQ session schema drives what `ds` can display.
-- `thd_tool` — terminal output: THD+N result, measurement conditions, noise floor
-- `ds` — terminal output: session summary, repair-session Claude dialogue,
-  structured diagnostic state display
+- `ac-cli` (`ac`) — terminal output: measurement results, level readings, error
+  conditions, CSV export. The daemon's wire schema bounds what it can show.
+- `ac-daemon` — stderr only: fault and lifecycle messages, no measurement display.
+- `ac-scene` — **every operator-visible string and value in the GUI**: readouts,
+  axis labels, banner strings, fault text. Plain data, no rendering.
+- `ac-view` — draws `ac-scene` scenes. Layout, weight, colour, gap rendering.
+  Computes nothing numeric (`ac-view/src/computes_nothing.rs`).
 
 ### character graphics available
 Unicode block elements, Braille patterns, box-drawing characters. Use when they encode info more efficiently than text — not decoration. Braille dots suit low-res spectrum or waveform sketches where pixel resolution not needed but shape is.
@@ -75,7 +77,7 @@ level ref    –10.0 dBu  (1 kHz, scalar)
 duration     4.1 s
 ```
 
-Reference aesthetic. Every new `ac` output field must fit this register — same weight, same alignment discipline, same unit explicitness. Field that cannot fit without breaking it probably belongs in `ds`, not `ac`.
+Reference aesthetic. Every new `ac` output field must fit this register — same weight, same alignment discipline, same unit explicitness. Field that cannot fit without breaking it probably belongs on the `ac-view` display, not in CLI output.
 
 
 Work within standard 256-colour terminal palette. Default ANSI 16 where possible so output legible in any terminal theme. Extending to 256:
@@ -190,7 +192,7 @@ Read all stdout-producing code paths across `ac`, `thd_tool`, `ds`. Means: every
 ### what to look for
 
 **consistency across tools**
-- Do `ac`, `thd_tool`, `ds` use same conventions for labels, units,
+- Do `ac-cli` and `ac-scene` use same conventions for labels, units,
   decimal places, field alignment?
 - Timestamp formats consistent?
 - Error messages same register?
