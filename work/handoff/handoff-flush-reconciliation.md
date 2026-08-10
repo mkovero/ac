@@ -486,8 +486,23 @@ either.
 How close it came is the point. **Both files were untracked.** In a clone, a
 tracked QA brief cited an authority that did not exist, and the authority
 cited nothing back — #230's failure mode with the roles reversed, and about
-two hours from being deleted rather than committed. Before deleting any
-document, grep for it as a *cited* name, not only as a subject.
+two hours from being deleted rather than committed.
+
+**Operational form: before deleting a document, grep for it as a *cited name*,
+not only as a subject.** Those are different searches — "does anything discuss
+this material" versus "does anything *depend on* this file" — and only the
+second one is load-bearing. The two files sorted on 2026-08-10 are the worked
+example, and they came out opposite ways:
+
+| file | subject search | cited-name search | disposition |
+|---|---|---|---|
+| `work/planning/plan-field-ux.md` | every decision found downstream (`handoff-field-transfer.md:18,37,41,42,302`; `ac-scene/src/transfer.rs:18,41`) | nothing names it | **deleted, correctly** |
+| `work/handoff/handoff-live-display-switch.md` | **nothing** — it is about a display switch and no other document covers that | `work/qa/qa-brief-218-222.md:10` names it as a specification input | **kept** |
+
+The second row is the one that matters: a subject-only search would have
+returned nothing for it too, and the file would have been deleted for looking
+orphaned when it was in fact depended upon. It survived only because something
+named it.
 
 ---
 
