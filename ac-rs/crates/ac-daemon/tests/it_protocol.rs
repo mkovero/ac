@@ -3254,3 +3254,224 @@ fn warmup_leaves_every_capture_ring_at_the_same_phase() {
         &skewed[..skewed.len().min(5)]
     );
 }
+
+/// #254 — a `transfer_stream` over three or more **distinct** capture channels
+/// replies `ok: true` and then publishes nothing, forever.
+///
+/// **This test is differential on purpose, and that is the whole design.** The
+/// obvious shape — request three channels, wait, assert a frame arrived — is
+/// the shape that cannot tell the defect from a slow machine, and this project
+/// has shipped that mistake before: `FakeEngine` inherited the trait's empty
+/// `last_drain_occupancy`, so the one mode built to reproduce ring defects
+/// reported `occ=[]` and the ring test passed against the unfixed daemon
+/// (`ring_drain_keeps_meas_and_ref_in_lockstep` above, and the comment at
+/// `handlers/transfer.rs`'s drain arm). A timeout is not an observation.
+///
+/// So a **two-channel control session runs first, on the same daemon, in the
+/// same process, against the same clock**, and its time-to-first-frame sets
+/// the budget for the three-channel session. That cancels machine speed: if
+/// the control produces a frame and the three-channel session produces neither
+/// a frame nor an error in several times that budget, the difference is the
+/// session shape and nothing else.
+///
+/// Three outcomes, all of them stated rather than inferred:
+///
+/// - control silent → **fails as inconclusive**, naming itself as unable to
+///   judge #254. It must never pass by both sessions being silent.
+/// - three channels silent while the control spoke → **fails as #254**, which
+///   is the state of `main` today.
+/// - three channels publish both pairs, or the launch is refused with a named
+///   error → **passes**. Both are acceptable fixes; direction 1 in the issue
+///   is the refusal, direction 2 is the fake modelling N channels. A refusal
+///   that names the mismatch is a recoverable client error. Silence is not.
+#[test]
+fn three_distinct_channels_publish_or_refuse_but_never_stall() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // --- control: two distinct channels, the shape that works today ---------
+    let started = Instant::now();
+    let r = c.call(json!({
+        "cmd":        "transfer_stream",
+        "pairs":      [[0, 1]],
+        "drive":      true,
+        "level_dbfs": -12.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "control session refused: {r:?}");
+
+    let mut control_first: Option<Duration> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                control_first = Some(started.elapsed());
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+
+    let control_first = control_first.expect(
+        "INCONCLUSIVE, not a #254 failure: the two-channel control session \
+         published no transfer_stream frame in 15 s. This test cannot say \
+         anything about three-channel behaviour until the two-channel path \
+         works here — fix the control first.",
+    );
+
+    // Budget generously against the control, so the verdict is about session
+    // shape rather than about how loaded this machine is. Six ticks' worth of
+    // slack, floored at 5 s for a fast control and capped so a pathologically
+    // slow control cannot hang the suite.
+    let budget = (control_first * 6).clamp(Duration::from_secs(5), Duration::from_secs(30));
+
+    // --- the case: three distinct channels, {0, 1, 3} -----------------------
+    // `[[3,3],[0,3]]` — the converter-constant shape rig session 3 ran — is
+    // two distinct channels and is unaffected. `[[0,3],[1,3]]` is a second
+    // measurement position against the same reference, which the rig has
+    // already produced results from (`rig-session-results.md`, Run 5), and it
+    // is three.
+    let d2 = Daemon::spawn();
+    let c2 = Client::new(&d2);
+    let r2 = c2.call(json!({
+        "cmd":        "transfer_stream",
+        "pairs":      [[0, 3], [1, 3]],
+        "drive":      true,
+        "level_dbfs": -12.0,
+    }));
+
+    // A refusal at launch is a pass: it is the recoverable outcome direction 1
+    // asks for. Anything else must go on to publish.
+    if r2["ok"] != json!(true) {
+        let msg = r2["error"].as_str().unwrap_or_default().to_string()
+            + r2["message"].as_str().unwrap_or_default();
+        assert!(
+            !msg.trim().is_empty(),
+            "three-channel launch was refused without a message: {r2:?}"
+        );
+        return;
+    }
+
+    let mut meas_seen: Vec<u64> = Vec::new();
+    let mut error_msg: Option<String> = None;
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c2.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "error" => {
+                error_msg = Some(v.to_string());
+                break;
+            }
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                if let Some(ch) = v["meas_channel"].as_u64() {
+                    if !meas_seen.contains(&ch) {
+                        meas_seen.push(ch);
+                    }
+                }
+                if meas_seen.len() >= 2 {
+                    break;
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c2.call(json!({"cmd": "stop"}));
+
+    if error_msg.is_some() {
+        return; // loud refusal mid-session: recoverable, and visible.
+    }
+
+    meas_seen.sort_unstable();
+    assert!(
+        !meas_seen.is_empty(),
+        "#254: `pairs=[[0,3],[1,3]]` (three distinct channels) replied ok:true \
+         and then published no transfer_stream frame and no error in {:?}, \
+         while the two-channel control on this same machine published its \
+         first frame in {:?}. The session shape is the only difference. \
+         `capture_multi` returns two buffers regardless of the session's \
+         channel count (audio/fake.rs), ring 2 never reaches `nperseg`, and \
+         the warmup gate in handlers/transfer.rs `continue`s forever.",
+        budget,
+        control_first,
+    );
+    assert_eq!(
+        meas_seen.len(),
+        2,
+        "#254: only measurement channel(s) {meas_seen:?} published; both 0 and \
+         1 must appear. A session that publishes one pair of a two-pair request \
+         and silently drops the other is the same defect one pair further in.",
+    );
+}
+
+/// #254, the half that converts rig work into desk work: `--fake-audio` must
+/// actually *run* a three-channel session, not merely refuse it loudly.
+///
+/// The test above accepts a named refusal as a pass, because for a backend
+/// that genuinely cannot capture N channels a refusal is the right answer.
+/// That is deliberately too weak here: a regression that returned the fake to
+/// two buffers would trip the handler guard, produce a clean error, and leave
+/// that test green. This one takes no error for an answer.
+///
+/// `pairs=[[0,3],[1,3]]` is a second measurement position against a shared
+/// reference — the shape `rig-session-results.md` Run 5 already produced
+/// results from on hardware, and the shape nothing desk-side could rehearse
+/// while this bug stood.
+#[test]
+fn three_distinct_channels_publish_both_pairs_on_fake_audio() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":        "transfer_stream",
+        "pairs":      [[0, 3], [1, 3]],
+        "drive":      true,
+        "level_dbfs": -12.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "unexpected REP: {r:?}");
+
+    let mut meas_seen: Vec<u64> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && meas_seen.len() < 2 {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "error" => errors.push(v.to_string()),
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                let meas = v["meas_channel"]
+                    .as_u64()
+                    .expect("frame without meas_channel");
+                let refch = v["ref_channel"]
+                    .as_u64()
+                    .expect("frame without ref_channel");
+                assert_eq!(refch, 3, "both pairs reference channel 3: {v}");
+                if !meas_seen.contains(&meas) {
+                    meas_seen.push(meas);
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    meas_seen.sort_unstable();
+    assert!(
+        errors.is_empty(),
+        "the fake backend must run three channels, not refuse them: {errors:?}"
+    );
+    assert_eq!(
+        meas_seen,
+        vec![0, 1],
+        "expected a frame for each measurement channel against the shared \
+         reference; saw {meas_seen:?}"
+    );
+}

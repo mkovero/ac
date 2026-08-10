@@ -697,6 +697,38 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 break;
             }
 
+            // #254: fewer buffers than the session has capture channels is
+            // unrecoverable, and it used to be handled by silence. The rings
+            // beyond what the backend returned never reach `nperseg`, so the
+            // warmup gate below `continue`s for the life of the session: the
+            // reply was already `ok: true`, nothing publishes, nothing errors,
+            // and the client cannot tell this from a slow start.
+            //
+            // Erroring here rather than at launch covers every backend,
+            // including ones not written yet, and covers a backend that
+            // changes its mind mid-session — the count is only knowable from
+            // what capture actually returned.
+            if bufs.len() < rings.len() {
+                send_pub(
+                    &pub_tx,
+                    "error",
+                    &json!({
+                        "cmd": "transfer_stream",
+                        "message": format!(
+                            "capture returned {} channel buffer(s) for a session over {} \
+                             capture channel(s) {:?}; no frames can be produced. Check the \
+                             backend's multi-channel capture support, the `pairs` list, and \
+                             the port names each channel resolved to: {:?}",
+                            bufs.len(),
+                            rings.len(),
+                            unique_chans,
+                            unique_ports,
+                        ),
+                    }),
+                );
+                break;
+            }
+
             // #208 D1: samples popped per tick against wall clock. Logged
             // before any of this tick's processing so the interval it reports
             // is the loop's own period, not a partial one. `bufs[0]` is the

@@ -99,15 +99,30 @@ Two things worth carrying out of it, both in section 5's failure class:
   requirement: **per-frame floors, not counters** — which is what `run4` got
   wrong, and why it could not be re-scored.
 
-### 3.2 #254 — the three-channel stall
+### ~~3.2 #254 — the three-channel stall~~ — **fix written 2026-08-10**
 
-`blocker`. A `transfer_stream` over three or more distinct channels reports
-`ok: true` and then publishes no frames, indefinitely, under `--fake-audio`.
+`blocker`. A `transfer_stream` over three or more distinct channels reported
+`ok: true` and then published no frames, indefinitely, under `--fake-audio`.
+`[[3,3],[0,3]]` (the converter-constant measurement) is two channels and was
+unaffected; a second measurement position — `[[0,3],[1,3]]` — is three, and
+that is the shape rig session 3 would have wanted.
 
-It compounds: while it stands, nothing three-channel can be rehearsed off the
-rig. `[[3,3],[0,3]]` (the converter-constant measurement) is two channels and
-unaffected, but adding a second measurement position — `[[0,3],[1,3]]` — is
-three. Landing it converts a class of rig work into desk work.
+Two layers, because they answer different questions:
+
+- **`handlers/transfer.rs` errors** when capture returns fewer buffers than the
+  session has channels, instead of skipping the warmup gate forever. Backend-
+  independent, so it covers backends nobody has written; it names what to
+  check without asserting which part is wrong.
+- **`audio/fake.rs` returns one buffer per registered port**, with per-port
+  correlated read positions so a second measurement channel does not inherit a
+  delay that is an artefact of call order. This is the layer that converts rig
+  work into desk work; the guard alone only makes the failure visible.
+
+**Ring mode is still one ref channel for every ref ring** (#204), so `fake_ring`
+is not a way to rehearse a multi-channel session. Named in `ring_ports`.
+
+Check `gh issue view 254` for issue state — this line records what the tree
+does, not what the tracker says.
 
 ### 3.3 #261 — the `monitor.rs` parity case
 
@@ -232,5 +247,11 @@ makes the spec under-describe rather than mis-describe.
 ~~**Block 2.**~~ Done 2026-08-10 — see 3.1. It was the only item where waiting
 cost a session, and it now costs none.
 
-**Next: #254**, the three-channel stall. It is the item that converts rig work
-into desk work, and everything below it in section 3 is bounded and can wait.
+~~**Next: #254**~~ — fix written the same day, see 3.2. It was the item that
+converts rig work into desk work.
+
+**Next: #261**, the `monitor.rs` parity case (3.3). Bounded,
+`ready-to-implement`, with a model test to copy — and its criterion 3 is the
+same discipline #254's fix was built on: compose the layers, watch the test go
+red, then revert. Items 7 and 8 (3.4) are writing rather than code and can run
+in parallel with it.

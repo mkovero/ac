@@ -167,7 +167,19 @@ pub struct FakeEngine {
     xruns: u32,
     output_ports: Vec<String>,
     input_port: Option<String>,
-    ref_port: Option<String>,
+    /// Every port registered through `add_ref_input`, in registration order,
+    /// deduplicated. `capture_multi` returns one buffer per entry after the
+    /// measurement buffer, which is what the handler's `rings` expects:
+    /// `unique_ports[0]` is the measurement channel and `unique_ports[1..]`
+    /// arrive here in the same order.
+    ///
+    /// It was a single `Option<String>`, last-write-wins, which is #254: a
+    /// session over three distinct channels registered two ref inputs, kept
+    /// only the second, and still captured two buffers — so the third ring
+    /// never filled and the session warmed up forever. The **first** entry is
+    /// the reference leg proper ([`Self::ref_port`]); with two channels there
+    /// is exactly one entry and every path below is unchanged.
+    ref_ports: Vec<String>,
     /// Per-channel-offset LCG state for `Stimulus::Noise`, keyed on the
     /// offset's bit pattern (one entry per distinct channel). Persisted
     /// across `capture_block`/`capture_stereo` calls so a soak driving the
@@ -191,7 +203,16 @@ pub struct FakeEngine {
     /// what makes "ref now" and "meas now, sourced from `now - delay`"
     /// consistent.
     correlated_ref_pos: u64,
-    correlated_meas_pos: u64,
+    /// Read position per **measurement** port, not one shared meas cursor.
+    ///
+    /// With a single measurement channel the two are identical. With two
+    /// (`pairs=[[0,3],[1,3]]`, the second measurement position) a shared
+    /// cursor advances twice per tick — once per channel — so each channel
+    /// would read a different window of the source and the second one would
+    /// carry a delay that is an artefact of call order rather than of
+    /// `delay_samples`. Keyed by port name so every measurement channel
+    /// tracks the ref independently.
+    correlated_meas_pos: HashMap<String, u64>,
     /// `Some` only when the caller opted into ring-backed capture. `None` —
     /// the default — leaves every capture path byte-identical to before.
     ring: Option<FakeRings>,
@@ -205,10 +226,10 @@ impl FakeEngine {
             xruns: 0,
             output_ports: Vec::new(),
             input_port: None,
-            ref_port: None,
+            ref_ports: Vec::new(),
             noise_state: HashMap::new(),
             correlated_ref_pos: 0,
-            correlated_meas_pos: 0,
+            correlated_meas_pos: HashMap::new(),
             ring: None,
         }
     }
@@ -244,16 +265,22 @@ impl FakeEngine {
     }
 
     /// Port names for the ring-mode channels, measurement first then refs, in
-    /// the order `capture_multi` returns them. The fake models a single
-    /// `ref_port`, so every ref ring reads the same channel — enough for the
-    /// contiguity question, which is per-channel and not about routing (that
-    /// blind spot is #204).
+    /// the order `capture_multi` returns them.
+    ///
+    /// **Ring mode still reads one channel for every ref ring** — the first
+    /// registered ref — which is enough for the contiguity question, since
+    /// that is per-channel and not about routing. The off-ring path no longer
+    /// works this way (#254: one buffer per registered port), so the two
+    /// differ, and **ring mode is not a way to rehearse a multi-channel
+    /// session**: it models N refs on one channel, while the case that
+    /// mattered is two distinct *measurement* channels sharing a reference.
+    /// That remaining blind spot is #204.
     fn ring_ports(&self) -> Vec<Option<String>> {
         let n_refs = self.ring.as_ref().map(|r| r.ref_prods.len()).unwrap_or(0);
         let mut ports = Vec::with_capacity(1 + n_refs);
         ports.push(self.input_port.clone());
         for _ in 0..n_refs {
-            ports.push(self.ref_port.clone());
+            ports.push(self.ref_port().map(str::to_string));
         }
         ports
     }
@@ -439,6 +466,13 @@ impl FakeEngine {
         self.make_samples_from(port, duration, 0)
     }
 
+    /// The reference leg proper: the **first** port registered through
+    /// `add_ref_input`. See [`Self::ref_ports`] for why first rather than
+    /// last, and why the distinction only arises above two channels.
+    fn ref_port(&self) -> Option<&str> {
+        self.ref_ports.first().map(String::as_str)
+    }
+
     /// As `make_samples_for`, but with tone phase advanced to absolute sample
     /// position `tone_start` instead of restarting at `t = 0`.
     ///
@@ -520,14 +554,18 @@ impl FakeEngine {
                 // practice) reads the same source, scaled and delayed.
                 // Independent per-role position counters (not a shared
                 // cursor) — see the field doc on `correlated_ref_pos`.
-                let is_ref = port.is_some() && port == self.ref_port.as_deref();
+                let is_ref = port.is_some() && port == self.ref_port();
                 let start_pos = if is_ref {
                     let p = self.correlated_ref_pos;
                     self.correlated_ref_pos += n as u64;
                     p
                 } else {
-                    let p = self.correlated_meas_pos;
-                    self.correlated_meas_pos += n as u64;
+                    let slot = self
+                        .correlated_meas_pos
+                        .entry(port.unwrap_or_default().to_string())
+                        .or_insert(0);
+                    let p = *slot;
+                    *slot += n as u64;
                     p
                 };
                 (0..n)
@@ -595,7 +633,7 @@ impl AudioEngine for FakeEngine {
         // switches stimulus mid-life would read from a stale absolute
         // index instead of starting the pair cleanly at t=0.
         self.correlated_ref_pos = 0;
-        self.correlated_meas_pos = 0;
+        self.correlated_meas_pos.clear();
     }
 
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
@@ -652,19 +690,42 @@ impl AudioEngine for FakeEngine {
         std::thread::sleep(Duration::from_secs_f64(duration));
         // If no explicit ref_port, reference mirrors the generator (channel 0).
         let in_port = self.input_port.clone();
-        let ref_port = self.ref_port.clone();
+        let ref_port = self.ref_port().map(str::to_string);
         let meas = self.make_samples_for(in_port.as_deref(), duration);
         let refch = self.make_samples_for(ref_port.as_deref(), duration);
         Ok((meas, refch))
     }
 
+    /// One buffer per capture channel this session registered: the
+    /// measurement port first, then every `add_ref_input` port in
+    /// registration order — the order the handler's `rings` are indexed in.
+    ///
+    /// #254: this used to end at `vec![meas, refch]` regardless of how many
+    /// ports had been registered, so a session over three distinct channels
+    /// got two buffers, its third ring never reached one Welch segment, and
+    /// the warmup gate skipped every tick for the life of the session. `ok:
+    /// true`, then nothing, forever.
+    ///
+    /// With two channels there is exactly one ref port and this is
+    /// byte-identical to the old path — `capture_stereo` still produces both
+    /// buffers, including the `CorrelatedPair` role dispatch, which is why
+    /// it is still called rather than replaced by a loop.
     fn capture_multi(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
         if self.ring.is_some() {
             let n = (self.sample_rate as f64 * duration) as usize;
             return self.ring_drain(n, duration, RingDrain::Multi);
         }
+        let extra: Vec<String> = self.ref_ports.iter().skip(1).cloned().collect();
         let (meas, refch) = self.capture_stereo(duration)?;
-        Ok(vec![meas, refch])
+        let mut out = Vec::with_capacity(2 + extra.len());
+        out.push(meas);
+        out.push(refch);
+        for port in &extra {
+            // `capture_stereo` already slept for `duration`; these are the
+            // same wall-clock tick, so they must not sleep again.
+            out.push(self.make_samples_for(Some(port.as_str()), duration));
+        }
+        Ok(out)
     }
 
     fn capture_multi_contiguous(&mut self, duration: f64) -> Result<Vec<Vec<f32>>> {
@@ -707,7 +768,9 @@ impl AudioEngine for FakeEngine {
     }
 
     fn add_ref_input(&mut self, port: &str) -> Result<()> {
-        self.ref_port = Some(port.to_string());
+        if !self.ref_ports.iter().any(|p| p == port) {
+            self.ref_ports.push(port.to_string());
+        }
         Ok(())
     }
 
@@ -770,6 +833,13 @@ mod tests {
     fn capture_multi_matches_stereo_default() {
         // Fake backend inherits the default `capture_multi` which calls
         // `capture_stereo` — covers the CPAL fallback path too.
+        //
+        // **Two buffers here is the two-channel case, not the contract.**
+        // This test previously read as the latter, and #254 is what that cost:
+        // `capture_multi` returned a fixed pair however many ports were
+        // registered, and the assertion below ratified it. The count is
+        // asserted per registered port in
+        // `capture_multi_returns_one_buffer_per_registered_port`.
         let mut eng = FakeEngine::new();
         eng.set_tone(1_000.0, 0.5);
         eng.reconnect_input("fake:capture_0").unwrap();
@@ -786,6 +856,99 @@ mod tests {
             diff > 0.0,
             "multi channels should differ between meas and ref"
         );
+    }
+
+    /// #254. The handler sizes `rings` from the session's unique capture
+    /// channels and fills them from `capture_multi`'s buffers positionally,
+    /// so a short return leaves the tail rings permanently below one Welch
+    /// segment — the warmup gate then skips every tick and the session never
+    /// publishes. One buffer per registered port, in registration order, is
+    /// what makes `pairs=[[0,3],[1,3]]` — a second measurement position
+    /// against a shared reference, which the rig has already run — testable
+    /// off the rig at all.
+    #[test]
+    fn capture_multi_returns_one_buffer_per_registered_port() {
+        let mut eng = FakeEngine::new();
+        eng.set_tone(1_000.0, 0.5);
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_3").unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+
+        let bufs = eng.capture_multi(0.02).unwrap();
+        assert_eq!(
+            bufs.len(),
+            3,
+            "three registered ports must produce three buffers"
+        );
+        for (i, b) in bufs.iter().enumerate() {
+            assert_eq!(b.len(), bufs[0].len(), "buffer {i} length differs");
+            assert!(b.iter().any(|s| *s != 0.0), "buffer {i} is silent");
+        }
+
+        // Positional, not incidental: buffer 2 must carry capture_1's tone
+        // offset (1 100 Hz), not capture_3's (1 300 Hz). A fill that returned
+        // the right *number* of buffers in the wrong order would put a
+        // measurement channel's audio on a reference ring and still look
+        // healthy from the frame count alone.
+        let n = bufs[0].len();
+        let energy_at = |buf: &[f32], freq: f64| -> f64 {
+            let sr = 48_000.0;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, s) in buf.iter().enumerate() {
+                let t = 2.0 * PI * freq * (i as f64) / sr;
+                re += *s as f64 * t.cos();
+                im += *s as f64 * t.sin();
+            }
+            ((re * re + im * im) / (n * n) as f64).sqrt()
+        };
+        assert!(
+            energy_at(&bufs[2], 1_100.0) > 10.0 * energy_at(&bufs[2], 1_300.0),
+            "buffer 2 must be capture_1 (1 100 Hz), got 1 100 Hz {:.6} vs 1 300 Hz {:.6}",
+            energy_at(&bufs[2], 1_100.0),
+            energy_at(&bufs[2], 1_300.0),
+        );
+        assert!(
+            energy_at(&bufs[1], 1_300.0) > 10.0 * energy_at(&bufs[1], 1_100.0),
+            "buffer 1 must be capture_3 (1 300 Hz), got 1 300 Hz {:.6} vs 1 100 Hz {:.6}",
+            energy_at(&bufs[1], 1_300.0),
+            energy_at(&bufs[1], 1_100.0),
+        );
+    }
+
+    /// Two measurement channels against one reference must each read the
+    /// source at the *same* delay. A single shared meas cursor advances once
+    /// per channel per tick, so the second channel would drift by one
+    /// buffer's length every tick — a delay that is an artefact of call order
+    /// and would have made the fake's multi-position support useless for
+    /// rehearsing exactly the session shape #254 blocks.
+    #[test]
+    fn correlated_pair_tracks_each_measurement_port_separately() {
+        let mut eng = FakeEngine::new();
+        eng.reconnect_input("fake:capture_0").unwrap();
+        eng.add_ref_input("fake:capture_3").unwrap();
+        eng.add_ref_input("fake:capture_1").unwrap();
+        eng.set_correlated_pair(0.5, 0);
+
+        for tick in 0..3 {
+            let bufs = eng.capture_multi(0.02).unwrap();
+            assert_eq!(bufs.len(), 3);
+            // delay 0 and gain 0.5: both measurement channels are the ref
+            // scaled, sample for sample, on every tick.
+            for (i, (m, r)) in bufs[0].iter().zip(&bufs[1]).enumerate() {
+                assert!(
+                    (*m - 0.5 * *r).abs() < 1e-6,
+                    "tick {tick} sample {i}: meas 0 {m} != 0.5 * ref {r}"
+                );
+            }
+            for (i, (m, r)) in bufs[2].iter().zip(&bufs[1]).enumerate() {
+                assert!(
+                    (*m - 0.5 * *r).abs() < 1e-6,
+                    "tick {tick} sample {i}: meas 1 {m} != 0.5 * ref {r} \
+                     — a shared meas cursor drifts the second channel by one \
+                     buffer per tick"
+                );
+            }
+        }
     }
 
     #[test]
