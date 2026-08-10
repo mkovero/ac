@@ -26,6 +26,12 @@ cargo test --workspace 2>&1 | tee /tmp/ws.log; echo "${PIPESTATUS[0]}"
 
 Redirect, then read the file. If you must pipe, `${PIPESTATUS[0]}` is the only
 status worth quoting — and never truncate the output you are counting from.
+
+The same trap catches the *chain*, not just the pipe: a `&&`/`;` sequence exits
+with its **last** command's status. `cargo test … ; grep -c FAILED log` reports
+a clean suite as a failure, because `grep -c` exits 1 when it matches nothing.
+Echo the status you care about at the point you care about it
+(`cargo test …; echo "exit: $?"`) rather than reading the chain's.
 Same family as verifying an installed binary by sha256 rather than by size and
 mtime: the convenient reading is not the evidence, and it fails quietly.
 
