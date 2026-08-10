@@ -309,6 +309,13 @@ under "Discharged" for their reasoning, not as work.
    and 52 cm wrong). A single threshold is being asked to separate two
    situations that differ in **where the peaks are**, not in how prominent
    they are. #251 is the capture that scores the selection half.
+
+   **One candidate answer is now closed** (2026-08-10,
+   `audit/rig-session-3/negative-lag-rule.md`): re-basing prominence on
+   `negative_lag_median` does not separate them. It narrows the margin against
+   silence and admits *three times* as many near-wall sessions at admission 24.
+   No floor fixes this, because the wrong peak is genuinely prominent — which
+   is the same conclusion #255 reaches from the other side.
 3. **#221 — snapshot parity divergence, now real rather than latent.** The
    live display draws the `mtw` columns, so a snapshot no longer matches the
    screen. This was the trigger condition the previous entry named.

@@ -265,12 +265,25 @@ cannot tell one passband from scattered accidents.
 
 ## 2. The negative-lag floor — the experiment finding 4 waits on
 
-> **Executed, session 3.** `negative_lag_median` was collected at every
-> position, locking or refusing, and the captures are in
-> `audit/rig-session-3/*.json.gz`, one record per session. The 1 m / 3 m
-> back-to-back comparison asked for below was also run — and it inverted the
-> session-2 result: 8/8 at 1.000 m, 0/8 at 3.000 m. The offline question is
-> answerable from those files without further rig time.
+> **Executed, session 3. Scored offline 2026-08-10 — the answer is "no", and
+> this block is closed.** `audit/rig-session-3/negative-lag-rule.md`
+> (`negative_lag_rule.py`, 843 attempts): the contamination the proposal exists
+> to remove is **3.5%**, against **±17.5%** per-attempt noise on the statistic
+> that would remove it; separation against the pooled silence ceiling gets
+> *worse* (1.37× → 1.04×); and the near-wall 52 cm-wrong lock is **promoted**,
+> 1/8 wall sessions admitted at 24 becoming 3/8. Do not raise the reverberation
+> argument again — this is its second measured refutation, after
+> `audit/rig-verify-125/gate-rules-offline.md` §2.
+>
+> **One narrower property survives and is untouched by this**: an onset-
+> straddling ring collapses the all-lag floor while the negative-lag floor
+> holds (`R = median_value / negative_lag_median` = 0.364 observed, against
+> 0.720 lowest in 843 steady-state attempts). That is a ring-composition
+> diagnostic, not a floor. Session 3's `run4` kept counters rather than
+> per-frame floors, so it could not be re-scored here.
+>
+> The 1 m / 3 m back-to-back comparison asked for below was also run — and it
+> inverted the session-2 result: 8/8 at 1.000 m, 0/8 at 3.000 m.
 
 `delay_evidence.negative_lag_median` is new on this branch, published every
 frame, and **decides nothing**. It is the noise floor measured over lags a
