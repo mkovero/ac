@@ -151,33 +151,41 @@ it — the caveat names #261 and was written to be deleted by it.
   misfit criterion names what to check rather than asserting a cause, and a
   corrected curve must be distinguishable from a gated one.
 - **Item 8** → `docs/coherence-diagnostics.md`. Operator reference. Two
-  departures from the instruction, both recorded in
-  `handoff-flush-reconciliation.md` item 8: the delay-tolerance material
-  **moved** out of `handoff-lock-and-smoothing.md` decision 5 instead of being
-  cross-referenced — a `docs/` file must not depend on a `work/` file under a
-  delete condition — and the Open Sound Meter conjecture was dropped rather
-  than labelled.
+  departures from the instruction, recorded here because the handoff that held
+  them is now deleted: the delay-tolerance material **moved** out of
+  `handoff-lock-and-smoothing.md` decision 5 instead of being cross-referenced
+  — a `docs/` file must not depend on a `work/` file under a delete condition,
+  and that dependency fails silently — and the **Open Sound Meter conjecture
+  was dropped**, not labelled, because "unverified" says to distrust a claim
+  without saying what would settle it. Decision 5's heading stays at its old
+  address: `ac-core/src/visualize/transfer.rs` cites it by name, and that
+  comment now points at the doc.
 
 **`flush-2026-08-05.md` is released**: both documents exist in the tree, so it
 is no longer the only copy of their substance.
-`work/handoff/handoff-flush-reconciliation.md` becomes deletable as soon as
-both land — its items 9 and 10 are **already discharged**, in
-`.agents/AGENTS.md`'s evidence-discipline section (`edc22cf`, PR #260),
-verified against `main` by content. That handoff's own top note claimed they
-were still pending and was stale.
+`work/handoff/handoff-flush-reconciliation.md` is **deleted** — items 1–8
+landed, and items 9 and 10 were already discharged in `.agents/AGENTS.md`'s
+evidence-discipline section (`edc22cf`, PR #260).
 
-### 3.5 Item 4 — the `#[ignore]` audit
+### ~~3.5 Item 4 — the `#[ignore]` audit~~ — **done 2026-08-10**
 
-No deadline. `qa` in audit mode — read-only, and it fits `qa.md`'s audit
-section exactly. Roughly 11 real attributes across 8 files, all carrying
-stated reasons, so the audit is cheap.
+`work/qa/qa-ignore-audit-2026-08-10.md`. Read-only, enumerated from the tree
+rather than from the handoff's table: **14 attributes across 8 files**, not the
+"roughly 11" the snapshot-era table said.
 
-The question per test is **what would notice if the thing it covers broke**. A
-row reading "nothing does" is the useful output, not a failure of the audit.
-The fixture-regeneration entries are a different category from genuinely unrun
-coverage and should be named as such rather than sharing an attribute.
+Nothing filed, nothing is a defect. Three things worth acting on eventually:
 
-Full table of the population is in `handoff-flush-reconciliation.md` item 4.
+- **Fixture currency is unchecked.** Nothing verifies a checked-in fixture
+  still matches what the code would generate; a format change that updates
+  writer and reader together leaves every consuming test passing against a
+  fixture that describes neither. Same silent shape as the stale snapshots.
+- **The five `ac-view` snapshot references are stale** — already queued in
+  `rig-verify-queue.md`, restated there because a stale reference is a test
+  that can no longer fail *for the right reason*.
+- **Two stale justifications**: `it_stimulus_live`'s header claims four
+  properties are unobservable headless, and `it_set_drive` now covers three of
+  them; and the three fixture-regeneration entries share `#[ignore]` with
+  genuinely-unrun coverage, which inflates the apparent gap.
 
 ### 3.6 Smaller
 
