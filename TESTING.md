@@ -11,27 +11,40 @@ against** — they rot silently. Run the command. `--workspace` matters: two
 branches that each pass `cargo test -p <crate>` can still break the build
 together, and with no CI here that is the only check.
 
-**Do not pipe the run and then read the result.** A pipeline reports the *last*
-command's exit status and the *filtered* output, and neither of those is the
-suite's. Both halves of that bit twice inside one PR (#265):
-`cargo test --workspace | tail` returned `tail`'s status — 0, whatever the
-tests did — and `cargo test --workspace | grep … | head -20` truncated the
-per-target result lines, undercounting 904 passing tests as 890. Neither
-looked wrong.
+**An exit status only answers for the command you asked.** Any construct that
+reports somebody else's status will eventually report a lie — a pipeline gives
+you the last stage's, a `;` or `&&` chain gives you the last command's, and the
+same goes for `xargs` and subshells. Ask cargo, then read cargo's answer:
 
 ```bash
 cargo test --workspace > /tmp/ws.log 2>&1; echo "exit: $?"      # status is cargo's
 cargo test --workspace 2>&1 | tee /tmp/ws.log; echo "${PIPESTATUS[0]}"
 ```
 
-Redirect, then read the file. If you must pipe, `${PIPESTATUS[0]}` is the only
-status worth quoting — and never truncate the output you are counting from.
+Redirect and read the file. If you must pipe, `${PIPESTATUS[0]}` is the only
+status worth quoting — and never truncate the output you are counting from,
+which is the other half of the same mistake.
 
-The same trap catches the *chain*, not just the pipe: a `&&`/`;` sequence exits
-with its **last** command's status. `cargo test … ; grep -c FAILED log` reports
-a clean suite as a failure, because `grep -c` exits 1 when it matches nothing.
-Echo the status you care about at the point you care about it
-(`cargo test …; echo "exit: $?"`) rather than reading the chain's.
+Three instances inside one session, and the third landed while the note about
+the first two was being written:
+
+| construct | reported | actual |
+|---|---|---|
+| `cargo test \| tail` | `tail`'s 0, whatever the tests did | — |
+| `cargo test \| grep … \| head -20` | 890 passing | 904 — the result lines were truncated |
+| `cargo test …; grep -c FAILED log` | **failure** | 905 passing, 0 failed |
+
+The third is the instructive one, because **nothing malfunctioned**: `grep -c`
+correctly found zero matches and correctly exited 1 to say so. The status was
+accurate for the question grep was asked and meaningless for the question being
+answered.
+
+It is also the expensive direction. A false green hides a defect; a false red
+sends someone hunting a regression that does not exist — the same shape as the
+stale `ac-view` snapshots in `work/rig/rig-verify-queue.md`, where the first
+pixel-diff failure is a real defect the tests could not see and reads as one
+they introduced.
+
 Same family as verifying an installed binary by sha256 rather than by size and
 mtime: the convenient reading is not the evidence, and it fails quietly.
 
