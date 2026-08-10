@@ -1,22 +1,30 @@
 # handoff-flush-reconciliation — moving `flush-2026-08-05` into the tree
 
 > **DELETE THIS FILE when items 1–8 below have landed.** Handoffs in this repo
-> do not expire on their own. Items 9 **and 10** are what must outlive the
-> deletion: both are `.agents/` changes under Markus's ratification, and until
-> that happens this file is their temporary lodging. If you are about to
-> delete this file and either is still only here, move it first. They go
-> together — one adds a rule to a spec, the other repairs the specs that rule
-> would be read alongside.
+> do not expire on their own.
+>
+> **Items 9 and 10 are discharged — verified against `main` 2026-08-10, by
+> content rather than by report.** Both rules are in `.agents/AGENTS.md`'s
+> "evidence discipline — every role" section, landed by `edc22cf` (PR #260)
+> along with the spec repair item 10 asked for: the hypothesis-with-a-test
+> rule with its ten-inference provenance and the `ρ = 1/6` path it closes, the
+> check-that-cannot-fail corollary, and the independent-specification-input
+> rule naming `work/qa/qa-brief-218-222.md:10`. Nothing in items 9 or 10 is
+> lodged only here any more, so the caveat that used to stand in this
+> paragraph is retired.
+>
+> That leaves items 1–8 as the whole delete condition.
 
-> **Do not delete `flush-2026-08-05.md` on the grounds that this file exists.**
-> This file supersedes it only for the items it has discharged. **Items 7 and
-> 8 are not written yet** — until
+> ~~**Do not delete `flush-2026-08-05.md` on the grounds that this file
+> exists.**~~ **Released 2026-08-10.** Items 7 and 8 are written:
 > `docs/design/design-parametric-reflection-removal.md` and
-> `docs/coherence-diagnostics.md` exist, the flush is still the only other
-> copy of that material, and it is not in this repo (it never was — it is a
-> conversation dump held outside the tree). Retiring it early loses both
-> documents' substance and leaves this file as the sole record, which is the
-> single-copy state item 10's `acoustic-analyze-v1.md` was rescued from.
+> `docs/coherence-diagnostics.md` are both in the tree, so the flush is no
+> longer the only other copy of that material and the single-copy state item
+> 10's `acoustic-analyze-v1.md` was rescued from no longer applies to it.
+>
+> **This file becomes deletable once items 7 and 8 land on `main`** — the last
+> two of the delete condition. Items 9 and 10 no longer hold it open; see the
+> note above.
 
 Written 2026-08-10 against the `ac-main` snapshot taken 2026-08-06. Its input
 is `flush-2026-08-05.md`, a context dump of material that existed only in
@@ -378,7 +386,15 @@ at once. This is a comment on an issue, not code.
 
 ---
 
-## 7. New file: `docs/design/design-parametric-reflection-removal.md`
+## ~~7. New file: `docs/design/design-parametric-reflection-removal.md`~~ — WRITTEN 2026-08-10
+
+> Written as a proposal, architect output. Structure departs from the order
+> below in one way that was deliberate: the file opens by refusing the
+> delay-estimation reading, because that is what a reader who recognises the
+> method will assume and it is what someone half-remembering the file will
+> later propose. Everything below is in it, including the LF-separability
+> objection answered in the body rather than a footnote, and §6 carries the
+> binding requirement as three gates on any implementation.
 
 Zero occurrences of MEDLL, "floor bounce", "image-source" or
 "quasi-anechoic" anywhere in the tree. The material below exists only in
@@ -463,7 +479,25 @@ not something measurement tools ship.
 
 ---
 
-## 8. New file: `docs/coherence-diagnostics.md`
+## ~~8. New file: `docs/coherence-diagnostics.md`~~ — WRITTEN 2026-08-10, with two departures
+
+> **Departure 1: the tolerance material moved rather than being
+> cross-referenced.** The instruction below says to cross-reference
+> `handoff-lock-and-smoothing.md` decision 5 and not restate it. That would
+> have pointed a durable `docs/` reference at a `work/` handoff carrying a
+> delete condition — a dependency running the wrong way, and one whose failure
+> is silent: honouring the delete condition would strip half the reference doc
+> with nothing to notice. The material now lives in
+> `docs/coherence-diagnostics.md` §4 and decision 5 points up at it. Its
+> heading stays at the old address because `ac-core/src/visualize/transfer.rs`
+> cites it by name from a doc comment; that comment now cites the doc.
+>
+> **Departure 2: the Open Sound Meter conjecture is dropped, not labelled.**
+> It was never load-bearing, and the operator-facing half of what it explained
+> needs no comparison to another tool: tolerance scales with display density,
+> which is now stated as a property of ac at the end of §4. A reader who
+> arrives from a stricter tool has the answer without this file asserting
+> anything about software nobody here has read.
 
 Alongside `docs/loudness-bs1770-5.md` as a reference doc rather than a design
 one — the audience is an operator asking "why is coherence low", which is the

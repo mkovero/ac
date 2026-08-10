@@ -102,31 +102,18 @@ ladder's version is already recorded in `docs/design/design-mtw-ladder.md`.
 
 ### 5. Delay accuracy: about 12 cycles at the top of the band
 
-The coherence loss at high frequency is dominated by **phase rotation across a
-column's bandwidth**, not by loss of window overlap. A column at 20 kHz spans
-289 Hz at 1/48 octave, `Sxy` is summed across its bins, and a residual delay
-rotates phase across that span — so the coherent sum collapses by roughly
-`|sinc(τ·BW)|` while `Sxx` and `Syy` do not.
-
-| highest frequency needed coherent | tolerance |
-|---|---|
-| 200 Hz | 62 ms |
-| 2 kHz | 6.2 ms |
-| 10 kHz | 1.2 ms |
-| 20 kHz | **616 µs** |
-
-Sub-millisecond is a 20 kHz requirement, not a general one. Subwoofer work is
-trivially tolerant.
-
-Precision is not the constraint — one sample is 10.4 µs at 96 kHz, 22.7 µs at
-44.1 kHz. The threats are all discrete or drifting:
-
-- **Two clock domains.** Same interface for both legs, one clock, no drift.
-  Separate devices means two crystals: at 20 ppm, 600 µs of drift in 30 s; at
-  50 ppm, 12 s; at 100 ppm, 6 s. Consumer crystals are ±50–100 ppm. This sets
-  the automatic re-lock interval — seconds to tens of seconds, not minutes.
-- **Xruns.** A dropped buffer shifts alignment permanently by that amount.
-- **Wrong peak** (#227) — milliseconds, not microseconds.
+> **The content of this decision now lives in `docs/coherence-diagnostics.md`
+> §4** — the tolerance table, the 616 µs derivation and its 625 µs measured
+> confirmation, the clock-drift figures that set the re-lock interval, and the
+> points-per-octave coupling. It moved because this file is a handoff and
+> carries a delete condition; a durable reference must not depend on an
+> expiring one. **This heading stays** so existing citations still resolve —
+> `ac-core/src/visualize/transfer.rs` cites it by name from a doc comment.
+>
+> The decision itself is unchanged and stands as ratified: HF coherence loss is
+> dominated by phase rotation across a column's bandwidth, sub-millisecond
+> alignment is a 20 kHz requirement rather than a general one, and two clock
+> domains force automatic re-locking on a seconds-to-tens-of-seconds interval.
 
 ---
 
