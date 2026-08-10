@@ -85,9 +85,19 @@ Two things session 3 raised that no block here covers yet:
   in pure code, and has never been exercised on real signal. It is the only way
   the state can occur at all.
 
-  Lock at a normal position, confirm a settled ladder, then **block the mic
-  capsule by hand with the drive still running** and capture frames across the
-  transition.
+  Procedure, in order — the ordering is what makes it a test rather than a
+  description:
+
+  1. **Lock at a normal position and confirm the ladder has settled** before
+     touching anything. A pair that has not locked yet reproduces the *pre-lock*
+     case Run 4 already tested, and the run then tells you nothing new. Settled
+     ladder is the precondition, not a nicety.
+  2. **Start capturing before you block anything.** The informative frames are
+     the ones where `mtw` is still present *and* coherence has collapsed. Begin
+     capture once the display is already blank and the discriminator — ladder
+     present versus absent — is gone with it.
+  3. **Block the mic capsule by hand, drive still running**, and keep capturing
+     through the transition and past it.
 
   > **Pass:** a capture showing `mtw` present, `coherence_dead` true, and
   > whatever the banner did alongside it. Either outcome is worth having — the

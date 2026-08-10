@@ -176,6 +176,22 @@ then re-run without `UPDATE_SNAPSHOTS` to confirm the diff is clean.
 > present and then gone. That combination is a `None` from `classify`, by
 > design.
 >
+> ```
+> commit c2c6b374599c0f614cc97c08c682a0e7cb8149e4
+>   2026-08-05 18:06:26 +0300, merge of PR #253 (issue-247-refusal-attempts)
+>   carries ab3d236 (#228) — confirmed by git merge-base --is-ancestor
+> machine: laptop rantu, not 192.168.9.25
+> drive: off
+> installed-binary sha256: not recorded
+> ```
+>
+> **The last line stays.** It identifies what was actually *running* on
+> `rantu`, which nobody measured and which may no longer exist anywhere — the
+> trap that cost two sessions. Here it happens not to matter: the ancestry
+> answers the reachability question, and the resolution below does not depend
+> on which binary ran. But a record that silently omits it reads as though it
+> was checked.
+>
 > **The mechanism is not "drive off, so blank is idle."** `fault.rs` is
 > explicit that drive state is *not* evidence about the lock: the gate
 > `if !frame.drive.on { return None; }` (`ac-scene/src/fault.rs:665`) sits
