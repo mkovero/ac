@@ -74,6 +74,46 @@ Two things session 3 raised that no block here covers yet:
   otherwise be first to be cut — schedule it *outside* the acoustic budget,
   not at the end of it.
 
+- **`CHECK ROUTING`, post-lock — the one path that has never fired on
+  hardware.** Session 3's Run 4 settled the *pre-lock* case and confirmed it
+  unreachable: unrelated legs refuse, no lock means no ladder,
+  `FaultInput::coherence` is empty, and `coherence_dead` returns `false` on an
+  empty slice. The reachable route is the other one — a pair that **locked**,
+  kept its cached delay (`handlers/transfer.rs`, `pair_delays[i].is_some()`, so
+  `delay_locked` stays true and `mtw` keeps publishing), and then lost coherence
+  **with both legs still above the floor**. That branch is written and covered
+  in pure code, and has never been exercised on real signal. It is the only way
+  the state can occur at all.
+
+  Procedure, in order — the ordering is what makes it a test rather than a
+  description:
+
+  1. **Lock at a normal position and confirm the ladder has settled** before
+     touching anything. A pair that has not locked yet reproduces the *pre-lock*
+     case Run 4 already tested, and the run then tells you nothing new. Settled
+     ladder is the precondition, not a nicety.
+  2. **Start capturing before you block anything.** The informative frames are
+     the ones where `mtw` is still present *and* coherence has collapsed. Begin
+     capture once the display is already blank and the discriminator — ladder
+     present versus absent — is gone with it.
+  3. **Block the mic capsule by hand, drive still running**, and keep capturing
+     through the transition and past it.
+
+  > **Pass:** a capture showing `mtw` present, `coherence_dead` true, and
+  > whatever the banner did alongside it. Either outcome is worth having — the
+  > banner firing exercises the path for the first time; the banner staying
+  > dark with `mtw` present and coherence collapsed is a defect with the
+  > evidence already attached. **File on the capture, not on the recollection.**
+  >
+  > **Do not let the drive stop.** Drive off plus both legs at the floor is a
+  > deliberate `None` (`ac-scene/src/fault.rs:652-665`) and produces a blank
+  > pane that looks like the same symptom while testing nothing. That
+  > combination is what the 2026-08 phone clip turned out to be.
+
+  **This one is not free.** It needs the acoustic path and the drive, unlike
+  the two blocks below — but it wants the mic **where session 3 left it**, so it
+  costs no position change. A minute, inside the acoustic budget.
+
 - **Does `install.sh` still hit `Text file busy`?** One line, zero cost
   alongside any other block. `install -m 755` over a running `ac-daemon` may
   fail on the daemon binary; it has never been established either way, and the

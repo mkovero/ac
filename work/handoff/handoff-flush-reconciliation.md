@@ -169,7 +169,59 @@ then re-run without `UPDATE_SNAPSHOTS` to confirm the diff is clean.
 
 **Pass:** five regenerated PNGs committed, and the second run green.
 
-### 3b. The video — reproduce it, do not re-interpret it
+### ~~3b. The video — reproduce it, do not re-interpret it~~ — RESOLVED: the instrument was right
+
+> **The clip shows correct behaviour, and the reproduction is not needed to
+> establish that.** Shot on the laptop `rantu`, **drive off**, with both traces
+> present and then gone. That combination is a `None` from `classify`, by
+> design.
+>
+> ```
+> commit c2c6b374599c0f614cc97c08c682a0e7cb8149e4
+>   2026-08-05 18:06:26 +0300, merge of PR #253 (issue-247-refusal-attempts)
+>   carries ab3d236 (#228) — confirmed by git merge-base --is-ancestor
+> machine: laptop rantu, not 192.168.9.25
+> drive: off
+> installed-binary sha256: not recorded
+> ```
+>
+> **The last line stays.** It identifies what was actually *running* on
+> `rantu`, which nobody measured and which may no longer exist anywhere — the
+> trap that cost two sessions. Here it happens not to matter: the ancestry
+> answers the reachability question, and the resolution below does not depend
+> on which binary ran. But a record that silently omits it reads as though it
+> was checked.
+>
+> **The mechanism is not "drive off, so blank is idle."** `fault.rs` is
+> explicit that drive state is *not* evidence about the lock: the gate
+> `if !frame.drive.on { return None; }` (`ac-scene/src/fault.rs:665`) sits
+> **inside** the `if ref_dead || meas_dead` branch opened at `:652`, and its
+> own comment says it "covers the two level rows and **only** them… two legs
+> both above the floor are carrying signal whoever put it there". Drive off by
+> itself would have suppressed nothing.
+>
+> What suppresses the banner is drive off **and** both legs falling to the
+> floor (`SIGNAL_FLOOR_DBFS = -80.0`, `:156`). Traces were present, so
+> something was feeding both legs correlated content — fake audio, or a
+> loopback on the laptop. When that stopped, both legs went silent, `classify`
+> entered the level branch, `!frame.drive.on` returned `None`, and nothing
+> painted. Correct: the daemon was not driving, so its own silence says
+> nothing about the inputs and there is nothing to report.
+>
+> This also discharges the build question rather than answering it. On any
+> build carrying the indicator the result is the same `None`; on a build
+> predating it there is no indicator at all. Both roads end at a blank pane
+> that is not a defect.
+>
+> **The successor question is smaller and real — see the queue.**
+> `CHECK ROUTING`'s **post-lock** path has still never fired on hardware.
+> Session 3's Run 4 tested the pre-lock case and confirmed it unreachable. The
+> reachable route is a pair that locked, kept its cached delay, and then lost
+> coherence with both legs still live — written, covered in pure code, never
+> exercised on real signal. That is the only way the state can occur at all,
+> and it needs the acoustic path, so it is not free the way 3a and 3c are.
+
+The struck text follows.
 
 Markus has a 2.4 s phone clip of `ac-view`: both traces continuous at ~1.5 s,
 both **completely gone** by ~2.35 s, empty grid, no indicator in the pane. A
