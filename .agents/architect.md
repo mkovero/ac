@@ -141,8 +141,8 @@ For each stated invariant, confirm code actually enforce it:
   **Read-only: `monitor.rs`** — its clause (never scale `spec`/`cwt_mags` by
   `vrms_at_0dbfs_in`; voltage ships as the separate `dbu_offset_db`) has no
   scale-change test, so an audit that answers this item ✓ has verified two of
-  three sites by machine and one by reading. Say which. Closing the gap means a
-  monitor-side parity case, after which this distinction goes away.
+  three sites by machine and one by reading. Say which. The monitor-side parity
+  case that closes the gap is **#261**; when it lands, this caveat goes.
 - H1 estimator: implementation match Müller-Massarani derivation in `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
 
 ### interface surface
