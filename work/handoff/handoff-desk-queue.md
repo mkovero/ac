@@ -72,17 +72,32 @@ read as a finished project.
 ### ~~3.1 Block 2's offline question~~ — **done 2026-08-10, answered "no"**
 
 `audit/rig-session-3/negative-lag-rule.md` + `negative_lag_rule.py`, 843
-attempts, no rig time. Contamination 3.5% against ±17.5% per-attempt noise;
-margin against the pooled silence ceiling *narrows* 1.37× → 1.04×; the
-near-wall 52 cm-wrong lock is promoted, 1/8 wall sessions admitted at
-admission 24 becoming 3/8. Second measured refutation of the reverberation
-argument, after `audit/rig-verify-125/gate-rules-offline.md` §2.
+attempts, no rig time. **The premise is false, which closes the family rather
+than this one variant**: the all-lag floor carries 3.5% contamination against
+±17.5% per-attempt noise, so there is nothing for an uncontaminated floor to
+remove. Second measured refutation, after
+`audit/rig-verify-125/gate-rules-offline.md` §2 (≤8% on 12 captures). The
+variant also underperforms — margin against the pooled silence ceiling narrows
+1.37× → 1.04×, the near-wall 52 cm-wrong lock is promoted, 1/8 wall sessions at
+admission 24 becoming 3/8 — but that is downstream of the premise, and reporting
+it first would invite a better variant of a dead family.
 
 **It did not change what the next rig visit is for** — which was the reason it
 went first, and is a legitimate outcome of asking. The gate remains a
-wrong-peak problem that no floor addresses. The one surviving property is an
-onset diagnostic (`median_value / negative_lag_median` < 0.5), recorded in the
-block and in the field's doc comment, and it is not a gate.
+wrong-peak problem that no floor addresses.
+
+Two things worth carrying out of it, both in section 5's failure class:
+
+- **It was settleable by reading.** `visualize/transfer.rs` held the premise
+  (`:319`) and its refutation (`:491`) about 170 lines apart, for as long as the
+  proposal was open. Nobody put them side by side, so a claim the tree already
+  contradicted shaped a capture plan across two sessions.
+- **The one surviving property has a home rather than being a remainder.**
+  `R = median_value / negative_lag_median` < 0.5 is a measured onset signature
+  and the discriminator the dropped onset guard lacked. Written into
+  `rig-verify-queue.md` block 1, with Run D as its control, as a capture
+  requirement: **per-frame floors, not counters** — which is what `run4` got
+  wrong, and why it could not be re-scored.
 
 ### 3.2 #254 — the three-channel stall
 

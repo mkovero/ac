@@ -224,6 +224,32 @@ the one case causality cannot catch. If it fails, the guard is the fix and its
 shape is in this branch's history — but it must then also handle gated
 stimuli.
 
+> **Record per-frame `median_value` and `negative_lag_median` on this run, not
+> frame counters.** A capture requirement, not a preference: it is the one
+> thing that makes the run re-scorable if it produces a surprise. Session 3
+> ran this case as `run4` and kept counters, so the capture that could have
+> carried the evidence does not — a run structurally unable to observe the
+> thing it was there to see. It cost the offline scoring in
+> `audit/rig-session-3/negative-lag-rule.md` §5 the only question it could not
+> answer.
+>
+> **What the two numbers are for.** `R = median_value / negative_lag_median` is
+> the measured signature of an onset-straddling ring: **0.364** on the one such
+> capture (`audit/rig-verify-125/gate-rules-offline.md` §2), against **0.720**
+> as the lowest of 843 steady-state attempts across all of session 3. A factor
+> of two, on the one condition that produced the only false-confidence lock
+> either session has recorded — the all-lag prominence there was 30.93, on the
+> *weakest* arrival in its set.
+>
+> That reaches the guard, not just the diagnosis. The guard's second defect was
+> that it would suppress a legitimately gated stimulus, and `R` is a
+> discriminator it never had: a gated burst puts the same noise into the
+> negative lags as into the positive ones between bursts, so its `R` should
+> *not* collapse the way an onset-straddling ring's does. **Run D is the
+> control for exactly that** — 50 ms bursts, already queued. Capture both runs
+> with per-frame floors and one session scores the guard's shape as well as the
+> fault it guards against. Neither is scoreable from counters.
+
 **Fix 2 — the capture can reproduce its own decision.** Pass: for every frame
 where `delay_locked` is true, `delay_samples` appears in
 `delay_evidence.candidates`, and so do `peak_lag` and `noncausal_peak_lag`,
@@ -275,12 +301,15 @@ cannot tell one passband from scattered accidents.
 > argument again — this is its second measured refutation, after
 > `audit/rig-verify-125/gate-rules-offline.md` §2.
 >
-> **One narrower property survives and is untouched by this**: an onset-
-> straddling ring collapses the all-lag floor while the negative-lag floor
-> holds (`R = median_value / negative_lag_median` = 0.364 observed, against
-> 0.720 lowest in 843 steady-state attempts). That is a ring-composition
-> diagnostic, not a floor. Session 3's `run4` kept counters rather than
-> per-frame floors, so it could not be re-scored here.
+> **One narrower property survives, and it has moved to block 1 rather than
+> staying here as a remainder**: an onset-straddling ring collapses the all-lag
+> floor while the negative-lag floor holds (`R = median_value /
+> negative_lag_median` = 0.364 observed, against 0.720 lowest in 843
+> steady-state attempts). That is a ring-composition diagnostic, not a floor —
+> and it is the discriminator the dropped onset guard lacked. Block 1's onset
+> case and Run D now both carry the capture requirement it needs: **per-frame
+> floors, not counters.** Session 3's `run4` kept counters, which is why this
+> could not be re-scored here.
 >
 > The 1 m / 3 m back-to-back comparison asked for below was also run — and it
 > inverted the session-2 result: 8/8 at 1.000 m, 0/8 at 3.000 m.
@@ -351,6 +380,14 @@ finger snap: the criterion is a *count* of episodes, and comparing counts
 across two different transients proves nothing — which is also why the A/B
 against `cda40ef` is not optional. One episode on the new build only means
 something if the old build shows four.
+
+**It now carries a second passenger, at no extra cost: per-frame
+`median_value` and `negative_lag_median`.** A 50 ms burst is the legitimately
+gated stimulus that the dropped onset guard would have suppressed, so this run
+is the control for block 1's onset capture — the case where `R` must *not*
+collapse. Same capture, no extra rig time, and it is the difference between
+being able to score the guard's shape and arguing about it for a fourth
+session. Do not record counters here.
 
 ---
 

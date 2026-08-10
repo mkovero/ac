@@ -8,40 +8,77 @@ answers "yes":
 > 7.1–25.8 on the all-lag statistic) from the noise ceiling, where
 > `peak_value / median_value` does not?
 
-**No — and it is worse than neutral.** It narrows the margin against silence,
-it *promotes* the one wrong lock in the session, and the contamination it was
-proposed to remove is five times smaller than the noise in the statistic that
-would remove it.
+**No, and the reason closes the whole family rather than this one variant: the
+premise is measurably false.** The all-lag floor is not contaminated — driven
+captures sit **3.5%** above silent ones on `R = median_value /
+negative_lag_median`, against **±17.5%** per-attempt spread on that same ratio.
+Every "uncontaminated floor" proposal rests on there being contamination to
+remove, and there is a fifth as much as the noise it would have to be read
+through. This is the second measured refutation, after
+`audit/rig-verify-125/gate-rules-offline.md` §2 (12 captures, ≤8%); this one is
+70× the data with a tighter bound.
+
+The specific variant then also underperforms — it narrows the margin against
+silence from 1.37× to 1.04× and *promotes* the one wrong lock in the session —
+but that is a consequence, not the finding. A statistic that merely
+underperforms invites a better variant. A premise that is false does not.
 
 Scored by `negative_lag_rule.py` over **843 attempts** — every capture in
-`audit/rig-session-3/`, thinned to one record per estimator attempt, since
-frames repeat an attempt's evidence and scoring frames would weight a run by
-how long it refused. No rig time was used.
+`audit/rig-session-3/`, thinned to **one record per estimator attempt**. That
+thinning is load-bearing rather than tidiness: `pair_prominence` is cached and
+republished every frame, so scoring frames would have counted a single
+attempt's evidence hundreds of times, weighted each run by how long it refused,
+and produced a far tighter-looking result out of the same underlying decisions.
+No rig time was used.
 
 ---
 
-## 1. The premise is false: the all-lag floor is not contaminated
+## 1. The premise is false — and the tree said so already, in the same file
 
-The proposal (`visualize/transfer.rs`, `negative_lag_median`'s doc comment) is
-that `prominence` divides by a median over *all* lags, most of which hold
-reverberation on a real path, so the floor contains the thing it discriminates
-against. Then `R = median_value / negative_lag_median` should be clearly above
-1 on driven captures and ~1 in silence.
+**Before any of the measurement below: this was settleable by reading.**
+`visualize/transfer.rs` has carried both the premise and its contradiction,
+about 170 lines apart, for as long as the proposal has been open.
+
+| line | what it says |
+|---|---|
+| `:319–332` — `negative_lag_median`'s doc comment | the premise: *"on a reverberant path most lags hold reverberation, so the statistic is contaminated by the thing it is meant to discriminate against"* |
+| `:491` — the implementation comment on the floor itself | the refutation: *"the median is unmoved by the peak itself and by a reverberant tail, both of which occupy a small fraction of the lags"* |
+
+They cannot both be right about the same quantity, and the second one is. A
+claim the tree already contradicted survived two rig sessions and shaped a
+capture plan, because nobody put the two comments side by side. That is the
+same class as everything else this session produced: the information was
+present, and the failure was in reading it rather than in collecting it.
+
+### The measurement, which agrees with `:491`
+
+`R = median_value / negative_lag_median` should be clearly above 1 on driven
+captures and ~1 in silence if the premise holds.
 
 | population | attempts | R median |
 |---|---|---|
 | driven (10 positions + the wall) | 777 | **1.035** |
 | silent (3 baselines, both ends of the evening) | 66 | **0.999** |
 
-**3.5%.** Not 3 dB, not 10 dB — 3.5%. The estimator's own source comment
-already says why, and it is right: *"the median is unmoved by the peak itself
-and by a reverberant tail, both of which occupy a small fraction of the
-lags."* A median over a 34 ms scan is not moved by a room.
+**3.5%.** Not 3 dB, not 10 dB — 3.5%. A median over a 34 ms scan is not moved
+by a room. **The reverberation argument should not be raised a third time.**
 
-This confirms `audit/rig-verify-125/gate-rules-offline.md` §2, which measured
-≤8% on twelve captures and recorded the reverberation argument dead. Session 3
-is 70× the data and gives the same answer with a tighter bound. **The
-reverberation argument should not be raised a third time.**
+### This also dissolves the drift confound rather than answering it
+
+The obvious objection to session 3's 1 m / 3 m inversion — 8/8 locks at
+1.000 m, 0/8 at 3.000 m — is that the two positions were measured hours apart
+while the room floor moved, so distance and drift are confounded. That
+objection does not reach this result, and it is worth saying plainly because it
+is the first one anyone will raise.
+
+The refutation here is not that the statistic failed to separate two positions.
+It is that **both floors measure the same quantity to 3.5%, on the same data, in
+the same frame, at the same instant.** Every `R` above is a within-frame ratio.
+Nothing about it can be confounded by drift between positions, by time of
+evening, or by which position was measured first — a session-independent and
+position-independent comparison, which is exactly what makes it decisive
+against a proposal that was argued from session-to-session drift in the first
+place.
 
 ## 2. The contamination is smaller than the noise on the statistic
 
@@ -144,6 +181,31 @@ replacement floor — a ring whose all-lag median has collapsed relative to its
 negative-lag median is a ring that does not contain a steady stimulus, which is
 a statement about the capture, not about the room.
 
+### It has a home, and it is block 1, not this block
+
+The onset guard was written and then **dropped before `rig2-fixes-125`
+shipped**, for two stated reasons (block 1): no synthetic onset ring could be
+built where the causal-only search still returned a wrong answer, so the guard
+had nothing left to prevent; and it would fire indefinitely on a legitimately
+gated stimulus — Run D is a 50 ms burst whose ring is silent for most of its
+length — suppressing locking outright on that session.
+
+**A measured ring-composition discriminator is precisely what that guard
+lacked.** `R` says *this ring straddles an onset* from the ring's own contents,
+without a rule that also condemns a gated stimulus: a gated burst puts the same
+noise in the negative lags as in the positive ones between bursts, so its `R`
+does not collapse the way an onset-straddling ring's does. Whether that holds is
+a measurement, not an argument — and it is the second reason block 1's onset
+run has to carry per-frame floors.
+
+So this block does not leave the property as a remainder. It goes into block 1
+as a capture requirement, written there: **whatever run reproduces the onset
+case must record per-frame `median_value` and `negative_lag_median`, not frame
+counters.** Session 3's `run4` kept counters, so the one capture that could
+have carried the signature does not — a run structurally unable to see the
+thing it was there to observe, which is the `#[ignore]`d-snapshot failure one
+layer out. Unwritten, the next session repeats it.
+
 ## 6. Recommendation
 
 - **Close the proposal to re-base `prominence` on `negative_lag_median`.**
@@ -155,10 +217,11 @@ a statement about the capture, not about the room.
   from captures that carry both floors. Its doc comment should say it is a
   ring-composition diagnostic rather than a candidate floor — the current text
   frames it as an open proposal, and it is not one any more.
-- **Record `R < 0.5` as the onset signature**, with 0.364 observed and 0.720
-  the lowest steady-state value across 843 attempts. That gap is wide enough to
-  be worth a diagnostic; it is not a gate, and it never fires on the case a
-  gate exists to catch.
+- **`R < 0.5` is the onset signature** — 0.364 observed, 0.720 the lowest
+  steady-state value across 843 attempts. Written into block 1 as a capture
+  requirement, with Run D as its control, because it is the discriminator the
+  dropped onset guard lacked. It is not a gate, and it never fires on the case
+  a gate exists to catch.
 - **The gate work is unchanged by this.** Block 2 could have redirected the
   next rig visit and does not: the near-wall failure remains a wrong-peak
   problem that no floor and no single threshold addresses.

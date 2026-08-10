@@ -328,9 +328,16 @@ pub struct DelayEstimate {
     /// `audit/rig-verify-125/gate-rules-offline.md` §2 (12 captures, ≤8%) and
     /// `audit/rig-session-3/negative-lag-rule.md` (843 attempts, 3.5% against
     /// ±17.5% per-attempt noise). Re-basing prominence on this field widens
-    /// nothing and admits three times as many near-wall wrong locks. A median
-    /// over a 34 ms scan is not moved by a room, which is the same reason the
-    /// floor above is robust in the first place. Do not raise it again.
+    /// nothing and admits three times as many near-wall wrong locks.
+    ///
+    /// **The contradiction sat in this file the whole time.** The comment
+    /// where `median` is actually computed — search for "Robust noise floor",
+    /// about 170 lines below — says the median is unmoved by the peak and by a
+    /// reverberant tail, *both of which occupy a small fraction of the lags*.
+    /// That is the direct refutation of the paragraph above it, it was written
+    /// first, and it is the one that measured true: a median over a 34 ms scan
+    /// is not moved by a room. The proposal was settleable by reading before it
+    /// was settleable by scoring. Do not raise it again.
     ///
     /// **What it is for now** is ring composition, not the room: a ring that
     /// straddles the stimulus onset is mostly silence, so `median_value`
