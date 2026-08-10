@@ -11,6 +11,24 @@ against** — they rot silently. Run the command. `--workspace` matters: two
 branches that each pass `cargo test -p <crate>` can still break the build
 together, and with no CI here that is the only check.
 
+**Do not pipe the run and then read the result.** A pipeline reports the *last*
+command's exit status and the *filtered* output, and neither of those is the
+suite's. Both halves of that bit twice inside one PR (#265):
+`cargo test --workspace | tail` returned `tail`'s status — 0, whatever the
+tests did — and `cargo test --workspace | grep … | head -20` truncated the
+per-target result lines, undercounting 904 passing tests as 890. Neither
+looked wrong.
+
+```bash
+cargo test --workspace > /tmp/ws.log 2>&1; echo "exit: $?"      # status is cargo's
+cargo test --workspace 2>&1 | tee /tmp/ws.log; echo "${PIPESTATUS[0]}"
+```
+
+Redirect, then read the file. If you must pipe, `${PIPESTATUS[0]}` is the only
+status worth quoting — and never truncate the output you are counting from.
+Same family as verifying an installed binary by sha256 rather than by size and
+mtime: the convenient reading is not the evidence, and it fails quietly.
+
 Among the `#[ignore]`'d, `it_loopback_ir` drives a Farina sweep through real
 JACK port-to-port loopback and is run manually after starting `jackd -d dummy`
 — see ARCHITECTURE.md → "Loopback IR runbook". The rest need real hardware, a
