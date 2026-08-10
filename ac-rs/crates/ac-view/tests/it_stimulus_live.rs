@@ -8,13 +8,25 @@
 //! derives capture from its stimulus, so drive-on lifts the peak from the
 //! idle tone's ≈ −20 dBFS to the driven ≈ −10 dBFS).
 //!
-//! Four properties, none observable headless:
-//! 1. fire → the drive actually reaches the daemon over ZMQ;
-//! 2. the 250 ms keepalive holds the drive up across seconds without ever
-//!    gapping past the 1.5 s dead-man under real scheduling;
+//! Four properties. **Three of them are no longer uniquely this test's** —
+//! `ac-daemon/tests/it_set_drive.rs` covers the dead-man against a real daemon
+//! over real ZMQ, in the default suite, across five tests. The claim below
+//! used to read "none observable headless" and was true when written; it is
+//! kept accurate here rather than deleted, because which property this test is
+//! *for* decides whether it is worth a trip to the box.
+//!
+//! 1. fire → the drive actually reaches the daemon over ZMQ
+//!    (also `it_set_drive`);
+//! 2. **the residue, and the reason this test still exists**: `ac-view`'s own
+//!    250 ms keepalive, driven by the real `StimulusMachine`, holds the drive
+//!    up across seconds without ever gapping past the 1.5 s dead-man **under
+//!    real scheduling**. That is a claim about the *client's* timing, and
+//!    `it_set_drive` exercises the daemon's side of the contract with a test
+//!    harness's timing, not the app's;
 //! 3. panic-stop latency through real REQ/REP is bounded;
-//! 4. the dead-man is a real backstop — a frozen client (no keepalive)
-//!    has its drive dropped by the daemon within ~1.5 s.
+//! 4. the dead-man is a real backstop — a frozen client (no keepalive) has its
+//!    drive dropped within ~1.5 s (also `it_set_drive`,
+//!    `dead_man_drops_drive_after_keepalive_silence_but_keeps_the_session`).
 //!
 //! `#[ignore]`: needs a real daemon; run on the box (192.168.9.25):
 //! `cargo test -p ac-view --test it_stimulus_live -- --ignored --nocapture`
