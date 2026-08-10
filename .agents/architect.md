@@ -115,12 +115,13 @@ failing case is not a check — it reports coverage it does not have.
 - `ac-scene` depends on `ac-core` + serde only. **Fails if** its `Cargo.toml`
   gains `egui`, `eframe`, `wgpu` or `zmq` — the isolation is enforced by the
   dependency list, not by convention.
-- `ac-view` computes nothing numeric. Enforced by `ac-view/src/computes_nothing.rs`,
-  which scans the crate's own `src/` for forbidden tokens: `no_trig_in_crate_sources`,
-  `no_log_arithmetic_in_crate_sources`, `no_format_macro_used_to_render_measurement_numbers`.
-  **Fails if** any of the three stops covering a file, or if a source file is
-  added to the scan's exclusion. Note `ac-view` *does* depend on `zmq` — it is
-  the DATA-socket client — so the boundary here is computation, not sockets.
+- `ac-view` computes nothing numeric. **`ac-view/src/computes_nothing.rs` is
+  authoritative** — read it, do not work from this description. It scans the
+  crate's own `src/` for forbidden tokens; as of 2026-08-10 that is trigonometry,
+  log arithmetic, and `format!` used to render measurement numbers. **Fails if**
+  a check stops covering a file, or a source file is added to the scan's
+  exclusion. Note `ac-view` *does* depend on `zmq` — it is the DATA-socket
+  client — so the boundary here is computation, not sockets.
 - `ac-core` has no socket dependency. **Fails if** `zmq` appears in its
   `Cargo.toml`.
 - Tier 1 (`measurement/`) does not call Tier 2 (`visualize/`). **Fails if** a
