@@ -148,9 +148,10 @@ was already flagged as the first thing to cut.
 
 ## ~~3. Issues and PRs pointing at things that no longer exist~~ — DONE, and this section was wrong about #230
 
-> **#230 — closed** as done in place. **#243 — closed** as documented-not-fixed
-> by owner decision, with #248's own "does not close it" recorded in the
-> closing comment so the residual is not lost. **PR #236 — merged.**
+> **#230 — closed** as done in place. ~~**#243 — closed** as
+> documented-not-fixed by owner decision, with #248's own "does not close it"
+> recorded in the closing comment so the residual is not lost.~~ **PR #236 —
+> merged.**
 > **PR #214 — closed**, #205 carries it; `conn_tags` survives only on
 > `feat-205-drive-path-health`, verified still on origin at `4bf6336`.
 > `work/handoff/handoff-issue-strategy.md:137`, which repeated #230's two dead references,
@@ -162,6 +163,24 @@ was already flagged as the first thing to cut.
 > They are absent from a *clone*, which is the reading that makes both
 > statements true — and the distinction matters, because it is the difference
 > between "the issue is stale" and "the issue is unfixable from a clone".
+>
+> **Second correction, 2026-08-10: #243 is open.** It was closed 2026-08-06
+> 01:44 UTC and **reopened 35 minutes later** by the owner, who recorded the
+> close as wrong: the README wiring section is item 1 of
+> `work/handoff/handoff-243-redirect.md`, not the resolution, and PR #248 said
+> "Addresses … **Does not close it**" in its own body. What is left is item 3
+> — a plausibility check, unlanded — and the rig's 1.1931 ms residual, which
+> reads 1.40 m at a taped 1.000 m: positive and locked, so
+> `format_delay_readout`'s existing gates pass it silently. The residual
+> reasoning below stands; only the closure claim was false.
+>
+> **The rule this argues for is not "check the tree against GitHub".** Thirty-
+> five minutes separates the two states, so this document was *true when
+> written* and false before anyone could have reviewed it — a staleness check
+> at any plausible moment would have passed. Prose should therefore not
+> restate an issue's open/closed state at all: name the issue and let the
+> tracker hold its state. What belongs in a document is the reasoning, which
+> does not expire.
 
 **#230** names `work/handoff/handoff-mtw-live-spectrum.md:239` and `work/qa/qa-brief-218-222.md:51`.
 Neither file is in the tree. The surviving occurrence of the `((W−D)/W)²`
@@ -175,11 +194,16 @@ correction immediately below it.
 **#243** is open, but the README already carries the full wiring doctrine —
 reference out the same converter as the stimulus — and explicitly declines to
 subtract a stored instrument constant, on the grounds that speaker DSP latency
-belongs to the DUT. There is no visible remaining deliverable.
+belongs to the DUT. ~~There is no visible remaining deliverable.~~
 
-> Action: close as documented-not-fixed, or state the remaining deliverable in
-> the issue. An open bug with its resolution already shipped as documentation
-> is a trap for whoever picks it up next.
+> ~~Action: close as documented-not-fixed, or state the remaining deliverable
+> in the issue. An open bug with its resolution already shipped as
+> documentation is a trap for whoever picks it up next.~~
+>
+> **This recommendation was acted on and was wrong** — see the second
+> correction above. The deliverable was visible in PR #248's own body. The
+> second half of the action ("state the remaining deliverable") is what the
+> reopen comment did.
 
 **PR #236** — a docs PR, open since Aug 3, closing the rig-session merge gate
 and dropping the `conn_tags` check from Run B. Session 3 ran on Aug 4 and did

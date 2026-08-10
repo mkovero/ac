@@ -46,6 +46,35 @@ Two things session 3 raised that no block here covers yet:
   session 3's captures are in `audit/rig-session-3/` and the ambiguous case is
   reproducible on demand (two of the room's three speakers energised).
 
+- **Regenerate the `ac-view` reference snapshots — do this before any other
+  block, and do not read the first failure as a regression.** The five PNGs in
+  `ac-rs/crates/ac-view/tests/snapshots/` were last regenerated at `de4b658`
+  (#194). #245's fix (`d569907`, merged as PR #252) reserves half a text line
+  at the top of every view, which shifts the layout by roughly 7 px, so all
+  five references are stale. Every one of these tests is `#[ignore]`d as
+  *"real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"*
+  (`it_transfer_snapshots.rs`), so nothing offline catches it and the next run
+  here pixel-diff-fails all five at once — a real defect the tests could not
+  see, not a regression in the build under test.
+
+  ```
+  UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots \
+      -- --ignored --test-threads=1
+  ```
+
+  > **Pass: five regenerated PNGs committed, and a second run without
+  > `UPDATE_SNAPSHOTS` green.** No emission, no wiring change, no drive —
+  > it costs a build and a minute.
+
+- **Does `install.sh` still hit `Text file busy`?** One line, zero cost
+  alongside any other block. `install -m 755` over a running `ac-daemon` may
+  fail on the daemon binary; it has never been established either way, and the
+  script now runs under `set -e`, so a failure aborts before the sha256 lines
+  print. Stop the daemon, install, and note which happened.
+  > **Pass:** a stated answer — either "installs cleanly with the daemon up",
+  > or "fails `Text file busy`, stop the daemon first", added to the rig
+  > defects list above.
+
 **Rides along with block 1, does not justify a trip:** what actually produced
 session 2's `LOCK ACQUIRED`. The capture bounds it but cannot identify it —
 `delay_attempts` did not exist on `7f0dd5e` (it arrived with #239), and
