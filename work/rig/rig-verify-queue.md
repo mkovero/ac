@@ -69,6 +69,23 @@ Two things session 3 raised that no block here covers yet:
   > `UPDATE_SNAPSHOTS` green.** No emission, no wiring change, no drive —
   > it costs a build and a minute.
 
+  **What the regeneration actually restores, which is a stronger argument than
+  tidiness.** These five are the *only* coverage of whether a correctly
+  computed trace is actually visible — `work/qa/qa-ignore-audit-2026-08-10.md`
+  finding 2. The headless suite covers the invariants: `it_banner_clearance`
+  asserts nothing overlaps the banner, `it_trace_distinction` asserts meas and
+  ref differ in colour and that snapshot traces paint dashed against live
+  solid, `it_transfer_geometry` covers tick and axis placement. None of them
+  can see a trace that is painted at the right coordinates in the right colour
+  and then not visible — clipped, alpha-zero, occluded, or a font fallback
+  substituting a glyph.
+
+  **While the references are stale that coverage is at zero, not
+  intermittent.** All five fail on the pixel diff before they can fail on
+  anything real, so a genuine rendering regression arriving today would be
+  indistinguishable from the known 7 px shift. Regenerating is what puts the
+  check back, not what tidies it up.
+
   **This block needs no microphone and must not compete with acoustic work for
   session time.** It is a wgpu render check on the box: the mic can stay where
   session 3 left it (near-wall, 2.4 m from A, 28 cm off the wall), and the

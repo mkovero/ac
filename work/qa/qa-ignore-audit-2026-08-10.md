@@ -171,9 +171,15 @@ a stated reason string, which is the convention that made this audit cheap —
 
 Three things are worth acting on eventually, in descending order of value:
 
-1. **Fixture currency is unchecked** (finding 1). The failure is silent and it
-   is the same shape as the stale snapshots.
-2. **The five snapshot references are stale** (finding 2), already queued.
-3. **Two stale justifications** — `it_stimulus_live`'s header (finding 4) and
-   the fixture-regeneration entries sharing an attribute with real coverage
-   (finding 1).
+1. **Fixture currency is unchecked** (finding 1) — **filed as #271**,
+   `ready-to-implement`. The failure is silent and it is the same shape as the
+   stale snapshots. The issue body records why the audit's own question was
+   malformed for this category, so the next audit does not skip it the same
+   way.
+2. **The five snapshot references are stale** (finding 2), already queued as
+   block 3a. The queue now carries the stronger argument for it: while they are
+   stale, rasterisation coverage is at **zero**, not intermittent — they fail on
+   the pixel diff before they can fail on anything real.
+3. **Two stale justifications.** `it_stimulus_live`'s header (finding 4) is
+   **corrected**; the fixture-regeneration entries sharing an attribute with
+   real coverage is noted as out of scope in #271, being cosmetic.
