@@ -148,6 +148,26 @@ Corollaries:
 - **Prose does not hold issue state.** Name the issue; let the tracker own
   open/closed. A document that restates it can be true when written and false
   half an hour later, which no review catches.
+- **The common failure is not a wrong statement, it is a true one that
+  decayed.** `handoff-doc-maintenance.md` was correct for thirty-five minutes.
+  The `#[ignore]`d snapshot references were correct until #252 moved the
+  layout. `#184`'s scope line was correct when the repo had three crates. A
+  test-file header claiming four properties were unobservable headless was
+  correct until `it_set_drive` covered three of them. None was wrong when
+  written, so **no review at the time could have caught any of them** — which
+  makes this a different class from asserting a mechanism without its
+  measurement, and one that review cannot fix.
+
+  The operational form: **do not restate what another artefact holds
+  authoritatively; where you must, name the artefact and date the restatement.**
+  Prefer describing what a file *enforces today* over enumerating its contents.
+  `computes_nothing.rs` is the worked example — `architect.md` names it as
+  authoritative and gives its current checks as dated commentary, so adding a
+  fourth check makes the spec under-describe rather than mis-describe.
+
+  Corollary for citations: **cite a section by name, not by line number.** A
+  line range is invalidated by the next edit to the file, including the edit
+  that adds the citation.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.
