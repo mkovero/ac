@@ -37,7 +37,7 @@ Tier 1 vs Tier 2 decides where a new analysis feature belongs — see
 - The `ac-daemon` wire schema = shared contract with every consumer (`ac-cli`, `ac-view`). Any change to what the PUB socket publishes is a breaking change for both. `ac-rs/ZMQ.md` is the protocol reference.
 - H1 estimator (`ac-core/visualize/transfer.rs`) use Müller-Massarani windowed cross-correlation. Estimator internal changes must preserve math correctness of transfer function estimate.
 - Level reference = scalar dBu offset (`ac-core/shared/reference_levels.rs`). **This is not a ban on frequency-dependent correction anywhere** — `ac-core/shared/mic_curve_filter.rs` is exactly that and ships deliberately, time-domain and ahead of K-weighting, because a scalar dB offset cannot compose with the BS.1770-5 filter. What must stay scalar is the *dBu reference itself*.
-- Calibration layers are **parallel, not composed**: voltage cal (`vrms_at_0dbfs_in`) and SPL cal (`mic_sensitivity_dbfs_at_94db_spl`) are independent readings off the same raw digital amplitude, and SPL is computed from *uncalibrated* dBFS. Composition does not break a convention, it breaks an identity: mic sensitivity is defined as what 94 dB SPL reads as raw dBFS, so both sides of `dbspl = dbfs − mic_sens + 94` must be the same quantity. Violated by any call site computing an absolute SPL from a voltage-scaled amplitude. Topology and the three call sites expected to preserve it: `ac-core/src/shared/calibration.rs:6-35`.
+- Calibration layers are **parallel, not composed**: voltage cal (`vrms_at_0dbfs_in`) and SPL cal (`mic_sensitivity_dbfs_at_94db_spl`) are independent readings off the same raw digital amplitude, and SPL is computed from *uncalibrated* dBFS. Composition does not break a convention, it breaks an identity: mic sensitivity is defined as what 94 dB SPL reads as raw dBFS, so both sides of `dbspl = dbfs − mic_sens + 94` must be the same quantity. Violated by any call site computing an absolute SPL from a voltage-scaled amplitude. Topology and the three call sites expected to preserve it: the "Layer topology" section of `ac-core/src/shared/calibration.rs`'s module doc (named rather than line-numbered — it has moved twice).
 
 ## inputs you will receive
 - Issue body + triage spec comment
@@ -133,16 +133,15 @@ failing case is not a check — it reports coverage it does not have.
 For each stated invariant, confirm code actually enforce it:
 - Wire schema: definition single-sourced or duplicated across daemon and consumers?
 - Level reference: any code path make the **dBu reference** frequency-dependent? (The mic-curve FIR is not that — see the invariant.)
-- Calibration layers: does `parity_transfer_spl_is_independent_of_voltage_cal_scale`
-  (`ac-daemon/tests/it_cross_tier_parity.rs`) still exist and still pass? It sets a
-  voltage cal large enough to produce a ~14 dB error if composition happened, so a
-  regression on the transfer path cannot hide in tolerance.
-  **Machine-covered: the transfer path only** (`derive_pair`, `transfer_stream`).
-  **Read-only: `monitor.rs`** — its clause (never scale `spec`/`cwt_mags` by
-  `vrms_at_0dbfs_in`; voltage ships as the separate `dbu_offset_db`) has no
-  scale-change test, so an audit that answers this item ✓ has verified two of
-  three sites by machine and one by reading. Say which. The monitor-side parity
-  case that closes the gap is **#261**; when it lands, this caveat goes.
+- Calibration layers: do **both** parity tests in
+  `ac-daemon/tests/it_cross_tier_parity.rs` still exist and still pass —
+  `parity_transfer_spl_is_independent_of_voltage_cal_scale` (`derive_pair`,
+  `transfer_stream`) and `parity_monitor_spl_is_independent_of_voltage_cal_scale`
+  (`monitor.rs`, #261)? Each sets a voltage cal large enough that composition
+  produces a ≥14 dB error, so a regression cannot hide in a tolerance sized for
+  capture jitter. **All three call sites are machine-covered**; nothing here is
+  verified by reading any more.
+  A ✓ means both tests pass, not that the topology reads correctly.
 - H1 estimator: implementation match Müller-Massarani derivation in `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
 
 ### interface surface
@@ -166,7 +165,7 @@ For each stated invariant, confirm code actually enforce it:
 |---|---|---|
 | wire schema single-sourced | ✓ / ✗ | |
 | dBu reference stays scalar | ✓ / ✗ | |
-| calibration layers parallel, not composed | ✓ / ✗ | transfer path machine-covered; `monitor.rs` read-only — state which |
+| calibration layers parallel, not composed | ✓ / ✗ | all three sites machine-covered — both parity tests must pass, name them |
 | H1 matches Müller-Massarani | ✓ / ? / ✗ | |
 | ac-scene has no egui/zmq dep | ✓ / ✗ | |
 | ac-view computes nothing numeric | ✓ / ✗ | |

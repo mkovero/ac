@@ -872,15 +872,21 @@ fn parity_transfer_spl_is_independent_of_voltage_cal_scale() {
     let spl_no_voltage_cal = spl_with_optional_voltage_cal(None);
     let spl_with_voltage_cal = spl_with_optional_voltage_cal(Some(5.0));
 
-    // A composed topology would show up as ~20*log10(5.0) = 13.98 dB;
-    // 2.0 dB comfortably separates that from cross-run capture jitter
-    // on the same deterministic stimulus.
+    // A composed topology shows up as **~27 dB**, not the ~14 dB this comment
+    // claimed until #261 measured it. `5.0` is the DMM reading; what gets
+    // applied is `vrms_at_0dbfs_in = reading / amplitude(measured dBFS)` —
+    // extrapolated to full scale from a cal capture at −13.01 dBFS, so 22.36,
+    // and 20·log10(22.36) = 26.99. The bound was never wrong, only the
+    // prediction behind it: 2.0 dB separates cross-run capture jitter from an
+    // error that is larger still than the one it was sized against. See
+    // `parity_monitor_spl_is_independent_of_voltage_cal_scale` below for the
+    // falsification run the figure comes from.
     let delta = (spl_with_voltage_cal - spl_no_voltage_cal).abs();
     assert!(
         delta < 2.0,
         "spl must not depend on voltage-cal scale (parallel-layer topology): \
          no-voltage-cal spl={spl_no_voltage_cal:.2} vrms=5.0 spl={spl_with_voltage_cal:.2} \
-         (Δ={delta:.2} — a composed topology would show ~14 dB here)"
+         (Δ={delta:.2} — a composed topology would show ~27 dB here)"
     );
 }
 
@@ -948,4 +954,157 @@ fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
         }
     }
     None
+}
+
+/// #261 — the third of the three call sites `shared/calibration.rs`'s layer
+/// topology names, and the last one that held by human reading alone.
+///
+/// `derive_pair` and the `transfer_stream` handler are covered by
+/// `parity_transfer_spl_is_independent_of_voltage_cal_scale` above.
+/// `monitor.rs`'s clause is the same invariant seen from its own side: it must
+/// never scale `spectrum` / `cwt_mags` by `vrms_at_0dbfs_in`, and voltage
+/// information must ship only in the separate `dbu_offset_db` field. If it
+/// composed the layers instead, every absolute SPL a consumer derives from a
+/// monitor frame — `20·log10(bin) + spl_offset_db` — would move the moment the
+/// channel picked up an electrical calibration, with nothing on screen to say
+/// so.
+///
+/// What existed nearby is not this test.
+/// `parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale`
+/// scales a monitor peak *by* the same vrms and compares paths — it asserts the
+/// two agree once converted, which a composed topology could still satisfy.
+/// `it_protocol.rs`'s `dbu_offset_db` check covers the unset case, where the
+/// scale factor is 1.0 and composition is unobservable by construction. The
+/// distinction this test dissolves is "verified by test" versus "verified by
+/// reading".
+///
+/// Two runs of the same deterministic fake stimulus, the second with a
+/// non-trivial voltage cal, asserting the derived SPL does not move.
+#[test]
+fn parity_monitor_spl_is_independent_of_voltage_cal_scale() {
+    /// Derived SPL from one monitor `visualize/spectrum` frame: the peak bin in
+    /// dBFS plus the frame's own `spl_offset_db`. This is the number a consumer
+    /// displays, which is what the invariant is about — not an internal.
+    fn monitor_spl_with_optional_voltage_cal(vrms: Option<f64>) -> f64 {
+        let d = Daemon::spawn();
+        let c = Client::new(&d);
+
+        if let Some(vrms) = vrms {
+            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                                   "output_channel": 0, "input_channel": 0}));
+            assert_eq!(r["ok"], json!(true));
+            let _ = c
+                .wait_for_topic("cal_prompt", Duration::from_secs(3))
+                .expect("voltage cal step 1 prompt");
+            let _ = c.call(json!({"cmd": "cal_reply", "vrms": vrms}));
+            let _ = c
+                .wait_for_topic("cal_prompt", Duration::from_secs(3))
+                .expect("voltage cal step 2 prompt");
+            let _ = c.call(json!({"cmd": "cal_reply", "vrms": vrms}));
+            let _ = c
+                .wait_for_topic("cal_done", Duration::from_secs(5))
+                .expect("voltage cal_done");
+
+            // **This test's discriminating power, asserted rather than
+            // assumed.** Composition scales by the *stored*
+            // `vrms_at_0dbfs_in`, so the symptom is 20·log10(that) — which is
+            // bounded below by nothing. A rig whose full scale is 1 Vrms
+            // stores 1.0 and composes with an error of exactly **0 dB**:
+            // ordinary hardware, not a contrived case, on which the composed
+            // and correct topologies are indistinguishable by the reading.
+            //
+            // So the stored constant is read back from the daemon rather than
+            // re-derived, and the test refuses to run on a value that cannot
+            // separate the two. Without this, tidying `5.0` to a rounder-
+            // looking `1.0` would leave a test that passes with the layers
+            // composed — and it would look like a simplification.
+            let cal = c.call(json!({"cmd": "get_calibration",
+                                    "output_channel": 0, "input_channel": 0}));
+            assert_eq!(cal["ok"], json!(true));
+            let stored = cal["vrms_at_0dbfs_in"]
+                .as_f64()
+                .expect("vrms_at_0dbfs_in must be set after calibrate");
+            let composed_error_db = 20.0 * stored.log10();
+            assert!(
+                composed_error_db.abs() > 10.0,
+                "this test cannot discriminate: stored vrms_at_0dbfs_in={stored:.3} makes                  composition a {composed_error_db:.2} dB error, which the 2.0 dB tolerance                  below would swallow. The `vrms` handed to `calibrate` must land the stored                  constant far from 1.0 — at 1.0 exactly, a composed topology is invisible                  here."
+            );
+        }
+
+        let r = c.call(json!({"cmd": "calibrate_spl", "input_channel": 0, "capture_s": 0.05}));
+        assert_eq!(r["ok"], json!(true));
+        let _ = c
+            .wait_for_topic("cal_prompt", Duration::from_secs(3))
+            .expect("spl cal_prompt");
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": Value::Null}));
+        let _ = c
+            .wait_for_topic("cal_done", Duration::from_secs(5))
+            .expect("spl cal_done");
+        while c.recv_pub(50).is_some() {}
+
+        let mf = capture_one_monitor_frame(&c, "fft", "visualize/spectrum", 5);
+        let _ = c.call(json!({"cmd": "stop"}));
+
+        // Present-and-finite, not just present: a null here would make the
+        // comparison below trivially true on both runs and the test vacuous.
+        let spl_offset = mf["spl_offset_db"]
+            .as_f64()
+            .expect("spl_offset_db must be finite — the channel is SPL-calibrated");
+        let spec: Vec<f64> = mf["spectrum"]
+            .as_array()
+            .expect("spectrum array")
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let peak = spec
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+            .max(1e-12);
+        20.0 * peak.log10() + spl_offset
+    }
+
+    let spl_no_voltage_cal = monitor_spl_with_optional_voltage_cal(None);
+    let spl_with_voltage_cal = monitor_spl_with_optional_voltage_cal(Some(5.0));
+
+    // `vrms = 5.0` is the operator's DMM reading, chosen far from the trivial
+    // 1.0/unset case. **The scale a composed topology would apply is not 5.0**,
+    // and that is worth being precise about, because the obvious prediction —
+    // 20·log10(5.0) = 13.98 dB — is wrong.
+    //
+    // `calibrate` stores `vrms_at_0dbfs_in = reading / amplitude(measured
+    // dBFS)`: Vrms extrapolated to full scale, from a reading taken well below
+    // it. Here the cal capture sits at −13.01 dBFS, so the stored constant is
+    // 5.0 / 0.2236 = **22.36**, and composition scales by that.
+    //
+    // Falsified, and the arithmetic closes exactly: composing the layers in
+    // `monitor.rs` moves the peak from −20.63 to +6.36 dBFS, a delta of
+    // **26.99 dB**, against 20·log10(22.36) = 26.989 predicted. `spl_offset_db`
+    // is **117.010 in both runs** — the SPL layer does not move at all.
+    //
+    // That last measurement is the operationally important one. `calibrate_spl`
+    // derives `mic_sensitivity_dbfs_at_94db_spl` from `capture_rms`, raw, and
+    // never touches `vrms_at_0dbfs_in`. So **re-running the SPL calibration
+    // after a composition bug appeared would not mask it**: the stored
+    // sensitivity comes back identical and the live reading stays wrong by the
+    // full 26.99 dB. An operator debugging a bad SPL number at the rig would
+    // re-calibrate first, and would learn nothing from it.
+    //
+    // **The tolerance absorbs capture jitter only.** Two independent daemon
+    // runs of the same deterministic fake stimulus land on slightly different
+    // FFT windows, which moves the peak bin by a fraction of a dB of Hann
+    // scalloping. 2.0 dB covers that with room; it is not a margin fitted to an
+    // observed discrepancy, and it is not a number to tighten later. If a
+    // future change makes this fail by a few tenths, the question is what moved
+    // the capture — not whether the bound is too generous.
+    let delta = (spl_with_voltage_cal - spl_no_voltage_cal).abs();
+    assert!(
+        delta < 2.0,
+        "monitor SPL moved with voltage cal: no-voltage-cal={spl_no_voltage_cal:.2} dB SPL, \
+         vrms=5.0 gives {spl_with_voltage_cal:.2} dB SPL (Δ={delta:.2}). ~27 dB means \
+         `monitor.rs` is scaling `spectrum` by `vrms_at_0dbfs_in` — that is \
+         20·log10(22.36), the stored full-scale constant, not 20·log10(5.0) of the DMM \
+         reading. Voltage cal and SPL cal are parallel layers off raw digital amplitude, \
+         not composed (`shared/calibration.rs`, layer topology)."
+    );
 }

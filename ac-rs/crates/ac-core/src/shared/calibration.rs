@@ -29,10 +29,42 @@
 //! applied), `ac-daemon`'s live `transfer_stream` handler (same split,
 //! `mc_meas_amp` vs. `meas_amp_wire`), and `monitor.rs` (never scales
 //! `spec/cwt_mags` by `vrms_at_0dbfs_in`; voltage info ships only as the
-//! separate `dbu_offset_db` field). Verified non-accidental by
-//! `ac-daemon`'s `parity_transfer_spl_is_independent_of_voltage_cal_scale`
-//! (`it_cross_tier_parity.rs`) — `spl` stays put across a non-trivial
-//! voltage-cal scale change, not just the trivial/unset case.
+//! separate `dbu_offset_db` field).
+//!
+//! **All three are machine-covered**, by two tests in `ac-daemon`'s
+//! `it_cross_tier_parity.rs`, each asserting its own side stays put across
+//! a *non-trivial* voltage-cal scale change rather than the trivial/unset
+//! case: `parity_transfer_spl_is_independent_of_voltage_cal_scale` for
+//! `derive_pair` and the `transfer_stream` handler, and
+//! `parity_monitor_spl_is_independent_of_voltage_cal_scale` (#261) for
+//! `monitor.rs`. Both were confirmed red against a deliberately composed
+//! derivation before landing.
+//!
+//! **The invariant is that SPL does not move — never that it moves by
+//! some amount when broken.** The symptom's size is
+//! `20·log10(vrms_at_0dbfs_in)`, which is bounded below by nothing: a rig
+//! whose full scale is 1 Vrms stores 1.0 and composes with an error of
+//! **exactly 0 dB**. That is ordinary hardware, and on it the composed and
+//! correct topologies are indistinguishable by the reading alone. No field
+//! diagnosis can work from magnitude. The only reliable signal is the one
+//! the tests assert: SPL changing when the *voltage* calibration changed
+//! and nothing else did.
+//!
+//! **What composition costs when it is visible, measured rather than
+//! predicted.** That constant is *Vrms extrapolated to full scale*,
+//! `reading / amplitude(measured dBFS)` — not the operator's DMM reading.
+//! In #261's falsification run a 5.0 V reading taken at a −13.01 dBFS cal
+//! capture stored 22.36, so the monitor SPL moved **26.99 dB**, against the
+//! 13.98 dB a reader would predict from the reading alone. Any bound sized
+//! against 14 dB is safe; any *diagnosis* expecting 14 dB misreads the
+//! symptom.
+//!
+//! **Re-calibrating does not mask it.** `calibrate_spl` derives
+//! `mic_sensitivity_dbfs_at_94db_spl` from `capture_rms` on raw amplitude
+//! and never reads `vrms_at_0dbfs_in`; `spl_offset_db` measured identical
+//! (117.010) either side of the composed run. So the SPL layer stays
+//! correct while the reading is wrong, and the first thing an operator
+//! would try at the rig — re-run the SPL calibration — changes nothing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
