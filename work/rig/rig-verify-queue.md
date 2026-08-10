@@ -269,6 +269,16 @@ survived two sessions unrun. If it is cut a third time, that is a decision to
 close #208's verification unproven, and it should be recorded as one rather
 than deferred again.
 
+**The trap in this run, recorded before it is set up.** Feeding the digital
+loopback to *both* legs makes H1 ≡ 1 with a flat magnitude, so the check
+returns a clean null **that looks exactly like a pass**. The measurement leg
+must be analog out→in and the reference leg the digital loopback, connected by
+`jack_connect` within ~1 s of session start. Use a repeatable level step, not a
+finger snap: the criterion is a *count* of episodes, and comparing counts
+across two different transients proves nothing — which is also why the A/B
+against `cda40ef` is not optional. One episode on the new build only means
+something if the old build shows four.
+
 ---
 
 ## Rig state left behind
