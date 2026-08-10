@@ -10,6 +10,15 @@ ac/old2
 ac-rs/crates/ac-view/tests/snapshots/*.old.png
 ac-rs/crates/ac-view/tests/snapshots/*.diff.png
 *.csv
+
+# Rig evidence — .json.gz / .pkl.gz frame captures and the .py that produced
+# them — is COMMITTED, deliberately, under audit/<session>/. Same reasoning as
+# the snapshot carve-out above: it is equipment, not output. A capture is the
+# only record of what the instrument saw at a position that no longer exists,
+# and analysis of it is re-run months later (audit/rig-session-3/ is 39 such
+# files). Do not add a blanket *.json.gz / *.pkl.gz ignore — that omission is
+# why several sessions' evidence sat untracked and invisible from a clone
+# while the documents citing it were committed.
 .env
 *.key
 *.pem

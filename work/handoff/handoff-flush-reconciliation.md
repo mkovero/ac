@@ -470,13 +470,26 @@ the path this rule has to close.
 
 ---
 
-## 10. Every `.agents/` spec describes a repo layout that no longer exists
+## 10. Every `.agents/` spec describes a repo layout that no longer exists — **extends #184**
 
 Found 2026-08-10 while reading `developer.md` for a role brief. Not one file —
 **all five specs**, and the tracked-item case is that this is the first
 doc-correctness defect here that **misdirects work** rather than misinforming
 a reader. Agents cannot edit `.agents/` unilaterally, so it waits on Markus,
 like item 9.
+
+> **This is already filed, and the filing is narrower than the defect.**
+> **#184** (open since 2026-07-24, `ready-to-implement`) has "regenerate the
+> module maps" as its first acceptance criterion — but names only
+> `architect.md` and `developer.md`, and scopes the work as regeneration.
+> `qa.md`, `triage.md` and `ux.md` carry the same dead layout and are not in
+> it, and its **out of scope** line ("any content change beyond regenerating
+> the module maps") reads as excluding the three unfailable checks below,
+> which are the part that misdirects work. #184's own framing supports
+> widening it — it was opened because "the architect pass on #180 had to
+> explicitly note it was orienting from the tree instead". Widen #184 rather
+> than filing a second issue; two issues over one spec file is how the
+> `blocker`/`blocked` collision it also tracks came about.
 
 The specs describe three crates — `ac/src/{main,estimator,session,level,
 signal}.rs`, `thd_tool/src/`, `ds/src/`. The tree is a five-crate workspace
@@ -520,6 +533,18 @@ that named the old layout either names the current one or is removed — with
 `architect.md:109`, `qa.md:198` and `ux.md:188` rewritten so that a wrong
 answer is *possible*. A checklist item nothing can fail is worth less than no
 item, because it reports coverage it does not have.
+
+**The sweep is not "delete every `thd_tool` mention."** Two kinds of line are
+mixed together and only one of them goes. A line naming a tool that no longer
+exists is dead — the `thd_tool` standalone invariant (`architect.md:38`,
+`developer.md:44`, and its checklist row at `architect.md:142`) has no
+referent and goes. A line carrying a **live reference wearing a dead label**
+must be re-pointed instead: `qa.md:54` names the Müller & Massarani PDF as the
+primary reference for the H1 estimator, which is still exactly what
+`ac-core/visualize/transfer.rs` implements, whatever `ac/src/estimator.rs` in
+the surrounding sentence says. A blanket delete costs a standards pointer,
+which is what `stddocs/` discipline exists to prevent. Read each of the 24
+lines; the grep locates them, it does not judge them.
 
 ---
 
