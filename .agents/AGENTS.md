@@ -78,13 +78,42 @@ Always human-only:
 | `ready-to-implement` | triage or architect | developer can pick up |
 | `in-review` | developer (via PR) | PR open |
 | `needs-work` | qa | PR has issues, developer must revise |
-| `blocked` | any agent | external dependency |
+| `blocked` | any agent | this issue waits on something else — see below |
+| `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
 | `drive-path` | triage or developer | stimulus/drive safety checklist applies |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
 | `agent:qa` | qa | audit trail |
+
+### `blocked` and `blocks-others` are opposite relations
+
+They point in opposite directions and were previously named `blocked` and
+`blocker`, one letter apart. `blocker` was renamed rather than retired: nine
+issues carried it, and a rename preserves them where a delete would have
+stripped them silently, with nothing in git to restore from.
+
+- **`blocked`** — *this* issue cannot proceed yet.
+- **`blocks-others`** — *other* work cannot proceed until this one lands.
+
+An issue can legitimately carry both.
+
+### the `blocked` lift condition — write it in the comment that applies it
+
+`ready-to-implement` describes **spec completeness, not queue position**. A
+spec-complete issue whose predecessor is unmerged is still ready in the sense
+that label means, so it carries `blocked` as well.
+
+**Whoever applies `blocked` names the exact condition that lifts it**, in the
+comment that applies it: *"#180 merged → remove `blocked`"*. #181 and #182 are
+the established form.
+
+Two reasons this is a rule rather than a habit. A developer agent routing on
+`ready-to-implement` alone would otherwise pick up work whose dependencies do
+not exist yet. And a `blocked` label with no stated lift condition is
+indistinguishable from one whose condition was met months ago — the label
+stops being state and becomes sediment.
 
 ## evidence discipline — every role
 
