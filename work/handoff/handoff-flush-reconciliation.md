@@ -8,6 +8,16 @@
 > together — one adds a rule to a spec, the other repairs the specs that rule
 > would be read alongside.
 
+> **Do not delete `flush-2026-08-05.md` on the grounds that this file exists.**
+> This file supersedes it only for the items it has discharged. **Items 7 and
+> 8 are not written yet** — until
+> `docs/design/design-parametric-reflection-removal.md` and
+> `docs/coherence-diagnostics.md` exist, the flush is still the only other
+> copy of that material, and it is not in this repo (it never was — it is a
+> conversation dump held outside the tree). Retiring it early loses both
+> documents' substance and leaves this file as the sole record, which is the
+> single-copy state item 10's `acoustic-analyze-v1.md` was rescued from.
+
 Written 2026-08-10 against the `ac-main` snapshot taken 2026-08-06. Its input
 is `flush-2026-08-05.md`, a context dump of material that existed only in
 conversation. Every claim below was checked against the tree rather than
@@ -199,6 +209,25 @@ Read whether `mtw` survives and what the banner does.
 
 **Before any of that, establish which build the clip was shot on.** If it
 predates #234 there is no indicator to expect and nothing to explain.
+
+> **The build side of that is resolved; only the clip's date is missing.**
+> #234 is a **PR**, not an issue — `feat: surface a fault indicator on the
+> transfer view`, the PR for issue #228 — merged **2026-08-03T16:29:03Z** as
+> `ab3d236`. The rig's installs are recorded, so the cut is a wall-clock time,
+> not a build inspection:
+>
+> | build installed on the rig | when | indicator present |
+> |---|---|---|
+> | `7f0dd5e` (#233 + #232 + **#234**), session 2 | 2026-08-03 **20:14** | yes |
+> | `4659b25`, session 3, still installed | 2026-08-04 | yes |
+> | anything earlier | — | **no** |
+>
+> **Clip at or after 2026-08-03 20:14 → this item stands. Earlier → it
+> dissolves, and the queue entry comes back out.** One command answers it —
+> `ffprobe -v error -show_entries format_tags=creation_time -of default=nw=1
+> <clip>`, or `ls -l --time-style=full-iso <clip>` if the file was copied
+> rather than re-encoded. The clip is not on the dev box; nothing under
+> `/home/mui` is a video modified since 2026-07-01.
 
 **Pass:** a capture that shows `mtw` present with `coherence_dead` true and
 the banner state that accompanied it. File an issue only on that evidence —
@@ -468,15 +497,74 @@ four checkpoints because each verified the arithmetic rather than whether the
 formula applied — and it then reached the code by way of a QA brief, which is
 the path this rule has to close.
 
+### The companion rule, found while sorting the untracked files
+
+**A document cited as an independent specification input is load-bearing, and
+must not be folded into the thing it checks.** The general rule that a
+ratified decision should be lifted out of an expiring handoff into a durable
+doc is right, and it retired `plan-field-ux.md` correctly. It does not apply
+to `work/handoff/handoff-live-display-switch.md`, which
+`work/qa/qa-brief-218-222.md:10` names as one of four specification inputs QA
+re-derives #218/#222 expectations from, **under an explicit rule against
+reading values from the implementation**. Merging it into the design doc it
+sits beside, or into the code it constrains, destroys precisely the
+independence it exists to supply. That is item 4's pattern seen from the other
+end: a check whose reference has been folded into its subject cannot fail
+either.
+
+How close it came is the point. **Both files were untracked.** In a clone, a
+tracked QA brief cited an authority that did not exist, and the authority
+cited nothing back — #230's failure mode with the roles reversed, and about
+two hours from being deleted rather than committed.
+
+**Operational form: before deleting a document, grep for it as a *cited name*,
+not only as a subject.** Those are different searches — "does anything discuss
+this material" versus "does anything *depend on* this file" — and only the
+second one is load-bearing. The two files sorted on 2026-08-10 are the worked
+example, and they came out opposite ways:
+
+| file | subject search | cited-name search | disposition |
+|---|---|---|---|
+| `work/planning/plan-field-ux.md` | every decision found downstream (`handoff-field-transfer.md:18,37,41,42,302`; `ac-scene/src/transfer.rs:18,41`) | nothing names it | **deleted, correctly** |
+| `work/handoff/handoff-live-display-switch.md` | **nothing** — it is about a display switch and no other document covers that | `work/qa/qa-brief-218-222.md:10` names it as a specification input | **kept** |
+
+The second row is the one that matters: a subject-only search would have
+returned nothing for it too, and the file would have been deleted for looking
+orphaned when it was in fact depended upon. It survived only because something
+named it.
+
 ---
 
-## 10. Every `.agents/` spec describes a repo layout that no longer exists
+## 10. Every `.agents/` spec describes a repo layout that no longer exists — **extends #184**
 
 Found 2026-08-10 while reading `developer.md` for a role brief. Not one file —
 **all five specs**, and the tracked-item case is that this is the first
 doc-correctness defect here that **misdirects work** rather than misinforming
 a reader. Agents cannot edit `.agents/` unilaterally, so it waits on Markus,
 like item 9.
+
+> **This is already filed, and the filing is narrower than the defect.**
+> **#184** (open since 2026-07-24, `ready-to-implement`) has "regenerate the
+> module maps" as its first acceptance criterion — but names only
+> `architect.md` and `developer.md`, and scopes the work as regeneration.
+> `qa.md`, `triage.md` and `ux.md` carry the same dead layout and are not in
+> it, and its **out of scope** line ("any content change beyond regenerating
+> the module maps") reads as excluding the three unfailable checks below,
+> which are the part that misdirects work. #184's own framing supports
+> widening it — it was opened because "the architect pass on #180 had to
+> explicitly note it was orienting from the tree instead". Widen #184 rather
+> than filing a second issue; two issues over one spec file is how the
+> `blocker`/`blocked` collision it also tracks came about.
+>
+> **#184 is labelled `ready-to-implement`, and must not stay that way if it is
+> widened.** Regenerating a module map is developer work against a written
+> spec. Deciding what `architect.md:109`, `qa.md:198` and `ux.md:188` should
+> *assert* — so that a wrong answer becomes possible, and in `ux.md`'s case so
+> that the audit covers a medium it currently cannot see — is a question about
+> what those checks are for. Under the repo's own routing that is architect
+> work. Widening the scope without moving the label is the worse of the two
+> states: the next developer invocation reads `ready-to-implement`, takes the
+> narrow acceptance criteria at face value, and closes the issue on them.
 
 The specs describe three crates — `ac/src/{main,estimator,session,level,
 signal}.rs`, `thd_tool/src/`, `ds/src/`. The tree is a five-crate workspace
@@ -493,10 +581,18 @@ design review. Two more of the same shape:
 
 - `qa.md:198` — standards conformance "for each output value in `ac`,
   `thd_tool`, `ds`", against the standards table in that spec.
-- `ux.md:188` — an audit instructed to read every stdout path "across `ac`,
-  `thd_tool`, `ds`". The real output surfaces are `ac-cli` and `ac-view`, and
-  `ac-view` is not text at all, so the instruction misses the entire graphical
-  surface it was written before.
+**`ux.md:188` is a different defect and needs saying separately.** The other
+two ask a question about a structure that does not exist — wrong subject, same
+shape. This one scopes the whole audit to *stdout-producing code paths*
+("every `println!`, `eprintln!`, format string"), and that is the **wrong
+medium**, not just a stale crate list. The project's primary output surface is
+now a wgpu GUI: an ember trace, a six-state fault banner, a delay readout,
+input-level meters. None of it is a `println!`. The spec knows `ac-view`
+exists — `ux.md:100-113` reviews the ARMED/DRIVING banners and the meters in
+normal mode — but **audit mode cannot see it**. Correcting the crate names
+here would leave a UX audit that still reads only text, so this is the one
+line where widening #184's scope is not sufficient; the instruction itself has
+to change.
 
 The rest are references rather than unfailable checks, and the population is
 larger than a first pass suggests — `grep -n 'thd_tool\|ds/src\|ac/src' .agents/*.md`:
@@ -520,6 +616,18 @@ that named the old layout either names the current one or is removed — with
 `architect.md:109`, `qa.md:198` and `ux.md:188` rewritten so that a wrong
 answer is *possible*. A checklist item nothing can fail is worth less than no
 item, because it reports coverage it does not have.
+
+**The sweep is not "delete every `thd_tool` mention."** Two kinds of line are
+mixed together and only one of them goes. A line naming a tool that no longer
+exists is dead — the `thd_tool` standalone invariant (`architect.md:38`,
+`developer.md:44`, and its checklist row at `architect.md:142`) has no
+referent and goes. A line carrying a **live reference wearing a dead label**
+must be re-pointed instead: `qa.md:54` names the Müller & Massarani PDF as the
+primary reference for the H1 estimator, which is still exactly what
+`ac-core/visualize/transfer.rs` implements, whatever `ac/src/estimator.rs` in
+the surrounding sentence says. A blanket delete costs a standards pointer,
+which is what `stddocs/` discipline exists to prevent. Read each of the 24
+lines; the grep locates them, it does not judge them.
 
 ---
 

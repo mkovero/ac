@@ -66,6 +66,14 @@ Two things session 3 raised that no block here covers yet:
   > `UPDATE_SNAPSHOTS` green.** No emission, no wiring change, no drive —
   > it costs a build and a minute.
 
+  **This block needs no microphone and must not compete with acoustic work for
+  session time.** It is a wgpu render check on the box: the mic can stay where
+  session 3 left it (near-wall, 2.4 m from A, 28 cm off the wall), and the
+  block runs while the machine warms up or after the last position change,
+  when position no longer matters. Its independence is exactly why it would
+  otherwise be first to be cut — schedule it *outside* the acoustic budget,
+  not at the end of it.
+
 - **Does `install.sh` still hit `Text file busy`?** One line, zero cost
   alongside any other block. `install -m 755` over a running `ac-daemon` may
   fail on the daemon binary; it has never been established either way, and the
@@ -74,6 +82,18 @@ Two things session 3 raised that no block here covers yet:
   > **Pass:** a stated answer — either "installs cleanly with the daemon up",
   > or "fails `Text file busy`, stop the daemon first", added to the rig
   > defects list above.
+
+  **No microphone, no emission — same scheduling rule as the block above.** It
+  is a file copy over a running daemon and happens during the install every
+  session already begins with.
+
+**The distinction that keeps these two off the cut list.** Run D has been
+dropped twice for being independent of everything else, and it *is* the right
+thing to cut when time runs short: it needs the emission path, drive-level
+consent, and an A/B against `cda40ef`, so it genuinely competes with the
+acoustic blocks for the session. Snapshot regeneration and the `install.sh`
+question compete with nothing. Cutting them for time is a category error —
+there is no acoustic measurement they are taking time away from.
 
 **Rides along with block 1, does not justify a trip:** what actually produced
 session 2's `LOCK ACQUIRED`. The capture bounds it but cannot identify it —
@@ -268,6 +288,16 @@ the first thing to cut if the session runs short — which is how it has now
 survived two sessions unrun. If it is cut a third time, that is a decision to
 close #208's verification unproven, and it should be recorded as one rather
 than deferred again.
+
+**The trap in this run, recorded before it is set up.** Feeding the digital
+loopback to *both* legs makes H1 ≡ 1 with a flat magnitude, so the check
+returns a clean null **that looks exactly like a pass**. The measurement leg
+must be analog out→in and the reference leg the digital loopback, connected by
+`jack_connect` within ~1 s of session start. Use a repeatable level step, not a
+finger snap: the criterion is a *count* of episodes, and comparing counts
+across two different transients proves nothing — which is also why the A/B
+against `cda40ef` is not optional. One episode on the new build only means
+something if the old build shows four.
 
 ---
 
