@@ -8,6 +8,10 @@
 //! stimulus that merely looks similar.
 //!
 //! `cargo test -p ac-scene --test regenerate_fixture -- --ignored`
+//!
+//! The fixture it writes is checked on every run by
+//! `wire_fixture_on_disk_is_current` (#271) — a regeneration that changes the
+//! numbers shows up in the diff instead of passing unnoticed.
 
 use ac_core::snapshot::read_acsnap;
 use ac_core::visualize::weighting_curves::WeightingCurve;
@@ -31,6 +35,139 @@ pub(crate) fn wire_fixture_path() -> PathBuf {
 #[test]
 #[ignore = "regenerates tests/fixtures/transfer-frame-v2.json — run manually"]
 fn generate_captured_frame_fixture() {
+    let frame = build_wire_frame();
+    let text = serde_json::to_string_pretty(&frame).expect("serialize frame");
+    std::fs::write(wire_fixture_path(), &text).expect("write fixture file");
+    eprintln!("wrote {}", wire_fixture_path().display());
+}
+
+/// #271: the fixture on disk must still be what `build_wire_frame` produces.
+///
+/// Without this, a derivation change that updates the writer and every reader
+/// together leaves the committed fixture describing numbers neither side
+/// produces, and `it_fixtures.rs` keeps passing against it. Silent, and the
+/// fixture stops being a reference while still looking like one.
+///
+/// **Compared with a tolerance, not exactly, and the tolerance is the finding.**
+/// This artefact is a pure function of committed inputs — derived from the
+/// checked-in `.acsnap` through `derive_pair`, no capture and no clock — so an
+/// exact comparison looked correct when this test was written. It is not: the
+/// derivation is not bit-reproducible across builds. Measured against the
+/// committed fixture on first run:
+///
+/// | field | max abs Δ |
+/// |---|---|
+/// | `coherence` | 1.1e-16 |
+/// | `magnitude_db` | 8.9e-16 dB |
+/// | `meas_spectrum` | 3.5e-18 |
+/// | `spec_freqs` | 3.6e-12 Hz (relative 1.8e-13) |
+///
+/// Every one is last-bit: FFT ordering, FMA contraction and library versions
+/// move a `f64` at that scale and none of it is drift. **A test that failed on
+/// 1e-16 would be deleted rather than debugged**, taking the check with it —
+/// which is the failure mode #271 was filed to avoid, arriving from the
+/// direction the issue did not anticipate.
+///
+/// `1e-9` relative sits six orders above the observed noise and six below any
+/// derivation change worth catching — a changed window, normalisation or
+/// weighting moves these by 1e-6 at the very least, usually far more. It is
+/// not a number to tighten: tightening it re-introduces ULP flakiness, and
+/// that is what the table above is here to say.
+///
+/// Structure, keys, strings and integers are still compared **exactly**.
+#[test]
+fn wire_fixture_on_disk_is_current() {
+    /// Relative tolerance for f64 arrays, with an absolute floor for values
+    /// near zero. See the doc comment: sized against measured ULP noise, not
+    /// fitted to an observed discrepancy.
+    const REL_TOL: f64 = 1e-9;
+    const ABS_FLOOR: f64 = 1e-12;
+
+    fn close(a: f64, b: f64) -> bool {
+        let d = (a - b).abs();
+        d <= ABS_FLOOR || d <= REL_TOL * a.abs().max(b.abs())
+    }
+
+    /// `Some(description)` when the two differ beyond tolerance.
+    fn diff(expected: &serde_json::Value, actual: &serde_json::Value) -> Option<String> {
+        match (expected, actual) {
+            (serde_json::Value::Array(e), serde_json::Value::Array(a)) => {
+                if e.len() != a.len() {
+                    return Some(format!("length {} vs {}", e.len(), a.len()));
+                }
+                let mut worst: Option<(usize, f64, f64)> = None;
+                for (i, (ev, av)) in e.iter().zip(a.iter()).enumerate() {
+                    match (ev.as_f64(), av.as_f64()) {
+                        (Some(x), Some(y)) => {
+                            if !close(x, y) {
+                                let d = (x - y).abs();
+                                if worst.map(|(_, wx, wy)| d > (wx - wy).abs()) != Some(false) {
+                                    worst = Some((i, x, y));
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(d) = diff(ev, av) {
+                                return Some(format!("[{i}] {d}"));
+                            }
+                        }
+                    }
+                }
+                worst.map(|(i, x, y)| {
+                    format!(
+                        "[{i}] {x} vs {y} (Δ {:e}, tolerance {REL_TOL:e} relative)",
+                        (x - y).abs()
+                    )
+                })
+            }
+            (serde_json::Value::Object(e), serde_json::Value::Object(a)) => {
+                for (k, ev) in e {
+                    match a.get(k) {
+                        None => return Some(format!("`{k}` missing from the fixture")),
+                        Some(av) => {
+                            if let Some(d) = diff(ev, av) {
+                                return Some(format!("`{k}`: {d}"));
+                            }
+                        }
+                    }
+                }
+                a.keys()
+                    .find(|k| !e.contains_key(k.as_str()))
+                    .map(|k| format!("fixture carries `{k}`, which this code no longer produces"))
+            }
+            (serde_json::Value::Number(e), serde_json::Value::Number(a)) => {
+                match (e.as_f64(), a.as_f64()) {
+                    (Some(x), Some(y)) if close(x, y) => None,
+                    _ if e == a => None,
+                    _ => Some(format!("{e} vs {a}")),
+                }
+            }
+            _ if expected == actual => None,
+            _ => Some(format!("{expected} vs {actual}")),
+        }
+    }
+
+    let expected = build_wire_frame();
+    let text = std::fs::read_to_string(wire_fixture_path()).expect(
+        "tests/fixtures/transfer-frame-v2.json must exist — regenerate with \
+         `cargo test -p ac-scene --test regenerate_fixture -- --ignored`",
+    );
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&text).expect("committed wire fixture must parse as JSON");
+
+    if let Some(d) = diff(&expected, &on_disk) {
+        panic!(
+            "the committed transfer-frame-v2.json fixture is stale: {d}. Regenerate with \
+             `cargo test -p ac-scene --test regenerate_fixture -- --ignored`, and check what \
+             changed before committing it — `it_fixtures.rs` has been asserting against the old \
+             content, so whatever moved has been unobserved since."
+        );
+    }
+}
+
+/// The fixture's content, shared by the regenerator and the currency check so
+/// the two cannot drift apart.
+fn build_wire_frame() -> serde_json::Value {
     let bytes = std::fs::read(acsnap_fixture_path()).expect(
         "tests/fixtures/snapshot-fixture-v1.acsnap must exist — regenerate via \
          `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
@@ -120,7 +257,5 @@ fn generate_captured_frame_fixture() {
         },
     });
 
-    let text = serde_json::to_string_pretty(&frame).expect("serialize frame");
-    std::fs::write(wire_fixture_path(), &text).expect("write fixture file");
-    eprintln!("wrote {}", wire_fixture_path().display());
+    frame
 }
