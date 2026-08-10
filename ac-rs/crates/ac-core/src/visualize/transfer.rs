@@ -1113,8 +1113,13 @@ mod tests {
         }
     }
 
-    /// Sub-millisecond acceptance (#227, `handoff-lock-and-smoothing.md`
-    /// decision 5): 1 ms is 48 samples at 48 kHz.
+    /// Sub-millisecond acceptance (#227): 1 ms is 48 samples at 48 kHz.
+    ///
+    /// Why sub-millisecond, and why it is a 20 kHz requirement rather than a
+    /// general one: `docs/coherence-diagnostics.md` §4, which carries the
+    /// tolerance table and the `sinc(τ·BW)` derivation. That material used to
+    /// live in `handoff-lock-and-smoothing.md` decision 5 — a handoff, and so
+    /// under a delete condition this comment should not have depended on.
     const SUB_MS: i64 = SR as i64 / 1000;
 
     /// Run 1's measured failure shape: microphone under 1.5 m from the

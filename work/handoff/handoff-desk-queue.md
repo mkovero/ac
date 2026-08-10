@@ -143,24 +143,26 @@ Two of them matter more than the rest:
 When it lands, `architect.md`'s read-only caveat about `monitor.rs` goes with
 it — the caveat names #261 and was written to be deleted by it.
 
-### 3.4 Items 7 and 8 — the two documents
+### ~~3.4 Items 7 and 8 — the two documents~~ — **both written 2026-08-10**
 
-These are the only reason `work/handoff/handoff-flush-reconciliation.md` still
-exists, and the only reason `flush-2026-08-05.md` still has to be protected.
-Both are writing, not code. Full substance for both is in that handoff — the
-worker does not need the flush file.
+- **Item 7** → `docs/design/design-parametric-reflection-removal.md`. Proposal,
+  architect output, nothing ratified. The load-bearing part landed as three
+  gates rather than a sentence: the fit residual is a published output, the
+  misfit criterion names what to check rather than asserting a cause, and a
+  corrected curve must be distinguishable from a gated one.
+- **Item 8** → `docs/coherence-diagnostics.md`. Operator reference. Two
+  departures from the instruction, both recorded in
+  `handoff-flush-reconciliation.md` item 8: the delay-tolerance material
+  **moved** out of `handoff-lock-and-smoothing.md` decision 5 instead of being
+  cross-referenced — a `docs/` file must not depend on a `work/` file under a
+  delete condition — and the Open Sound Meter conjecture was dropped rather
+  than labelled.
 
-- **Item 7** → `docs/design/design-parametric-reflection-removal.md`. The
-  floor-bounce / MEDLL proposal. Architect output. Write it as a proposal, not
-  a plan; nothing in it is ratified. The load-bearing part is the
-  architectural requirement: **the fit residual must be an output, not an
-  internal.**
-- **Item 8** → `docs/coherence-diagnostics.md`. Operator-facing reference.
-  Half the material is already tracked in `handoff-lock-and-smoothing.md`
-  decision 5 — cross-reference, do not restate. What is untracked: the
-  algebraic gain-invariance argument, the `γ² = SNR/(1+SNR)` table, the two
-  diagnostic rules, and the Open Sound Meter conjecture, which must go in
-  **labelled as unverified**.
+**`flush-2026-08-05.md` is released**: both documents exist in the tree, so it
+is no longer the only copy of their substance.
+`work/handoff/handoff-flush-reconciliation.md` still cannot be deleted — items
+9 and 10 are `.agents/` changes awaiting Markus's ratification and it is their
+only lodging.
 
 ### 3.5 Item 4 — the `#[ignore]` audit
 
