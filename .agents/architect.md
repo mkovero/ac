@@ -36,7 +36,8 @@ Tier 1 vs Tier 2 decides where a new analysis feature belongs — see
 ### key invariants
 - The `ac-daemon` wire schema = shared contract with every consumer (`ac-cli`, `ac-view`). Any change to what the PUB socket publishes is a breaking change for both. `ac-rs/ZMQ.md` is the protocol reference.
 - H1 estimator (`ac-core/visualize/transfer.rs`) use Müller-Massarani windowed cross-correlation. Estimator internal changes must preserve math correctness of transfer function estimate.
-- Level reference = scalar dBu offset. No frequency-dependent correction curve (code removed; do not reintroduce).
+- Level reference = scalar dBu offset (`ac-core/shared/reference_levels.rs`). **This is not a ban on frequency-dependent correction anywhere** — `ac-core/shared/mic_curve_filter.rs` is exactly that and ships deliberately, time-domain and ahead of K-weighting, because a scalar dB offset cannot compose with the BS.1770-5 filter. What must stay scalar is the *dBu reference itself*.
+- Calibration layers are **parallel, not composed**: voltage cal (`vrms_at_0dbfs_in`) and SPL cal (`mic_sensitivity_dbfs_at_94db_spl`) are independent readings off the same raw digital amplitude, and SPL is computed from *uncalibrated* dBFS. Violated by any call site that computes an absolute SPL from a voltage-scaled amplitude — the topology and the call sites expected to preserve it are documented at `ac-core/src/shared/calibration.rs:6-30`.
 
 ## inputs you will receive
 - Issue body + triage spec comment
@@ -107,14 +108,31 @@ Invoked with "audit the codebase as architect" → do this instead of normal iss
 Read full source tree. Produce structured findings report covering:
 
 ### module boundaries
-- Three crates (`ac`, `thd_tool`, `ds`) cleanly separated?
+
+Each check below names what would make it **fail**. A boundary question with no
+failing case is not a check — it reports coverage it does not have.
+
+- `ac-scene` depends on `ac-core` + serde only. **Fails if** its `Cargo.toml`
+  gains `egui`, `eframe`, `wgpu` or `zmq` — the isolation is enforced by the
+  dependency list, not by convention.
+- `ac-view` computes nothing numeric. Enforced by `ac-view/src/computes_nothing.rs`,
+  which scans the crate's own `src/` for forbidden tokens: `no_trig_in_crate_sources`,
+  `no_log_arithmetic_in_crate_sources`, `no_format_macro_used_to_render_measurement_numbers`.
+  **Fails if** any of the three stops covering a file, or if a source file is
+  added to the scan's exclusion. Note `ac-view` *does* depend on `zmq` — it is
+  the DATA-socket client — so the boundary here is computation, not sockets.
+- `ac-core` has no socket dependency. **Fails if** `zmq` appears in its
+  `Cargo.toml`.
+- Tier 1 (`measurement/`) does not call Tier 2 (`visualize/`). **Fails if** a
+  conformance path takes a live-analysis dependency — see `ARCHITECTURE.md`.
 - Logic belong in one crate but live in another?
 - Circular or unexpected deps?
 
 ### invariant audit
 For each stated invariant, confirm code actually enforce it:
-- ZMQ session schema: schema definition single-sourced or duplicated?
-- Level reference: any code path could introduce frequency-dependent correction?
+- Wire schema: definition single-sourced or duplicated across daemon and consumers?
+- Level reference: any code path make the **dBu reference** frequency-dependent? (The mic-curve FIR is not that — see the invariant.)
+- Calibration layers: any call site compute absolute SPL from a voltage-scaled amplitude?
 - H1 estimator: implementation match Müller-Massarani derivation in `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`?
 
 ### interface surface
@@ -136,9 +154,12 @@ For each stated invariant, confirm code actually enforce it:
 ### invariant audit
 | invariant | enforced | notes |
 |---|---|---|
-| ZMQ schema single-sourced | ✓ / ✗ | |
-| no freq-dependent level ref | ✓ / ✗ | |
+| wire schema single-sourced | ✓ / ✗ | |
+| dBu reference stays scalar | ✓ / ✗ | |
+| calibration layers parallel, not composed | ✓ / ✗ | |
 | H1 matches Müller-Massarani | ✓ / ? / ✗ | |
+| ac-scene has no egui/zmq dep | ✓ / ✗ | |
+| ac-view computes nothing numeric | ✓ / ✗ | |
 
 ### interface surface
 {findings}

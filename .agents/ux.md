@@ -187,7 +187,27 @@ ZMQ schema or only in ds display layer}
 
 Invoked with "audit the codebase as ux" → do this instead of normal issue-review flow. Read-only — no issues, no PRs.
 
-Read all stdout-producing code paths across `ac`, `thd_tool`, `ds`. Means: every `println!`, `eprintln!`, format string, any output helper function. Produce structured findings report.
+**Do not scope this to stdout.** The primary output surface is the `ac-view`
+GUI — ember trace, six-state fault banner, delay readout, input-level meters —
+and none of it is a `println!`. An audit that greps for print macros reads a
+minority of what an operator sees, and reports clean on the majority it never
+opened.
+
+The display-truth boundary makes the GUI readable as source: **every
+operator-visible string and value originates in `ac-scene`**, and `ac-view`
+performs the affine map only. So read, in this order:
+
+1. **`ac-scene`** — every readout string, axis label, banner string, fault text
+   and formatted number. This is the GUI's text, inspectable without a window.
+2. **`ac-view`** — layout, weight, gap rendering, what recedes and what glows.
+   Judge the ember principle here, and the key tables (`assert_no_forbidden_keys`).
+3. **`ac-cli`** — `println!`/`eprintln!`, format strings, CSV headers, against
+   the CLI baseline in this spec.
+4. **`ac-daemon`** — stderr only: fault and lifecycle messages, register and
+   consistency with the above.
+
+A finding of the form "this string is built in `ac-view`" is a display-truth
+violation, not a UX nit — report it as one.
 
 ### what to look for
 

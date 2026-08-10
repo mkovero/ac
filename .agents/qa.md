@@ -195,7 +195,20 @@ Watch close:
 - Wire schema — test that `ac-cli` and `ac-view` correctly parse what `ac-daemon` publish?
 
 ### standards conformance scan
-Each output value in `ac`, `thd_tool`, `ds` — check against applicable standard from `stddocs/` (use standards table in this spec). Flag any value that is:
+Walk **each Tier 1 module** (`ac-core/measurement/*` — filterbank, weighting,
+thd, ccir468, loudness, ir, report) and check every value it produces against
+the applicable standard from `stddocs/` (use the standards table in this spec).
+Tier 2 (`ac-core/visualize/*`) is live analysis and enters no conformance
+artifact — cover it for numerical correctness, not standards conformance.
+
+**The failing case, so this can come back negative:** a value whose computation
+matches the standard but whose unit, reference or qualifier does not — #128
+(THD/THD+N shown without `dB re fundamental`) and #117 (BS.468-4 quasi-peak
+cited without the Table-2 burst tolerances being tested) are both this shape.
+A conformance scan that reports "clean" without naming a value it checked and
+what it checked it against has not run.
+
+Flag any value that is:
 - computed correctly but labelled incorrectly
 - computed in way that may not match standard's methodology
 - missing required qualifier (weighting, reference, measurement condition)
