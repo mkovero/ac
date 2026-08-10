@@ -549,6 +549,10 @@ mod tests {
 
     /// Regenerates the checked-in fixture. `#[ignore]`d — not part of the
     /// normal suite, run manually when the format changes:
+    ///
+    /// Its output is checked on every run by
+    /// [`snapshot_fixture_on_disk_is_current`] (#271), so a regeneration that
+    /// changes the fixture is visible in the diff rather than silent.
     /// `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`
     ///
     /// Content (handoff: parity-completion M1.5, deliverable 4): `ref` is
@@ -564,6 +568,22 @@ mod tests {
     #[test]
     #[ignore = "regenerates tests/fixtures/snapshot-fixture-v1.acsnap — run manually"]
     fn generate_snapshot_fixture() {
+        let (bytes, sha256) = build_snapshot_fixture();
+        std::fs::write(fixture_path(), &bytes).expect("write fixture file");
+        eprintln!(
+            "wrote {} ({} bytes, sha256={sha256})",
+            fixture_path().display(),
+            bytes.len()
+        );
+    }
+
+    /// The fixture's content, as a pure function of committed constants —
+    /// fixed seed, fixed `captured_at_utc`, no wall clock anywhere. Shared by
+    /// the regenerator above and the currency check below, so the two cannot
+    /// drift apart: a check that rebuilt the fixture its own way would be
+    /// asserting agreement between two copies of the same idea rather than
+    /// that the file on disk is what this code produces.
+    fn build_snapshot_fixture() -> (Vec<u8>, String) {
         let sr = 48_000u32;
         let n = 3 * sr as usize;
         let gain = 0.5_f64;
@@ -629,12 +649,51 @@ mod tests {
             ring_duration_s: n as f64 / sr as f64,
         };
 
-        let (bytes, sha256) = write_acsnap(&meta, &[meas, refch]).expect("write fixture");
-        std::fs::write(fixture_path(), &bytes).expect("write fixture file");
-        eprintln!(
-            "wrote {} ({} bytes, sha256={sha256})",
-            fixture_path().display(),
-            bytes.len()
+        write_acsnap(&meta, &[meas, refch]).expect("write fixture")
+    }
+
+    /// #271: the fixture on disk must still be what `build_snapshot_fixture`
+    /// produces.
+    ///
+    /// Without this, a format or derivation change that updates the writer and
+    /// every reader together leaves the committed fixture describing a format
+    /// neither side speaks, and every consuming test keeps passing against it.
+    /// The failure is silent and the fixture stops being a reference while
+    /// still looking like one — the same shape as a stale snapshot PNG, in a
+    /// category that looks like housekeeping.
+    ///
+    /// **sha256, not a structural comparison**, because this artefact is a
+    /// pure function of committed inputs: no capture, no clock, no floats that
+    /// depend on when it ran. Where that is true, byte equality is the honest
+    /// assertion. (`transfer-frame-v2-live.json` is *not* such an artefact and
+    /// deliberately gets a different check — see `it_scene_fixture.rs`.)
+    #[test]
+    fn snapshot_fixture_on_disk_is_current() {
+        let (expected_bytes, expected_sha) = build_snapshot_fixture();
+        let on_disk = std::fs::read(fixture_path()).expect(
+            "tests/fixtures/snapshot-fixture-v1.acsnap must exist — regenerate with \
+             `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored`",
+        );
+        let actual_sha = {
+            let mut h = Sha256::new();
+            h.update(&on_disk);
+            h.finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            actual_sha,
+            expected_sha,
+            "the committed .acsnap fixture is stale: on disk {} bytes (sha256 {}), this code \
+             now produces {} bytes (sha256 {}). Regenerate it with \
+             `cargo test -p ac-core --lib snapshot::tests::generate_snapshot_fixture -- --ignored` \
+             and check what changed — every test that reads this fixture has been passing \
+             against the old content.",
+            on_disk.len(),
+            actual_sha,
+            expected_bytes.len(),
+            expected_sha,
         );
     }
 

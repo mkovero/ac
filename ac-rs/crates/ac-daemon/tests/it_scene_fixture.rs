@@ -202,7 +202,40 @@ fn fixture_path() -> PathBuf {
 
 #[test]
 #[ignore = "regenerates tests/fixtures/transfer-frame-v2-live.json — run manually, needs a live daemon"]
+/// Its output's *shape* is checked on every run by
+/// [`live_fixture_on_disk_has_the_shape_the_daemon_still_produces`] (#271).
+/// That check found this fixture eight wire fields out of date on its first
+/// run — `mtw`, `delay_evidence`, `delay_locked`, `delay_attempts`, `drive`,
+/// `meas_peak_dbfs`, `ref_peak_dbfs`, `speed_of_sound_m_s` — which is what the
+/// gap looked like in practice.
 fn generate_live_captured_frame_fixture() {
+    let raw_frame = capture_live_frame();
+    fs::write(fixture_path(), &raw_frame).expect("write fixture file");
+    eprintln!(
+        "wrote {} ({} bytes, verbatim off-wire DATA payload)",
+        fixture_path().display(),
+        raw_frame.len()
+    );
+}
+
+/// #271: the committed live fixture must still have the **shape** the daemon
+/// produces.
+///
+/// **This one deliberately does not compare values, and that is the point.**
+/// The other two currency checks — `ac-core`'s sha256 on the `.acsnap` and
+/// `ac-scene`'s tolerance comparison on `transfer-frame-v2.json` — work because
+/// those artefacts are functions of committed inputs. This one is a live
+/// capture off a real daemon: its numbers carry capture timing, and a value
+/// comparison would be flaky. A flaky test in this suite gets deleted rather
+/// than debugged, correctly, and deleting it would leave the fixture uncovered
+/// *and* consume the attempt to cover it — a retired test reads as a decision,
+/// not an omission.
+///
+/// What is stable is what the fixture exists to protect: the frame's key set
+/// and the `cal_tags` vocabulary, with a full cal stack loaded so every tag
+/// exercises its "on" branch. Vocabulary drift is what an all-"none" frame
+/// cannot catch, and it is what `ac-scene` parses.
+fn capture_live_frame() -> Vec<u8> {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
@@ -279,10 +312,67 @@ fn generate_live_captured_frame_fixture() {
     assert_eq!(parsed["cal_tags"]["meas"]["spl"], json!("on"));
     assert_eq!(parsed["cal_tags"]["meas"]["mic_curve"], json!("on"));
 
-    fs::write(fixture_path(), &raw_frame).expect("write fixture file");
-    eprintln!(
-        "wrote {} ({} bytes, verbatim off-wire DATA payload)",
-        fixture_path().display(),
-        raw_frame.len()
+    raw_frame
+}
+
+#[test]
+fn live_fixture_on_disk_has_the_shape_the_daemon_still_produces() {
+    let live: Value =
+        serde_json::from_slice(&capture_live_frame()).expect("live frame parses as JSON");
+    let text = fs::read_to_string(fixture_path()).expect(
+        "tests/fixtures/transfer-frame-v2-live.json must exist — regenerate with \
+         `cargo test -p ac-daemon --test it_scene_fixture -- --ignored`",
+    );
+    let fixture: Value = serde_json::from_str(&text).expect("committed live fixture parses");
+
+    let keys = |v: &Value| -> Vec<String> {
+        let mut k: Vec<String> = v
+            .as_object()
+            .expect("frame is an object")
+            .keys()
+            .cloned()
+            .collect();
+        k.sort();
+        k
+    };
+    assert_eq!(
+        keys(&fixture),
+        keys(&live),
+        "the committed live fixture's key set no longer matches what the daemon publishes. \
+         Regenerate with `cargo test -p ac-daemon --test it_scene_fixture -- --ignored` — \
+         `ac-scene` parses this frame, so a key that appeared or vanished here is a wire \
+         change nothing else in the default suite would have caught."
+    );
+
+    // Types, not values: a field that changed from a number to a string, or an
+    // array to a scalar, breaks every consumer, and no amount of capture
+    // jitter can produce that.
+    for k in keys(&fixture) {
+        let f = &fixture[&k];
+        let l = &live[&k];
+        let kind = |v: &Value| match v {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        };
+        // `spl` is null without SPL cal and a number with it; both runs load
+        // the full stack, so a mismatch here is real.
+        assert_eq!(
+            kind(f),
+            kind(l),
+            "field `{k}` changed type: fixture has {}, the daemon now publishes {}",
+            kind(f),
+            kind(l)
+        );
+    }
+
+    assert_eq!(
+        fixture["cal_tags"], live["cal_tags"],
+        "the `cal_tags` vocabulary drifted. This is the one part of the frame compared \
+         exactly — the tags are a closed string vocabulary, not a measurement, and both runs \
+         load the same full cal stack, so any difference is drift rather than jitter."
     );
 }
