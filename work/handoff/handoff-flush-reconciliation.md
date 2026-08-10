@@ -8,6 +8,16 @@
 > together — one adds a rule to a spec, the other repairs the specs that rule
 > would be read alongside.
 
+> **Do not delete `flush-2026-08-05.md` on the grounds that this file exists.**
+> This file supersedes it only for the items it has discharged. **Items 7 and
+> 8 are not written yet** — until
+> `docs/design/design-parametric-reflection-removal.md` and
+> `docs/coherence-diagnostics.md` exist, the flush is still the only other
+> copy of that material, and it is not in this repo (it never was — it is a
+> conversation dump held outside the tree). Retiring it early loses both
+> documents' substance and leaves this file as the sole record, which is the
+> single-copy state item 10's `acoustic-analyze-v1.md` was rescued from.
+
 Written 2026-08-10 against the `ac-main` snapshot taken 2026-08-06. Its input
 is `flush-2026-08-05.md`, a context dump of material that existed only in
 conversation. Every claim below was checked against the tree rather than
@@ -199,6 +209,25 @@ Read whether `mtw` survives and what the banner does.
 
 **Before any of that, establish which build the clip was shot on.** If it
 predates #234 there is no indicator to expect and nothing to explain.
+
+> **The build side of that is resolved; only the clip's date is missing.**
+> #234 is a **PR**, not an issue — `feat: surface a fault indicator on the
+> transfer view`, the PR for issue #228 — merged **2026-08-03T16:29:03Z** as
+> `ab3d236`. The rig's installs are recorded, so the cut is a wall-clock time,
+> not a build inspection:
+>
+> | build installed on the rig | when | indicator present |
+> |---|---|---|
+> | `7f0dd5e` (#233 + #232 + **#234**), session 2 | 2026-08-03 **20:14** | yes |
+> | `4659b25`, session 3, still installed | 2026-08-04 | yes |
+> | anything earlier | — | **no** |
+>
+> **Clip at or after 2026-08-03 20:14 → this item stands. Earlier → it
+> dissolves, and the queue entry comes back out.** One command answers it —
+> `ffprobe -v error -show_entries format_tags=creation_time -of default=nw=1
+> <clip>`, or `ls -l --time-style=full-iso <clip>` if the file was copied
+> rather than re-encoded. The clip is not on the dev box; nothing under
+> `/home/mui` is a video modified since 2026-07-01.
 
 **Pass:** a capture that shows `mtw` present with `coherence_dead` true and
 the banner state that accompanied it. File an issue only on that evidence —
