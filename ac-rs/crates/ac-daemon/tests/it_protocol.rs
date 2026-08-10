@@ -3475,3 +3475,112 @@ fn three_distinct_channels_publish_both_pairs_on_fake_audio() {
          reference; saw {meas_seen:?}"
     );
 }
+
+/// #254, the part presence assertions cannot reach: **the second measurement
+/// channel's delay must be the configured one.**
+///
+/// Every other test here is satisfied by three buffers arriving. A shared
+/// measurement read cursor in the fake produces three buffers too — it
+/// advances once per channel per tick, so the second channel reads a window
+/// one buffer further along and reports a delay that is an artefact of call
+/// order. `delay_attempts` climbs, a frame publishes, `pair_delays[1]` fills
+/// in, and every presence check above goes green on a wrong number.
+///
+/// That is the failure mode worth guarding, because it is the one that
+/// contaminates rather than blocks: an offline experiment built on fake
+/// multi-position sessions would have inherited the artefact silently, with
+/// nothing to distinguish it from a real delay. So this pins the value, on the
+/// channel where a shared cursor would move it, against a known
+/// `fake_correlated_pair`.
+#[test]
+fn both_measurement_channels_report_the_configured_delay() {
+    let gain = 0.5_f64;
+    // ~4.2 ms at 48 kHz, well inside the delay-search window — the same
+    // figure `it_snapshot.rs`'s ground-truth test uses.
+    let delay_samples = 200_i64;
+
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":   "transfer_stream",
+        "pairs": [[0, 3], [1, 3]],
+        "fake_correlated_pair": {"gain": gain, "delay_samples": delay_samples},
+    }));
+    assert_eq!(r["ok"], json!(true), "unexpected REP: {r:?}");
+
+    // One locked frame per measurement channel. Both pairs read the same
+    // reference, so both must land on the same configured delay: the second
+    // channel is not a second DUT, it is the same source read by another
+    // capture channel.
+    let mut locked: Vec<(u64, i64)> = Vec::new();
+    let mut published: Vec<u64> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline && locked.len() < 2 {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                let meas = v["meas_channel"]
+                    .as_u64()
+                    .expect("frame without meas_channel");
+                if !published.contains(&meas) {
+                    published.push(meas);
+                }
+                if v["delay_locked"].as_bool() != Some(true) {
+                    continue;
+                }
+                let got = v["delay_samples"]
+                    .as_i64()
+                    .expect("frame without delay_samples");
+                if !locked.iter().any(|(m, _)| *m == meas) {
+                    locked.push((meas, got));
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    locked.sort_unstable();
+    published.sort_unstable();
+
+    // Split from the lock assertion so the two cannot be confused: no frames
+    // at all is #254 itself regressing, and says nothing about delays.
+    assert_eq!(
+        published,
+        vec![0, 1],
+        "measurement channel(s) missing from published frames {published:?} — that \
+         is the #254 stall, not a delay question"
+    );
+
+    // The shared-cursor artefact arrives by either of two roads, and both are
+    // named here because the first one otherwise reads as flakiness. A shared
+    // `correlated_meas_pos` shifts the second channel by a whole tick's worth
+    // of samples — thousands, far outside the search window — so in practice
+    // it decorrelates that channel and the estimator refuses it rather than
+    // locking to a plausible wrong number. A smaller future artefact would
+    // lock and land on the value check below instead. Verified red both ways.
+    assert_eq!(
+        locked.len(),
+        2,
+        "both channels published, but only {locked:?} locked within 30 s. A channel \
+         that publishes and never locks is the shared-cursor artefact decorrelating \
+         it: `FakeEngine::correlated_meas_pos` must be keyed per port, or the second \
+         measurement channel reads a window one tick further along than the first.",
+    );
+
+    // Tolerance is one correlation bin, not a fitted margin: the estimator
+    // reports whole samples and the fake's source is exact, so the honest
+    // answer is the configured lag itself. A call-order artefact is off by a
+    // whole tick's worth of samples — thousands — so it cannot hide in here.
+    for (meas, got) in &locked {
+        assert!(
+            (got - delay_samples).abs() <= 1,
+            "measurement channel {meas} reported delay {got}, configured {delay_samples}. \
+             A delay that is wrong only on the second channel is the shared-cursor \
+             artefact: `FakeEngine::correlated_meas_pos` must be keyed per port.",
+        );
+    }
+}

@@ -10,6 +10,26 @@
 //! `fake:capture_0` to `fake:capture_3` and captures at a nominal 1 kHz will
 //! observe energy at 1 300 Hz instead. `capture_stereo()` emits independent
 //! offsets for the measurement and reference channels.
+//!
+//! # What this backend must never do
+//!
+//! **Return a plausible wrong value rather than failing.** A refusal or a
+//! missing buffer is visible and gets fixed; a number that looks like a
+//! measurement is not, and it propagates. Offline experiments are built on
+//! fake sessions here — the gate scoring, the parity fixtures, the frame
+//! cadence work — so a quantity this backend synthesises incorrectly is
+//! inherited by every conclusion drawn from them, with nothing to mark it.
+//!
+//! That is a harder rule than "model what the hardware does", and it is the
+//! one that decides the design when the two conflict. #254's fix could have
+//! returned one buffer per port while leaving a single shared measurement
+//! read cursor: three buffers would have arrived, the session would have
+//! published, and the second measurement channel's delay would have been an
+//! artefact of call order that no presence check could distinguish from a real
+//! one (`correlated_meas_pos`). Prefer the shape that cannot produce a wrong
+//! answer over the shape that usually produces a right one, and where a
+//! quantity has a configured ground truth, pin it in a test rather than
+//! asserting that it arrived.
 
 use anyhow::Result;
 use ringbuf::traits::{Producer, Split};
