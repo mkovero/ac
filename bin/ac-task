@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# ac-task — dispatch briefs to Claude Code workers
+#
+#   ac-task new  <slug> [role] [crate]   scaffold .agents/tasks/<date>-<slug>.md
+#   ac-task run  <id> [--fg]             run in a worktree, headless unless --fg
+#   ac-task clean <id>                   drop the worktree, keep the branch
+#
+# Assumes: repo root is cwd, .agents/tasks/ and docs/handoffs/ exist.
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+TASKS="$ROOT/.agents/tasks"
+HANDOFFS="$ROOT/docs/handoffs"
+WT_BASE="${AC_WT_BASE:-$ROOT/../ac-wt}"
+
+# Role -> tool allowlist. Path-level restriction is NOT expressible here;
+# it lives in .claude/settings.json deny rules plus the role's own prompt.
+tools_for() {
+  case "$1" in
+    architect) echo "Read,Grep,Glob,Write,Edit" ;;      # docs + interfaces only
+    ux)        echo "Read,Grep,Glob,Write,Edit,Bash" ;;
+    developer) echo "Read,Grep,Glob,Write,Edit,Bash" ;;
+    qa)        echo "Read,Grep,Glob,Bash,Write" ;;      # reports; must not patch src
+    *)         echo "unknown role: $1" >&2; exit 2 ;;
+  esac
+}
+
+meta() {  # meta <file> <key>  — reads YAML frontmatter, flat scalars only
+  sed -n '2,/^---$/p' "$1" | sed -n "s/^$2:[[:space:]]*//p" | sed 's/[[:space:]]*#.*$//'
+}
+
+set_meta() {  # set_meta <file> <key> <value>
+  sed -i "0,/^$2:/s|^$2:.*|$2: $3|" "$1"
+}
+
+cmd_new() {
+  local slug="$1" role="${2:-developer}" crate="${3:-ac-core}"
+  local id="$(date +%Y-%m-%d)-$slug" f
+  f="$TASKS/$id.md"
+  [[ -e $f ]] && { echo "exists: $f" >&2; exit 1; }
+  sed -e "s|^id:.*|id: $id|" -e "s|^role:.*|role: $role|" \
+      -e "s|^crate:.*|crate: $crate|" "$TASKS/TEMPLATE.md" > "$f"
+  echo "$f"
+}
+
+cmd_run() {
+  local id="$1" fg="${2:-}"
+  local task="$TASKS/$id.md"
+  [[ -f $task ]] || { echo "no such task: $id" >&2; exit 1; }
+
+  local role crate deps
+  role="$(meta "$task" role)"; crate="$(meta "$task" crate)"
+  deps="$(meta "$task" depends_on)"
+  [[ "$deps" != "[]" && -n "$deps" ]] && \
+    echo "warn: depends_on = $deps — verify those are done" >&2
+
+  # one worker per crate lane
+  if pgrep -fa "ac-task run" | grep -qv "$id" && \
+     grep -lq "^crate: $crate" "$TASKS"/*.md 2>/dev/null; then
+    grep -l "^status: running" "$TASKS"/*.md 2>/dev/null | while read -r o; do
+      [[ "$(meta "$o" crate)" == "$crate" ]] && \
+        echo "warn: $(meta "$o" id) already running in $crate" >&2
+    done
+  fi
+
+  local wt="$WT_BASE/$id"
+  git worktree add -B "task/$id" "$wt" HEAD >/dev/null 2>&1 || true
+
+  local prompt="Read .agents/tasks/$id.md and execute it.
+Adopt the $role role defined in .claude/agents/$role.md.
+Stay inside the 'In scope' file list; anything else needs a new task.
+When finished, write the handoff to docs/handoffs/$id.md following
+docs/handoffs/TEMPLATE.md, then commit everything on this branch."
+
+  set_meta "$task" status running
+
+  if [[ "$fg" == "--fg" ]]; then
+    ( cd "$wt" && claude "$prompt" )
+  else
+    ( cd "$wt" && claude -p "$prompt" \
+        --allowedTools "$(tools_for "$role")" \
+        --permission-mode acceptEdits \
+        --max-turns 60 \
+        --output-format json ) > "/tmp/ac-task-$id.json"
+    jq -r '.result' "/tmp/ac-task-$id.json"
+  fi
+
+  # trust the handoff, not the transcript
+  if [[ -f "$wt/docs/handoffs/$id.md" ]]; then
+    set_meta "$task" status "$(meta "$wt/docs/handoffs/$id.md" status)"
+  else
+    set_meta "$task" status blocked
+    echo "no handoff written — marked blocked" >&2
+  fi
+  "$ROOT/bin/ac-status" >/dev/null
+}
+
+cmd_clean() { git worktree remove --force "$WT_BASE/$1"; }
+
+case "${1:-}" in
+  new)   shift; cmd_new "$@" ;;
+  run)   shift; cmd_run "$@" ;;
+  clean) shift; cmd_clean "$@" ;;
+  *) sed -n '2,10p' "$0" >&2; exit 1 ;;
+esac

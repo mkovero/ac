@@ -42,7 +42,6 @@ export GITHUB_TOKEN=your_pat
 ### github actions (automated)
 Use agent file contents as system prompt in workflow step.
 Example trigger: label applied → run triage or developer agent.
-See `.github/workflows/` for workflow definitions (if present).
 
 ## routing logic
 
