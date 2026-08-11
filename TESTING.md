@@ -77,6 +77,50 @@ cargo test --workspace            # all five crates — the only check that catc
 Rough shape as of 2026-08-06 (899 passed, 14 ignored): `ac-core` 396,
 `ac-daemon` 214, `ac-scene` 115, `ac-cli` 97, `ac-view` the remainder.
 
+## Checked-in fixtures — and which comparison each one earns
+
+Three fixtures are committed, each written by an `#[ignore]`d regenerator and
+read by tests in the default suite:
+
+| fixture | regenerator | currency check |
+|---|---|---|
+| `tests/fixtures/snapshot-fixture-v1.acsnap` | `ac-core` `snapshot::tests::generate_snapshot_fixture` | sha256, exact |
+| `tests/fixtures/transfer-frame-v2.json` | `ac-scene` `regenerate_fixture` | numeric, 1e-9 relative |
+| `tests/fixtures/transfer-frame-v2-live.json` | `ac-daemon` `it_scene_fixture` | key set, types, `cal_tags` |
+
+Each currency check rebuilds the artefact and compares it to the committed
+file, so a regeneration that changes something shows up in a diff instead of
+passing unnoticed (#271). Without them, a format change that updates the writer
+and every reader together leaves the fixture describing something neither side
+produces, and every consuming test keeps passing against it.
+
+**Which comparison is honest depends on bit-reproducibility, not on purity.**
+This is the part that is easy to get wrong: `derive_pair` is a *pure* function
+of the committed `.acsnap` and still not bit-reproducible, because FFT
+ordering, FMA contraction and library versions move an `f64` in the last bits.
+Measured across a rebuild: 1.1e-16 on `coherence`, 8.9e-16 dB on
+`magnitude_db`, 3.6e-12 Hz on `spec_freqs`. Exact comparison there fails on
+noise, and **a test that fails on 1e-16 gets deleted rather than debugged** —
+taking the check with it.
+
+So:
+
+- **Bit-reproducible** (integer construction, no float reduction — the
+  `.acsnap`): compare exactly, by hash.
+- **Pure but float-derived** (`transfer-frame-v2.json`): compare numerically,
+  with a tolerance far above measured ULP noise and far below any change worth
+  catching. 1e-9 relative, and the measured noise table is in the test's doc
+  comment so nobody tightens it blind.
+- **Captured live** (`transfer-frame-v2-live.json`): do **not** compare values
+  at all. Its numbers carry capture jitter. Compare what is stable and what the
+  fixture exists to protect — the key set, the field types, and the `cal_tags`
+  vocabulary.
+
+**Regenerate deliberately.** A currency check going red means the artefact and
+the code disagree; the fix is to find out which moved before committing a
+regenerated file. Regenerating reflexively to get green is the same act as
+deleting the check, one step slower.
+
 ## Build
 
 ```bash

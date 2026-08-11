@@ -148,24 +148,44 @@ Corollaries:
 - **Prose does not hold issue state.** Name the issue; let the tracker own
   open/closed. A document that restates it can be true when written and false
   half an hour later, which no review catches.
+- **The common failure is not a wrong statement, it is a true one that
+  decayed.** `handoff-doc-maintenance.md` was correct for thirty-five minutes.
+  The `#[ignore]`d snapshot references were correct until #252 moved the
+  layout. `#184`'s scope line was correct when the repo had three crates. A
+  test-file header claiming four properties were unobservable headless was
+  correct until `it_set_drive` covered three of them. None was wrong when
+  written, so **no review at the time could have caught any of them** — which
+  makes this a different class from asserting a mechanism without its
+  measurement, and one that review cannot fix.
+
+  The operational form: **do not restate what another artefact holds
+  authoritatively; where you must, name the artefact and date the restatement.**
+  Prefer describing what a file *enforces today* over enumerating its contents.
+  `computes_nothing.rs` is the worked example — `architect.md` names it as
+  authoritative and gives its current checks as dated commentary, so adding a
+  fourth check makes the spec under-describe rather than mis-describe.
+
+  Corollary for citations: **cite a section by name, not by line number.** A
+  line range is invalidated by the next edit to the file, including the edit
+  that adds the citation.
 - **Added precision must come from a lookup, not from an inference.** The
-  file-citation rule pointed the other way: a bare `plot.rs:430` is ambiguous
-  but true, and `ac-cli/src/commands/plot.rs:430` — inferred from the command
-  name — is specific and false, because the code is in
+  citation corollary above says where a cite should point; this says where the
+  precision may come from. A bare `plot.rs:430` is ambiguous but true, and
+  `ac-cli/src/commands/plot.rs:430` — inferred from the command name — is
+  specific and false, because the code is in
   `ac-daemon/src/handlers/audio/plot.rs` and the CLI file is 212 lines long.
   Resolving an ambiguous cite is worth doing; resolving it from memory of the
   layout is not, and the result is *harder* to catch than the ambiguity it
-  replaced, because the failure reads as diligence. Open the file or leave the
-  cite as it was.
+  replaced, because the failure reads as diligence. Open the file, name the
+  section, or leave the cite as it was.
 - **A cite that was added is not a cite that was verified.** In a final
-  artifact the two look identical: a line number resolved cleanly against the
-  tree and a line number that was wrong and got corrected both appear as
-  correct line numbers. Only the second says anything about the draft's
-  reliability, so counting additions as corrections inflates the apparent
-  verification rate of the source document. When reporting what a verification
-  pass found, separate *corrected*, *added*, and *checked and unchanged* —
-  this is the project's own harm-statistic discipline turned on the
-  verification process itself.
+  artifact the two look identical: a reference resolved cleanly against the
+  tree and one that was wrong and got corrected both appear as correct
+  references. Only the second says anything about the draft's reliability, so
+  counting additions as corrections inflates the apparent verification rate of
+  the source document. When reporting what a verification pass found, separate
+  *corrected*, *added*, and *checked and unchanged* — this is the project's own
+  harm-statistic discipline turned on the verification process itself.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

@@ -322,12 +322,30 @@ under "Discharged" for their reasoning, not as work.
 4. #219 Part B stays open: the deterministic drain test + injection seam. The
    seam must carry a **mixed** stream (`keepalive` + `transfer_stream` +
    `visualize/ir`) or it will not reproduce Part A's behaviour at all.
-5. **#255 — the discarded second arrival** (`needs-design`). On a two-source
-   measurement the estimator locks the nearest arrival, correctly, and never
-   tells the operator a comparable one 1.4 ms later was passed over.
+5. **#255 — the discarded second arrival.** **Designed 2026-08-10**, now
+   `ready-to-implement` with `needs-ux` still live on the operator wording.
+   On a two-source measurement the estimator locks the nearest arrival,
+   correctly, and never says a comparable one 1.4 ms later was passed over.
    Disclosure gap, not a correctness bug, and **not gateable** — prominence
-   rises in the ambiguous case. The dead end (candidate count, censored at
-   `MAX_CANDIDATES`) is recorded in the issue body.
+   rises in the ambiguous case.
+
+   Two things the design settled that are worth not re-deriving. The statistic
+   must be computed **inside the estimator**, not from the published candidate
+   list: that list is capped at `MAX_CANDIDATES` by rank, and the A+B capture
+   returned exactly 32, so the count is a ceiling wearing a count's clothes and
+   any rule built on it would validate against the very capture that motivated
+   it. And the disclosure must be **two-sided** — a positive "single arrival"
+   state, not merely the absence of a warning, because absence is
+   indistinguishable from an old daemon, an unparsed field, and a silently
+   regressed feature. That is the same requirement as the fit residual in
+   `docs/design/design-parametric-reflection-removal.md` §6.
+
+6. **#254 landed** (2026-08-10). A `transfer_stream` over three or more
+   distinct channels used to reply `ok: true` and publish nothing forever;
+   `--fake-audio` now models N ports, so a second measurement position
+   (`pairs=[[0,3],[1,3]]`) is rehearsable off the rig. Ring mode still points
+   every ref ring at one channel — that is #204, and it is not a multi-channel
+   rehearsal path.
 
 Emission rules unchanged: explicit per-run consent, and the daemon run from
 an isolated `HOME` with a server-side `drive_max_dbfs` clamp. The −40 dBFS
