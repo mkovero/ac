@@ -43,8 +43,9 @@ pub struct ServerState {
     /// Optional channel to signal the running test_dut worker (compare-mode hand-off).
     pub dut_reply_tx: Arc<Mutex<Option<Sender<()>>>>,
     /// Optional channel to signal the running calibrate worker.
-    /// Sends Option<f64>: Some(vrms) = user reading, None = skip.
-    pub cal_reply_tx: Arc<Mutex<Option<Sender<Option<f64>>>>>,
+    /// Sends a [`CalReply`]: a reading, a skip (keep the stored value),
+    /// or an explicit clear.
+    pub cal_reply_tx: Arc<Mutex<Option<Sender<crate::handlers::CalReply>>>>,
     /// Handle to the active `transfer_stream` session's snapshot ring
     /// (handoff: snapshot-backend M1). `None` when no transfer session is
     /// running — the `snapshot` handler's "only while a transfer session

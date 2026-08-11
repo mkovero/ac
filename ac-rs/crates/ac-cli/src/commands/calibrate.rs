@@ -54,66 +54,68 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
 
             let dmm_vrms = data.get("dmm_vrms").and_then(|v| v.as_f64());
 
-            let vrms = if let Some(dmm) = dmm_vrms {
+            let reply = if let Some(dmm) = dmm_vrms {
                 let hint = format!("{:.4} mVrms", dmm * 1000.0);
-                print!("  Enter to accept ({hint}), or override (q to cancel): ");
-                io::stdout().flush().ok();
-                let raw = read_line();
-                if raw.trim().eq_ignore_ascii_case("q") {
-                    println!("  Calibration cancelled.");
-                    client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
-                    return;
-                }
-                if raw.trim().is_empty() {
-                    Some(dmm)
-                } else {
-                    parse_vrms(raw.trim())
-                }
-            } else {
                 loop {
-                    print!("  DMM reading (e.g. 245mV or 0.245, Enter to skip, q to cancel): ");
+                    print!(
+                        "  Enter to accept ({hint}), or override \
+                         (skip to keep stored, clear to erase, q to cancel): "
+                    );
                     io::stdout().flush().ok();
                     let raw = read_line();
-                    if raw.trim().eq_ignore_ascii_case("q") {
+                    let t = raw.trim();
+                    if t.eq_ignore_ascii_case("q") {
                         println!("  Calibration cancelled.");
                         client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
                         return;
                     }
-                    if raw.trim().is_empty() {
-                        break None;
+                    if t.is_empty() {
+                        break Reply::Value(dmm);
                     }
-                    match parse_vrms(raw.trim()) {
-                        Some(v) => break Some(v),
-                        None => println!("  Try:  0.245  or  245mV"),
+                    if t.eq_ignore_ascii_case("skip") {
+                        break Reply::Skip;
+                    }
+                    if t.eq_ignore_ascii_case("clear") {
+                        break Reply::Clear;
+                    }
+                    match parse_vrms(t) {
+                        Some(v) => break Reply::Value(v),
+                        None => println!("  Try:  0.245  or  245mV  (or skip / clear)"),
+                    }
+                }
+            } else {
+                loop {
+                    print!(
+                        "  DMM reading (e.g. 245mV or 0.245; Enter keeps the stored \
+                         value, clear erases it, q to cancel): "
+                    );
+                    io::stdout().flush().ok();
+                    let raw = read_line();
+                    let t = raw.trim();
+                    if t.eq_ignore_ascii_case("q") {
+                        println!("  Calibration cancelled.");
+                        client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
+                        return;
+                    }
+                    if t.is_empty() || t.eq_ignore_ascii_case("skip") {
+                        break Reply::Skip;
+                    }
+                    if t.eq_ignore_ascii_case("clear") {
+                        break Reply::Clear;
+                    }
+                    match parse_vrms(t) {
+                        Some(v) => break Reply::Value(v),
+                        None => println!("  Try:  0.245  or  245mV  (or clear)"),
                     }
                 }
             };
 
-            let reply_val: serde_json::Value = match vrms {
-                Some(v) => v.into(),
-                None => serde_json::Value::Null,
-            };
-            client.send_cmd(
-                &serde_json::json!({"cmd": "cal_reply", "vrms": reply_val}),
-                None,
-            );
+            client.send_cmd(&reply.to_cmd(), None);
         } else if topic == "cal_done" {
             let key = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
             println!("\n  Calibration saved: [{key}]");
-            if let Some(v) = data.get("vrms_at_0dbfs_out").and_then(|v| v.as_f64()) {
-                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
-                println!(
-                    "  Output: 0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::shared::conversions::fmt_vrms(v)
-                );
-            }
-            if let Some(v) = data.get("vrms_at_0dbfs_in").and_then(|v| v.as_f64()) {
-                let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
-                println!(
-                    "  Input:  0 dBFS = {:>14}  =  {dbu:+.2} dBu",
-                    ac_core::shared::conversions::fmt_vrms(v)
-                );
-            }
+            print_cal_leg("Output", &data, "vrms_at_0dbfs_out", "out_state");
+            print_cal_leg("Input", &data, "vrms_at_0dbfs_in", "in_state");
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 println!("  Note: {err}");
             }
@@ -127,6 +129,48 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             eprintln!("  error: {msg}");
             return;
         }
+    }
+}
+
+/// What the user asked the daemon to do with one voltage leg. Kept
+/// distinct from `Option<f64>` so "I did not measure this" cannot be
+/// mistaken on the wire for "erase it" (#279).
+enum Reply {
+    Value(f64),
+    Skip,
+    Clear,
+}
+
+impl Reply {
+    fn to_cmd(&self) -> serde_json::Value {
+        match self {
+            Reply::Value(v) => serde_json::json!({"cmd": "cal_reply", "vrms": v}),
+            Reply::Skip => serde_json::json!({"cmd": "cal_reply", "vrms": null}),
+            Reply::Clear => serde_json::json!({"cmd": "cal_reply", "vrms": null, "clear": true}),
+        }
+    }
+}
+
+/// Render one voltage leg of a `cal_done` frame. The `*_state` word is
+/// what separates a value this run measured from one it left alone, and
+/// an absent value from either.
+fn print_cal_leg(label: &str, data: &serde_json::Value, vrms_key: &str, state_key: &str) {
+    let state = data.get(state_key).and_then(|v| v.as_str());
+    let label = format!("{label}:");
+    match data.get(vrms_key).and_then(|v| v.as_f64()) {
+        Some(v) => {
+            let dbu = ac_core::shared::conversions::vrms_to_dbu(v);
+            let note = match state {
+                Some("unchanged") => "   (unchanged)",
+                Some("measured") => "   (measured)",
+                _ => "",
+            };
+            println!(
+                "  {label:<8}0 dBFS = {:>14}  =  {dbu:+.2} dBu{note}",
+                ac_core::shared::conversions::fmt_vrms(v)
+            );
+        }
+        None => println!("  {label:<8}not calibrated"),
     }
 }
 

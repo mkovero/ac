@@ -1141,6 +1141,137 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     assert!((stored_out - expected_out).abs() < 1e-6);
 }
 
+/// Seed a `cal.json` entry with both voltage legs set, at a `ref_dbfs`
+/// deliberately different from the one the test's `calibrate` run uses.
+fn seed_voltage_cal(d: &Daemon, out_vrms: f64, in_vrms: f64, ref_dbfs: f64) -> PathBuf {
+    let path = d.home.join(".config").join("ac").join("cal.json");
+    let seeded = json!({
+        "out0_in0": {
+            "output_channel":                   0,
+            "input_channel":                    0,
+            "ref_freq":                         1000.0,
+            "vrms_at_0dbfs_out":                out_vrms,
+            "vrms_at_0dbfs_in":                 in_vrms,
+            "ref_dbfs":                         ref_dbfs,
+            "mic_sensitivity_dbfs_at_94db_spl": -32.5,
+            "mic_response":                     null,
+        }
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&seeded).unwrap()).expect("seed cal.json");
+    path
+}
+
+fn read_cal_entry(path: &PathBuf) -> Value {
+    let raw = fs::read_to_string(path).expect("read cal.json");
+    let all: Value = serde_json::from_str(&raw).expect("parse cal.json");
+    all["out0_in0"].clone()
+}
+
+/// #279: a skipped prompt must preserve the stored reading, not erase it.
+///
+/// Mutation check — against the pre-fix handler, which assigned
+/// `reading.map(..)` unconditionally, both `vrms_at_0dbfs_*` come back
+/// `null` and every assertion below on a preserved value fails.
+#[test]
+fn calibrate_skipped_prompts_preserve_stored_voltage_cal() {
+    let d = Daemon::spawn();
+    let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
+    let before = read_cal_entry(&cal_path);
+    let c = Client::new(&d);
+
+    // Run at a *different* ref_dbfs than the seeded entry records, so a
+    // handler that rewrites `ref_dbfs` on a no-measurement run is caught
+    // too — the stored level tag must keep describing the stored readings.
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    // Three states, three words: nothing was measured, so both legs read
+    // "unchanged" — not the null-valued frame that reads as "not measured".
+    assert_eq!(done["out_state"], json!("unchanged"), "frame: {done}");
+    assert_eq!(done["in_state"], json!("unchanged"), "frame: {done}");
+    assert_eq!(done["vrms_at_0dbfs_out"], before["vrms_at_0dbfs_out"]);
+    assert_eq!(done["vrms_at_0dbfs_in"], before["vrms_at_0dbfs_in"]);
+
+    // On disk: both voltage fields survive bit-identical, and so does the
+    // `ref_dbfs` that describes what level they were taken at.
+    let after = read_cal_entry(&cal_path);
+    assert_eq!(
+        after["vrms_at_0dbfs_out"], before["vrms_at_0dbfs_out"],
+        "skipping step 1 must not touch the stored output cal"
+    );
+    assert_eq!(
+        after["vrms_at_0dbfs_in"], before["vrms_at_0dbfs_in"],
+        "skipping step 2 must not touch the stored input cal"
+    );
+    assert_eq!(
+        after["ref_dbfs"], before["ref_dbfs"],
+        "a run that measured nothing must not relabel the stored readings"
+    );
+    // The other cal layers were already preserved via `load_or_new`;
+    // assert it so this test fails if the preservation path is rewritten.
+    assert_eq!(
+        after["mic_sensitivity_dbfs_at_94db_spl"], before["mic_sensitivity_dbfs_at_94db_spl"],
+        "SPL layer must be untouched by a voltage calibrate run"
+    );
+}
+
+/// #279: erasing is still possible, but only when asked for by name —
+/// `clear: true`, not the same reply that means "I did not measure this".
+/// The two legs are independent: one cleared, one measured, in one run.
+#[test]
+fn calibrate_clear_erases_only_the_leg_it_names() {
+    let d = Daemon::spawn();
+    let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null, "clear": true}));
+
+    c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let in_reading = 1.5_f64;
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": in_reading}));
+
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["out_state"], json!("absent"), "frame: {done}");
+    assert_eq!(done["in_state"], json!("measured"), "frame: {done}");
+    assert_eq!(done["vrms_at_0dbfs_out"], json!(null), "frame: {done}");
+
+    let after = read_cal_entry(&cal_path);
+    assert_eq!(
+        after["vrms_at_0dbfs_out"],
+        json!(null),
+        "an explicit clear must erase the output cal"
+    );
+    let stored_in = after["vrms_at_0dbfs_in"]
+        .as_f64()
+        .expect("input cal stored");
+    assert!(
+        stored_in > in_reading,
+        "the measured leg must be rewritten (scaled up from the captured level), \
+         got {stored_in} for a {in_reading} V reading"
+    );
+    // A measurement happened, so the level tag follows this run.
+    assert_eq!(after["ref_dbfs"], json!(-10.0));
+}
+
 #[test]
 fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     // Fake backend implements `play_and_capture` as a delayed loopback
