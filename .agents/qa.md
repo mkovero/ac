@@ -31,6 +31,8 @@ not compile. No CI here, so this command is the only thing that catches it.
 
 Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
+**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and two papers alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `Fundamentals_of_modern_audio_measurement.pdf` exists at both `stddocs/` and `stddocs/iec-full/` with **different hashes** — same name, different content — so a path guessed from the filename can reach the wrong document without erroring. Copy the cell.
+
 ### normative standards
 
 | standard | file | applies to |
@@ -93,11 +95,6 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 - A room measurement cite ISO 18233 **and** the classical standard it substitutes for (ISO 3382-1 or 3382-2). One without the other is incomplete.
 - A quasi-anechoic loudspeaker / PA measurement cite **neither** — no classical method in §1's list covers it. That case want IEC 60268-21, which is not held. AES17-2015 A.4 + Farina remain its citation.
 - Annex B is normative. Clause strings for it must not say "(informative)"; that qualifier belongs to AES17 A.4 and IEC 61260-1 Annex G.
-
-**ISO 3382-1 / 3382-2** apply if any room-acoustic parameter appear (T20, T30, EDT, C50, D50). None exist in the tree today, and adding one is out of scope for the IR epic. If a PR introduce one anyway, check:
-- Forward analysis satisfy `BT > 16` and `T > T_det` (§7.3), or `BT > 4` and `T > T_det/4` with time reversal
-- Background noise at least evaluation range + 15 dB below the impulse peak when the correction `C = 0` (3382-1 §5.3.3, Eq. 3) — 45 dB down for T30
-- Evaluation range stated: T20 over −5 to −25 dB, T30 over −5 to −35 dB (3382-2 §6), with the decay-curve linearity check made before a result is stated at all
 
 ### standards check procedure
 
