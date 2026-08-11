@@ -54,6 +54,10 @@ ac-view/src/    — `ac-view`: egui shell, draws ac-scene scenes
 Read full triage spec comment + architect comment (if present).
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
+Locating code → delegate to `explorer` subagent. Read-only, run own context, return verified path + section name. Do not grep workspace yourself for "where does X live" — that burn session context on output you never reference again.
+Give explorer the crate and symbol you actually after. It see nothing of this issue or this conversation; vague brief return vague finding.
+Explorer separate verified read from unopened candidate. Candidate is lead, not fact — open file before you touch it.
+
 ### step 2 — branch
 ```bash
 git checkout -b issue-{N}-{short-slug}
@@ -112,6 +116,7 @@ closes #{N}
 
 ## hard constraints
 - Touch only files justified by spec + listed in step 1.
+- Explorer finding is evidence about location, not licence to widen scope. It name file outside step 1 list → same rule: stop, comment on issue.
 - No reformat or style cleanup outside scope. `cargo fmt --check` must pass, but run `cargo fmt` only on files you edited.
 - No TODO comments. Implement it or open follow-up issue.
 - No commented-out code.
