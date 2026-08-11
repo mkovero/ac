@@ -148,6 +148,24 @@ Corollaries:
 - **Prose does not hold issue state.** Name the issue; let the tracker own
   open/closed. A document that restates it can be true when written and false
   half an hour later, which no review catches.
+- **Added precision must come from a lookup, not from an inference.** The
+  file-citation rule pointed the other way: a bare `plot.rs:430` is ambiguous
+  but true, and `ac-cli/src/commands/plot.rs:430` — inferred from the command
+  name — is specific and false, because the code is in
+  `ac-daemon/src/handlers/audio/plot.rs` and the CLI file is 212 lines long.
+  Resolving an ambiguous cite is worth doing; resolving it from memory of the
+  layout is not, and the result is *harder* to catch than the ambiguity it
+  replaced, because the failure reads as diligence. Open the file or leave the
+  cite as it was.
+- **A cite that was added is not a cite that was verified.** In a final
+  artifact the two look identical: a line number resolved cleanly against the
+  tree and a line number that was wrong and got corrected both appear as
+  correct line numbers. Only the second says anything about the draft's
+  reliability, so counting additions as corrections inflates the apparent
+  verification rate of the source document. When reporting what a verification
+  pass found, separate *corrected*, *added*, and *checked and unchanged* —
+  this is the project's own harm-statistic discipline turned on the
+  verification process itself.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.
