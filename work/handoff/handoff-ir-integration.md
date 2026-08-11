@@ -96,10 +96,13 @@ other.* Neither `ac plot` nor `transfer_stream` can say that today.
 ### What was corrected at filing, and what was only added
 
 **One cite drifted.** The `visualize/ir` sidecar is computed at
-`handlers/transfer.rs:1238`, not `:1253`. Corrected in #286 and, below, in this
-document's own S8 section — that section carried the stale number until after filing,
-so a reader who checked the tree copy rather than the issue would have found the wrong
-line.
+`handlers/transfer.rs:1238`, not `:1253`. Corrected in #286. This document's own S8
+section carried the stale number until after filing, so a reader who checked the tree
+copy rather than the issue would have found the wrong line; S8 now cites the file and
+the `"type": "visualize/ir"` `json!` block by name and carries no line number at all.
+The drift is recorded here, once, rather than pinned to a number in the body that will
+move again — the same reason the calibration invariant is documented by section name in
+`calibration.rs` after moving twice.
 
 **Three cites were added, not corrected.** `handlers/calibrate.rs:155–156`,
 `measurement/sweep.rs:253` and `it_loopback_ir.rs:205` have no line numbers in the draft
@@ -468,7 +471,8 @@ readout, and displaces the gate relative to the reflection it was placed to excl
 **type:** output-format · **needs-design**
 
 **problem statement**
-`handlers/transfer.rs:1238` [corrected at filing; drafted as `:1253`] computes a `visualize/ir` sidecar for every transfer frame.
+`handlers/transfer.rs` computes a `visualize/ir` sidecar — the `json!` block emitting
+`"type": "visualize/ir"` — for every transfer frame.
 `ZMQ.md:1939` documents it. `it_protocol.rs:1451` tests it. `ac-view/src/session.rs:145`
 returns only frames where `type == "transfer_stream"` and the comment says outright that
 `ac-view` has no consumer for anything else. It is produced, tested, documented, and
