@@ -13,8 +13,8 @@ optimizes for when constraints conflict**.
 
 ### Tier 1 — Reference measurement
 
-Commands: `ac plot`, `ac sweep` (Farina IR-based), `ac noise`
-(future), `ac level` (future), `ac impedance`, `ac transfer`.
+Commands: `ac plot` (including `ac plot ir`, Farina IR-based, #282),
+`ac noise` (future), `ac level` (future), `ac impedance`, `ac transfer`.
 
 Optimizes for: **reproducibility, standards alignment, report-grade output.**
 
@@ -190,7 +190,9 @@ Plain, claim-the-ground names. These are the tools a user reaches for
 when they need a number that goes in a report.
 
 - `ac plot` — stepped-sine frequency response
-- `ac sweep` — swept-sine IR measurement (Farina log-sweep)
+- `ac plot ir` — swept-sine IR measurement (Farina log-sweep, #282; `ac sweep
+  ir` is a deprecated alias — `sweep` itself is a pure generator verb, see
+  "Command naming conventions" below and #276/#282)
 - `ac noise` — noise floor per AES17 §6.4.2 (future CLI surface; core landed)
 - `ac level` — single-point level measurement (future)
 - `ac impedance` — impedance measurement
@@ -341,7 +343,7 @@ revision the implementation has been verified against.
 
 Every Tier 1 module exposes a `citation()` (or `Type::citation()`) fn
 returning a `StandardsCitation { standard, clause, verified }`. Handler
-code (e.g. `plot.rs`, `sweep_ir`) should always call that fn rather than
+code (e.g. `plot.rs`, `plot_ir`) should always call that fn rather than
 inlining the citation — that keeps the source-of-truth in one place and
 makes audits trivial to roll out.
 
@@ -379,7 +381,7 @@ module with `verified: true` from the start — do not reintroduce
 
 ### Loopback IR runbook
 
-`sweep_ir`'s real-audio path (`JackEngine::play_and_capture`) is exercised
+`plot_ir`'s real-audio path (`JackEngine::play_and_capture`) is exercised
 by an `#[ignore]`'d integration test that needs a live JACK server. It is
 not run in `cargo test`; invoke it manually after starting JACK:
 
@@ -454,7 +456,9 @@ steps — nothing is broken en route.
 - [x] Wire `ac sweep ir` to run a Farina measurement end-to-end and emit
       `measurement/impulse_response` + `measurement/report` frames. Fake
       backend supported end-to-end (including integration test); real
-      JACK/CPAL `play_and_capture` is follow-up #78.
+      JACK/CPAL `play_and_capture` is follow-up #78. Renamed to `ac plot
+      ir` / wire `plot_ir` by #282 — see "Command naming conventions"
+      above; `ac sweep ir` is now a deprecated alias.
 - [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
       frequency weighting. Bilinear-mapped biquad cascade, unity gain at
       1 kHz, Class 1 tolerance verified in tests.

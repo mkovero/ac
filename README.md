@@ -160,9 +160,9 @@ larger than the delay estimate's own resolution.
 | `devices` | List audio ports |
 | `setup` | Configure hardware — device, output, input, reference, refout, dburef, range, temp, dmm, gpio, server-timeout |
 | `calibrate` | Voltage cal (sine + DMM); `calibrate spl` adds 94 dB SPL pistonphone reference; `calibrate mic-curve <path>` attaches a mic response correction; `calibrate show` lists stored entries |
-| `generate` | Play a sine or pink noise tone |
-| `sweep` | Level ramp, frequency chirp, or `sweep ir` (Farina log-sweep impulse response) |
-| `plot` | Point-by-point THD vs frequency; `plot level` for THD vs level. Writes CSV to the session directory |
+| `generate` | Play a sine or pink noise tone; `generate level` / `generate frequency` for an output-only level ramp or frequency chirp (no capture) |
+| `plot` | Point-by-point THD vs frequency; `plot level` for THD vs level; `plot ir` for a Farina log-sweep impulse response + report. Writes CSV/report to the session directory |
+| `sweep` | Deprecated alias for `generate level` / `generate frequency` / `plot ir` — prints a warning, not a second spelling |
 | `transfer` | Launch the `ac-view` transfer view — H1 magnitude, phase, coherence |
 | `monitor` | Live spectrum in `ac-view`; `--tui` for the terminal readout. `monitor cwt` / `cqt` / `reassigned` switch the daemon analysis mode and use the terminal readout |
 | `test` | Built-in self-tests — `test software`, `test hardware [dmm]`, `test dut [compare] [level]` |

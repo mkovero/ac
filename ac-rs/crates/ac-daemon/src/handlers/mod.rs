@@ -41,7 +41,7 @@ pub use admin::{
     set_monitor_params, set_time_integration, setup, status, stop,
 };
 pub use audio::{
-    generate, generate_pink, monitor_spectrum, plot, plot_level, sweep_frequency, sweep_ir,
+    generate, generate_pink, monitor_spectrum, plot, plot_ir, plot_level, sweep_frequency,
     sweep_level,
 };
 pub use calibrate::{

@@ -1,4 +1,4 @@
-//! `#[ignore]`'d JACK-loopback integration test for `sweep_ir`.
+//! `#[ignore]`'d JACK-loopback integration test for `plot_ir`.
 //!
 //! Runs a Farina exponential sweep through the daemon's real `JackEngine`
 //! with the JACK output port connected to the JACK input port, then asserts
@@ -213,7 +213,7 @@ fn loopback_ir_recovers_sharp_peak() {
     // shift (one JACK period for a self-connected client) plus a wide
     // pre-impulse stretch that's clear of the bandlimited-sinc skirts.
     let ack = c.call(json!({
-        "cmd":        "sweep_ir",
+        "cmd":        "plot_ir",
         "f1_hz":      50.0,
         "f2_hz":      16_000.0,
         "duration":   0.5,
@@ -222,7 +222,7 @@ fn loopback_ir_recovers_sharp_peak() {
         "n_harmonics": 3,
         "window_len":  16_384,
     }));
-    assert_eq!(ack["ok"], json!(true), "sweep_ir REQ rejected: {ack}");
+    assert_eq!(ack["ok"], json!(true), "plot_ir REQ rejected: {ack}");
 
     let frame = c.wait_for_or_error("measurement/impulse_response", Duration::from_secs(15));
     let data = &frame["data"];

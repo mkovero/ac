@@ -1343,7 +1343,7 @@ fn calibrate_cancel_at_second_prompt_saves_nothing() {
 }
 
 #[test]
-fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
+fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     // Fake backend implements `play_and_capture` as a delayed loopback
     // (see audio/fake.rs). Running a Farina sweep through it and
     // deconvolving should produce a linear IR with its peak at the
@@ -1351,7 +1351,7 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     let r = c.call(json!({
-        "cmd":"sweep_ir",
+        "cmd":"plot_ir",
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
@@ -1398,6 +1398,10 @@ fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
             Some((t, v)) if t == "measurement/report" => {
                 assert_eq!(v["report"]["data"]["kind"], json!("impulse_response"));
                 assert_eq!(v["report"]["schema_version"], json!(3));
+                // #282 acceptance criterion 6: the ISO 18233 §6.3.2
+                // tail-decay verdict rides in `notes`, not a silent default.
+                let notes = v["report"]["notes"].as_str().expect("notes present");
+                assert!(notes.contains("18233"), "notes: {notes:?}");
                 got_report = true;
             }
             Some((t, _)) if t == "done" => break,

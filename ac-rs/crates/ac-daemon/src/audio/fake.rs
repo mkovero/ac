@@ -683,7 +683,7 @@ impl AudioEngine for FakeEngine {
     /// Fake loopback: returns `samples` delayed by a fixed number of
     /// samples (`FAKE_LOOPBACK_DELAY_SAMPLES`), padded with trailing
     /// zeros to `samples.len() + tail` total length. Used by the
-    /// `sweep_ir` integration test to verify the deconvolved linear IR
+    /// `plot_ir` integration test to verify the deconvolved linear IR
     /// peaks at the expected offset.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         const FAKE_LOOPBACK_DELAY_SAMPLES: usize = 32;

@@ -43,7 +43,7 @@ pub trait AudioEngine: Send + 'static {
 
     /// Play `samples` out the configured output and synchronously capture
     /// `samples.len() + tail` samples from the measurement input. Used by
-    /// Farina swept-sine IR measurement (`sweep_ir`). The returned buffer
+    /// Farina swept-sine IR measurement (`plot_ir`). The returned buffer
     /// length is `samples.len() + round(tail_s · sample_rate)`.
     ///
     /// Default returns an error — only the fake backend (used in tests and
