@@ -21,12 +21,12 @@ else
   cd "$wt"
 fi
 
-run developer "PR #$n in $AC_REPO is labelled needs-work. Read the agent:qa \
-review comment on it and address every point raised. This is a revision: the \
-branch and the PR already exist — commit and push to this branch, do not open \
-a new PR and do not change labels. Reply to the review points in a PR comment \
-so the next QA pass can see what you did and why. Any point you disagree with, \
-say so there rather than silently leaving it." "$@"
+AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
+Read the agent:qa review comment on it and address every point raised. This is \
+a revision: the branch and the PR already exist — commit and push to this \
+branch, do not open a new PR and do not change labels. Reply to the review \
+points in a PR comment so the next QA pass can see what you did and why. Any \
+point you disagree with, say so there rather than silently leaving it." "$@"
 
 echo "worktree: $wt   branch: $branch" >&2
 echo "when pushed: gh pr edit $n -R $AC_REPO --remove-label needs-work --add-label in-review" >&2

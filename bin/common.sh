@@ -21,6 +21,18 @@ TOOLS_READ="Read,Grep,Glob,Bash,Agent"
 
 spec() { printf '%s/.agents/%s.md' "$ROOT" "$1"; }
 
+# Extract the session's final message from a finished transcript.
+# Prefer the result event; fall back to the last assistant text block, because
+# not every version emits result into the stream — an interrupted run has none
+# either, and a header-only session file is worse than a partial one.
+distill() {
+  local raw="$1" r
+  r=$(jq -r 'select(.type=="result") | .result // empty' "$raw" 2>/dev/null || true)
+  if [[ -n $r ]]; then printf '%s\n' "$r"; return; fi
+  jq -rs '[.[] | select(.type=="assistant") | .message.content[]?
+           | select(.type=="text") | .text] | last // empty' "$raw" 2>/dev/null || true
+}
+
 # run <role> <prompt> [--fg] [--read] [extra claude args...]
 # --fg drops into interactive Claude Code: you see everything and can steer,
 # but the allowlist is not enforced — you are prompted instead, and nothing
@@ -42,17 +54,15 @@ run() {
     return
   fi
 
-  local tag="${AC_TAG:-$$}"
-  local raw="$AC_LOG_DIR/$(date +%F)-$role-$tag.jsonl"
-  local out="$AC_SESSION_DIR/$(date +%F)-$role-$tag.md"
+  local tag="${AC_TAG:-$$}" stamp status=0
+  stamp="$(date +%F)-$role-$tag"
+  local raw="$AC_LOG_DIR/$stamp.jsonl"
+  local out="$AC_SESSION_DIR/$stamp.md"
   mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
 
-  # Header says what this file is. Point-in-time record of one session, not
-  # state — the tracker still owns whether the issue or PR is open.
-  { printf '<!-- %s session, %s, %s -->\n' "$role" "$tag" "$(date -Iminutes)"
-    printf '<!-- record of one run. not status. raw: %s -->\n\n' "${raw/#$HOME/\~}"
-  } > "$out"
-
+  # Stream to the terminal, keep the raw transcript. Distillation happens after
+  # the run, not inside the pipe — a process-substitution tee races the
+  # pipeline's exit and truncates exactly the long sessions worth reading.
   CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 \
   claude -p --system-prompt-file "$(spec "$role")" "$prompt" \
     --model "${AC_MODEL:-sonnet}" \
@@ -61,13 +71,22 @@ run() {
     --max-turns "${AC_MAX_TURNS:-60}" \
     --output-format stream-json --verbose "${extra[@]}" \
   | tee "$raw" \
-  | tee >(jq -r --unbuffered 'select(.type=="result") | .result' >> "$out") \
   | jq -r --unbuffered '
       if .type=="assistant" then
         (.message.content[]? | select(.type=="tool_use") | "→ \(.name)")
       elif .type=="result" then "\n\(.result)"
-      else empty end'
+      else empty end' || status=$?
 
-  wait                       # process substitution outlives the pipeline
+  # Header says what this file is: a point-in-time record of one run, not
+  # state. The tracker still owns whether the issue or PR is open.
+  { printf '<!-- %s session %s — %s — exit %s -->\n' \
+      "$role" "$tag" "$(date -Iminutes)" "$status"
+    printf '<!-- record of one run, not status. raw: %s -->\n\n' "${raw/#$HOME/\~}"
+    distill "$raw"
+  } > "$out"
+
+  [[ -s $raw ]] || echo "warning: empty transcript — check claude exited cleanly" >&2
   echo "session: $out" >&2
+  echo "raw:     $raw" >&2
+  return "$status"
 }
