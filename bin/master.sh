@@ -31,23 +31,49 @@ labels()    { gh issue view "$1" -R "$AC_REPO" --json labels --jq '.labels[].nam
 pr_labels() { gh pr view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name' 2>/dev/null; }
 has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 
-# Match on head branch, not title — titles get edited. developer.md step 2
-# specifies issue-{N}-{slug}.
+# Match on head branch first — developer.md step 2 specifies issue-{N}-{slug}.
+# Fall back to the PR body's closing reference, because not every branch in
+# this repo follows that convention. Never match on title: titles get edited.
 pr_for() {
-  gh pr list -R "$AC_REPO" --state open --json number,headRefName \
-    --jq "[.[] | select(.headRefName | startswith(\"issue-$1-\") or .headRefName == \"issue-$1\")] | .[0].number // empty"
+  local n="$1" pr
+  pr=$(gh pr list -R "$AC_REPO" --state open --json number,headRefName --jq \
+    "[.[] | select((.headRefName | startswith(\"issue-$n-\")) or (.headRefName == \"issue-$n\"))] | .[0].number // empty")
+  [[ -n $pr ]] && { printf '%s\n' "$pr"; return; }
+  gh pr list -R "$AC_REPO" --state open --json number,body --jq \
+    "[.[] | select(.body // \"\" | test(\"[Cc]loses +#$n\\\\b\"))] | .[0].number // empty"
+}
+
+# A branch with no open PR is a failed earlier run, not a fresh start.
+stale_branch() {
+  git show-ref -q "refs/heads/issue-$1"
+}
+
+# Count QA's own comments. Absence of needs-work is NOT approval: a session
+# that crashed, hit its turn limit, or ended without posting leaves the labels
+# exactly as an approving one does. Require positive evidence that QA spoke.
+qa_comments() {
+  gh pr view "$1" -R "$AC_REPO" --json comments \
+    --jq '[.comments[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0
 }
 
 qa_loop() {
-  local n="$1" pr="$2" round=0 ls
+  local n="$1" pr="$2" round=0 ls before after
   while (( round < ROUNDS )); do
     (( ++round ))
     echo "  #$n PR #$pr: qa round $round"
+    before="$(qa_comments "$pr")"
     "$BIN/review.sh" "$pr" $fg || { echo "  #$n: review failed"; return 1; }
+    after="$(qa_comments "$pr")"
+
+    if (( after <= before )); then
+      echo "  #$n PR #$pr: qa posted nothing — inconclusive, NOT approved"
+      echo "     read the session log before believing this PR passed."
+      return 1
+    fi
 
     ls="$(pr_labels "$pr")"
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; return 0; }
-    has needs-work "$ls"       || { echo "  #$n PR #$pr: qa satisfied — yours to merge"; return 0; }
+    has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; return 0; }
 
     if (( round >= ROUNDS )); then
       echo "  #$n PR #$pr: still needs-work after $ROUNDS rounds — stopping"
@@ -95,6 +121,13 @@ drive() {
     if [[ -n $pr ]]; then
       echo "  #$n: PR #$pr"
       qa_loop "$n" "$pr"; return
+    fi
+
+    if stale_branch "$n"; then
+      echo "  #$n: branch issue-$n exists but no open PR."
+      echo "     earlier run did not open one, or the PR was closed. inspect, then:"
+      echo "     git worktree remove --force $WT_BASE/issue-$n; git branch -D issue-$n"
+      return 0
     fi
 
     has ready-to-implement "$ls" \

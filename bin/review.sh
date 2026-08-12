@@ -29,14 +29,29 @@ mark="$AC_LOG_DIR/reviewed-pr-$n.sha"
 mkdir -p "$AC_LOG_DIR"
 head_sha="$(gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
 
+# Positive evidence that QA has actually spoken on this PR. A cached SHA is not
+# enough: a session can record a review it never posted.
+qa_comments() {
+  gh pr view "$n" -R "$AC_REPO" --json comments \
+    --jq '[.comments[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0
+}
+
 if [[ $mode == auto ]]; then
-  if [[ -f $mark ]]; then
+  if [[ -f $mark && $(qa_comments) -gt 0 ]]; then
     since="$(cat "$mark")"
-    [[ $since == "$head_sha" ]] && echo "note: no new commits since last review" >&2
     mode=delta
   else
+    [[ -f $mark ]] && echo "note: cached SHA but no qa comment on the PR — full review" >&2
     mode=full
   fi
+fi
+
+# An empty range is not a delta. Refuse rather than hand QA a task whose
+# premise is false — it will either say so and waste the run, or invent one.
+if [[ $mode == delta && $since == "$head_sha" ]]; then
+  echo "no new commits since last review of #$n ($since)." >&2
+  echo "use --full to review the same tip again." >&2
+  exit 0
 fi
 
 if [[ $mode == delta && -n $since ]]; then
@@ -65,7 +80,15 @@ else
   prompt="Review PR #$n in $AC_REPO."
 fi
 
+before="$(qa_comments)"
 AC_TAG="pr-$n${since:+-delta}" run qa "$prompt" --read "${rest[@]+"${rest[@]}"}"
+after="$(qa_comments)"
 
-# Record what was reviewed, so the next pass knows where to start.
-printf '%s\n' "$head_sha" > "$mark"
+# Record what was reviewed only if QA actually posted. Otherwise the next pass
+# would go delta against a review that does not exist.
+if (( after > before )); then
+  printf '%s\n' "$head_sha" > "$mark"
+else
+  echo "warning: qa posted no comment — not recording $head_sha as reviewed" >&2
+  exit 1
+fi

@@ -1,1 +1,14 @@
-{ "permissions": {"deny": ["Agent(Explore)"]} }
+{
+  "permissions": {
+    "deny": [
+      "Task(Explore)",
+      "Bash(sed -i:*)", "Bash(perl -i:*)", "Bash(tee:*)",
+      "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)",
+      "Bash(truncate:*)", "Bash(dd:*)"
+    ],
+    "allow": [
+      "Bash(cargo test:*)", "Bash(cargo clippy:*)", "Bash(cargo fmt --check)",
+      "Bash(git diff:*)", "Bash(git log:*)", "Bash(gh pr:*)", "Bash(gh issue:*)"
+    ]
+  }
+}
