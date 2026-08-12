@@ -1301,6 +1301,19 @@ daemon converts to "Vrms at 0 dBFS peak" before saving:
 - `vrms_at_0dbfs_out = reading / dbfs_to_amplitude(ref_dbfs)`
 - `vrms_at_0dbfs_in  = reading / dbfs_to_amplitude(captured_dbfs)`
 
+A prompt answered with a skip (`vrms: null`, no `clear`) leaves the
+stored value for that leg alone — re-checking one leg does not cost the
+other. Only an explicit `clear: true` erases. `ref_dbfs` on the stored
+entry is rewritten only when at least one leg was actually measured, so
+it keeps describing the level the stored readings were taken at.
+
+A timed-out prompt (120 s, no reply) resolves the same as a skip and the
+run continues — the other leg can still be answered and saved normally.
+A **cancelled** prompt (`{"cmd": "stop"}`, sent by the CLI's `q`) is not
+a skip: it aborts the whole run before anything is saved, at either
+step, so a cancel after step 1 was answered does not commit that
+reading either.
+
 **DATA — `cal_done`**:
 ```json
 // topic: cal_done
@@ -1308,9 +1321,20 @@ daemon converts to "Vrms at 0 dBFS peak" before saving:
   "key":               "out0_in0",
   "vrms_at_0dbfs_out": <float> | null,  // post-scale, projected to 0 dBFS
   "vrms_at_0dbfs_in":  <float> | null,  // post-scale, projected to 0 dBFS
+  "out_state":         "measured" | "unchanged" | "absent",
+  "in_state":          "measured" | "unchanged" | "absent",
   "error":             "<message>"      // only present on partial failure
 }
 ```
+
+The `vrms_at_0dbfs_*` fields report what is **stored after this run**,
+not only what this run measured, and the `*_state` word says which:
+
+| state | meaning |
+|-------|---------|
+| `measured` | this run supplied a reading and overwrote the field |
+| `unchanged` | the prompt was skipped; the previously stored value stands |
+| `absent` | the field holds no value — never set, or just cleared |
 
 ---
 
@@ -1320,13 +1344,25 @@ Sends the user's DMM reading back to a running `calibrate` worker.
 Also used as a sync point by `calibrate_spl` (the `vrms` field is
 ignored there — only the act of replying releases the worker).
 
+Three distinct intents, not two — skipping a leg and erasing it are
+different requests and must not share an encoding:
+
+| request | intent |
+|---------|--------|
+| `{"vrms": <float>}` | measured reading; overwrites the stored value |
+| `{"vrms": null}` (or `vrms` absent) | skip; the stored value is kept |
+| `{"clear": true}` | erase the stored value for this leg |
+
 **Request**
 ```json
 {
-  "cmd":  "cal_reply",
-  "vrms": <float> | null   // null = skip / press Enter
+  "cmd":   "cal_reply",
+  "vrms":  <float> | null,  // null / absent = skip, keep what is stored
+  "clear": <bool>           // optional, default false; true = erase this leg
 }
 ```
+
+`clear: true` wins over any `vrms` sent alongside it.
 
 **Reply**
 ```json

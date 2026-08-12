@@ -560,19 +560,48 @@ pub(super) fn read_dmm_vrms(host: &str, n: usize) -> Option<f64> {
     }
 }
 
-/// Poll a cal_reply channel until a value arrives, stop flag fires, or timeout.
+/// What a `cal_reply` asks the calibrate worker to do with one field.
+///
+/// Three intents, not two: "I did not measure this leg" and "erase what
+/// you have" are different requests, and collapsing them onto the same
+/// reply is what let a skipped prompt delete a stored voltage cal (#279).
+/// A timed-out or cancelled prompt resolves to `Skip`, so the failure
+/// mode of every path that produces no answer is "keep what is stored".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum CalReply {
+    /// A measured reading, in Vrms at the played/captured level.
+    Value(f64),
+    /// No reading supplied — leave the stored value alone.
+    Skip,
+    /// Explicitly erase the stored value.
+    Clear,
+}
+
+impl CalReply {
+    /// The reading, if one was supplied. `Skip` and `Clear` both yield
+    /// `None` — use this only where a number is wanted, never to decide
+    /// what to write.
+    pub(super) fn value(self) -> Option<f64> {
+        match self {
+            CalReply::Value(v) => Some(v),
+            CalReply::Skip | CalReply::Clear => None,
+        }
+    }
+}
+
+/// Poll a cal_reply channel until a reply arrives, stop flag fires, or timeout.
 pub(super) fn wait_cal_reply(
-    rx: &crossbeam_channel::Receiver<Option<f64>>,
+    rx: &crossbeam_channel::Receiver<CalReply>,
     stop: &Arc<AtomicBool>,
     timeout_secs: u64,
-) -> Option<f64> {
+) -> CalReply {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         if stop.load(Ordering::Relaxed) {
-            return None;
+            return CalReply::Skip;
         }
         if std::time::Instant::now() > deadline {
-            return None;
+            return CalReply::Skip;
         }
         if let Ok(v) = rx.try_recv() {
             return v;

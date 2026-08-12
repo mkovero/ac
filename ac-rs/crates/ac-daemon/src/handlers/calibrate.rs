@@ -13,8 +13,39 @@ use crate::server::ServerState;
 
 use super::{
     busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output, rms_to_dbfs, send_pub,
-    spawn_worker, wait_cal_reply,
+    spawn_worker, wait_cal_reply, CalReply,
 };
+
+/// Apply one prompt's reply to one stored voltage field and report which
+/// of the three states the field ends up in.
+///
+/// `"measured"` — a reading was supplied and scaled into the field.
+/// `"unchanged"` — nothing was supplied; the previously stored value stands.
+/// `"absent"` — the field holds no value, either because it never did or
+/// because the reply asked for it to be cleared.
+///
+/// Skipping must never write. That is the whole of #279: the old code
+/// assigned `reading.map(..)` unconditionally, so a skipped prompt wrote
+/// `None` over a good calibration and reported it as "not measured".
+fn apply_cal_reading(field: &mut Option<f64>, reply: CalReply, scale: f64) -> &'static str {
+    match reply {
+        CalReply::Value(v) => {
+            *field = Some(v * scale);
+            "measured"
+        }
+        CalReply::Clear => {
+            *field = None;
+            "absent"
+        }
+        CalReply::Skip => {
+            if field.is_some() {
+                "unchanged"
+            } else {
+                "absent"
+            }
+        }
+    }
+}
 
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
@@ -73,12 +104,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
                 "step":      1,
                 "text":      format!(
                     "Output cal — measure DAC output Vrms with DMM (1 kHz @ {ref_dbfs:.1} dBFS). \
-                     Enter reading or press Enter to skip."),
+                     Enter reading, or press Enter to keep the stored value."),
                 "dmm_vrms":  dmm_v1,
                 "ref_dbfs":  ref_dbfs,
             }),
         );
-        let out_reading = wait_cal_reply(&rx1, &stop, 120);
+        let out_reply = wait_cal_reply(&rx1, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
         if stop.load(Ordering::Relaxed) {
             eng.set_silence();
@@ -109,7 +140,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let loopback_dbfs = ref_dbfs - 20.0 * 2f64.sqrt().log10();
         let is_loopback = (captured_dbfs - loopback_dbfs).abs() <= 2.0;
         let dmm_v2_real = cfg.dmm_host.as_deref().and_then(|h| read_dmm_vrms(h, 3));
-        let dmm_v2 = dmm_v2_real.or(if is_loopback { out_reading } else { None });
+        let dmm_v2 = dmm_v2_real.or(if is_loopback { out_reply.value() } else { None });
 
         let prompt_text = if is_loopback {
             format!(
@@ -119,7 +150,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         } else {
             format!(
                 "Input cal — measure ADC input Vrms with DMM (captured {captured_dbfs:.1} dBFS). \
-                 Enter reading or press Enter to skip."
+                 Enter reading, or press Enter to keep the stored value."
             )
         };
         let (tx2, rx2) = crossbeam_channel::bounded(1);
@@ -135,8 +166,18 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
                 "loopback":      is_loopback,
             }),
         );
-        let in_reading = wait_cal_reply(&rx2, &stop, 120);
+        let in_reply = wait_cal_reply(&rx2, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
+        // Symmetric with the step-1 check above: a cancel here must also
+        // abort the run rather than fall through to save. Before this fix
+        // a `q` at the second prompt still committed step 1's reading and
+        // `ref_dbfs`, while the CLI told the operator "Calibration
+        // cancelled." (#294 QA correctness issue 1).
+        if stop.load(Ordering::Relaxed) {
+            eng.set_silence();
+            eng.stop();
+            return;
+        }
 
         eng.set_silence();
         eng.stop();
@@ -144,23 +185,31 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
         let out_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
         let in_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(in_dbfs_for_scale);
-        let vrms_at_0dbfs_out = out_reading.map(|v| v * out_scale);
-        let vrms_at_0dbfs_in = in_reading.map(|v| v * in_scale);
 
         // Load existing entry to preserve unrelated fields (notably the
-        // SPL pistonphone reading set by `calibrate_spl`); only voltage
-        // fields are overwritten here.
+        // SPL pistonphone reading set by `calibrate_spl`), and to preserve
+        // a voltage field whose prompt was skipped — a re-check of one leg
+        // must not cost the other.
         let mut cal = Calibration::load_or_new(out_ch, in_ch, None);
-        cal.ref_dbfs = ref_dbfs;
-        cal.vrms_at_0dbfs_out = vrms_at_0dbfs_out;
-        cal.vrms_at_0dbfs_in = vrms_at_0dbfs_in;
+        let out_state = apply_cal_reading(&mut cal.vrms_at_0dbfs_out, out_reply, out_scale);
+        let in_state = apply_cal_reading(&mut cal.vrms_at_0dbfs_in, in_reply, in_scale);
+        // `ref_dbfs` records the level the stored readings were taken at,
+        // so it only moves when a reading did. A run that skipped both
+        // prompts measured nothing and must leave the entry as it found it.
+        if out_state == "measured" || in_state == "measured" {
+            cal.ref_dbfs = ref_dbfs;
+        }
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
+        // Values reported are what is now stored, not what this run
+        // measured — with `*_state` naming which of the three that is.
         let mut cal_done_frame = json!({
             "key":               key,
-            "vrms_at_0dbfs_out": vrms_at_0dbfs_out,
-            "vrms_at_0dbfs_in":  vrms_at_0dbfs_in,
+            "vrms_at_0dbfs_out": cal.vrms_at_0dbfs_out,
+            "vrms_at_0dbfs_in":  cal.vrms_at_0dbfs_in,
+            "out_state":         out_state,
+            "in_state":          in_state,
         });
         if let Some(ref e) = save_err {
             cal_done_frame["error"] = json!(e);
@@ -197,10 +246,20 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 }
 
 pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {
-    let vrms = cmd.get("vrms").and_then(Value::as_f64); // None if JSON null or absent
+    // `clear: true` is the only way to erase a stored value, and it has to
+    // be asked for by name — a missing/null `vrms` means "I did not measure
+    // this", which is not the same request (#279).
+    let reply = if cmd.get("clear").and_then(Value::as_bool).unwrap_or(false) {
+        CalReply::Clear
+    } else {
+        match cmd.get("vrms").and_then(Value::as_f64) {
+            Some(v) => CalReply::Value(v),
+            None => CalReply::Skip, // JSON null or absent
+        }
+    };
     let tx = state.cal_reply_tx.lock().unwrap();
     if let Some(ref t) = *tx {
-        let _ = t.send(vrms);
+        let _ = t.send(reply);
     }
     json!({"ok": true})
 }
