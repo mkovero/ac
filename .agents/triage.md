@@ -83,6 +83,15 @@ Then routing label:
 - Needs architect review → `needs-design`
 - Else → `ready-to-implement`
 
+Then, additively — issue change what a user see (stdout format, new display
+field, `ac-scene` readout, axis label, banner or fault text) → also apply
+`needs-ux`. This is the same condition as category `output-format`, but not
+only that category: a `bug` or `measurement-accuracy` issue that alter a
+printed value or its label change output too, and route the same way.
+`needs-ux` combine with either routing label above — it is not an alternative
+to them. Both set → ux comment first, architect still own promotion to
+`ready-to-implement`.
+
 Epic (multiple independent work pieces) → `epic`.
 Break into sub-issues, reference them in comment before labeling parent `epic`.
 
@@ -98,6 +107,7 @@ Break into sub-issues, reference them in comment before labeling parent `epic`.
 |---|---|
 | `needs-clarification` | waiting on reporter |
 | `needs-design` | architect must review before implementation |
+| `needs-ux` | output surface change; ux must specify it before implementation |
 | `ready-to-implement` | spec complete, developer can pick up |
 | `in-review` | PR open |
 | `blocked` | depends on something external |

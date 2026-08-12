@@ -100,6 +100,13 @@ to look at as a model. Not pseudocode — just orientation.}
 ### 4. apply label
 - Recommendation clear + complete → remove `needs-design`, apply `ready-to-implement`
 - Need human decision (real ambiguity, architectural risk) → apply `needs-discussion`, do not apply `ready-to-implement`
+- Your decision turn out to change what a user see — new field on the wire that
+  reach a readout, a value that get displayed differently, a fault state that
+  need a banner — apply `needs-ux` as well, even when triage did not. Triage
+  route on the issue as written; you route on the design you just made, and a
+  display consequence is often only visible after the boundary is decided.
+  Apply it alongside `ready-to-implement`, not instead of: ux specify the
+  surface, it does not re-open the boundary you settled.
 
 ## audit mode
 

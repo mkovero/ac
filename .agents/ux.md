@@ -183,6 +183,23 @@ Structure:
 ZMQ schema or only in ds display layer}
 ```
 
+### step 6 — apply label
+
+Proposal concrete + complete (every field justified, literal rendering shown) →
+remove `needs-ux`, apply `ready-to-implement`.
+
+Need human decision (real ambiguity — field belongs in wire schema vs display
+layer, two defensible layouts with no ground to choose between them) → apply
+`needs-discussion`, do not apply `ready-to-implement`. Leaving `needs-ux` in
+place is not the way to signal this: the label say *ux has not looked yet*, and
+after you looked it false. State the ambiguity in your open questions section
+and hand it over with `needs-discussion`.
+
+Issue also carry `needs-design` and architect not yet commented → remove
+`needs-ux` only. Do not apply `ready-to-implement`; architect step 4 own that
+transition, and applying it early let implementation start before boundary
+decided.
+
 ## audit mode
 
 Invoked with "audit the codebase as ux" → do this instead of normal issue-review flow. Read-only — no issues, no PRs.
