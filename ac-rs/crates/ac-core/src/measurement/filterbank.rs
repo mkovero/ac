@@ -187,6 +187,17 @@ impl Filterbank {
         &self.centres
     }
 
+    /// Per-band settling-prefix length, in samples — the number of leading
+    /// samples [`Filterbank::process`] discards before integrating power for
+    /// that band (see `process`'s doc comment). Aligned index-for-index with
+    /// [`Filterbank::centres_hz`]. Callers that need to size an analysis
+    /// window ahead of calling `process` (rather than discover after the
+    /// fact that a band came back `NEG_INFINITY`) read this first — see
+    /// `measurement::sweep::check_tail_decay`.
+    pub fn settle_samples(&self) -> Vec<usize> {
+        self.filters.iter().map(|f| f.settle).collect()
+    }
+
     /// Run `samples` through every band filter and return the per-band
     /// level in dBFS, where 0 dBFS corresponds to a full-scale sine
     /// (mean-square = 0.5).
