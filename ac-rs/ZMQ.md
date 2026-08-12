@@ -133,7 +133,7 @@ see an unknown version must refuse to decode. Example payload:
 | `kind`          | Producer      | Extra fields                                                                                  |
 |-----------------|---------------|-----------------------------------------------------------------------------------------------|
 | `stepped_sine`  | `plot`        | `{ "n_points": <int>, "standard": <StandardsCitation?> }`                                     |
-| `swept_sine`    | `sweep_ir`    | `{ "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "standard": <StandardsCitation?> }`         |
+| `swept_sine`    | `plot_ir`     | `{ "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "standard": <StandardsCitation?> }`         |
 
 `data.kind` values currently defined:
 
@@ -898,6 +898,11 @@ Returns all stored calibration entries.
 Output-only: ramps amplitude linearly in dB from `start_dbfs` to `stop_dbfs`
 over `duration` seconds at a fixed frequency. No capture.
 
+Reached from the CLI via `ac generate level` (#282; `ac sweep level` is a
+deprecated alias). The wire `cmd` is unchanged — `sweep_level` was always an
+accurate name for what this command does (ramp output, no capture); only
+its CLI parent noun moved.
+
 **Request**
 ```json
 {
@@ -929,6 +934,10 @@ On port error: `{ "ok": false, "error": "port error: ..." }`.
 Output-only: logarithmic chirp from `start_hz` to `stop_hz` over `duration`
 seconds at fixed level. No capture.
 
+Reached from the CLI via `ac generate frequency` (#282; `ac sweep frequency`
+is a deprecated alias). Wire `cmd` unchanged — same reasoning as
+`sweep_level` above.
+
 **Request**
 ```json
 {
@@ -953,7 +962,7 @@ seconds at fixed level. No capture.
 
 ---
 
-### `sweep_ir`
+### `plot_ir`
 
 Farina exponential log-sweep impulse-response measurement. Generates an
 ESS, plays it out the configured output, synchronously captures
@@ -961,13 +970,27 @@ ESS, plays it out the configured output, synchronously captures
 normalized inverse filter (`ac-core::measurement::sweep`). Emits a
 `measurement/impulse_response` frame and a full `measurement/report`.
 
+Renamed from `sweep_ir` by #282: reached from the CLI via `ac plot ir`
+(`ac sweep ir` is a deprecated alias) — it captures and analyses, so it
+now belongs with its `plot`/`plot_level` siblings, both in the CLI and on
+the wire, rather than parked under a generator name. All three DATA
+topics' `"cmd"` field and the busy-guard group key moved with it (see the
+`EXCLUSIVE` group table below).
+
+`report.notes` carries the ISO 18233 §6.3.2 post-hoc tail-decay verdict:
+whether the captured tail decayed at least 30 dB in every 1/3-octave band
+between the linear-IR peak and the end of the capture — a room's
+reverberation isn't known ahead of a real capture, so `tail_s`'s adequacy
+is checked after the fact against the room actually measured, not
+guessed beforehand (`ac_core::measurement::sweep::check_tail_decay`).
+
 Today only the fake backend implements the required `play_and_capture`
 engine path; real JACK / CPAL buffer-playback is a follow-up.
 
 **Request**
 ```json
 {
-  "cmd":          "sweep_ir",
+  "cmd":          "plot_ir",
   "f1_hz":        <float>,   // default 20
   "f2_hz":        <float>,   // default 20000 (must be < sr/2)
   "duration":     <float>,   // seconds, default 1.0
@@ -986,13 +1009,13 @@ engine path; real JACK / CPAL buffer-playback is a follow-up.
 **DATA**
 ```json
 // topic: measurement/impulse_response
-{ "cmd": "sweep_ir", "data": { "kind": "impulse_response", ... } }
+{ "cmd": "plot_ir", "data": { "kind": "impulse_response", ... } }
 
 // topic: measurement/report
-{ "cmd": "sweep_ir", "report": { "schema_version": 1, ... } }
+{ "cmd": "plot_ir", "report": { "schema_version": 3, "notes": "ISO 18233 §6.3.2 ...", ... } }
 
 // topic: done
-{ "cmd": "sweep_ir" }
+{ "cmd": "plot_ir" }
 ```
 
 ---
@@ -2255,7 +2278,7 @@ Audio commands are classified into four concurrency groups:
 | `OUTPUT`    | `sweep_level`, `sweep_frequency`, `generate`, `generate_pink` |
 | `INPUT`     | `monitor_spectrum` |
 | `TRANSFER`  | `transfer_stream` |
-| `EXCLUSIVE` | `plot`, `plot_level`, `calibrate`, `probe`, `test_hardware`, `test_dut`, `sweep_ir` |
+| `EXCLUSIVE` | `plot`, `plot_level`, `plot_ir`, `calibrate`, `probe`, `test_hardware`, `test_dut` |
 
 Rules:
 - Only one `OUTPUT` command at a time.

@@ -30,6 +30,41 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
         });
     }
 
+    if args.first().map(|a| expand(a)) == Some("ir") {
+        args.remove(0);
+        let mut tokens = classify_all(args)?;
+        let f1 = pull(&mut tokens, TokenKind::Freq)
+            .map(|v| v.as_f64())
+            .unwrap_or(20.0);
+        let f2 = pull(&mut tokens, TokenKind::Freq)
+            .map(|v| v.as_f64())
+            .unwrap_or(20_000.0);
+        let duration = pull(&mut tokens, TokenKind::Time)
+            .map(|v| v.as_f64())
+            .unwrap_or(1.0);
+        let level = pull(&mut tokens, TokenKind::Level)
+            .map(|v| v.as_level())
+            .unwrap_or(LevelSpec::Dbfs(-6.0));
+        let n_harmonics = pull(&mut tokens, TokenKind::Harmonics).map(|v| v.as_u32());
+        let window_len = pull(&mut tokens, TokenKind::Window).map(|v| v.as_u32());
+        // Second `Time` token, pulled after `duration` — same positional
+        // pattern `plot level`'s start/stop `Level` pair uses.
+        let tail_s = pull(&mut tokens, TokenKind::Time).map(|v| v.as_f64());
+        check_empty(&tokens)?;
+        return Ok(ParsedCommand {
+            cmd: CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                n_harmonics,
+                window_len,
+                tail_s,
+            },
+            show_plot,
+        });
+    }
+
     // Support `bands <N>` as two separate tokens. The single-token
     // composite forms `<N>bands` / `<N>bpo` are handled by the
     // classifier; convert `bands N` to `Nbands` before classifying.
@@ -155,5 +190,72 @@ mod tests {
         // A lone `bands` token with no following integer should fall
         // through to the classifier, which has no rule for it.
         assert!(parse(&args("plot 20hz 20khz 0dbu bands")).is_err());
+    }
+
+    #[test]
+    fn test_plot_ir() {
+        let p = parse(&args("plot ir 20hz 20khz 1s -6dbu 5harm 4096win 0.8s")).unwrap();
+        match p.cmd {
+            CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                n_harmonics,
+                window_len,
+                tail_s,
+            } => {
+                assert!((f1 - 20.0).abs() < 1e-9);
+                assert!((f2 - 20000.0).abs() < 1e-9);
+                assert!((duration - 1.0).abs() < 1e-9);
+                assert!(matches!(level, LevelSpec::Dbu(v) if (v - (-6.0)).abs() < 1e-9));
+                assert_eq!(n_harmonics, Some(5));
+                assert_eq!(window_len, Some(4096));
+                assert!((tail_s.unwrap() - 0.8).abs() < 1e-9);
+            }
+            other => panic!("expected PlotIr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plot_ir_defaults() {
+        let p = parse(&args("plot ir")).unwrap();
+        match p.cmd {
+            CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                n_harmonics,
+                window_len,
+                tail_s,
+            } => {
+                assert!((f1 - 20.0).abs() < 1e-9);
+                assert!((f2 - 20000.0).abs() < 1e-9);
+                assert!((duration - 1.0).abs() < 1e-9);
+                assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-6.0)).abs() < 1e-9));
+                // Unset — the daemon applies its own defaults, not the CLI.
+                assert_eq!(n_harmonics, None);
+                assert_eq!(window_len, None);
+                assert_eq!(tail_s, None);
+            }
+            other => panic!("expected PlotIr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plot_ir_abbreviated() {
+        let p = parse(&args("p ir 20hz 20khz")).unwrap();
+        assert!(matches!(p.cmd, CommandKind::PlotIr { .. }));
+    }
+
+    /// Test against the rejected form: a bare integer meant as
+    /// `n_harmonics` with the `harm` marker forgotten must NOT silently
+    /// land as harmonics — it collides with the existing bare-number-is-
+    /// dBFS rule and becomes a second `Level` token, which `check_empty`
+    /// then rejects as leftover.
+    #[test]
+    fn test_plot_ir_bare_integer_is_not_harmonics() {
+        assert!(parse(&args("plot ir 20hz 20khz 1s -6dbu 5")).is_err());
     }
 }

@@ -1,5 +1,5 @@
 //! `MeasurementReport` — the Tier 1 archival artifact emitted by
-//! reproducible measurement commands (`ac plot`, future `ac sweep`,
+//! reproducible measurement commands (`ac plot`, `ac plot ir`, future
 //! `ac noise`). Serialises to self-describing JSON for archiving and
 //! to CSV for spreadsheet tools.
 //!
@@ -94,7 +94,7 @@ pub enum MeasurementMethod {
     /// Continuous log-swept sine (Farina ESS) — stimulus is a single
     /// exponential sweep from `f1_hz` to `f2_hz` over `duration_s`; the
     /// captured response is processed by deconvolution or a fractional-
-    /// octave filterbank. Used by `sweep_ir`.
+    /// octave filterbank. Used by `plot_ir`.
     SweptSine {
         f1_hz: f64,
         f2_hz: f64,

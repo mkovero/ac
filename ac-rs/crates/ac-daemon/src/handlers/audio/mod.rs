@@ -10,5 +10,5 @@ mod sweep;
 
 pub use generate::{generate, generate_pink};
 pub use monitor::monitor_spectrum;
-pub use plot::{plot, plot_level};
-pub use sweep::{sweep_frequency, sweep_ir, sweep_level};
+pub use plot::{plot, plot_ir, plot_level};
+pub use sweep::{sweep_frequency, sweep_level};

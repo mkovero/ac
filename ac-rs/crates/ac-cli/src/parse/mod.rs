@@ -19,6 +19,10 @@ enum TokenKind {
     Level,
     Freq,
     Bands,
+    /// `<N>harm` — `plot ir`'s `n_harmonics` gate parameter (#282).
+    Harmonics,
+    /// `<N>win` — `plot ir`'s `window_len` gate parameter, in samples (#282).
+    Window,
 }
 
 type Token = (TokenKind, TokenValue);
@@ -137,6 +141,27 @@ fn parse_bands(s: &str) -> Result<u32, ()> {
         .ok_or(())
 }
 
+/// Accepts `"<N>harm"` — `plot ir`'s `n_harmonics` gate parameter. A
+/// dedicated suffix, not a bare integer: a bare `5` is ambiguous with the
+/// existing bare-number-defaults-to-dBFS rule in `parse_level`, so
+/// `n_harmonics`/`window_len` must always be typed with their marker.
+fn parse_harmonics(s: &str) -> Result<u32, ()> {
+    let s = s.to_lowercase();
+    s.strip_suffix("harm")
+        .and_then(|rest| rest.parse::<f64>().ok())
+        .map(|v| v as u32)
+        .ok_or(())
+}
+
+/// Accepts `"<N>win"` — `plot ir`'s `window_len` gate parameter, samples.
+fn parse_window(s: &str) -> Result<u32, ()> {
+    let s = s.to_lowercase();
+    s.strip_suffix("win")
+        .and_then(|rest| rest.parse::<f64>().ok())
+        .map(|v| v as u32)
+        .ok_or(())
+}
+
 fn classify(token: &str) -> Result<Token, String> {
     if let Ok(v) = parse_ppd(token) {
         return Ok((TokenKind::Ppd, TokenValue::Int(v)));
@@ -146,6 +171,12 @@ fn classify(token: &str) -> Result<Token, String> {
     }
     if let Ok(v) = parse_bands(token) {
         return Ok((TokenKind::Bands, TokenValue::Int(v)));
+    }
+    if let Ok(v) = parse_harmonics(token) {
+        return Ok((TokenKind::Harmonics, TokenValue::Int(v)));
+    }
+    if let Ok(v) = parse_window(token) {
+        return Ok((TokenKind::Window, TokenValue::Int(v)));
     }
     if let Ok(v) = parse_time(token) {
         return Ok((TokenKind::Time, TokenValue::Float(v)));
@@ -312,11 +343,22 @@ pub enum CommandKind {
         level: LevelSpec,
         duration: f64,
     },
-    SweepIr {
+    // `SweepIr` removed by #282 — `ac sweep ir` is now an alias parsed
+    // straight into `PlotIr` below (see `parse/sweep.rs`), not a second
+    // command variant to keep in sync.
+    /// `ac plot ir` — Farina log-sweep impulse response (#282; moved from
+    /// `ac sweep ir`, which is now a deprecated alias). Gate parameters
+    /// are `Option` — unset means "use the daemon's default", not "send a
+    /// hardcoded override" (the daemon already defaults them; see
+    /// `ZMQ.md`'s `plot_ir` request).
+    PlotIr {
         f1: f64,
         f2: f64,
         duration: f64,
         level: LevelSpec,
+        n_harmonics: Option<u32>,
+        window_len: Option<u32>,
+        tail_s: Option<f64>,
     },
     Plot {
         start: Option<f64>,
@@ -654,11 +696,12 @@ Commands:
   calibrate       [output <N>] [input <N>] [level] [show]             level calibration (default: -10dBFS)
   generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
   generate pink   [channels] [level]                                  pink noise
-  sweep level     <start> <stop> [freq] [duration]                    level sweep at fixed frequency
-  sweep frequency [freqStart freqStop] [level] [duration]             frequency sweep at fixed level
-  sweep ir        [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response
+  generate level  <start> <stop> [freq] [duration]                    level sweep at fixed frequency (output-only)
+  generate frequency [freqStart freqStop] [level] [duration]          frequency sweep at fixed level (output-only)
   plot            [freqStart freqStop] [level] [ppd] [<N>bpo] [show]  per-point THD vs freq (+ optional IEC 61260-1 bands)
   plot level      <start> <stop> [freq] [steps] [show]                per-point THD vs level
+  plot ir         [freqStart freqStop] [duration] [level]             Farina log-sweep impulse response + report
+                  [<N>harm] [<N>win] [<N>s tail]                      (gate params: harmonics, window, tail capture)
   monitor         [spectrum|cwt] [channels] [freqStart freqStop] [interval] [show]
                                                                       live spectrum (default FFT; cwt = Morlet)
   stop                                                                stop active generator/measurement
@@ -669,11 +712,16 @@ Commands:
   gpio            [log]                                               USB2GPIO status (log = stream frames)
   report          <path.json> [html|pdf]                              render MeasurementReport JSON (default html, sibling file)
 
+Deprecated aliases (still work, print a warning, no new spelling):
+  sweep level | sweep frequency   -> generate level | generate frequency
+  sweep ir                        -> plot ir
+
 Units:  20hz 1khz              frequency
         0dbu -12dbfs 775mv     level (also vrms, mvrms, vpp, mvpp; bare number = dBFS)
         1s                     duration
         10ppd 26steps          sweep density
         6bpo 3bands            fractional-octave bins-per-octave
+        5harm 4096win          plot ir gate params: n_harmonics, window_len
         show                   also open GPU view window (abbrev: sh)
 
 Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) pr(obe) te(st)
@@ -701,7 +749,8 @@ Examples:
   ac plot 20hz 20khz 0dbu 10ppd 6bpo show
   ac plot level -20dbu 6dbu 1khz 26steps show
   ac m cwt 0-3 show
-  ac s f 20hz 20khz 0dbu 2s";
+  ac g f 20hz 20khz 0dbu 2s
+  ac plot ir 20hz 20khz 1s -6dbu 5harm 4096win 0.8s";
 
 // ---------------------------------------------------------------------------
 // Display impl for LevelSpec
