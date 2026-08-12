@@ -514,6 +514,19 @@ pub fn citation() -> StandardsCitation {
     }
 }
 
+/// `deconvolve_full` recovers the IR via [`fft_linear_convolve`] — a
+/// *linear* deconvolution. ISO 18233 §B.5 documents the consequence: the
+/// tail past the peak is a decaying noise floor, increasingly low-pass
+/// filtered toward its end, and the standard requires callers state this
+/// "so as not to confuse the decreasing noise floor with the reverberant
+/// tail of the room". Any reader of the linear IR (printed summary or
+/// persisted [`crate::measurement::report::MeasurementReport::notes`])
+/// needs this stated, since nothing else in the report tells them.
+pub const LINEAR_DECONV_TAIL_NOTE: &str =
+    "The decaying tail after the peak is a linear-deconvolution artefact \
+     (fft_linear_convolve), increasingly low-pass filtered toward its end \
+     — not the measured system's reverberant decay. See ISO 18233 §B.5.";
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

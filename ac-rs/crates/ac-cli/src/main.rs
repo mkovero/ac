@@ -8,6 +8,29 @@ use std::process;
 
 use parse::CommandKind;
 
+/// Daemon port for `var`, defaulting to `default`. Mirrors `ac-daemon`'s
+/// own `--ctrl-port` / `--data-port` flags so a client and a daemon can be
+/// pointed at the same non-default pair — which is what lets an
+/// integration test drive the real `ac` binary against its own
+/// `--fake-audio` daemon instead of whatever happens to be listening on
+/// 5556 (#283).
+///
+/// An unparseable value is refused rather than silently falling back:
+/// a client that quietly used 5556 after being told otherwise would talk
+/// to the wrong daemon and report someone else's measurement.
+fn port_override(var: &str, default: u16) -> u16 {
+    match std::env::var(var) {
+        Err(_) => default,
+        Ok(v) => match v.parse::<u16>() {
+            Ok(p) if p > 0 => p,
+            _ => {
+                eprintln!("  error: {var}={v:?} is not a valid TCP port");
+                process::exit(1);
+            }
+        },
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -48,8 +71,8 @@ fn main() {
     }
 
     let host = cfg.server_host.as_deref().unwrap_or("localhost");
-    let ctrl_port = 5556u16;
-    let data_port = 5557u16;
+    let ctrl_port = port_override("AC_CTRL_PORT", 5556);
+    let data_port = port_override("AC_DATA_PORT", 5557);
     let mut client = match client::AcClient::new(host, ctrl_port, data_port) {
         Ok(c) => c,
         Err(e) => {

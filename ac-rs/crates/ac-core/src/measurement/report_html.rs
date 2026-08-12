@@ -660,6 +660,7 @@ mod tests {
             },
             calibration: None,
             position: None,
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse {
                     points: vec![

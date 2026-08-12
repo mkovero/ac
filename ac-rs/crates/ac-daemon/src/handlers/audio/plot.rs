@@ -10,16 +10,16 @@ use serde_json::{json, Value};
 
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
-    FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-    MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams,
-    SCHEMA_VERSION,
+    FrequencyResponsePoint, GateParams, IntegrationParams, InterfaceLatency, MeasuredLatency,
+    MeasurementData, MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot,
+    ProcessingChain, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep,
-    log_sweep, SweepParams,
+    log_sweep, SweepParams, LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
-use ac_core::shared::calibration::Calibration;
+use ac_core::shared::calibration::{Calibration, TauConditions};
 
 use crate::audio::make_engine;
 use crate::server::ServerState;
@@ -205,6 +205,9 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             },
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
+            // A stepped-sine sweep records no arrival, so there is
+            // nothing here for a τ to correct (#283).
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -470,6 +473,8 @@ fn emit_spectrum_bands(
         },
         calibration: snapshot_from_cal(cal),
         position,
+        // Band levels carry no arrival for a τ to correct (#283).
+        interface_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -504,6 +509,40 @@ fn emit_spectrum_bands(
         if let Err(e) = bands_report.write_to(&path) {
             eprintln!("plot: bands report write error ({}): {e}", path.display());
         }
+    }
+}
+
+/// Look up the τ (interface latency) matching `cond` exactly, and flatten
+/// the result into the archival form. Never measures, never falls back to
+/// a nearest entry: [`Calibration::tau_for`] refuses on any condition
+/// mismatch, and that refusal — with the differing fields named — is what
+/// gets recorded, so a reader can see why no distance was derived (#281,
+/// #283). A capture with no calibration at all is the same case as a
+/// calibration with no matching τ, and says so.
+fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLatency {
+    let Some(cal) = cal else {
+        return InterfaceLatency::Unavailable {
+            reason: format!(
+                "no calibration stored for this channel pair \u{2014} run `ac calibrate` with \
+                 loopback patched to measure \u{3c4} for device {} / {} backend",
+                cond.device, cond.backend
+            ),
+        };
+    };
+    match cal.tau_for(cond) {
+        Ok(e) => InterfaceLatency::Measured(MeasuredLatency {
+            tau_s: e.tau_s,
+            measured_at: e.measured_at.clone(),
+            method: e.method.clone(),
+            backend: e.conditions.backend.clone(),
+            sample_rate_hz: e.conditions.sample_rate,
+            period_size: e.conditions.period_size,
+            output_port: e.conditions.output_port.clone(),
+            input_port: e.conditions.input_port.clone(),
+        }),
+        Err(refusal) => InterfaceLatency::Unavailable {
+            reason: refusal.message(),
+        },
     }
 }
 
@@ -552,6 +591,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let in_ch = cfg.input_channel;
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
+    let device = cfg.device;
+    let tau_out_port = out_port.clone();
+    let tau_in_port = in_port.clone();
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -573,6 +615,25 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
         let sr = eng.sample_rate();
+
+        // τ (#281) resolved here, while the engine is live: `period_size()`
+        // and `backend_name()` are part of the exact-match key, and a τ
+        // measured under any other tuple is a different number. Looked up
+        // rather than measured — `plot_ir` must not silently re-run a
+        // calibration step. Both outcomes are recorded; "no τ" is the
+        // provenance that stops a distance being derived downstream (#283).
+        let interface_latency = Some(resolve_tau(
+            cal.as_ref(),
+            &TauConditions {
+                device,
+                backend: eng.backend_name().to_string(),
+                sample_rate: sr,
+                period_size: eng.period_size(),
+                output_port: tau_out_port,
+                input_port: tau_in_port,
+            },
+        ));
+
         let params = SweepParams {
             f1_hz,
             f2_hz,
@@ -693,12 +754,28 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             },
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
+            interface_latency,
             data: vec![MeasurementPayload {
                 data,
                 standard: vec![sweep_citation()],
-                gate: None,
+                // `extract_irs` gates a rectangular `window_len` window
+                // centred on the sweep endpoint — the zero-delay
+                // reference — so the gate opens half a window before it.
+                // Recorded rather than left implicit: #280's rule is that
+                // `f_low_hz` is stored, not recomputed by the reader.
+                gate: Some(GateParams {
+                    gate_start_s: -((window_len / 2) as f64) / sr as f64,
+                    gate_length_s: window_len as f64 / sr as f64,
+                    window_kind: "rectangular".into(),
+                    f_low_hz: sr as f64 / window_len as f64,
+                }),
             }],
-            notes: Some(decay_note),
+            // Two distinct statements, both required, neither implying
+            // the other: the ISO 18233 §6.3.2 verdict is *measured* from
+            // this capture's tail, while the §B.5 note is a *structural*
+            // consequence of deconvolving linearly and holds regardless
+            // of what the verdict came back as (#283).
+            notes: Some(format!("{decay_note}\n{LINEAR_DECONV_TAIL_NOTE}")),
             // plot_ir's IR isn't yet mic-curve-corrected (deferred from
             // #97 to a follow-up). The snapshot still captures the curve
             // provenance via `calibration.mic_response`; downstream
@@ -721,10 +798,23 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // configured — before #282 nothing wrote `sweep_ir`'s report to
         // disk, so `ac report` had no Farina input to render.
         if let Some(ref dir) = report_dir {
-            let filename = format!("{timestamp}-plot_ir.json").replace(':', "-");
-            let path = dir.join(filename);
+            let stem = format!("{timestamp}-plot_ir").replace(':', "-");
+            let path = dir.join(format!("{stem}.json"));
             if let Err(e) = report.write_to(&path) {
                 eprintln!("plot_ir: report write error ({}): {e}", path.display());
+            }
+            // CSV alongside the JSON, via the report's own IR branch —
+            // the same pair `plot`/`plot_level` leave behind, so a
+            // spreadsheet reader never has to go through `ac report`
+            // (#283).
+            let csv_path = dir.join(format!("{stem}.csv"));
+            match report.to_csv() {
+                Ok(csv) => {
+                    if let Err(e) = std::fs::write(&csv_path, csv) {
+                        eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
+                    }
+                }
+                Err(e) => eprintln!("plot_ir: CSV encode error: {e}"),
             }
         }
 

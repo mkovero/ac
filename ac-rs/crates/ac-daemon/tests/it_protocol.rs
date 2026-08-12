@@ -1482,7 +1482,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(4));
+                assert_eq!(v["report"]["schema_version"], json!(5));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -1496,6 +1496,84 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     }
     assert!(got_ir, "never saw measurement/impulse_response frame");
     assert!(got_report, "never saw measurement/report frame");
+}
+
+/// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
+/// the entry it must hit was written by `calibrate`. Nothing but a test
+/// couples those two condition tuples — they are built in different
+/// handlers, from different locals — so a drift in either (a port
+/// resolved differently, a device field read from elsewhere) would leave
+/// every `plot_ir` reporting "distance unavailable" forever, with no
+/// error anywhere. The failure is silent by construction, so it needs an
+/// explicit check that the round trip lands.
+#[test]
+fn plot_ir_resolves_the_tau_that_calibrate_stored() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // 1. Measure τ. Both voltage prompts skipped — τ is keyed on
+    //    loopback detection, not on either reply (see
+    //    `calibrate_cheap_refresh_still_measures_tau`).
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    let stored_tau = done["tau_s"].as_f64().expect("tau_s");
+
+    // 2. Run an IR capture under the same conditions.
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+
+    let latency = &v["report"]["interface_latency"];
+    assert_eq!(
+        latency["state"],
+        json!("measured"),
+        "plot_ir did not match calibrate's stored τ — the two TauConditions \
+         tuples have drifted apart: {latency}"
+    );
+    let used_tau = latency["tau_s"].as_f64().expect("tau_s in report");
+    assert!(
+        (used_tau - stored_tau).abs() < 1e-12,
+        "plot_ir used τ {used_tau}, calibrate stored {stored_tau}"
+    );
+    // The provenance the printed distance names must be present, not just
+    // the number.
+    assert!(latency["measured_at"].is_string(), "{latency}");
+    assert_eq!(latency["method"], json!("farina_short_ess"), "{latency}");
+
+    // With a τ this close to the arrival (both are the same 32-sample
+    // fake loopback), the derived path length must land near zero — the
+    // fake backend has no acoustic path. A τ that failed to subtract
+    // would read ~0.23 m instead.
+    let report: ac_core::measurement::report::MeasurementReport =
+        serde_json::from_value(v["report"].clone()).expect("decode report");
+    match report.ir_arrival_distance() {
+        ac_core::measurement::report::ArrivalDistance::Known { distance_m, .. } => assert!(
+            distance_m.abs() < 0.05,
+            "fake loopback has no acoustic path, got {distance_m} m"
+        ),
+        other => panic!("expected a known distance, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2295,7 +2373,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(4));
+                    assert_eq!(v["report"]["schema_version"], json!(5));
                     got_report = true;
                 }
             }
