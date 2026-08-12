@@ -1,1 +1,1 @@
-"permissions": {"deny": ["Agent(Explore)"]}
+{ "permissions": {"deny": ["Agent(Explore)"]} }

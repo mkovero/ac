@@ -30,6 +30,7 @@ section blocked           "blocked (lift condition is in the comment that applie
 section needs-discussion  "needs human input"
 section needs-design      "awaiting architect"
 section needs-work        "QA sent back"
+section ready-to-implement "ready to implement"
 
 prs=$(gh pr list -R "$R" --json number,title,isDraft \
       --jq '.[] | "- #\(.number) \(.title)\(if .isDraft then " (draft)" else "" end)"')
