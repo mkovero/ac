@@ -157,7 +157,7 @@ correctness.
 `snapshot` runs on the CTRL/REP thread; the ring lives inside
 `transfer_stream`'s worker closure. `ServerState` already has the exact
 shape needed for this (`dut_reply_tx: Arc<Mutex<Option<Sender<()>>>>`,
-`cal_reply_tx: Arc<Mutex<Option<Sender<Option<f64>>>>>` — both
+`cal_reply_tx: Arc<Mutex<Option<Sender<CalReply>>>>` — both
 "populated when a worker starts, read/cleared elsewhere" fields).
 
 **Decision:** add `snapshot_ring: Arc<Mutex<Option<Arc<SnapshotRing>>>>`

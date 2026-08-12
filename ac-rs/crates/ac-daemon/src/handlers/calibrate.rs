@@ -168,6 +168,16 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         );
         let in_reply = wait_cal_reply(&rx2, &stop, 120);
         *cal_reply_tx.lock().unwrap() = None;
+        // Symmetric with the step-1 check above: a cancel here must also
+        // abort the run rather than fall through to save. Before this fix
+        // a `q` at the second prompt still committed step 1's reading and
+        // `ref_dbfs`, while the CLI told the operator "Calibration
+        // cancelled." (#294 QA correctness issue 1).
+        if stop.load(Ordering::Relaxed) {
+            eng.set_silence();
+            eng.stop();
+            return;
+        }
 
         eng.set_silence();
         eng.stop();

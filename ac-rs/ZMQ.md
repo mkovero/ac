@@ -1303,10 +1303,16 @@ daemon converts to "Vrms at 0 dBFS peak" before saving:
 
 A prompt answered with a skip (`vrms: null`, no `clear`) leaves the
 stored value for that leg alone — re-checking one leg does not cost the
-other. Only an explicit `clear: true` erases. A cancelled or timed-out
-prompt is treated as a skip. `ref_dbfs` on the stored entry is rewritten
-only when at least one leg was actually measured, so it keeps describing
-the level the stored readings were taken at.
+other. Only an explicit `clear: true` erases. `ref_dbfs` on the stored
+entry is rewritten only when at least one leg was actually measured, so
+it keeps describing the level the stored readings were taken at.
+
+A timed-out prompt (120 s, no reply) resolves the same as a skip and the
+run continues — the other leg can still be answered and saved normally.
+A **cancelled** prompt (`{"cmd": "stop"}`, sent by the CLI's `q`) is not
+a skip: it aborts the whole run before anything is saved, at either
+step, so a cancel after step 1 was answered does not commit that
+reading either.
 
 **DATA — `cal_done`**:
 ```json

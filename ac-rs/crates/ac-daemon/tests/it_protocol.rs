@@ -1272,6 +1272,76 @@ fn calibrate_clear_erases_only_the_leg_it_names() {
     assert_eq!(after["ref_dbfs"], json!(-10.0));
 }
 
+/// #279 criterion 3: `absent` has two origins, not one. A skip on a leg
+/// that was never calibrated must report `absent`, not `unchanged` — the
+/// no-prior-value branch of `apply_cal_reading` is otherwise untested.
+/// Mutating that branch to `=> "unchanged"` passes every other calibrate
+/// test in this file and fails only this one.
+#[test]
+fn calibrate_skip_on_uncalibrated_leg_reports_absent() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    assert_eq!(done["out_state"], json!("absent"), "frame: {done}");
+    assert_eq!(done["in_state"], json!("absent"), "frame: {done}");
+    assert_eq!(done["vrms_at_0dbfs_out"], json!(null), "frame: {done}");
+    assert_eq!(done["vrms_at_0dbfs_in"], json!(null), "frame: {done}");
+}
+
+/// #294 QA correctness issue 1: a cancel (`{"cmd": "stop"}`, what the
+/// CLI's `q` sends) at the *second* prompt must not commit the first
+/// prompt's reading. Pre-fix, the worker had no stop check after step 2
+/// and fell through to `cal.save()` — the operator was told "Calibration
+/// cancelled." while `vrms_at_0dbfs_out` and `ref_dbfs` were overwritten
+/// anyway.
+#[test]
+fn calibrate_cancel_at_second_prompt_saves_nothing() {
+    let d = Daemon::spawn();
+    let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
+    let before = read_cal_entry(&cal_path);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": 2.095}));
+
+    c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    // No cal_done at all — the run aborted, it did not complete with an
+    // "unchanged"/"absent" verdict.
+    assert!(
+        c.wait_for_topic("cal_done", Duration::from_millis(500))
+            .is_none(),
+        "a cancelled run must not emit cal_done"
+    );
+
+    let after = read_cal_entry(&cal_path);
+    assert_eq!(
+        after, before,
+        "a cancel at the second prompt must leave the stored entry \
+         byte-identical, including the leg answered before the cancel"
+    );
+}
+
 #[test]
 fn sweep_ir_emits_impulse_response_with_expected_delay_peak() {
     // Fake backend implements `play_and_capture` as a delayed loopback

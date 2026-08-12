@@ -54,59 +54,36 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
 
             let dmm_vrms = data.get("dmm_vrms").and_then(|v| v.as_f64());
 
-            let reply = if let Some(dmm) = dmm_vrms {
+            let (prompt, try_hint) = if let Some(dmm) = dmm_vrms {
                 let hint = format!("{:.4} mVrms", dmm * 1000.0);
-                loop {
-                    print!(
+                (
+                    format!(
                         "  Enter to accept ({hint}), or override \
                          (skip to keep stored, clear to erase, q to cancel): "
-                    );
-                    io::stdout().flush().ok();
-                    let raw = read_line();
-                    let t = raw.trim();
-                    if t.eq_ignore_ascii_case("q") {
-                        println!("  Calibration cancelled.");
-                        client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
-                        return;
-                    }
-                    if t.is_empty() {
-                        break Reply::Value(dmm);
-                    }
-                    if t.eq_ignore_ascii_case("skip") {
-                        break Reply::Skip;
-                    }
-                    if t.eq_ignore_ascii_case("clear") {
-                        break Reply::Clear;
-                    }
-                    match parse_vrms(t) {
-                        Some(v) => break Reply::Value(v),
-                        None => println!("  Try:  0.245  or  245mV  (or skip / clear)"),
-                    }
-                }
+                    ),
+                    "  Try:  0.245  or  245mV  (or skip / clear)",
+                )
             } else {
-                loop {
-                    print!(
-                        "  DMM reading (e.g. 245mV or 0.245; Enter keeps the stored \
-                         value, clear erases it, q to cancel): "
-                    );
-                    io::stdout().flush().ok();
-                    let raw = read_line();
-                    let t = raw.trim();
-                    if t.eq_ignore_ascii_case("q") {
+                (
+                    "  DMM reading (e.g. 245mV or 0.245; Enter or skip keeps the stored \
+                     value, clear erases it, q to cancel): "
+                        .to_string(),
+                    "  Try:  0.245  or  245mV  (or clear)",
+                )
+            };
+
+            let reply = loop {
+                print!("{prompt}");
+                io::stdout().flush().ok();
+                let raw = read_line();
+                match classify_entry(&raw, dmm_vrms) {
+                    Entry::Cancel => {
                         println!("  Calibration cancelled.");
                         client.send_cmd(&serde_json::json!({"cmd": "stop"}), None);
                         return;
                     }
-                    if t.is_empty() || t.eq_ignore_ascii_case("skip") {
-                        break Reply::Skip;
-                    }
-                    if t.eq_ignore_ascii_case("clear") {
-                        break Reply::Clear;
-                    }
-                    match parse_vrms(t) {
-                        Some(v) => break Reply::Value(v),
-                        None => println!("  Try:  0.245  or  245mV  (or clear)"),
-                    }
+                    Entry::Reply(r) => break r,
+                    Entry::Unparsed => println!("{try_hint}"),
                 }
             };
 
@@ -135,6 +112,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
 /// What the user asked the daemon to do with one voltage leg. Kept
 /// distinct from `Option<f64>` so "I did not measure this" cannot be
 /// mistaken on the wire for "erase it" (#279).
+#[derive(Debug, PartialEq)]
 enum Reply {
     Value(f64),
     Skip,
@@ -147,6 +125,42 @@ impl Reply {
             Reply::Value(v) => serde_json::json!({"cmd": "cal_reply", "vrms": v}),
             Reply::Skip => serde_json::json!({"cmd": "cal_reply", "vrms": null}),
             Reply::Clear => serde_json::json!({"cmd": "cal_reply", "vrms": null, "clear": true}),
+        }
+    }
+}
+
+/// One line of operator input, resolved to an intent. Split out of the
+/// prompt loop so the keystroke -> intent mapping is testable without a
+/// terminal — getting that mapping wrong is exactly what #279 was: Enter
+/// meant "skip" to the user and `None` meant "erase" to the daemon.
+///
+/// `dmm` is the pre-filled reading the daemon offered, if any. It is the
+/// only thing that changes what an empty line means: accept the offered
+/// reading when there is one, keep the stored value when there is not.
+#[derive(Debug, PartialEq)]
+enum Entry {
+    Cancel,
+    Reply(Reply),
+    Unparsed,
+}
+
+fn classify_entry(input: &str, dmm: Option<f64>) -> Entry {
+    let t = input.trim();
+    if t.eq_ignore_ascii_case("q") {
+        Entry::Cancel
+    } else if t.is_empty() {
+        match dmm {
+            Some(v) => Entry::Reply(Reply::Value(v)),
+            None => Entry::Reply(Reply::Skip),
+        }
+    } else if t.eq_ignore_ascii_case("skip") {
+        Entry::Reply(Reply::Skip)
+    } else if t.eq_ignore_ascii_case("clear") {
+        Entry::Reply(Reply::Clear)
+    } else {
+        match parse_vrms(t) {
+            Some(v) => Entry::Reply(Reply::Value(v)),
+            None => Entry::Unparsed,
         }
     }
 }
@@ -381,4 +395,71 @@ fn parse_vrms(raw: &str) -> Option<f64> {
         return rest.parse::<f64>().ok();
     }
     s.parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #279: Enter with no DMM reading offered must resolve to `Skip`,
+    /// never to something that erases the stored value.
+    #[test]
+    fn enter_keeps_the_stored_value_when_no_reading_is_offered() {
+        assert_eq!(classify_entry("", None), Entry::Reply(Reply::Skip));
+        assert_eq!(classify_entry("   ", None), Entry::Reply(Reply::Skip));
+        assert_eq!(classify_entry("skip", None), Entry::Reply(Reply::Skip));
+        assert_eq!(classify_entry("SKIP", None), Entry::Reply(Reply::Skip));
+    }
+
+    #[test]
+    fn enter_accepts_the_offered_reading_but_skip_still_skips() {
+        assert_eq!(
+            classify_entry("", Some(0.245)),
+            Entry::Reply(Reply::Value(0.245))
+        );
+        assert_eq!(
+            classify_entry("skip", Some(0.245)),
+            Entry::Reply(Reply::Skip)
+        );
+    }
+
+    #[test]
+    fn only_the_clear_word_erases() {
+        assert_eq!(classify_entry("clear", None), Entry::Reply(Reply::Clear));
+        assert_eq!(
+            classify_entry("Clear", Some(0.245)),
+            Entry::Reply(Reply::Clear)
+        );
+    }
+
+    #[test]
+    fn q_cancels_from_either_branch() {
+        assert_eq!(classify_entry("q", None), Entry::Cancel);
+        assert_eq!(classify_entry("Q", Some(0.245)), Entry::Cancel);
+    }
+
+    #[test]
+    fn unparseable_input_reprompts_and_sends_nothing() {
+        assert_eq!(classify_entry("banana", None), Entry::Unparsed);
+        assert_eq!(classify_entry("banana", Some(0.245)), Entry::Unparsed);
+    }
+
+    /// The wire encoding is the other half of #279: a skip must not carry
+    /// `clear`, or the daemon reads "I did not measure this" as "erase it".
+    #[test]
+    fn skip_and_clear_encode_to_distinct_wire_frames() {
+        let skip = Reply::Skip.to_cmd();
+        assert_eq!(skip["vrms"], serde_json::Value::Null);
+        assert!(
+            skip.get("clear").is_none(),
+            "a skip must not carry `clear`: {skip}"
+        );
+
+        let clear = Reply::Clear.to_cmd();
+        assert_eq!(clear["clear"], serde_json::json!(true));
+
+        let value = Reply::Value(0.245).to_cmd();
+        assert_eq!(value["vrms"], serde_json::json!(0.245));
+        assert!(value.get("clear").is_none());
+    }
 }
