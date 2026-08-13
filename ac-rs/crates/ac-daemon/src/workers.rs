@@ -102,6 +102,40 @@ impl DriveState {
     }
 }
 
+/// Session-wide re-lock request for a running `transfer_stream` worker
+/// (#226). A monotone generation counter rather than a bool, so two
+/// requests arriving inside one worker tick cannot be swallowed into one
+/// and so the worker-side test is deterministic: the worker compares
+/// against the last generation it consumed, not against a flag a second
+/// press before the next poll would silently coalesce into the first.
+pub struct RelockRequest {
+    generation: AtomicU64,
+}
+
+impl RelockRequest {
+    pub fn new() -> RelockRequest {
+        RelockRequest {
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Ask for a re-lock. The worker's next poll sees a changed
+    /// generation even if a prior request was already consumed this tick.
+    pub fn request(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for RelockRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct WorkerHandle {
     pub stop_flag: Arc<AtomicBool>,
     pub thread: Option<JoinHandle<()>>,

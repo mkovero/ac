@@ -61,6 +61,12 @@ pub struct ServerState {
     /// `snapshot_ring`'s "only while a transfer session runs" rule.
     /// Populated at worker start, cleared at stop.
     pub drive_state: Arc<Mutex<Option<Arc<crate::workers::DriveState>>>>,
+    /// Session-wide re-lock request for the active `transfer_stream`
+    /// session (#226). `None` when no transfer session runs — the
+    /// `relock` handler's precondition is exactly this check, mirroring
+    /// `drive_state`'s lifecycle. Populated at worker start, cleared at
+    /// stop.
+    pub relock_state: Arc<Mutex<Option<Arc<crate::workers::RelockRequest>>>>,
     /// Spooled `.acsnap` files, keyed by `id` (= the file's own sha256 —
     /// content-addressed, so identical snapshots share one spool entry
     /// and no separate ID generator/dependency is needed). Cleared at
@@ -190,6 +196,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
         cal_reply_tx: Arc::new(Mutex::new(None)),
         snapshot_ring: Arc::new(Mutex::new(None)),
         drive_state: Arc::new(Mutex::new(None)),
+        relock_state: Arc::new(Mutex::new(None)),
         snapshot_spool: Arc::new(Mutex::new(HashMap::new())),
         playback_ports_cache: Arc::new(Mutex::new(None)),
         capture_ports_cache: Arc::new(Mutex::new(None)),
@@ -420,6 +427,7 @@ fn dispatch(
         "server_connections" => handlers::server_connections(state),
         "transfer_stream" => handlers::transfer_stream(state, &cmd),
         "set_drive" => handlers::set_drive(state, &cmd),
+        "relock" => handlers::relock(state, &cmd),
         "snapshot" => handlers::snapshot(state, &cmd),
         "snapshot_fetch" => handlers::snapshot_fetch(state, &cmd),
         "snapshot_list" => handlers::snapshot_list(state, &cmd),

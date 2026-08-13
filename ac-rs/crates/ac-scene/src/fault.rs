@@ -104,15 +104,14 @@
 //! (#247). What that threshold is coupled to — the estimator's admission
 //! constant, in another crate — is at [`PERSISTENT_REFUSAL_S`].
 //!
-//! **Only the second half fires today, and that is not a defect in the gate.**
-//! The daemon estimates a pair's delay once and caches it
-//! (`handlers/transfer.rs` — `pair_delays[i].is_some()` skips the retry), so
-//! `delay_locked` is monotone false-then-true for the life of a session and a
-//! settled pair never reports a refusal. [`Fault::LostLock`] and the `settled`
-//! half of this gate are therefore dormant until #226 makes the lock a
-//! maintained quantity; they are written and tested now so that landing #226
-//! does not also have to invent the display state for what it unblocks. What
-//! #238 fixes is the half that *is* reachable: a pair that never locks.
+//! **Both halves fire now.** #226 gives the lock a producer: a manual re-lock
+//! key and the drive off→on edge both flush a pair's held delay, so
+//! `delay_locked` can return to false after having been true, and
+//! [`Fault::LostLock`] and the `settled` half of this gate — dormant while
+//! the daemon only ever estimated a pair's delay once and cached it — are
+//! reachable today, not merely written ahead of their producer. #238's
+//! contribution stands unchanged: the half that needed no producer, a pair
+//! that never locks.
 //!
 //! # `CHECK ROUTING` remains a post-lock state, deliberately
 //!
@@ -289,12 +288,9 @@ pub enum Fault {
     /// Requires a lock to have existed. A pair that has never locked gets
     /// [`Fault::NoLockYet`] instead — see its docs.
     ///
-    /// **Unreachable against today's daemon**, which caches a pair's delay
-    /// after the first successful estimate and never re-runs it, so
-    /// `delay_locked` never returns to false. #226 makes the lock a
-    /// maintained quantity and this becomes live; until then it is behaviour
-    /// written and tested ahead of its producer, not a state the rig can
-    /// reach.
+    /// Reachable since #226: a manual re-lock or the drive's off→on edge
+    /// flushes a held delay lock, so `delay_locked` can return to false
+    /// after having been true.
     LostLock,
     /// The estimator has refused every attempt so far, and the session has
     /// never held a lock, for less than [`PERSISTENT_REFUSAL_S`].
@@ -627,9 +623,9 @@ impl FaultState {
         // ladder outlives the lock), and `estimator_attempted` is the only one
         // a pair that has never locked can satisfy (there is no ladder without
         // an offset). Requiring both is what made this unreachable — #238.
-        // Only the second gate fires against today's daemon: it caches a
-        // pair's delay, so no settled pair ever reports a refusal. The first
-        // is written for #226 — see the module docs.
+        // Both gates fire today: #226 gave the lock a producer, so a
+        // settled pair can lose its lock and report a refusal too — see
+        // the module docs.
         let asked = frame.settled || frame.estimator_attempted();
         let refusing = asked && frame.delay_locked == Some(false);
         if refusing {
@@ -1200,13 +1196,12 @@ mod tests {
     /// count cannot cover: a pair that locked, settled, and then lost the
     /// lock keeps its ladder, and its refusal must still paint.
     ///
-    /// The frame below is one **no daemon publishes today** — the delay is
-    /// cached after the first success, so `delay_locked` never returns to
-    /// false, and `delay_attempts: 0` after a lock would violate the monotone
-    /// contract besides. It is written against #226's producer, not
-    /// against the current one, and it is the only test that pins the
-    /// `settled` half of the gate. Read it as a specification, not as
-    /// evidence that the half is exercised.
+    /// `delay_attempts: 0` here is not what a live #226 daemon would send for
+    /// a pair that has already locked — attempts is monotone and a lock
+    /// implies at least one — so this frame isolates the `settled` half of
+    /// the gate from the `estimator_attempted` half rather than reproducing
+    /// a real wire frame. It is the only test that pins that half in
+    /// isolation.
     #[test]
     fn a_settled_pair_that_loses_its_lock_still_paints() {
         let coh = [0.755, 0.92];
@@ -1650,10 +1645,10 @@ mod tests {
         );
     }
 
-    /// #226 will add re-locking. If a re-lock ever resets `delay_attempts`,
-    /// a pair that locked and then started refusing reads as one that has
-    /// not been asked yet — and warmup paints nothing, which is the blank
-    /// window this issue removed.
+    /// #226 adds re-locking. If a re-lock ever reset `delay_attempts`, a
+    /// pair that locked and then started refusing would read as one that
+    /// has not been asked yet — and warmup paints nothing, which is the
+    /// blank window this issue removed.
     #[test]
     fn a_relocking_pair_never_falls_back_to_warmup() {
         let coh = [0.755, 0.92];

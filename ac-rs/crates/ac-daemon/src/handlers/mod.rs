@@ -51,7 +51,7 @@ pub use snapshot::{snapshot, snapshot_delete, snapshot_fetch, snapshot_list};
 pub use test_dut::{dut_reply, test_dut};
 pub use test_hw::test_hardware;
 pub use test_software::test_software;
-pub use transfer::{probe, set_drive, transfer_stream};
+pub use transfer::{probe, relock, set_drive, transfer_stream};
 
 // ---------------------------------------------------------------------------
 // Busy guard
