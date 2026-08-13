@@ -13,8 +13,9 @@ use std::fmt::Write as _;
 
 use crate::measurement::report::{
     CalibrationSnapshot, FrequencyResponsePoint, MeasurementData, MeasurementMethod,
-    MeasurementReport, ProcessingChain,
+    MeasurementPayload, MeasurementReport, ProcessingChain,
 };
+use crate::shared::conversions::speed_of_sound_at;
 
 const CSS: &str = r#"
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -51,8 +52,11 @@ pub fn render_html(report: &MeasurementReport) -> String {
     if let Some(cal) = &report.calibration {
         write_calibration(&mut out, cal);
     }
+    write_environment(&mut out, report);
     write_processing_chain(&mut out, &report.processing_chain);
-    write_data(&mut out, &report.data);
+    for payload in &report.data {
+        write_payload(&mut out, payload);
+    }
     if let Some(notes) = &report.notes {
         let _ = writeln!(out, "<h2>Notes</h2><pre>{}</pre>", html_escape(notes));
     }
@@ -78,46 +82,32 @@ fn write_header(out: &mut String, r: &MeasurementReport) {
     let _ = writeln!(out, "</dl>");
 }
 
+/// Method section — describes only the stimulus shape (what was
+/// played), never what a derived payload means. Citations moved to
+/// each payload's own section (#280) — a report-level "standard" line
+/// here could show at most one citation while the report can carry
+/// several, one per payload.
 fn write_method(out: &mut String, r: &MeasurementReport) {
     let _ = writeln!(out, "<h2>Method</h2>");
     let _ = writeln!(out, "<dl class=\"meta\">");
     match &r.method {
-        MeasurementMethod::SteppedSine { n_points, standard } => {
+        MeasurementMethod::SteppedSine { n_points } => {
             let _ = writeln!(
                 out,
                 "<dt>kind</dt><dd>stepped_sine ({} points)</dd>",
                 n_points
             );
-            if let Some(s) = standard {
-                let _ = writeln!(
-                    out,
-                    "<dt>standard</dt><dd>{} — {}{}</dd>",
-                    html_escape(&s.standard),
-                    html_escape(&s.clause),
-                    if s.verified { " ✓ verified" } else { "" }
-                );
-            }
         }
         MeasurementMethod::SweptSine {
             f1_hz,
             f2_hz,
             duration_s,
-            standard,
         } => {
             let _ = writeln!(
                 out,
                 "<dt>kind</dt><dd>swept_sine ({:.1} Hz → {:.1} Hz, {:.3} s)</dd>",
                 f1_hz, f2_hz, duration_s
             );
-            if let Some(s) = standard {
-                let _ = writeln!(
-                    out,
-                    "<dt>standard</dt><dd>{} — {}{}</dd>",
-                    html_escape(&s.standard),
-                    html_escape(&s.clause),
-                    if s.verified { " ✓ verified" } else { "" }
-                );
-            }
         }
     }
     let _ = writeln!(
@@ -202,6 +192,59 @@ fn write_calibration(out: &mut String, c: &CalibrationSnapshot) {
     let _ = writeln!(out, "</dl>");
 }
 
+/// Environment + geometry (#280): the knowable subset of ISO 3382-1
+/// §9.2 / 3382-2 §9.2 — temperature, relative humidity, source/receiver
+/// height, distance. Section is omitted entirely when `r.position` is
+/// `None` (nothing captured) rather than rendered empty. Speed of
+/// sound is derived from temperature at render time and shown so a
+/// reader can sanity-check a gate start against distance without a
+/// calculator; it is not stored in the report itself.
+fn write_environment(out: &mut String, r: &MeasurementReport) {
+    let Some(pos) = &r.position else {
+        return;
+    };
+    let _ = writeln!(out, "<h2>Environment &amp; Geometry</h2>");
+    let _ = writeln!(out, "<dl class=\"meta\">");
+    if let Some(t) = pos.temperature_c {
+        let _ = writeln!(out, "<dt>temperature</dt><dd>{:.1} °C</dd>", t);
+    }
+    if let Some(h) = pos.relative_humidity_pct {
+        let _ = writeln!(out, "<dt>relative humidity</dt><dd>{:.0} %</dd>", h);
+    }
+    if let Some(sh) = pos.source_height_m {
+        let _ = writeln!(out, "<dt>source position</dt><dd>height {:.2} m</dd>", sh);
+    }
+    match (pos.receiver_height_m, pos.distance_m) {
+        (Some(rh), Some(d)) => {
+            let _ = writeln!(
+                out,
+                "<dt>receiver position</dt><dd>height {:.2} m, distance {:.2} m from source</dd>",
+                rh, d
+            );
+        }
+        (Some(rh), None) => {
+            let _ = writeln!(out, "<dt>receiver position</dt><dd>height {:.2} m</dd>", rh);
+        }
+        (None, Some(d)) => {
+            let _ = writeln!(
+                out,
+                "<dt>receiver distance</dt><dd>{:.2} m from source</dd>",
+                d
+            );
+        }
+        (None, None) => {}
+    }
+    if let Some(t) = pos.temperature_c {
+        let c = speed_of_sound_at(t);
+        let _ = writeln!(
+            out,
+            "<dt>speed of sound</dt><dd>{:.1} m/s (c = 331.3 + 0.606·T)</dd>",
+            c
+        );
+    }
+    let _ = writeln!(out, "</dl>");
+}
+
 /// Render the active overlay / processing state captured with the
 /// report. When the chain is "all-off + uncorrected" (default for
 /// reports built from `ProcessingChain::default()` or legacy v1/v2
@@ -249,10 +292,55 @@ fn write_processing_chain(out: &mut String, chain: &ProcessingChain) {
     let _ = writeln!(out, "</dl>");
 }
 
-fn write_data(out: &mut String, d: &MeasurementData) {
+fn payload_title(d: &MeasurementData) -> &'static str {
+    match d {
+        MeasurementData::FrequencyResponse { .. } => "Frequency Response",
+        MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
+        MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
+        MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
+    }
+}
+
+/// Render one payload: heading, then its citation(s) and gate block
+/// (when present), then the data-specific body. A payload with no
+/// citation shows no `standard` line at all — omission reads as "not
+/// applicable," not an error state (#280).
+fn write_payload(out: &mut String, payload: &MeasurementPayload) {
+    let _ = writeln!(out, "<h2>{}</h2>", payload_title(&payload.data));
+    if !payload.standard.is_empty() || payload.gate.is_some() {
+        let _ = writeln!(out, "<dl class=\"meta\">");
+        for s in &payload.standard {
+            let _ = writeln!(
+                out,
+                "<dt>standard</dt><dd>{} — {}{}</dd>",
+                html_escape(&s.standard),
+                html_escape(&s.clause),
+                if s.verified { " ✓ verified" } else { "" }
+            );
+        }
+        if let Some(g) = &payload.gate {
+            let _ = writeln!(
+                out,
+                "<dt>gate</dt><dd>{:.1} ms → {:.1} ms ({:.1} ms window, {})</dd>",
+                g.gate_start_s * 1000.0,
+                (g.gate_start_s + g.gate_length_s) * 1000.0,
+                g.gate_length_s * 1000.0,
+                html_escape(&g.window_kind),
+            );
+            let _ = writeln!(
+                out,
+                "<dt>f_low</dt><dd>{:.1} Hz (= 1 / gate length)</dd>",
+                g.f_low_hz
+            );
+        }
+        let _ = writeln!(out, "</dl>");
+    }
+    write_payload_body(out, &payload.data);
+}
+
+fn write_payload_body(out: &mut String, d: &MeasurementData) {
     match d {
         MeasurementData::FrequencyResponse { points } => {
-            let _ = writeln!(out, "<h2>Frequency Response</h2>");
             out.push_str(&render_frequency_response_svg(points));
             write_frequency_response_table(out, points);
         }
@@ -262,7 +350,6 @@ fn write_data(out: &mut String, d: &MeasurementData) {
             centres_hz,
             levels_dbfs,
         } => {
-            let _ = writeln!(out, "<h2>Spectrum Bands</h2>");
             let _ = writeln!(
                 out,
                 "<p class=\"note\">{} — 1/{} octave bands</p>",
@@ -290,7 +377,6 @@ fn write_data(out: &mut String, d: &MeasurementData) {
             linear_ir,
             harmonics,
         } => {
-            let _ = writeln!(out, "<h2>Impulse Response (Farina log sweep)</h2>");
             let _ = writeln!(out, "<dl class=\"meta\">");
             let _ = writeln!(
                 out,
@@ -321,7 +407,6 @@ fn write_data(out: &mut String, d: &MeasurementData) {
             a_weighted_dbfs,
             ccir_weighted_dbfs,
         } => {
-            let _ = writeln!(out, "<h2>Idle-channel Noise (AES17)</h2>");
             let _ = writeln!(out, "<dl class=\"meta\">");
             let _ = writeln!(
                 out,
@@ -547,8 +632,9 @@ fn html_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::measurement::report::{
-        FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-        MeasurementReport, StandardsCitation, StimulusParams, SCHEMA_VERSION,
+        FrequencyResponsePoint, GateParams, IntegrationParams, MeasurementData, MeasurementMethod,
+        MeasurementPayload, MeasurementReport, PositionSnapshot, StandardsCitation, StimulusParams,
+        SCHEMA_VERSION,
     };
 
     fn sample_fr_report() -> MeasurementReport {
@@ -556,14 +642,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             ac_version: "0.1.0".into(),
             timestamp_utc: "2026-04-22T12:00:00Z".into(),
-            method: MeasurementMethod::SteppedSine {
-                n_points: 3,
-                standard: Some(StandardsCitation {
-                    standard: "IEC 60268-3:2018".into(),
-                    clause: "§15.12.3".into(),
-                    verified: false,
-                }),
-            },
+            method: MeasurementMethod::SteppedSine { n_points: 3 },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
                 f_start_hz: 100.0,
@@ -576,40 +655,49 @@ mod tests {
                 window: "hann".into(),
             },
             calibration: None,
-            data: MeasurementData::FrequencyResponse {
-                points: vec![
-                    FrequencyResponsePoint {
-                        freq_hz: 100.0,
-                        fundamental_dbfs: -20.5,
-                        thd_pct: 0.005,
-                        thdn_pct: 0.012,
-                        noise_floor_dbfs: -120.0,
-                        linear_rms: 0.0707,
-                        clipping: false,
-                        ac_coupled: false,
-                    },
-                    FrequencyResponsePoint {
-                        freq_hz: 1_000.0,
-                        fundamental_dbfs: -20.0,
-                        thd_pct: 0.003,
-                        thdn_pct: 0.009,
-                        noise_floor_dbfs: -121.3,
-                        linear_rms: 0.0707,
-                        clipping: false,
-                        ac_coupled: false,
-                    },
-                    FrequencyResponsePoint {
-                        freq_hz: 10_000.0,
-                        fundamental_dbfs: -21.2,
-                        thd_pct: 0.008,
-                        thdn_pct: 0.015,
-                        noise_floor_dbfs: -119.5,
-                        linear_rms: 0.0706,
-                        clipping: true,
-                        ac_coupled: false,
-                    },
-                ],
-            },
+            position: None,
+            data: vec![MeasurementPayload {
+                data: MeasurementData::FrequencyResponse {
+                    points: vec![
+                        FrequencyResponsePoint {
+                            freq_hz: 100.0,
+                            fundamental_dbfs: -20.5,
+                            thd_pct: 0.005,
+                            thdn_pct: 0.012,
+                            noise_floor_dbfs: -120.0,
+                            linear_rms: 0.0707,
+                            clipping: false,
+                            ac_coupled: false,
+                        },
+                        FrequencyResponsePoint {
+                            freq_hz: 1_000.0,
+                            fundamental_dbfs: -20.0,
+                            thd_pct: 0.003,
+                            thdn_pct: 0.009,
+                            noise_floor_dbfs: -121.3,
+                            linear_rms: 0.0707,
+                            clipping: false,
+                            ac_coupled: false,
+                        },
+                        FrequencyResponsePoint {
+                            freq_hz: 10_000.0,
+                            fundamental_dbfs: -21.2,
+                            thd_pct: 0.008,
+                            thdn_pct: 0.015,
+                            noise_floor_dbfs: -119.5,
+                            linear_rms: 0.0706,
+                            clipping: true,
+                            ac_coupled: false,
+                        },
+                    ],
+                },
+                standard: vec![StandardsCitation {
+                    standard: "IEC 60268-3:2018".into(),
+                    clause: "§15.12.3".into(),
+                    verified: false,
+                }],
+                gate: None,
+            }],
             notes: Some("bench run 2026-04-22".into()),
             processing_chain: crate::measurement::report::ProcessingChain::default(),
         }
@@ -625,10 +713,20 @@ mod tests {
     }
 
     #[test]
-    fn includes_method_and_standard() {
+    fn includes_method_and_payload_standard() {
         let html = render_html(&sample_fr_report());
         assert!(html.contains("stepped_sine"));
         assert!(html.contains("IEC 60268-3:2018"));
+    }
+
+    #[test]
+    fn method_section_no_longer_carries_standard_line() {
+        // #280: citation belongs to the payload, not the stimulus
+        // method — the Method section itself must not render a
+        // "standard" row.
+        let mut out = String::new();
+        write_method(&mut out, &sample_fr_report());
+        assert!(!out.contains("<dt>standard</dt>"), "{out}");
     }
 
     #[test]
@@ -661,16 +759,97 @@ mod tests {
     #[test]
     fn spectrum_bands_renders_table() {
         let mut r = sample_fr_report();
-        r.data = MeasurementData::SpectrumBands {
-            bpo: 3,
-            class: "Class 1".into(),
-            centres_hz: vec![100.0, 125.0, 160.0],
-            levels_dbfs: vec![-30.0, -25.0, -28.0],
-        };
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0, 125.0, 160.0],
+                levels_dbfs: vec![-30.0, -25.0, -28.0],
+            },
+            standard: vec![],
+            gate: None,
+        }];
         let html = render_html(&r);
         assert!(html.contains("Spectrum Bands"));
         assert!(html.contains("Class 1"));
         assert!(html.contains("125.00"));
+    }
+
+    #[test]
+    fn payload_without_standard_omits_standard_line() {
+        let mut r = sample_fr_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0],
+                levels_dbfs: vec![-30.0],
+            },
+            standard: vec![],
+            gate: None,
+        }];
+        let html = render_html(&r);
+        assert!(!html.contains("<dt>standard</dt>"), "{html}");
+    }
+
+    #[test]
+    fn payload_with_multiple_standards_renders_each() {
+        let mut r = sample_fr_report();
+        r.data[0].standard = vec![
+            StandardsCitation {
+                standard: "ISO 18233:2006".into(),
+                clause: "§9(c)".into(),
+                verified: false,
+            },
+            StandardsCitation {
+                standard: "ISO 3382-2:2008".into(),
+                clause: "§9.2".into(),
+                verified: false,
+            },
+        ];
+        let html = render_html(&r);
+        assert!(html.contains("ISO 18233:2006"));
+        assert!(html.contains("ISO 3382-2:2008"));
+        assert_eq!(html.matches("<dt>standard</dt>").count(), 2);
+    }
+
+    #[test]
+    fn payload_with_gate_renders_gate_block_and_stored_f_low() {
+        let mut r = sample_fr_report();
+        r.data[0].gate = Some(GateParams {
+            gate_start_s: 0.0029,
+            gate_length_s: 0.020,
+            window_kind: "tukey0.25".into(),
+            f_low_hz: 50.0,
+        });
+        let html = render_html(&r);
+        assert!(html.contains("<dt>gate</dt>"), "{html}");
+        assert!(html.contains("tukey0.25"));
+        assert!(html.contains("50.0 Hz (= 1 / gate length)"), "{html}");
+    }
+
+    #[test]
+    fn environment_section_omitted_when_position_absent() {
+        let html = render_html(&sample_fr_report());
+        assert!(!html.contains("Environment &amp; Geometry"));
+    }
+
+    #[test]
+    fn environment_section_renders_temperature_geometry_and_speed_of_sound() {
+        let mut r = sample_fr_report();
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(21.3),
+            relative_humidity_pct: Some(45.0),
+            source_height_m: Some(1.2),
+            receiver_height_m: Some(1.1),
+            distance_m: Some(1.0),
+        });
+        let html = render_html(&r);
+        assert!(html.contains("Environment &amp; Geometry"));
+        assert!(html.contains("21.3 °C"));
+        assert!(html.contains("45 %"));
+        assert!(html.contains("height 1.10 m, distance 1.00 m from source"));
+        assert!(html.contains("speed of sound"));
     }
 
     #[test]
@@ -783,13 +962,17 @@ mod tests {
     #[test]
     fn noise_result_renders_numbers() {
         let mut r = sample_fr_report();
-        r.data = MeasurementData::NoiseResult {
-            sample_rate_hz: 48_000,
-            duration_s: 0.9,
-            unweighted_dbfs: -98.4,
-            a_weighted_dbfs: -103.1,
-            ccir_weighted_dbfs: None,
-        };
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::NoiseResult {
+                sample_rate_hz: 48_000,
+                duration_s: 0.9,
+                unweighted_dbfs: -98.4,
+                a_weighted_dbfs: -103.1,
+                ccir_weighted_dbfs: None,
+            },
+            standard: vec![],
+            gate: None,
+        }];
         let html = render_html(&r);
         assert!(html.contains("Idle-channel Noise"));
         assert!(html.contains("-98.40 dBFS"));

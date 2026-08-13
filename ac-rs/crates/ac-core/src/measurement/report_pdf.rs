@@ -15,8 +15,10 @@ use printpdf::{
 };
 
 use crate::measurement::report::{
-    FrequencyResponsePoint, MeasurementData, MeasurementMethod, MeasurementReport,
+    FrequencyResponsePoint, MeasurementData, MeasurementMethod, MeasurementPayload,
+    MeasurementReport,
 };
+use crate::shared::conversions::speed_of_sound_at;
 
 // Page geometry — A4 portrait.
 const PAGE_W_MM: f32 = 210.0;
@@ -56,72 +58,14 @@ pub fn render_pdf(report: &MeasurementReport) -> Result<Vec<u8>> {
 
     y = draw_title(&current, &font_bold, y, "ac MeasurementReport");
     y = draw_header(&current, &font, &font_mono, y, report);
-    y = draw_method(&current, &font_bold, &font, &font_mono, y, report);
+    y = draw_method(&current, &font_bold, &font_mono, y, report);
     y = draw_stimulus(&current, &font_bold, &font_mono, y, report);
     y = draw_calibration(&current, &font_bold, &font_mono, y, report);
+    y = draw_environment(&current, &font_bold, &font_mono, y, report);
     y = draw_processing_chain(&current, &font_bold, &font_mono, y, report);
 
-    match &report.data {
-        MeasurementData::FrequencyResponse { points } => {
-            y = draw_freq_response(&current, &font_bold, &font_mono, y, points);
-        }
-        MeasurementData::SpectrumBands {
-            bpo,
-            class,
-            centres_hz,
-            levels_dbfs,
-        } => {
-            y = draw_spectrum_bands(
-                &current,
-                &font_bold,
-                &font_mono,
-                y,
-                *bpo,
-                class,
-                centres_hz,
-                levels_dbfs,
-            );
-        }
-        MeasurementData::ImpulseResponse {
-            sample_rate_hz,
-            f1_hz,
-            f2_hz,
-            duration_s,
-            linear_ir,
-            harmonics,
-        } => {
-            y = draw_impulse_response(
-                &current,
-                &font_bold,
-                &font_mono,
-                y,
-                *sample_rate_hz,
-                *f1_hz,
-                *f2_hz,
-                *duration_s,
-                linear_ir.len(),
-                harmonics.len(),
-            );
-        }
-        MeasurementData::NoiseResult {
-            sample_rate_hz,
-            duration_s,
-            unweighted_dbfs,
-            a_weighted_dbfs,
-            ccir_weighted_dbfs,
-        } => {
-            y = draw_noise_result(
-                &current,
-                &font_bold,
-                &font_mono,
-                y,
-                *sample_rate_hz,
-                *duration_s,
-                *unweighted_dbfs,
-                *a_weighted_dbfs,
-                *ccir_weighted_dbfs,
-            );
-        }
+    for payload in &report.data {
+        y = draw_payload(&current, &font_bold, &font_mono, y, payload);
     }
 
     if let Some(notes) = &report.notes {
@@ -166,75 +110,46 @@ fn draw_header(
     y - 2.0
 }
 
+/// Method section — describes only the stimulus shape (what was
+/// played), never what a derived payload means. Citation moved to
+/// each payload's own block (#280); see `draw_payload`.
 fn draw_method(
     layer: &PdfLayerReference,
     font_bold: &IndirectFontRef,
-    font: &IndirectFontRef,
     font_mono: &IndirectFontRef,
     y: f32,
     r: &MeasurementReport,
 ) -> f32 {
     let mut y = section_heading(layer, font_bold, y, "Method");
     match &r.method {
-        MeasurementMethod::SteppedSine { n_points, standard } => {
+        MeasurementMethod::SteppedSine { n_points } => {
             y = kv_row(
                 layer,
-                font,
+                font_bold,
                 font_mono,
                 y,
                 "kind",
                 &format!("stepped_sine ({n_points} points)"),
             );
-            if let Some(s) = standard {
-                y = kv_row(
-                    layer,
-                    font,
-                    font_mono,
-                    y,
-                    "standard",
-                    &format!(
-                        "{} — {}{}",
-                        s.standard,
-                        s.clause,
-                        if s.verified { " ✓ verified" } else { "" }
-                    ),
-                );
-            }
         }
         MeasurementMethod::SweptSine {
             f1_hz,
             f2_hz,
             duration_s,
-            standard,
         } => {
             y = kv_row(
                 layer,
-                font,
+                font_bold,
                 font_mono,
                 y,
                 "kind",
                 &format!("swept_sine ({f1_hz:.1}→{f2_hz:.1} Hz, {duration_s:.3} s)"),
             );
-            if let Some(s) = standard {
-                y = kv_row(
-                    layer,
-                    font,
-                    font_mono,
-                    y,
-                    "standard",
-                    &format!(
-                        "{} — {}{}",
-                        s.standard,
-                        s.clause,
-                        if s.verified { " ✓ verified" } else { "" }
-                    ),
-                );
-            }
         }
     }
     y = kv_row(
         layer,
-        font,
+        font_bold,
         font_mono,
         y,
         "integration",
@@ -347,6 +262,96 @@ fn draw_calibration(
     y - 2.0
 }
 
+/// Environment + geometry (#280) — mirrors the HTML `write_environment`
+/// block. Section is omitted entirely when `r.position` is `None`.
+fn draw_environment(
+    layer: &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_mono: &IndirectFontRef,
+    y: f32,
+    r: &MeasurementReport,
+) -> f32 {
+    let Some(pos) = r.position.as_ref() else {
+        return y;
+    };
+    let mut y = section_heading(layer, font_bold, y, "Environment & Geometry");
+    if let Some(t) = pos.temperature_c {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "temperature",
+            &format!("{t:.1} \u{b0}C"),
+        );
+    }
+    if let Some(h) = pos.relative_humidity_pct {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "relative humidity",
+            &format!("{h:.0} %"),
+        );
+    }
+    if let Some(sh) = pos.source_height_m {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "source position",
+            &format!("height {sh:.2} m"),
+        );
+    }
+    match (pos.receiver_height_m, pos.distance_m) {
+        (Some(rh), Some(d)) => {
+            y = kv_row(
+                layer,
+                font_bold,
+                font_mono,
+                y,
+                "receiver position",
+                &format!("height {rh:.2} m, distance {d:.2} m from source"),
+            );
+        }
+        (Some(rh), None) => {
+            y = kv_row(
+                layer,
+                font_bold,
+                font_mono,
+                y,
+                "receiver position",
+                &format!("height {rh:.2} m"),
+            );
+        }
+        (None, Some(d)) => {
+            y = kv_row(
+                layer,
+                font_bold,
+                font_mono,
+                y,
+                "receiver distance",
+                &format!("{d:.2} m from source"),
+            );
+        }
+        (None, None) => {}
+    }
+    if let Some(t) = pos.temperature_c {
+        let c = speed_of_sound_at(t);
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "speed of sound",
+            &format!("{c:.1} m/s (c = 331.3 + 0.606\u{b7}T)"),
+        );
+    }
+    y - 2.0
+}
+
 /// Active overlay / processing chain block (#105). Mirrors the HTML
 /// `write_processing_chain` block: collapsed to "raw" when nothing is
 /// active, full key/value table otherwise.
@@ -402,14 +407,130 @@ fn draw_processing_chain(
     y - 2.0
 }
 
-fn draw_freq_response(
+fn payload_title(d: &MeasurementData) -> &'static str {
+    match d {
+        MeasurementData::FrequencyResponse { .. } => "Frequency Response",
+        MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
+        MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
+        MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
+    }
+}
+
+/// Draw one payload: heading, its citation(s) and gate block (when
+/// present), then the data-specific body.
+fn draw_payload(
+    layer: &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_mono: &IndirectFontRef,
+    y: f32,
+    payload: &MeasurementPayload,
+) -> f32 {
+    let mut y = section_heading(layer, font_bold, y, payload_title(&payload.data));
+    for s in &payload.standard {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "standard",
+            &format!(
+                "{} — {}{}",
+                s.standard,
+                s.clause,
+                if s.verified { " ✓ verified" } else { "" }
+            ),
+        );
+    }
+    if let Some(g) = &payload.gate {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "gate",
+            &format!(
+                "{:.1}\u{2192}{:.1} ms ({:.1} ms window, {})",
+                g.gate_start_s * 1000.0,
+                (g.gate_start_s + g.gate_length_s) * 1000.0,
+                g.gate_length_s * 1000.0,
+                g.window_kind,
+            ),
+        );
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "f_low",
+            &format!("{:.1} Hz (=1/gate length)", g.f_low_hz),
+        );
+    }
+    match &payload.data {
+        MeasurementData::FrequencyResponse { points } => {
+            draw_freq_response_body(layer, font_bold, font_mono, y, points)
+        }
+        MeasurementData::SpectrumBands {
+            bpo,
+            class,
+            centres_hz,
+            levels_dbfs,
+        } => draw_spectrum_bands_body(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            *bpo,
+            class,
+            centres_hz,
+            levels_dbfs,
+        ),
+        MeasurementData::ImpulseResponse {
+            sample_rate_hz,
+            f1_hz,
+            f2_hz,
+            duration_s,
+            linear_ir,
+            harmonics,
+        } => draw_impulse_response_body(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            *sample_rate_hz,
+            *f1_hz,
+            *f2_hz,
+            *duration_s,
+            linear_ir.len(),
+            harmonics.len(),
+        ),
+        MeasurementData::NoiseResult {
+            sample_rate_hz,
+            duration_s,
+            unweighted_dbfs,
+            a_weighted_dbfs,
+            ccir_weighted_dbfs,
+        } => draw_noise_result_body(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            *sample_rate_hz,
+            *duration_s,
+            *unweighted_dbfs,
+            *a_weighted_dbfs,
+            *ccir_weighted_dbfs,
+        ),
+    }
+}
+
+fn draw_freq_response_body(
     layer: &PdfLayerReference,
     font_bold: &IndirectFontRef,
     font_mono: &IndirectFontRef,
     y: f32,
     points: &[FrequencyResponsePoint],
 ) -> f32 {
-    let mut y = section_heading(layer, font_bold, y, "Frequency Response");
+    let mut y = y;
     if points.is_empty() {
         layer.use_text(
             "(no points)",
@@ -517,7 +638,7 @@ fn draw_freq_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_spectrum_bands(
+fn draw_spectrum_bands_body(
     layer: &PdfLayerReference,
     font_bold: &IndirectFontRef,
     font_mono: &IndirectFontRef,
@@ -527,8 +648,7 @@ fn draw_spectrum_bands(
     centres: &[f64],
     levels: &[f64],
 ) -> f32 {
-    let mut y = section_heading(layer, font_bold, y, "Spectrum Bands");
-    y = kv_row(layer, font_bold, font_mono, y, "bpo", &bpo.to_string());
+    let mut y = kv_row(layer, font_bold, font_mono, y, "bpo", &bpo.to_string());
     y = kv_row(layer, font_bold, font_mono, y, "class", class);
     y -= 2.0;
     let widths = [30.0, 30.0];
@@ -543,7 +663,7 @@ fn draw_spectrum_bands(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_impulse_response(
+fn draw_impulse_response_body(
     layer: &PdfLayerReference,
     font_bold: &IndirectFontRef,
     font_mono: &IndirectFontRef,
@@ -555,7 +675,7 @@ fn draw_impulse_response(
     linear_len: usize,
     n_harmonics: usize,
 ) -> f32 {
-    let mut y = section_heading(layer, font_bold, y, "Impulse Response (Farina log sweep)");
+    let mut y = y;
     for (label, value) in [
         ("sample rate", format!("{sr_hz} Hz")),
         ("f1", format!("{f1_hz:.2} Hz")),
@@ -570,7 +690,7 @@ fn draw_impulse_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_noise_result(
+fn draw_noise_result_body(
     layer: &PdfLayerReference,
     font_bold: &IndirectFontRef,
     font_mono: &IndirectFontRef,
@@ -581,7 +701,7 @@ fn draw_noise_result(
     a_weighted_dbfs: f64,
     ccir_weighted_dbfs: Option<f64>,
 ) -> f32 {
-    let mut y = section_heading(layer, font_bold, y, "Idle-channel Noise (AES17)");
+    let mut y = y;
     let mut rows: Vec<(&str, String)> = vec![
         ("sample rate", format!("{sr_hz} Hz")),
         ("duration", format!("{duration_s:.3} s")),
@@ -864,8 +984,8 @@ fn fmt_f(v: f64, decimals: usize) -> String {
 mod tests {
     use super::*;
     use crate::measurement::report::{
-        FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-        MeasurementReport, StimulusParams, SCHEMA_VERSION,
+        FrequencyResponsePoint, GateParams, IntegrationParams, MeasurementData, MeasurementMethod,
+        MeasurementPayload, MeasurementReport, PositionSnapshot, StimulusParams, SCHEMA_VERSION,
     };
 
     fn sample_report() -> MeasurementReport {
@@ -873,10 +993,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             ac_version: "0.2.0".into(),
             timestamp_utc: "2026-04-23T10:00:00Z".into(),
-            method: MeasurementMethod::SteppedSine {
-                n_points: 3,
-                standard: None,
-            },
+            method: MeasurementMethod::SteppedSine { n_points: 3 },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,
                 f_start_hz: 100.0,
@@ -889,20 +1006,25 @@ mod tests {
                 window: "hann".into(),
             },
             calibration: None,
-            data: MeasurementData::FrequencyResponse {
-                points: (0..3)
-                    .map(|i| FrequencyResponsePoint {
-                        freq_hz: 100.0 * 10f64.powi(i),
-                        fundamental_dbfs: -20.0 - i as f64 * 0.1,
-                        thd_pct: 0.001 * (i + 1) as f64,
-                        thdn_pct: 0.002 * (i + 1) as f64,
-                        noise_floor_dbfs: -120.0,
-                        linear_rms: 0.0707,
-                        clipping: false,
-                        ac_coupled: false,
-                    })
-                    .collect(),
-            },
+            position: None,
+            data: vec![MeasurementPayload {
+                data: MeasurementData::FrequencyResponse {
+                    points: (0..3)
+                        .map(|i| FrequencyResponsePoint {
+                            freq_hz: 100.0 * 10f64.powi(i),
+                            fundamental_dbfs: -20.0 - i as f64 * 0.1,
+                            thd_pct: 0.001 * (i + 1) as f64,
+                            thdn_pct: 0.002 * (i + 1) as f64,
+                            noise_floor_dbfs: -120.0,
+                            linear_rms: 0.0707,
+                            clipping: false,
+                            ac_coupled: false,
+                        })
+                        .collect(),
+                },
+                standard: vec![],
+                gate: None,
+            }],
             notes: Some("unit test".into()),
             processing_chain: crate::measurement::report::ProcessingChain::default(),
         }
@@ -923,28 +1045,69 @@ mod tests {
     #[test]
     fn render_pdf_handles_all_data_variants() {
         let mut r = sample_report();
-        r.data = MeasurementData::SpectrumBands {
-            bpo: 3,
-            class: "Class 1".into(),
-            centres_hz: vec![100.0, 125.0, 160.0],
-            levels_dbfs: vec![-40.0, -35.0, -38.0],
-        };
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0, 125.0, 160.0],
+                levels_dbfs: vec![-40.0, -35.0, -38.0],
+            },
+            standard: vec![],
+            gate: None,
+        }];
         assert!(render_pdf(&r).is_ok());
 
-        r.data = MeasurementData::NoiseResult {
-            sample_rate_hz: 48_000,
-            duration_s: 1.0,
-            unweighted_dbfs: -98.0,
-            a_weighted_dbfs: -103.0,
-            ccir_weighted_dbfs: Some(-95.0),
-        };
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::NoiseResult {
+                sample_rate_hz: 48_000,
+                duration_s: 1.0,
+                unweighted_dbfs: -98.0,
+                a_weighted_dbfs: -103.0,
+                ccir_weighted_dbfs: Some(-95.0),
+            },
+            standard: vec![],
+            gate: None,
+        }];
         assert!(render_pdf(&r).is_ok());
     }
 
     #[test]
     fn render_pdf_empty_points_does_not_crash() {
         let mut r = sample_report();
-        r.data = MeasurementData::FrequencyResponse { points: vec![] };
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::FrequencyResponse { points: vec![] },
+            standard: vec![],
+            gate: None,
+        }];
         assert!(render_pdf(&r).is_ok());
+    }
+
+    #[test]
+    fn render_pdf_handles_multi_payload_and_gate_and_position() {
+        let mut r = sample_report();
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(21.3),
+            relative_humidity_pct: Some(45.0),
+            source_height_m: Some(1.2),
+            receiver_height_m: Some(1.1),
+            distance_m: Some(1.0),
+        });
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0],
+                levels_dbfs: vec![-30.0],
+            },
+            standard: vec![],
+            gate: Some(GateParams {
+                gate_start_s: 0.0029,
+                gate_length_s: 0.020,
+                window_kind: "tukey0.25".into(),
+                f_low_hz: 50.0,
+            }),
+        });
+        let pdf = render_pdf(&r).expect("render");
+        assert!(pdf.starts_with(b"%PDF-"));
     }
 }
