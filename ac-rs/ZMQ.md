@@ -2161,6 +2161,52 @@ UI-driven session goes through `set_drive`, so the UI is always covered.
 **Sessions always launch with drive off** unless the legacy launch-time
 `drive` param says otherwise. `ac transfer` never sets it.
 
+An `on: false → true` transition discards a per-pair delay lock **that
+was acquired while the drive was off**, flushing that pair's averages and
+re-settling (2.56 s at the bottom stage). A lock acquired while driving is
+kept, so the dead-man expiring and the client resuming does not disturb a
+running measurement. `on: true → false`, a level change, and a repeated
+`on: true` keepalive never discard a lock. `delay_attempts` counts the
+re-estimate and never resets. See `relock`, below, for the manual half of
+this (#226).
+
+---
+
+### `relock`
+
+Discards every pair's held delay lock in the **running** `transfer_stream`
+session (#226), so each pair's next tick retries acquisition from
+scratch. A held lock is a maintained quantity, not a cached one: this is
+the operator half of what invalidates it — the other half is the drive
+off→on transition documented under `set_drive`, above, and both go
+through the same flush.
+
+Dispatched like `set_drive`/`snapshot`: targets a live worker rather than
+spawning one, so it does not go through the busy guard.
+
+**CTRL**
+```json
+{ "cmd": "relock" }
+```
+
+No arguments — session-wide, not per-pair. A per-pair variant is scope
+this command does not need.
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+**Errors**
+```json
+{ "ok": false, "error": "no transfer_stream session running" }
+```
+
+**What it does not touch.** `delay_attempts` keeps counting and never
+resets — a re-lock is another attempt, not evidence the pair was never
+asked. `delay_evidence` (the last attempt's prominence/peak data) is
+overwritten by the next attempt, not cleared by the request itself.
+
 ---
 
 ### `snapshot`

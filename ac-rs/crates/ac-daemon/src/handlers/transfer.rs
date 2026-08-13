@@ -141,6 +141,60 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
     json!({"ok": true, "on": on, "level_dbfs": applied})
 }
 
+/// `relock` (#226) — discard every pair's held delay lock in the
+/// **running** `transfer_stream` session, so the worker's next tick
+/// retries acquisition from scratch. A held lock is a maintained
+/// quantity, not a cached one: the operator asking is one of the two
+/// events that invalidate it (the other is the drive coming on, handled
+/// inside the worker loop itself).
+///
+/// Dispatched like `set_drive`: targets a live worker without spawning
+/// one, so it has no `cmd_group` entry and never consults `check_busy`.
+/// Session-wide, no `pair` selector — the flush is a session event and a
+/// per-pair variant is scope this issue does not need.
+pub fn relock(state: &ServerState, _cmd: &Value) -> Value {
+    let slot = state.relock_state.lock().unwrap();
+    match slot.as_ref() {
+        Some(r) => {
+            r.request();
+            json!({"ok": true})
+        }
+        None => json!({"ok": false, "error": "no transfer_stream session running"}),
+    }
+}
+
+/// A pair's held delay lock (#226). `driving` records whether the drive
+/// was on at the tick this lock was accepted — the qualifier the drive
+/// off→on edge reads to decide whether this lock is stale by
+/// construction (taken against silence) or survives (taken while
+/// driving, so a dead-man drop and resume must not disturb it). Carried
+/// inside the `Option` rather than beside it so a pair that is currently
+/// unlocked cannot hold a stale, meaningless flag: provenance exists only
+/// when a lock does.
+#[derive(Debug, Clone, Copy)]
+struct Lock {
+    samples: i64,
+    driving: bool,
+}
+
+/// Discard pair `i`'s held lock and its ladder, and clear its retry
+/// timer so the next tick attempts acquisition immediately rather than
+/// waiting out `RELOCK_RETRY`. Leaves `pair_delay_attempts` and
+/// `pair_prominence` untouched — the first must stay monotone (a reset
+/// would make a locked-then-refusing pair read as one never asked), and
+/// the second is last-attempt evidence that the next attempt overwrites
+/// on its own.
+fn flush_pair(
+    i: usize,
+    pair_delays: &mut [Option<Lock>],
+    next_delay_attempt: &mut [Option<std::time::Instant>],
+    mtw: &mut [Option<ac_core::visualize::mtw::MtwPair>],
+) {
+    pair_delays[i] = None;
+    next_delay_attempt[i] = None;
+    mtw[i] = None;
+}
+
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
 
@@ -395,6 +449,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .collect();
     let snapshot_ring_slot = state.snapshot_ring.clone();
     let drive_state_slot = state.drive_state.clone();
+    let relock_state_slot = state.relock_state.clone();
     let snapshot_spool = state.snapshot_spool.clone();
     let snapshot_spool_dir = ac_core::config::snapshot_spool_dir(&cfg);
     let snapshot_ring_s = cfg.snapshot_ring_s;
@@ -416,9 +471,17 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     *drive_state_slot.lock().unwrap() = Some(drive_state.clone());
     let drive_state_for_worker = drive_state;
 
+    // Published before spawn for the same structural reason as
+    // `drive_state` above: closing the window between the CTRL reply and
+    // the worker actually existing, rather than narrowing it.
+    let relock_state = std::sync::Arc::new(crate::workers::RelockRequest::new());
+    *relock_state_slot.lock().unwrap() = Some(relock_state.clone());
+    let relock_state_for_worker = relock_state;
+
     let worker = spawn_worker(state, "transfer_stream", move |stop| {
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
         let drive_state = drive_state_for_worker;
+        let relock_state = relock_state_for_worker;
 
         // Passive mode (default): open no output ports at all so the daemon
         // doesn't need exclusive access to the playback side — the user is
@@ -598,7 +661,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // `chunk_secs` was 0.2 when the ~10 Hz figure was written. Measured
         // 2026-08-06 on `--fake-audio` at 48 kHz over 30 s, two pairs, median
         // inter-frame gap 60.3 ms; the rig sees 17.5–18 Hz at 96 kHz.
-        let mut pair_delays: Vec<Option<i64>> = vec![None; pairs.len()];
+        let mut pair_delays: Vec<Option<Lock>> = vec![None; pairs.len()];
 
         // A pair whose delay estimate was *refused* (no prominent correlation
         // peak — #227) stays unlocked and is retried, because the cause is
@@ -676,6 +739,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         let mut mtw: Vec<Option<ac_core::visualize::mtw::MtwPair>> =
             (0..pairs.len()).map(|_| None).collect();
         let mut mtw_failed = false;
+
+        // Last `relock` generation consumed (#226). Seeded from the
+        // request state's own start value rather than 0 so a generation
+        // already at some count from a prior worker's Arc (there isn't
+        // one — this Arc is fresh per session) can never be mistaken for
+        // a pending request; harmless either way, but this is the value
+        // that makes "no request yet" mean the same thing here as it does
+        // in `RelockRequest::new`.
+        let mut last_relock_gen = relock_state.generation();
 
         while !stop.load(Ordering::Relaxed) {
             // Contiguous drain (#207). `capture_multi` would clear the ring
@@ -755,6 +827,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             drive_state.expire_if_stale(crate::workers::DRIVE_DEADMAN_MS);
             let want_on = drive_state.on();
             let want_level = drive_state.level_dbfs();
+            let prev_engine_on = engine_on;
             if want_on != engine_on || (want_on && want_level != engine_level) {
                 if want_on {
                     eng.set_pink(ac_core::shared::generator::dbfs_to_amplitude(want_level));
@@ -763,6 +836,49 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 }
                 engine_on = want_on;
                 engine_level = want_level;
+            }
+            // `engine_on` is now this tick's observed state — the edge
+            // (#226) is the false→true transition of that assignment, not
+            // a re-derivation, so it is read straight off the before/after
+            // pair rather than compared against commanded state.
+            let drive_edge_on = !prev_engine_on && engine_on;
+
+            // Manual re-lock (#226), consumed right after the drive poll
+            // and before this tick's own estimate, so a re-lock request
+            // and the tick's delay attempt never interleave.
+            let relock_gen = relock_state.generation();
+            if relock_gen != last_relock_gen {
+                last_relock_gen = relock_gen;
+                for i in 0..pairs.len() {
+                    flush_pair(i, &mut pair_delays, &mut next_delay_attempt, &mut mtw);
+                }
+            }
+
+            // Drive off→on edge (#226). A lock is stale by construction —
+            // not by drift, not by a threshold — the instant the drive
+            // that was off starts driving, because the signal producing
+            // it just changed. The qualifier: only a lock acquired *while
+            // the drive was off* is discarded, so a dead-man drop and
+            // resume of a lock taken while driving survives untouched —
+            // nothing about that lock's premise changed. A pair that is
+            // currently unlocked gets its retry timer cleared instead, so
+            // acquisition is attempted this tick rather than up to
+            // `RELOCK_RETRY` later.
+            if drive_edge_on {
+                for i in 0..pairs.len() {
+                    match pair_delays[i] {
+                        Some(Lock { driving: false, .. }) => {
+                            flush_pair(i, &mut pair_delays, &mut next_delay_attempt, &mut mtw);
+                        }
+                        Some(Lock { driving: true, .. }) => {
+                            // Acquired while driving — the dead-man/resume
+                            // thrash case. Survives untouched.
+                        }
+                        None => {
+                            next_delay_attempt[i] = None;
+                        }
+                    }
+                }
             }
 
             // Observed drive state (#228). Built from `engine_on`/`engine_level`
@@ -839,7 +955,13 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         meas.as_slice(),
                         sr,
                     );
-                    pair_delays[i] = est.lag;
+                    // `driving` is this tick's already-updated `engine_on`
+                    // — the provenance a future drive edge (#226) reads to
+                    // decide whether this lock is stale by construction.
+                    pair_delays[i] = est.lag.map(|samples| Lock {
+                        samples,
+                        driving: engine_on,
+                    });
                     // Counted here rather than at the top of the loop: this is
                     // the branch where an estimate actually ran on full rings,
                     // so the count means "the estimator has answered", not
@@ -876,7 +998,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // Keep the ring's copy in sync — cheap (small Vec), and
             // simpler than trying to push incrementally from inside the
             // loop above.
-            snapshot_ring.lock().unwrap().delay_samples = pair_delays.clone();
+            snapshot_ring.lock().unwrap().delay_samples =
+                pair_delays.iter().map(|l| l.map(|l| l.samples)).collect();
 
             // Build each pair's ladder once its alignment offset is known —
             // the offset is applied at full rate, before decimation, so it has
@@ -885,7 +1008,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 if slot.is_some() || mtw_failed {
                     continue;
                 }
-                let Some(delay) = pair_delays[i] else {
+                let Some(delay) = pair_delays[i].map(|l| l.samples) else {
                     continue;
                 };
                 match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
@@ -975,7 +1098,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                         // `delay_ms` 0.0, and #216 established that the loopback
                         // case is legitimately 0.0, so the number alone cannot
                         // carry the difference.
-                        let delay = delay_opt.unwrap_or(0);
+                        let delay = delay_opt.map(|l| l.samples).unwrap_or(0);
                         let result = ac_core::visualize::transfer::h1_estimate_with_delay(
                             refb, meas, sr, delay,
                         );
@@ -1337,6 +1460,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
         eng.stop();
         *drive_state_slot.lock().unwrap() = None;
+        *relock_state_slot.lock().unwrap() = None;
 
         // Known, bounded: a `set_drive` arriving between this worker's
         // last poll and the slot-clear below returns `{"ok":true}` for a

@@ -236,6 +236,14 @@ impl AcViewApp {
                 }
             }
             Action::OpenSettings => self.open_settings(),
+            Action::Relock => {
+                // Best-effort, same discipline as `set_drive`: a failed
+                // send is not a crash, it is a re-lock that did not
+                // happen, and the daemon's own retry path is unaffected.
+                if let Some(session) = &self.session {
+                    let _ = session.client().call(&serde_json::json!({"cmd": "relock"}));
+                }
+            }
             // -- transfer view: stimulus. Each key drives the safety
             // machine; the DriveCmd it emits (if any) goes to the daemon
             // via set_drive. The machine owns arm/fire/stop, auto-disarm,

@@ -62,6 +62,10 @@ pub enum Action {
     /// Open the settings overlay (channels + start level). M4b binds it;
     /// M4c (#182) implements the overlay itself.
     OpenSettings,
+    /// Re-estimate delay lock on every pair, flushing that pair's running
+    /// averages (#226). Sends `relock` to the daemon; the daemon's own
+    /// warmup/retry path does the re-acquisition.
+    Relock,
 
     // -- transfer view: stimulus cluster (reserved, D7/D10) --
     /// Space: Idle→Armed, or stop from Armed/Driving.
@@ -97,7 +101,7 @@ pub struct Binding {
 ///
 /// Key ledger (so the single-pass assignment is auditable at a glance):
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
-/// `W` `T` `V`; transfer `P` `R` `N` `G` + stimulus `Space` `Enter` `Esc`
+/// `W` `T` `V`; transfer `P` `R` `N` `G` `E` + stimulus `Space` `Enter` `Esc`
 /// `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
@@ -216,6 +220,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::OpenSettings,
         scope: Scope::Transfer,
         description: "Open settings (channels, start level)",
+    },
+    Binding {
+        key: Key::E,
+        action: Action::Relock,
+        scope: Scope::Transfer,
+        description: "Re-estimate delay (flushes averages)",
     },
     // -- transfer view: stimulus cluster (D7/D10 reserved) --
     Binding {
