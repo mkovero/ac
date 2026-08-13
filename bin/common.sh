@@ -13,6 +13,18 @@ GH_TOOLS="${AC_GH_TOOLS:-}"
 # Raw transcripts are debugging material: large, noisy, gitignored.
 # Distilled final messages are the return channel to the planning session:
 # small, readable, committed deliberately.
+# cargo test --workspace on five crates with egui exceeds the default Bash
+# timeout, and a session that hits it backgrounds the build instead — then ends
+# its turn with nothing to wait on, and the -p process exits taking the
+# background task with it. Give it room to run synchronously.
+export BASH_DEFAULT_TIMEOUT_MS="${AC_BASH_TIMEOUT_MS:-900000}"
+export BASH_MAX_TIMEOUT_MS="${AC_BASH_MAX_TIMEOUT_MS:-1800000}"
+
+# One target dir across all worktrees: a fresh worktree otherwise rebuilds the
+# whole workspace from scratch, which is what makes the timeout bite. Note
+# cargo locks it, so parallel dispatch serialises at the build step.
+export CARGO_TARGET_DIR="${AC_CARGO_TARGET_DIR:-$HOME/.cache/ac-target}"
+
 AC_LOG_DIR="${AC_LOG_DIR:-$HOME/.local/state/ac}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
 
