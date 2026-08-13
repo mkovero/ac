@@ -2,13 +2,42 @@
   "permissions": {
     "deny": [
       "Task(Explore)",
-      "Bash(sed -i:*)", "Bash(perl -i:*)", "Bash(tee:*)",
-      "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)",
-      "Bash(truncate:*)", "Bash(dd:*)"
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(cat:*)",
+      "Bash(less:*)",
+      "Bash(more:*)",
+      "Bash(nl:*)",
+      "Bash(strings:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(ag:*)",
+      "Bash(ack:*)",
+      "Bash(find:*)",
+      "Bash(fd:*)",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(perl:*)",
+      "Bash(ruby:*)",
+      "Bash(node:*)",
+      "Bash(tee:*)",
+      "Bash(truncate:*)",
+      "Bash(dd:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(rm:*)"
     ],
     "allow": [
-      "Bash(cargo test:*)", "Bash(cargo clippy:*)", "Bash(cargo fmt --check)",
-      "Bash(git diff:*)", "Bash(git log:*)", "Bash(gh pr:*)", "Bash(gh issue:*)"
+      "Bash(cargo:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(python3:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(cut:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)"
     ]
   }
 }

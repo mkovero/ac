@@ -118,7 +118,7 @@ Check:
 - **numerical correctness** — estimator/measurement code: window sizes, normalization factors, array indices correct?
 - **wire schema** — `ac-daemon`'s published frame changed → do `ac-cli` and `ac-view` match? (`ac-rs/ZMQ.md`)
 
-Cross-crate check (schema match, existing helper, pattern used elsewhere) → delegate to `explorer` subagent. Ask for specific symbol, not "check ac-view". Explorer locate; it not assess. Correctness judgement stay yours.
+Cross-crate check (schema match, existing helper, pattern used elsewhere) → `Grep` for the specific symbol, then `Read` the hit. Shell readers and searchers denied by `.claude/settings.json`; do not work around them.
 - **error handling** — Results propagated, not silently unwrapped?
 - **test coverage** — new code paths exercised by tests?
 - **scope discipline** — dev touch files outside spec? Yes → flag.
@@ -246,7 +246,7 @@ wrong without any test catching it. These are the highest priority.}
 
 
 - No implementation changes yourself (except suggested test additions in comment).
-- No cite location `explorer` mark as candidate. Candidate mean not opened. Cite verified only, or open file yourself. Same rule as standards: consult document, no memory.
+- No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
