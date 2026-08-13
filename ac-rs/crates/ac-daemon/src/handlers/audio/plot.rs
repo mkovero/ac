@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, IntegrationParams, MeasurementData, MeasurementMethod,
-    MeasurementReport, ProcessingChain, StimulusParams, SCHEMA_VERSION,
+    MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams,
+    SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep,
@@ -67,6 +68,11 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let time_integration_shared = state.time_integration_mode.clone();
 
     let report_dir = cfg.report_dir.clone();
+    // Environment provenance (#280): flows the setup temperature into
+    // the report rather than collecting it a second time. `position`
+    // stays `None` when no temperature is configured — nothing else
+    // here is knowable without operator entry.
+    let temperature_c = cfg.temperature_c;
 
     let worker = spawn_worker(state, "plot", move |stop| {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
@@ -176,14 +182,15 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             time_integration: time_integration_shared.lock().unwrap().clone(),
             mic_correction_applied: mc_applied,
         };
+        let position = temperature_c.map(|t| PositionSnapshot {
+            temperature_c: Some(t),
+            ..Default::default()
+        });
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_utc: timestamp.clone(),
-            method: MeasurementMethod::SteppedSine {
-                n_points: n,
-                standard: Some(thd::citation()),
-            },
+            method: MeasurementMethod::SteppedSine { n_points: n },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,
                 f_start_hz: start_hz,
@@ -194,9 +201,15 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             integration: IntegrationParams {
                 duration_s: duration,
                 window: "hann".into(),
+                n_averages: None,
             },
             calibration: snapshot_from_cal(cal.as_ref()),
-            data: MeasurementData::FrequencyResponse { points },
+            position,
+            data: vec![MeasurementPayload {
+                data: MeasurementData::FrequencyResponse { points },
+                standard: vec![thd::citation()],
+                gate: None,
+            }],
             notes: None,
             processing_chain: chain.clone(),
         };
@@ -249,6 +262,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 report_dir.as_deref(),
                 cal.as_ref(),
                 chain.clone(),
+                temperature_c,
             );
         }
 
@@ -405,6 +419,7 @@ fn emit_spectrum_bands(
     report_dir: Option<&std::path::Path>,
     cal: Option<&Calibration>,
     chain: ProcessingChain,
+    temperature_c: Option<f64>,
 ) {
     let f_max = (sr as f64 * 0.45).min(stop_hz.max(start_hz));
     let f_min = start_hz.max(1.0);
@@ -430,13 +445,16 @@ fn emit_spectrum_bands(
         }),
     );
 
+    let position = temperature_c.map(|t| PositionSnapshot {
+        temperature_c: Some(t),
+        ..Default::default()
+    });
     let bands_report = MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp_utc: timestamp.to_string(),
         method: MeasurementMethod::SteppedSine {
             n_points: centres.len(),
-            standard: Some(Filterbank::citation()),
         },
         stimulus: StimulusParams {
             sample_rate_hz: sr,
@@ -448,14 +466,20 @@ fn emit_spectrum_bands(
         integration: IntegrationParams {
             duration_s: duration,
             window: "butterworth-bp".into(),
+            n_averages: None,
         },
         calibration: snapshot_from_cal(cal),
-        data: MeasurementData::SpectrumBands {
-            bpo: bpo as u32,
-            class: fb.class().label().to_string(),
-            centres_hz: centres,
-            levels_dbfs: levels,
-        },
+        position,
+        data: vec![MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: bpo as u32,
+                class: fb.class().label().to_string(),
+                centres_hz: centres,
+                levels_dbfs: levels,
+            },
+            standard: vec![Filterbank::citation()],
+            gate: None,
+        }],
         notes: None,
         processing_chain: chain,
     };
@@ -527,6 +551,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let report_dir = cfg.report_dir.clone();
+    let temperature_c = cfg.temperature_c;
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -641,6 +666,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         );
 
         let timestamp = ac_core::shared::time::now_utc_iso8601();
+        let position = temperature_c.map(|t| PositionSnapshot {
+            temperature_c: Some(t),
+            ..Default::default()
+        });
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -649,7 +678,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 f1_hz,
                 f2_hz,
                 duration_s: duration,
-                standard: Some(sweep_citation()),
             },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,
@@ -661,9 +689,15 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             integration: IntegrationParams {
                 duration_s: duration,
                 window: "farina-inverse".into(),
+                n_averages: None,
             },
             calibration: snapshot_from_cal(cal.as_ref()),
-            data,
+            position,
+            data: vec![MeasurementPayload {
+                data,
+                standard: vec![sweep_citation()],
+                gate: None,
+            }],
             notes: Some(decay_note),
             // plot_ir's IR isn't yet mic-curve-corrected (deferred from
             // #97 to a follow-up). The snapshot still captures the curve

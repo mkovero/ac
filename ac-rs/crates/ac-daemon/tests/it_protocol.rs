@@ -1478,8 +1478,11 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                 got_ir = true;
             }
             Some((t, v)) if t == "measurement/report" => {
-                assert_eq!(v["report"]["data"]["kind"], json!("impulse_response"));
-                assert_eq!(v["report"]["schema_version"], json!(3));
+                assert_eq!(
+                    v["report"]["data"][0]["data"]["kind"],
+                    json!("impulse_response")
+                );
+                assert_eq!(v["report"]["schema_version"], json!(4));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -2290,9 +2293,9 @@ fn plot_with_bpo_emits_spectrum_bands() {
                 got_frame = true;
             }
             Some((t, v)) if t == "measurement/report" => {
-                if v["report"]["data"]["kind"] == json!("spectrum_bands") {
-                    assert_eq!(v["report"]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(3));
+                if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
+                    assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
+                    assert_eq!(v["report"]["schema_version"], json!(4));
                     got_report = true;
                 }
             }
