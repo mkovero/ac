@@ -116,6 +116,9 @@ fn write_method(out: &mut String, r: &MeasurementReport) {
         r.integration.duration_s,
         html_escape(&r.integration.window)
     );
+    if let Some(n) = r.integration.n_averages {
+        let _ = writeln!(out, "<dt>averages</dt><dd>{}</dd>", n);
+    }
     let _ = writeln!(out, "</dl>");
 }
 
@@ -653,6 +656,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "hann".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
@@ -826,6 +830,19 @@ mod tests {
         assert!(html.contains("<dt>gate</dt>"), "{html}");
         assert!(html.contains("tukey0.25"));
         assert!(html.contains("50.0 Hz (= 1 / gate length)"), "{html}");
+    }
+
+    #[test]
+    fn averages_line_omitted_when_absent_and_rendered_when_set() {
+        let mut out = String::new();
+        write_method(&mut out, &sample_fr_report());
+        assert!(!out.contains("<dt>averages</dt>"), "{out}");
+
+        let mut r = sample_fr_report();
+        r.integration.n_averages = Some(8);
+        let mut out = String::new();
+        write_method(&mut out, &r);
+        assert!(out.contains("<dt>averages</dt><dd>8</dd>"), "{out}");
     }
 
     #[test]

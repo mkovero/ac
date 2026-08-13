@@ -31,10 +31,12 @@ use serde::{Deserialize, Serialize};
 ///   shape (what was played), not what a derived payload means — that
 ///   citation now lives on the payload it applies to. New optional
 ///   `position: PositionSnapshot` records temperature, relative
-///   humidity, source/receiver height and distance. Legacy v1/v2/v3
-///   reports (where `data` is a bare object) still decode: the object
-///   is wrapped into a single-element payload vec with no citation and
-///   no gate (#280).
+///   humidity, source/receiver height and distance. `IntegrationParams`
+///   gains optional `n_averages` (ISO 18233 §9 method-description
+///   item), unpopulated until a call site averages repeat captures.
+///   Legacy v1/v2/v3 reports (where `data` is a bare object) still
+///   decode: the object is wrapped into a single-element payload vec
+///   with no citation and no gate (#280).
 pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -250,6 +252,13 @@ pub struct StimulusParams {
 pub struct IntegrationParams {
     pub duration_s: f64,
     pub window: String,
+    /// Number of averages taken to produce the reported result — the
+    /// third ISO 18233 §9 method-description item (signal type, signal
+    /// duration, number of averages). No call site sets this today (no
+    /// `ac` command averages repeat captures yet); `None` rather than a
+    /// misleading `1` when the capture path doesn't exist (#280).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_averages: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -504,6 +513,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "hann".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
@@ -637,6 +647,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "none".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
@@ -693,6 +704,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "none".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
@@ -750,6 +762,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "none".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
@@ -1039,6 +1052,22 @@ mod tests {
         assert!(csv.contains("# payload 2: spectrum_bands  gate=0.0ms+20.0ms hann f_low=50.0Hz"));
         assert!(csv.contains("sample_idx,time_s,order,amplitude"));
         assert!(csv.contains("centre_hz,level_dbfs,bpo,class"));
+    }
+
+    #[test]
+    fn n_averages_round_trips_and_omits_absent_field() {
+        let mut r = sample_report();
+        r.integration.n_averages = Some(8);
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"n_averages\": 8"), "{json}");
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+
+        // A report with no averages count omits the field entirely
+        // rather than serialising a misleading default.
+        let bare = sample_report();
+        let bare_json = bare.to_json().unwrap();
+        assert!(!bare_json.contains("n_averages"), "{bare_json}");
     }
 
     #[test]

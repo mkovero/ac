@@ -201,6 +201,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             integration: IntegrationParams {
                 duration_s: duration,
                 window: "hann".into(),
+                n_averages: None,
             },
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
@@ -465,6 +466,7 @@ fn emit_spectrum_bands(
         integration: IntegrationParams {
             duration_s: duration,
             window: "butterworth-bp".into(),
+            n_averages: None,
         },
         calibration: snapshot_from_cal(cal),
         position,
@@ -687,6 +689,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             integration: IntegrationParams {
                 duration_s: duration,
                 window: "farina-inverse".into(),
+                n_averages: None,
             },
             calibration: snapshot_from_cal(cal.as_ref()),
             position,

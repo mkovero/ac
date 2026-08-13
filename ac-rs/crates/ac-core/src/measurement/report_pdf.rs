@@ -158,6 +158,9 @@ fn draw_method(
             r.integration.duration_s, r.integration.window
         ),
     );
+    if let Some(n) = r.integration.n_averages {
+        y = kv_row(layer, font_bold, font_mono, y, "averages", &format!("{n}"));
+    }
     y - 2.0
 }
 
@@ -1004,6 +1007,7 @@ mod tests {
             integration: IntegrationParams {
                 duration_s: 1.0,
                 window: "hann".into(),
+                n_averages: None,
             },
             calibration: None,
             position: None,
