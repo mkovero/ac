@@ -1346,7 +1346,12 @@ reading either.
   "vrms_at_0dbfs_in":  <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":         "measured" | "unchanged" | "absent",
   "in_state":          "measured" | "unchanged" | "absent",
-  "error":             "<message>"      // only present on partial failure
+  "tau_state":         "measured" | "not_measured_no_loopback" | "error",
+  "tau_s":             <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
+  "tau_sample_rate":   <int>,           // condition tau_s was measured/attempted under
+  "tau_period_size":   <int> | null,    // ditto; null on backends that can't report one (not "unknown")
+  "tau_error":         "<message>",     // only present when tau_state == "error"
+  "error":             "<message>"      // only present on partial failure (voltage-cal save)
 }
 ```
 
@@ -1358,6 +1363,26 @@ not only what this run measured, and the `*_state` word says which:
 | `measured` | this run supplied a reading and overwrote the field |
 | `unchanged` | the prompt was skipped; the previously stored value stands |
 | `absent` | the field holds no value — never set, or just cleared |
+
+**τ (interface latency, #281)** is not prompt-driven — it piggybacks on
+the loopback state `cal_prompt` step 2 already established, so there is
+no third interactive step and no `unchanged` state (skipping a voltage
+prompt does not affect it):
+
+| `tau_state` | meaning |
+|-------------|---------|
+| `measured` | loopback detected this run; a short ESS measured τ and it was appended to `tau_history` |
+| `not_measured_no_loopback` | loopback not detected this run — nothing to measure τ against |
+| `error` | loopback was detected but the ESS measurement itself failed (`tau_error` names why); the voltage-cal legs above are unaffected |
+
+`tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
+under (present regardless of `tau_state`, including `error`), so a
+`not_measured_no_loopback` or `error` result is still legible against
+`cal.json` history without a second round trip. `tau_period_size: null`
+does not mean unknown — see `AudioEngine::period_size` in
+`ac-daemon/src/audio/mod.rs`: some backends cannot report a period size
+at all, which is a documented backend limitation, distinct from a period
+size that simply wasn't queried.
 
 ---
 

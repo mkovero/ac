@@ -6,9 +6,12 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::{Calibration, MicResponse};
+use ac_core::measurement::sweep::{
+    deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
+};
+use ac_core::shared::calibration::{Calibration, MicResponse, TauConditions, TauEntry};
 
-use crate::audio::make_engine;
+use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
 
 use super::{
@@ -44,6 +47,75 @@ fn apply_cal_reading(field: &mut Option<f64>, reply: CalReply, scale: f64) -> &'
                 "absent"
             }
         }
+    }
+}
+
+/// Method tag stored on every [`TauEntry`] this handler produces.
+const TAU_METHOD: &str = "farina_short_ess";
+
+/// Short-ESS parameters for the τ measurement (#281). Deliberately much
+/// shorter than a `plot_ir` sweep — this only has to locate the linear-IR
+/// peak, not resolve harmonics or a decay tail. `TAU_WINDOW_LEN` / 2 sets
+/// the largest round-trip delay this can report (≈85 ms at 48 kHz), and
+/// `TAU_TAIL_S` is sized to keep that whole window inside the capture.
+const TAU_F1_HZ: f64 = 100.0;
+const TAU_DURATION_S: f64 = 0.2;
+const TAU_TAIL_S: f64 = 0.15;
+const TAU_WINDOW_LEN: usize = 8192;
+
+/// Play a short ESS, deconvolve it, and return the interface round-trip
+/// delay in seconds (peak of the linear IR, converted from samples).
+///
+/// Reuses the Farina machinery from `ac_core::measurement::sweep` exactly
+/// as `plot_ir` does — see `handlers/audio/plot.rs` for the longer-form
+/// version of the same technique.
+fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
+    let sr = eng.sample_rate();
+    let f2_hz = (sr as f64 * 0.45).min(20_000.0);
+    let params = SweepParams {
+        f1_hz: TAU_F1_HZ,
+        f2_hz,
+        duration_s: TAU_DURATION_S,
+        sample_rate: sr,
+    };
+    let sweep = log_sweep(&params)?;
+    let amp = amp as f32;
+    let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
+    let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
+    let inv = inverse_sweep(&params)?;
+    let full = deconvolve_full(&captured, &inv);
+    let irs = extract_irs(&full, &params, 1, TAU_WINDOW_LEN)?;
+    let (peak_idx, _) = irs
+        .linear
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (i, *v))
+        .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+        .ok_or_else(|| anyhow::anyhow!("empty IR from τ sweep"))?;
+    let offset_samples = peak_idx as i64 - (TAU_WINDOW_LEN / 2) as i64;
+    Ok(offset_samples as f64 / sr as f64)
+}
+
+/// Turn the loopback flag established at step 2 into the `tau_state` /
+/// `tau_s` / `tau_error` triple `calibrate` reports — the exact decision
+/// #281 QA flagged as untestable because it was inlined in the worker
+/// closure, reachable only through a full daemon spawn. `measure` is only
+/// called when `is_loopback`, matching the worker's original behaviour of
+/// never running the τ sweep on a run with no loopback detected.
+fn tau_result(
+    is_loopback: bool,
+    measure: impl FnOnce() -> anyhow::Result<f64>,
+) -> (&'static str, Option<f64>, Option<String>) {
+    if !is_loopback {
+        return ("not_measured_no_loopback", None, None);
+    }
+    match measure() {
+        Ok(t) => ("measured", Some(t), None),
+        Err(e) => (
+            "error",
+            None,
+            Some(format!("\u{3c4} measurement failed: {e}")),
+        ),
     }
 }
 
@@ -179,6 +251,26 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
 
+        // τ (interface latency, #281) — not prompt-driven, so it piggybacks
+        // on the loopback state established above rather than adding a
+        // third interactive step. Runs here, before `eng.stop()`, because
+        // `period_size()` needs a live client. Measured whenever a loopback
+        // was detected this run, regardless of whether either voltage
+        // prompt was answered or skipped — the cheap-refresh path (#279:
+        // both prompts skipped) still refreshes τ.
+        let tau_conditions = TauConditions {
+            device: cfg.device,
+            backend: eng.backend_name().to_string(),
+            sample_rate: eng.sample_rate(),
+            period_size: eng.period_size(),
+            output_port: out_port.clone(),
+            input_port: in_port.clone(),
+        };
+        let (tau_state, tau_s, tau_err) = tau_result(is_loopback, || {
+            let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
+            measure_tau(&mut *eng, amp)
+        });
+
         eng.set_silence();
         eng.stop();
 
@@ -199,6 +291,14 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         if out_state == "measured" || in_state == "measured" {
             cal.ref_dbfs = ref_dbfs;
         }
+        if tau_state == "measured" {
+            cal.tau_history.push(TauEntry {
+                conditions: tau_conditions.clone(),
+                tau_s: tau_s.expect("tau_s is Some when tau_state is \"measured\""),
+                measured_at: ac_core::shared::time::now_utc_iso8601(),
+                method: TAU_METHOD.to_string(),
+            });
+        }
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
@@ -210,7 +310,14 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             "vrms_at_0dbfs_in":  cal.vrms_at_0dbfs_in,
             "out_state":         out_state,
             "in_state":          in_state,
+            "tau_state":         tau_state,
+            "tau_s":             tau_s,
+            "tau_sample_rate":   tau_conditions.sample_rate,
+            "tau_period_size":   tau_conditions.period_size,
         });
+        if let Some(ref e) = tau_err {
+            cal_done_frame["tau_error"] = json!(e);
+        }
         if let Some(ref e) = save_err {
             cal_done_frame["error"] = json!(e);
         }
@@ -487,4 +594,49 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("calibrate_spl".to_string(), worker);
     }
     json!({"ok": true})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #281 QA correctness issue 3: the no-loopback path is hard to drive
+    /// end-to-end under `--fake-audio` (the fake backend's step-2 capture
+    /// always reads as loopback-shaped), so pin the decision down directly
+    /// instead. `measure` must not run at all when there's no loopback.
+    #[test]
+    fn tau_result_no_loopback_short_circuits_without_measuring() {
+        let mut called = false;
+        let (state, tau_s, err) = tau_result(false, || {
+            called = true;
+            Ok(0.001)
+        });
+        assert_eq!(state, "not_measured_no_loopback");
+        assert_eq!(tau_s, None);
+        assert_eq!(err, None);
+        assert!(
+            !called,
+            "measure must not run when no loopback was detected"
+        );
+    }
+
+    #[test]
+    fn tau_result_loopback_ok_reports_measured() {
+        let (state, tau_s, err) = tau_result(true, || Ok(0.000_667));
+        assert_eq!(state, "measured");
+        assert_eq!(tau_s, Some(0.000_667));
+        assert_eq!(err, None);
+    }
+
+    #[test]
+    fn tau_result_loopback_err_reports_error_state_and_message() {
+        let (state, tau_s, err) = tau_result(true, || Err(anyhow::anyhow!("timeout")));
+        assert_eq!(state, "error");
+        assert_eq!(tau_s, None);
+        let msg = err.expect("error message present on failure");
+        assert!(
+            msg.contains("timeout"),
+            "error message should name the failure: {msg}"
+        );
+    }
 }

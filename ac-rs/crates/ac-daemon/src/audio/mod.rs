@@ -198,6 +198,18 @@ pub trait AudioEngine: Send + 'static {
         "unknown"
     }
 
+    /// Period/buffer size in frames, if this backend can report one.
+    ///
+    /// `None` means "not applicable to this backend" (documented that way,
+    /// not "unknown" — see `TauConditions::period_size`), not a value this
+    /// backend simply hasn't gotten around to reporting. Queried fresh at
+    /// measurement time by callers that need it, not cached at `start()` —
+    /// a running JACK server's buffer size can change out from under a
+    /// long-lived client (`jack_bufsize` run externally).
+    fn period_size(&self) -> Option<u32> {
+        None
+    }
+
     /// Set continuous output as the sum of several simultaneous sine tones,
     /// each `(freq_hz, amplitude)`. Used by the display-truth harness (#170)
     /// to drive the I3 orientation invariant (two tones at distinct levels,

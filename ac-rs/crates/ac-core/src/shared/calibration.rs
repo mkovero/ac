@@ -65,6 +65,21 @@
 //! (117.010) either side of the composed run. So the SPL layer stays
 //! correct while the reading is wrong, and the first thing an operator
 //! would try at the rig — re-run the SPL calibration — changes nothing.
+//!
+//! # A third parallel layer: interface latency (τ), issue #281
+//!
+//! [`Calibration::tau_history`] is a third layer under the same rule: no
+//! function introduced for it takes a voltage field to produce a τ, or a
+//! `TauEntry` to produce a Vrms/dBu/dB SPL value. τ is a property of
+//! *(device, backend, sample rate, period size, port pair)* — not of the
+//! electrical or acoustic calibration — so it is kept as an append-only
+//! history looked up by exact condition match ([`Calibration::tau_for`]),
+//! never applied through the voltage or SPL layers and never averaged or
+//! interpolated across history entries. `tau_history_does_not_affect_
+//! voltage_or_spl_derivations` below is the parity test for this layer;
+//! there is no consumer of `tau_history` yet (applying τ to a live
+//! measurement is out of scope for #281), so unlike the voltage/SPL pair
+//! there is no second call site to test for the same independence yet.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -97,6 +112,135 @@ pub struct CalibrationEntry {
     /// doesn't strand the cal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_response: Option<MicResponse>,
+    /// Interface-latency (τ) measurement history — see
+    /// [`Calibration::tau_history`]. Append-only; never overwritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tau_history: Vec<TauEntry>,
+}
+
+/// Conditions τ (interface round-trip latency) was measured under. τ is a
+/// property of this whole tuple, not of the interface alone — a period-size
+/// change alone can move it by milliseconds — so lookup
+/// ([`Calibration::tau_for`]) is exact-match on every field, never
+/// nearest-neighbour or interpolated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TauConditions {
+    pub device: u32,
+    pub backend: String,
+    pub sample_rate: u32,
+    /// `None` means "not applicable to this backend" (it cannot report a
+    /// period/buffer size at all), not "unknown" — see
+    /// `AudioEngine::period_size`. Two runs on such a backend at different
+    /// real buffer sizes will spuriously exact-match; this is a documented
+    /// limitation of that backend, not new to this field.
+    pub period_size: Option<u32>,
+    pub output_port: String,
+    pub input_port: String,
+}
+
+/// One τ measurement: the conditions it was taken under, the value, when,
+/// and how. Stored in [`Calibration::tau_history`] as an append-only list —
+/// entries are never overwritten or removed, so a stale value never
+/// silently replaces a good one; [`Calibration::tau_for`] picks among them
+/// by exact condition match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TauEntry {
+    pub conditions: TauConditions,
+    pub tau_s: f64,
+    /// RFC3339 timestamp of the measurement.
+    pub measured_at: String,
+    /// Free-text description of the method, e.g. `"farina_short_ess"`.
+    pub method: String,
+}
+
+/// Why an exact-match τ lookup missed. Names the delta to the nearest
+/// stored entry rather than silently interpolating, falling back to
+/// "closest", or proceeding uncorrected — see the acceptance criteria on
+/// issue #281.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TauRefusal {
+    pub requested: TauConditions,
+    /// Nearest entry by fewest differing condition fields, ties broken by
+    /// most recent `measured_at`. `None` when no entry exists at all for
+    /// this calibration key.
+    pub nearest: Option<TauEntry>,
+    /// Condition field names (see [`TauConditions`]) that differ between
+    /// `requested` and `nearest`, in tuple order. Empty when `nearest` is
+    /// `None`.
+    pub differing_fields: Vec<&'static str>,
+}
+
+impl TauRefusal {
+    /// Diagnostic message naming the delta — the point of refusing instead
+    /// of guessing is that a reader can see *why* in one line, without
+    /// opening `cal.json` by hand.
+    pub fn message(&self) -> String {
+        match &self.nearest {
+            None => format!(
+                "no \u{3c4} history recorded for device {} / {} backend yet \u{2014} run `ac \
+                 calibrate` with loopback patched to measure one",
+                self.requested.device, self.requested.backend
+            ),
+            Some(nearest) => {
+                let deltas: Vec<String> = self
+                    .differing_fields
+                    .iter()
+                    .map(|&f| {
+                        format!(
+                            "{f} (requested {}, stored {})",
+                            tau_field_value(&self.requested, f),
+                            tau_field_value(&nearest.conditions, f)
+                        )
+                    })
+                    .collect();
+                format!(
+                    "no \u{3c4} entry for these exact conditions; nearest stored entry \
+                     (measured {}) differs in {}",
+                    nearest.measured_at,
+                    deltas.join(", ")
+                )
+            }
+        }
+    }
+}
+
+fn tau_field_value(c: &TauConditions, field: &str) -> String {
+    match field {
+        "device" => c.device.to_string(),
+        "backend" => c.backend.clone(),
+        "sample_rate" => format!("{} Hz", c.sample_rate),
+        "period_size" => c
+            .period_size
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        "output_port" => c.output_port.clone(),
+        "input_port" => c.input_port.clone(),
+        _ => "?".to_string(),
+    }
+}
+
+/// Condition fields that differ between `a` and `b`, in a fixed order.
+fn tau_diff_fields(a: &TauConditions, b: &TauConditions) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if a.device != b.device {
+        out.push("device");
+    }
+    if a.backend != b.backend {
+        out.push("backend");
+    }
+    if a.sample_rate != b.sample_rate {
+        out.push("sample_rate");
+    }
+    if a.period_size != b.period_size {
+        out.push("period_size");
+    }
+    if a.output_port != b.output_port {
+        out.push("output_port");
+    }
+    if a.input_port != b.input_port {
+        out.push("input_port");
+    }
+    out
 }
 
 /// Parsed and validated mic frequency-response correction curve.
@@ -253,6 +397,9 @@ pub struct Calibration {
     pub ref_dbfs: f64,
     pub mic_sensitivity_dbfs_at_94db_spl: Option<f64>,
     pub mic_response: Option<MicResponse>,
+    /// Interface-latency (τ) measurement history for this channel pair.
+    /// Append-only — see [`TauEntry`] / [`Calibration::tau_for`].
+    pub tau_history: Vec<TauEntry>,
 }
 
 /// Reference SPL of an acoustic pistonphone calibrator. ANSI S1.40 / IEC
@@ -272,6 +419,7 @@ impl Calibration {
             ref_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
+            tau_history: Vec::new(),
         }
     }
 
@@ -326,6 +474,37 @@ impl Calibration {
         self.mic_response.as_ref().map(|r| r.correction_at(freq_hz))
     }
 
+    /// Exact-match τ lookup. Refuses rather than interpolating or falling
+    /// back to "closest" — a stale τ is a silent-wrongness bug (issue
+    /// #281), so a miss must say so and name the delta, not degrade.
+    pub fn tau_for(&self, cond: &TauConditions) -> Result<&TauEntry, Box<TauRefusal>> {
+        if let Some(hit) = self.tau_history.iter().find(|e| &e.conditions == cond) {
+            return Ok(hit);
+        }
+        let mut nearest: Option<&TauEntry> = None;
+        let mut best_diff = usize::MAX;
+        for e in &self.tau_history {
+            let n_diff = tau_diff_fields(cond, &e.conditions).len();
+            let better = n_diff < best_diff
+                || (n_diff == best_diff
+                    && nearest
+                        .map(|n| e.measured_at > n.measured_at)
+                        .unwrap_or(true));
+            if better {
+                best_diff = n_diff;
+                nearest = Some(e);
+            }
+        }
+        let differing_fields = nearest
+            .map(|n| tau_diff_fields(cond, &n.conditions))
+            .unwrap_or_default();
+        Err(Box::new(TauRefusal {
+            requested: cond.clone(),
+            nearest: nearest.cloned(),
+            differing_fields,
+        }))
+    }
+
     // -----------------------------------------------------------------------
     // Persistence
     // -----------------------------------------------------------------------
@@ -359,6 +538,7 @@ impl Calibration {
                 ref_dbfs: self.ref_dbfs,
                 mic_sensitivity_dbfs_at_94db_spl: self.mic_sensitivity_dbfs_at_94db_spl,
                 mic_response: self.mic_response.clone(),
+                tau_history: self.tau_history.clone(),
             },
         );
 
@@ -448,6 +628,7 @@ impl Calibration {
             ref_dbfs: e.ref_dbfs,
             mic_sensitivity_dbfs_at_94db_spl: e.mic_sensitivity_dbfs_at_94db_spl,
             mic_response: e.mic_response.clone(),
+            tau_history: e.tau_history.clone(),
         }
     }
 
@@ -762,5 +943,131 @@ mod tests {
         assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-29.4));
         assert_eq!(loaded.vrms_at_0dbfs_out, Some(1.234));
         assert_eq!(loaded.vrms_at_0dbfs_in, Some(0.567));
+    }
+
+    // ─── τ (interface latency) history — issue #281 ────────────────────
+
+    fn dummy_conditions() -> TauConditions {
+        TauConditions {
+            device: 0,
+            backend: "jack".to_string(),
+            sample_rate: 48_000,
+            period_size: Some(1024),
+            output_port: "system:playback_1".to_string(),
+            input_port: "system:capture_2".to_string(),
+        }
+    }
+
+    fn dummy_tau_entry(cond: TauConditions, tau_s: f64) -> TauEntry {
+        TauEntry {
+            conditions: cond,
+            tau_s,
+            measured_at: crate::shared::time::now_utc_iso8601(),
+            method: "farina_short_ess".to_string(),
+        }
+    }
+
+    #[test]
+    fn tau_for_exact_match_hits() {
+        let mut cal = Calibration::new(0, 0);
+        let cond = dummy_conditions();
+        cal.tau_history
+            .push(dummy_tau_entry(cond.clone(), 0.0011931));
+        let hit = cal.tau_for(&cond).expect("exact match should hit");
+        assert!((hit.tau_s - 0.0011931).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tau_for_refuses_on_period_size_change_and_names_the_delta() {
+        // #281 acceptance criterion: "a synthetic entry recorded at one
+        // period size is refused at another, with the delta in the
+        // message" — τ moves by milliseconds on a period-size change, so
+        // this must never silently degrade to the stored value.
+        let mut cal = Calibration::new(0, 0);
+        let stored = dummy_conditions();
+        cal.tau_history
+            .push(dummy_tau_entry(stored.clone(), 0.0011931));
+
+        let mut requested = stored.clone();
+        requested.period_size = Some(256);
+
+        let refusal = cal
+            .tau_for(&requested)
+            .expect_err("period-size mismatch must refuse, not degrade");
+        assert_eq!(refusal.differing_fields, vec!["period_size"]);
+        assert_eq!(refusal.nearest.as_ref().unwrap().tau_s, 0.0011931);
+        let msg = refusal.message();
+        assert!(
+            msg.contains("period_size"),
+            "message must name the differing field: {msg}"
+        );
+        assert!(
+            msg.contains("256"),
+            "message must name the requested value: {msg}"
+        );
+        assert!(
+            msg.contains("1024"),
+            "message must name the stored value: {msg}"
+        );
+    }
+
+    #[test]
+    fn tau_for_refuses_with_no_nearest_when_history_is_empty() {
+        let cal = Calibration::new(0, 0);
+        let refusal = cal.tau_for(&dummy_conditions()).unwrap_err();
+        assert!(refusal.nearest.is_none());
+        assert!(refusal.differing_fields.is_empty());
+        assert!(refusal.message().contains("no \u{3c4} history"));
+    }
+
+    #[test]
+    fn tau_history_round_trips_alongside_voltage_and_spl() {
+        // Same composition guarantee as `mic_curve_save_preserves_voltage_
+        // and_spl`, extended to the third layer: appending a τ entry must
+        // not disturb the other two.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+
+        let mut a = Calibration::new(0, 0);
+        a.vrms_at_0dbfs_out = Some(1.234);
+        a.vrms_at_0dbfs_in = Some(0.567);
+        a.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+        a.save(Some(&path)).unwrap();
+
+        let mut b = Calibration::load_or_new(0, 0, Some(&path));
+        b.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0011931));
+        b.save(Some(&path)).unwrap();
+
+        let loaded = Calibration::load(0, 0, Some(&path)).unwrap().unwrap();
+        assert_eq!(loaded.vrms_at_0dbfs_out, Some(1.234));
+        assert_eq!(loaded.vrms_at_0dbfs_in, Some(0.567));
+        assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-30.0));
+        assert_eq!(loaded.tau_history.len(), 1);
+        assert!((loaded.tau_history[0].tau_s - 0.0011931).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tau_history_does_not_affect_voltage_or_spl_derivations() {
+        // Parallel-not-composed layer topology (module docs, "A third
+        // parallel layer" section): appending τ history must not move any
+        // voltage- or SPL-derived value on the same entry.
+        let mut cal = Calibration::new(0, 0);
+        cal.vrms_at_0dbfs_out = Some(1.234);
+        cal.vrms_at_0dbfs_in = Some(0.567);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+
+        let out_before = cal.out_vrms(-6.0);
+        let in_before = cal.in_vrms(0.5);
+        let spl_before = cal.dbfs_to_dbspl(-20.0);
+
+        cal.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0011931));
+        cal.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0025));
+
+        assert_eq!(cal.out_vrms(-6.0), out_before);
+        assert_eq!(cal.in_vrms(0.5), in_before);
+        assert_eq!(cal.dbfs_to_dbspl(-20.0), spl_before);
     }
 }

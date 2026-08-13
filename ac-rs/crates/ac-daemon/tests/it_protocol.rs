@@ -1141,6 +1141,88 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     assert!((stored_out - expected_out).abs() < 1e-6);
 }
 
+/// #281 QA correctness issue 1: `measure_tau`'s sweep→deconvolve→peak→seconds
+/// path had zero test coverage — the only τ tests (`calibration.rs`)
+/// construct `TauEntry`/`TauConditions` directly and never call
+/// `measure_tau`. The fake backend's `play_and_capture` delays by a fixed
+/// `FAKE_LOOPBACK_DELAY_SAMPLES = 32` (see `audio/fake.rs`), the same
+/// deterministic delay `plot_ir_emits_impulse_response_with_expected_delay_peak`
+/// already checks its IR peak against — this is that precedent applied to
+/// `calibrate`'s τ measurement.
+#[test]
+fn calibrate_measures_tau_against_fake_loopback_delay() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    // Both prompts skipped — τ must still be measured (it keys only on
+    // `is_loopback`, established at step 2, independent of the replies).
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    let tau_s = done["tau_s"].as_f64().expect("tau_s present when measured");
+    let expected = 32.0 / 48_000.0; // FAKE_LOOPBACK_DELAY_SAMPLES / fake sample rate
+    assert!(
+        (tau_s - expected).abs() < 1e-4,
+        "tau_s {tau_s} far from expected {expected} (32-sample fake loopback delay): {done}"
+    );
+    assert_eq!(done["tau_sample_rate"], json!(48_000), "frame: {done}");
+}
+
+/// #281 QA correctness issue 2: the cheap-refresh criterion (#279: both
+/// voltage prompts skipped still refreshes stored state cheaply) is an
+/// explicit issue acceptance criterion for τ too — a skipped-both-prompts
+/// run must still append a fresh `tau_history` entry, not just leave the
+/// voltage legs alone. Previously asserted only by reading the code (τ's
+/// branch is keyed on `is_loopback`, not on either reply); this test pins
+/// it down on the wire and on disk.
+#[test]
+fn calibrate_cheap_refresh_still_measures_tau() {
+    let d = Daemon::spawn();
+    let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    // Both voltage legs unchanged (the #279 path this test rides on)...
+    assert_eq!(done["out_state"], json!("unchanged"), "frame: {done}");
+    assert_eq!(done["in_state"], json!("unchanged"), "frame: {done}");
+    // ...but τ was measured anyway.
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    assert!(done["tau_s"].as_f64().is_some(), "frame: {done}");
+
+    let after = read_cal_entry(&cal_path);
+    let history = after["tau_history"]
+        .as_array()
+        .expect("tau_history present");
+    assert_eq!(
+        history.len(),
+        1,
+        "a cheap-refresh run must still append a tau_history entry: {after}"
+    );
+}
+
 /// Seed a `cal.json` entry with both voltage legs set, at a `ref_dbfs`
 /// deliberately different from the one the test's `calibrate` run uses.
 fn seed_voltage_cal(d: &Daemon, out_vrms: f64, in_vrms: f64, ref_dbfs: f64) -> PathBuf {

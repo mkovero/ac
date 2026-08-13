@@ -448,6 +448,7 @@ mod tests {
             ref_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: Some(-20.0),
             mic_response: None,
+            tau_history: Vec::new(),
         };
         let meta = SnapshotMeta {
             format_version: FORMAT_VERSION,
@@ -617,6 +618,7 @@ mod tests {
             ref_dbfs: -10.0,
             mic_sensitivity_dbfs_at_94db_spl: Some(-26.0),
             mic_response: None,
+            tau_history: Vec::new(),
         };
 
         let meta = SnapshotMeta {
