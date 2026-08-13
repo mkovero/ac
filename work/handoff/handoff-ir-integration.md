@@ -121,6 +121,47 @@ is 212 lines and has neither. The draft's bare `plot.rs:` was right; the first p
 `report_pdf.rs:85`, `ZMQ.md:1939`, `it_protocol.rs:1451`, `jack_backend.rs:375`,
 `cpal_backend.rs:363` all check out against the tree at filing time.
 
+### Amended after filing
+
+**2026-08-11 — ISO 18233:2006, ISO 3382-1:2009, ISO 3382-2:2008 acquired.** §Standards
+above said those documents were not held and that acquiring them was unfiled; both
+sentences went false the moment they landed in `stddocs/iso-full/`. The section is
+rewritten in place rather than annotated, because the tree copy is what a future reader
+trusts. Full analysis, and the routing of every consequence to an issue, is in
+`work/handoff/handoff-ir-integration-iso-amendment.md`. Nothing there widens the epic:
+no sub-issue was added, no label changed, and #277, #278, #279, #281, #286, #287 and #288
+are untouched. Two items narrow it. One new issue was filed for the `sweep.rs::citation()`
+addition; the rest are body edits to #276, #280, #282, #283, #284 and #285.
+
+The amendment's own citations, counted the three ways `AGENTS.md` §evidence discipline
+now requires:
+
+- **Corrected.** Two. The constants file is `ac-rs/crates/ac-core/src/shared/constants.rs`
+  — the amendment draft dropped the `crates/` segment, in a repo where every crate sits
+  under it. And the three ISO documents are filed under `stddocs/iso-full/`, not
+  `stddocs/` root; the draft's `.agents/qa.md` rows would have carried paths that resolve
+  to nothing.
+- **Checked and unchanged.** Four. `G_OCTAVE = 1.995_262_314_968_88` with the §5.2.1
+  reference in its doc comment; `deconvolve_full` calling `fft_linear_convolve`;
+  `tail_s` defaulting to `0.5` at `handlers/audio/sweep.rs:157`; the three ISO PDFs
+  present on disk.
+- **Added.** None. No line number in the amendment was absent from its draft.
+
+Recorded separately because a draft that had two paths wrong is not the same artifact as
+one where two paths were merely written down for the first time, and in the finished
+document the two are indistinguishable.
+
+**A false claim in an earlier draft of that amendment, retracted before it reached any
+issue.** The draft asserted `filterbank.rs` uses `G = 2` and that the IEC 61260-1
+base-10 ratio fix was still outstanding, which would have blocked any ISO 18233 §6.3.2
+conformance claim. It is false against the tree: `G_OCTAVE` is defined once, as
+10^(3/10), and both `measurement/filterbank.rs` and `visualize/fractional_octave.rs`
+import it — there is no second definition and no local override, so
+`Filterbank::citation()`'s `verified: true` is sound. The claim came from a stale summary
+rather than a grep, and read as *more* rigorous than the vaguer true statement it
+replaced — the failure mode #290's first corollary names. No blocker, no issue, no
+citation revisited.
+
 ### Routing exceptions
 
 `output-format` has no label in this repo; #286 carries `feature` + `needs-ux` +
@@ -593,8 +634,17 @@ this epic removes.
 
 ## Standards — what this epic can and cannot claim
 
+**Amended 2026-08-11.** ISO 18233:2006, ISO 3382-1:2009 and ISO 3382-2:2008 are now held
+as `stddocs/iso-full/ISO18233.pdf`, `ISO3382-1.pdf` and `ISO3382-2.pdf`. The section
+below was written when they were not, and said so; it has been rewritten in place.
+Analysis and the routing of every consequence:
+`work/handoff/handoff-ir-integration-iso-amendment.md`. #276's body on GitHub is the
+authoritative version — this is the provenance copy.
+
 **Citable from documents already in `stddocs/`, after human cross-check:**
 
+- ISO 18233:2006 **Annex B (normative)**, "Swept-sine method". The swept-sine method now
+  has a normative standard behind it rather than two informative annexes alone.
 - AES17-2015 Annex A.4 (informative), "Exponential sine sweep (chirp) analysis" — ESS
   is an AES17-recognised measurement method.
 - IEC 61260-1:2014 Annex G (informative), "Filter response to exponentially swept
@@ -602,29 +652,77 @@ this epic removes.
   linear time scale of the sweep. This is the hook for ESS → conformant filterbank →
   band levels.
 - The existing Farina AES 108 #5093 citation, already `verified: true`, correctly
-  labelled as a preprint rather than a standard.
+  labelled as a preprint rather than a standard. It stays: the preprint is the
+  theoretical basis (harmonic offsets, inverse-filter construction), Annex B is the
+  normative method. Both, not either.
 
 Informative annexes do not block `verified: true` — verified means a human checked the
 clause says what the code claims, not that the clause is normative. The clause string
 must say "(informative)".
 
-**A constraint in a document already held, not a licence:** IEC 61260-1:2014 §3.30
-defines *filter decay time* — 60 dB drop after cessation of the input — and Annex H
-covers measuring it, explicitly distinguishing instruments that can measure
-reverberation time from those that cannot. Band-filtering an IR and integrating the
-decay contaminates the result with the filter's own decay, worst at LF where the bands
-are narrowest. This is the reason room parameters are out of scope for this epic rather
-than a stretch goal.
+**ISO 18233 never stands alone.** §1 specifies methods "to be used as substitutes for
+measurement methods specified in standards covering classical methods, such as ISO 140
+(all parts), ISO 3382 (all parts) and ISO 17497-1", and §9(c) requires the test report to
+name "the number and title of the International Standard of the applicable classical
+method". The standards string therefore depends on *what was measured*, not on which
+stimulus produced it:
 
-**Not held, and therefore not claimable:** ISO 3382-1 and ISO 3382-2 define the room
-parameters, precision grades, and position requirements. ISO 18233 is what permits
-deterministic signals in place of interrupted noise for those measurements — it is
-specifically what makes a Farina sweep a *conformant* route to an ISO 3382 number rather
-than merely a good one. IEC 60268-21 is the acoustical-output counterpart to the
-60268-3 already held. Any parameter shipped before those are on disk carries
-`verified: false` or no citation at all.
+| use case | classical method | ISO 18233 applies? | citation |
+|---|---|---|---|
+| room measurement | ISO 3382-2 (or 3382-1) | yes | ISO 18233 + the classical standard |
+| quasi-anechoic loudspeaker / PA | none in §1's list | **no** | AES17-2015 A.4 + Farina |
 
-Acquiring them is Markus's action and is deliberately **not** filed as an issue.
+That is a design constraint on #280, not prose: it decides whether the citation attaches
+to `MeasurementMethod` or to the payload, and must be settled before the schema is cut.
+
+**Still not held:** IEC 60268-21, the acoustical-output counterpart to the 60268-3
+already held. It is now the *only* missing document, and it is missing for the
+loudspeaker/PA case alone. Acquiring the three ISO documents did not make that case
+citable — it made the room case citable and left the PA case where it was. Acquiring
+60268-21 is Markus's action and is deliberately **not** filed as an issue.
+
+**A documented misreading of what this code produces.** `deconvolve_full` calls
+`fft_linear_convolve` — `ac` does linear, not circular, deconvolution. ISO 18233 B.5
+states that linear deconvolution yields a decaying noise tail, increasingly low-pass
+filtered toward its end, because that part of the result is steady noise convolved with
+the sweep in reverse order; it then requires that "the user shall be aware of this effect
+so as not to confuse the decreasing noise floor with the reverberant tail of the room."
+This lands exactly on the epic's bar — a user can tell what part of the result is real.
+Routed to #283 (print and persist) and #284 (mark it on the result).
+
+**Acquisition length has a criterion.** ISO 18233 §6.3.2: for non-repetitive excitation
+and measurement of level, the recording "shall cover the time from the start of
+excitation to the time where the response in each fractional octave band has decayed by
+more than 30 dB". B.2 adds that acquisition shall outlast the sweep until the
+reverberation falls under the noise floor, and that — unlike periodic excitation — no
+requirement relates sweep duration to expected reverberation time.
+`handlers/audio/sweep.rs:157` defaults `tail_s = 0.5`; that default is now checkable
+rather than a guess. Routed to #282.
+
+**Room parameters stay out of scope, now for quantitative reasons.** IEC 61260-1:2014
+§3.30 defines *filter decay time* — 60 dB drop after cessation of the input — and Annex H
+covers measuring it, explicitly distinguishing instruments that can measure reverberation
+time from those that cannot. Band-filtering an IR and integrating the decay contaminates
+the result with the filter's own decay, worst at LF where the bands are narrowest. The
+ISO documents give that concern its specific form and add their own:
+
+- ISO 3382-2 §7.3 / 3382-1 §7.3 — forward analysis requires `BT > 16` and `T > T_det`,
+  relaxing to `BT > 4` and `T > T_det/4` with time reversal.
+- ISO 3382-1 §5.3.3 and Eq. (3) — backward integration from a noise-aware start point
+  `t₁` with optional correction `C`. With `C = 0` the background noise must sit at least
+  the evaluation range plus 15 dB below the impulse peak: 45 dB down for T30.
+- ISO 3382-2 §6 — T20 over −5 to −25 dB, T30 over −5 to −35 dB, least-squares fit, with a
+  linearity check on the decay curve before a result may be stated at all.
+
+None of that is hard, and all of it has its own falsifiable criteria — which is the
+argument for filing it separately rather than bolting it onto an integration epic. Carry
+forward when it is filed: ISO 18233 B.6, §6.3.6 and B.8 all favour a single longer sweep
+over averaged or repeated sweeps (doubling duration buys 3 dB of effective SNR; averaging
+buys the same 3 dB while increasing sensitivity to environmental drift). If IR averaging
+is proposed later, the standard already argues against it.
+
+Any parameter shipped before its document is on disk carries `verified: false` or no
+citation at all.
 
 ---
 
