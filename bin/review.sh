@@ -29,12 +29,8 @@ mark="$AC_LOG_DIR/reviewed-pr-$n.sha"
 mkdir -p "$AC_LOG_DIR"
 head_sha="$(gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
 
-# Positive evidence that QA has actually spoken on this PR. A cached SHA is not
-# enough: a session can record a review it never posted.
-qa_comments() {
-  gh pr view "$n" -R "$AC_REPO" --json comments \
-    --jq '[.comments[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0
-}
+# qa_evidence() lives in common.sh — counts both comments and reviews.
+qa_comments() { qa_evidence "$n"; }
 
 if [[ $mode == auto ]]; then
   if [[ -f $mark && $(qa_comments) -gt 0 ]]; then

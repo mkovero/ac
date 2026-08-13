@@ -48,22 +48,46 @@ stale_branch() {
   git show-ref -q "refs/heads/issue-$1"
 }
 
-# Count QA's own comments. Absence of needs-work is NOT approval: a session
-# that crashed, hit its turn limit, or ended without posting leaves the labels
-# exactly as an approving one does. Require positive evidence that QA spoke.
-qa_comments() {
-  gh pr view "$1" -R "$AC_REPO" --json comments \
-    --jq '[.comments[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0
-}
+# Absence of needs-work is NOT approval: a session that crashed, hit its turn
+# limit, or ended without posting leaves the labels exactly as an approving one
+# does. Require positive evidence that QA spoke. qa_evidence() is in common.sh.
+qa_comments() { qa_evidence "$1"; }
 
 qa_loop() {
-  local n="$1" pr="$2" round=0 ls before after
-  while (( round < ROUNDS )); do
-    (( ++round ))
-    echo "  #$n PR #$pr: qa round $round"
-    before="$(qa_comments "$pr")"
+  local n="$1" pr="$2" round=0 ls before after head mark
+  while (( round <= ROUNDS )); do
+    ls="$(pr_labels "$pr")"
+    has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; return 0; }
+
+    # Already labelled needs-work: the verdict is in, revise before reviewing
+    # again. Reviewing first would re-review a tip qa has already judged.
+    if has needs-work "$ls"; then
+      (( ++round ))
+      if (( round > ROUNDS )); then
+        echo "  #$n PR #$pr: still needs-work after $ROUNDS rounds — stopping"
+        echo "     two agents failing to converge is signal. read the reviews."
+        return 0
+      fi
+      echo "  #$n PR #$pr: revising (round $round)"
+      "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
+      gh pr edit "$pr" -R "$AC_REPO" \
+        --remove-label needs-work --add-label in-review >/dev/null 2>&1 || true
+      ls="$(pr_labels "$pr")"
+    fi
+
+    head="$(gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+    mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
+
+    # Already reviewed at this exact tip and qa raised nothing: that is a pass.
+    if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( $(qa_evidence "$pr") > 0 )); then
+      echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
+      return 0
+    fi
+
+    echo "  #$n PR #$pr: qa review"
+    before="$(qa_evidence "$pr")"
     "$BIN/review.sh" "$pr" $fg || { echo "  #$n: review failed"; return 1; }
-    after="$(qa_comments "$pr")"
+    after="$(qa_evidence "$pr")"
 
     if (( after <= before )); then
       echo "  #$n PR #$pr: qa posted nothing — inconclusive, NOT approved"
@@ -74,17 +98,6 @@ qa_loop() {
     ls="$(pr_labels "$pr")"
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; return 0; }
     has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; return 0; }
-
-    if (( round >= ROUNDS )); then
-      echo "  #$n PR #$pr: still needs-work after $ROUNDS rounds — stopping"
-      echo "     two agents failing to converge is signal. read the reviews."
-      return 0
-    fi
-
-    echo "  #$n PR #$pr: revising"
-    "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
-    gh pr edit "$pr" -R "$AC_REPO" \
-      --remove-label needs-work --add-label in-review >/dev/null 2>&1 || true
   done
 }
 

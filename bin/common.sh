@@ -20,10 +20,24 @@ GH_TOOLS="${AC_GH_TOOLS:-}"
 export BASH_DEFAULT_TIMEOUT_MS="${AC_BASH_TIMEOUT_MS:-900000}"
 export BASH_MAX_TIMEOUT_MS="${AC_BASH_MAX_TIMEOUT_MS:-1800000}"
 
-# One target dir across all worktrees: a fresh worktree otherwise rebuilds the
-# whole workspace from scratch, which is what makes the timeout bite. Note
-# cargo locks it, so parallel dispatch serialises at the build step.
-export CARGO_TARGET_DIR="${AC_CARGO_TARGET_DIR:-$HOME/.cache/ac-target}"
+# Compile parallelism. Leave headroom: a full-throttle build starves the box
+# this is running on, and on a host with cores reserved for RT audio it will
+# spill onto them unless -j is bounded or the process is pinned. Set
+# AC_CARGO_JOBS to the cores you are willing to give up, not to nproc.
+export CARGO_BUILD_JOBS="${AC_CARGO_JOBS:-$(( $(nproc) > 4 ? $(nproc) - 2 : 1 ))}"
+
+# Test parallelism is a separate knob from compile parallelism, and for
+# measurement code the right value is often lower: timing-sensitive tests that
+# share a machine get flakier, not faster. Unset by default — set it if the
+# suite turns out to contend.
+[[ -n ${AC_TEST_THREADS:-} ]] && export RUST_TEST_THREADS="$AC_TEST_THREADS"
+
+# Target dir root. The per-branch subdirectory is chosen inside run(), after
+# the caller has cd'd into its worktree — one dir shared across worktrees means
+# lock contention and fingerprint churn, one dir per worktree means every
+# dispatch pays a cold build. Per branch is warm across runs on the same issue
+# and isolated between them.
+AC_TARGET_ROOT="${AC_TARGET_ROOT:-$HOME/.cache/ac-target}"
 
 AC_LOG_DIR="${AC_LOG_DIR:-$HOME/.local/state/ac}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
@@ -51,6 +65,18 @@ TaskUpdate,EnterWorktree,ExitWorktree"
 DENY_READ="Edit,Write,NotebookEdit"
 
 spec() { printf '%s/.agents/%s.md' "$ROOT" "$1"; }
+
+# Count QA's output on a PR. It may land as an issue comment OR as a review
+# (gh pr review --comment creates the latter, and --json comments does not
+# return those). Count both, or a good review reads as silence.
+qa_evidence() {
+  local c r
+  c=$(gh pr view "$1" -R "$AC_REPO" --json comments \
+      --jq '[.comments[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0)
+  r=$(gh pr view "$1" -R "$AC_REPO" --json reviews \
+      --jq '[.reviews[] | select(.body | test("agent: *qa"; "i"))] | length' 2>/dev/null || echo 0)
+  echo $(( c + r ))
+}
 
 # Extract the session's final message from a finished transcript.
 # Prefer the result event; fall back to the last assistant text block, because
@@ -85,6 +111,12 @@ run() {
     return
   fi
 
+  # Set here, not at source time: the caller has cd'd into its worktree by now.
+  local branch
+  branch="$(git branch --show-current 2>/dev/null || echo detached)"
+  export CARGO_TARGET_DIR="$AC_TARGET_ROOT/${branch:-detached}"
+  mkdir -p "$CARGO_TARGET_DIR"
+
   local tag="${AC_TAG:-$$}" stamp status=0
   stamp="$(date +%F)-$role-$tag"
   local raw="$AC_LOG_DIR/$stamp.jsonl"
@@ -112,7 +144,6 @@ run() {
          | if .type=="text" then .text
            elif .type=="tool_use" then "  → \(.name)  \(arg)"
            else empty end)
-      elif .type=="result" then "\n\(.result)"
       else empty end' || status=$?
 
   # Header says what this file is: a point-in-time record of one run, not

@@ -7,4 +7,6 @@
 # portable to older CPUs than the build host. If you need portable
 # release artifacts, build with `RUSTFLAGS="-C target-cpu=x86-64"` or
 # override this file in the CI job.
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=mold"]
+[profile.dev]
+debug = "line-tables-only"
