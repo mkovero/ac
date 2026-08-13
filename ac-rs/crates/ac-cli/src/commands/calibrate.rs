@@ -93,6 +93,7 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
             println!("\n  Calibration saved: [{key}]");
             print_cal_leg("Output", &data, "vrms_at_0dbfs_out", "out_state");
             print_cal_leg("Input", &data, "vrms_at_0dbfs_in", "in_state");
+            print_tau_leg(&data);
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 println!("  Note: {err}");
             }
@@ -185,6 +186,59 @@ fn print_cal_leg(label: &str, data: &serde_json::Value, vrms_key: &str, state_ke
             );
         }
         None => println!("  {label:<8}not calibrated"),
+    }
+}
+
+/// Render the `Delay:` leg of a `cal_done` frame (#281) — third leg of the
+/// same block, same `{label:<8}` alignment as `print_cal_leg`'s
+/// Output/Input rows.
+///
+/// τ has no `(unchanged)` state — unlike the voltage legs, it is not
+/// prompt-driven, so a skipped voltage prompt never touches it (see
+/// ZMQ.md's `cal_done` schema). The sample rate + period size are printed
+/// alongside the value on purpose: without them the number is
+/// unfalsifiable a year and three `-p` changes later, which is the exact
+/// failure #281 exists to close (device/backend/port identity is already
+/// implied by the session and the `[out_in]` key on the line above, so
+/// repeating those here would be redundant, not missing).
+fn print_tau_leg(data: &serde_json::Value) {
+    let state = data.get("tau_state").and_then(|v| v.as_str()).unwrap_or("");
+    let sample_rate = data.get("tau_sample_rate").and_then(|v| v.as_u64());
+    let period_size = data.get("tau_period_size").and_then(|v| v.as_u64());
+    let conditions = match (sample_rate, period_size) {
+        (Some(sr), Some(p)) => format!("{sr} Hz, period {p}"),
+        (Some(sr), None) => format!("{sr} Hz"),
+        (None, _) => String::new(),
+    };
+    match state {
+        "measured" => match data.get("tau_s").and_then(|v| v.as_f64()) {
+            Some(tau_s) => {
+                println!(
+                    "  {:<8}{:.4} ms   (measured, {conditions})",
+                    "Delay:",
+                    tau_s * 1000.0
+                );
+            }
+            None => println!("  {:<8}not measured", "Delay:"),
+        },
+        "error" => {
+            // A real measurement failure with a loopback present — state
+            // the observed cause, unlike the no-loopback case below where
+            // the daemon has no cause to report, only an observation.
+            let msg = data
+                .get("tau_error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("measurement failed");
+            println!("  {:<8}not measured ({msg})", "Delay:");
+        }
+        // "not_measured_no_loopback" and anything unrecognised (older
+        // daemon without this field): state the observation, not an
+        // inferred cause — `is_loopback` is what the daemon saw, not a
+        // claim about physical wiring the instrument cannot verify.
+        _ => println!(
+            "  {:<8}not measured (loopback not detected this run)",
+            "Delay:"
+        ),
     }
 }
 

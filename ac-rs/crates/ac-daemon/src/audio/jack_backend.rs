@@ -557,6 +557,14 @@ impl AudioEngine for JackEngine {
         "jack"
     }
 
+    fn period_size(&self) -> Option<u32> {
+        // Queried fresh from the live client, never cached — a running
+        // jackd's buffer size can change mid-session (see trait docs).
+        self._async_client
+            .as_ref()
+            .map(|ac| ac.as_client().buffer_size())
+    }
+
     fn playback_ports(&self) -> Vec<String> {
         // IS_INPUT | IS_PHYSICAL — JACK's `IS_INPUT` flag is "audio
         // flows INTO this port", so without `IS_PHYSICAL` the query
