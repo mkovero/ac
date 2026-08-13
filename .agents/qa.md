@@ -31,6 +31,8 @@ not compile. No CI here, so this command is the only thing that catches it.
 
 Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
+**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and two papers alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `Fundamentals_of_modern_audio_measurement.pdf` exists at both `stddocs/` and `stddocs/iec-full/` with **different hashes** — same name, different content — so a path guessed from the filename can reach the wrong document without erroring. Copy the cell.
+
 ### normative standards
 
 | standard | file | applies to |
@@ -42,6 +44,9 @@ Source docs in `stddocs/` at repo root. Read relevant standard before reviewing 
 | IEC 61672-1:2013 | `stddocs/IEC-61672-1-2013.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
 | ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
 | ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
+| ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
+| ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
+| ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
 
 ### reference reading (non-normative)
 
@@ -85,6 +90,11 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 - Integrated loudness expressed as `LUFS` (not `LKFS` — both used in wild, LUFS is current preferred term per BS.1770-5 §3)
 - True-peak expressed as `dBTP`, not `dBFS`
 - Gating behaviour (absolute + relative gates) match §2.7 if implemented
+
+**ISO 18233** apply to swept-sine / deterministic-signal measurement. It is a *substitution* standard — §1 gives methods used "as substitutes for measurement methods specified in standards covering classical methods", and §9(c) require the report name the applicable classical standard. It never stands alone. Check:
+- A room measurement cite ISO 18233 **and** the classical standard it substitutes for (ISO 3382-1 or 3382-2). One without the other is incomplete.
+- A quasi-anechoic loudspeaker / PA measurement cite **neither** — no classical method in §1's list covers it. That case want IEC 60268-21, which is not held. AES17-2015 A.4 + Farina remain its citation.
+- Annex B is normative. Clause strings for it must not say "(informative)"; that qualifier belongs to AES17 A.4 and IEC 61260-1 Annex G.
 
 ### standards check procedure
 
