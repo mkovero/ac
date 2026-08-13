@@ -96,6 +96,29 @@ fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
     Ok(offset_samples as f64 / sr as f64)
 }
 
+/// Turn the loopback flag established at step 2 into the `tau_state` /
+/// `tau_s` / `tau_error` triple `calibrate` reports — the exact decision
+/// #281 QA flagged as untestable because it was inlined in the worker
+/// closure, reachable only through a full daemon spawn. `measure` is only
+/// called when `is_loopback`, matching the worker's original behaviour of
+/// never running the τ sweep on a run with no loopback detected.
+fn tau_result(
+    is_loopback: bool,
+    measure: impl FnOnce() -> anyhow::Result<f64>,
+) -> (&'static str, Option<f64>, Option<String>) {
+    if !is_loopback {
+        return ("not_measured_no_loopback", None, None);
+    }
+    match measure() {
+        Ok(t) => ("measured", Some(t), None),
+        Err(e) => (
+            "error",
+            None,
+            Some(format!("\u{3c4} measurement failed: {e}")),
+        ),
+    }
+}
+
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
     let cfg = state.cfg.lock().unwrap().clone();
@@ -243,19 +266,10 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             output_port: out_port.clone(),
             input_port: in_port.clone(),
         };
-        let (tau_state, tau_s, tau_err): (&str, Option<f64>, Option<String>) = if is_loopback {
+        let (tau_state, tau_s, tau_err) = tau_result(is_loopback, || {
             let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
-            match measure_tau(&mut *eng, amp) {
-                Ok(t) => ("measured", Some(t), None),
-                Err(e) => (
-                    "error",
-                    None,
-                    Some(format!("\u{3c4} measurement failed: {e}")),
-                ),
-            }
-        } else {
-            ("not_measured_no_loopback", None, None)
-        };
+            measure_tau(&mut *eng, amp)
+        });
 
         eng.set_silence();
         eng.stop();
@@ -580,4 +594,49 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("calibrate_spl".to_string(), worker);
     }
     json!({"ok": true})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #281 QA correctness issue 3: the no-loopback path is hard to drive
+    /// end-to-end under `--fake-audio` (the fake backend's step-2 capture
+    /// always reads as loopback-shaped), so pin the decision down directly
+    /// instead. `measure` must not run at all when there's no loopback.
+    #[test]
+    fn tau_result_no_loopback_short_circuits_without_measuring() {
+        let mut called = false;
+        let (state, tau_s, err) = tau_result(false, || {
+            called = true;
+            Ok(0.001)
+        });
+        assert_eq!(state, "not_measured_no_loopback");
+        assert_eq!(tau_s, None);
+        assert_eq!(err, None);
+        assert!(
+            !called,
+            "measure must not run when no loopback was detected"
+        );
+    }
+
+    #[test]
+    fn tau_result_loopback_ok_reports_measured() {
+        let (state, tau_s, err) = tau_result(true, || Ok(0.000_667));
+        assert_eq!(state, "measured");
+        assert_eq!(tau_s, Some(0.000_667));
+        assert_eq!(err, None);
+    }
+
+    #[test]
+    fn tau_result_loopback_err_reports_error_state_and_message() {
+        let (state, tau_s, err) = tau_result(true, || Err(anyhow::anyhow!("timeout")));
+        assert_eq!(state, "error");
+        assert_eq!(tau_s, None);
+        let msg = err.expect("error message present on failure");
+        assert!(
+            msg.contains("timeout"),
+            "error message should name the failure: {msg}"
+        );
+    }
 }
