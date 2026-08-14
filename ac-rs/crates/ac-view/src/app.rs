@@ -3,7 +3,7 @@
 //! `eframe`/`egui::Context` directly — everything else in the crate is
 //! toolkit-agnostic and unit-testable without a window.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ac_core::visualize::weighting_curves::WeightingCurve;
 use ac_scene::Scene;
@@ -12,6 +12,15 @@ use crate::keys::{bindings_for, Action};
 use crate::session::{ConnectionState, Session};
 use crate::view::{draw_view, SpectrumViewState, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
+
+/// Grace window a run of `WireFrame`-parse failures must clear before the
+/// status line flips from `live` to `malformed` (#193) — a single bad
+/// frame in an otherwise-healthy stream must not flicker the status.
+/// Same magnitude as `Session`'s `DISCONNECT_AFTER`, by the UX design's
+/// reasoning (no second unexplained number); tracked as its own constant
+/// because the two gate different failure classes — this one is the
+/// `WireFrame` schema boundary, that one is raw socket silence.
+const MALFORMED_GRACE: Duration = Duration::from_secs(10);
 
 pub struct AcViewApp {
     session: Option<Session>,
@@ -35,6 +44,16 @@ pub struct AcViewApp {
     /// reason: it is time-dependent, so it cannot be rebuilt from the last
     /// frame alone.
     fault: ac_scene::FaultState,
+    /// Consecutive DATA frames since the last one that parsed into a
+    /// `WireFrame` — resets to 0 on every successful parse (#193). Distinct
+    /// from `Session::malformed_frames`, which counts a different failure
+    /// class one layer down (wire/topic-level decode, `Recv::Malformed`) —
+    /// this counts frames that decoded fine off the wire but failed the
+    /// `WireFrame` schema.
+    frame_parse_failures: u32,
+    /// When the current parse-failure streak started, so `MALFORMED_GRACE`
+    /// can be measured from it. `None` while the streak is 0.
+    first_malformed_since: Option<Instant>,
     help_open: bool,
     /// The settings overlay (`G`, transfer view). `None` = closed.
     settings: Option<crate::settings::SettingsOverlay>,
@@ -70,6 +89,8 @@ impl AcViewApp {
                 ac_scene::MeterState::default(),
             ),
             fault: ac_scene::FaultState::default(),
+            frame_parse_failures: 0,
+            first_malformed_since: None,
             help_open: false,
             settings: None,
             weighting: WeightingCurve::Z,
@@ -110,6 +131,93 @@ impl AcViewApp {
     /// changed) cannot: that the changed mode failed to reach the scene.
     pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
         self.transfer_scene.as_ref()
+    }
+
+    /// Parse one raw DATA-topic value into a `WireFrame`, updating the
+    /// consecutive-failure streak that backs the `malformed` status state
+    /// (#193). This is the actual ingest boundary — both the live drain
+    /// loop in `ui()` and the headless test below go through it, so a
+    /// test exercises the same `serde_json::from_value` failure path a
+    /// real malformed frame hits. Returns `true` if the frame was
+    /// accepted (`self.last_frame` updated).
+    fn ingest_raw_frame(&mut self, frame: serde_json::Value, now: Instant) -> bool {
+        match serde_json::from_value::<ac_scene::WireFrame>(frame) {
+            Ok(wire_frame) => {
+                self.last_frame = Some(wire_frame);
+                self.frame_parse_failures = 0;
+                self.first_malformed_since = None;
+                true
+            }
+            Err(_) => {
+                if self.frame_parse_failures == 0 {
+                    self.first_malformed_since = Some(now);
+                }
+                self.frame_parse_failures += 1;
+                false
+            }
+        }
+    }
+
+    /// Whether the parse-failure streak has cleared `MALFORMED_GRACE` —
+    /// the gate between "one bad frame" (ignored) and "not rendering"
+    /// (reported).
+    fn malformed_active(&self, now: Instant) -> bool {
+        self.frame_parse_failures > 0
+            && self
+                .first_malformed_since
+                .is_some_and(|t| now.duration_since(t) >= MALFORMED_GRACE)
+    }
+
+    /// Render the status line for a given raw connection state — split out
+    /// from `ui()` so a headless test can drive the `malformed` branch
+    /// with an explicit `ConnectionState::Live` instead of needing a real
+    /// ZMQ session (`Session::connection_state` is not constructible
+    /// without a socket).
+    ///
+    /// A real `Disconnected` transition clears the parse-failure streak
+    /// (#301 review): `Session::connection_state()` only reports
+    /// `Disconnected` once frames stop arriving entirely for
+    /// `DISCONNECT_AFTER`, so a streak that was building pre-outage does
+    /// not describe anything "consecutive" once the session actually
+    /// dropped and came back — carrying it forward would report a stale
+    /// count and skip `MALFORMED_GRACE` on the first frame of a new run.
+    fn status_for_state(&mut self, state: ConnectionState, now: Instant) -> String {
+        match state {
+            ConnectionState::NoSession => "no session".to_string(),
+            ConnectionState::Disconnected => {
+                self.frame_parse_failures = 0;
+                self.first_malformed_since = None;
+                format!(
+                    "disconnected — {}:{} not responding",
+                    self.endpoint.host, self.endpoint.ctrl_port
+                )
+            }
+            ConnectionState::Live => {
+                if self.malformed_active(now) {
+                    format!(
+                        "malformed — {}:{} — {} consecutive frames dropped, not rendering",
+                        self.endpoint.host, self.endpoint.ctrl_port, self.frame_parse_failures
+                    )
+                } else {
+                    format!("live — {}:{}", self.endpoint.host, self.endpoint.ctrl_port)
+                }
+            }
+        }
+    }
+
+    /// Test-only entry point onto [`Self::ingest_raw_frame`] — the raw-JSON
+    /// seam the parse-failure path needs, since `ingest_frame_for_test`
+    /// below takes an already-parsed `WireFrame` and so cannot exercise a
+    /// malformed one.
+    #[cfg(test)]
+    pub(crate) fn ingest_raw_for_test(&mut self, frame: serde_json::Value, now: Instant) -> bool {
+        self.ingest_raw_frame(frame, now)
+    }
+
+    /// Test-only entry point onto [`Self::status_for_state`].
+    #[cfg(test)]
+    pub(crate) fn status_for_test(&mut self, state: ConnectionState, now: Instant) -> String {
+        self.status_for_state(state, now)
     }
 
     /// Feed one wire frame directly, bypassing the ZMQ session — the
@@ -538,9 +646,18 @@ impl eframe::App for AcViewApp {
             // for as long as that held, so treat it as load-bearing rather
             // than descriptive — if `poll_frame`'s contract changes back,
             // this loop silently stops draining again.
+            //
+            // Collected first, then fed through `ingest_raw_frame` below:
+            // that call needs `&mut self` for the parse-failure streak
+            // (#193), which can't overlap `session`'s own `&mut self.session`
+            // borrow above.
+            let mut drained = Vec::new();
             while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
-                if let Ok(wire_frame) = serde_json::from_value::<ac_scene::WireFrame>(frame) {
-                    self.last_frame = Some(wire_frame);
+                drained.push(frame);
+            }
+            let now = std::time::Instant::now();
+            for frame in drained {
+                if self.ingest_raw_frame(frame, now) {
                     got_new_frame = true;
                 }
             }
@@ -590,18 +707,7 @@ impl eframe::App for AcViewApp {
 
         let status = match &self.session {
             None => "no session".to_string(),
-            Some(s) => match s.connection_state() {
-                ConnectionState::NoSession => "no session".to_string(),
-                ConnectionState::Live => {
-                    format!("live — {}:{}", self.endpoint.host, self.endpoint.ctrl_port)
-                }
-                ConnectionState::Disconnected => {
-                    format!(
-                        "disconnected — {}:{} not responding",
-                        self.endpoint.host, self.endpoint.ctrl_port
-                    )
-                }
-            },
+            Some(s) => self.status_for_state(s.connection_state(), std::time::Instant::now()),
         };
         ui.label(status);
         draw_view(
@@ -913,6 +1019,14 @@ mod tests {
     }
 
     fn transfer_frame() -> ac_scene::WireFrame {
+        serde_json::from_value(transfer_frame_json()).expect("wire frame")
+    }
+
+    /// The raw wire JSON `transfer_frame` parses — split out so a test can
+    /// mutate it (e.g. drop a required field) before it reaches
+    /// `serde_json::from_value`, exercising the same boundary the app's
+    /// ingest path does.
+    fn transfer_frame_json() -> serde_json::Value {
         // A mis-estimated delay so the wire carries non-zero phase and
         // Session (τ_derot 0) differs from the other modes — otherwise
         // cycling would be a no-op and the test could not fail on the bug
@@ -966,7 +1080,7 @@ mod tests {
             // What the display actually draws (built above).
             "mtw": mtw
         });
-        serde_json::from_value(json).expect("wire frame")
+        json
     }
 
     // Scene-accessor AC (no shape scraping): a derot keypress must change
@@ -1226,5 +1340,182 @@ mod tests {
         });
         app.ingest_frame_for_test(transfer_frame(), 0.0);
         assert_eq!(app.current_transfer_scene().unwrap().fault, None);
+    }
+
+    // #193: the status line must say `malformed`, with a count, once a run
+    // of frames that fail the `WireFrame` schema clears the grace window —
+    // driven through `ingest_raw_for_test` (the raw-JSON boundary), not
+    // `ingest_frame_for_test`, so the test exercises the same
+    // `serde_json::from_value` failure #192's blank-but-"live" view hid.
+    #[test]
+    fn a_sustained_run_of_malformed_frames_flips_status_to_malformed_with_a_count() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        // Missing `sr`, a required field — fails to deserialize into
+        // `WireFrame` rather than being silently dropped and forgotten.
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+
+        for _ in 0..7 {
+            assert!(
+                !app.ingest_raw_for_test(bad.clone(), t0),
+                "a frame missing `sr` must fail to parse"
+            );
+        }
+        assert_eq!(app.frame_parse_failures, 7);
+
+        // Before the grace window clears, the status must still read
+        // `live` — a run of bad frames must not out-race the grace period.
+        assert_eq!(
+            app.status_for_test(
+                ConnectionState::Live,
+                t0 + MALFORMED_GRACE - Duration::from_millis(1)
+            ),
+            "live — localhost:5556",
+            "status flipped before the grace window cleared"
+        );
+
+        // Once the grace window clears, `malformed` replaces `live` and
+        // carries the streak count — `live` must not appear while every
+        // frame is being dropped (acceptance criterion, verbatim).
+        let status = app.status_for_test(ConnectionState::Live, t0 + MALFORMED_GRACE);
+        assert_eq!(
+            status,
+            "malformed — localhost:5556 — 7 consecutive frames dropped, not rendering"
+        );
+    }
+
+    // A single dropped frame in an otherwise-healthy stream must not
+    // flicker the status: one bad frame followed by a good one, well
+    // inside the grace window, must never read `malformed` — the good
+    // frame clears the streak before the grace gate ever gets to fire.
+    #[test]
+    fn a_single_malformed_frame_followed_by_a_good_one_never_flips_the_status() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+
+        app.ingest_raw_for_test(bad, t0);
+        assert!(app.ingest_raw_for_test(transfer_frame_json(), t0 + Duration::from_millis(50)));
+
+        // Checked at every point up to and past the grace window: the
+        // streak was cleared by the good frame, so it never fires.
+        for elapsed in [
+            Duration::from_millis(50),
+            MALFORMED_GRACE,
+            MALFORMED_GRACE * 10,
+        ] {
+            assert_eq!(
+                app.status_for_test(ConnectionState::Live, t0 + elapsed),
+                "live — localhost:5556",
+                "a single glitch flickered the status at t0+{elapsed:?}"
+            );
+        }
+    }
+
+    // The happy path (AC): a run of good frames reports live-and-rendering
+    // with no false `malformed` indicator, and a parse success clears a
+    // prior streak instead of leaving a stale failure count behind it.
+    #[test]
+    fn good_frames_report_live_and_clear_a_prior_malformed_streak() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+        for _ in 0..3 {
+            app.ingest_raw_for_test(bad.clone(), t0);
+        }
+        assert_eq!(app.frame_parse_failures, 3);
+
+        assert!(app.ingest_raw_for_test(transfer_frame_json(), t0 + MALFORMED_GRACE));
+        assert_eq!(
+            app.frame_parse_failures, 0,
+            "a good parse must reset the streak"
+        );
+        assert_eq!(
+            app.status_for_test(ConnectionState::Live, t0 + MALFORMED_GRACE),
+            "live — localhost:5556",
+            "status must not stay malformed after a good frame"
+        );
+    }
+
+    // connected-but-no-frames (the third AC state) is `Disconnected`,
+    // already distinct from both `live` and the new `malformed` — this
+    // pins that a malformed streak never masks it, since `Disconnected`
+    // only happens once the raw socket itself has gone quiet.
+    #[test]
+    fn disconnected_state_is_unaffected_by_a_malformed_streak() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+        for _ in 0..3 {
+            app.ingest_raw_for_test(bad.clone(), t0);
+        }
+        assert_eq!(
+            app.status_for_test(ConnectionState::Disconnected, t0 + MALFORMED_GRACE),
+            "disconnected — localhost:5556 not responding"
+        );
+    }
+
+    // A real disconnect must not let a stale streak fast-path the grace
+    // window on the next session: a malformed streak from before an outage
+    // must not survive it, and the first post-reconnect frame must not
+    // skip MALFORMED_GRACE (#301 review).
+    #[test]
+    fn a_streak_does_not_survive_a_real_disconnect() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+
+        // Streak builds and clears the grace window before the outage.
+        for _ in 0..5 {
+            app.ingest_raw_for_test(bad.clone(), t0);
+        }
+        assert_eq!(
+            app.status_for_test(ConnectionState::Live, t0 + MALFORMED_GRACE),
+            "malformed — localhost:5556 — 5 consecutive frames dropped, not rendering"
+        );
+
+        // The daemon actually goes away — real disconnect, no frames at all.
+        let t_reconnect = t0 + MALFORMED_GRACE + Duration::from_secs(15);
+        assert_eq!(
+            app.status_for_test(ConnectionState::Disconnected, t_reconnect),
+            "disconnected — localhost:5556 not responding"
+        );
+
+        // Session resumes; first frame back is bad again. This is a *new*
+        // run — it must get its own grace window, not inherit the old one.
+        assert!(!app.ingest_raw_for_test(bad, t_reconnect));
+        assert_eq!(
+            app.status_for_test(
+                ConnectionState::Live,
+                t_reconnect + Duration::from_millis(1)
+            ),
+            "live — localhost:5556",
+            "post-reconnect streak reused the pre-outage grace timer"
+        );
     }
 }
