@@ -332,7 +332,7 @@ against:
 | `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | `stddocs/iec-full/aes17_2020_…pdf` |
 | `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | `stddocs/ITU-R BS.468-4.pdf` |
 | `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | `stddocs/ITU-R BS.1770-5.pdf` + EBU Tech 3341/3342 conformance cases |
-| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` |
+| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`; `stddocs/iso-full/ISO18233.pdf` (Annex B pending human cross-check, `verified: false`) |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical

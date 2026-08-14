@@ -490,16 +490,27 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
 
 /// Citation for a `MeasurementReport` emitted from a Farina-sweep run.
 ///
-/// The Farina technique is not covered by an IEC or AES standard; the
-/// canonical reference is the AES 108th Convention preprint #5093 by
+/// Two standards apply, for two different things. The theoretical basis —
+/// the log sweep, the closed-form inverse filter, the harmonic-order
+/// offsets — is Farina's; it is not covered by an IEC or AES standard, so
+/// the canonical reference is the AES 108th Convention preprint #5093 by
 /// Angelo Farina, "Simultaneous measurement of impulse response and
-/// distortion with a swept-sine technique" (Paris, 2000). Verified
-/// against the full preprint PDF under `stddocs/iec-full/`.
+/// distortion with a swept-sine technique" (Paris, 2000). Verified against
+/// the full preprint PDF under `stddocs/iec-full/`.
+///
+/// The swept-sine method itself, separately, is now covered by a normative
+/// standard: ISO 18233:2006 Annex B (normative), "Swept-sine method". This
+/// issue adds that reference; it does not replace the preprint, which
+/// remains the correct citation for the theoretical basis.
+///
+/// `verified` covers the whole citation. It stays `false` until a human
+/// has cross-checked the Annex B text against `stddocs/iso-full/` — an
+/// agent may prepare this citation but must not flip that flag.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "Farina, AES 108th Convention preprint #5093 (2000)".into(),
-        clause: "§2 Theoretical basis (log sweep, inverse filter, harmonic offsets)".into(),
-        verified: true,
+        standard: "Farina, AES 108th Convention preprint #5093 (2000); ISO 18233:2006 Annex B (normative)".into(),
+        clause: "§2 Theoretical basis (log sweep, inverse filter, harmonic offsets); Annex B (normative) Swept-sine method".into(),
+        verified: false,
     }
 }
 
@@ -698,9 +709,17 @@ mod tests {
     #[test]
     fn citation_shape() {
         let c = citation();
+        // Preprint: theoretical basis. Must not be dropped by this change.
         assert!(c.standard.contains("Farina"));
         assert!(c.clause.contains("§2"));
-        assert!(c.verified);
+        // ISO 18233:2006 Annex B: normative swept-sine method, added
+        // alongside the preprint (#291).
+        assert!(c.standard.contains("ISO 18233:2006"));
+        assert!(c.standard.contains("Annex B"));
+        assert!(c.clause.contains("Annex B"));
+        // Human gate: Annex B text not yet cross-checked, so the combined
+        // citation is not `verified` yet. An agent must not flip this.
+        assert!(!c.verified);
     }
 
     // ─── check_tail_decay (#282 acceptance criterion 6) ────────────
