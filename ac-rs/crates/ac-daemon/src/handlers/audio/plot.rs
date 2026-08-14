@@ -533,6 +533,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(-6.0);
     let tail_s = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
     let n_harmonics = cmd.get("n_harmonics").and_then(Value::as_u64).unwrap_or(5) as usize;
+    // 4096 is a request, not a promise: `extract_irs` clamps each order's
+    // gate down to the spacing of its own nearest neighbour, so the linear
+    // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
+    // away at these defaults) while the tighter high orders get 2818 /
+    // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
+    // the `measurement/impulse_response` envelope and, when any order was
+    // shortened, in the report notes. See issue #278.
     let window_len = cmd
         .get("window_len")
         .and_then(Value::as_u64)
@@ -635,6 +642,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             Ok(check) => check.note(),
             Err(e) => format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
         };
+        let mut notes = vec![decay_note];
 
         let irs = match extract_irs(&full, &params, n_harmonics.max(1), window_len) {
             Ok(r) => r,
@@ -647,6 +655,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 return;
             }
         };
+        if let Some(note) = irs.clamp_note() {
+            notes.push(note);
+        }
 
         let data = MeasurementData::ImpulseResponse {
             sample_rate_hz: sr,
@@ -656,12 +667,18 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             linear_ir: irs.linear.clone(),
             harmonics: irs.harmonics.clone(),
         };
+        // Gate lengths ride alongside `data` rather than inside it: a
+        // consumer that assumes every IR is `window_len` long would read
+        // the clamped harmonics wrong, and `MeasurementData` is a
+        // versioned schema this doesn't need to bump.
         send_pub(
             &pub_tx,
             "measurement/impulse_response",
             &json!({
                 "cmd": "plot_ir",
                 "data": &data,
+                "window_len_requested": irs.window_len_requested,
+                "window_len_used": irs.window_len_used,
             }),
         );
 
@@ -698,7 +715,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 standard: vec![sweep_citation()],
                 gate: None,
             }],
-            notes: Some(decay_note),
+            notes: Some(notes.join(" ")),
             // plot_ir's IR isn't yet mic-curve-corrected (deferred from
             // #97 to a follow-up). The snapshot still captures the curve
             // provenance via `calibration.mic_response`; downstream

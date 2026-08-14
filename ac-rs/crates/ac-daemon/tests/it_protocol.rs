@@ -1498,6 +1498,93 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
+#[test]
+fn plot_ir_reports_the_gate_lengths_it_actually_used() {
+    // #278: `window_len` is a request. Adjacent harmonic orders would
+    // cross-contaminate if their gates overlapped, so each order is clamped
+    // to the spacing of its nearest neighbour. At 200 Hz–8 kHz over 0.5 s at
+    // 48 kHz, L = T/ln(f2/f1) = 135.5 ms, so Farina's Δt_k = L·ln(k) puts the
+    // order centres at [0, 4510, 7148, 9019, 10471] samples and the gaps at
+    // [4510, 2638, 1871, 1452].
+    //
+    // The linear IR must survive at the full 4096 — its only neighbour is
+    // order 2, 4510 samples away — while orders 2..5 shrink. A global clamp
+    // to the narrowest gap would cut the linear IR to 1452 and is what this
+    // test is here to catch.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 4096,
+        "n_harmonics": 5,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let expected_used = json!([4096, 2638, 1871, 1452, 1452]);
+    let mut got_ir = false;
+    let mut got_report = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(got_ir && got_report) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                assert_eq!(v["window_len_requested"], json!(4096));
+                assert_eq!(
+                    v["window_len_used"], expected_used,
+                    "per-order gate lengths must be reported, not inferred"
+                );
+                let ir = v["data"]["linear_ir"].as_array().expect("linear_ir array");
+                assert_eq!(
+                    ir.len(),
+                    4096,
+                    "linear IR must keep the requested window; only the \
+                     tight high orders are constrained"
+                );
+                let harmonics = v["data"]["harmonics"].as_array().expect("harmonics");
+                for h in harmonics {
+                    let order = h["order"].as_u64().expect("order") as usize;
+                    let n = h["samples"].as_array().expect("samples").len();
+                    assert_eq!(
+                        json!(n),
+                        expected_used[order - 1],
+                        "order {order} gate length disagrees with window_len_used"
+                    );
+                }
+                got_ir = true;
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                // A shortened gate changes what the harmonic IRs mean, so
+                // it has to reach the operator rather than being applied
+                // silently.
+                let notes = v["report"]["notes"].as_str().expect("notes present");
+                assert!(notes.contains("clamped"), "notes: {notes:?}");
+                assert!(notes.contains("4096"), "notes: {notes:?}");
+                assert!(notes.contains("order 2"), "notes: {notes:?}");
+                assert!(
+                    !notes.contains("order 1 \u{2192}"),
+                    "the unclamped linear IR must not be listed: {notes:?}"
+                );
+                // The #282 tail-decay verdict shares the field and must
+                // not have been displaced by the clamp note.
+                assert!(notes.contains("18233"), "notes: {notes:?}");
+                got_report = true;
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_ir, "never saw measurement/impulse_response frame");
+    assert!(got_report, "never saw measurement/report frame");
+}
+
 // ---------------------------------------------------------------------------
 // Time-integration — set_time_integration / get_time_integration / reset_leq.
 // See issue #62.
