@@ -173,13 +173,25 @@ impl AcViewApp {
     /// with an explicit `ConnectionState::Live` instead of needing a real
     /// ZMQ session (`Session::connection_state` is not constructible
     /// without a socket).
-    fn status_for_state(&self, state: ConnectionState, now: Instant) -> String {
+    ///
+    /// A real `Disconnected` transition clears the parse-failure streak
+    /// (#301 review): `Session::connection_state()` only reports
+    /// `Disconnected` once frames stop arriving entirely for
+    /// `DISCONNECT_AFTER`, so a streak that was building pre-outage does
+    /// not describe anything "consecutive" once the session actually
+    /// dropped and came back — carrying it forward would report a stale
+    /// count and skip `MALFORMED_GRACE` on the first frame of a new run.
+    fn status_for_state(&mut self, state: ConnectionState, now: Instant) -> String {
         match state {
             ConnectionState::NoSession => "no session".to_string(),
-            ConnectionState::Disconnected => format!(
-                "disconnected — {}:{} not responding",
-                self.endpoint.host, self.endpoint.ctrl_port
-            ),
+            ConnectionState::Disconnected => {
+                self.frame_parse_failures = 0;
+                self.first_malformed_since = None;
+                format!(
+                    "disconnected — {}:{} not responding",
+                    self.endpoint.host, self.endpoint.ctrl_port
+                )
+            }
             ConnectionState::Live => {
                 if self.malformed_active(now) {
                     format!(
@@ -204,7 +216,7 @@ impl AcViewApp {
 
     /// Test-only entry point onto [`Self::status_for_state`].
     #[cfg(test)]
-    pub(crate) fn status_for_test(&self, state: ConnectionState, now: Instant) -> String {
+    pub(crate) fn status_for_test(&mut self, state: ConnectionState, now: Instant) -> String {
         self.status_for_state(state, now)
     }
 
@@ -1460,6 +1472,50 @@ mod tests {
         assert_eq!(
             app.status_for_test(ConnectionState::Disconnected, t0 + MALFORMED_GRACE),
             "disconnected — localhost:5556 not responding"
+        );
+    }
+
+    // A real disconnect must not let a stale streak fast-path the grace
+    // window on the next session: a malformed streak from before an outage
+    // must not survive it, and the first post-reconnect frame must not
+    // skip MALFORMED_GRACE (#301 review).
+    #[test]
+    fn a_streak_does_not_survive_a_real_disconnect() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 5556,
+            data_port: 5557,
+        });
+        let t0 = Instant::now();
+        let mut bad = transfer_frame_json();
+        bad.as_object_mut().unwrap().remove("sr");
+
+        // Streak builds and clears the grace window before the outage.
+        for _ in 0..5 {
+            app.ingest_raw_for_test(bad.clone(), t0);
+        }
+        assert_eq!(
+            app.status_for_test(ConnectionState::Live, t0 + MALFORMED_GRACE),
+            "malformed — localhost:5556 — 5 consecutive frames dropped, not rendering"
+        );
+
+        // The daemon actually goes away — real disconnect, no frames at all.
+        let t_reconnect = t0 + MALFORMED_GRACE + Duration::from_secs(15);
+        assert_eq!(
+            app.status_for_test(ConnectionState::Disconnected, t_reconnect),
+            "disconnected — localhost:5556 not responding"
+        );
+
+        // Session resumes; first frame back is bad again. This is a *new*
+        // run — it must get its own grace window, not inherit the old one.
+        assert!(!app.ingest_raw_for_test(bad, t_reconnect));
+        assert_eq!(
+            app.status_for_test(
+                ConnectionState::Live,
+                t_reconnect + Duration::from_millis(1)
+            ),
+            "live — localhost:5556",
+            "post-reconnect streak reused the pre-outage grace timer"
         );
     }
 }
