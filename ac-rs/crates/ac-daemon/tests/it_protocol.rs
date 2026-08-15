@@ -1482,7 +1482,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(4));
+                assert_eq!(v["report"]["schema_version"], json!(5));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -1496,6 +1496,84 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     }
     assert!(got_ir, "never saw measurement/impulse_response frame");
     assert!(got_report, "never saw measurement/report frame");
+}
+
+/// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
+/// the entry it must hit was written by `calibrate`. Nothing but a test
+/// couples those two condition tuples — they are built in different
+/// handlers, from different locals — so a drift in either (a port
+/// resolved differently, a device field read from elsewhere) would leave
+/// every `plot_ir` reporting "distance unavailable" forever, with no
+/// error anywhere. The failure is silent by construction, so it needs an
+/// explicit check that the round trip lands.
+#[test]
+fn plot_ir_resolves_the_tau_that_calibrate_stored() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    // 1. Measure τ. Both voltage prompts skipped — τ is keyed on
+    //    loopback detection, not on either reply (see
+    //    `calibrate_cheap_refresh_still_measures_tau`).
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    let stored_tau = done["tau_s"].as_f64().expect("tau_s");
+
+    // 2. Run an IR capture under the same conditions.
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+
+    let latency = &v["report"]["interface_latency"];
+    assert_eq!(
+        latency["state"],
+        json!("measured"),
+        "plot_ir did not match calibrate's stored τ — the two TauConditions \
+         tuples have drifted apart: {latency}"
+    );
+    let used_tau = latency["tau_s"].as_f64().expect("tau_s in report");
+    assert!(
+        (used_tau - stored_tau).abs() < 1e-12,
+        "plot_ir used τ {used_tau}, calibrate stored {stored_tau}"
+    );
+    // The provenance the printed distance names must be present, not just
+    // the number.
+    assert!(latency["measured_at"].is_string(), "{latency}");
+    assert_eq!(latency["method"], json!("farina_short_ess"), "{latency}");
+
+    // With a τ this close to the arrival (both are the same 32-sample
+    // fake loopback), the derived path length must land near zero — the
+    // fake backend has no acoustic path. A τ that failed to subtract
+    // would read ~0.23 m instead.
+    let report: ac_core::measurement::report::MeasurementReport =
+        serde_json::from_value(v["report"].clone()).expect("decode report");
+    match report.ir_arrival_distance() {
+        ac_core::measurement::report::ArrivalDistance::Known { distance_m, .. } => assert!(
+            distance_m.abs() < 0.05,
+            "fake loopback has no acoustic path, got {distance_m} m"
+        ),
+        other => panic!("expected a known distance, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1583,6 +1661,88 @@ fn plot_ir_reports_the_gate_lengths_it_actually_used() {
     }
     assert!(got_ir, "never saw measurement/impulse_response frame");
     assert!(got_report, "never saw measurement/report frame");
+}
+
+/// #283 × #278: the `GateParams` archived on the IR payload must describe
+/// the gate that actually ran, not the one that was asked for.
+///
+/// `window_len` is a request (#278) and the linear IR is clamped when
+/// order 2 sits closer than the requested length. Recording the request
+/// instead would archive a gate that never ran and an `f_low_hz` the
+/// payload does not meet — and `f_low_hz` is the number #280 stores
+/// precisely so a reader does not have to derive it.
+///
+/// The sweep is chosen so the two values differ: over 0.3 s from 200 Hz
+/// to 8 kHz, L = T/ln(f2/f1) = 81.3 ms, so Farina's Δt_2 = L·ln 2 puts
+/// order 2 about 2705 samples out — inside the requested 4096. An
+/// implementation that recorded `window_len` would report a 4096-sample
+/// gate and an f_low of 11.7 Hz here, both wrong.
+#[test]
+fn plot_ir_records_the_gate_it_used_not_the_one_requested() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.3,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 4096,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let mut used: Option<u64> = None;
+    let mut gate: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(used.is_some() && gate.is_some()) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                used = v["window_len_used"][0].as_u64();
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                gate = Some(v["report"]["data"][0]["gate"].clone());
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let used = used.expect("window_len_used[0] on the IR frame");
+    let gate = gate.expect("gate on the IR payload");
+
+    // The premise: this sweep really does clamp. Without this the test
+    // would pass against an implementation that records the request.
+    assert!(
+        used < 4096,
+        "sweep did not clamp the linear IR ({used} samples) — the test no \
+         longer distinguishes the recorded gate from the requested one"
+    );
+
+    let sr = 48_000.0;
+    let gate_length_s = gate["gate_length_s"].as_f64().expect("gate_length_s");
+    let f_low_hz = gate["f_low_hz"].as_f64().expect("f_low_hz");
+    let gate_start_s = gate["gate_start_s"].as_f64().expect("gate_start_s");
+
+    assert!(
+        (gate_length_s - used as f64 / sr).abs() < 1e-9,
+        "recorded gate_length_s {gate_length_s} does not match the {used} \
+         samples actually used"
+    );
+    assert!(
+        (f_low_hz - sr / used as f64).abs() < 1e-6,
+        "recorded f_low_hz {f_low_hz} does not match the gate that ran"
+    );
+    // The gate is centred on the zero-delay reference, so it opens half a
+    // window before it.
+    assert!(
+        (gate_start_s + (used / 2) as f64 / sr).abs() < 1e-9,
+        "recorded gate_start_s {gate_start_s} is not half a window early"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,7 +2542,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(4));
+                    assert_eq!(v["report"]["schema_version"], json!(5));
                     got_report = true;
                 }
             }

@@ -1024,11 +1024,50 @@ also stated in the report `notes`.
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "report": { "schema_version": 3, "notes": "ISO 18233 §6.3.2 ...", ... } }
+{ "cmd": "plot_ir", "report": { "schema_version": 5, "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }
 ```
+
+`notes` carries independent statements, **one per line**: the ISO 18233
+§6.3.2 tail-decay verdict *measured* from this capture; the #278 gate
+clamp note when any order was shortened; and the §B.5 statement that the
+tail past the peak is a linear-deconvolution artefact — a structural
+consequence of `deconvolve_full`, true regardless of what the other two
+came back as. None implies the others; a reader must not collapse them,
+and must split on `\n` rather than assuming a single sentence.
+
+The IR payload carries a `gate` block (`gate_start_s`, `gate_length_s`,
+`window_kind: "rectangular"`, `f_low_hz`) describing the window
+`extract_irs` applied to the *linear* IR, centred on the sweep endpoint.
+Its length is `window_len_used[0]` — the length order 1 actually got
+after #278's per-order clamp — not the requested `window_len`, which the
+clamp may have shortened. `f_low_hz` follows from that same length.
+
+`interface_latency` is the τ (interface round-trip latency) resolved for
+this capture — the field that lets an arrival be converted to a distance.
+It is a tagged union on `state`:
+
+```json
+// τ measured under exactly these conditions (device, backend, sample
+// rate, period size, port pair) by a prior `calibrate` run
+{ "state": "measured", "tau_s": 0.0011931, "measured_at": "<RFC3339>",
+  "method": "farina_short_ess", "backend": "jack", "sample_rate_hz": 48000,
+  "period_size": 1024, "output_port": "...", "input_port": "..." }
+
+// no exact match — never a nearest-neighbour or interpolated value
+{ "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
+```
+
+A reader must not derive a distance from the arrival when `state` is
+`unavailable`: the arrival still contains the uncorrected interface
+latency, which at 48 kHz is routinely tens of samples of phantom path.
+
+When `cfg.report_dir` is configured the daemon also writes the pair
+`<ISO8601>-plot_ir.json` and `<ISO8601>-plot_ir.csv` there (colons
+replaced with `-`), so the result survives the run without the client
+having to save anything.
 
 ---
 

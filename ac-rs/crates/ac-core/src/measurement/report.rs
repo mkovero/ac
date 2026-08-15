@@ -37,7 +37,16 @@ use serde::{Deserialize, Serialize};
 ///   Legacy v1/v2/v3 reports (where `data` is a bare object) still
 ///   decode: the object is wrapped into a single-element payload vec
 ///   with no citation and no gate (#280).
-pub const SCHEMA_VERSION: u32 = 4;
+/// - v5: new optional `interface_latency: InterfaceLatency` records the
+///   τ resolved for the capture — or the named reason none applied.
+///   Without it an archived arrival can never be converted to a path
+///   length, since τ is a property of the *(device, backend, sample
+///   rate, period size, port pair)* tuple and is not recoverable from
+///   the report otherwise (#283, consuming #281). Reports written at
+///   v1-v4 decode unchanged: the field defaults to `None`, which
+///   `ir_arrival_distance` reports as unavailable rather than deriving
+///   a distance from an uncorrected arrival.
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -56,6 +65,15 @@ pub struct MeasurementReport {
     /// geometry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<PositionSnapshot>,
+    /// Interface round-trip latency (τ) resolved for the capture that
+    /// produced this report (#281 measures it, #283 is its first
+    /// consumer). Carried in the archive because it is what turns a
+    /// recorded arrival into a path length: without it, a reader a year
+    /// later has an arrival that can never be converted to a distance.
+    /// `None` on reports written before v5 and on captures where τ was
+    /// never looked up at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_latency: Option<InterfaceLatency>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +151,45 @@ pub struct GateParams {
     /// (`f_low_hz = 1 / gate_length_s`). Stored, not left for the
     /// reader to recompute.
     pub f_low_hz: f64,
+}
+
+/// Interface round-trip latency (τ) as resolved for one capture. Either
+/// a τ measured under this run's exact conditions, or a statement of why
+/// none applies — never a nearest-match or interpolated value, matching
+/// [`crate::shared::calibration::Calibration::tau_for`]'s refusal rule
+/// (#281). Both cases are archived: "no τ" is itself provenance a reader
+/// needs, and is what stops a distance being derived downstream (#283).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum InterfaceLatency {
+    Measured(MeasuredLatency),
+    /// `reason` is the operator-facing text from
+    /// [`crate::shared::calibration::TauRefusal::message`], which names
+    /// the differing condition fields rather than asserting a cause.
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// A τ that matched this capture's conditions exactly. The conditions are
+/// flattened in rather than referenced, so the report stays readable
+/// without `cal.json` beside it — the same self-containment rule
+/// [`CalibrationSnapshot`] follows.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MeasuredLatency {
+    pub tau_s: f64,
+    /// RFC3339 timestamp of the τ measurement — not of this capture.
+    pub measured_at: String,
+    /// How τ was measured, e.g. `"farina_short_ess"`.
+    pub method: String,
+    pub backend: String,
+    pub sample_rate_hz: u32,
+    /// `None` means the backend cannot report one, not "unknown" — see
+    /// [`crate::shared::calibration::TauConditions::period_size`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_size: Option<u32>,
+    pub output_port: String,
+    pub input_port: String,
 }
 
 /// Environment + geometry captured with a report (#280): the knowable
@@ -491,6 +548,211 @@ impl MeasurementReport {
         }
         fs::write(path, json).with_context(|| format!("write {}", path.display()))
     }
+
+    /// Derived read-out quantities for the report's first
+    /// `ImpulseResponse` payload: arrival timing, peak magnitude,
+    /// pre-impulse SNR, and the time gate's low-frequency limit. `None`
+    /// when no payload carries an impulse response, or its linear IR is
+    /// empty (see issue #283).
+    pub fn ir_stats(&self) -> Option<IrStats> {
+        let payload = self
+            .data
+            .iter()
+            .find(|p| matches!(p.data, MeasurementData::ImpulseResponse { .. }))?;
+        let MeasurementData::ImpulseResponse {
+            sample_rate_hz,
+            linear_ir,
+            ..
+        } = &payload.data
+        else {
+            return None;
+        };
+        if linear_ir.is_empty() || *sample_rate_hz == 0 {
+            return None;
+        }
+        let window_len = linear_ir.len();
+        let (peak_index, peak_magnitude) =
+            linear_ir
+                .iter()
+                .enumerate()
+                .fold((0usize, 0.0_f64), |acc, (i, &v)| {
+                    let m = v.abs();
+                    if m > acc.1 {
+                        (i, m)
+                    } else {
+                        acc
+                    }
+                });
+
+        // `extract_irs` (`measurement::sweep`) centres the gate at the
+        // sweep endpoint — the position an identity (zero-delay) system
+        // would peak at — so the peak's offset from the window centre
+        // *is* the measured round-trip delay in samples.
+        let centre = window_len / 2;
+        let delay_samples = peak_index as i64 - centre as i64;
+        let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
+
+        // Pre-impulse noise floor: everything strictly before the peak,
+        // minus a small guard band so the peak's own skirt doesn't bias
+        // the floor estimate upward.
+        let guard = (window_len / 32).max(8);
+        let pre_end = peak_index.saturating_sub(guard);
+        let pre_region = &linear_ir[..pre_end];
+        let pre_impulse_snr_db = if pre_region.is_empty() {
+            f64::INFINITY
+        } else {
+            let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
+            let rms = mean_sq.sqrt();
+            if rms > 0.0 {
+                20.0 * (peak_magnitude / rms).log10()
+            } else {
+                f64::INFINITY
+            }
+        };
+
+        // Prefer the gate the producer actually applied. #280 stores
+        // `f_low_hz` on the payload precisely so a reader does not
+        // recompute it; falling back to `window_len / sample_rate_hz`
+        // only covers legacy (v1-v3) reports, where no gate was recorded
+        // and the rectangular `extract_irs` window is the only gate that
+        // could have produced this payload.
+        let (gate_window_s, gate_f_low_hz, gate_window_kind) = match &payload.gate {
+            Some(g) => (g.gate_length_s, g.f_low_hz, g.window_kind.clone()),
+            None => {
+                let len_s = window_len as f64 / *sample_rate_hz as f64;
+                (len_s, 1.0 / len_s, "rectangular (not recorded)".to_string())
+            }
+        };
+
+        Some(IrStats {
+            sample_rate_hz: *sample_rate_hz,
+            window_len,
+            peak_index,
+            peak_magnitude,
+            delay_samples,
+            arrival_s,
+            pre_impulse_snr_db,
+            gate_window_s,
+            gate_f_low_hz,
+            gate_window_kind,
+        })
+    }
+
+    /// Arrival converted to an acoustic path length, in metres, or the
+    /// reason it cannot be.
+    ///
+    /// The arrival [`IrStats::arrival_s`] reports is a *round-trip* figure:
+    /// it still contains the interface's own latency (τ). Subtracting a τ
+    /// measured under this run's exact conditions is the only thing that
+    /// turns it into a path length, so this returns
+    /// [`ArrivalDistance::Unavailable`] — never a number — when the report
+    /// carries no τ. Speed of sound comes from `position.temperature_c`
+    /// when the capture recorded one, else the 20 °C default (see
+    /// [`crate::shared::conversions::speed_of_sound_from_config`]).
+    pub fn ir_arrival_distance(&self) -> ArrivalDistance {
+        let Some(stats) = self.ir_stats() else {
+            return ArrivalDistance::Unavailable {
+                reason: "report carries no impulse-response payload".to_string(),
+            };
+        };
+        let tau = match &self.interface_latency {
+            Some(InterfaceLatency::Measured(m)) => m,
+            Some(InterfaceLatency::Unavailable { reason }) => {
+                return ArrivalDistance::Unavailable {
+                    reason: reason.clone(),
+                }
+            }
+            None => {
+                return ArrivalDistance::Unavailable {
+                    reason: "no interface latency (\u{3c4}) recorded with this measurement"
+                        .to_string(),
+                }
+            }
+        };
+        let c = crate::shared::conversions::speed_of_sound_from_config(
+            self.position.as_ref().and_then(|p| p.temperature_c),
+        );
+        ArrivalDistance::Known {
+            distance_m: (stats.arrival_s - tau.tau_s) * c,
+            speed_of_sound_m_s: c,
+            tau_s: tau.tau_s,
+            provenance: m_provenance(tau),
+        }
+    }
+}
+
+/// One-line provenance for a τ used in a distance derivation: when it was
+/// measured, by what method, and under which conditions. Named in full
+/// because a distance derived from someone else's τ is a different number
+/// — see [`crate::shared::calibration::TauConditions`].
+fn m_provenance(m: &MeasuredLatency) -> String {
+    format!(
+        "\u{3c4} = {:.4} ms, measured {} by {} on {} backend @ {} Hz, period {}, {} \u{2192} {}",
+        m.tau_s * 1000.0,
+        m.measured_at,
+        m.method,
+        m.backend,
+        m.sample_rate_hz,
+        m.period_size
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        m.output_port,
+        m.input_port,
+    )
+}
+
+/// Result of converting an IR arrival into an acoustic path length. A
+/// distance is either derived from a named τ or explicitly unavailable —
+/// there is deliberately no third case that returns an uncorrected
+/// arrival as if it were a distance (#283).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrivalDistance {
+    Known {
+        distance_m: f64,
+        speed_of_sound_m_s: f64,
+        tau_s: f64,
+        /// Human-readable τ provenance, for printing next to the number.
+        provenance: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// See [`MeasurementReport::ir_stats`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrStats {
+    pub sample_rate_hz: u32,
+    /// Length of the gated linear IR, in samples.
+    pub window_len: usize,
+    /// Index of the peak-magnitude sample within the gated IR.
+    pub peak_index: usize,
+    /// `|linear_ir[peak_index]|`.
+    pub peak_magnitude: f64,
+    /// `peak_index - window_len / 2` — signed offset of the peak from the
+    /// gate centre, in samples. Positive means the response arrived after
+    /// the zero-delay reference position.
+    pub delay_samples: i64,
+    /// `delay_samples / sample_rate_hz` — arrival time relative to the
+    /// gate's zero-delay reference. This is **not** acoustic path delay:
+    /// it still contains any uncorrected interface latency, which is why
+    /// it must not be converted to a distance without a calibrated τ.
+    pub arrival_s: f64,
+    /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
+    /// no pre-impulse energy was measurable at all (silent floor).
+    pub pre_impulse_snr_db: f64,
+    /// Gate window duration, in seconds — the recorded
+    /// [`GateParams::gate_length_s`] when the payload carries one.
+    pub gate_window_s: f64,
+    /// The lowest frequency for which one full period fits inside the
+    /// gate window. Read from [`GateParams::f_low_hz`] when recorded;
+    /// content below it is not reliably resolved by a gate this short.
+    pub gate_f_low_hz: f64,
+    /// Window shape the gate applied, from [`GateParams::window_kind`].
+    /// `"rectangular (not recorded)"` for legacy reports that stored no
+    /// gate — an inference from `extract_irs`, flagged as such so a
+    /// reader does not mistake it for a recorded value.
+    pub gate_window_kind: String,
 }
 
 #[cfg(test)]
@@ -517,6 +779,7 @@ mod tests {
             },
             calibration: None,
             position: None,
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse {
                     points: vec![
@@ -612,7 +875,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 4"));
+        assert!(json.contains("\"schema_version\": 5"));
     }
 
     #[test]
@@ -651,6 +914,7 @@ mod tests {
             },
             calibration: None,
             position: None,
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::SpectrumBands {
                     bpo: 3,
@@ -708,6 +972,7 @@ mod tests {
             },
             calibration: None,
             position: None,
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::ImpulseResponse {
                     sample_rate_hz: 48_000,
@@ -746,6 +1011,275 @@ mod tests {
         assert_eq!(csv.lines().count(), 12);
     }
 
+    // ─── `ir_stats` (#283) ────────────────────────────────────────────
+
+    /// Build an IR report with `window_len` samples, an impulse of
+    /// `peak_mag` at `peak_index`, and `noise` amplitude everywhere else
+    /// — enough signal shape to exercise `ir_stats` deterministically.
+    /// Carries no `gate`, so it also covers the legacy fallback path.
+    fn ir_report_with_peak(
+        window_len: usize,
+        peak_index: usize,
+        peak_mag: f64,
+        noise: f64,
+        sample_rate_hz: u32,
+    ) -> MeasurementReport {
+        let mut r = sample_impulse_response_report();
+        let mut ir = vec![noise; window_len];
+        ir[peak_index] = peak_mag;
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: ir,
+                harmonics: vec![],
+            },
+            standard: Vec::new(),
+            gate: None,
+        }];
+        r
+    }
+
+    #[test]
+    fn ir_stats_reports_delay_samples_relative_to_gate_centre() {
+        // Peak 32 samples after the window centre — the fake backend's
+        // fixed loopback delay (see `ac-daemon/src/audio/fake.rs`).
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre + 32, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().expect("impulse response data present");
+        assert_eq!(stats.delay_samples, 32);
+        assert!((stats.arrival_s - 32.0 / 48_000.0).abs() < 1e-12);
+        assert_eq!(stats.peak_index, centre + 32);
+        assert_eq!(stats.peak_magnitude, 1.0);
+    }
+
+    #[test]
+    fn ir_stats_delay_is_negative_when_peak_precedes_centre() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre - 10, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.delay_samples, -10);
+        assert!(stats.arrival_s < 0.0);
+    }
+
+    #[test]
+    fn ir_stats_pre_impulse_snr_reflects_noise_floor() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak of 1.0 against a 0.01 floor -> 20*log10(100) = 40 dB.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.01, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(
+            (stats.pre_impulse_snr_db - 40.0).abs() < 0.5,
+            "pre_impulse_snr_db = {}",
+            stats.pre_impulse_snr_db
+        );
+    }
+
+    #[test]
+    fn ir_stats_snr_is_infinite_over_true_silence() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(stats.pre_impulse_snr_db.is_infinite());
+    }
+
+    #[test]
+    fn ir_stats_falls_back_to_window_duration_when_no_gate_recorded() {
+        let r = ir_report_with_peak(4_800, 2_400, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        // 4800 samples @ 48 kHz = 100 ms window -> f_low = 10 Hz.
+        assert!((stats.gate_window_s - 0.1).abs() < 1e-12);
+        assert!((stats.gate_f_low_hz - 10.0).abs() < 1e-9);
+        // A legacy report's gate is inferred, and must say so — a reader
+        // must not take "rectangular" here for a recorded fact.
+        assert!(
+            stats.gate_window_kind.contains("not recorded"),
+            "inferred gate must be flagged: {}",
+            stats.gate_window_kind
+        );
+    }
+
+    /// The recorded gate wins over the `window_len / sample_rate` guess.
+    /// This is the case that separates the two: a gate whose recorded
+    /// `f_low_hz` and length disagree with what the IR length implies
+    /// (a half-length gate on a zero-padded payload) — if `ir_stats`
+    /// recomputed instead of reading, it would report 10 Hz, not 20.
+    #[test]
+    fn ir_stats_prefers_the_recorded_gate_over_the_ir_length() {
+        let mut r = ir_report_with_peak(4_800, 2_400, 1.0, 0.0, 48_000);
+        r.data[0].gate = Some(GateParams {
+            gate_start_s: 0.0,
+            gate_length_s: 0.05,
+            window_kind: "half-hann".into(),
+            f_low_hz: 20.0,
+        });
+        let stats = r.ir_stats().unwrap();
+        assert!((stats.gate_window_s - 0.05).abs() < 1e-12);
+        assert!((stats.gate_f_low_hz - 20.0).abs() < 1e-9);
+        assert_eq!(stats.gate_window_kind, "half-hann");
+    }
+
+    #[test]
+    fn ir_stats_none_for_non_impulse_response_report() {
+        let r = sample_report(); // FrequencyResponse variant
+        assert!(r.ir_stats().is_none());
+    }
+
+    /// A Farina capture emits several payloads; the impulse response is
+    /// not necessarily first. `ir_stats` must find it rather than read
+    /// `data[0]` and give up.
+    #[test]
+    fn ir_stats_finds_the_ir_payload_behind_another_payload() {
+        let mut r = ir_report_with_peak(1_024, 1_024 / 2 + 32, 1.0, 0.0, 48_000);
+        let ir_payload = r.data.remove(0);
+        r.data = vec![
+            MeasurementPayload {
+                data: MeasurementData::FrequencyResponse { points: vec![] },
+                standard: Vec::new(),
+                gate: None,
+            },
+            ir_payload,
+        ];
+        assert_eq!(r.ir_stats().unwrap().delay_samples, 32);
+    }
+
+    #[test]
+    fn ir_stats_none_for_empty_linear_ir() {
+        let mut r = sample_impulse_response_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 48_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: vec![],
+                harmonics: vec![],
+            },
+            standard: Vec::new(),
+            gate: None,
+        }];
+        assert!(r.ir_stats().is_none());
+    }
+
+    // ─── `ir_arrival_distance` (#283) ─────────────────────────────────
+
+    fn measured_tau(tau_s: f64) -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s,
+            measured_at: "2026-08-15T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "fake".into(),
+            sample_rate_hz: 48_000,
+            period_size: Some(1024),
+            output_port: "out1".into(),
+            input_port: "in1".into(),
+        })
+    }
+
+    /// The rig's own converter constant: arrival(d) = 1.1931 ms + d/c.
+    /// An arrival of τ + 1 m/c must come back as 1 m — the τ subtraction
+    /// is the whole content of the conversion.
+    #[test]
+    fn arrival_distance_subtracts_tau_before_converting() {
+        let tau_s = 0.0011931;
+        let sr = 48_000.0;
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        let want_m = 1.0;
+        // Round to whole samples, as a real peak index would be.
+        let delay = ((tau_s + want_m / c) * sr).round() as usize;
+        let window_len = 4_096;
+        let mut r = ir_report_with_peak(window_len, window_len / 2 + delay, 1.0, 0.0, 48_000);
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            ..Default::default()
+        });
+        r.interface_latency = Some(measured_tau(tau_s));
+
+        let ArrivalDistance::Known {
+            distance_m,
+            provenance,
+            ..
+        } = r.ir_arrival_distance()
+        else {
+            panic!("distance should be known when tau is recorded");
+        };
+        // One sample at 48 kHz is ~7 mm of path; allow that quantisation.
+        assert!(
+            (distance_m - want_m).abs() < 0.01,
+            "distance_m = {distance_m}"
+        );
+        // The AC requires the provenance be *named*, not just applied.
+        assert!(provenance.contains("farina_short_ess"), "{provenance}");
+        assert!(provenance.contains("2026-08-15T00:00:00Z"), "{provenance}");
+        assert!(provenance.contains("fake"), "{provenance}");
+    }
+
+    /// The load-bearing refusal: no τ must never fall through to a
+    /// distance computed from the uncorrected arrival. At 48 kHz a
+    /// 1.1931 ms τ is 57 samples — roughly 0.41 m of phantom path — so a
+    /// fallthrough would be a plausible-looking wrong number, not an
+    /// obvious one.
+    #[test]
+    fn arrival_distance_unavailable_without_tau() {
+        let window_len = 4_096;
+        let r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
+        assert!(r.interface_latency.is_none());
+        match r.ir_arrival_distance() {
+            ArrivalDistance::Unavailable { reason } => {
+                assert!(reason.contains("\u{3c4}"), "reason must name τ: {reason}")
+            }
+            ArrivalDistance::Known { distance_m, .. } => {
+                panic!("derived {distance_m} m from an uncorrected arrival")
+            }
+        }
+    }
+
+    /// A recorded refusal carries its reason through to the reader
+    /// instead of being flattened into a generic "no τ".
+    #[test]
+    fn arrival_distance_propagates_a_recorded_refusal_reason() {
+        let window_len = 4_096;
+        let mut r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(InterfaceLatency::Unavailable {
+            reason: "nearest stored entry differs in period_size (requested 512, stored 1024)"
+                .into(),
+        });
+        match r.ir_arrival_distance() {
+            ArrivalDistance::Unavailable { reason } => assert!(reason.contains("period_size")),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+    }
+
+    /// v1-v4 archives decode with `interface_latency` absent, and must
+    /// land on the refusal — not on a distance derived without a τ.
+    #[test]
+    fn legacy_report_without_interface_latency_decodes_and_refuses_distance() {
+        let r = ir_report_with_peak(4_096, 4_096 / 2 + 57, 1.0, 0.0, 48_000);
+        let mut v: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        v["schema_version"] = serde_json::json!(4);
+        assert!(v.get("interface_latency").is_none(), "None must not encode");
+        let back: MeasurementReport = serde_json::from_value(v).unwrap();
+        assert!(back.interface_latency.is_none());
+        assert!(matches!(
+            back.ir_arrival_distance(),
+            ArrivalDistance::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn interface_latency_round_trips_through_json() {
+        let mut r = ir_report_with_peak(1_024, 512, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(measured_tau(0.0011931));
+        let back: MeasurementReport = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        assert_eq!(back.interface_latency, r.interface_latency);
+    }
+
     fn sample_noise_report() -> MeasurementReport {
         MeasurementReport {
             schema_version: SCHEMA_VERSION,
@@ -766,6 +1300,7 @@ mod tests {
             },
             calibration: None,
             position: None,
+            interface_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::NoiseResult {
                     sample_rate_hz: 48_000,
@@ -835,7 +1370,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 4"));
+            assert!(json.contains("\"schema_version\": 5"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

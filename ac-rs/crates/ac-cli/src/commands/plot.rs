@@ -141,7 +141,7 @@ pub fn run_level(
 /// `generate::wait_for_stop` and printed nothing else), actually reads the
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
-pub fn run_ir(cmd: &CommandKind, _cfg: &ac_core::config::Config, client: &mut AcClient) {
+pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
     let (f1, f2, duration, level, n_harmonics, window_len, tail_s) = match cmd {
         CommandKind::PlotIr {
             f1,
@@ -213,6 +213,89 @@ pub fn run_ir(cmd: &CommandKind, _cfg: &ac_core::config::Config, client: &mut Ac
 
     let (ir_frame, report_frame) = collect_ir(client, "plot_ir");
     print_ir_result(ir_frame.as_ref(), report_frame.as_ref(), duration, tail_s);
+    print_ir_report(report_frame.as_ref(), cfg);
+    print_ir_notes(report_frame.as_ref());
+}
+
+/// The #283 read-out: arrival, arrival as distance, peak, pre-impulse
+/// SNR, and the gate that produced them — decoded from the
+/// `measurement/report` frame rather than recomputed off the raw IR
+/// frame, so the printed numbers and the archived ones are the same
+/// numbers by construction.
+fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::config::Config) {
+    use ac_core::measurement::report::{ArrivalDistance, MeasurementReport};
+
+    let Some(value) = report_frame.and_then(|f| f.get("report")) else {
+        eprintln!("  !! no measurement/report frame — nothing to summarise");
+        return;
+    };
+    let report: MeasurementReport = match serde_json::from_value(value.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  !! could not decode report: {e}");
+            return;
+        }
+    };
+    let Some(stats) = report.ir_stats() else {
+        eprintln!("  !! report carries no impulse-response payload to summarise");
+        return;
+    };
+
+    println!(
+        "  arrival       {:+} samples  ({:+.3} ms re gate centre @ {} Hz)",
+        stats.delay_samples,
+        stats.arrival_s * 1000.0,
+        stats.sample_rate_hz,
+    );
+    // The AC's load-bearing case: without a τ measured under this run's
+    // exact conditions there is no distance, and the reason is printed
+    // rather than the arrival being quietly reused as one.
+    match report.ir_arrival_distance() {
+        ArrivalDistance::Known {
+            distance_m,
+            speed_of_sound_m_s,
+            provenance,
+            ..
+        } => {
+            println!("  distance      {distance_m:.3} m  (c = {speed_of_sound_m_s:.1} m/s)");
+            println!("                {provenance}");
+        }
+        ArrivalDistance::Unavailable { reason } => {
+            println!("  distance      unavailable — {reason}");
+        }
+    }
+    println!(
+        "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
+        stats.peak_magnitude,
+        20.0 * stats.peak_magnitude.max(1e-12).log10(),
+        stats.peak_index,
+    );
+    if stats.pre_impulse_snr_db.is_finite() {
+        println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
+    } else {
+        println!("  pre-imp SNR   no measurable pre-impulse floor (silence)");
+    }
+    println!(
+        "  gate          {} window, {} samples ({:.2} ms) → f_low {:.1} Hz",
+        stats.gate_window_kind,
+        stats.window_len,
+        stats.gate_window_s * 1000.0,
+        stats.gate_f_low_hz,
+    );
+
+    if let Some(dir) = cfg.report_dir.as_ref() {
+        let stem = report.timestamp_utc.replace(':', "-");
+        println!(
+            "  report        {}",
+            dir.join(format!("{stem}-plot_ir.json")).display()
+        );
+        println!(
+            "  csv           {}",
+            dir.join(format!("{stem}-plot_ir.csv")).display()
+        );
+    } else {
+        eprintln!("  note: report_dir not configured — result not persisted (see `ac setup`)");
+    }
 }
 
 /// Wait for `plot_ir`'s DATA frames: `measurement/impulse_response` and
@@ -262,28 +345,9 @@ fn print_ir_result(
         eprintln!("  !! no impulse response received");
         return;
     };
-    let sr = data
-        .get("sample_rate_hz")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(48_000);
-    if let Some(samples) = data.get("linear_ir").and_then(|v| v.as_array()) {
-        let (peak_idx, peak_val) =
-            samples
-                .iter()
-                .enumerate()
-                .fold((0usize, 0.0f64), |acc, (i, v)| {
-                    let mag = v.as_f64().unwrap_or(0.0).abs();
-                    if mag > acc.1 {
-                        (i, mag)
-                    } else {
-                        acc
-                    }
-                });
-        println!(
-            "  peak IR       {peak_val:.3} FS  at sample {peak_idx} ({:.4}s @ {sr} Hz)",
-            peak_idx as f64 / sr as f64
-        );
-    }
+    // Peak, arrival and gate now come from the report frame via
+    // `print_ir_report` (#283) — reading them off the raw IR frame here
+    // as well would let the printed and archived numbers drift apart.
     if let Some(n) = data
         .get("harmonics")
         .and_then(|v| v.as_array())
@@ -299,13 +363,24 @@ fn print_ir_result(
         "  captured      {:.2}s  ({duration:.2}s sweep + {tail:.2}s tail)",
         duration + tail
     );
+    let _ = report_frame;
+}
 
-    if let Some(note) = report_frame
+/// The report's `notes`: the ISO 18233 §6.3.2 measured tail-decay verdict
+/// and the §B.5 linear-deconvolution artefact statement, one line each.
+/// Printed last, and printed verbatim from the report so the operator
+/// reads exactly what the archive records (#283).
+fn print_ir_notes(report_frame: Option<&serde_json::Value>) {
+    let Some(notes) = report_frame
         .and_then(|f| f.get("report"))
         .and_then(|r| r.get("notes"))
         .and_then(|v| v.as_str())
-    {
-        println!("  {note}");
+    else {
+        return;
+    };
+    println!();
+    for line in notes.lines() {
+        println!("  {line}");
     }
 }
 

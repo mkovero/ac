@@ -97,8 +97,21 @@ fn spawn_daemon() {
         }
     };
     eprintln!("  starting daemon: {}", bin.display());
-    if let Err(e) = Command::new(&bin)
-        .arg("--local")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--local");
+    // Carry the client's port override (see `main::port_override`) into
+    // the daemon we start. Without this the override would move the
+    // client and leave an auto-spawned daemon on 5556/5557, so the two
+    // would never meet — a setting that silently does nothing.
+    for (var, flag) in [
+        ("AC_CTRL_PORT", "--ctrl-port"),
+        ("AC_DATA_PORT", "--data-port"),
+    ] {
+        if let Ok(p) = std::env::var(var) {
+            cmd.arg(flag).arg(p);
+        }
+    }
+    if let Err(e) = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
