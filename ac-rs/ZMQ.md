@@ -1058,7 +1058,9 @@ peak — not from the buffer origin, unlike the `ImpulseResponse` payload's
 own `gate` block) and run for half the linear gate's length. Its `gate`
 block's `f_low_hz` is `1 / gate_length_s` for *that* gate, independent of
 the `ImpulseResponse` payload's own `f_low_hz`. Cites both
-`ac-core::measurement::sweep::citation()` (Farina/ISO 18233 basis) and
+`ac-core::measurement::sweep::farina_citation()` (Farina basis only — no
+ISO 18233 half, since a quasi-anechoic capture has no classical-standard
+counterpart to pair it with) and
 `ac-core::measurement::sweep::gated_response_citation()` (AES17-2015
 Annex A.4, the gating method itself).
 
