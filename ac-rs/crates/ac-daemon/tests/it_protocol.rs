@@ -1576,6 +1576,175 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     }
 }
 
+#[test]
+fn plot_ir_reports_the_gate_lengths_it_actually_used() {
+    // #278: `window_len` is a request. Adjacent harmonic orders would
+    // cross-contaminate if their gates overlapped, so each order is clamped
+    // to the spacing of its nearest neighbour. At 200 Hz–8 kHz over 0.5 s at
+    // 48 kHz, L = T/ln(f2/f1) = 135.5 ms, so Farina's Δt_k = L·ln(k) puts the
+    // order centres at [0, 4510, 7148, 9019, 10471] samples and the gaps at
+    // [4510, 2638, 1871, 1452].
+    //
+    // The linear IR must survive at the full 4096 — its only neighbour is
+    // order 2, 4510 samples away — while orders 2..5 shrink. A global clamp
+    // to the narrowest gap would cut the linear IR to 1452 and is what this
+    // test is here to catch.
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 4096,
+        "n_harmonics": 5,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let expected_used = json!([4096, 2638, 1871, 1452, 1452]);
+    let mut got_ir = false;
+    let mut got_report = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(got_ir && got_report) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                assert_eq!(v["window_len_requested"], json!(4096));
+                assert_eq!(
+                    v["window_len_used"], expected_used,
+                    "per-order gate lengths must be reported, not inferred"
+                );
+                let ir = v["data"]["linear_ir"].as_array().expect("linear_ir array");
+                assert_eq!(
+                    ir.len(),
+                    4096,
+                    "linear IR must keep the requested window; only the \
+                     tight high orders are constrained"
+                );
+                let harmonics = v["data"]["harmonics"].as_array().expect("harmonics");
+                for h in harmonics {
+                    let order = h["order"].as_u64().expect("order") as usize;
+                    let n = h["samples"].as_array().expect("samples").len();
+                    assert_eq!(
+                        json!(n),
+                        expected_used[order - 1],
+                        "order {order} gate length disagrees with window_len_used"
+                    );
+                }
+                got_ir = true;
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                // A shortened gate changes what the harmonic IRs mean, so
+                // it has to reach the operator rather than being applied
+                // silently.
+                let notes = v["report"]["notes"].as_str().expect("notes present");
+                assert!(notes.contains("clamped"), "notes: {notes:?}");
+                assert!(notes.contains("4096"), "notes: {notes:?}");
+                assert!(notes.contains("order 2"), "notes: {notes:?}");
+                assert!(
+                    !notes.contains("order 1 \u{2192}"),
+                    "the unclamped linear IR must not be listed: {notes:?}"
+                );
+                // The #282 tail-decay verdict shares the field and must
+                // not have been displaced by the clamp note.
+                assert!(notes.contains("18233"), "notes: {notes:?}");
+                got_report = true;
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(got_ir, "never saw measurement/impulse_response frame");
+    assert!(got_report, "never saw measurement/report frame");
+}
+
+/// #283 × #278: the `GateParams` archived on the IR payload must describe
+/// the gate that actually ran, not the one that was asked for.
+///
+/// `window_len` is a request (#278) and the linear IR is clamped when
+/// order 2 sits closer than the requested length. Recording the request
+/// instead would archive a gate that never ran and an `f_low_hz` the
+/// payload does not meet — and `f_low_hz` is the number #280 stores
+/// precisely so a reader does not have to derive it.
+///
+/// The sweep is chosen so the two values differ: over 0.3 s from 200 Hz
+/// to 8 kHz, L = T/ln(f2/f1) = 81.3 ms, so Farina's Δt_2 = L·ln 2 puts
+/// order 2 about 2705 samples out — inside the requested 4096. An
+/// implementation that recorded `window_len` would report a 4096-sample
+/// gate and an f_low of 11.7 Hz here, both wrong.
+#[test]
+fn plot_ir_records_the_gate_it_used_not_the_one_requested() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.3,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 4096,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let mut used: Option<u64> = None;
+    let mut gate: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(used.is_some() && gate.is_some()) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                used = v["window_len_used"][0].as_u64();
+            }
+            Some((t, v)) if t == "measurement/report" => {
+                gate = Some(v["report"]["data"][0]["gate"].clone());
+            }
+            Some((t, _)) if t == "done" => break,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let used = used.expect("window_len_used[0] on the IR frame");
+    let gate = gate.expect("gate on the IR payload");
+
+    // The premise: this sweep really does clamp. Without this the test
+    // would pass against an implementation that records the request.
+    assert!(
+        used < 4096,
+        "sweep did not clamp the linear IR ({used} samples) — the test no \
+         longer distinguishes the recorded gate from the requested one"
+    );
+
+    let sr = 48_000.0;
+    let gate_length_s = gate["gate_length_s"].as_f64().expect("gate_length_s");
+    let f_low_hz = gate["f_low_hz"].as_f64().expect("f_low_hz");
+    let gate_start_s = gate["gate_start_s"].as_f64().expect("gate_start_s");
+
+    assert!(
+        (gate_length_s - used as f64 / sr).abs() < 1e-9,
+        "recorded gate_length_s {gate_length_s} does not match the {used} \
+         samples actually used"
+    );
+    assert!(
+        (f_low_hz - sr / used as f64).abs() < 1e-6,
+        "recorded f_low_hz {f_low_hz} does not match the gate that ran"
+    );
+    // The gate is centred on the zero-delay reference, so it opens half a
+    // window before it.
+    assert!(
+        (gate_start_s + (used / 2) as f64 / sr).abs() < 1e-9,
+        "recorded gate_start_s {gate_start_s} is not half a window early"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Time-integration — set_time_integration / get_time_integration / reset_leq.
 // See issue #62.

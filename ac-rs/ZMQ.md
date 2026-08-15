@@ -997,9 +997,17 @@ engine path; real JACK / CPAL buffer-playback is a follow-up.
   "level_dbfs":   <float>,   // default -6
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
-  "window_len":   <int>      // IR gate length in samples, default 4096
+  "window_len":   <int>      // requested IR gate length in samples, default 4096
 }
 ```
+
+`window_len` is a request, not a guarantee. Gates for adjacent harmonic
+orders must not overlap, so each order's gate is clamped down to the
+sample distance to its nearest neighbouring order; the linear IR, whose
+only neighbour is order 2, is usually left at the requested length while
+the tighter high orders are shortened. The lengths actually used come
+back on the `measurement/impulse_response` frame, and any shortening is
+also stated in the report `notes`.
 
 **Reply**
 ```json
@@ -1009,7 +1017,11 @@ engine path; real JACK / CPAL buffer-playback is a follow-up.
 **DATA**
 ```json
 // topic: measurement/impulse_response
-{ "cmd": "plot_ir", "data": { "kind": "impulse_response", ... } }
+// window_len_used is indexed by order-1: [0] is the linear IR (order 1),
+// [i] is harmonic order i+1. Each entry is the gate length of the
+// corresponding IR in `data`, which may be below window_len_requested.
+{ "cmd": "plot_ir", "data": { "kind": "impulse_response", ... },
+  "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
 { "cmd": "plot_ir", "report": { "schema_version": 5, "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
@@ -1018,15 +1030,20 @@ engine path; real JACK / CPAL buffer-playback is a follow-up.
 { "cmd": "plot_ir" }
 ```
 
-`notes` carries two independent statements, one per line: the ISO 18233
-§6.3.2 tail-decay verdict *measured* from this capture, and the §B.5
-statement that the tail past the peak is a linear-deconvolution artefact
-— a structural consequence of `deconvolve_full`, true regardless of the
-verdict. Neither implies the other; a reader must not collapse them.
+`notes` carries independent statements, **one per line**: the ISO 18233
+§6.3.2 tail-decay verdict *measured* from this capture; the #278 gate
+clamp note when any order was shortened; and the §B.5 statement that the
+tail past the peak is a linear-deconvolution artefact — a structural
+consequence of `deconvolve_full`, true regardless of what the other two
+came back as. None implies the others; a reader must not collapse them,
+and must split on `\n` rather than assuming a single sentence.
 
 The IR payload carries a `gate` block (`gate_start_s`, `gate_length_s`,
-`window_kind: "rectangular"`, `f_low_hz`) describing the `window_len`
-window `extract_irs` applied, centred on the sweep endpoint.
+`window_kind: "rectangular"`, `f_low_hz`) describing the window
+`extract_irs` applied to the *linear* IR, centred on the sweep endpoint.
+Its length is `window_len_used[0]` — the length order 1 actually got
+after #278's per-order clamp — not the requested `window_len`, which the
+clamp may have shortened. `f_low_hz` follows from that same length.
 
 `interface_latency` is the τ (interface round-trip latency) resolved for
 this capture — the field that lets an arrival be converted to a distance.

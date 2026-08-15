@@ -572,6 +572,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(-6.0);
     let tail_s = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
     let n_harmonics = cmd.get("n_harmonics").and_then(Value::as_u64).unwrap_or(5) as usize;
+    // 4096 is a request, not a promise: `extract_irs` clamps each order's
+    // gate down to the spacing of its own nearest neighbour, so the linear
+    // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
+    // away at these defaults) while the tighter high orders get 2818 /
+    // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
+    // the `measurement/impulse_response` envelope and, when any order was
+    // shortened, in the report notes. See issue #278.
     let window_len = cmd
         .get("window_len")
         .and_then(Value::as_u64)
@@ -696,6 +703,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             Ok(check) => check.note(),
             Err(e) => format!("ISO 18233 \u{a7}6.3.2 tail-decay check could not be evaluated: {e}"),
         };
+        let mut notes = vec![decay_note];
 
         let irs = match extract_irs(&full, &params, n_harmonics.max(1), window_len) {
             Ok(r) => r,
@@ -708,6 +716,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 return;
             }
         };
+        if let Some(note) = irs.clamp_note() {
+            notes.push(note);
+        }
+        // A third, independent statement (#283). The §6.3.2 verdict above
+        // is *measured* from this capture's tail and the #278 clamp note
+        // describes this run's gate lengths; the §B.5 note is a
+        // *structural* consequence of deconvolving linearly, true
+        // whatever those two came back as. None implies the others, so
+        // all three are emitted.
+        notes.push(LINEAR_DECONV_TAIL_NOTE.to_string());
+
+        // Gate length order 1 (the linear IR) actually got — see the
+        // `GateParams` below. Falls back to the requested length only if
+        // the per-order vec is somehow empty, which `extract_irs` does
+        // not do for `n_harmonics >= 1`.
+        let linear_gate_len = irs.window_len_for(1).unwrap_or(window_len);
 
         let data = MeasurementData::ImpulseResponse {
             sample_rate_hz: sr,
@@ -717,12 +741,18 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             linear_ir: irs.linear.clone(),
             harmonics: irs.harmonics.clone(),
         };
+        // Gate lengths ride alongside `data` rather than inside it: a
+        // consumer that assumes every IR is `window_len` long would read
+        // the clamped harmonics wrong, and `MeasurementData` is a
+        // versioned schema this doesn't need to bump.
         send_pub(
             &pub_tx,
             "measurement/impulse_response",
             &json!({
                 "cmd": "plot_ir",
                 "data": &data,
+                "window_len_requested": irs.window_len_requested,
+                "window_len_used": irs.window_len_used,
             }),
         );
 
@@ -758,24 +788,29 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             data: vec![MeasurementPayload {
                 data,
                 standard: vec![sweep_citation()],
-                // `extract_irs` gates a rectangular `window_len` window
-                // centred on the sweep endpoint — the zero-delay
-                // reference — so the gate opens half a window before it.
-                // Recorded rather than left implicit: #280's rule is that
-                // `f_low_hz` is stored, not recomputed by the reader.
+                // `extract_irs` gates a rectangular window centred on the
+                // sweep endpoint — the zero-delay reference — so the gate
+                // opens half a window before it. Recorded rather than left
+                // implicit: #280's rule is that `f_low_hz` is stored, not
+                // recomputed by the reader.
+                //
+                // The length here is the one order 1 *actually* got, not
+                // the one requested: #278 clamps each order to its nearest
+                // neighbour's spacing, so on a short sweep the linear IR's
+                // gate can come back shorter than `window_len`. Recording
+                // the request would archive a gate that never ran and an
+                // `f_low_hz` the payload does not meet.
                 gate: Some(GateParams {
-                    gate_start_s: -((window_len / 2) as f64) / sr as f64,
-                    gate_length_s: window_len as f64 / sr as f64,
+                    gate_start_s: -((linear_gate_len / 2) as f64) / sr as f64,
+                    gate_length_s: linear_gate_len as f64 / sr as f64,
                     window_kind: "rectangular".into(),
-                    f_low_hz: sr as f64 / window_len as f64,
+                    f_low_hz: sr as f64 / linear_gate_len as f64,
                 }),
             }],
-            // Two distinct statements, both required, neither implying
-            // the other: the ISO 18233 §6.3.2 verdict is *measured* from
-            // this capture's tail, while the §B.5 note is a *structural*
-            // consequence of deconvolving linearly and holds regardless
-            // of what the verdict came back as (#283).
-            notes: Some(format!("{decay_note}\n{LINEAR_DECONV_TAIL_NOTE}")),
+            // One statement per line: each note is an independent claim
+            // and the CLI prints them one to a row, so they must not run
+            // together into a single paragraph (#283).
+            notes: Some(notes.join("\n")),
             // plot_ir's IR isn't yet mic-curve-corrected (deferred from
             // #97 to a follow-up). The snapshot still captures the curve
             // provenance via `calibration.mic_response`; downstream
