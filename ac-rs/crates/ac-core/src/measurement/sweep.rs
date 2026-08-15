@@ -767,16 +767,41 @@ pub fn gated_frequency_response(
         .collect()
 }
 
+/// Farina-preprint-only citation for the theoretical basis (log sweep,
+/// closed-form inverse filter, harmonic-order offsets) — same text as the
+/// preprint half of [`citation`], deliberately *without* the ISO
+/// 18233:2006 Annex B half.
+///
+/// Scoped to [`crate::measurement::report::MeasurementData::GatedFrequencyResponse`]
+/// (#284): ISO 18233 §1 restricts its own scope to substituting for
+/// classical-method standards (ISO 140, ISO 3382, ISO 17497-1) and §9(c)
+/// requires the test report to additionally name that classical
+/// counterpart whenever ISO 18233 is cited — a quasi-anechoic
+/// loudspeaker/system capture has no classical counterpart, so it cannot
+/// carry that citation. [`citation`] itself is unchanged (still packs both
+/// standards into one string) since the pre-existing `ImpulseResponse`
+/// payload's use of it is out of scope here — see PR #305 review.
+pub fn farina_citation() -> StandardsCitation {
+    StandardsCitation {
+        standard: "Farina, AES 108th Convention preprint #5093 (2000)".into(),
+        clause: "§2 Theoretical basis (log sweep, inverse filter, harmonic offsets)".into(),
+        verified: false,
+    }
+}
+
 /// Citation for the [`crate::measurement::report::MeasurementData::GatedFrequencyResponse`]
 /// payload (#284): a quasi-anechoic frequency response derived by
 /// time-gating a Farina-swept-sine impulse response, distinct from the
 /// impulse-response payload's own citation ([`citation`]) — both apply,
-/// in relevance order (see `sweep::citation`'s doc for why the theoretical
-/// basis and the swept-sine method are cited separately).
+/// in relevance order. Paired with [`farina_citation`], not [`citation`]
+/// — see [`farina_citation`]'s doc for why the ISO 18233 half must not
+/// come along for this payload.
 ///
 /// `verified` stays `false` until a human cross-checks Annex A.4 against
-/// the published AES17-2015 text — this repo does not carry that PDF
-/// under `stddocs/`.
+/// the published AES17-2015 text. `stddocs/AES-17-2015-1.pdf` exists but
+/// is a 5-page purchase-preview stub (title page + TOC only, cut off
+/// before Annex A's own pages) — not the full text, so it does not
+/// satisfy the cross-check.
 pub fn gated_response_citation() -> StandardsCitation {
     StandardsCitation {
         standard: "AES17-2015".into(),
@@ -1487,6 +1512,20 @@ mod tests {
         let c = gated_response_citation();
         assert!(c.standard.contains("AES17"));
         assert!(c.clause.contains("A.4"));
+        assert!(!c.verified);
+    }
+
+    /// PR #305 review, correctness issue 1: the gated-response payload
+    /// must not end up citing ISO 18233 by way of reusing `citation()`
+    /// wholesale — `farina_citation()` carries the preprint only.
+    #[test]
+    fn farina_citation_excludes_iso_18233() {
+        let c = farina_citation();
+        assert!(c.standard.contains("Farina"));
+        assert!(
+            !c.standard.contains("ISO 18233"),
+            "gated payload's citation must not carry ISO 18233: {c:?}"
+        );
         assert!(!c.verified);
     }
 }

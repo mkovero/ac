@@ -15,7 +15,7 @@ use ac_core::measurement::report::{
     MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
-    check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs,
+    check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
     gated_frequency_response, gated_response_citation, inverse_sweep, log_sweep,
     noise_tail_start_s, SweepParams, LINEAR_DECONV_TAIL_NOTE,
 };
@@ -789,11 +789,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             data: MeasurementData::GatedFrequencyResponse {
                 points: gated_points,
             },
-            // Quasi-anechoic frequency response cites the Farina/ISO 18233
-            // theoretical basis plus AES17-2015 Annex A.4 for the gating
-            // method itself — not ISO 18233 a second time (see
-            // `gated_response_citation`'s doc).
-            standard: vec![sweep_citation(), gated_response_citation()],
+            // Quasi-anechoic frequency response cites the Farina
+            // theoretical basis (preprint only, not `sweep_citation()` —
+            // that also packs in ISO 18233:2006 Annex B, which does not
+            // apply to this payload per the architect's #284 decision 4;
+            // see `farina_citation`'s doc) plus AES17-2015 Annex A.4 for
+            // the gating method itself.
+            standard: vec![farina_citation(), gated_response_citation()],
             gate: Some(GateParams {
                 gate_start_s: 0.0,
                 gate_length_s: gated_gate_length_s,

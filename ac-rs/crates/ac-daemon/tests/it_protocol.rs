@@ -1773,8 +1773,11 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
     assert_eq!(data[0]["data"]["kind"], json!("impulse_response"));
     assert_eq!(data[1]["data"]["kind"], json!("gated_frequency_response"));
 
-    // Citations: the payload cites both the Farina/ISO 18233 basis and
-    // AES17-2015 Annex A.4 for the gating method itself.
+    // Citations: the payload cites the Farina preprint (theoretical basis
+    // only) and AES17-2015 Annex A.4 for the gating method itself — not
+    // ISO 18233, which per the architect's #284 decision 4 only attaches
+    // when a classical room standard also applies, which a quasi-anechoic
+    // capture never has (PR #305 review, correctness issue 1).
     let standards = data[1]["standard"].as_array().expect("standard array");
     assert_eq!(standards.len(), 2, "{standards:?}");
     assert!(
@@ -1782,6 +1785,12 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
             .iter()
             .any(|s| s["standard"].as_str().unwrap_or("").contains("AES17")),
         "{standards:?}"
+    );
+    assert!(
+        !standards
+            .iter()
+            .any(|s| s["standard"].as_str().unwrap_or("").contains("ISO 18233")),
+        "gated_frequency_response payload must not cite ISO 18233: {standards:?}"
     );
 
     // f_low_hz = 1 / gate_length_s, by hand arithmetic off the recorded
