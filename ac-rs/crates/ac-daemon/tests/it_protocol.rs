@@ -1745,6 +1745,76 @@ fn plot_ir_records_the_gate_it_used_not_the_one_requested() {
     );
 }
 
+/// #284: `plot_ir`'s report carries a second payload — the gated
+/// frequency response derived from the linear IR — alongside the
+/// impulse-response payload. Its `f_low_hz` must match `1 / gate_length_s`
+/// by hand arithmetic, and the points must carry both magnitude and phase.
+#[test]
+fn plot_ir_emits_a_gated_frequency_response_payload() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 1,
+    }));
+    assert_eq!(r["ok"], json!(true));
+
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let data = v["report"]["data"].as_array().expect("data array");
+    assert_eq!(data.len(), 2, "expected impulse response + gated response");
+    assert_eq!(data[0]["data"]["kind"], json!("impulse_response"));
+    assert_eq!(data[1]["data"]["kind"], json!("gated_frequency_response"));
+
+    // Citations: the payload cites both the Farina/ISO 18233 basis and
+    // AES17-2015 Annex A.4 for the gating method itself.
+    let standards = data[1]["standard"].as_array().expect("standard array");
+    assert_eq!(standards.len(), 2, "{standards:?}");
+    assert!(
+        standards
+            .iter()
+            .any(|s| s["standard"].as_str().unwrap_or("").contains("AES17")),
+        "{standards:?}"
+    );
+
+    // f_low_hz = 1 / gate_length_s, by hand arithmetic off the recorded
+    // gate — not recomputed elsewhere.
+    let gate = &data[1]["gate"];
+    let gate_length_s = gate["gate_length_s"].as_f64().expect("gate_length_s");
+    let f_low_hz = gate["f_low_hz"].as_f64().expect("f_low_hz");
+    assert!(
+        (f_low_hz - 1.0 / gate_length_s).abs() < 1e-9,
+        "f_low_hz {f_low_hz} does not match 1/gate_length_s {}",
+        1.0 / gate_length_s
+    );
+    assert_eq!(gate["window_kind"], json!("tukey0.25"));
+
+    let points = data[1]["data"]["points"].as_array().expect("points array");
+    assert!(points.len() > 4, "expected several frequency bins");
+    for p in points {
+        assert!(p["freq_hz"].is_number());
+        assert!(p["magnitude_db"].is_number());
+        assert!(p["phase_deg"].is_number());
+    }
+
+    // The impulse-response payload now also carries the noise-tail
+    // boundary — derivable, not left to the reader (#284).
+    let noise_tail = data[0]["data"]["noise_tail_start_s"]
+        .as_f64()
+        .expect("noise_tail_start_s present");
+    assert!(
+        (noise_tail - 0.5).abs() < 1e-9,
+        "noise_tail_start_s should equal the sweep duration (0.5s): {noise_tail}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Time-integration — set_time_integration / get_time_integration / reset_leq.
 // See issue #62.

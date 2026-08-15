@@ -10,13 +10,14 @@ use serde_json::{json, Value};
 
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
-    FrequencyResponsePoint, GateParams, IntegrationParams, InterfaceLatency, MeasuredLatency,
-    MeasurementData, MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot,
-    ProcessingChain, StimulusParams, SCHEMA_VERSION,
+    FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
+    InterfaceLatency, MeasuredLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
+    MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
-    check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, inverse_sweep,
-    log_sweep, SweepParams, LINEAR_DECONV_TAIL_NOTE,
+    check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs,
+    gated_frequency_response, gated_response_citation, inverse_sweep, log_sweep,
+    noise_tail_start_s, SweepParams, LINEAR_DECONV_TAIL_NOTE,
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, TauConditions};
@@ -740,6 +741,9 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             duration_s: duration,
             linear_ir: irs.linear.clone(),
             harmonics: irs.harmonics.clone(),
+            // Derivable from the sweep parameters, not estimated — see
+            // `noise_tail_start_s`'s doc (#284).
+            noise_tail_start_s: Some(noise_tail_start_s(&params)),
         };
         // Gate lengths ride alongside `data` rather than inside it: a
         // consumer that assumes every IR is `window_len` long would read
@@ -755,6 +759,48 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 "window_len_used": irs.window_len_used,
             }),
         );
+
+        // Gated frequency response (#284): magnitude + phase from a Tukey-
+        // tapered FFT of the linear IR. The gate starts at the linear IR's
+        // peak-reference sample (`linear_ir.len() / 2`, per #278) and runs
+        // for half the linear gate's length — the causal half that
+        // actually holds post-arrival samples; a gate starting there and
+        // running the *full* window would read past the end of `irs.linear`
+        // on its trailing half. Default shape is Tukey α=0.25, matching the
+        // string already used in #280's fixtures/UX mockup.
+        const GATED_RESPONSE_ALPHA: f64 = 0.25;
+        let gated_gate_len = (linear_gate_len / 2).max(2);
+        let gated_gate_length_s = gated_gate_len as f64 / sr as f64;
+        let gated_points: Vec<GatedFrequencyResponsePoint> = gated_frequency_response(
+            &irs.linear,
+            sr,
+            0.0,
+            gated_gate_length_s,
+            GATED_RESPONSE_ALPHA,
+        )
+        .into_iter()
+        .map(|p| GatedFrequencyResponsePoint {
+            freq_hz: p.freq_hz,
+            magnitude_db: p.magnitude_db,
+            phase_deg: p.phase_deg,
+        })
+        .collect();
+        let gated_payload = MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: gated_points,
+            },
+            // Quasi-anechoic frequency response cites the Farina/ISO 18233
+            // theoretical basis plus AES17-2015 Annex A.4 for the gating
+            // method itself — not ISO 18233 a second time (see
+            // `gated_response_citation`'s doc).
+            standard: vec![sweep_citation(), gated_response_citation()],
+            gate: Some(GateParams {
+                gate_start_s: 0.0,
+                gate_length_s: gated_gate_length_s,
+                window_kind: format!("tukey{GATED_RESPONSE_ALPHA:.2}"),
+                f_low_hz: 1.0 / gated_gate_length_s,
+            }),
+        };
 
         let timestamp = ac_core::shared::time::now_utc_iso8601();
         let position = temperature_c.map(|t| PositionSnapshot {
@@ -785,28 +831,31 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
             interface_latency,
-            data: vec![MeasurementPayload {
-                data,
-                standard: vec![sweep_citation()],
-                // `extract_irs` gates a rectangular window centred on the
-                // sweep endpoint — the zero-delay reference — so the gate
-                // opens half a window before it. Recorded rather than left
-                // implicit: #280's rule is that `f_low_hz` is stored, not
-                // recomputed by the reader.
-                //
-                // The length here is the one order 1 *actually* got, not
-                // the one requested: #278 clamps each order to its nearest
-                // neighbour's spacing, so on a short sweep the linear IR's
-                // gate can come back shorter than `window_len`. Recording
-                // the request would archive a gate that never ran and an
-                // `f_low_hz` the payload does not meet.
-                gate: Some(GateParams {
-                    gate_start_s: -((linear_gate_len / 2) as f64) / sr as f64,
-                    gate_length_s: linear_gate_len as f64 / sr as f64,
-                    window_kind: "rectangular".into(),
-                    f_low_hz: sr as f64 / linear_gate_len as f64,
-                }),
-            }],
+            data: vec![
+                MeasurementPayload {
+                    data,
+                    standard: vec![sweep_citation()],
+                    // `extract_irs` gates a rectangular window centred on the
+                    // sweep endpoint — the zero-delay reference — so the gate
+                    // opens half a window before it. Recorded rather than left
+                    // implicit: #280's rule is that `f_low_hz` is stored, not
+                    // recomputed by the reader.
+                    //
+                    // The length here is the one order 1 *actually* got, not
+                    // the one requested: #278 clamps each order to its nearest
+                    // neighbour's spacing, so on a short sweep the linear IR's
+                    // gate can come back shorter than `window_len`. Recording
+                    // the request would archive a gate that never ran and an
+                    // `f_low_hz` the payload does not meet.
+                    gate: Some(GateParams {
+                        gate_start_s: -((linear_gate_len / 2) as f64) / sr as f64,
+                        gate_length_s: linear_gate_len as f64 / sr as f64,
+                        window_kind: "rectangular".into(),
+                        f_low_hz: sr as f64 / linear_gate_len as f64,
+                    }),
+                },
+                gated_payload,
+            ],
             // One statement per line: each note is an independent claim
             // and the CLI prints them one to a row, so they must not run
             // together into a single paragraph (#283).
