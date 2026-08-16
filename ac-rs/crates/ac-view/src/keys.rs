@@ -66,6 +66,10 @@ pub enum Action {
     /// averages (#226). Sends `relock` to the daemon; the daemon's own
     /// warmup/retry path does the re-acquisition.
     Relock,
+    /// Toggle the IR panel (#286) — h(t) from the `visualize/ir` sidecar,
+    /// live-arrival only (the sweep-derived kind is a disjoint data path,
+    /// #308). Mnemonic: `H`, this display's own y-axis label.
+    ToggleIrPanel,
 
     // -- transfer view: stimulus cluster (reserved, D7/D10) --
     /// Space: Idle→Armed, or stop from Armed/Driving.
@@ -101,8 +105,8 @@ pub struct Binding {
 ///
 /// Key ledger (so the single-pass assignment is auditable at a glance):
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
-/// `W` `T` `V`; transfer `P` `R` `N` `G` `E` + stimulus `Space` `Enter` `Esc`
-/// `↑` `↓`.
+/// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` + stimulus `Space` `Enter`
+/// `Esc` `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
     Binding {
@@ -226,6 +230,12 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::Relock,
         scope: Scope::Transfer,
         description: "Re-estimate delay (flushes averages)",
+    },
+    Binding {
+        key: Key::H,
+        action: Action::ToggleIrPanel,
+        scope: Scope::Transfer,
+        description: "Toggle IR panel — h(t), live arrival",
     },
     // -- transfer view: stimulus cluster (D7/D10 reserved) --
     Binding {
@@ -432,6 +442,14 @@ mod tests {
         assert!(
             !transfer.contains("SPL weighting"),
             "transfer help lists a spectrum-only toggle"
+        );
+        assert!(
+            !spectrum.contains("IR panel"),
+            "spectrum help lists the transfer-only IR toggle"
+        );
+        assert!(
+            transfer.contains("IR panel"),
+            "transfer help missing the IR toggle"
         );
     }
 

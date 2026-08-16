@@ -32,7 +32,7 @@ use std::time::Duration;
 use ac_core::visualize::weighting_curves::WeightingCurve;
 use ac_scene::Scene;
 use ac_view::app::connect_and_launch;
-use ac_view::session::{ConnectionState, Session};
+use ac_view::session::{ConnectionState, PolledFrame, Session};
 use ac_view::zmq_client::{Client, Endpoint, Recv};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -91,7 +91,11 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut found = None;
         while std::time::Instant::now() < deadline {
-            if let Some(f) = sniff_session.poll_frame(Duration::from_millis(200)) {
+            // Skip the interleaved `visualize/ir` sidecar (#286) — this
+            // check wants a `transfer_stream` frame specifically.
+            if let Some(PolledFrame::Transfer(f)) =
+                sniff_session.poll_frame(Duration::from_millis(200))
+            {
                 found = Some(f);
                 break;
             }

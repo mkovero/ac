@@ -37,7 +37,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use ac_core::visualize::weighting_curves::WeightingCurve;
-use ac_view::session::Session;
+use ac_view::session::{PolledFrame, Session};
 use ac_view::stimulus::StimulusMachine;
 use ac_view::zmq_client::{Client, Endpoint};
 use support::DaemonProcess;
@@ -60,11 +60,14 @@ fn next_peak(session: &mut Session, timeout: Duration) -> Option<f64> {
     let mut latest = None;
     while Instant::now() < deadline {
         match session.poll_frame(Duration::from_millis(80)) {
-            Some(f) => {
+            Some(PolledFrame::Transfer(f)) => {
                 if let Some(p) = f.get("meas_peak_dbfs").and_then(|v| v.as_f64()) {
                     latest = Some(p);
                 }
             }
+            // The IR sidecar carries no peak — not a gap in the stream,
+            // just not the frame this helper reads.
+            Some(PolledFrame::Ir(_)) => {}
             None => {
                 if latest.is_some() {
                     break;

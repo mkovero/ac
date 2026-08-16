@@ -78,7 +78,7 @@ fn masked_columns_leave_a_gap_in_the_painted_transfer_polyline() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(&scene));
+        draw_view(&view, ui, None, Some(&scene), None);
     });
     harness.run();
 
@@ -181,7 +181,7 @@ fn painted_texts(scene: &TransferScene) -> Vec<String> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(scene));
+        draw_view(&view, ui, None, Some(scene), None);
     });
     harness.run();
     extract_texts(&harness.output().shapes)
@@ -357,7 +357,7 @@ fn painted_text_centres(scene: &TransferScene) -> Vec<(String, f32)> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(960.0, 420.0));
-        draw_view(&view, ui, None, Some(scene));
+        draw_view(&view, ui, None, Some(scene), None);
     });
     harness.run();
     harness
@@ -381,7 +381,7 @@ fn painted_text_rects(scene: &TransferScene) -> Vec<(String, egui::Rect)> {
     let view = ViewKind::Transfer(TransferViewState::default());
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(960.0, 420.0));
-        draw_view(&view, ui, None, Some(scene));
+        draw_view(&view, ui, None, Some(scene), None);
     });
     harness.run();
     harness

@@ -33,6 +33,7 @@
 
 pub mod dbfs;
 pub mod fault;
+pub mod ir;
 pub mod readout;
 pub mod scene;
 pub mod ticks;
@@ -40,9 +41,10 @@ pub mod transfer;
 pub mod wire;
 
 pub use fault::{Fault, FaultInput, FaultState, Severity};
+pub use ir::{ArrivalMarker, IrInput, IrScene, IR_HEADER};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
 pub use ticks::{Axis, Tick};
 pub use transfer::{
     BandLabel, DerotMode, DisplayModes, Meter, MeterState, Smoothing, TransferInput, TransferScene,
 };
-pub use wire::{MtwStage, WireDrive, WireFrame};
+pub use wire::{IrWireFrame, MtwStage, WireDrive, WireFrame};

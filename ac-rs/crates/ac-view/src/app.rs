@@ -9,7 +9,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use ac_scene::Scene;
 
 use crate::keys::{bindings_for, Action};
-use crate::session::{ConnectionState, Session};
+use crate::session::{ConnectionState, PolledFrame, Session};
 use crate::view::{draw_view, SpectrumViewState, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
 
@@ -38,6 +38,16 @@ pub struct AcViewApp {
     /// Built when the active view is Transfer; the spectrum `scene` stays
     /// `None` then, and vice versa.
     transfer_scene: Option<ac_scene::TransferScene>,
+    /// The last `visualize/ir` sidecar frame received (#286), kept for
+    /// the same zoom/pan-independent-of-new-frame reason `last_frame`
+    /// is: today the IR panel has no zoom/pan of its own, but rebuilding
+    /// from the held frame rather than only on arrival keeps the two
+    /// frame types symmetric instead of one being a special case.
+    last_ir_frame: Option<ac_scene::IrWireFrame>,
+    /// Built only when the Transfer view is active AND its IR panel is
+    /// open (`H`) — the accessory-panel cost should not be paid every
+    /// frame just because a sidecar frame arrived.
+    ir_scene: Option<ac_scene::IrScene>,
     meters: (ac_scene::MeterState, ac_scene::MeterState),
     /// The fault indicator's cross-frame state (#228) — the refusal clock
     /// and the lock-acquired transient. Lives beside `meters` for the same
@@ -84,6 +94,8 @@ impl AcViewApp {
             last_frame: None,
             last_scene_ranges: None,
             transfer_scene: None,
+            last_ir_frame: None,
+            ir_scene: None,
             meters: (
                 ac_scene::MeterState::default(),
                 ac_scene::MeterState::default(),
@@ -131,6 +143,41 @@ impl AcViewApp {
     /// changed) cannot: that the changed mode failed to reach the scene.
     pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
         self.transfer_scene.as_ref()
+    }
+
+    /// The IR scene currently being drawn (#286), if the IR panel is
+    /// open and a sidecar frame has been received — the same
+    /// test-support role `current_transfer_scene` plays.
+    pub fn current_ir_scene(&self) -> Option<&ac_scene::IrScene> {
+        self.ir_scene.as_ref()
+    }
+
+    /// Parse one raw DATA-topic `visualize/ir` value into an
+    /// `IrWireFrame`. A parse failure is dropped silently rather than
+    /// feeding `frame_parse_failures` (#193): that streak is specifically
+    /// the `WireFrame` schema boundary for the status line's `malformed`
+    /// state, and the IR panel is an on-demand accessory with no status
+    /// line of its own — losing one sidecar frame does not stop the
+    /// transfer view from rendering.
+    fn ingest_raw_ir_frame(&mut self, frame: serde_json::Value) {
+        if let Ok(ir_frame) = serde_json::from_value::<ac_scene::IrWireFrame>(frame) {
+            self.last_ir_frame = Some(ir_frame);
+        }
+    }
+
+    /// Rebuild `ir_scene` from `last_ir_frame` if the Transfer view's IR
+    /// panel is open, else clear it — the one place this decision is
+    /// made, called from both the live paint pass and the test helpers
+    /// below so they can't drift apart.
+    fn rebuild_ir_scene(&mut self) {
+        let open = matches!(&self.view, ViewKind::Transfer(t) if t.ir_panel_open());
+        self.ir_scene = if open {
+            self.last_ir_frame
+                .as_ref()
+                .map(|f| ac_scene::IrScene::from_input(&ac_scene::IrInput::from_wire_frame(f)))
+        } else {
+            None
+        };
     }
 
     /// Parse one raw DATA-topic value into a `WireFrame`, updating the
@@ -256,6 +303,15 @@ impl AcViewApp {
                 self.scene = None;
             }
         }
+        self.rebuild_ir_scene();
+    }
+
+    /// Feed one `visualize/ir` sidecar frame directly, bypassing the ZMQ
+    /// session — the IR-panel analogue of [`Self::ingest_frame_for_test`].
+    #[cfg(test)]
+    pub(crate) fn ingest_ir_frame_for_test(&mut self, frame: ac_scene::IrWireFrame) {
+        self.last_ir_frame = Some(frame);
+        self.rebuild_ir_scene();
     }
 
     /// Apply a keypress action in a test, then rebuild the active scene —
@@ -266,6 +322,7 @@ impl AcViewApp {
         if let Some(frame) = self.last_frame.clone() {
             self.ingest_frame_for_test(frame, now_s);
         }
+        self.rebuild_ir_scene();
     }
 
     fn handle_action(&mut self, action: Action, shift: bool) {
@@ -344,6 +401,11 @@ impl AcViewApp {
                 }
             }
             Action::OpenSettings => self.open_settings(),
+            Action::ToggleIrPanel => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.toggle_ir_panel()
+                }
+            }
             Action::Relock => {
                 // Best-effort, same discipline as `set_drive`: a failed
                 // send is not a crash, it is a re-lock that did not
@@ -650,16 +712,28 @@ impl eframe::App for AcViewApp {
             // Collected first, then fed through `ingest_raw_frame` below:
             // that call needs `&mut self` for the parse-failure streak
             // (#193), which can't overlap `session`'s own `&mut self.session`
-            // borrow above.
+            // borrow above. Split by the tagged `PolledFrame` (#286) rather
+            // than merged — a `transfer_stream` frame and its `visualize/ir`
+            // sidecar are independent JSON objects and go to independent
+            // ingest paths.
             let mut drained = Vec::new();
+            let mut drained_ir = Vec::new();
             while let Some(frame) = session.poll_frame(Duration::from_millis(0)) {
-                drained.push(frame);
+                match frame {
+                    PolledFrame::Transfer(v) => drained.push(v),
+                    PolledFrame::Ir(v) => drained_ir.push(v),
+                }
             }
             let now = std::time::Instant::now();
             for frame in drained {
                 if self.ingest_raw_frame(frame, now) {
                     got_new_frame = true;
                 }
+            }
+            // Same "drain to the newest" discipline as the transfer frame
+            // above — the last one in the backlog wins.
+            for frame in drained_ir {
+                self.ingest_raw_ir_frame(frame);
             }
         }
 
@@ -704,6 +778,7 @@ impl eframe::App for AcViewApp {
                 self.scene = None;
             }
         }
+        self.rebuild_ir_scene();
 
         let status = match &self.session {
             None => "no session".to_string(),
@@ -715,6 +790,7 @@ impl eframe::App for AcViewApp {
             ui,
             self.scene.as_ref(),
             self.transfer_scene.as_ref(),
+            self.ir_scene.as_ref(),
         );
 
         if self.help_open {
@@ -1517,5 +1593,97 @@ mod tests {
             "live — localhost:5556",
             "post-reconnect streak reused the pre-outage grace timer"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // IR panel (#286)
+    // ---------------------------------------------------------------
+
+    fn ir_frame() -> ac_scene::IrWireFrame {
+        serde_json::from_value(serde_json::json!({
+            "samples": [0.0, 1.0, -0.5, 0.0],
+            "sr": 48000,
+            "stride": 24,
+            "dt_ms": 250.0,
+            "t_origin_ms": -500.0,
+            "ref_channel": 1,
+            "meas_channel": 0,
+            "delay_samples": 231,
+            "delay_ms": 4.82,
+            "delay_locked": true
+        }))
+        .expect("ir wire frame")
+    }
+
+    fn ir_app() -> AcViewApp {
+        AcViewApp::new_transfer(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        })
+    }
+
+    // The panel is closed by default: a received sidecar frame alone
+    // must not build a scene the view never asked for.
+    #[test]
+    fn ir_scene_stays_none_while_the_panel_is_closed() {
+        let mut app = ir_app();
+        app.ingest_ir_frame_for_test(ir_frame());
+        assert!(app.current_ir_scene().is_none());
+    }
+
+    // Opening the panel (`H`) with a frame already held builds the scene
+    // immediately — it does not wait for the next sidecar frame to
+    // arrive, matching the toggle-then-frame ordering test below.
+    #[test]
+    fn opening_the_panel_builds_the_scene_from_the_held_frame() {
+        let mut app = ir_app();
+        app.ingest_ir_frame_for_test(ir_frame());
+        app.press_for_test(Action::ToggleIrPanel, 0.0);
+
+        let scene = app.current_ir_scene().expect("scene built on open");
+        assert_eq!(scene.header, ac_scene::IR_HEADER);
+        assert!(!scene.trace.segments.is_empty());
+    }
+
+    // The order the operator is more likely to hit in practice: panel
+    // opened first (nothing to show yet), a frame arrives after.
+    #[test]
+    fn a_frame_arriving_after_the_panel_opens_still_builds_the_scene() {
+        let mut app = ir_app();
+        app.press_for_test(Action::ToggleIrPanel, 0.0);
+        assert!(app.current_ir_scene().is_none(), "no frame held yet");
+
+        app.ingest_ir_frame_for_test(ir_frame());
+        assert!(app.current_ir_scene().is_some());
+    }
+
+    // Closing the panel again clears the built scene, not just the state
+    // flag — the same scene-accessor discipline the derot/smoothing keys
+    // are held to elsewhere in this module.
+    #[test]
+    fn closing_the_panel_clears_the_built_scene() {
+        let mut app = ir_app();
+        app.ingest_ir_frame_for_test(ir_frame());
+        app.press_for_test(Action::ToggleIrPanel, 0.0);
+        assert!(app.current_ir_scene().is_some());
+
+        app.press_for_test(Action::ToggleIrPanel, 0.0);
+        assert!(app.current_ir_scene().is_none());
+    }
+
+    // The toggle only affects the transfer view's own panel — pressing it
+    // in the spectrum view (where the binding isn't even offered) must
+    // not fabricate an IR scene.
+    #[test]
+    fn toggle_ir_panel_is_a_noop_outside_the_transfer_view() {
+        let mut app = AcViewApp::new(Endpoint {
+            host: "localhost".into(),
+            ctrl_port: 0,
+            data_port: 0,
+        });
+        app.ingest_ir_frame_for_test(ir_frame());
+        app.press_for_test(Action::ToggleIrPanel, 0.0);
+        assert!(app.current_ir_scene().is_none());
     }
 }

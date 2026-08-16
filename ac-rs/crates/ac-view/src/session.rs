@@ -34,6 +34,17 @@ pub enum ConnectionState {
 /// the failure is as silent as the bug this replaced.
 const MALFORMED_LOG_LIMIT: u64 = 5;
 
+/// The two DATA frame types [`Session::poll_frame`] returns (#286).
+/// Tagged rather than merged into one struct: a `transfer_stream` frame
+/// and its `visualize/ir` sidecar are independent JSON objects on the
+/// wire (`ZMQ.md`), and merging them here would mean this layer decides
+/// how they relate — that fusion belongs to `ac-scene`, one layer up.
+#[derive(Debug, Clone)]
+pub enum PolledFrame {
+    Transfer(serde_json::Value),
+    Ir(serde_json::Value),
+}
+
 pub struct Session {
     client: Client,
     launched: bool,
@@ -108,24 +119,31 @@ impl Session {
         }));
     }
 
-    /// Poll for the next `transfer_stream` DATA frame, non-blocking
-    /// beyond `timeout`. Records arrival time for [`Self::connection_state`]
-    /// — this is the only place "are we still connected" gets decided,
-    /// so the rest of the app doesn't each invent its own guess.
+    /// Poll for the next DATA frame this crate consumes — either a
+    /// `transfer_stream` frame or its `visualize/ir` sidecar (#286) —
+    /// non-blocking beyond `timeout`. Records arrival time for
+    /// [`Self::connection_state`] — this is the only place "are we still
+    /// connected" gets decided, so the rest of the app doesn't each
+    /// invent its own guess.
     ///
     /// **`None` means the socket is empty, not "the next frame wasn't mine"**
     /// (issue #219). The DATA socket is interleaved: a live session publishes
     /// `keepalive`, `data`/`transfer_stream` and `data`/`visualize/ir`, the
     /// last of these once per transfer frame and immediately behind it. This
-    /// used to return `None` for any of those, which ended the caller's drain
-    /// loop after exactly one transfer frame however deep the backlog was —
-    /// measured at 1 surfaced out of 75 available after a 2 s stall against a
-    /// real daemon. So non-matching frames are skipped here rather than
-    /// reported as end-of-stream.
+    /// used to return `None` for any non-`transfer_stream` frame, which ended
+    /// the caller's drain loop after exactly one transfer frame however deep
+    /// the backlog was — measured at 1 surfaced out of 75 available after a
+    /// 2 s stall against a real daemon. So a frame of either matched type is
+    /// returned, tagged by [`PolledFrame`] rather than merged into one
+    /// struct — the two arrive as distinct wire frames on distinct
+    /// schedules (the sidecar is once per transfer tick, not every tick
+    /// necessarily carries one), and `ac-scene` fuses them into one
+    /// panel's traces, not this layer.
     ///
-    /// Discarding them costs nothing: `ac-view` has no consumer for any other
-    /// frame type, so they were already being thrown away one call later.
-    pub fn poll_frame(&mut self, timeout: Duration) -> Option<serde_json::Value> {
+    /// Any other frame type is still skipped rather than reported as
+    /// end-of-stream: `ac-view` has no consumer for it, so it would
+    /// otherwise be thrown away one call later anyway.
+    pub fn poll_frame(&mut self, timeout: Duration) -> Option<PolledFrame> {
         loop {
             match self.client.recv_frame(timeout) {
                 Recv::Empty => return None,
@@ -142,9 +160,16 @@ impl Session {
                     }
                 }
                 Recv::Frame(topic, v) => {
-                    if topic == "data" && v["type"] == "transfer_stream" {
+                    if topic != "data" {
+                        continue;
+                    }
+                    if v["type"] == "transfer_stream" {
                         self.last_frame_at = Some(Instant::now());
-                        return Some(v);
+                        return Some(PolledFrame::Transfer(v));
+                    }
+                    if v["type"] == "visualize/ir" {
+                        self.last_frame_at = Some(Instant::now());
+                        return Some(PolledFrame::Ir(v));
                     }
                 }
             }
