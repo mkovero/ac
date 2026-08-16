@@ -1062,8 +1062,8 @@ the `ImpulseResponse` payload's own `f_low_hz`. Cites both
 `ac-core::measurement::sweep::farina_citation()` (Farina basis only — no
 ISO 18233 half, since a quasi-anechoic capture has no classical-standard
 counterpart to pair it with) and
-`ac-core::measurement::sweep::gated_response_citation()` (AES17-2015
-Annex A.4, the gating method itself).
+`ac-core::measurement::sweep::gated_response_citation()` (AES17-2020
+Annex A.4.5, the gating method itself).
 
 `interface_latency` is the τ (interface round-trip latency) resolved for
 this capture — the field that lets an arrival be converted to a distance.

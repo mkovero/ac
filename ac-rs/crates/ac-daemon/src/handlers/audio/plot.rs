@@ -830,7 +830,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             // theoretical basis (preprint only, not `sweep_citation()` —
             // that also packs in ISO 18233:2006 Annex B, which does not
             // apply to this payload per the architect's #284 decision 4;
-            // see `farina_citation`'s doc) plus AES17-2015 Annex A.4 for
+            // see `farina_citation`'s doc) plus AES17-2020 Annex A.4.5 for
             // the gating method itself.
             standard: vec![farina_citation(), gated_response_citation()],
             gate: Some(GateParams {

@@ -1290,8 +1290,8 @@ mod tests {
             },
             standard: vec![
                 StandardsCitation {
-                    standard: "AES17-2015".into(),
-                    clause: "Annex A.4".into(),
+                    standard: "AES17-2020".into(),
+                    clause: "Annex A.4.5".into(),
                     verified: false,
                 },
                 StandardsCitation {
