@@ -288,6 +288,39 @@ mod tests {
         }
     }
 
+    /// (#306 QA test coverage gap) `apply_mic_curve_to_gated_response`
+    /// inherits `apply_mic_curve_inplace_f64`'s non-finite-bin skip
+    /// contract (module doc above) but had no direct test on this call
+    /// site — a zero/degenerate FFT bin producing `-inf` dB is plausible
+    /// on `GatedResponsePoint`.
+    #[test]
+    fn gated_response_correction_skips_non_finite_bins() {
+        let curve = tilted_curve();
+        let mut points = vec![
+            GatedResponsePoint {
+                freq_hz: 100.0,
+                magnitude_db: f64::NEG_INFINITY,
+                phase_deg: 0.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 200.0,
+                magnitude_db: f64::NAN,
+                phase_deg: 0.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 1000.0,
+                magnitude_db: -5.0,
+                phase_deg: 0.0,
+            },
+        ];
+        apply_mic_curve_to_gated_response(&curve, &mut points);
+        assert_eq!(points[0].magnitude_db, f64::NEG_INFINITY);
+        assert!(points[1].magnitude_db.is_nan());
+        assert!(
+            (points[2].magnitude_db - (-5.0 - curve.correction_at(1000.0) as f64)).abs() < 1e-9
+        );
+    }
+
     /// The load-bearing test (#285): mic-curve correction on the derived
     /// gated spectrum must leave the IR peak — and therefore the gate
     /// anchored to it — exactly where it was. Demonstrates the failure

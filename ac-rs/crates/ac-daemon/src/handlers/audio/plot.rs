@@ -798,6 +798,21 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             }
         }
         let mc_applied = mic_curve_opt.is_some() && mc_enabled;
+        if mc_applied {
+            // (#306 QA correctness issue 1) `processing_chain.mic_correction_
+            // applied` is one report-wide flag, but this report carries two
+            // payloads with different correction status: the linear IR /
+            // harmonics are never corrected (see the comment at the top of
+            // this worker), only the gated frequency response is. Without
+            // this note, a reader trusting the report-wide flag (per its own
+            // doc comment on `ProcessingChain::mic_correction_applied`) could
+            // wrongly assume `linear_ir` is corrected too.
+            notes.push(
+                "mic correction applied to the gated frequency-response payload only; \
+                 the linear impulse response and harmonics are uncorrected raw capture data"
+                    .to_string(),
+            );
+        }
         let gated_points: Vec<GatedFrequencyResponsePoint> = gated_raw
             .into_iter()
             .map(|p| GatedFrequencyResponsePoint {
