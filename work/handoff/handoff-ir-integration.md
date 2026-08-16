@@ -706,8 +706,14 @@ time from those that cannot. Band-filtering an IR and integrating the decay cont
 the result with the filter's own decay, worst at LF where the bands are narrowest. The
 ISO documents give that concern its specific form and add their own:
 
-- ISO 3382-2 §7.3 / 3382-1 §7.3 — forward analysis requires `BT > 16` and `T > T_det`,
-  relaxing to `BT > 4` and `T > T_det/4` with time reversal.
+- ISO 3382-1:2009 §7.3, Eq. (6)/(7) — forward analysis requires `BT > 16` and
+  `T > 2·T_det`. Twice as strict as 3382-2's detector limit.
+- ISO 3382-2:2008 §7.3, Eq. (4)/(5) — forward analysis requires `BT > 16` and
+  `T > T_det`. A NOTE under this clause relaxes to `BT > 4` and `T > T_det/4` for the
+  time-reversal technique, citing an undated `ISO 3382-1:—` (the then-forthcoming
+  edition). The held ISO 3382-1:2009 §7.3 contains neither the relaxation nor a
+  time-reversal clause, so the relaxation is not verifiable against the 2009 edition on
+  disk — whoever files T20/T30 should treat it as 3382-2-only.
 - ISO 3382-1 §5.3.3 and Eq. (3) — backward integration from a noise-aware start point
   `t₁` with optional correction `C`. With `C = 0` the background noise must sit at least
   the evaluation range plus 15 dB below the impulse peak: 45 dB down for T30.
