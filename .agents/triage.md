@@ -51,7 +51,7 @@ Post comment in this exact structure:
 
 ### spec
 
-**type:** {bug | feature | measurement-accuracy | infrastructure | docs}
+**type:** {bug | feature | measurement-accuracy | output-format | infrastructure | docs}
 
 **problem statement**
 {One paragraph. What is wrong or missing and why it matters.}
@@ -77,7 +77,7 @@ Post comment in this exact structure:
 ### 4. apply labels
 
 Always exactly one category label:
-`bug`, `feature`, `measurement-accuracy`, `infrastructure`, `docs`
+`bug`, `feature`, `measurement-accuracy`, `output-format`, `infrastructure`, `docs`
 
 Then routing label:
 - Needs architect review → `needs-design`
