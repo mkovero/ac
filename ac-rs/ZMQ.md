@@ -141,8 +141,9 @@ see an unknown version must refuse to decode. Example payload:
 |------------------------|----------------------------------------------------|-----------------------------------------------------------------------------------|
 | `frequency_response`   | `plot` (stepped-sine)                              | `{ "points": [FrequencyResponsePoint, ...] }`                                     |
 | `spectrum_bands`       | IEC 61260-1 filterbank (`ac-core::measurement::filterbank`) | `{ "bpo": <int>, "class": "Class 1", "centres_hz": [...], "levels_dbfs": [...] }` |
-| `impulse_response`     | Farina log-sweep (`ac-core::measurement::sweep`)   | `{ "sample_rate_hz": <int>, "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "linear_ir": [...], "harmonics": [{ "order": <int>, "samples": [...] }, ...] }` |
+| `impulse_response`     | Farina log-sweep (`ac-core::measurement::sweep`)   | `{ "sample_rate_hz": <int>, "f1_hz": <f>, "f2_hz": <f>, "duration_s": <f>, "linear_ir": [...], "harmonics": [{ "order": <int>, "samples": [...] }, ...], "noise_tail_start_s": <f?> }` |
 | `noise_result`         | AES17-2020 §6.4.2 idle-channel noise (`ac-core::measurement::noise`) | `{ "sample_rate_hz": <int>, "duration_s": <f>, "unweighted_dbfs": <f>, "a_weighted_dbfs": <f>, "ccir_weighted_dbfs": <f?> }` |
+| `gated_frequency_response` | Time-gated FFT of the linear IR (`ac-core::measurement::sweep::gated_frequency_response`, #284) | `{ "points": [{ "freq_hz": <f>, "magnitude_db": <f>, "phase_deg": <f> }, ...] }` |
 
 The `spectrum_bands`, `impulse_response`, and `noise_result` variants
 are serializable today but not yet emitted from any CLI command —
@@ -1044,6 +1045,24 @@ The IR payload carries a `gate` block (`gate_start_s`, `gate_length_s`,
 Its length is `window_len_used[0]` — the length order 1 actually got
 after #278's per-order clamp — not the requested `window_len`, which the
 clamp may have shortened. `f_low_hz` follows from that same length.
+The `ImpulseResponse` payload also carries `noise_tail_start_s`: seconds
+after the linear-IR peak past which the capture can only hold
+linear-deconvolution noise, never real system response (derived from the
+sweep duration, not estimated — see `ac-core::measurement::sweep::noise_tail_start_s`).
+
+`report.data` (#284) carries a **second** payload alongside the impulse
+response: a `gated_frequency_response` derived by Tukey-tapering
+(`window_kind: "tukey0.25"`) and FFTing the linear IR, gated to start at
+the IR's peak-reference sample (`gate_start_s: 0.0`, measured from the
+peak — not from the buffer origin, unlike the `ImpulseResponse` payload's
+own `gate` block) and run for half the linear gate's length. Its `gate`
+block's `f_low_hz` is `1 / gate_length_s` for *that* gate, independent of
+the `ImpulseResponse` payload's own `f_low_hz`. Cites both
+`ac-core::measurement::sweep::farina_citation()` (Farina basis only — no
+ISO 18233 half, since a quasi-anechoic capture has no classical-standard
+counterpart to pair it with) and
+`ac-core::measurement::sweep::gated_response_citation()` (AES17-2015
+Annex A.4, the gating method itself).
 
 `interface_latency` is the τ (interface round-trip latency) resolved for
 this capture — the field that lets an arrival be converted to a distance.

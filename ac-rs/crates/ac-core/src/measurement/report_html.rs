@@ -12,8 +12,8 @@
 use std::fmt::Write as _;
 
 use crate::measurement::report::{
-    CalibrationSnapshot, FrequencyResponsePoint, MeasurementData, MeasurementMethod,
-    MeasurementPayload, MeasurementReport, ProcessingChain,
+    CalibrationSnapshot, FrequencyResponsePoint, GatedFrequencyResponsePoint, MeasurementData,
+    MeasurementMethod, MeasurementPayload, MeasurementReport, ProcessingChain,
 };
 use crate::shared::conversions::speed_of_sound_at;
 
@@ -34,6 +34,7 @@ svg .axis { stroke: #888; stroke-width: 1; fill: none; }
 svg .grid { stroke: #ddd; stroke-width: 1; fill: none; }
 svg text { font-family: ui-monospace, Consolas, monospace; font-size: 10px; fill: #333; }
 svg .trace { fill: none; stroke: #1f77b4; stroke-width: 1.6; }
+svg .trace-phase { fill: none; stroke: #999; stroke-width: 1.0; }
 "#;
 
 /// Render `report` as a self-contained HTML document.
@@ -301,6 +302,7 @@ fn payload_title(d: &MeasurementData) -> &'static str {
         MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
         MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
         MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
+        MeasurementData::GatedFrequencyResponse { .. } => "Frequency Response (gated)",
     }
 }
 
@@ -379,6 +381,7 @@ fn write_payload_body(out: &mut String, d: &MeasurementData) {
             duration_s,
             linear_ir,
             harmonics,
+            noise_tail_start_s,
         } => {
             let _ = writeln!(out, "<dl class=\"meta\">");
             let _ = writeln!(
@@ -401,6 +404,15 @@ fn write_payload_body(out: &mut String, d: &MeasurementData) {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            if let Some(t) = noise_tail_start_s {
+                let _ = writeln!(
+                    out,
+                    "<dt>noise tail begins</dt><dd>{:.1} ms after peak (sweep duration \
+                     \u{2014} beyond this, `full` is convolution-smeared noise, not system \
+                     response)</dd>",
+                    t * 1000.0
+                );
+            }
             let _ = writeln!(out, "</dl>");
         }
         MeasurementData::NoiseResult {
@@ -430,6 +442,11 @@ fn write_payload_body(out: &mut String, d: &MeasurementData) {
                 let _ = writeln!(out, "<dt>CCIR-468</dt><dd>{:.2} dBFS</dd>", c);
             }
             let _ = writeln!(out, "</dl>");
+        }
+        MeasurementData::GatedFrequencyResponse { points } => {
+            out.push_str(&render_gated_magnitude_svg(points));
+            out.push_str(&render_gated_phase_svg(points));
+            write_gated_frequency_response_table(out, points);
         }
     }
 }
@@ -590,6 +607,244 @@ fn render_frequency_response_svg(points: &[FrequencyResponsePoint]) -> String {
 
     let _ = writeln!(s, "</svg>");
     s
+}
+
+/// Magnitude panel for a [`MeasurementData::GatedFrequencyResponse`]
+/// payload — full visual weight, primary result (#284). DC (`freq_hz ==
+/// 0`) is excluded from the log-frequency axis, matching the ungated
+/// renderer's own `freq_hz > 0.0` convention.
+fn render_gated_magnitude_svg(points: &[GatedFrequencyResponsePoint]) -> String {
+    let pts: Vec<&GatedFrequencyResponsePoint> =
+        points.iter().filter(|p| p.freq_hz > 0.0).collect();
+    if pts.len() < 2 {
+        return String::new();
+    }
+    let w = 900.0_f64;
+    let h = 300.0_f64;
+    let pad_l = 60.0_f64;
+    let pad_r = 20.0_f64;
+    let pad_t = 20.0_f64;
+    let pad_b = 40.0_f64;
+
+    let f_min = pts.iter().map(|p| p.freq_hz).fold(f64::INFINITY, f64::min);
+    let f_max = pts
+        .iter()
+        .map(|p| p.freq_hz)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (db_min_raw, db_max_raw) = pts
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p.magnitude_db), hi.max(p.magnitude_db))
+        });
+    let mut db_min = db_min_raw.floor() - 1.0;
+    let mut db_max = db_max_raw.ceil() + 1.0;
+    if (db_max - db_min) < 6.0 {
+        db_min -= 3.0;
+        db_max += 3.0;
+    }
+
+    let x = |f: f64| {
+        pad_l + (f.log10() - f_min.log10()) / (f_max.log10() - f_min.log10()) * (w - pad_l - pad_r)
+    };
+    let y = |db: f64| pad_t + (db_max - db) / (db_max - db_min) * (h - pad_t - pad_b);
+
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" width=\"{}\" height=\"{}\" role=\"img\" aria-label=\"Gated frequency response magnitude\">",
+        w as i64, h as i64, w as i64, h as i64
+    );
+
+    let mut decade = 10f64.powf(f_min.log10().floor());
+    while decade <= f_max {
+        if decade >= f_min {
+            let xp = x(decade);
+            let _ = writeln!(
+                s,
+                "<line class=\"grid\" x1=\"{:.1}\" y1=\"{}\" x2=\"{:.1}\" y2=\"{}\" />",
+                xp,
+                pad_t as i64,
+                xp,
+                (h - pad_b) as i64
+            );
+            let _ = writeln!(
+                s,
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{} Hz</text>",
+                xp,
+                h - pad_b + 14.0,
+                format_freq(decade)
+            );
+        }
+        decade *= 10.0;
+    }
+
+    let db_step = pick_db_step(db_max - db_min);
+    let mut db = (db_min / db_step).ceil() * db_step;
+    while db <= db_max {
+        let yp = y(db);
+        let _ = writeln!(
+            s,
+            "<line class=\"grid\" x1=\"{}\" y1=\"{:.1}\" x2=\"{}\" y2=\"{:.1}\" />",
+            pad_l as i64,
+            yp,
+            (w - pad_r) as i64,
+            yp
+        );
+        let _ = writeln!(
+            s,
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{:.0} dB</text>",
+            pad_l - 6.0,
+            yp + 3.5,
+            db
+        );
+        db += db_step;
+    }
+
+    let _ = writeln!(
+        s,
+        "<rect class=\"axis\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" />",
+        pad_l as i64,
+        pad_t as i64,
+        (w - pad_l - pad_r) as i64,
+        (h - pad_t - pad_b) as i64
+    );
+
+    let mut d = String::new();
+    for (i, p) in pts.iter().enumerate() {
+        let prefix = if i == 0 { 'M' } else { 'L' };
+        let _ = write!(d, "{}{:.2} {:.2} ", prefix, x(p.freq_hz), y(p.magnitude_db));
+    }
+    let _ = writeln!(s, "<path class=\"trace\" d=\"{}\" />", d);
+
+    let _ = writeln!(s, "</svg>");
+    s
+}
+
+/// Phase panel — thinner, lighter trace, same x-pixel mapping as the
+/// magnitude panel above it, its own y-axis fixed to the wrapped
+/// `[-180°, +180°]` range (#284). A second stacked SVG, not a dual-axis
+/// overlay on one plot: dB and degrees sharing a y-axis is exactly the
+/// kind of optical noise a static document (no zoom/toggle to
+/// disambiguate) should not carry.
+fn render_gated_phase_svg(points: &[GatedFrequencyResponsePoint]) -> String {
+    let pts: Vec<&GatedFrequencyResponsePoint> =
+        points.iter().filter(|p| p.freq_hz > 0.0).collect();
+    if pts.len() < 2 {
+        return String::new();
+    }
+    let w = 900.0_f64;
+    let h = 140.0_f64;
+    let pad_l = 60.0_f64;
+    let pad_r = 20.0_f64;
+    let pad_t = 10.0_f64;
+    let pad_b = 40.0_f64;
+
+    let f_min = pts.iter().map(|p| p.freq_hz).fold(f64::INFINITY, f64::min);
+    let f_max = pts
+        .iter()
+        .map(|p| p.freq_hz)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let x = |f: f64| {
+        pad_l + (f.log10() - f_min.log10()) / (f_max.log10() - f_min.log10()) * (w - pad_l - pad_r)
+    };
+    let y = |deg: f64| pad_t + (180.0 - deg) / 360.0 * (h - pad_t - pad_b);
+
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" width=\"{}\" height=\"{}\" role=\"img\" aria-label=\"Gated frequency response phase\">",
+        w as i64, h as i64, w as i64, h as i64
+    );
+
+    let mut decade = 10f64.powf(f_min.log10().floor());
+    while decade <= f_max {
+        if decade >= f_min {
+            let xp = x(decade);
+            let _ = writeln!(
+                s,
+                "<line class=\"grid\" x1=\"{:.1}\" y1=\"{}\" x2=\"{:.1}\" y2=\"{}\" />",
+                xp,
+                pad_t as i64,
+                xp,
+                (h - pad_b) as i64
+            );
+            let _ = writeln!(
+                s,
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{} Hz</text>",
+                xp,
+                h - pad_b + 14.0,
+                format_freq(decade)
+            );
+        }
+        decade *= 10.0;
+    }
+
+    for deg in [-180.0_f64, 0.0, 180.0] {
+        let yp = y(deg);
+        let _ = writeln!(
+            s,
+            "<line class=\"grid\" x1=\"{}\" y1=\"{:.1}\" x2=\"{}\" y2=\"{:.1}\" />",
+            pad_l as i64,
+            yp,
+            (w - pad_r) as i64,
+            yp
+        );
+        let _ = writeln!(
+            s,
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{:+.0}\u{b0}</text>",
+            pad_l - 6.0,
+            yp + 3.5,
+            deg
+        );
+    }
+
+    let _ = writeln!(
+        s,
+        "<rect class=\"axis\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" />",
+        pad_l as i64,
+        pad_t as i64,
+        (w - pad_l - pad_r) as i64,
+        (h - pad_t - pad_b) as i64
+    );
+
+    // Break the path (move-to, not line-to) at wrap discontinuities so a
+    // wrap does not draw as a vertical spike a reader could mistake for a
+    // real transient (#284).
+    let mut d = String::new();
+    let mut prev: Option<f64> = None;
+    for p in &pts {
+        let start_new = match prev {
+            None => true,
+            Some(pv) => (p.phase_deg - pv).abs() > 180.0,
+        };
+        let prefix = if start_new { 'M' } else { 'L' };
+        let _ = write!(d, "{}{:.2} {:.2} ", prefix, x(p.freq_hz), y(p.phase_deg));
+        prev = Some(p.phase_deg);
+    }
+    let _ = writeln!(s, "<path class=\"trace-phase\" d=\"{}\" />", d);
+
+    let _ = writeln!(s, "</svg>");
+    s
+}
+
+fn write_gated_frequency_response_table(out: &mut String, points: &[GatedFrequencyResponsePoint]) {
+    let _ = writeln!(
+        out,
+        "<table><thead><tr>\
+         <th class=\"label\">freq (Hz)</th>\
+         <th>magnitude (dB)</th>\
+         <th>phase (°)</th>\
+         </tr></thead><tbody>"
+    );
+    for p in points {
+        let _ = writeln!(
+            out,
+            "<tr><td class=\"label\">{:.2}</td><td>{:.2}</td><td>{:.2}</td></tr>",
+            p.freq_hz, p.magnitude_db, p.phase_deg
+        );
+    }
+    let _ = writeln!(out, "</tbody></table>");
 }
 
 fn pick_db_step(span: f64) -> f64 {
@@ -997,5 +1252,105 @@ mod tests {
         assert!(html.contains("-103.10 dBFS"));
         // CCIR field omitted when None.
         assert!(!html.contains("CCIR-468"));
+    }
+
+    // ─── GatedFrequencyResponse / noise_tail_start_s (#284) ──────────────
+
+    fn sample_gated_points() -> Vec<GatedFrequencyResponsePoint> {
+        vec![
+            GatedFrequencyResponsePoint {
+                freq_hz: 0.0,
+                magnitude_db: -0.1,
+                phase_deg: 0.0,
+            },
+            GatedFrequencyResponsePoint {
+                freq_hz: 100.0,
+                magnitude_db: -0.5,
+                phase_deg: 142.68,
+            },
+            GatedFrequencyResponsePoint {
+                freq_hz: 1_000.0,
+                magnitude_db: -0.2,
+                phase_deg: -18.44,
+            },
+            GatedFrequencyResponsePoint {
+                freq_hz: 10_000.0,
+                magnitude_db: -4.9,
+                phase_deg: -171.19,
+            },
+        ]
+    }
+
+    #[test]
+    fn gated_frequency_response_renders_title_gate_magnitude_phase_and_table() {
+        let mut r = sample_fr_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: sample_gated_points(),
+            },
+            standard: vec![
+                StandardsCitation {
+                    standard: "AES17-2015".into(),
+                    clause: "Annex A.4".into(),
+                    verified: false,
+                },
+                StandardsCitation {
+                    standard: "Farina, AES 108th Convention preprint #5093 (2000)".into(),
+                    clause: "§2".into(),
+                    verified: false,
+                },
+            ],
+            gate: Some(GateParams {
+                gate_start_s: 0.0029,
+                gate_length_s: 0.020,
+                window_kind: "tukey0.25".into(),
+                f_low_hz: 50.0,
+            }),
+        }];
+        let html = render_html(&r);
+        assert!(html.contains("Frequency Response (gated)"), "{html}");
+        assert!(html.contains("<dt>gate</dt>"), "{html}");
+        assert!(html.contains("tukey0.25"), "{html}");
+        assert!(html.contains("50.0 Hz (= 1 / gate length)"), "{html}");
+        // Two stacked SVGs: magnitude (full weight) then phase (thinner).
+        assert_eq!(html.matches("<svg").count(), 2, "{html}");
+        assert!(html.contains("trace-phase"), "{html}");
+        // Table carries all three columns.
+        assert!(html.contains("magnitude (dB)"), "{html}");
+        assert!(html.contains("phase (°)"), "{html}");
+        assert!(html.contains("142.68"), "{html}");
+    }
+
+    #[test]
+    fn noise_tail_line_omitted_when_absent_and_rendered_when_set() {
+        let mut r = sample_fr_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 48_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 3.0,
+                linear_ir: vec![0.0, 1.0, 0.0],
+                harmonics: vec![],
+                noise_tail_start_s: None,
+            },
+            standard: vec![],
+            gate: None,
+        }];
+        let html = render_html(&r);
+        assert!(!html.contains("noise tail begins"), "{html}");
+
+        r.data[0].data = MeasurementData::ImpulseResponse {
+            sample_rate_hz: 48_000,
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 3.0,
+            linear_ir: vec![0.0, 1.0, 0.0],
+            harmonics: vec![],
+            noise_tail_start_s: Some(3.0),
+        };
+        let html = render_html(&r);
+        assert!(html.contains("noise tail begins"), "{html}");
+        assert!(html.contains("3000.0 ms after peak"), "{html}");
     }
 }

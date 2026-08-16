@@ -416,6 +416,7 @@ fn payload_title(d: &MeasurementData) -> &'static str {
         MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
         MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
         MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
+        MeasurementData::GatedFrequencyResponse { .. } => "Frequency Response (gated)",
     }
 }
 
@@ -494,6 +495,7 @@ fn draw_payload(
             duration_s,
             linear_ir,
             harmonics,
+            noise_tail_start_s,
         } => draw_impulse_response_body(
             layer,
             font_bold,
@@ -505,6 +507,7 @@ fn draw_payload(
             *duration_s,
             linear_ir.len(),
             harmonics.len(),
+            *noise_tail_start_s,
         ),
         MeasurementData::NoiseResult {
             sample_rate_hz,
@@ -523,6 +526,9 @@ fn draw_payload(
             *a_weighted_dbfs,
             *ccir_weighted_dbfs,
         ),
+        MeasurementData::GatedFrequencyResponse { points } => {
+            draw_gated_frequency_response_body(layer, font_bold, font_mono, y, points)
+        }
     }
 }
 
@@ -677,6 +683,7 @@ fn draw_impulse_response_body(
     duration_s: f64,
     linear_len: usize,
     n_harmonics: usize,
+    noise_tail_start_s: Option<f64>,
 ) -> f32 {
     let mut y = y;
     for (label, value) in [
@@ -689,7 +696,164 @@ fn draw_impulse_response_body(
     ] {
         y = kv_row(layer, font_bold, font_mono, y, label, &value);
     }
+    if let Some(t) = noise_tail_start_s {
+        y = kv_row(
+            layer,
+            font_bold,
+            font_mono,
+            y,
+            "noise tail begins",
+            &format!("{:.1} ms after peak (sweep duration)", t * 1000.0),
+        );
+    }
     y - 2.0
+}
+
+/// PDF: magnitude plot only (page-budget asymmetry vs the HTML two-panel
+/// render, stated in #284's UX review — a fixed A4 page pushes real table
+/// rows off the page for a full sweep before a phase panel earns its
+/// space). Phase rides as a third table column instead.
+#[allow(clippy::too_many_arguments)]
+fn draw_gated_frequency_response_body(
+    layer: &PdfLayerReference,
+    font_bold: &IndirectFontRef,
+    font_mono: &IndirectFontRef,
+    y: f32,
+    points: &[crate::measurement::report::GatedFrequencyResponsePoint],
+) -> f32 {
+    let mut y = y;
+    if points.is_empty() {
+        layer.use_text(
+            "(no points)",
+            SIZE_BODY,
+            Mm(MARGIN_MM),
+            Mm(y - SIZE_BODY),
+            font_mono,
+        );
+        return y - SIZE_BODY - 2.0;
+    }
+
+    let plot_x0 = MARGIN_MM + 14.0;
+    let plot_x1 = PAGE_W_MM - MARGIN_MM;
+    let plot_y1 = y - 2.0;
+    let plot_y0 = plot_y1 - PLOT_H_MM;
+
+    draw_rect_outline(layer, plot_x0, plot_y0, plot_x1, plot_y1, 0.4);
+
+    let (fmin, fmax) = gated_log_x_domain(points);
+    let (dmin, dmax) = gated_db_y_domain(points);
+
+    draw_log_freq_grid(
+        layer, font_mono, plot_x0, plot_y0, plot_x1, plot_y1, fmin, fmax,
+    );
+    draw_db_grid(
+        layer, font_mono, plot_x0, plot_y0, plot_x1, plot_y1, dmin, dmax,
+    );
+
+    let fspan = (fmax.log10() - fmin.log10()).max(1e-9);
+    let dspan = (dmax - dmin).max(1e-9);
+    let trace: Vec<(Point, bool)> = points
+        .iter()
+        .filter(|p| p.freq_hz > 0.0)
+        .map(|p| {
+            let x = lerp(
+                plot_x0,
+                plot_x1,
+                ((p.freq_hz.max(fmin)).log10() - fmin.log10()) as f32 / fspan as f32,
+            );
+            let yv = lerp(
+                plot_y0,
+                plot_y1,
+                (p.magnitude_db - dmin) as f32 / dspan as f32,
+            );
+            (Point::new(Mm(x), Mm(yv)), false)
+        })
+        .collect();
+    if trace.len() >= 2 {
+        layer.set_outline_color(Color::Rgb(Rgb::new(0.12, 0.47, 0.71, None)));
+        layer.set_outline_thickness(0.6);
+        layer.add_line(Line {
+            points: trace,
+            is_closed: false,
+        });
+        layer.set_outline_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
+        layer.set_outline_thickness(0.3);
+    }
+
+    y = plot_y0 - 6.0;
+
+    let widths = [24.0, 26.0, 24.0];
+    y = table_header(
+        layer,
+        font_bold,
+        y,
+        &["freq_hz", "mag_dB", "phase_deg"],
+        &widths,
+    );
+    let row_h = SIZE_BODY * 1.25;
+    let max_rows = ((y - MARGIN_MM) / row_h).floor() as usize;
+    let show = max_rows.saturating_sub(1).min(points.len());
+    for p in &points[..show] {
+        y = table_row(
+            layer,
+            font_mono,
+            y,
+            &[
+                fmt_f(p.freq_hz, 1),
+                fmt_f(p.magnitude_db, 2),
+                fmt_f(p.phase_deg, 1),
+            ],
+            &widths,
+        );
+    }
+    if show < points.len() {
+        layer.use_text(
+            format!(
+                "… {} more rows — see JSON report for full data",
+                points.len() - show
+            ),
+            SIZE_SMALL,
+            Mm(MARGIN_MM),
+            Mm(y - SIZE_SMALL),
+            font_mono,
+        );
+        y -= SIZE_SMALL + 1.0;
+    }
+    y
+}
+
+fn gated_log_x_domain(
+    points: &[crate::measurement::report::GatedFrequencyResponsePoint],
+) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in points {
+        if p.freq_hz > 0.0 {
+            lo = lo.min(p.freq_hz);
+            hi = hi.max(p.freq_hz);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+        return (20.0, 20_000.0);
+    }
+    (lo, hi)
+}
+
+fn gated_db_y_domain(
+    points: &[crate::measurement::report::GatedFrequencyResponsePoint],
+) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in points {
+        let v = p.magnitude_db;
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return (-60.0, 0.0);
+    }
+    let pad = ((hi - lo).abs() * 0.1).max(1.0);
+    (lo - pad, hi + pad)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -987,8 +1151,9 @@ fn fmt_f(v: f64, decimals: usize) -> String {
 mod tests {
     use super::*;
     use crate::measurement::report::{
-        FrequencyResponsePoint, GateParams, IntegrationParams, MeasurementData, MeasurementMethod,
-        MeasurementPayload, MeasurementReport, PositionSnapshot, StimulusParams, SCHEMA_VERSION,
+        FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
+        MeasurementData, MeasurementMethod, MeasurementPayload, MeasurementReport,
+        PositionSnapshot, StimulusParams, SCHEMA_VERSION,
     };
 
     fn sample_report() -> MeasurementReport {
@@ -1114,5 +1279,67 @@ mod tests {
         });
         let pdf = render_pdf(&r).expect("render");
         assert!(pdf.starts_with(b"%PDF-"));
+    }
+
+    // ─── GatedFrequencyResponse / noise_tail_start_s (#284) ──────────────
+
+    #[test]
+    fn render_pdf_handles_gated_frequency_response_payload() {
+        let mut r = sample_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: vec![
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 100.0,
+                        magnitude_db: -0.5,
+                        phase_deg: 142.68,
+                    },
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 1_000.0,
+                        magnitude_db: -0.2,
+                        phase_deg: -18.44,
+                    },
+                ],
+            },
+            standard: vec![],
+            gate: Some(GateParams {
+                gate_start_s: 0.0,
+                gate_length_s: 0.020,
+                window_kind: "tukey0.25".into(),
+                f_low_hz: 50.0,
+            }),
+        }];
+        let pdf = render_pdf(&r).expect("render");
+        assert!(pdf.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn render_pdf_gated_frequency_response_empty_points_does_not_crash() {
+        let mut r = sample_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse { points: vec![] },
+            standard: vec![],
+            gate: None,
+        }];
+        assert!(render_pdf(&r).is_ok());
+    }
+
+    #[test]
+    fn render_pdf_handles_impulse_response_with_noise_tail() {
+        let mut r = sample_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 48_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 3.0,
+                linear_ir: vec![0.0, 1.0, 0.0],
+                harmonics: vec![],
+                noise_tail_start_s: Some(3.0),
+            },
+            standard: vec![],
+            gate: None,
+        }];
+        assert!(render_pdf(&r).is_ok());
     }
 }

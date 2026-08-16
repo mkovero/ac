@@ -387,6 +387,14 @@ pub enum MeasurementData {
         duration_s: f64,
         linear_ir: Vec<f64>,
         harmonics: Vec<crate::measurement::sweep::HarmonicIr>,
+        /// The instant, seconds after the linear-IR peak, past which the
+        /// captured deconvolution can only carry linear-deconvolution
+        /// noise, never real system response — see
+        /// [`crate::measurement::sweep::noise_tail_start_s`] (#284).
+        /// `None` on reports written before this field existed and on
+        /// captures where it was never computed (e.g. no tail captured).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        noise_tail_start_s: Option<f64>,
     },
     /// AES17 idle-channel noise — output of `measurement/noise.rs`.
     /// `ccir_weighted_dbfs` is the ITU-R BS.468-4 weighted quasi-peak
@@ -401,6 +409,15 @@ pub enum MeasurementData {
         #[serde(skip_serializing_if = "Option::is_none")]
         ccir_weighted_dbfs: Option<f64>,
     },
+    /// Quasi-anechoic frequency response derived by time-gating and FFTing
+    /// the linear IR from a Farina sweep — output of
+    /// `measurement::sweep::gated_frequency_response` (#284). A distinct
+    /// producer from the stepped-sine `FrequencyResponse` above: no
+    /// per-point THD (the gate+FFT path carries no harmonic analysis) and
+    /// a `phase_deg` the stepped-sine path never measures.
+    GatedFrequencyResponse {
+        points: Vec<GatedFrequencyResponsePoint>,
+    },
 }
 
 impl MeasurementData {
@@ -413,6 +430,7 @@ impl MeasurementData {
             MeasurementData::SpectrumBands { .. } => "spectrum_bands",
             MeasurementData::ImpulseResponse { .. } => "impulse_response",
             MeasurementData::NoiseResult { .. } => "noise_result",
+            MeasurementData::GatedFrequencyResponse { .. } => "gated_frequency_response",
         }
     }
 
@@ -486,9 +504,31 @@ impl MeasurementData {
                     sample_rate_hz, duration_s, unweighted_dbfs, a_weighted_dbfs, ccir,
                 )?;
             }
+            MeasurementData::GatedFrequencyResponse { points } => {
+                writeln!(s, "freq_hz,magnitude_db,phase_deg")?;
+                for p in points {
+                    writeln!(
+                        s,
+                        "{:.6},{:.6},{:.4}",
+                        p.freq_hz, p.magnitude_db, p.phase_deg
+                    )?;
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// One point of a [`MeasurementData::GatedFrequencyResponse`] payload —
+/// see `measurement::sweep::GatedResponsePoint`, which this mirrors for
+/// archival (#284).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GatedFrequencyResponsePoint {
+    pub freq_hz: f64,
+    pub magnitude_db: f64,
+    /// Wrapped `atan2` phase in degrees — see
+    /// `measurement::sweep::GatedResponsePoint::phase_deg`.
+    pub phase_deg: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -980,6 +1020,7 @@ mod tests {
                     f2_hz: 20_000.0,
                     duration_s: 1.0,
                     linear_ir: vec![0.0, 0.5, 1.0, 0.25, 0.0],
+                    noise_tail_start_s: None,
                     harmonics: vec![HarmonicIr {
                         order: 2,
                         samples: vec![0.0, 0.1, 0.2, 0.05, 0.0],
@@ -1034,6 +1075,7 @@ mod tests {
                 f2_hz: 20_000.0,
                 duration_s: 1.0,
                 linear_ir: ir,
+                noise_tail_start_s: None,
                 harmonics: vec![],
             },
             standard: Vec::new(),
@@ -1159,6 +1201,7 @@ mod tests {
                 f2_hz: 20_000.0,
                 duration_s: 1.0,
                 linear_ir: vec![],
+                noise_tail_start_s: None,
                 harmonics: vec![],
             },
             standard: Vec::new(),
@@ -1357,6 +1400,7 @@ mod tests {
             crate::measurement::noise::citation(),
             crate::measurement::weighting::WeightingFilter::citation(),
             crate::measurement::sweep::citation(),
+            crate::measurement::sweep::gated_response_citation(),
             crate::measurement::ccir468::citation(),
             crate::shared::reference_levels::citation(),
         ];
@@ -1623,5 +1667,95 @@ mod tests {
         let bare = sample_report();
         let bare_json = bare.to_json().unwrap();
         assert!(!bare_json.contains("\"position\""), "{bare_json}");
+    }
+
+    // ─── GatedFrequencyResponse / noise_tail_start_s (#284) ──────────────
+
+    #[test]
+    fn gated_frequency_response_round_trips_and_labels_correctly() {
+        let mut r = sample_impulse_response_report();
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: vec![
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 100.0,
+                        magnitude_db: -0.5,
+                        phase_deg: 12.3,
+                    },
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 1_000.0,
+                        magnitude_db: -1.2,
+                        phase_deg: -145.0,
+                    },
+                ],
+            },
+            standard: vec![
+                crate::measurement::sweep::citation(),
+                crate::measurement::sweep::gated_response_citation(),
+            ],
+            gate: Some(GateParams {
+                gate_start_s: 0.0,
+                gate_length_s: 0.020,
+                window_kind: "tukey0.25".into(),
+                f_low_hz: 50.0,
+            }),
+        });
+        assert_eq!(r.data[1].data.kind_label(), "gated_frequency_response");
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+        assert_eq!(r2.data[1].standard.len(), 2);
+    }
+
+    #[test]
+    fn gated_frequency_response_csv_shape() {
+        let mut r = sample_impulse_response_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: vec![
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 100.0,
+                        magnitude_db: -0.5,
+                        phase_deg: 12.3,
+                    },
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 1_000.0,
+                        magnitude_db: -1.2,
+                        phase_deg: -145.0,
+                    },
+                ],
+            },
+            standard: vec![],
+            gate: None,
+        }];
+        let csv = r.to_csv().unwrap();
+        assert!(csv.starts_with("# payload 1: gated_frequency_response"));
+        assert!(csv.contains("freq_hz,magnitude_db,phase_deg"));
+        // Payload comment + header + 2 data lines.
+        assert_eq!(csv.lines().count(), 4);
+    }
+
+    #[test]
+    fn impulse_response_noise_tail_start_s_round_trips_and_is_optional() {
+        let mut r = sample_impulse_response_report();
+        let MeasurementData::ImpulseResponse {
+            noise_tail_start_s, ..
+        } = &mut r.data[0].data
+        else {
+            panic!("expected ImpulseResponse");
+        };
+        *noise_tail_start_s = Some(3.0);
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"noise_tail_start_s\": 3.0"), "{json}");
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+
+        // Absent field omits the key entirely (legacy reports decode
+        // with `None`, not a misleading `0.0`).
+        let bare = sample_impulse_response_report();
+        let bare_json = bare.to_json().unwrap();
+        assert!(!bare_json.contains("noise_tail_start_s"), "{bare_json}");
+        let bare2: MeasurementReport = serde_json::from_str(&bare_json).unwrap();
+        assert_eq!(bare2, bare);
     }
 }
