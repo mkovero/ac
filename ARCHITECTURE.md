@@ -336,7 +336,9 @@ standard's PDF lives. Look the standard up there by name.
 | `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | see `.agents/qa.md` |
 | `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | see `.agents/qa.md` |
 | `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | see `.agents/qa.md`; EBU Tech 3341/3342 conformance cases (not a `stddocs/` file) |
-| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see `.agents/qa.md` (Annex B pending human cross-check, `verified: false`) |
+| `sweep.rs::citation()` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see `.agents/qa.md` (Annex B pending human cross-check, `verified: false`) |
+| `sweep.rs::farina_citation()` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis (log sweep, inverse filter, harmonic offsets) | see `.agents/qa.md`; `verified: false` |
+| `sweep.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) quasi-anechoic frequency response via time-gated impulse response | see `.agents/qa.md`; pending human cross-check, `verified: false` |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical
