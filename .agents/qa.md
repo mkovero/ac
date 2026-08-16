@@ -31,7 +31,7 @@ not compile. No CI here, so this command is the only thing that catches it.
 
 Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
-**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and two papers alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. A file of the same name previously sat at `stddocs/iec-full/` too, but it was a mislabelled copy of IEC 60268-3 — not an edition or variant of the Cabot paper — and has been deleted. If a same-named file ever reappears under `iec-full/`, treat it as suspect and verify against its first page before citing it; don't assume it's the fuller copy. Copy the cell.
+**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and one paper alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. A file of the same name previously sat at `stddocs/iec-full/` too, but it was a mislabelled copy of IEC 60268-3 — not an edition or variant of the Cabot paper — and has been deleted. If a same-named file ever reappears under `iec-full/`, treat it as suspect and verify against its first page before citing it; don't assume it's the fuller copy. Copy the cell.
 
 ### normative standards
 
