@@ -8,6 +8,7 @@
 //! on dB-domain magnitudes, leaving non-finite bins (NaN / -inf
 //! sentinels) untouched.
 
+use ac_core::measurement::sweep::GatedResponsePoint;
 use ac_core::shared::calibration::MicResponse;
 use ac_core::shared::types::AnalysisResult;
 
@@ -79,10 +80,38 @@ pub(crate) fn apply_mic_curve_to_analysis(curve: &MicResponse, r: &mut AnalysisR
     }
 }
 
+/// Apply mic-curve correction to a gated (quasi-anechoic) frequency
+/// response in place — the frequency-domain route #285 requires for
+/// `plot_ir`. Reuses [`apply_mic_curve_inplace_f64`]'s subtraction on
+/// the derived `magnitude_db` column, keyed by each point's `freq_hz`.
+///
+/// Deliberately does not touch any impulse response: by the time a
+/// [`GatedResponsePoint`] slice exists, arrival estimation and gating
+/// are already done, so there is no time axis left to disturb. Contrast
+/// with [`ac_core::shared::mic_curve_filter::MicCurveFir`] — a
+/// linear-phase FIR meant for *time-domain* correction — convolving
+/// that into the IR ahead of gating would shift the IR peak by the
+/// filter's group delay and corrupt the arrival sample the gate was
+/// anchored to (#285's `mic_curve_correction_does_not_move_ir_peak`
+/// test demonstrates exactly this failure mode).
+pub(crate) fn apply_mic_curve_to_gated_response(
+    curve: &MicResponse,
+    points: &mut [GatedResponsePoint],
+) {
+    let freqs: Vec<f64> = points.iter().map(|p| p.freq_hz).collect();
+    let mut mags: Vec<f64> = points.iter().map(|p| p.magnitude_db).collect();
+    apply_mic_curve_inplace_f64(curve, &freqs, &mut mags);
+    for (p, m) in points.iter_mut().zip(mags) {
+        p.magnitude_db = m;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ac_core::measurement::sweep::gated_frequency_response;
     use ac_core::shared::calibration::parse_mic_curve;
+    use ac_core::shared::mic_curve_filter::MicCurveFir;
 
     fn flat_curve_text(n: usize, gain_db: f32) -> String {
         let mut s = String::new();
@@ -201,5 +230,173 @@ mod tests {
         assert_eq!(mic_correction_tag(false, false), "none");
         assert_eq!(mic_correction_tag(true, true), "on");
         assert_eq!(mic_correction_tag(true, false), "off");
+    }
+
+    /// Non-flat, log-spaced curve — 6 dB at 20 Hz sloping to 0 dB at
+    /// 20 kHz — so a `MicCurveFir` built from it has genuine taps
+    /// rather than degenerating toward a near-delta.
+    fn tilted_curve() -> MicResponse {
+        let mut s = String::new();
+        let log_min = 20.0_f32.ln();
+        let log_max = 20_000.0_f32.ln();
+        for i in 0..24 {
+            let t = i as f32 / 23.0;
+            let f = (log_min + t * (log_max - log_min)).exp();
+            let gain = 6.0 * (1.0 - t);
+            s.push_str(&format!("{f}\t{gain}\n"));
+        }
+        parse_mic_curve(&s, None).unwrap()
+    }
+
+    #[test]
+    fn gated_response_corrected_by_curve_at_each_bin() {
+        let curve = tilted_curve();
+        let mut points = vec![
+            GatedResponsePoint {
+                freq_hz: 200.0,
+                magnitude_db: -10.0,
+                phase_deg: 0.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 1000.0,
+                magnitude_db: -5.0,
+                phase_deg: 45.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 8000.0,
+                magnitude_db: -2.0,
+                phase_deg: -90.0,
+            },
+        ];
+        let expected: Vec<f64> = points
+            .iter()
+            .map(|p| p.magnitude_db - curve.correction_at(p.freq_hz as f32) as f64)
+            .collect();
+        let phases: Vec<f64> = points.iter().map(|p| p.phase_deg).collect();
+        apply_mic_curve_to_gated_response(&curve, &mut points);
+        for ((p, exp), ph) in points.iter().zip(expected).zip(phases) {
+            assert!(
+                (p.magnitude_db - exp).abs() < 1e-9,
+                "got {} want {}",
+                p.magnitude_db,
+                exp
+            );
+            assert_eq!(
+                p.phase_deg, ph,
+                "phase must be untouched by mic-curve correction"
+            );
+        }
+    }
+
+    /// (#306 QA test coverage gap) `apply_mic_curve_to_gated_response`
+    /// inherits `apply_mic_curve_inplace_f64`'s non-finite-bin skip
+    /// contract (module doc above) but had no direct test on this call
+    /// site — a zero/degenerate FFT bin producing `-inf` dB is plausible
+    /// on `GatedResponsePoint`.
+    #[test]
+    fn gated_response_correction_skips_non_finite_bins() {
+        let curve = tilted_curve();
+        let mut points = vec![
+            GatedResponsePoint {
+                freq_hz: 100.0,
+                magnitude_db: f64::NEG_INFINITY,
+                phase_deg: 0.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 200.0,
+                magnitude_db: f64::NAN,
+                phase_deg: 0.0,
+            },
+            GatedResponsePoint {
+                freq_hz: 1000.0,
+                magnitude_db: -5.0,
+                phase_deg: 0.0,
+            },
+        ];
+        apply_mic_curve_to_gated_response(&curve, &mut points);
+        assert_eq!(points[0].magnitude_db, f64::NEG_INFINITY);
+        assert!(points[1].magnitude_db.is_nan());
+        assert!(
+            (points[2].magnitude_db - (-5.0 - curve.correction_at(1000.0) as f64)).abs() < 1e-9
+        );
+    }
+
+    /// The load-bearing test (#285): mic-curve correction on the derived
+    /// gated spectrum must leave the IR peak — and therefore the gate
+    /// anchored to it — exactly where it was. Demonstrates the failure
+    /// mode this guards against by computing, inside the test, what the
+    /// rejected implementation (convolving the equivalent `MicCurveFir`
+    /// into the time-domain IR *before* gating) would have done: shift
+    /// the arrival sample by the filter's group delay.
+    #[test]
+    fn mic_curve_correction_does_not_move_ir_peak() {
+        let sr = 48_000u32;
+        let n = 4096usize;
+        let peak_idx = 2100usize; // arrival sample, offset from centre (2048)
+        let mut ir = vec![0.0_f64; n];
+        ir[peak_idx] = 1.0;
+
+        let curve = tilted_curve();
+
+        // --- the real implementation: gate/FFT the raw IR, correct the
+        // derived spectrum afterward. `ir` is only ever read. ---
+        let gate_length_s = 0.02;
+        let raw_points = gated_frequency_response(&ir, sr, 0.0, gate_length_s, 0.25);
+        let mut corrected_points = raw_points.clone();
+        apply_mic_curve_to_gated_response(&curve, &mut corrected_points);
+
+        let ir_peak_after = ir
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            ir_peak_after, peak_idx,
+            "mic-curve correction on the derived spectrum must not move the IR peak"
+        );
+
+        for (raw, corrected) in raw_points.iter().zip(&corrected_points) {
+            let expected = raw.magnitude_db - curve.correction_at(raw.freq_hz as f32) as f64;
+            assert!(
+                (corrected.magnitude_db - expected).abs() < 1e-6,
+                "freq {}: got {}, want {}",
+                raw.freq_hz,
+                corrected.magnitude_db,
+                expected
+            );
+        }
+
+        // --- what the rejected implementation would have done: convolve
+        // the equivalent MicCurveFir into the time-domain IR ahead of
+        // gating. Its linear-phase group delay shifts the impulse by
+        // `group_delay_samples`, corrupting exactly the arrival sample
+        // the gate is anchored to.
+        let n_taps = 512;
+        let mut fir = MicCurveFir::new(&curve, sr, n_taps);
+        let mut wrong_ir: Vec<f32> = ir.iter().map(|&v| v as f32).collect();
+        fir.process_inplace(&mut wrong_ir);
+        let wrong_peak = wrong_ir
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        // Not an exact `peak_idx + group_delay_samples` match — the
+        // curve isn't flat, so the FIR's impulse response is a shaped
+        // pulse, not a pure delta, and its peak can land a sample or two
+        // off the nominal group delay. Still unmistakably in that
+        // neighbourhood, nowhere near the untouched `peak_idx`.
+        assert!(
+            wrong_peak.abs_diff(peak_idx + fir.group_delay_samples) <= 4,
+            "sanity: the rejected time-domain-FIR route shifts the impulse by ~its group delay \
+             ({}), got peak at {wrong_peak}",
+            fir.group_delay_samples
+        );
+        assert_ne!(
+            wrong_peak, ir_peak_after,
+            "the rejected implementation moves the IR peak; the real implementation above must \
+             not — this is exactly the bug #285 exists to prevent"
+        );
     }
 }
