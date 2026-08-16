@@ -61,13 +61,24 @@ fn ac_daemon_bin() -> PathBuf {
     } else {
         "release"
     };
-    let candidate = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
-        .join(profile)
-        .join("ac-daemon");
+    // Honour CARGO_TARGET_DIR when the caller set it (#314) — `bin/*.sh`
+    // agent scripts export it (bin/common.sh) to keep worktrees isolated,
+    // which redirects build output away from the hardcoded
+    // `<manifest_dir>/../../target` guess below.
+    let target_root = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target")));
+    let candidate = target_root.join(profile).join("ac-daemon");
     assert!(
         candidate.exists(),
-        "ac-daemon binary not found at {} — run `cargo build -p ac-daemon` first",
-        candidate.display()
+        "ac-daemon binary not found at {} — resolved from {} ({}); build it with `cargo build -p ac-daemon`",
+        candidate.display(),
+        if env::var_os("CARGO_TARGET_DIR").is_some() {
+            "CARGO_TARGET_DIR"
+        } else {
+            "default workspace target dir"
+        },
+        target_root.display()
     );
     candidate
 }
