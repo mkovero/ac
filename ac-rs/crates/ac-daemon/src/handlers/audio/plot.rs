@@ -602,16 +602,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let device = cfg.device;
     let tau_out_port = out_port.clone();
     let tau_in_port = in_port.clone();
+    let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
 
     let worker = spawn_worker(state, "plot_ir", move |_stop| {
-        // Calibration snapshot — the IR itself is NOT yet mic-curve-
-        // corrected (the FIR-based deep correction is tracked as a
-        // follow-up to #97; the curve provenance is preserved in the
-        // report so a downstream tool can apply correction post hoc).
+        // Calibration snapshot. The linear IR itself is never mic-curve
+        // corrected — arrival estimation and gating (`extract_irs`,
+        // `gated_frequency_response` below) run on the raw, uncorrected
+        // capture. Correction is applied afterward, in the frequency
+        // domain, to the *derived* gated spectrum only (#285) — see the
+        // `gated_points` correction step below for why: `MicCurveFir`'s
+        // linear-phase group delay would otherwise move the IR peak the
+        // gate is anchored to.
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
+        let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
 
         let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
@@ -771,20 +777,35 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         const GATED_RESPONSE_ALPHA: f64 = 0.25;
         let gated_gate_len = (linear_gate_len / 2).max(2);
         let gated_gate_length_s = gated_gate_len as f64 / sr as f64;
-        let gated_points: Vec<GatedFrequencyResponsePoint> = gated_frequency_response(
+        let mut gated_raw = gated_frequency_response(
             &irs.linear,
             sr,
             0.0,
             gated_gate_length_s,
             GATED_RESPONSE_ALPHA,
-        )
-        .into_iter()
-        .map(|p| GatedFrequencyResponsePoint {
-            freq_hz: p.freq_hz,
-            magnitude_db: p.magnitude_db,
-            phase_deg: p.phase_deg,
-        })
-        .collect();
+        );
+        // Mic-curve correction (#285): applied here, to the already-gated
+        // derived spectrum, in the frequency domain — the same
+        // `mic::apply_mic_curve_inplace_f64` subtraction `plot`/
+        // `plot_level` use on `AnalysisResult.spectrum`. `irs.linear`
+        // above (and the arrival/gate it was extracted with) is never
+        // touched: by this point gating is already done, so there is no
+        // time axis left for a FIR's group delay to disturb.
+        let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+        if mc_enabled {
+            if let Some(curve) = &mic_curve_opt {
+                mic::apply_mic_curve_to_gated_response(curve, &mut gated_raw);
+            }
+        }
+        let mc_applied = mic_curve_opt.is_some() && mc_enabled;
+        let gated_points: Vec<GatedFrequencyResponsePoint> = gated_raw
+            .into_iter()
+            .map(|p| GatedFrequencyResponsePoint {
+                freq_hz: p.freq_hz,
+                magnitude_db: p.magnitude_db,
+                phase_deg: p.phase_deg,
+            })
+            .collect();
         let gated_payload = MeasurementPayload {
             data: MeasurementData::GatedFrequencyResponse {
                 points: gated_points,
@@ -862,12 +883,14 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             // and the CLI prints them one to a row, so they must not run
             // together into a single paragraph (#283).
             notes: Some(notes.join("\n")),
-            // plot_ir's IR isn't yet mic-curve-corrected (deferred from
-            // #97 to a follow-up). The snapshot still captures the curve
-            // provenance via `calibration.mic_response`; downstream
-            // tools can apply the correction post-hoc.
+            // Reports the truth (#285): `true` exactly when a curve was
+            // loaded *and* the global mic-correction toggle was on for
+            // this capture — the same predicate `gated_raw`'s correction
+            // step above used. The linear IR itself is still uncorrected
+            // (see the comment at the top of this worker); this flag
+            // describes the gated frequency-response payload only.
             processing_chain: ProcessingChain {
-                mic_correction_applied: false,
+                mic_correction_applied: mc_applied,
                 ..Default::default()
             },
         };
