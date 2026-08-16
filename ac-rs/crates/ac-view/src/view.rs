@@ -644,23 +644,7 @@ fn draw_segments(painter: &egui::Painter, trace: &ac_scene::Trace, vp: Viewport,
 /// maps the normalized `[0,1]²` points into `rect` and draws (the same
 /// contract every other pane in this file holds).
 fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::IrScene) {
-    let vp = Viewport {
-        x: rect.min.x,
-        y: rect.min.y,
-        width: rect.width(),
-        height: rect.height(),
-    };
-
-    // Header: verbatim ac-scene string, naming the source and what it is
-    // not — the one thing the acceptance criteria require distinctly
-    // labelled.
-    painter.text(
-        rect.left_top(),
-        egui::Align2::LEFT_TOP,
-        scene.header,
-        egui::FontId::default(),
-        COLOR_LABEL,
-    );
+    draw_ir_header(painter, rect, scene.header);
 
     if scene.trace.segments.is_empty() {
         painter.text(
@@ -673,11 +657,107 @@ fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::Ir
         return;
     }
 
+    draw_ir_trace_and_arrival(
+        painter,
+        rect,
+        &scene.trace,
+        &scene.time_axis,
+        &scene.arrival,
+    );
+}
+
+/// Frame C (#308): the sweep-derived, gated IR panel — a
+/// `MeasurementReport` read back off disk by `report_flow::open_sweep_ir`
+/// rather than fed live from a wire frame, so this takes the already-
+/// decided `Result` rather than an `Option` (#286's live panel has
+/// "no frame yet"; this one has two distinct, named reasons a file
+/// didn't produce a scene, per [`ac_scene::SweepIrFault`]).
+///
+/// Not yet reachable from [`draw_view`]'s dispatch — the file-open UI
+/// that would call it is #256's picker, sequenced after this issue (the
+/// architect review's explicit call). This function is the orchestration
+/// side of that: implemented and tested now, wired once the picker
+/// exists — same pattern `Action::OpenSnapshot` already documents for
+/// `.acsnap`.
+pub fn draw_sweep_ir_panel(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    result: Result<&ac_scene::SweepIrScene, ac_scene::SweepIrFault>,
+) {
+    match result {
+        Ok(scene) => {
+            draw_ir_header(painter, rect, &scene.header);
+            if scene.trace.segments.is_empty() {
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "no samples in gate window",
+                    egui::FontId::default(),
+                    COLOR_STRUCTURAL,
+                );
+                return;
+            }
+            draw_ir_trace_and_arrival(
+                painter,
+                rect,
+                &scene.trace,
+                &scene.time_axis,
+                &scene.arrival,
+            );
+        }
+        Err(fault) => {
+            // Same panel-geometry slot the success frame's header
+            // occupies (UX comment: "nothing jumps when a bad file
+            // replaces a good one"), plus the fault's own detail text —
+            // names what to check, never a cause (`SweepIrFault::detail`'s
+            // doc).
+            draw_ir_header(painter, rect, fault.header());
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                fault.detail(),
+                egui::FontId::default(),
+                COLOR_STRUCTURAL,
+            );
+        }
+    }
+}
+
+/// The header line both IR panel variants draw at `rect`'s top-left —
+/// verbatim `ac-scene` string, this crate only positions it.
+fn draw_ir_header(painter: &egui::Painter, rect: egui::Rect, header: &str) {
+    painter.text(
+        rect.left_top(),
+        egui::Align2::LEFT_TOP,
+        header,
+        egui::FontId::default(),
+        COLOR_LABEL,
+    );
+}
+
+/// The part both IR panel variants share once there's a non-empty trace
+/// to draw: h(t), the time axis, and the arrival marker — every string
+/// and coordinate `ac-scene`'s, this crate only maps the normalized
+/// `[0,1]²` points into `rect`.
+fn draw_ir_trace_and_arrival(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    trace: &ac_scene::Trace,
+    time_axis: &ac_scene::Axis,
+    arrival: &ac_scene::ArrivalMarker,
+) {
+    let vp = Viewport {
+        x: rect.min.x,
+        y: rect.min.y,
+        width: rect.width(),
+        height: rect.height(),
+    };
+
     // h(t): one polyline per segment, same drawing rule `draw_segments`
     // uses for the mag/phase traces — there is always exactly one
     // segment here (no coherence mask over a time-domain sample), but
     // the loop stays generic rather than assuming that shape.
-    for segment in &scene.trace.segments {
+    for segment in &trace.segments {
         let points: Vec<egui::Pos2> = segment
             .iter()
             .map(|&pt| {
@@ -685,7 +765,7 @@ fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::Ir
                 egui::pos2(x, y)
             })
             .collect();
-        match scene.trace.provenance.source {
+        match trace.provenance.source {
             ac_scene::Source::Live => {
                 painter.add(egui::Shape::line(points, Stroke::new(1.5, COLOR_SIGNAL)));
             }
@@ -706,7 +786,7 @@ fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::Ir
     // Time axis: bottom labels, verbatim ac-scene ticks — same mapping
     // `draw_freq_labels` uses for the mag/phase panes' shared frequency
     // axis.
-    for tick in &scene.time_axis.ticks {
+    for tick in &time_axis.ticks {
         let (x, _) = scene_to_screen((tick.position, 0.0), vp);
         painter.text(
             egui::pos2(x, rect.max.y),
@@ -722,8 +802,8 @@ fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::Ir
     // pane — `ac-scene` leaves an out-of-range position as-is (see
     // `IrScene`'s doc), and egui simply draws it off-canvas, which is
     // honest rather than a fabricated in-range position.
-    let (ax, top) = scene_to_screen((scene.arrival.position, 1.0), vp);
-    let (_, bottom) = scene_to_screen((scene.arrival.position, 0.0), vp);
+    let (ax, top) = scene_to_screen((arrival.position, 1.0), vp);
+    let (_, bottom) = scene_to_screen((arrival.position, 0.0), vp);
     painter.line_segment(
         [egui::pos2(ax, top), egui::pos2(ax, bottom)],
         Stroke::new(1.0, COLOR_VALUE),
@@ -731,7 +811,7 @@ fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::Ir
     painter.text(
         egui::pos2(ax, bottom + 2.0),
         egui::Align2::CENTER_TOP,
-        &scene.arrival.text,
+        &arrival.text,
         egui::FontId::default(),
         COLOR_VALUE,
     );

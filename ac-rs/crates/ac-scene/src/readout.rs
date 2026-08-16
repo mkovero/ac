@@ -96,6 +96,22 @@ fn format_output_target(output_channel: u32, output_port: Option<&str>) -> Strin
     }
 }
 
+/// Frame C's header line (#308) — `"IR — sweep-derived     gate ± 11.70
+/// ms  ·  f_low 85 Hz  ·  valid above f_low only"`, carried forward
+/// verbatim from #286's UX comment. `gate_half_span_ms` is the recorded
+/// gate window's half-length: the window is centred on the zero-delay
+/// reference, so this figure is the same number the display's own
+/// `-x..+x` time axis endpoints show — never recomputed from the
+/// sample count, per #280's "store, don't re-derive" rule. Gate
+/// milliseconds keep this project's established 2-decimal precision
+/// (matches [`format_spl_readout`]'s convention); `f_low_hz` is whole
+/// Hz, matching [`format_cursor_readout`]'s frequency precision.
+pub fn format_sweep_ir_header(gate_half_span_ms: f64, f_low_hz: f64) -> String {
+    format!(
+        "IR — sweep-derived     gate \u{b1} {gate_half_span_ms:.2} ms  \u{b7}  f_low {f_low_hz:.0} Hz  \u{b7}  valid above f_low only"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +158,15 @@ mod tests {
         assert_eq!(
             format_spl_readout(Some(-6.75), WeightingCurve::Z, None),
             Some("-6.75 dB SPL (Z)".to_string())
+        );
+    }
+
+    // #308's UX mockup, byte-exact.
+    #[test]
+    fn sweep_ir_header_matches_the_ux_mockup() {
+        assert_eq!(
+            format_sweep_ir_header(11.70, 85.0),
+            "IR — sweep-derived     gate \u{b1} 11.70 ms  \u{b7}  f_low 85 Hz  \u{b7}  valid above f_low only"
         );
     }
 

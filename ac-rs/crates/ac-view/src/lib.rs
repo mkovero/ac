@@ -11,6 +11,7 @@ pub mod fonts;
 pub mod geometry;
 pub mod keys;
 pub mod range;
+pub mod report_flow;
 pub mod session;
 pub mod settings;
 pub mod snapshot_flow;

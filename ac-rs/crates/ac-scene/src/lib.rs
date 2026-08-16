@@ -36,6 +36,7 @@ pub mod fault;
 pub mod ir;
 pub mod readout;
 pub mod scene;
+pub mod sweep_ir;
 pub mod ticks;
 pub mod transfer;
 pub mod wire;
@@ -43,6 +44,7 @@ pub mod wire;
 pub use fault::{Fault, FaultInput, FaultState, Severity};
 pub use ir::{ArrivalMarker, IrInput, IrScene, IR_HEADER};
 pub use scene::{Provenance, Readouts, Scene, SceneInput, Source, Trace};
+pub use sweep_ir::{SweepIrFault, SweepIrScene};
 pub use ticks::{Axis, Tick};
 pub use transfer::{
     BandLabel, DerotMode, DisplayModes, Meter, MeterState, Smoothing, TransferInput, TransferScene,
