@@ -31,17 +31,16 @@ not compile. No CI here, so this command is the only thing that catches it.
 
 Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
 
-**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and two papers alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `Fundamentals_of_modern_audio_measurement.pdf` exists at both `stddocs/` and `stddocs/iec-full/` with **different hashes** — same name, different content — so a path guessed from the filename can reach the wrong document without erroring. Copy the cell.
+**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and one paper alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. A file of the same name previously sat at `stddocs/iec-full/` too, but it was a mislabelled copy of IEC 60268-3 — not an edition or variant of the Cabot paper — and has been deleted. If a same-named file ever reappears under `iec-full/`, treat it as suspect and verify against its first page before citing it; don't assume it's the fuller copy. Copy the cell.
 
 ### normative standards
 
 | standard | file | applies to |
 |---|---|---|
-| AES-17-2015 | `stddocs/AES-17-2015-1.pdf` | THD+N methodology, notch filter specs, measurement conditions, result expression |
-| AES-17-2020 | `stddocs/iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf` | Digital audio extension of AES-17-2015 — prefer this for any digital signal path |
-| IEC 60268-3:2018 | `stddocs/IEC-60268-3-2018.pdf` | Sound system equipment — amplifiers: frequency response, S/N, dynamic range |
-| IEC 61260-1:2014 | `stddocs/IEC-61260-1-2014.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
-| IEC 61672-1:2013 | `stddocs/IEC-61672-1-2013.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
+| AES-17-2020 | `stddocs/iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf` | THD+N methodology, notch filter specs, measurement conditions, result expression — digital audio |
+| IEC 60268-3:2018 | `stddocs/iec-full/IEC60268-3.pdf` | Sound system equipment — amplifiers: frequency response, S/N, dynamic range |
+| IEC 61260-1:2014 | `stddocs/iec-full/IEC61260-1.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
+| IEC 61672-1:2013 | `stddocs/iec-full/IEC61672-1.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
 | ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
 | ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
 | ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
