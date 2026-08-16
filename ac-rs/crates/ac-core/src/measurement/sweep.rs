@@ -797,15 +797,13 @@ pub fn farina_citation() -> StandardsCitation {
 /// — see [`farina_citation`]'s doc for why the ISO 18233 half must not
 /// come along for this payload.
 ///
-/// `verified` stays `false` until a human cross-checks Annex A.4 against
-/// the published AES17-2015 text. `stddocs/AES-17-2015-1.pdf` exists but
-/// is a 5-page purchase-preview stub (title page + TOC only, cut off
-/// before Annex A's own pages) — not the full text, so it does not
-/// satisfy the cross-check.
+/// `verified` stays `false` until a human cross-checks Annex A.4.5 against
+/// the published AES17-2020 text at
+/// `stddocs/iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf`.
 pub fn gated_response_citation() -> StandardsCitation {
     StandardsCitation {
-        standard: "AES17-2015".into(),
-        clause: "Annex A.4 (quasi-anechoic frequency response via time-gated impulse response)"
+        standard: "AES17-2020".into(),
+        clause: "Annex A.4.5 (informative) (quasi-anechoic frequency response via time-gated impulse response)"
             .into(),
         verified: false,
     }

@@ -92,7 +92,7 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 
 **ISO 18233** apply to swept-sine / deterministic-signal measurement. It is a *substitution* standard — §1 gives methods used "as substitutes for measurement methods specified in standards covering classical methods", and §9(c) require the report name the applicable classical standard. It never stands alone. Check:
 - A room measurement cite ISO 18233 **and** the classical standard it substitutes for (ISO 3382-1 or 3382-2). One without the other is incomplete.
-- A quasi-anechoic loudspeaker / PA measurement cite **neither** — no classical method in §1's list covers it. That case want IEC 60268-21, which is not held. AES17-2015 A.4 + Farina remain its citation.
+- A quasi-anechoic loudspeaker / PA measurement cite **neither** — no classical method in §1's list covers it. That case want IEC 60268-21, which is not held. AES17-2020 A.4.5 + Farina remain its citation.
 - Annex B is normative. Clause strings for it must not say "(informative)"; that qualifier belongs to AES17 A.4 and IEC 61260-1 Annex G.
 
 ### standards check procedure

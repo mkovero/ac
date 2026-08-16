@@ -1774,7 +1774,7 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
     assert_eq!(data[1]["data"]["kind"], json!("gated_frequency_response"));
 
     // Citations: the payload cites the Farina preprint (theoretical basis
-    // only) and AES17-2015 Annex A.4 for the gating method itself — not
+    // only) and AES17-2020 Annex A.4.5 for the gating method itself — not
     // ISO 18233, which per the architect's #284 decision 4 only attaches
     // when a classical room standard also applies, which a quasi-anechoic
     // capture never has (PR #305 review, correctness issue 1).
