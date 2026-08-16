@@ -19,6 +19,7 @@ fi
 git fetch -q origin main
 git worktree add -B "issue-$n" "$wt" origin/main >/dev/null
 cd "$wt"
+link_support "$wt"
 
 AC_TAG="issue-$n" run developer "Implement issue #$n in $AC_REPO." "$@"
 echo "worktree: $wt   branch: issue-$n" >&2

@@ -20,6 +20,7 @@ else
     || git worktree add --track -b "$branch" "$wt" "origin/$branch" >/dev/null
   cd "$wt"
 fi
+link_support "$wt"
 
 AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
 Read the agent:qa review comment on it and address every point raised. This is \

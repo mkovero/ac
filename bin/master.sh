@@ -19,6 +19,7 @@
 source "$(dirname "$0")/common.sh"
 BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
+STATE=""          # outcome of the last drive(), read by the epic runner
 STEPS="${AC_STEPS:-8}"
 
 fg=""; ids=()
@@ -57,7 +58,7 @@ qa_loop() {
   local n="$1" pr="$2" round=0 ls before after head mark
   while (( round <= ROUNDS )); do
     ls="$(pr_labels "$pr")"
-    has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; return 0; }
+    has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
 
     # Already labelled needs-work: the verdict is in, revise before reviewing
     # again. Reviewing first would re-review a tip qa has already judged.
@@ -81,7 +82,7 @@ qa_loop() {
     # Already reviewed at this exact tip and qa raised nothing: that is a pass.
     if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( $(qa_evidence "$pr") > 0 )); then
       echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
-      return 0
+      STATE=awaiting-merge; return 0
     fi
 
     echo "  #$n PR #$pr: qa review"
@@ -96,8 +97,8 @@ qa_loop() {
     fi
 
     ls="$(pr_labels "$pr")"
-    has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; return 0; }
-    has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; return 0; }
+    has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
+    has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; STATE=awaiting-merge; return 0; }
   done
 }
 
@@ -109,8 +110,8 @@ drive() {
     (( ++step ))
     ls="$(labels "$n")" || { echo "  #$n: cannot read issue"; return 1; }
 
-    has blocked "$ls"          && { echo "  #$n: blocked — lift condition is in the comment that applied it"; return 0; }
-    has needs-discussion "$ls" && { echo "  #$n: needs-discussion — yours to decide"; return 0; }
+    has blocked "$ls"          && { echo "  #$n: blocked — lift condition is in the comment that applied it"; STATE=blocked; return 0; }
+    has needs-discussion "$ls" && { echo "  #$n: needs-discussion — yours to decide"; STATE=needs-human; return 0; }
 
     # ux step 6 runs first: it clears needs-ux but defers ready-to-implement to
     # architect when both labels are set, so design must be the later gate.
@@ -137,9 +138,22 @@ drive() {
     fi
 
     if stale_branch "$n"; then
+      local wt="$WT_BASE/issue-$n" dirty="" ahead=""
+      [[ -d $wt ]] && dirty="$(git -C "$wt" status --porcelain 2>/dev/null | wc -l)"
+      ahead="$(git rev-list --count "origin/main..issue-$n" 2>/dev/null || echo 0)"
+
       echo "  #$n: branch issue-$n exists but no open PR."
-      echo "     earlier run did not open one, or the PR was closed. inspect, then:"
-      echo "     git worktree remove --force $WT_BASE/issue-$n; git branch -D issue-$n"
+      if (( ${dirty:-0} > 0 )) || (( ahead > 0 )); then
+        # Work is present. Deleting here throws away a whole run.
+        echo "     it has work: ${dirty:-0} uncommitted file(s), $ahead commit(s) ahead of main."
+        echo "     an earlier run was probably cut off. do NOT delete it. resume:"
+        echo "       jq -r 'select(.type==\"system\") | .session_id // empty' \\"
+        echo "         ${AC_LOG_DIR}/*developer-issue-$n.jsonl | head -1"
+        echo "       cd $wt && claude --resume <id>"
+      else
+        echo "     it is empty — no commits, nothing uncommitted. safe to clear:"
+        echo "       git worktree remove --force $wt; git branch -D issue-$n"
+      fi
       return 0
     fi
 
@@ -157,9 +171,93 @@ drive() {
   echo "  #$n: hit step limit ($STEPS) — labels are cycling, look at it"
 }
 
+# Children of an epic, in the order the epic lists them. Three shapes, in
+# order of preference: the sub-issues API; a markdown table whose first column
+# is `| #NNN |` and whose last column is blocked-by; task-list checkboxes.
+# Order is the sequencing — never sort or dedupe it into a different order.
+epic_body() { gh issue view "$1" -R "$AC_REPO" --json body --jq .body 2>/dev/null; }
+
+# emits: "<issue> <blocker> <blocker> ..."  (blockers may be empty)
+epic_rows() {
+  epic_body "$1" | awk -F'|' '
+    /^[[:space:]]*\|[[:space:]]*#[0-9]+[[:space:]]*\|/ {
+      n = $2; gsub(/[^0-9]/, "", n)
+      b = $(NF-1); gsub(/[^0-9 ]/, " ", b)
+      print n, b
+    }'
+}
+
+children() {
+  local out
+  out=$(gh api "repos/$AC_REPO/issues/$1/sub_issues" --jq '.[].number' 2>/dev/null || true)
+  [[ -n $out ]] && { printf '%s\n' "$out"; return; }
+  out=$(epic_rows "$1" | awk '{print $1}')
+  [[ -n $out ]] && { printf '%s\n' "$out"; return; }
+  epic_body "$1" \
+    | grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' \
+    | grep -oE '[0-9]+$'
+}
+
+# Blockers for one child, from the epic's table. Empty when the table gives
+# none, or when the epic does not use the table shape at all.
+blockers_of() {
+  epic_rows "$1" | awk -v c="$2" '$1 == c { $1 = ""; print }'
+}
+
+is_epic() {
+  printf '%s\n' "$(labels "$1")" | grep -qx epic && return 0
+  [[ -n "$(children "$1")" ]]
+}
+
+drive_epic() {
+  local e="$1" kids c st
+  mapfile -t kids < <(children "$e")
+  (( ${#kids[@]} )) || { echo "  #$e: no sub-issues or task-list refs found"; return 0; }
+  echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
+
+  for c in "${kids[@]}"; do
+    st="$(gh issue view "$c" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+    if [[ $st == CLOSED ]]; then echo "  #$c: closed, skipping"; continue; fi
+
+    # The epic's blocked-by column is a real dependency, not a hint. A child
+    # whose blocker is still open would branch from a main without it.
+    local blk open_blk=""
+    for blk in $(blockers_of "$e" "$c"); do
+      [[ "$(gh issue view "$blk" -R "$AC_REPO" --json state --jq .state 2>/dev/null)" == CLOSED ]] \
+        || open_blk+="#$blk "
+    done
+    if [[ -n $open_blk ]]; then
+      echo "  #$c: blocked by $open_blk— skipping"
+      continue
+    fi
+
+    echo "-- #$c (child of #$e)"
+    STATE=""
+    drive "$c" || { echo "  #$c: aborted — stopping epic"; return 1; }
+
+    case "$STATE" in
+      awaiting-merge)
+        echo
+        echo "  #$c is ready for your merge. Stopping here."
+        echo "  Later children branch from main and would not see #$c's work."
+        echo "  Merge it, then rerun: master.sh $e"
+        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+      needs-human|blocked)
+        echo "  #$c needs you — stopping epic."
+        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+    esac
+  done
+  echo "  #$e: all children processed"
+}
+
 for id in "${ids[@]}"; do
   echo "== issue #$id"
-  drive "$id" || echo "  #$id: aborted"
+  if is_epic "$id"; then
+    drive_epic "$id" || true
+  else
+    STATE=""
+    drive "$id" || echo "  #$id: aborted"
+  fi
 done
 
 echo

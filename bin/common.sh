@@ -30,7 +30,7 @@ export CARGO_BUILD_JOBS="${AC_CARGO_JOBS:-$(( $(nproc) > 4 ? $(nproc) - 2 : 1 ))
 # measurement code the right value is often lower: timing-sensitive tests that
 # share a machine get flakier, not faster. Unset by default — set it if the
 # suite turns out to contend.
-[[ -n ${AC_TEST_THREADS:-} ]] && export RUST_TEST_THREADS="$AC_TEST_THREADS"
+if [[ -n ${AC_TEST_THREADS:-} ]]; then export RUST_TEST_THREADS="$AC_TEST_THREADS"; fi
 
 # Target dir root. The per-branch subdirectory is chosen inside run(), after
 # the caller has cd'd into its worktree — one dir shared across worktrees means
@@ -38,6 +38,10 @@ export CARGO_BUILD_JOBS="${AC_CARGO_JOBS:-$(( $(nproc) > 4 ? $(nproc) - 2 : 1 ))
 # dispatch pays a cold build. Per branch is warm across runs on the same issue
 # and isolated between them.
 AC_TARGET_ROOT="${AC_TARGET_ROOT:-$HOME/.cache/ac-target}"
+
+# Standards PDFs live outside the repo — licence-restricted, gitignored, so no
+# worktree checkout will contain them. Roles reach them by absolute path.
+export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 
 AC_LOG_DIR="${AC_LOG_DIR:-$HOME/.local/state/ac}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
@@ -59,12 +63,49 @@ DENY_ASYNC="ScheduleWakeup,Monitor,PushNotification,RemoteTrigger,SendMessage,\
 CronCreate,CronDelete,CronList,TaskCreate,TaskGet,TaskList,TaskOutput,TaskStop,\
 TaskUpdate,EnterWorktree,ExitWorktree"
 
-# Note this does NOT make a role read-only: Bash is granted, and `sed -i`
-# writes files as well as Edit does. Real enforcement needs a Bash command
-# allowlist in .claude/settings.json.
-DENY_READ="Edit,Write,NotebookEdit"
+# Edit is denied so a reviewer cannot quietly patch what it should be
+# reporting. Write is NOT denied: a review has to be composed somewhere before
+# `gh pr review --body-file` can post it, and with Bash and python3 available
+# the denial blocked nothing while costing several turns per run discovering a
+# workaround. This is a convention against fixing-instead-of-reporting, not an
+# enforced sandbox — that would need a Bash command allowlist.
+DENY_READ="Edit,NotebookEdit"
 
 spec() { printf '%s/.agents/%s.md' "$ROOT" "$1"; }
+
+# Gitignored directories a worktree needs but will not get from a checkout.
+# stddocs holds the standards PDFs; without it qa.md's "consult document, no
+# memory" rule cannot be followed, and the pass degrades to an open note while
+# still reading like a completed review.
+# A cold workspace build is several GB. Running out mid-session leaves a
+# half-written worktree and a session that fails in a confusing way, so check
+# before creating one rather than after.
+require_space() {
+  local path="$1" need="${AC_MIN_FREE_GB:-15}" avail
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  avail=$(df -BG --output=avail "$(dirname "$path")" 2>/dev/null | tail -1 | tr -dc '0-9')
+  [[ -z $avail ]] && return 0
+  if (( avail < need )); then
+    echo "refusing to start: ${avail}G free, need ${need}G." >&2
+    echo "  reclaim with: .agents/bin/ac-gc.sh" >&2
+    echo "  or override:  AC_MIN_FREE_GB=5 ..." >&2
+    return 1
+  fi
+  if (( avail < need * 2 )); then
+    echo "note: ${avail}G free — getting tight" >&2
+  fi
+  return 0
+}
+
+link_support() {
+  local wt="$1" d
+  for d in ${AC_SUPPORT_DIRS:-stddocs}; do
+    if [[ -e "$ROOT/$d" && ! -e "$wt/$d" ]]; then
+      ln -s "$ROOT/$d" "$wt/$d"
+    fi
+  done
+  return 0
+}
 
 # Count QA's output on a PR. It may land as an issue comment OR as a review
 # (gh pr review --comment creates the latter, and --json comments does not
@@ -96,6 +137,19 @@ distill() {
 # is written to work/sessions.
 run() {
   local role="$1" prompt="$2"; shift 2
+
+  # Read-heavy roles need more turns than a focused implementation: qa reruns
+  # the gate, reads the diff, then chases each acceptance criterion through the
+  # tests. Hitting the cap mid-investigation costs the whole run — it ends with
+  # nothing posted, which is indistinguishable from having found nothing.
+  local turns="${AC_MAX_TURNS:-}"
+  if [[ -z $turns ]]; then
+    case "$role" in
+      developer)          turns=160 ;;  # implementation across crates is long
+      qa|architect|audit) turns=120 ;;
+      *)                  turns=80  ;;
+    esac
+  fi
   local fg="" tools="$TOOLS_WRITE" deny="$DENY_ASYNC" mode="acceptEdits" arg
   local -a extra=()
   for arg in "$@"; do
@@ -132,7 +186,7 @@ run() {
     --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
     ${deny:+--disallowedTools "$deny"} \
     --permission-mode "$mode" \
-    --max-turns "${AC_MAX_TURNS:-60}" \
+    --max-turns "$turns" \
     --output-format stream-json --verbose "${extra[@]}" \
   | tee "$raw" \
   | jq -r --unbuffered '
@@ -157,6 +211,17 @@ run() {
     printf '<!-- resume: claude --resume %s -->\n\n' "${sid:-unknown}"
     distill "$raw"
   } > "$out"
+
+  # A capped run ends mid-task with a final message that reads like progress,
+  # not like failure. Say so plainly rather than leaving it to be inferred.
+  local used
+  used=$(jq -r 'select(.type=="result") | .num_turns // empty' "$raw" 2>/dev/null | tail -1 || true)
+  if [[ -n $used ]] && (( used >= turns )); then
+    echo "WARNING: hit the $turns-turn cap (used $used) — this run was cut off." >&2
+    echo "  work is uncommitted in the worktree. resume:" >&2
+    echo "  cd \$(git rev-parse --show-toplevel) && claude --resume ${sid:-<id>}" >&2
+    echo "  or raise it: AC_MAX_TURNS=$(( turns * 2 )) ..." >&2
+  fi
 
   [[ -s $raw ]] || echo "warning: empty transcript — check claude exited cleanly" >&2
   echo "session: $out" >&2

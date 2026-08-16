@@ -71,10 +71,30 @@ Scope of this pass:
 - The delta may break something outside itself. Where it plausibly does, say
   where you looked.
 
-State at the top of your comment which commit range you reviewed."
+State at the top of your comment which commit range you reviewed.
+
+Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Open them there by absolute path. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 else
-  prompt="Review PR #$n in $AC_REPO."
+  prompt="Review PR #$n in $AC_REPO.
+
+Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Open them there by absolute path. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi
+
+# Give QA a worktree. Without one it builds its own — three of them on PR
+# #299, one under /tmp — and nothing cleans them up.
+wt="$WT_BASE/pr-$n"
+branch="$(gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRefName)"
+if [[ -d $wt ]]; then
+  git -C "$wt" fetch -q origin "$branch" && git -C "$wt" reset -q --hard "origin/$branch"
+else
+  git fetch -q origin "$branch"
+  git worktree add --force "$wt" "origin/$branch" >/dev/null 2>&1 \
+    || git worktree add --force --track -b "review-$branch" "$wt" "origin/$branch" >/dev/null
+fi
+cd "$wt"
+echo "review worktree: $wt" >&2
+link_support "$wt"
+
 
 before="$(qa_comments)"
 AC_TAG="pr-$n${since:+-delta}" run qa "$prompt" --read "${rest[@]+"${rest[@]}"}"
