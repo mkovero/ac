@@ -102,7 +102,7 @@ fn assert_view_clears_the_banner(view: ViewKind, scene: Option<&ac_scene::Scene>
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
         ui.label(BANNER);
-        draw_view(&view, ui, scene, transfer_arg);
+        draw_view(&view, ui, scene, transfer_arg, None);
     });
     harness.run();
 

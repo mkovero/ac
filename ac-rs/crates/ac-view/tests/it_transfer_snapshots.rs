@@ -26,8 +26,8 @@
 //! versus off.
 
 use ac_scene::{
-    DerotMode, DisplayModes, FaultState, MeterState, Scene, SceneInput, Smoothing, Source,
-    TransferInput, TransferScene,
+    DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
+    Smoothing, Source, TransferInput, TransferScene,
 };
 use ac_view::view::{draw_view, SpectrumViewState, StimState, TransferViewState, ViewKind};
 use egui_kittest::Harness;
@@ -89,6 +89,36 @@ fn transfer_scene() -> TransferScene {
     )
 }
 
+/// IR panel fixture (#286, QA follow-up on PR #309: the A3 gate's human-
+/// viewable evidence was missing for this panel specifically). 200
+/// samples of a decaying sinusoid so the trace looks like an actual
+/// arrival rather than the geometry tests' 5-point fixtures — this one
+/// is for a person to look at, not for a coordinate assertion.
+fn ir_scene() -> IrScene {
+    let n = 200;
+    let dt_ms = 0.5;
+    let t_origin_ms = -(n as f64 / 2.0) * dt_ms;
+    let samples: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 * dt_ms + t_origin_ms;
+            let env = (-((t - 10.0).abs() / 8.0).max(0.0)).exp();
+            (env * (t * 0.3).sin()) as f32
+        })
+        .collect();
+    let input = IrInput {
+        samples,
+        dt_ms,
+        t_origin_ms,
+        delay_ms: 10.0,
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
+        channel_role: "meas_0".to_string(),
+        source: Source::Live,
+        sr: 48_000,
+    };
+    IrScene::from_input(&input)
+}
+
 fn spectrum_scene() -> Scene {
     let input = SceneInput {
         spec_freqs: vec![100.0, 1_000.0, 10_000.0],
@@ -132,7 +162,7 @@ fn snapshot_transfer_live_masked_gap() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_live_masked_gap");
@@ -146,7 +176,7 @@ fn snapshot_transfer_armed_banner() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_armed_banner");
@@ -160,10 +190,27 @@ fn snapshot_transfer_driving_banner() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene)));
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&scene), None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_driving_banner");
+}
+
+#[test]
+#[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
+fn snapshot_transfer_ir_panel() {
+    let transfer = transfer_scene();
+    let ir = ir_scene();
+    let mut state = transfer_state(StimState::Idle);
+    state.toggle_ir_panel();
+    let view = ViewKind::Transfer(state);
+    let mut h = Harness::builder()
+        .with_size(SIZE)
+        .wgpu()
+        .build_ui(|ui| draw_view(&view, ui, None, Some(&transfer), Some(&ir)));
+    ac_view::fonts::install(&h.ctx);
+    h.run();
+    h.snapshot("transfer_ir_panel");
 }
 
 #[test]
@@ -177,7 +224,7 @@ fn snapshot_spectrum_ref_trace_on() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None));
+        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_on");
@@ -194,7 +241,7 @@ fn snapshot_spectrum_ref_trace_off() {
     let mut h = Harness::builder()
         .with_size(SIZE)
         .wgpu()
-        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None));
+        .build_ui(|ui| draw_view(&view, ui, Some(&scene), None, None));
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("spectrum_ref_trace_off");

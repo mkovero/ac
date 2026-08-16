@@ -1,7 +1,8 @@
 //! Deserialization types for the `transfer_stream` v2 DATA frame
-//! (`ZMQ.md` lines ~1572-1627). `serde` ignores JSON fields this struct
-//! doesn't name, so a real wire frame deserializes fine even though this
-//! struct is a subset of the schema.
+//! (`ZMQ.md` lines ~1572-1627) and its `visualize/ir` sidecar
+//! (`ZMQ.md` lines ~2094-2156). `serde` ignores JSON fields a struct
+//! doesn't name, so a real wire frame deserializes fine even though
+//! each struct here is a subset of its schema.
 //!
 //! The spectrum-view fields (M2, architect review decision 1) and the
 //! transfer-view fields (M4a, §4.1/§4.2) both live here. The transfer
@@ -272,6 +273,42 @@ impl MtwColumns {
     }
 }
 
+/// The `visualize/ir` sidecar DATA frame (`ZMQ.md:2094`) — daemon-side
+/// IFFT of the full-resolution H₁(ω) into a time-domain h(t), published
+/// alongside each `transfer_stream` frame for the same pair on the same
+/// tick. A separate top-level shape (`"type": "visualize/ir"`), not a
+/// variant of [`WireFrame`] — see that struct's fields for the ones this
+/// omits (`spec_freqs`, `spl`, the H1 grid, …), which this frame carries
+/// none of.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IrWireFrame {
+    /// h(t), `fftshift`-centred and downsampled to ≤2000 samples
+    /// (stride-picked, not interpolated).
+    #[serde(default)]
+    pub samples: Vec<f32>,
+    pub sr: u32,
+    /// Downsample factor (`ir_full.len() / samples.len()`).
+    #[serde(default)]
+    pub stride: usize,
+    /// ms per output sample — `1000/sr * stride`.
+    #[serde(default)]
+    pub dt_ms: f64,
+    /// The first sample's time, ms — negative; `t=0` sits at
+    /// `samples.len()/2`.
+    #[serde(default)]
+    pub t_origin_ms: f64,
+    pub ref_channel: i64,
+    pub meas_channel: i64,
+    #[serde(default)]
+    pub delay_samples: i64,
+    #[serde(default)]
+    pub delay_ms: f64,
+    /// #227 lock verdict for this tick — see [`WireFrame::delay_locked`]
+    /// for the three-way meaning this field shares.
+    #[serde(default)]
+    pub delay_locked: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +368,44 @@ mod tests {
         let frame: WireFrame = serde_json::from_str(json).expect("deserialize");
         assert_eq!(frame.speed_of_sound_m_s, Some(345.844));
         assert_eq!(frame.delay_locked, Some(true));
+    }
+
+    #[test]
+    fn ir_wire_frame_deserializes_a_real_shaped_sidecar() {
+        let json = r#"{
+            "type":          "visualize/ir",
+            "cmd":           "transfer_stream",
+            "samples":       [0.0, 0.5, -0.25, 0.0],
+            "sr":            48000,
+            "stride":        24,
+            "dt_ms":         0.5,
+            "t_origin_ms":   -1.0,
+            "ref_channel":   1,
+            "meas_channel":  0,
+            "delay_samples": 231,
+            "delay_ms":      4.82,
+            "delay_locked":  true
+        }"#;
+        let frame: IrWireFrame = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(frame.samples, vec![0.0, 0.5, -0.25, 0.0]);
+        assert_eq!(frame.sr, 48000);
+        assert_eq!(frame.stride, 24);
+        assert_eq!(frame.dt_ms, 0.5);
+        assert_eq!(frame.t_origin_ms, -1.0);
+        assert_eq!(frame.ref_channel, 1);
+        assert_eq!(frame.meas_channel, 0);
+        assert_eq!(frame.delay_ms, 4.82);
+        assert_eq!(frame.delay_locked, Some(true));
+    }
+
+    #[test]
+    fn ir_wire_frame_missing_lock_field_is_none_not_false() {
+        // A daemon predating #227 names no delay_locked field — the
+        // three-way meaning `WireFrame::delay_locked` documents applies
+        // here too: absence must not read as "measured unaligned".
+        let json = r#"{"sr": 48000, "ref_channel": 1, "meas_channel": 0}"#;
+        let frame: IrWireFrame = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(frame.delay_locked, None);
+        assert!(frame.samples.is_empty());
     }
 }

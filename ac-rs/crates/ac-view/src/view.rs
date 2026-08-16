@@ -89,6 +89,7 @@ pub fn draw_view(
     ui: &mut Ui,
     scene: Option<&Scene>,
     transfer: Option<&ac_scene::TransferScene>,
+    ir: Option<&ac_scene::IrScene>,
 ) {
     // Reserve the half line the top y-axis tick label hangs into (#245).
     // Every pane's tick labels are drawn vertically centred on their
@@ -113,7 +114,7 @@ pub fn draw_view(
     ui.add_space(tick_line_h / 2.0);
     match kind {
         ViewKind::Spectrum(state) => draw_spectrum(state, ui, scene),
-        ViewKind::Transfer(state) => draw_transfer(state, ui, transfer),
+        ViewKind::Transfer(state) => draw_transfer(state, ui, transfer, ir),
     }
 }
 
@@ -293,6 +294,11 @@ pub struct TransferViewState {
     /// default. The cost is one keypress, on a control the operator changes
     /// while looking at the screen anyway.
     pub smoothing: ac_scene::Smoothing,
+    /// IR panel visibility (#286), toggled by `H`. Off by default — the
+    /// mag/phase panes are the resting state of the transfer view; the
+    /// panel is an on-demand accessory, not a third pane always fighting
+    /// the other two for the same screen.
+    ir_panel_open: bool,
 }
 
 impl Default for TransferViewState {
@@ -312,6 +318,7 @@ impl TransferViewState {
             stimulus: crate::stimulus::StimulusMachine::new(drive_max_dbfs, start_level_dbfs),
             snapshot_delay_ms: 0.0,
             smoothing: ac_scene::Smoothing::Off,
+            ir_panel_open: false,
         }
     }
 
@@ -338,13 +345,27 @@ impl TransferViewState {
     pub fn derot_mode(&self) -> ac_scene::DerotMode {
         self.derot.to_mode(self.snapshot_delay_ms)
     }
+
+    /// `H`: toggle the IR panel.
+    pub fn toggle_ir_panel(&mut self) {
+        self.ir_panel_open = !self.ir_panel_open;
+    }
+
+    pub fn ir_panel_open(&self) -> bool {
+        self.ir_panel_open
+    }
 }
 
 /// Transfer view (M4b): magnitude pane stacked over phase pane, shared
 /// log-f axis, gap rendering for masked columns, delay readout, input
 /// meters, and the stimulus banner — every string and coordinate from
 /// `ac-scene`, drawn verbatim.
-fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene::TransferScene>) {
+fn draw_transfer(
+    state: &TransferViewState,
+    ui: &mut Ui,
+    scene: Option<&ac_scene::TransferScene>,
+    ir: Option<&ac_scene::IrScene>,
+) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
 
@@ -398,6 +419,31 @@ fn draw_transfer(state: &TransferViewState, ui: &mut Ui, scene: Option<&ac_scene
     // Everything else lives below the banner band.
     let content =
         egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.min.y + banner_band), rect.max);
+
+    // The IR panel (`H`, #286) replaces the mag/phase panes rather than
+    // sharing the content band with them — it is an on-demand accessory
+    // view of the same session, not a third pane the other two must make
+    // room for. Input meters stay: gain staging is still relevant while
+    // looking at h(t). The fault indicator does not — it is drawn
+    // relative to the magnitude pane's geometry, which does not exist in
+    // this branch.
+    if state.ir_panel_open() {
+        match ir {
+            Some(ir_scene) => draw_ir_panel(painter, content, ir_scene),
+            None => {
+                painter.text(
+                    content.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "no IR frame yet",
+                    egui::FontId::default(),
+                    COLOR_STRUCTURAL,
+                );
+            }
+        }
+        draw_meter(painter, content, 0, &scene.ref_meter, "R");
+        draw_meter(painter, content, 1, &scene.meas_meter, "M");
+        return;
+    }
 
     // Two stacked panes: magnitude (top), phase (bottom). Shared x
     // (log-f); each pane maps its own normalized y over its own band.
@@ -593,6 +639,104 @@ fn draw_segments(painter: &egui::Painter, trace: &ac_scene::Trace, vp: Viewport,
     }
 }
 
+/// The IR panel (#286): header, h(t) trace, time axis, and the arrival
+/// marker — every string and coordinate `ac-scene`'s, this crate only
+/// maps the normalized `[0,1]²` points into `rect` and draws (the same
+/// contract every other pane in this file holds).
+fn draw_ir_panel(painter: &egui::Painter, rect: egui::Rect, scene: &ac_scene::IrScene) {
+    let vp = Viewport {
+        x: rect.min.x,
+        y: rect.min.y,
+        width: rect.width(),
+        height: rect.height(),
+    };
+
+    // Header: verbatim ac-scene string, naming the source and what it is
+    // not — the one thing the acceptance criteria require distinctly
+    // labelled.
+    painter.text(
+        rect.left_top(),
+        egui::Align2::LEFT_TOP,
+        scene.header,
+        egui::FontId::default(),
+        COLOR_LABEL,
+    );
+
+    if scene.trace.segments.is_empty() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no samples yet",
+            egui::FontId::default(),
+            COLOR_STRUCTURAL,
+        );
+        return;
+    }
+
+    // h(t): one polyline per segment, same drawing rule `draw_segments`
+    // uses for the mag/phase traces — there is always exactly one
+    // segment here (no coherence mask over a time-domain sample), but
+    // the loop stays generic rather than assuming that shape.
+    for segment in &scene.trace.segments {
+        let points: Vec<egui::Pos2> = segment
+            .iter()
+            .map(|&pt| {
+                let (x, y) = scene_to_screen(pt, vp);
+                egui::pos2(x, y)
+            })
+            .collect();
+        match scene.trace.provenance.source {
+            ac_scene::Source::Live => {
+                painter.add(egui::Shape::line(points, Stroke::new(1.5, COLOR_SIGNAL)));
+            }
+            ac_scene::Source::Snapshot => {
+                let mut shapes = Vec::new();
+                egui::Shape::dashed_line_many(
+                    &points,
+                    Stroke::new(1.5, COLOR_SIGNAL),
+                    6.0,
+                    4.0,
+                    &mut shapes,
+                );
+                painter.extend(shapes);
+            }
+        }
+    }
+
+    // Time axis: bottom labels, verbatim ac-scene ticks — same mapping
+    // `draw_freq_labels` uses for the mag/phase panes' shared frequency
+    // axis.
+    for tick in &scene.time_axis.ticks {
+        let (x, _) = scene_to_screen((tick.position, 0.0), vp);
+        painter.text(
+            egui::pos2(x, rect.max.y),
+            egui::Align2::CENTER_BOTTOM,
+            &tick.label,
+            egui::FontId::default(),
+            COLOR_LABEL,
+        );
+    }
+
+    // Arrival marker: a vertical line at the frame's own delay position,
+    // plus the verbatim readout string beneath it. Not clamped to the
+    // pane — `ac-scene` leaves an out-of-range position as-is (see
+    // `IrScene`'s doc), and egui simply draws it off-canvas, which is
+    // honest rather than a fabricated in-range position.
+    let (ax, top) = scene_to_screen((scene.arrival.position, 1.0), vp);
+    let (_, bottom) = scene_to_screen((scene.arrival.position, 0.0), vp);
+    painter.line_segment(
+        [egui::pos2(ax, top), egui::pos2(ax, bottom)],
+        Stroke::new(1.0, COLOR_VALUE),
+    );
+    painter.text(
+        egui::pos2(ax, bottom + 2.0),
+        egui::Align2::CENTER_TOP,
+        &scene.arrival.text,
+        egui::FontId::default(),
+        COLOR_VALUE,
+    );
+}
+
 fn draw_meter(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -695,6 +839,16 @@ mod tests {
                 snapshot_delay_ms: 3.0
             }
         );
+    }
+
+    #[test]
+    fn ir_panel_starts_closed_and_toggles() {
+        let mut t = TransferViewState::default();
+        assert!(!t.ir_panel_open());
+        t.toggle_ir_panel();
+        assert!(t.ir_panel_open());
+        t.toggle_ir_panel();
+        assert!(!t.ir_panel_open());
     }
 
     // Stimulus transitions, level steps, arm-expiry, clamp, and keepalive

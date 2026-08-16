@@ -138,6 +138,56 @@ fn phase_label(deg: i64) -> String {
     }
 }
 
+/// Normalized x for `t_ms` within `[t_min_ms, t_max_ms]` (linear, `x=0`
+/// at `t_min_ms`) — the IR panel's one time mapping, shared between the
+/// h(t) trace and its axis ticks and arrival marker (#286).
+pub fn time_to_x(t_ms: f64, t_min_ms: f64, t_max_ms: f64) -> f64 {
+    (t_ms - t_min_ms) / (t_max_ms - t_min_ms)
+}
+
+/// The IR panel's time axis (#286): ticks at both endpoints plus `0 ms`
+/// when it falls inside the range (a live sidecar always straddles it —
+/// `t_origin_ms` is negative by construction — but the guard keeps this
+/// total for a caller-given range that doesn't).
+///
+/// Labels: endpoints get a signed `"{±N} ms"`; the zero tick is bare
+/// `"0"`, matching [`phase_axis`]'s `"0°"` convention — the unit is the
+/// axis, not every tick's business to repeat.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn time_axis(t_min_ms: f64, t_max_ms: f64) -> Axis {
+    if !(t_max_ms > t_min_ms) {
+        return Axis { ticks: Vec::new() };
+    }
+    let mut ticks = vec![
+        Tick {
+            position: time_to_x(t_min_ms, t_min_ms, t_max_ms),
+            label: time_label(t_min_ms),
+        },
+        Tick {
+            position: time_to_x(t_max_ms, t_min_ms, t_max_ms),
+            label: time_label(t_max_ms),
+        },
+    ];
+    if t_min_ms < 0.0 && t_max_ms > 0.0 {
+        ticks.insert(
+            1,
+            Tick {
+                position: time_to_x(0.0, t_min_ms, t_max_ms),
+                label: time_label(0.0),
+            },
+        );
+    }
+    Axis { ticks }
+}
+
+fn time_label(t_ms: f64) -> String {
+    if t_ms == 0.0 {
+        "0".to_string()
+    } else {
+        format!("{t_ms:+.0} ms")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +318,44 @@ mod tests {
     fn db_axis_degenerate_inverted_bounds_is_empty_not_nan() {
         let axis = db_axis(0.0, -80.0);
         assert!(axis.ticks.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // IR panel time axis (#286)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn time_axis_symmetric_range_has_three_ticks_min_zero_max() {
+        let axis = time_axis(-500.0, 500.0);
+        let got: Vec<(f64, &str)> = axis
+            .ticks
+            .iter()
+            .map(|t| (t.position, t.label.as_str()))
+            .collect();
+        assert_eq!(got, vec![(0.0, "-500 ms"), (0.5, "0"), (1.0, "+500 ms")]);
+    }
+
+    #[test]
+    fn time_axis_range_not_straddling_zero_has_only_endpoints() {
+        let axis = time_axis(100.0, 300.0);
+        let got: Vec<(f64, &str)> = axis
+            .ticks
+            .iter()
+            .map(|t| (t.position, t.label.as_str()))
+            .collect();
+        assert_eq!(got, vec![(0.0, "+100 ms"), (1.0, "+300 ms")]);
+    }
+
+    #[test]
+    fn time_axis_degenerate_bounds_is_empty_not_nan() {
+        assert!(time_axis(0.0, 0.0).ticks.is_empty());
+        assert!(time_axis(500.0, -500.0).ticks.is_empty());
+    }
+
+    #[test]
+    fn time_to_x_maps_endpoints_and_midpoint() {
+        assert_eq!(time_to_x(-500.0, -500.0, 500.0), 0.0);
+        assert_eq!(time_to_x(0.0, -500.0, 500.0), 0.5);
+        assert_eq!(time_to_x(500.0, -500.0, 500.0), 1.0);
     }
 }

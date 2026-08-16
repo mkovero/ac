@@ -30,9 +30,9 @@ mod support;
 use std::time::Duration;
 
 use ac_core::visualize::weighting_curves::WeightingCurve;
-use ac_scene::Scene;
-use ac_view::app::connect_and_launch;
-use ac_view::session::{ConnectionState, Session};
+use ac_scene::{IrInput, IrScene, Scene};
+use ac_view::app::{connect_and_launch, connect_and_launch_transfer};
+use ac_view::session::{ConnectionState, PolledFrame, Session};
 use ac_view::zmq_client::{Client, Endpoint, Recv};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -91,7 +91,11 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut found = None;
         while std::time::Instant::now() < deadline {
-            if let Some(f) = sniff_session.poll_frame(Duration::from_millis(200)) {
+            // Skip the interleaved `visualize/ir` sidecar (#286) — this
+            // check wants a `transfer_stream` frame specifically.
+            if let Some(PolledFrame::Transfer(f)) =
+                sniff_session.poll_frame(Duration::from_millis(200))
+            {
                 found = Some(f);
                 break;
             }
@@ -163,5 +167,131 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         "app's on-screen SPL ({app_spl:.4}) and an independently-sniffed frame's SPL \
          ({sniffed_spl:.4}) diverged by {delta:.4} dB — measured near-zero on a stationary \
          fake tone, so this should never trip on jitter alone"
+    );
+}
+
+/// QA follow-up on #286/PR #309: the SPL check above never exercised the
+/// `visualize/ir` sidecar or the IR panel at all — extends the same
+/// two-check discipline to it.
+///
+/// 1. **Determinism check**: the identical sidecar frame bytes, parsed
+///    twice independently, must produce byte-identical `IrScene`s
+///    (trace included, not just the header/arrival strings) — proves
+///    the sidecar → `IrWireFrame` → `IrInput` → `IrScene` chain is a
+///    pure function of the bytes.
+/// 2. **Live-app paint check**: the real `AcViewApp`, driven through a
+///    real eframe harness with an actual `H` keypress (not
+///    `handle_action` called directly — that would only prove the
+///    dispatch table exists, not that a key event reaches it), opens
+///    the IR panel and its `current_ir_scene()` reads back the header
+///    verbatim and an arrival delay within tolerance of an
+///    independently-sniffed frame from the same session.
+#[test]
+fn ir_panel_header_and_arrival_match_ac_scene_for_the_same_sidecar_frame() {
+    let daemon = DaemonProcess::spawn();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".to_string(),
+        ctrl_port: daemon.ctrl_port,
+        data_port: daemon.data_port,
+    };
+
+    // --- Check 1: determinism, exact equality ---
+    let sniff_client = Client::connect(&endpoint).expect("connect (sniffer)");
+    let mut sniff_session = Session::new(sniff_client);
+    sniff_session
+        .launch(0, 1, WeightingCurve::A, "fast")
+        .expect("launch transfer_stream (sniffer)");
+    assert_eq!(sniff_session.connection_state(), ConnectionState::Live);
+
+    let raw_ir_frame = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut found = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(PolledFrame::Ir(f)) = sniff_session.poll_frame(Duration::from_millis(200)) {
+                found = Some(f);
+                break;
+            }
+        }
+        found.expect("no visualize/ir frame within 10s")
+    };
+    let frame_text = serde_json::to_string(&raw_ir_frame).unwrap();
+    let parse_a: ac_scene::IrWireFrame = serde_json::from_str(&frame_text).unwrap();
+    let parse_b: ac_scene::IrWireFrame = serde_json::from_str(&frame_text).unwrap();
+    let scene_a = IrScene::from_input(&IrInput::from_wire_frame(&parse_a));
+    let scene_b = IrScene::from_input(&IrInput::from_wire_frame(&parse_b));
+    assert_eq!(
+        scene_a, scene_b,
+        "identical sidecar frame bytes must parse to an identical IrScene"
+    );
+    assert!(
+        !scene_a.trace.segments.is_empty(),
+        "expected a non-empty h(t) trace from a live session"
+    );
+    let sniffed_delay_ms: f64 = scene_a
+        .arrival
+        .text
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sniff_session.stop();
+    drop(sniff_session);
+
+    // --- Check 2: the real app, driven through a real eframe harness
+    // with a real `H` keypress, reads back what it would paint ---
+    let mut harness = Harness::new_eframe(move |_cc| {
+        connect_and_launch_transfer(endpoint, 0, 1, WeightingCurve::A, "fast")
+            .expect("connect_and_launch_transfer")
+    });
+
+    // One `H` press opens the IR panel — queued now, consumed on the
+    // next `step()` inside the polling loop below (`AcViewApp::ui`'s
+    // `ctx.input(|i| i.key_pressed(...))` check needs to see the event
+    // land inside a frame it processes, not merely be queued).
+    harness.key_press(egui::Key::H);
+
+    let (app_header, app_delay_ms): (&'static str, f64) = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut found = None;
+        while std::time::Instant::now() < deadline {
+            harness.step();
+            if let Some(scene) = harness.state().current_ir_scene() {
+                if !scene.trace.segments.is_empty() {
+                    let ms: f64 = scene
+                        .arrival
+                        .text
+                        .split(' ')
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    found = Some((scene.header, ms));
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        found.expect("app's IR panel never received a non-empty frame within 10s")
+    };
+
+    assert_eq!(
+        app_header,
+        ac_scene::IR_HEADER,
+        "the painted panel's header must be ac-scene's IR_HEADER verbatim"
+    );
+
+    // Tolerance: two independent H1 estimates off the same stationary
+    // fake tone, ~seconds apart — same discipline and same order of
+    // magnitude as the SPL check above, not a loose guess. The delay
+    // estimate has coarser native resolution than SPL (sample-period
+    // granularity, not a continuously-varying integrator), so the bound
+    // is wider; it still catches a mis-wired panel (which would show a
+    // multi-ms-to-multi-second divergence, not a fraction of a ms).
+    let delta = (app_delay_ms - sniffed_delay_ms).abs();
+    assert!(
+        delta < 0.5,
+        "app's on-screen IR arrival ({app_delay_ms:.4} ms) and an independently-sniffed \
+         frame's arrival ({sniffed_delay_ms:.4} ms) diverged by {delta:.4} ms"
     );
 }
