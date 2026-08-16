@@ -985,8 +985,9 @@ reverberation isn't known ahead of a real capture, so `tail_s`'s adequacy
 is checked after the fact against the room actually measured, not
 guessed beforehand (`ac_core::measurement::sweep::check_tail_decay`).
 
-Today only the fake backend implements the required `play_and_capture`
-engine path; real JACK / CPAL buffer-playback is a follow-up.
+Fake, JACK, and CPAL backends all implement the required
+`play_and_capture` engine path (`jack_backend.rs`, `cpal_backend.rs`) —
+only the default trait impl bails.
 
 **Request**
 ```json

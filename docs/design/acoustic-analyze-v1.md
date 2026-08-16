@@ -237,6 +237,17 @@ invent an explanation for it. Track it as a precondition, not a caveat.
    report's own speed of sound where one is recorded rather than a hardcoded
    343.
 
+**Retired for the IR path, not implemented here.** #284 lands a
+`gated_frequency_response` payload derived from the linear IR, which
+carries a measured arrival directly (the IR's peak sample, corrected by
+`interface_latency` when resolved) rather than a value estimated from a
+phase-slope fit. When the native input is that payload, step 1's estimator
+has a measured value to defer to and is retired for that path — noted so
+the next reader does not re-derive the estimator where a direct
+measurement already exists. This document does not implement that
+substitution; §10 still parks the whole feature on preconditions the IR
+path has not yet met.
+
 ### 6.3 Per-band aggregation
 
 From the delay-rotated complex values:

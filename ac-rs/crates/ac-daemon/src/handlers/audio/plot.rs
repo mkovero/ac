@@ -560,8 +560,9 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// verdict (issue #282 acceptance criterion 6) — see
 /// `ac_core::measurement::sweep::check_tail_decay`.
 ///
-/// Today only the fake backend implements `play_and_capture`; real JACK /
-/// CPAL buffer-playback is tracked as a follow-up. See ARCHITECTURE.md.
+/// Fake, JACK, and CPAL backends all implement `play_and_capture`
+/// (`jack_backend.rs`, `cpal_backend.rs`) — only the default trait impl
+/// bails. See ARCHITECTURE.md.
 pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_ir");
     let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);

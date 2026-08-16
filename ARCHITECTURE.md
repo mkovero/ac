@@ -456,9 +456,10 @@ steps — nothing is broken en route.
 - [x] Wire `ac sweep ir` to run a Farina measurement end-to-end and emit
       `measurement/impulse_response` + `measurement/report` frames. Fake
       backend supported end-to-end (including integration test); real
-      JACK/CPAL `play_and_capture` is follow-up #78. Renamed to `ac plot
-      ir` / wire `plot_ir` by #282 — see "Command naming conventions"
-      above; `ac sweep ir` is now a deprecated alias.
+      JACK/CPAL `play_and_capture` is implemented (`jack_backend.rs`,
+      `cpal_backend.rs` — only the default trait impl still bails).
+      Renamed to `ac plot ir` / wire `plot_ir` by #282 — see "Command
+      naming conventions" above; `ac sweep ir` is now a deprecated alias.
 - [x] Build `measurement/weighting.rs` — IEC 61672-1 A / C / Z
       frequency weighting. Bilinear-mapped biquad cascade, unity gain at
       1 kHz, Class 1 tolerance verified in tests.
