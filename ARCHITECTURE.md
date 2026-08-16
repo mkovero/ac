@@ -323,16 +323,20 @@ reports remain readable forever.
 Tier 1 modules cite the edition each implementation has been verified
 against:
 
+Paths to the held documents are not restated here — `.agents/qa.md`'s
+normative standards table is the single source of truth for where each
+standard's PDF lives. Look the standard up there by name.
+
 | Module | Standard | Clause | Verified against |
 |--------|----------|--------|------------------|
-| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf` |
-| `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | `stddocs/iec-full/Electroacoustics - Octave-band …pdf` |
-| `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | `stddocs/iec-full/Electroacoustics - Sound level meters …pdf` |
-| `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | `stddocs/iec-full/aes17_2020_…pdf` |
-| `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | `stddocs/iec-full/aes17_2020_…pdf` |
-| `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | `stddocs/ITU-R BS.468-4.pdf` |
-| `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | `stddocs/ITU-R BS.1770-5.pdf` + EBU Tech 3341/3342 conformance cases |
-| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf`; `stddocs/iso-full/ISO18233.pdf` (Annex B pending human cross-check, `verified: false`) |
+| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | see `.agents/qa.md` |
+| `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | see `.agents/qa.md` |
+| `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | see `.agents/qa.md` |
+| `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | see `.agents/qa.md` |
+| `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | see `.agents/qa.md` |
+| `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | see `.agents/qa.md` |
+| `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | see `.agents/qa.md`; EBU Tech 3341/3342 conformance cases (not a `stddocs/` file) |
+| `sweep.rs` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see `.agents/qa.md` (Annex B pending human cross-check, `verified: false`) |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical
