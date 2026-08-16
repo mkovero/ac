@@ -372,4 +372,87 @@ mod tests {
         assert!(!scene.trace.segments.is_empty());
         assert_eq!(scene.trace.segments[0].len(), input.samples.len());
     }
+
+    // Cross-tier parity (QA follow-up on #286/PR #309): both producers
+    // funnel the *same* underlying H1 through the *same* IFFT
+    // (`impulse_response_from_h`) and the *same* stride-downsample
+    // formula (this module's doc on `IR_MAX_SAMPLES` claims byte-for-byte
+    // identity with `ac-daemon/src/handlers/transfer.rs`'s `ir_msg` block —
+    // this test is what pins that claim down instead of leaving it as
+    // prose). A synthetic `IrWireFrame` is built here by hand, running the
+    // daemon's own downsample arithmetic verbatim, so it stands in for a
+    // live wire frame carrying the identical H1 a `.acsnap`'s
+    // `PairDerivation` also stores — the two `IrScene`s built from it must
+    // then agree on everything the panel draws, not merely be close.
+    #[test]
+    fn live_wire_and_pair_derivation_agree_on_the_same_underlying_h1() {
+        use ac_core::visualize::transfer::h1_estimate_with_delay;
+        let sr = 48_000u32;
+        let n = sr as usize;
+        let r: Vec<f32> = (0..n).map(|i| ((i as f64 * 0.01).sin()) as f32).collect();
+        let m = r.clone();
+        let h1 = h1_estimate_with_delay(&r, &m, sr, 144); // 3.0 ms at 48 kHz
+
+        let ir_full = impulse_response_from_h(&h1.re, &h1.im);
+        // Mirrors `IR_MAX_SAMPLES` above and
+        // `ac-daemon/src/handlers/transfer.rs`'s `IR_MAX_SAMPLES` — a
+        // fresh local copy rather than reaching for either, since the
+        // point of this test is that a wire frame built independently by
+        // that formula still lands on the same numbers `from_pair_derivation`
+        // computes internally.
+        const DAEMON_IR_MAX_SAMPLES: usize = 2000;
+        let stride = (ir_full.len() / DAEMON_IR_MAX_SAMPLES).max(1);
+        let samples: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        let dt_ms = 1000.0 / sr as f64 * stride as f64;
+        let t_origin_ms = -((samples.len() / 2) as f64) * dt_ms;
+
+        let wire = IrWireFrame {
+            samples,
+            sr,
+            stride,
+            dt_ms,
+            t_origin_ms,
+            ref_channel: 1,
+            meas_channel: 0,
+            delay_samples: h1.delay_samples,
+            delay_ms: h1.delay_ms,
+            // A `PairDerivation` records no lock verdict either — held
+            // equal on both sides so this test isolates the numeric
+            // (trace/axis/arrival-position) claim from the unrelated
+            // "no metres before lock" formatting rule already covered by
+            // `arrival_marker_drops_metres_when_unlocked` above.
+            delay_locked: None,
+        };
+
+        let d = PairDerivation {
+            h1: h1.clone(),
+            spec_freqs: vec![],
+            meas_spectrum: vec![],
+            ref_spectrum: vec![],
+            spl: None,
+            spl_weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+        };
+
+        let live_scene = IrScene::from_input(&IrInput::from_wire_frame(&wire));
+        let snap_scene = IrScene::from_input(&IrInput::from_pair_derivation(&d, "meas_0", sr));
+
+        // Segments only, not the whole `Trace` — `provenance.source`
+        // (`Live` vs `Snapshot`) is *supposed* to differ, that is the
+        // correctly-tagged half of D15; the claim under test is that the
+        // geometry agrees.
+        assert_eq!(
+            live_scene.trace.segments, snap_scene.trace.segments,
+            "the wire-frame and snapshot paths painted different h(t) traces \
+             for the identical underlying H1"
+        );
+        assert_eq!(
+            live_scene.time_axis, snap_scene.time_axis,
+            "the two paths disagree on the time axis for the identical H1"
+        );
+        assert_eq!(
+            live_scene.arrival.position, snap_scene.arrival.position,
+            "the two paths placed the arrival marker at different positions \
+             for the identical H1"
+        );
+    }
 }
