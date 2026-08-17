@@ -11,6 +11,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `audit.md` | audit coordinator — orchestrates full codebase audit | manual invocation |
+| `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | manual invocation |
 
 ## invocation
 
@@ -31,6 +32,10 @@ claude --context .agents/developer.md \
 # review an open PR
 claude --context .agents/qa.md \
   "review PR #43: https://github.com/mkovero/ac/pull/43"
+
+# run a rig session (manual invocation, hardware-in-the-loop)
+claude --system-prompt-file .agents/rig.md \
+  "run rig session against work/rig/rig-verify-queue.md block 4"
 ```
 
 Claude Code need GitHub MCP server connected for issue/PR read-write:
