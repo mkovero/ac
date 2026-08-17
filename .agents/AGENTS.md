@@ -61,7 +61,9 @@ PRs touching stimulus/drive (`set_drive`, arm/fire state machine, keepalive):
 
 ## human gates
 Always human-only:
-- Merging PRs to main
+- Merging PRs to main — an agent reviewing another agent's PR shares the same
+  specs, the same failure modes, and the same blind spots, so that review is
+  not an independent check; merge needs one.
 - Closing issues
 - Deleting branches
 - Changing agent spec files
@@ -177,6 +179,10 @@ Corollaries:
   layout is not, and the result is *harder* to catch than the ambiguity it
   replaced, because the failure reads as diligence. Open the file, name the
   section, or leave the cite as it was.
+- **Report the sign of an unscored gap.** Where a gap is left unscored — a
+  check not run, a case not tested, a value not verified — say which direction
+  its error would push a result, or say that the direction is unknown. An
+  unscored gap with no stated direction reads as harmless; most are not.
 - **A cite that was added is not a cite that was verified.** In a final
   artifact the two look identical: a reference resolved cleanly against the
   tree and one that was wrong and got corrected both appear as correct

@@ -189,6 +189,7 @@ For each stated invariant, confirm code actually enforce it:
 
 
 - No implementation code. Implementation notes = orientation, not code.
+- Do not merge. Merge to main is a human gate.
 - No contradicting triage spec acceptance criteria. Disagree with scope → note explicit, do not silently change.
 - No proposing wire schema changes without noting the impact on both consumers (`ac-cli`, `ac-view`).
 - One design comment per issue. Edit if revision needed.

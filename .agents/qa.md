@@ -185,8 +185,11 @@ Post PR review in this structure:
 - Approving → apply `in-review` (already set) — no change, leave for human merge
 - Requesting changes → apply `needs-work`, remove `in-review`
 
-### approval covers a specific commit — a later push voids it
-`agent:qa` approval attest to tree **at commit it reviewed**, not branch forever. **Any commit pushed after approval revert PR to `needs-work` and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. Rule exist because real one slipped through: #197's closure-evidence commit landed on `main` unformatted and CI-red *after* approval (#199). Relay between "approved" and "merged" is seam like any other — close structurally, not by remembering to re-check.
+### approval covers a specific commit — a later push voids it (load-bearing, not advisory)
+This rule is load-bearing: merge to main is human-only precisely because agent
+review is not independent (see `AGENTS.md` human gates), so this is the one
+mechanism stopping an approved-then-amended PR from reaching that human merge
+unreviewed. `agent:qa` approval attest to tree **at commit it reviewed**, not branch forever. **Any commit pushed after approval revert PR to `needs-work` and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. Rule exist because real one slipped through: #197's closure-evidence commit landed on `main` unformatted and CI-red *after* approval (#199). Relay between "approved" and "merged" is seam like any other — close structurally, not by remembering to re-check.
 
 ## audit mode
 
@@ -255,6 +258,7 @@ wrong without any test catching it. These are the highest priority.}
 
 
 - No implementation changes yourself (except suggested test additions in comment).
+- Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
