@@ -139,6 +139,25 @@ Check:
 Cross-crate check (schema match, existing helper, pattern used elsewhere) → `Grep` for the specific symbol, then `Read` the hit. Shell readers and searchers denied by `.claude/settings.json`; do not work around them.
 - **error handling** — Results propagated, not silently unwrapped?
 - **test coverage** — new code paths exercised by tests?
+- **coupled constants** — PR introduce or change a constant whose correct
+  value depends on another constant (same crate or cross-crate — of the
+  first three instances of this shape, #238 and #247 crossed a crate
+  boundary; #246 did not, `MIN_PROMINENCE` and `NOISE_FLOOR_PROMINENCE`
+  both lived in `ac-core/src/visualize/transfer.rs` — so crate boundary is
+  not the operative reason review misses these) → requires a test asserting
+  the *relationship* between the two constants, not a test that merely
+  exercises each value in isolation. Worked example already in tree:
+  `the_admission_constant_leaves_room_before_the_advice_fires`
+  (`ac-rs/crates/ac-scene/src/fault.rs:1473`, added by PR #253). That test
+  carries both failure modes such a test must have — require both:
+  - fails when the two constants move to a *wrong pair* (measured worst
+    first-lock attempt no longer clear of the advice threshold);
+  - fails when either constant moves to a value *nobody has scored* — the
+    `RIG_WORST_ATTEMPT_TO_FIRST_LOCK` lookup table (same file, line 1453)
+    has no row for it and the test panics with instructions, rather than
+    silently passing.
+  Missing this test on a coupled-constant PR is a `needs-work` blocker, not
+  a note.
 - **scope discipline** — dev touch files outside spec? Yes → flag.
 - **no dead code** — no commented-out blocks, no unreachable branches
 
