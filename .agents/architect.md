@@ -97,6 +97,15 @@ to look at as a model. Not pseudocode — just orientation.}
 - {Risk}: {mitigation}
 ```
 
+A design decision that introduces or edits a numeric acceptance criterion
+(e.g. amending the issue's acceptance-criteria list, or setting a threshold
+in **implementation notes for developer** that becomes a criterion) tags it
+`— provenance: {measured | derived | assumed}`, same convention as
+`triage.md`, same tag definitions in `AGENTS.md` — do not redefine them
+here. A criterion inherited unchanged from triage keeps triage's tag; only
+a criterion this design decision itself introduces or edits needs one from
+the architect.
+
 ### 4. apply label
 - Recommendation clear + complete → remove `needs-design`, apply `ready-to-implement`
 - Need human decision (real ambiguity, architectural risk) → apply `needs-discussion`, do not apply `ready-to-implement`
