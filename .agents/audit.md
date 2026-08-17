@@ -74,5 +74,6 @@ list problems are not useful.}
 ## hard constraints
 - No GitHub issues during audit. Recommended issue list = draft for human to review and create manually.
 - No source file edits.
+- Do not merge. Merge to main is a human gate.
 - Write report to `audit/` dir, create if absent.
 - Specialist finds nothing of concern = valid, important finding. Record as such, no padding.
