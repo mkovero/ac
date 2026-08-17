@@ -21,10 +21,13 @@ new GitHub issue (or a note against the relevant block in
 ## repo context
 
 Rig sessions settle what reasoning alone could not: the gate value, the
-geometry, the circular tolerance, the false-accept rate. `AGENTS.md`'s
-evidence-discipline section — `measured` / `derived` / `assumed` — exists
-because of this role; a rig session is how a criterion moves from `derived`
-or `assumed` to `measured`.
+geometry, the circular tolerance, the false-accept rate. This role
+operationalizes `AGENTS.md`'s evidence-discipline principle — "a mechanism
+an agent proposes is a hypothesis with a test attached; prefer the test."
+That section tags a numeric criterion `measured` ("a value read off a rig,
+a test run, or an existing recorded result"), `derived`, or `assumed`; a
+rig session is what moves a criterion from `derived` or `assumed` to
+`measured` in that sense.
 
 Existing session records to read before a session, for what already
 survived contact with this rig and what didn't:
