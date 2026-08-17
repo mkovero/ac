@@ -27,6 +27,15 @@ combination: #252 added an `ac-view` test against a `TransferInput` that #248
 then gave two more fields. No textual conflict, both merged clean, `main` would
 not compile. No CI here, so this command is the only thing that catches it.
 
+## scratch space
+Work in the worktree you were given. Any further checkout, build target, or
+log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
+`target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
+for a cargo build; a scratch worktree parked there once ran root out of space
+at 99% usage and killed a linker mid-link. Whoever creates a scratch worktree
+removes it when the task ends (`git worktree remove`), not the next session
+that trips over it.
+
 ## applicable standards
 
 Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
@@ -136,6 +145,20 @@ Cross-crate check (schema match, existing helper, pattern used elsewhere) → `G
 ### step 3 — check test quality
 Each new test:
 - Test behavior from acceptance criteria, or just that code run without panic?
+- **Reachable: can it execute against the defect it names, and would it fail
+  if that defect were present?** A strong assertion on an unreachable path
+  reads as coverage while proving nothing — e.g. an equality assertion that
+  passes because both sides are the same empty/default value. A test that
+  cannot fail on the defect it names is a `needs-work` finding, not a note —
+  file it as one.
+- Depends on a fake or mock: name the field the assertion checks and confirm
+  the fake actually models it. #325's ring regression test passed against an
+  unfixed daemon because `FakeEngine` lacked the field under assertion, in
+  the one mode built to reproduce ring defects — a fake missing the field
+  can't fail on it no matter what the test asserts.
+- `#[ignore]`d test: name what would notice if it broke — a CI job, a manual
+  run, a checklist step — or record plainly that nothing would. An `#[ignore]`
+  only ever run where it would fail is not coverage.
 - Measurement functions: numeric assertions with tight tolerances?
   Example: `assert!((result.thd - 0.0023).abs() < 1e-4)` not just `assert!(result.thd > 0.0)`
 - CLI behavior: output strings or exit codes asserted?

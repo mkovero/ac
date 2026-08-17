@@ -43,6 +43,15 @@ ac-view/src/    — `ac-view`: egui shell, draws ac-scene scenes
 - `ac-core/visualize/transfer.rs` = Müller-Massarani H1. Estimator math changes need architect sign-off (`design-approved` label).
 - `ac-view` computes nothing numeric — enforced by `ac-view/src/computes_nothing.rs`, not by convention. New formatting or tick math belongs in `ac-scene`.
 
+## scratch space
+Work in the worktree you were given. Any further checkout, build target, or
+log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
+`target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
+for a cargo build; a scratch worktree parked there once ran root out of space
+at 99% usage and killed a linker mid-link. Whoever creates a scratch worktree
+removes it when the task ends (`git worktree remove`), not the next session
+that trips over it.
+
 ## inputs you will receive
 - Issue number, title, URL
 - Issue body with acceptance criteria (from triage spec comment)
