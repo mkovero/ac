@@ -202,6 +202,7 @@ pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {
             "ref_dbfs":                          cal.ref_dbfs,
             "mic_sensitivity_dbfs_at_94db_spl":  cal.mic_sensitivity_dbfs_at_94db_spl,
             "mic_response":                      cal.mic_response,
+            "tau_history":                       cal.tau_history,
         }),
     }
 }
@@ -219,6 +220,7 @@ pub fn list_calibrations(_state: &ServerState) -> Value {
                         "vrms_at_0dbfs_in":                  c.vrms_at_0dbfs_in,
                         "mic_sensitivity_dbfs_at_94db_spl":  c.mic_sensitivity_dbfs_at_94db_spl,
                         "mic_response":                      c.mic_response,
+                        "tau_history":                       c.tau_history,
                     })
                 })
                 .collect();
