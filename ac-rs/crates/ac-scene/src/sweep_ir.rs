@@ -23,7 +23,7 @@
 //! Rendering target and fault text are #286/#308's UX comment, carried
 //! forward verbatim; this module is where they become plain data.
 
-use ac_core::measurement::report::{MeasurementData, MeasurementReport};
+use ac_core::measurement::report::{ArrivalDistance, MeasurementData, MeasurementReport};
 
 use crate::ir::ArrivalMarker;
 use crate::readout::format_sweep_ir_header;
@@ -192,27 +192,55 @@ impl SweepIrScene {
         };
 
         let arrival_ms = stats.arrival_s * 1000.0;
+        // `stats.arrival_s` is a round-trip figure and still contains any
+        // uncorrected interface latency (`IrStats::arrival_s`'s own doc);
+        // it must not be converted to a distance without a calibrated τ
+        // (#283, `ArrivalDistance`'s doc: "no third case that returns an
+        // uncorrected arrival as if it were a distance"). Route through
+        // `MeasurementReport::ir_arrival_distance()` — the one place that
+        // subtraction is allowed to happen — rather than hand-rolling the
+        // `delay_locked` argument: only a `Known` result (a measured τ on
+        // this report) both unlocks metres *and* supplies the
+        // τ-corrected delay to print them from; `Unavailable` (the common
+        // case — no τ measured with this run) prints ms only, same as the
+        // live panel's own `delay_locked: Some(false)` path.
+        let (readout_delay_ms, delay_locked, speed_of_sound_m_s) =
+            match report.ir_arrival_distance() {
+                ArrivalDistance::Known {
+                    tau_s,
+                    speed_of_sound_m_s,
+                    ..
+                } => (
+                    (stats.arrival_s - tau_s) * 1000.0,
+                    Some(true),
+                    speed_of_sound_m_s,
+                ),
+                ArrivalDistance::Unavailable { .. } => {
+                    (arrival_ms, Some(false), SPEED_OF_SOUND_DEFAULT_M_S)
+                }
+            };
         let arrival = ArrivalMarker {
             position: if has_span {
                 time_to_x(arrival_ms, t_origin_ms, t_max_ms)
             } else {
                 0.5
             },
-            // A gate-confirmed arrival is a completed, deterministic
-            // measurement, not a provisional live lock (#308 review,
-            // implementation notes) — `Some(true)` reads through
-            // `format_delay_readout`'s own `delay_ms >= 0.0` guard, so
-            // a peak that lands before the gate's zero-delay reference
-            // still prints ms-only rather than fabricating a negative
-            // distance.
-            text: format_delay_readout(arrival_ms, Some(true), SPEED_OF_SOUND_DEFAULT_M_S),
+            // `format_delay_readout`'s own `delay_ms >= 0.0` guard means a
+            // peak that lands before the gate's zero-delay reference (or,
+            // in the `Known` branch, before τ) still prints ms-only
+            // rather than fabricating a negative distance.
+            text: format_delay_readout(readout_delay_ms, delay_locked, speed_of_sound_m_s),
         };
 
-        // The window is centred on the zero-delay reference (the
-        // daemon's own `gate_start_s = -(half window)/sr`), so the
-        // recorded gate length's half-span is the same figure the time
-        // axis's own `-x..+x` endpoints show.
-        let half_span_ms = stats.gate_window_s * 1000.0 / 2.0;
+        // The recorded gate start, not `gate_window_s / 2`: the daemon's
+        // own gate construction (`plot.rs`) truncates `gate_start_s` via
+        // integer division on an odd-sample window while `gate_length_s`
+        // stays untruncated, so the two can differ by up to half a
+        // sample. `gate.gate_start_s` is the actual left bound; deriving
+        // the header figure from it rather than re-halving the window
+        // length is the same "store, don't re-derive" rule this module
+        // already follows for the time axis above.
+        let half_span_ms = -gate.gate_start_s * 1000.0;
         let header = format_sweep_ir_header(half_span_ms, stats.gate_f_low_hz);
 
         Ok(SweepIrScene {
@@ -228,8 +256,8 @@ impl SweepIrScene {
 mod tests {
     use super::*;
     use ac_core::measurement::report::{
-        GateParams, IntegrationParams, MeasurementMethod, MeasurementPayload, ProcessingChain,
-        StimulusParams, SCHEMA_VERSION,
+        GateParams, IntegrationParams, InterfaceLatency, MeasuredLatency, MeasurementMethod,
+        MeasurementPayload, ProcessingChain, StimulusParams, SCHEMA_VERSION,
     };
 
     fn base_report() -> MeasurementReport {
@@ -308,6 +336,43 @@ mod tests {
         }
     }
 
+    // Same 5-sample gate as `locked_gate`, but the peak sits one sample
+    // after the window's centre (index 3, not index 2) so
+    // `delay_samples = 1` and `arrival_s > 0` — every other fixture in
+    // this module peaks exactly on the zero-delay sample, which made
+    // `Some(true)` and the correct τ-gated `delay_locked` value
+    // indistinguishable (both print `"0.00 ms (0.00 m)"`).
+    fn gated_report_with_delayed_peak() -> MeasurementReport {
+        let mut r = base_report();
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 4_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: vec![0.0, 0.0, 0.0, 1.0, -0.5],
+                harmonics: vec![],
+                noise_tail_start_s: None,
+            },
+            standard: vec![],
+            gate: Some(locked_gate()),
+        });
+        r
+    }
+
+    fn measured_tau(tau_s: f64) -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s,
+            measured_at: "2026-08-16T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "jack".into(),
+            sample_rate_hz: 4_000,
+            period_size: None,
+            output_port: "out1".into(),
+            input_port: "in1".into(),
+        })
+    }
+
     #[test]
     fn no_impulse_response_payload_is_not_a_sweep_derived_ir() {
         let r = base_report(); // data is empty
@@ -370,15 +435,108 @@ mod tests {
 
     #[test]
     fn arrival_marker_reuses_format_delay_readout_verbatim() {
+        // `base_report()` sets `interface_latency: None`, so this is the
+        // no-τ path: `delay_locked` must gate off `Some(false)`, not the
+        // unconditional `Some(true)` this test previously pinned.
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
         let want = format_delay_readout(
             stats.arrival_s * 1000.0,
-            Some(true),
+            Some(false),
             SPEED_OF_SOUND_DEFAULT_M_S,
         );
         assert_eq!(scene.arrival.text, want);
+    }
+
+    #[test]
+    fn arrival_distance_is_not_shown_without_a_measured_interface_latency() {
+        // Nonzero delay (see `gated_report_with_delayed_peak`'s doc) so a
+        // metres figure derived from the uncorrected round trip would be
+        // visibly nonzero too, not masked by a delay of exactly 0.
+        let r = gated_report_with_delayed_peak(); // interface_latency: None
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        assert!(
+            !scene.arrival.text.contains('('),
+            "no measured \u{3c4} on this report — arrival text must not report metres: {}",
+            scene.arrival.text
+        );
+        assert!(scene.arrival.text.ends_with("ms"));
+    }
+
+    #[test]
+    fn arrival_distance_is_tau_corrected_when_interface_latency_is_measured() {
+        let mut r = gated_report_with_delayed_peak();
+        // delay_samples=1 at sr=4000 -> arrival_s = 0.25 ms. A τ larger
+        // than the raw round trip pins the corrected figure to a
+        // different, checkable sign/magnitude than the uncorrected one.
+        r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let ArrivalDistance::Known {
+            tau_s,
+            speed_of_sound_m_s,
+            ..
+        } = r.ir_arrival_distance()
+        else {
+            panic!("interface_latency is Measured, ir_arrival_distance() must be Known");
+        };
+        let stats = r.ir_stats().unwrap();
+        let corrected_ms = (stats.arrival_s - tau_s) * 1000.0;
+        assert!(
+            (corrected_ms - 0.15).abs() < 1e-9,
+            "expected 0.25ms - 0.1ms = 0.15ms, got {corrected_ms}"
+        );
+        let want = format_delay_readout(corrected_ms, Some(true), speed_of_sound_m_s);
+        assert_eq!(scene.arrival.text, want);
+        // Not the uncorrected round-trip figure (#283's forbidden case).
+        assert_ne!(
+            scene.arrival.text,
+            format!("{:.2} ms", stats.arrival_s * 1000.0)
+        );
+    }
+
+    #[test]
+    fn header_gate_span_reads_the_recorded_gate_start_not_half_the_window() {
+        // An asymmetric gate — `gate_length_s` is not `-2 * gate_start_s`
+        // — the way the daemon's own integer-division truncation of
+        // `gate_start_s` can produce (`plot.rs`'s `linear_gate_len / 2`).
+        // The header must reflect the recorded left bound, not
+        // `gate_window_s / 2`, which would silently disagree with it.
+        let gate = GateParams {
+            gate_start_s: -0.010,
+            gate_length_s: 0.0234, // half would be 0.0117, not 0.010
+            window_kind: "rectangular".into(),
+            f_low_hz: 85.0,
+        };
+        let r = gated_report(Some(gate));
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        assert!(
+            scene.header.contains("gate \u{b1} 10.00 ms"),
+            "expected the recorded gate_start_s (10.00 ms), got: {}",
+            scene.header
+        );
+    }
+
+    #[test]
+    fn degenerate_single_sample_span_draws_no_trace_or_axis() {
+        let mut r = base_report();
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 4_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: vec![1.0],
+                harmonics: vec![],
+                noise_tail_start_s: None,
+            },
+            standard: vec![],
+            gate: Some(locked_gate()),
+        });
+        let scene = SweepIrScene::from_report(&r).expect("gate present, should build a scene");
+        assert!(scene.trace.segments.is_empty());
+        assert!(scene.time_axis.ticks.is_empty());
+        assert_eq!(scene.arrival.position, 0.5);
     }
 
     #[test]
