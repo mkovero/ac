@@ -16,6 +16,7 @@ if git show-ref -q "refs/heads/issue-$n"; then
   exit 1
 fi
 
+require_space "$wt" || exit 1
 git fetch -q origin main
 git worktree add -B "issue-$n" "$wt" origin/main >/dev/null
 cd "$wt"

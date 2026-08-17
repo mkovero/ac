@@ -28,8 +28,11 @@ for a in "$@"; do
 done
 [[ ${#ids[@]} -gt 0 ]] || { echo "usage: master.sh <issue-id>... [--fg]" >&2; exit 1; }
 
-labels()    { gh issue view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name' 2>/dev/null; }
-pr_labels() { gh pr view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name' 2>/dev/null; }
+# No 2>/dev/null: gh_retry already separates real errors from transient ones,
+# and swallowing the message here turns an API outage into an empty label set —
+# which reads as "no needs-work", which reads as "approved".
+labels()    { gh_retry gh issue view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name'; }
+pr_labels() { gh_retry gh pr view "$1" -R "$AC_REPO" --json labels --jq '.labels[].name'; }
 has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 
 # Match on head branch first — developer.md step 2 specifies issue-{N}-{slug}.
@@ -37,10 +40,10 @@ has()       { printf '%s\n' "$2" | grep -qx "$1"; }
 # this repo follows that convention. Never match on title: titles get edited.
 pr_for() {
   local n="$1" pr
-  pr=$(gh pr list -R "$AC_REPO" --state open --json number,headRefName --jq \
+  pr=$(gh_retry gh pr list -R "$AC_REPO" --state open --json number,headRefName --jq \
     "[.[] | select((.headRefName | startswith(\"issue-$n-\")) or (.headRefName == \"issue-$n\"))] | .[0].number // empty")
   [[ -n $pr ]] && { printf '%s\n' "$pr"; return; }
-  gh pr list -R "$AC_REPO" --state open --json number,body --jq \
+  gh_retry gh pr list -R "$AC_REPO" --state open --json number,body --jq \
     "[.[] | select(.body // \"\" | test(\"[Cc]loses +#$n\\\\b\"))] | .[0].number // empty"
 }
 
@@ -55,9 +58,9 @@ stale_branch() {
 qa_comments() { qa_evidence "$1"; }
 
 qa_loop() {
-  local n="$1" pr="$2" round=0 ls before after head mark
+  local n="$1" pr="$2" round=0 ls before after head mark ev
   while (( round <= ROUNDS )); do
-    ls="$(pr_labels "$pr")"
+    ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
 
     # Already labelled needs-work: the verdict is in, revise before reviewing
@@ -71,24 +74,25 @@ qa_loop() {
       fi
       echo "  #$n PR #$pr: revising (round $round)"
       "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
-      gh pr edit "$pr" -R "$AC_REPO" \
+      gh_retry gh pr edit "$pr" -R "$AC_REPO" \
         --remove-label needs-work --add-label in-review >/dev/null 2>&1 || true
       ls="$(pr_labels "$pr")"
     fi
 
-    head="$(gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+    head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
     mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
 
     # Already reviewed at this exact tip and qa raised nothing: that is a pass.
-    if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( $(qa_evidence "$pr") > 0 )); then
+    ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
+    if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
       echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
       STATE=awaiting-merge; return 0
     fi
 
     echo "  #$n PR #$pr: qa review"
-    before="$(qa_evidence "$pr")"
+    before="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     "$BIN/review.sh" "$pr" $fg || { echo "  #$n: review failed"; return 1; }
-    after="$(qa_evidence "$pr")"
+    after="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — review may have succeeded, check the PR"; return 1; }
 
     if (( after <= before )); then
       echo "  #$n PR #$pr: qa posted nothing — inconclusive, NOT approved"
@@ -96,7 +100,7 @@ qa_loop() {
       return 1
     fi
 
-    ls="$(pr_labels "$pr")"
+    ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
     has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; STATE=awaiting-merge; return 0; }
   done
@@ -175,7 +179,7 @@ drive() {
 # order of preference: the sub-issues API; a markdown table whose first column
 # is `| #NNN |` and whose last column is blocked-by; task-list checkboxes.
 # Order is the sequencing — never sort or dedupe it into a different order.
-epic_body() { gh issue view "$1" -R "$AC_REPO" --json body --jq .body 2>/dev/null; }
+epic_body() { gh_retry gh issue view "$1" -R "$AC_REPO" --json body --jq .body 2>/dev/null; }
 
 # emits: "<issue> <blocker> <blocker> ..."  (blockers may be empty)
 epic_rows() {
@@ -189,7 +193,7 @@ epic_rows() {
 
 children() {
   local out
-  out=$(gh api "repos/$AC_REPO/issues/$1/sub_issues" --jq '.[].number' 2>/dev/null || true)
+  out=$(gh_retry gh api "repos/$AC_REPO/issues/$1/sub_issues" --jq '.[].number' 2>/dev/null || true)
   [[ -n $out ]] && { printf '%s\n' "$out"; return; }
   out=$(epic_rows "$1" | awk '{print $1}')
   [[ -n $out ]] && { printf '%s\n' "$out"; return; }
@@ -216,14 +220,14 @@ drive_epic() {
   echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
 
   for c in "${kids[@]}"; do
-    st="$(gh issue view "$c" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+    st="$(gh_retry gh issue view "$c" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
     if [[ $st == CLOSED ]]; then echo "  #$c: closed, skipping"; continue; fi
 
     # The epic's blocked-by column is a real dependency, not a hint. A child
     # whose blocker is still open would branch from a main without it.
     local blk open_blk=""
     for blk in $(blockers_of "$e" "$c"); do
-      [[ "$(gh issue view "$blk" -R "$AC_REPO" --json state --jq .state 2>/dev/null)" == CLOSED ]] \
+      [[ "$(gh_retry gh issue view "$blk" -R "$AC_REPO" --json state --jq .state 2>/dev/null)" == CLOSED ]] \
         || open_blk+="#$blk "
     done
     if [[ -n $open_blk ]]; then
@@ -249,6 +253,8 @@ drive_epic() {
   done
   echo "  #$e: all children processed"
 }
+
+gh_up || exit 1
 
 for id in "${ids[@]}"; do
   echo "== issue #$id"

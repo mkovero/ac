@@ -15,10 +15,14 @@ set -euo pipefail
 f="${1:?usage: session.sh <jsonl> [summary|tools|text|files|delegate|final|errors|types]}"
 view="${2:-summary}"
 
+# Collapse newlines: a heredoc in a Bash command otherwise becomes several
+# rows, and every downstream cut/sort counts its lines as tool names.
 tools() {
   jq -r 'select(.type=="assistant") | .message.content[]?
          | select(.type=="tool_use")
-         | "\(.name)\t\(.input.file_path // .input.pattern // .input.command // .input.description // "")"' "$f"
+         | .name + "\t" +
+           ((.input.file_path // .input.pattern // .input.command // .input.description // "")
+            | tostring | gsub("[\r\n]+"; " ") | .[0:120])' "$f"
 }
 
 files() {

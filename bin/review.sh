@@ -27,7 +27,7 @@ done
 
 mark="$AC_LOG_DIR/reviewed-pr-$n.sha"
 mkdir -p "$AC_LOG_DIR"
-head_sha="$(gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+head_sha="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
 
 # qa_evidence() lives in common.sh — counts both comments and reviews.
 qa_comments() { qa_evidence "$n"; }
@@ -73,32 +73,38 @@ Scope of this pass:
 
 State at the top of your comment which commit range you reviewed.
 
-Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Open them there by absolute path. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
+Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 else
   prompt="Review PR #$n in $AC_REPO.
 
-Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Open them there by absolute path. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
+Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi
 
 # Give QA a worktree. Without one it builds its own — three of them on PR
-# #299, one under /tmp — and nothing cleans them up.
+# #299, one under /tmp — and nothing cleans them up. Use a review-only branch
+# so it never contends with the implement worktree for the PR's own branch,
+# and so it is never left detached (a detached worktree shares one target dir
+# with every other detached run).
+branch="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRefName)"
+[[ -n $branch ]] || { echo "no branch for PR #$n" >&2; exit 1; }
 wt="$WT_BASE/pr-$n"
-branch="$(gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRefName)"
+require_space "$wt" || exit 1
+
+git fetch -q origin "$branch"
 if [[ -d $wt ]]; then
-  git -C "$wt" fetch -q origin "$branch" && git -C "$wt" reset -q --hard "origin/$branch"
+  git -C "$wt" reset -q --hard "origin/$branch"
 else
-  git fetch -q origin "$branch"
-  git worktree add --force "$wt" "origin/$branch" >/dev/null 2>&1 \
-    || git worktree add --force --track -b "review-$branch" "$wt" "origin/$branch" >/dev/null
+  git worktree add -B "review-pr-$n" "$wt" "origin/$branch" >/dev/null
 fi
 cd "$wt"
-echo "review worktree: $wt" >&2
+echo "review worktree: $wt  [review-pr-$n @ $branch]" >&2
+
 link_support "$wt"
 
 
-before="$(qa_comments)"
+before="$(qa_comments)" || { echo "cannot reach github — not starting a review" >&2; exit 1; }
 AC_TAG="pr-$n${since:+-delta}" run qa "$prompt" --read "${rest[@]+"${rest[@]}"}"
-after="$(qa_comments)"
+after="$(qa_comments)" || { echo "cannot verify whether qa posted — check the PR by hand" >&2; exit 1; }
 
 # Record what was reviewed only if QA actually posted. Otherwise the next pass
 # would go delta against a review that does not exist.

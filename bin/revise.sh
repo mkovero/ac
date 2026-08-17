@@ -8,18 +8,17 @@
 source "$(dirname "$0")/common.sh"
 n="${1:?usage: revise.sh <pr> [--fg]}"; shift || true
 
-branch="$(gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRefName)"
+branch="$(gh_retry gh pr view "$n" -R "$AC_REPO" --json headRefName --jq .headRefName)"
 [[ -n $branch ]] || { echo "no branch for PR #$n" >&2; exit 1; }
-wt="$WT_BASE/$branch"
+require_space "$WT_BASE/$branch" || exit 1
 
-if [[ -d $wt ]]; then
-  cd "$wt" && git pull -q --ff-only 2>/dev/null || true
-else
-  git fetch -q origin "$branch"
-  git worktree add "$wt" "$branch" >/dev/null 2>&1 \
-    || git worktree add --track -b "$branch" "$wt" "origin/$branch" >/dev/null
-  cd "$wt"
-fi
+# A revise usually runs against the branch the implement session left checked
+# out. Reuse that worktree — a branch cannot be checked out twice, and both
+# fallbacks in the old version failed on exactly that case.
+wt="$(ensure_worktree "$branch" "$WT_BASE/$branch")" \
+  || { echo "cannot get a worktree for $branch" >&2; exit 1; }
+cd "$wt"
+git pull -q --ff-only 2>/dev/null || true
 link_support "$wt"
 
 AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
@@ -30,4 +29,4 @@ points in a PR comment so the next QA pass can see what you did and why. Any \
 point you disagree with, say so there rather than silently leaving it." "$@"
 
 echo "worktree: $wt   branch: $branch" >&2
-echo "when pushed: gh pr edit $n -R $AC_REPO --remove-label needs-work --add-label in-review" >&2
+echo "when pushed: gh_retry gh pr edit $n -R $AC_REPO --remove-label needs-work --add-label in-review" >&2

@@ -13,7 +13,7 @@ if [[ -n $arg && $arg != --* ]]; then
   tag="$arg"
   prompt="Review #$arg in $AC_REPO and write your design comment on it."
 else
-  ids=$(gh issue list -R "$AC_REPO" --state open --label needs-ux \
+  ids=$(gh_retry gh issue list -R "$AC_REPO" --state open --label needs-ux \
         --json number --jq 'map("#\(.number)")|join(" ")')
   [[ -n $ids && $ids != '""' ]] || { echo "nothing labelled needs-ux"; exit 0; }
   echo "reviewing: $ids" >&2

@@ -26,3 +26,4 @@ ac-rs/crates/ac-view/tests/snapshots/*.diff.png
 .idea/
 pytest-of-mui/
 stddocs
+/.cargo/
