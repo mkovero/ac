@@ -856,7 +856,22 @@ Look up a stored calibration entry.
     "gain_db":     [<float>, ...],
     "source_path": "<string>" | null,
     "imported_at": "<RFC3339>"
-  } | null
+  } | null,
+  "tau_history": [                                          // interface-latency (τ) layer, #281/#297
+    {
+      "conditions": {
+        "device":      <int>,
+        "backend":     "<string>",
+        "sample_rate": <int>,
+        "period_size": <int> | null,   // null = backend cannot report one
+        "output_port": "<string>",
+        "input_port":  "<string>"
+      },
+      "tau_s":       <float>,
+      "measured_at": "<RFC3339>",
+      "method":      "<string>"
+    }
+  ]   // always present, [] when no τ has ever been measured for this key
 }
 ```
 
@@ -886,7 +901,8 @@ Returns all stored calibration entries.
       "vrms_at_0dbfs_out":                 <float> | null,
       "vrms_at_0dbfs_in":                  <float> | null,
       "mic_sensitivity_dbfs_at_94db_spl":  <float> | null,
-      "mic_response":                      { ... } | null
+      "mic_response":                      { ... } | null,
+      "tau_history":                       [ { ... } ]   // same shape as get_calibration, always present, [] when unmeasured
     }
   ]
 }

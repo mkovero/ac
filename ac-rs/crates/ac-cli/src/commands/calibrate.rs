@@ -283,8 +283,94 @@ pub fn run_show(client: &mut AcClient) {
             }
             None => println!("    Input:  not calibrated"),
         }
+        print_tau_history_leg(c);
         println!();
     }
+}
+
+/// Render the `Delay:` leg of a stored `list_calibrations` entry (#297) —
+/// third leg alongside Output/Input, symmetric with `print_cal_leg`'s
+/// "found vs not calibrated" shape. Unlike `print_tau_leg` (the live
+/// `cal_done` render), this reads `tau_history` — a possibly-multi-entry
+/// array with no active session to imply which entry is current — so it
+/// picks the newest by `measured_at` for the primary row, states the
+/// conditions and ports that entry was measured under (this command has no
+/// live session to imply them from context), and names any older entries
+/// rather than hiding them. Split from the pure [`render_tau_history_leg`]
+/// so the line content is testable without capturing stdout.
+fn print_tau_history_leg(c: &serde_json::Value) {
+    for line in render_tau_history_leg(c) {
+        println!("{line}");
+    }
+}
+
+/// Pure line-rendering core of [`print_tau_history_leg`]. Returns each
+/// output line (indentation included) so the mapping from JSON to text is
+/// unit-testable.
+fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
+    let history = c
+        .get("tau_history")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let newest = history.iter().max_by(|a, b| {
+        let a_ts = a.get("measured_at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_ts = b.get("measured_at").and_then(|v| v.as_str()).unwrap_or("");
+        a_ts.cmp(b_ts)
+    });
+
+    let Some(entry) = newest else {
+        return vec!["    Delay:  not measured".to_string()];
+    };
+
+    let mut lines = Vec::new();
+
+    let tau_s = entry.get("tau_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let measured_at = entry
+        .get("measured_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let age = ac_core::shared::time::age_from_iso8601(measured_at);
+    lines.push(format!(
+        "    Delay:  {:.4} ms   (measured {measured_at}, {age})",
+        tau_s * 1000.0
+    ));
+
+    if let Some(cond) = entry.get("conditions") {
+        let device = cond.get("device").and_then(|v| v.as_u64()).unwrap_or(0);
+        let backend = cond.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
+        let sample_rate = cond
+            .get("sample_rate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let period_size = cond.get("period_size").and_then(|v| v.as_u64());
+        let period = period_size
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+        lines.push(format!(
+            "            {backend}, dev {device}, {sample_rate} Hz, period {period}"
+        ));
+
+        let out_port = cond
+            .get("output_port")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let in_port = cond
+            .get("input_port")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        lines.push(format!("            {out_port} \u{2192} {in_port}"));
+    }
+
+    let more = history.len() - 1;
+    if more > 0 {
+        lines.push(format!(
+            "            +{more} more \u{3c4} entries in history — see cal.json"
+        ));
+    }
+
+    lines
 }
 
 /// `ac calibrate spl [input N] [output N]` — pistonphone-reference SPL.
@@ -515,5 +601,117 @@ mod tests {
         let value = Reply::Value(0.245).to_cmd();
         assert_eq!(value["vrms"], serde_json::json!(0.245));
         assert!(value.get("clear").is_none());
+    }
+
+    // ─── run_show τ (tau_history) rendering — issue #297 ────────────────
+
+    #[test]
+    fn render_tau_history_leg_absent_prints_not_measured() {
+        let entry = serde_json::json!({"key": "out0_in0", "tau_history": []});
+        let lines = render_tau_history_leg(&entry);
+        assert_eq!(lines, vec!["    Delay:  not measured".to_string()]);
+    }
+
+    #[test]
+    fn render_tau_history_leg_missing_field_prints_not_measured() {
+        // Older daemon without the #297 field: `tau_history` absent
+        // entirely must render the same as an explicit `[]`, not panic.
+        let entry = serde_json::json!({"key": "out0_in0"});
+        let lines = render_tau_history_leg(&entry);
+        assert_eq!(lines, vec!["    Delay:  not measured".to_string()]);
+    }
+
+    #[test]
+    fn render_tau_history_leg_single_entry_shows_value_conditions_and_ports() {
+        let entry = serde_json::json!({
+            "key": "out1_in2",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0,
+                        "backend": "jack",
+                        "sample_rate": 48000,
+                        "period_size": 128,
+                        "output_port": "system:playback_3",
+                        "input_port": "system:capture_1"
+                    },
+                    "tau_s": 0.0011931,
+                    "measured_at": "2020-01-01T00:00:00Z",
+                    "method": "farina_short_ess"
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        assert!(
+            lines[0].starts_with("    Delay:  1.1931 ms   (measured 2020-01-01T00:00:00Z, "),
+            "got {:?}",
+            lines[0]
+        );
+        assert_eq!(
+            lines[1],
+            "            jack, dev 0, 48000 Hz, period 128".to_string()
+        );
+        assert_eq!(
+            lines[2],
+            "            system:playback_3 \u{2192} system:capture_1".to_string()
+        );
+    }
+
+    #[test]
+    fn render_tau_history_leg_picks_newest_and_counts_the_rest() {
+        let entry = serde_json::json!({
+            "key": "out0_in0",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0, "backend": "jack", "sample_rate": 48000,
+                        "period_size": 1024, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.001, "measured_at": "2020-01-01T00:00:00Z",
+                    "method": "farina_short_ess"
+                },
+                {
+                    "conditions": {
+                        "device": 0, "backend": "jack", "sample_rate": 48000,
+                        "period_size": 256, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.002, "measured_at": "2024-06-15T12:00:00Z",
+                    "method": "farina_short_ess"
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        // Newest (2024) entry's value must be the one shown, not the older.
+        assert!(
+            lines[0].contains("2.0000 ms") && lines[0].contains("2024-06-15T12:00:00Z"),
+            "got {:?}",
+            lines[0]
+        );
+        assert_eq!(lines[1], "            jack, dev 0, 48000 Hz, period 256");
+        let last = lines.last().unwrap();
+        assert!(
+            last.contains("+1 more") && last.contains("cal.json"),
+            "got {last:?}"
+        );
+    }
+
+    #[test]
+    fn render_tau_history_leg_missing_period_size_shows_na() {
+        let entry = serde_json::json!({
+            "key": "out0_in0",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0, "backend": "cpal", "sample_rate": 44100,
+                        "period_size": null, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.0005, "measured_at": "2020-01-01T00:00:00Z",
+                    "method": "farina_short_ess"
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        assert_eq!(lines[1], "            cpal, dev 0, 44100 Hz, period n/a");
     }
 }
