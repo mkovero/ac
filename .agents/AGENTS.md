@@ -124,6 +124,27 @@ usually right in *form* and wrong about *which quantity it applies to*. Say
 what measurement would separate your explanation from an equally plausible
 one, and rank that above the explanation.
 
+**Provenance tag — the rule above given a name, so it travels with a numeric
+acceptance criterion instead of living only in this section.** `triage.md`
+and `architect.md` tag each numeric acceptance criterion with one of:
+
+- `measured` — a value read off a rig, a test run, or an existing recorded
+  result. Claims: this number was observed, not inferred.
+- `derived` — a value computed from other known quantities by a stated
+  formula. Claims: the formula is right and applies to this quantity — the
+  exact claim the rule above asks you to test rather than trust.
+- `assumed` — a value chosen without either measurement or derivation
+  (a round number, a guess at a reasonable bound, an unexamined carry-over
+  from a similar criterion). Claims: nothing yet: this is the tag with the
+  least evidence behind it.
+
+An untagged numeric criterion defaults to `assumed` — the default fails
+toward more scrutiny, not less. `qa.md` step 1 branches on the tag: it
+still is not licensed to re-litigate a `measured` criterion, but a
+`derived` or `assumed` one gets asked what `ρ = 1/6`, the circular ±2-sample
+tolerance, `((W−D)/W)²`, and the settle-anchored clock did not get asked in
+time.
+
 Provenance: ten wrong inferences in this project share one shape — a plausible
 mechanism asserted without the measurement that would distinguish it. None was
 caught by reasoning; all were caught by the rig, by someone reading the code,

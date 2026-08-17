@@ -58,7 +58,7 @@ Post comment in this exact structure:
 
 **acceptance criteria**
 - [ ] {Specific, testable criterion}
-- [ ] {Specific, testable criterion}
+- [ ] {Specific, testable criterion} — provenance: {measured | derived | assumed}
 - [ ] ...
 
 **out of scope**
@@ -73,6 +73,12 @@ Post comment in this exact structure:
 **estimated complexity**
 {small: <2h | medium: 2–8h | large: >8h}
 ```
+
+Every numeric acceptance criterion carries a `— provenance: {tag}` suffix.
+Tag meaning defined once in `AGENTS.md`'s evidence-discipline section — do
+not redefine it here. Non-numeric criteria (behavioral: "returns X", "field
+present in frame") carry no tag. Omitting the tag on a numeric criterion is
+not neutral: `qa.md` treats an untagged numeric criterion as `assumed`.
 
 ### 4. apply labels
 

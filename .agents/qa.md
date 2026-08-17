@@ -130,6 +130,33 @@ No applicable standard covers changed behaviour → write
 Walk each acceptance criterion in triage spec comment.
 Each one: addressed by diff? Note gaps.
 
+Branch on the criterion's provenance tag (`triage.md`/`architect.md` set it;
+tag definitions live in `AGENTS.md`'s evidence-discipline section — no
+memory, no redefinition here):
+
+- `measured`, or non-numeric (untagged non-numeric criteria carry no tag by
+  design): walk as above — check the diff against the criterion, note gaps.
+- `derived` or `assumed` (an untagged *numeric* criterion reads as
+  `assumed`): do not only check the diff against the criterion — name the
+  measurement that would separate the criterion from an equally plausible
+  alternative, and flag it in the spec-coverage table rather than only
+  checking the implementation against it. This is the same rule
+  `AGENTS.md` states for an agent asserting a mechanism, applied here to a
+  reviewer inheriting one.
+
+A flagged `derived`/`assumed` criterion withholds `in-review` — apply
+`needs-work` — unless one of:
+- the gap is closed with evidence in the PR (a measurement, a rig run, a
+  cited derivation the review comment can point to directly), or
+- a human has already posted an explicit comment on the issue accepting the
+  criterion as-is (an agent comment does not count — see `AGENTS.md` human
+  gates: merge is human-only because agent review is not independent, and
+  neither is an agent's acceptance of another agent's assumption).
+
+This blocks only the flagged criterion. A `measured` criterion failing spec
+coverage is a correctness issue, reported in that section below, not folded
+into this one.
+
 ### step 2 — review the diff
 Check:
 - **correctness** — implementation do what spec says?
@@ -192,9 +219,9 @@ Post PR review in this structure:
 <!-- agent: qa -->
 
 ### spec coverage
-| criterion | covered | notes |
-|---|---|---|
-| {criterion from spec} | ✓ / ✗ | {note if ✗} |
+| criterion | provenance | covered | notes |
+|---|---|---|---|
+| {criterion from spec} | {measured / derived / assumed / n/a} | ✓ / ✗ | {note if ✗; for derived/assumed, name the separating measurement here} |
 
 ### standards conformance
 | standard | clause | check | result |
