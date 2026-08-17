@@ -1424,6 +1424,61 @@ fn calibrate_cancel_at_second_prompt_saves_nothing() {
     );
 }
 
+/// #295: symmetric with `calibrate_cancel_at_second_prompt_saves_nothing`,
+/// but the cancel lands at the *first* prompt instead — the path that
+/// worked all along, per the step-1 stop check at `handlers/calibrate.rs`
+/// (checked immediately after `wait_cal_reply` for the output leg, before
+/// `cal.save()`). No test pinned it, so a future edit to that check could
+/// regress silently.
+///
+/// Mutation check — remove the step-1 stop check (or replace it with a
+/// no-op) and this test must fail: `cal_done` would arrive instead of
+/// timing out, and/or the stored entry would gain the seeded run's
+/// `ref_dbfs`/output reading even though the operator cancelled before
+/// answering it.
+#[test]
+fn calibrate_cancel_at_first_prompt_saves_nothing() {
+    let d = Daemon::spawn();
+    let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
+    let before = read_cal_entry(&cal_path);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    // The step-1 check must return *before* step 2 is ever built — no
+    // second cal_prompt. This is the assertion that actually pins the
+    // step-1 check: the step-2 stop check (same `stop` flag, checked
+    // again after step 2's wait_cal_reply) would independently catch a
+    // cancel that fell through step 1 and still block cal_done/the save,
+    // so only the absence of a second prompt distinguishes "step 1 caught
+    // it" from "step 1 was bypassed and step 2 caught it instead."
+    assert!(
+        c.wait_for_topic("cal_prompt", Duration::from_millis(500))
+            .is_none(),
+        "a cancel at the first prompt must not advance to a second prompt"
+    );
+
+    // No cal_done at all — the run aborted before ever reaching step 2.
+    assert!(
+        c.wait_for_topic("cal_done", Duration::from_millis(500))
+            .is_none(),
+        "a cancelled run must not emit cal_done"
+    );
+
+    let after = read_cal_entry(&cal_path);
+    assert_eq!(
+        after, before,
+        "a cancel at the first prompt must leave the stored entry \
+         byte-identical — nothing was answered before the cancel"
+    );
+}
+
 #[test]
 fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     // Fake backend implements `play_and_capture` as a delayed loopback
