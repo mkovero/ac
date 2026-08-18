@@ -195,16 +195,24 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
     ]);
 
-    // ── printed arrival matches the fake backend's known delay ────────
-    // The gate re-centres the linear IR on the sweep endpoint, so a
-    // 32-sample loopback shows up as a +32-sample offset from centre.
-    // Tolerance is for finite-window deconvolution, not for the constant:
-    // a regression that lost the delay entirely would read 0.
+    // ── printed arrival is onset-derived, not peak-derived (#346) ─────
+    // The gate re-centres the linear IR on the sweep endpoint, so the
+    // fake backend's 32-sample loopback still shows up as the *peak's*
+    // offset from centre — but `arrival` now comes from
+    // `estimate_onset`, which walks backward from the peak into its own
+    // bandlimited main-lobe skirt whenever that skirt clears the
+    // floor+margin threshold. No geometry is recorded for this run, so
+    // no causal bound applies and the onset can legitimately land before
+    // the peak. It can never land at or after the peak plus this
+    // fixture's window, and a regression that lost the delay entirely
+    // would read ~0.
     let arrival = printed_arrival_samples(&stdout);
     assert!(
-        (arrival - FAKE_LOOPBACK_DELAY_SAMPLES).abs() <= 8,
-        "printed arrival {arrival} samples, expected ~{FAKE_LOOPBACK_DELAY_SAMPLES} \
-         (fake loopback delay):\n{stdout}"
+        arrival > 0 && arrival <= FAKE_LOOPBACK_DELAY_SAMPLES,
+        "printed arrival {arrival} samples should be a positive onset at or \
+         before the {FAKE_LOOPBACK_DELAY_SAMPLES}-sample fake loopback delay \
+         (peak); #346 makes arrival onset-derived, so it can land earlier \
+         than the peak but never later:\n{stdout}"
     );
 
     // ── the rest of the printed summary ───────────────────────────────
