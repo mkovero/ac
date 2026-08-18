@@ -24,6 +24,17 @@
 //! evidence attached to the PR: live transfer (masked gap, meters, delay
 //! readout), the ARMED and DRIVING banners, and the ref-trace toggle on
 //! versus off.
+//!
+//! **Reference currency.** These references are only as current as the
+//! rig run that produced them — nothing re-checks them against `draw_view`
+//! automatically (#337). Last regenerated 2026-08-18 on 192.168.9.25 (RTX
+//! 2070), `main` at `3c05c03`, immediately followed by a plain (non-update)
+//! run in the same session per the acceptance check in #337.
+//! `transfer_ir_panel.png` and `transfer_stored_comparison_no_live.png`
+//! came out byte-identical to the pre-regeneration commit, so only the
+//! other 5 files in this directory moved. See `TESTING.md` → "A3 snapshot
+//! reference currency" for the checklist a `draw_view`/pane change must
+//! satisfy before merge.
 
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,

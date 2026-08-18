@@ -361,6 +361,14 @@ wrong without any test catching it. These are the highest priority.}
     truth still no CI harness — accepted M3+ posture, not pending blocker.
   PR changing only internal correctness checks (CSV export, cursor
   readout) outside this gate.
+  - **Reference currency (#337).** PR touches `draw_view` or a pane
+    module → PR body must show one of: the 7 `it_transfer_snapshots`
+    references regenerated on the rig in this PR (box + date + commit,
+    matching the provenance line in `it_transfer_snapshots.rs`'s doc
+    comment), or a stated reason the change cannot affect rendered
+    pixels. Neither present → `needs-work`, not a note — a stale
+    reference is a gate reporting coverage it does not have. See
+    `TESTING.md` → "A3 snapshot reference currency".
 - **Daemon-pipeline PRs — I5 temporal soak (A3 soak half, STILL
   OUTSTANDING).** No approve daemon-pipeline PR (anything touching
   `ac-daemon/src/handlers/audio/monitor.rs`, ring buffers /
