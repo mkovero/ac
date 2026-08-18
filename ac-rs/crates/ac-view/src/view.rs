@@ -89,7 +89,7 @@ pub fn draw_view(
     ui: &mut Ui,
     scene: Option<&Scene>,
     transfer: Option<&ac_scene::TransferScene>,
-    stored: &[(&str, &ac_scene::TransferScene, bool)],
+    stored: &[(&str, &str, &ac_scene::TransferScene, bool)],
     ir: Option<&ac_scene::IrScene>,
 ) {
     // Reserve the half line the top y-axis tick label hangs into (#245).
@@ -504,13 +504,19 @@ fn draw_transfer(
     state: &TransferViewState,
     ui: &mut Ui,
     scene: Option<&ac_scene::TransferScene>,
-    stored: &[(&str, &ac_scene::TransferScene, bool)],
+    stored: &[(&str, &str, &ac_scene::TransferScene, bool)],
     ir: Option<&ac_scene::IrScene>,
 ) {
     let rect = ui.available_rect_before_wrap();
     let painter = ui.painter();
 
-    let Some(scene) = scene else {
+    // "No session" only when there is truly nothing to show — a viewer
+    // that has loaded stored runs for comparison (#321, AC1) must still
+    // see them with no live frame yet (fresh session, idle daemon, or a
+    // purely offline before/after review). Gating the whole comparison
+    // feature on an unrelated live-frame precondition made it unreachable
+    // in exactly that state (QA #336 correctness issue 1).
+    if scene.is_none() && stored.is_empty() {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -519,7 +525,7 @@ fn draw_transfer(
             COLOR_STRUCTURAL,
         );
         return;
-    };
+    }
 
     // The stimulus banner (safety UI) owns a reserved top band that
     // nothing else draws into — UX finding: it must be top-center and
@@ -581,8 +587,12 @@ fn draw_transfer(
                 );
             }
         }
-        draw_meter(painter, content, 0, &scene.ref_meter, "R");
-        draw_meter(painter, content, 1, &scene.meas_meter, "M");
+        // Meters are the live frame's own input levels — nothing to show
+        // without one; unaffected by a stored-run-only comparison.
+        if let Some(scene) = scene {
+            draw_meter(painter, content, 0, &scene.ref_meter, "R");
+            draw_meter(painter, content, 1, &scene.meas_meter, "M");
+        }
         return;
     }
 
@@ -621,9 +631,20 @@ fn draw_transfer(
     // coordinates, this crate only maps them (no tick math here). dB grid
     // on the magnitude pane, ±180° grid on the phase pane (with the 0°
     // reference), shared freq labels along the bottom.
-    draw_pane_grid(painter, &scene.mag_axis, mag_vp);
-    draw_pane_grid(painter, &scene.phase_axis, phase_vp);
-    draw_freq_labels(painter, &scene.freq_axis, phase_vp);
+    //
+    // Ticks are derived purely from the caller's freq/db range (identical
+    // across every scene built this pass, live or stored — `app.rs` builds
+    // them all against the same range), never from which trace supplied
+    // them. So with no live frame yet, the first stored run's axis is the
+    // same grid the live one would have drawn — this is what lets the
+    // comparison render before any live frame arrives (correctness issue
+    // 1, QA #336).
+    let axis_scene = scene.or_else(|| stored.first().map(|(_, _, s, _)| *s));
+    if let Some(axis_scene) = axis_scene {
+        draw_pane_grid(painter, &axis_scene.mag_axis, mag_vp);
+        draw_pane_grid(painter, &axis_scene.phase_axis, phase_vp);
+        draw_freq_labels(painter, &axis_scene.freq_axis, phase_vp);
+    }
 
     // Trace weight/colour is focus, not identity (#321 UX ruling: the
     // palette has one signal hue on purpose, so N traces cannot each get
@@ -633,17 +654,21 @@ fn draw_transfer(
     // live-vs-stored provenance convention (unchanged from before this
     // trace could ever collide with another).
     let live_focused = matches!(state.focus, Focus::Live);
-    let live_stroke = if live_focused {
-        Stroke::new(1.5, COLOR_SIGNAL)
-    } else {
-        Stroke::new(1.0, COLOR_STRUCTURAL)
-    };
-    draw_segments(painter, &scene.magnitude, mag_vp, live_stroke, false);
-    draw_segments(painter, &scene.phase, phase_vp, live_stroke, false);
+    if let Some(scene) = scene {
+        let live_stroke = if live_focused {
+            Stroke::new(1.5, COLOR_SIGNAL)
+        } else {
+            Stroke::new(1.0, COLOR_STRUCTURAL)
+        };
+        draw_segments(painter, &scene.magnitude, mag_vp, live_stroke, false);
+        draw_segments(painter, &scene.phase, phase_vp, live_stroke, false);
+    }
 
     // Stored runs (#321): dashed overlay, drawn after the live trace so a
-    // focused stored run's full-weight curve is not occluded by it.
-    for (_, stored_scene, focused) in stored {
+    // focused stored run's full-weight curve is not occluded by it. Drawn
+    // even when there is no live trace to be occluded by (correctness
+    // issue 1) — the loop does not depend on `scene`.
+    for (_, _, stored_scene, focused) in stored {
         let stroke = if *focused {
             Stroke::new(1.5, COLOR_SIGNAL)
         } else {
@@ -680,27 +705,31 @@ fn draw_transfer(
     // Positions and strings are verbatim ac-scene; this crate maps the
     // normalized x and draws, as with every other label. Structural grey
     // with no rule or box: findable when sought, invisible when not.
-    for band in &scene.band_labels {
-        let (x, _) = scene_to_screen((band.position, 0.0), mag_vp);
-        painter.text(
-            egui::pos2(x, mag_vp.y),
-            egui::Align2::CENTER_TOP,
-            &band.text,
-            egui::FontId::default(),
-            COLOR_STRUCTURAL,
-        );
-    }
+    // Live-only: band labels state what the analyser resolved on *this*
+    // (live) frame, so there is nothing to draw without one.
+    if let Some(scene) = scene {
+        for band in &scene.band_labels {
+            let (x, _) = scene_to_screen((band.position, 0.0), mag_vp);
+            painter.text(
+                egui::pos2(x, mag_vp.y),
+                egui::Align2::CENTER_TOP,
+                &band.text,
+                egui::FontId::default(),
+                COLOR_STRUCTURAL,
+            );
+        }
 
-    // Absent when smoothing is off — an unaltered trace is the resting
-    // state and needs no caption. The string is ac-scene's.
-    if let Some(label) = scene.smoothing_readout {
-        painter.text(
-            content.left_top() + egui::vec2(0.0, ROW_H),
-            egui::Align2::LEFT_TOP,
-            label,
-            egui::FontId::default(),
-            COLOR_LABEL,
-        );
+        // Absent when smoothing is off — an unaltered trace is the resting
+        // state and needs no caption. The string is ac-scene's.
+        if let Some(label) = scene.smoothing_readout {
+            painter.text(
+                content.left_top() + egui::vec2(0.0, ROW_H),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::default(),
+                COLOR_LABEL,
+            );
+        }
     }
 
     // Delay readout. With nothing loaded this is `scene.delay_readout`
@@ -711,34 +740,42 @@ fn draw_transfer(
     // ambiguous) — `delay (<owner>)` is this crate's own chrome text, not
     // a reformatted measurement, so it does not cross the `computes_nothing`
     // boundary; the number after it is still ac-scene's string, untouched.
-    let (focused_label, focused_delay): (&str, &str) = match state.focus {
-        Focus::Live => ("live", scene.delay_readout.as_str()),
+    // `Focus::Live` with no live scene (nothing loaded yet either, or a
+    // stored-only session that hasn't cycled focus) draws no readout at
+    // all — there is no measurement to attribute.
+    let focused: Option<(&str, &str)> = match state.focus {
+        Focus::Live => scene.map(|s| ("live", s.delay_readout.as_str())),
         Focus::Stored(idx) => stored
             .get(idx)
-            .map(|(label, s, _)| (*label, s.delay_readout.as_str()))
-            .unwrap_or(("live", scene.delay_readout.as_str())),
+            .map(|(label, _, s, _)| (*label, s.delay_readout.as_str())),
     };
-    let delay_text = if stored.is_empty() {
-        scene.delay_readout.clone()
-    } else {
-        format!("delay ({focused_label})  {focused_delay}")
-    };
-    painter.text(
-        content.left_top() + egui::vec2(0.0, 2.0 * ROW_H),
-        egui::Align2::LEFT_TOP,
-        delay_text,
-        egui::FontId::default(),
-        COLOR_VALUE,
-    );
+    if let Some((focused_label, focused_delay)) = focused {
+        let delay_text = if stored.is_empty() {
+            focused_delay.to_string()
+        } else {
+            format!("delay ({focused_label})  {focused_delay}")
+        };
+        painter.text(
+            content.left_top() + egui::vec2(0.0, 2.0 * ROW_H),
+            egui::Align2::LEFT_TOP,
+            delay_text,
+            egui::FontId::default(),
+            COLOR_VALUE,
+        );
+    }
 
     // Comparison legend (#321): one row for the live trace, one per
     // stored run, in the band reserved above the panes. Filename +
-    // timestamp (attribution, criterion 1) and that run's own smoothing
-    // caption (criterion 2) — verbatim `ac-scene` string, blank when that
-    // run is unsmoothed, the same "absent means off" convention the
-    // single-trace caption above already uses. `▸` marks focus, the one
-    // signal that also selects what `N` edits and what the delay readout
-    // above names.
+    // captured-at timestamp (attribution, criterion 1 — two runs sharing
+    // a basename, the same file opened twice or two files named
+    // identically from different session directories, stay
+    // distinguishable; QA #336 correctness issue 2) and that run's own
+    // smoothing caption (criterion 2) — verbatim `ac-scene` string, blank
+    // when that run is unsmoothed, the same "absent means off" convention
+    // the single-trace caption above already uses. `▸` marks focus, the
+    // one signal that also selects what `N` edits and what the delay
+    // readout above names. The live row draws even with no live scene —
+    // it is always a valid focus target once something is loaded.
     if !stored.is_empty() {
         let legend_top = content.max.y - legend_band;
         let live_marker = if live_focused { "▸ " } else { "  " };
@@ -753,13 +790,13 @@ fn draw_transfer(
                 COLOR_LABEL
             },
         );
-        for (i, (label, stored_scene, focused)) in stored.iter().enumerate() {
+        for (i, (label, captured_at_utc, stored_scene, focused)) in stored.iter().enumerate() {
             let marker = if *focused { "▸ " } else { "  " };
             let smoothing = stored_scene.smoothing_readout.unwrap_or("");
             painter.text(
                 egui::pos2(content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
                 egui::Align2::LEFT_TOP,
-                format!("{marker}{label}  {smoothing}"),
+                format!("{marker}{label}  {captured_at_utc}  {smoothing}"),
                 egui::FontId::default(),
                 if *focused { COLOR_VALUE } else { COLOR_LABEL },
             );
@@ -769,16 +806,20 @@ fn draw_transfer(
     // Input-level meters: two thin bars at the right edge, M left of R
     // (UX standing requirement), heights normalized by ac-scene. Always
     // on (D6) — no toggle. `idx` counts from the right edge, so R (idx 0)
-    // is rightmost and M (idx 1) sits to its left.
-    draw_meter(painter, content, 0, &scene.ref_meter, "R");
-    draw_meter(painter, content, 1, &scene.meas_meter, "M");
+    // is rightmost and M (idx 1) sits to its left. Live-only: there is no
+    // input-level reading without a live frame.
+    if let Some(scene) = scene {
+        draw_meter(painter, content, 0, &scene.ref_meter, "R");
+        draw_meter(painter, content, 1, &scene.meas_meter, "M");
+    }
 
     // Fault indicator (#228), last so it is over the traces rather than
     // under them. Centred on the magnitude pane: the delay readout owns
     // the content band's top-left corner, the meters own the right edge,
     // and the stimulus banner owns its own reserved band above all of
     // this, so nothing collides. Both strings are verbatim ac-scene.
-    if let Some(fault) = scene.fault {
+    // Live-only: a fault is a live-session condition.
+    if let Some(fault) = scene.and_then(|s| s.fault) {
         let color = match fault.severity() {
             // Never green, and never the trace colour: a fault must not
             // read as measurement.

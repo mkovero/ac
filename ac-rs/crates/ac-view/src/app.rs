@@ -821,12 +821,13 @@ impl eframe::App for AcViewApp {
             Some(s) => self.status_for_state(s.connection_state(), std::time::Instant::now()),
         };
         ui.label(status);
-        // Stored-run legend rows (#321): label + built scene + whether it
-        // currently has focus, index-aligned with `loaded_scenes` and
-        // `TransferViewState::loaded`. Empty outside the transfer view or
-        // when nothing is loaded — `draw_view` renders the pre-#321
-        // layout unchanged in that case.
-        let stored_refs: Vec<(&str, &ac_scene::TransferScene, bool)> = match &self.view {
+        // Stored-run legend rows (#321): label + captured-at timestamp
+        // (QA #336 correctness issue 2 — two runs sharing a basename stay
+        // distinguishable) + built scene + whether it currently has focus,
+        // index-aligned with `loaded_scenes` and `TransferViewState::loaded`.
+        // Empty outside the transfer view or when nothing is loaded —
+        // `draw_view` renders the pre-#321 layout unchanged in that case.
+        let stored_refs: Vec<(&str, &str, &ac_scene::TransferScene, bool)> = match &self.view {
             ViewKind::Transfer(state) => state
                 .loaded
                 .iter()
@@ -835,6 +836,7 @@ impl eframe::App for AcViewApp {
                 .map(|(i, (run, scene))| {
                     (
                         run.label.as_str(),
+                        run.captured_at_utc.as_str(),
                         scene,
                         matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
                     )
@@ -1377,6 +1379,97 @@ mod tests {
             Some("smoothing 1/24 octave"),
             "the smoothed trace must say so on screen"
         );
+    }
+
+    /// A real `PairDerivation` cheap enough for a unit test — the same
+    /// `derive_pair` path `open_stored_transfer_run` uses, just fed
+    /// samples directly instead of via a written `.acsnap` (no fixture
+    /// file needed for what this test is about: dispatch, not decoding).
+    /// A deterministic pseudo-noise sequence, not a sine — `sin` is one
+    /// of `computes_nothing`'s forbidden tokens, enforced over all of
+    /// `src/` including test code, so a tone fixture cannot live here
+    /// (`it_trace_comparison.rs`, in `tests/`, is outside that scan and
+    /// uses a real one).
+    fn fixture_derivation() -> ac_core::visualize::pair_derivation::PairDerivation {
+        let sr = 48_000u32;
+        let n = sr as usize;
+        let samples: Vec<f32> = (0..n).map(|i| (i % 97) as f32 / 97.0 - 0.5).collect();
+        ac_core::visualize::pair_derivation::derive_pair(
+            &samples,
+            &samples,
+            sr,
+            0,
+            None,
+            None,
+            WeightingCurve::Z,
+        )
+    }
+
+    fn loaded_run(label: &str, captured_at_utc: &str) -> crate::view::LoadedRun {
+        crate::view::LoadedRun::new(
+            label.to_string(),
+            captured_at_utc.to_string(),
+            fixture_derivation(),
+            "meas_0".to_string(),
+            48_000,
+        )
+    }
+
+    fn focus_of(app: &AcViewApp) -> crate::view::Focus {
+        match &app.view {
+            ViewKind::Transfer(state) => state.focus,
+            ViewKind::Spectrum(_) => panic!("not transfer view"),
+        }
+    }
+
+    // QA #336, test coverage gap: `Action::CycleFocus` and
+    // `Action::CloseFocusedRun` are wired in `handle_action` (#321) but
+    // were exercised only by calling `TransferViewState::cycle_focus` /
+    // `close_focused_stored_run` directly (`it_trace_comparison.rs`),
+    // never through the actual keypress dispatch path. This drives both
+    // through `handle_action`, the same entry point a real `Tab`/`X`
+    // press reaches.
+    #[test]
+    fn cycle_focus_and_close_focused_run_reach_transfer_view_state_through_dispatch() {
+        let mut app = transfer_app();
+        if let ViewKind::Transfer(state) = &mut app.view {
+            state.add_loaded_run(loaded_run("a.acsnap", "2026-01-01T00:00:00Z"));
+            state.add_loaded_run(loaded_run("b.acsnap", "2026-01-02T00:00:00Z"));
+        }
+        assert_eq!(
+            focus_of(&app),
+            crate::view::Focus::Stored(1),
+            "load-order focus, established elsewhere — the starting point here"
+        );
+
+        // `Tab`, through dispatch: Stored(1) is the last run, so this
+        // wraps to Live.
+        app.handle_action(Action::CycleFocus, false);
+        assert_eq!(
+            focus_of(&app),
+            crate::view::Focus::Live,
+            "Action::CycleFocus did not reach TransferViewState::cycle_focus"
+        );
+
+        // `Tab` again: Live -> Stored(0).
+        app.handle_action(Action::CycleFocus, false);
+        assert_eq!(focus_of(&app), crate::view::Focus::Stored(0));
+
+        // `X`, through dispatch: closes the focused run (a.acsnap) and
+        // leaves b.acsnap as the sole remaining run.
+        app.handle_action(Action::CloseFocusedRun, false);
+        match &app.view {
+            ViewKind::Transfer(state) => {
+                assert_eq!(
+                    state.loaded.len(),
+                    1,
+                    "Action::CloseFocusedRun did not reach \
+                     TransferViewState::close_focused_stored_run"
+                );
+                assert_eq!(state.loaded[0].label, "b.acsnap");
+            }
+            ViewKind::Spectrum(_) => panic!("not transfer view"),
+        }
     }
 
     /// A refusing frame, built from the healthy fixture so only the fields
