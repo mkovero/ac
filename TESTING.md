@@ -209,6 +209,35 @@ needed, which is the point of the crate split.
 `it_stimulus_live`, `it_remote`, plus `egui_kittest` snapshots under
 `tests/snapshots/`. Layout and composition only.
 
+### A3 snapshot reference currency
+
+`it_transfer_snapshots`'s 7 `#[ignore]`'d tests pixel-diff `draw_view`
+against committed PNGs, but the gate is real-adapter-only and there is no
+CI — nothing re-runs it when `draw_view` or a pane changes. A layout
+change that doesn't also regenerate the references leaves the gate
+reporting coverage it no longer has (#337: 5 of the 7 references sat
+stale for weeks after #245/#252 shifted every view down half a text line,
+undetected because nobody was obliged to run the gate).
+
+**The references are current only as of the rig run recorded in
+`it_transfer_snapshots.rs`'s doc comment** (box, date, commit). Treat that
+line as the source of truth for staleness, not this file.
+
+**Checklist — any PR touching `ac-view/src/view.rs`'s `draw_view` or a
+pane module:**
+- [ ] Regenerate the 7 references on the rig (192.168.9.25) in that PR —
+      `UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots
+      -- --ignored --test-threads=1`, then a plain re-run in the same
+      session — and update the doc-comment provenance line, **or**
+- [ ] state in the PR body why the change cannot affect rendered pixels
+      (e.g. a change gated behind a flag the fixtures don't exercise).
+
+**What makes this come back negative:** a PR that changes `draw_view` or a
+pane, ships without either a regeneration or a stated reason, and is
+reviewed anyway — same shape as #337. QA checks the PR diff for `draw_view`
+or pane-module changes and requires one of the two boxes above before
+approving (see `.agents/qa.md`'s display-truth gate).
+
 ## What is verified numerically
 
 ### THD accuracy (ac-core `analysis` module)
