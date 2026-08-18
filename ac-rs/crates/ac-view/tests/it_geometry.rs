@@ -60,7 +60,7 @@ fn geometry_orientation_holds_through_the_actual_paint_call() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, Some(&scene), None, None);
+        draw_view(&view, ui, Some(&scene), None, &[], None);
     });
     harness.run();
 
@@ -102,7 +102,7 @@ fn ref_trace_toggle_removes_a_polyline_through_the_paint_path() {
     let view_on = ViewKind::Spectrum(on);
     let mut h_on = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view_on, ui, Some(&scene), None, None);
+        draw_view(&view_on, ui, Some(&scene), None, &[], None);
     });
     h_on.run();
     let n_on = extract_line_points(&h_on.output().shapes).len();
@@ -114,7 +114,7 @@ fn ref_trace_toggle_removes_a_polyline_through_the_paint_path() {
     let view_off = ViewKind::Spectrum(off);
     let mut h_off = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view_off, ui, Some(&scene), None, None);
+        draw_view(&view_off, ui, Some(&scene), None, &[], None);
     });
     h_off.run();
     let n_off = extract_line_points(&h_off.output().shapes).len();
