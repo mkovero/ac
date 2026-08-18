@@ -1614,7 +1614,7 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // The provenance the printed distance names must be present, not just
     // the number.
     assert!(latency["measured_at"].is_string(), "{latency}");
-    assert_eq!(latency["method"], json!("farina_short_ess"), "{latency}");
+    assert_eq!(latency["method"], json!("farina_short_ess_v2"), "{latency}");
 
     // With a τ this close to the arrival (both are the same 32-sample
     // fake loopback), the derived path length must land near zero — the

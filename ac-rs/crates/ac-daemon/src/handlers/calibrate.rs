@@ -50,18 +50,70 @@ fn apply_cal_reading(field: &mut Option<f64>, reply: CalReply, scale: f64) -> &'
     }
 }
 
-/// Method tag stored on every [`TauEntry`] this handler produces.
-const TAU_METHOD: &str = "farina_short_ess";
+/// Method tag stored on every [`TauEntry`] this handler produces. Bumped
+/// to `_v2` by #340: the window-sizing change below means a τ captured
+/// under the old, uncapped-in-time window (which pinned wrong past
+/// ~13–43 ms depending on sample rate, silently) must not go on matching
+/// current conditions via `Calibration::tau_for`'s exact lookup — the
+/// window it was measured with was never part of `TauConditions`, so the
+/// method tag is the only thing that can invalidate it.
+const TAU_METHOD: &str = "farina_short_ess_v2";
 
 /// Short-ESS parameters for the τ measurement (#281). Deliberately much
 /// shorter than a `plot_ir` sweep — this only has to locate the linear-IR
-/// peak, not resolve harmonics or a decay tail. `TAU_WINDOW_LEN` / 2 sets
-/// the largest round-trip delay this can report (≈85 ms at 48 kHz), and
-/// `TAU_TAIL_S` is sized to keep that whole window inside the capture.
+/// peak, not resolve harmonics or a decay tail, so `n_harmonics = 1` on
+/// the `extract_irs` call below. That matters for the window bound: with
+/// `n_harmonics == 1` there is no neighbouring order, so
+/// `per_order_window_lens`'s harmonic-gap clamp (`sweep.rs`) never runs —
+/// it does not bind here, only on multi-harmonic callers like `plot_ir`.
+///
+/// The bound that actually fires is the requested window itself, so it
+/// must be sized directly to the round trip this needs to measure rather
+/// than left as a fixed sample count (#340): `TAU_WINDOW_LEN` used to be a
+/// `usize`, so its *time* value shrank as sample rate rose — 85 ms at
+/// 48 kHz (looked generous) but only 42.67 ms at 96 kHz, 1.03× short of
+/// this rig's measured 43.75 ms τ, and wrong at every rate in between.
+/// `TAU_MIN_HALF_WINDOW_S` fixes that: it is a *time* bound, converted to
+/// a sample window at measurement time, so the measurable ceiling is the
+/// same 50 ms at every sample rate. `TAU_TAIL_S` (150 ms) stays well
+/// above it so the capture always holds the whole window regardless of
+/// sample rate.
 const TAU_F1_HZ: f64 = 100.0;
 const TAU_DURATION_S: f64 = 0.2;
 const TAU_TAIL_S: f64 = 0.15;
-const TAU_WINDOW_LEN: usize = 8192;
+/// Half-width of the τ measurement window, in seconds (AC5 of #340). The
+/// largest round trip `measure_tau` can report is just under this value.
+const TAU_MIN_HALF_WINDOW_S: f64 = 0.05;
+/// Fraction of the half-window treated as "too close to the edge to
+/// trust" (AC4 of #340). A peak this close to either edge is
+/// indistinguishable from one pinned by an arrival outside the window
+/// entirely, so it is refused rather than reported. Not derived from rig
+/// data — a threshold newly introduced by this change; may need revisiting
+/// once measured against real noise floors.
+const TAU_EDGE_MARGIN_FRAC: f64 = 0.10;
+
+/// Refuse a peak sitting within `margin_frac` of the half-window of
+/// either edge of a `window_len`-sample gate. Pulled out of `measure_tau`
+/// so the edge case can be driven directly in tests without an
+/// `AudioEngine` (#340 AC4).
+fn check_peak_within_window(
+    peak_idx: usize,
+    window_len: usize,
+    margin_frac: f64,
+) -> anyhow::Result<()> {
+    let half = window_len / 2;
+    let margin = (margin_frac * half as f64).round() as usize;
+    let dist_from_start = peak_idx;
+    let dist_from_end = window_len.saturating_sub(1).saturating_sub(peak_idx);
+    if dist_from_start <= margin || dist_from_end <= margin {
+        anyhow::bail!(
+            "\u{3c4} peak at sample {peak_idx} of a {window_len}-sample window (half-width \
+             {half} samples) sits within {margin} samples of the window edge — the arrival is \
+             likely outside the window rather than at this position, so no value is reported"
+        );
+    }
+    Ok(())
+}
 
 /// Play a short ESS, deconvolve it, and return the interface round-trip
 /// delay in seconds (peak of the linear IR, converted from samples).
@@ -84,7 +136,9 @@ fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
     let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
     let inv = inverse_sweep(&params)?;
     let full = deconvolve_full(&captured, &inv);
-    let irs = extract_irs(&full, &params, 1, TAU_WINDOW_LEN)?;
+    let half = (TAU_MIN_HALF_WINDOW_S * sr as f64).ceil() as usize;
+    let window_len = 2 * half;
+    let irs = extract_irs(&full, &params, 1, window_len)?;
     let (peak_idx, _) = irs
         .linear
         .iter()
@@ -92,7 +146,8 @@ fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
         .map(|(i, v)| (i, *v))
         .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
         .ok_or_else(|| anyhow::anyhow!("empty IR from τ sweep"))?;
-    let offset_samples = peak_idx as i64 - (TAU_WINDOW_LEN / 2) as i64;
+    check_peak_within_window(peak_idx, window_len, TAU_EDGE_MARGIN_FRAC)?;
+    let offset_samples = peak_idx as i64 - half as i64;
     Ok(offset_samples as f64 / sr as f64)
 }
 
@@ -638,5 +693,54 @@ mod tests {
             msg.contains("timeout"),
             "error message should name the failure: {msg}"
         );
+    }
+
+    /// #340 AC4/AC-test: a peak pinned at the window's far edge — exactly
+    /// the shape #277 measured — must be refused, not converted into the
+    /// plausible-looking offset the old, unguarded code would have
+    /// returned. Compute that pinned value here, the way `measure_tau`
+    /// used to unconditionally, and confirm the guard fires before it
+    /// would ever reach the caller.
+    #[test]
+    fn check_peak_within_window_refuses_peak_pinned_at_edge() {
+        let window_len = 9600; // 2 * 4800, i.e. a 50 ms half-window @ 96 kHz
+        let half = window_len / 2;
+        let peak_idx = window_len - 1; // pinned against the far edge
+        let pinned_offset_samples = peak_idx as i64 - half as i64; // what the old code returned
+        assert_eq!(pinned_offset_samples, half as i64 - 1);
+
+        let result = check_peak_within_window(peak_idx, window_len, TAU_EDGE_MARGIN_FRAC);
+        assert!(
+            result.is_err(),
+            "peak pinned at the window edge must be refused, not silently reported as offset {pinned_offset_samples}"
+        );
+    }
+
+    /// A peak exactly `margin_frac` of the half-window from the start edge
+    /// is refused — the margin boundary itself counts as "too close", per
+    /// the architect note's instruction to test the boundary directly.
+    #[test]
+    fn check_peak_within_window_refuses_at_margin_boundary() {
+        let window_len = 100;
+        let half = window_len / 2;
+        let margin = (TAU_EDGE_MARGIN_FRAC * half as f64).round() as usize;
+
+        assert!(check_peak_within_window(margin, window_len, TAU_EDGE_MARGIN_FRAC).is_err());
+        assert!(check_peak_within_window(
+            window_len - 1 - margin,
+            window_len,
+            TAU_EDGE_MARGIN_FRAC
+        )
+        .is_err());
+    }
+
+    /// A peak safely inside the window, away from either edge, is
+    /// accepted — the guard must not refuse the ordinary, correctly
+    /// measured case.
+    #[test]
+    fn check_peak_within_window_accepts_interior_peak() {
+        let window_len = 9600;
+        let half = window_len / 2;
+        assert!(check_peak_within_window(half, window_len, TAU_EDGE_MARGIN_FRAC).is_ok());
     }
 }
