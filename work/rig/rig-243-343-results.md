@@ -107,22 +107,33 @@ loudspeaker's group delay as if it were path.
 The mic was moved to ~3 m. The increment is pure flight and cancels every
 constant — τ, channel asymmetry, speaker, mic, and any fixed estimator bias.
 
-| | 1.000 m | 3.005 m | increment |
-|---|---|---|---|
-| `transfer_stream` | 378.5 | 933 | **554.5** |
-| IR peak | 4741 | 5300 | **559** |
-| predicted for a 2.005 m move | | | **555** |
+Both positions are taped on axis, 1.000 m and 3.000 m, so the move is a
+**taped 2.000 m** and this is a check against an external truth rather than
+an internal consistency test. The operator's "roughly" refers to tape
+accuracy over 3 m, not to an unmeasured position.
+
+| | 1.000 m | 3.000 m | increment | implied distance |
+|---|---|---|---|---|
+| `transfer_stream` | 378.5 | 933 | **554.5 samples** | **2.0047 m** |
+| IR peak | 4741 | 5300 | **559 samples** | **2.0210 m** |
+| taped | | | 555 samples | 2.000 m |
+
+**`transfer_stream` agrees with the tape to 4.7 mm. The IR peak agrees to
+21 mm.**
+
+Uncertainty on that comparison, so the two are not over-read: the room
+temperature was estimated at 25–27 °C rather than measured, and that ±1 °C
+is ±0.17% on `c`, or **±3.5 mm** over 2.000 m. Tape accuracy over 3 m to a
+mic capsule is realistically no better than **±5–10 mm**. So the
+`transfer_stream` figure sits inside the combined uncertainty and the IR
+figure sits just outside it — consistent with the IR's much lower SNR at the
+far position (11.25 dB against 28.66 dB at 1 m).
 
 The two methods differ by **4.5 samples — 1.6 cm** on the increment while
 differing by ~148 samples on the absolute (145 at 1 m, 151 at 3 m). A
 constant that cancels in the increment and persists in the absolute is
 exactly the signature of a fixed group-delay bias, and it confirms the
 decomposition above from an independent direction.
-
-The measured increment implies the mic moved 2.005 m, so the second position
-is 3.005 m if the first was exactly 1.000 m. The operator described it as
-"roughly 3 m" and did not tape it; the number above is therefore a
-measurement of the move, not a check against a known one.
 
 ---
 
@@ -213,7 +224,7 @@ uncapped `candidates` list. These are #251's data.
 | `ac243-run3-1m-gain36.jsonl.gz` | 1.000 m | volume 2, preamp 36 — **the clean 1 m reference** |
 | `ac243-run4-1m-routed.jsonl.gz` | 1.000 m | **degraded graph state**, +1024 |
 | `ac243-run5-1m-routed-repeat.jsonl.gz` | 1.000 m | **degraded graph state**, +1024 |
-| `ac243-run6-3m.jsonl.gz` | 3.005 m | volume 2, preamp 36 — **the clean 3 m reference** |
+| `ac243-run6-3m.jsonl.gz` | 3.000 m taped | volume 2, preamp 36 — **the clean 3 m reference** |
 
 Runs 4 and 5 are retained deliberately and must not be pooled with the
 others: they were taken while the graph carried an extra period, and they
@@ -237,8 +248,14 @@ SNR on this rig requires acoustic level or a quieter room.
 
 ## What this session does not say
 
-- **Nothing about absolute distance accuracy.** The 3 m position was not
-  taped; its distance is derived from the measured increment.
+- **Nothing about absolute distance accuracy**, only about the *increment*.
+  Both positions are taped, but the constant term — converter asymmetry plus
+  acoustic centre plus capsule — is derived from these same measurements, so
+  the absolute is not an independent check. The 2.000 m increment is.
+- **Nothing measured about room temperature.** 26 °C is the operator's
+  estimate of a 25–27 °C range, and it enters every distance through `c`.
+  A thermometer would remove ±3.5 mm from the 2.000 m comparison and is the
+  cheapest accuracy improvement available to this rig.
 - **Nothing about the loudspeaker's response**, only its arrival timing.
 - **Nothing about whether 46 samples of converter channel asymmetry is
   constant** across other channel pairs, sample rates or period sizes. It was

@@ -409,6 +409,52 @@ above the pre-impulse floor and within `len/4` of the IR centre.
 A CPAL equivalent (e.g. via `snd-aloop` or a PipeWire virtual sink) is
 deferred until the CPAL routing path is fixed (issue #27).
 
+### Headless rig runbook
+
+`ac transfer` launches `ac-view`, and `ac plot ir` runs the measurement and
+then discards it (`run_ir` waits for `done` and prints nothing — the gap
+epic #276 exists to close). Neither is usable over SSH, so a rig session
+drives the daemon through two examples that build from the tree:
+
+```bash
+# transfer_stream, two pairs, 20 s, driven at -30 dBFS, frames to JSON Lines
+cargo run --release -p ac-daemon --example transfer_probe -- \
+  --pairs "2,2;0,2" --seconds 20 --drive-dbfs -30 --out run.jsonl
+
+# plot_ir, reporting peak, floor, SNR, offset from window centre, and onset
+cargo run --release -p ac-daemon --example ir_probe -- \
+  --level-dbfs -30 --duration 2.0 --f1 50 --f2 16000 --window 16384
+```
+
+Both take `--ctrl-port` / `--data-port` for a daemon on non-default ports;
+the `ac` CLI takes `AC_CTRL_PORT` / `AC_DATA_PORT` for the same purpose, and
+`ac setup output <N> input <N>` retargets a **running** daemon so successive
+measurements share one client (below).
+
+`transfer_probe` starts the session `drivable`, so it comes up silent and
+`set_drive` raises it, refreshing the 1500 ms dead-man every 250 ms. Without
+`--drive-dbfs` the session is passive and opens no output port.
+`--level-dbfs` is **mandatory** on `ir_probe`: `plot_ir` does not apply the
+config's `drive_max_dbfs` ceiling — only `set_drive` does — so that value is
+the only limit on what reaches the interface.
+
+**Three traps this runbook exists to avoid**, all of them measured on the rig
+(`work/rig/rig-243-343-results.md`):
+
+1. **Absolute latency is per client.** Round-trip latency for a fixed path
+   varies by exactly one period between client starts, fractional part
+   unchanged. Do not compare an absolute measured by one process against one
+   measured by another; measure a difference inside a single session, which
+   is what makes `transfer_stream`'s differential trustworthy.
+2. **The IR peak is not the arrival.** `argmax |h|` reads late on a multi-way
+   loudspeaker, and naive onset thresholds go non-causal. Check any candidate
+   arrival against pure flight for the taped distance before believing it.
+3. **Check the device is still there.** An interface can leave ALSA while
+   remaining visible to `lsusb`; the graph then falls back to a dummy device
+   and every measurement still returns plausible numbers. Verify
+   `/proc/asound/cards`, `jack_lsp`, and `hw_params` rate/period/buffer before
+   and after a session.
+
 ## Decisions this architecture closes
 
 - "Should this new feature be accurate or pretty?" — Wrong framing.
