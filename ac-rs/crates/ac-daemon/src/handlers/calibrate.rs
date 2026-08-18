@@ -743,4 +743,70 @@ mod tests {
         let half = window_len / 2;
         assert!(check_peak_within_window(half, window_len, TAU_EDGE_MARGIN_FRAC).is_ok());
     }
+
+    /// One sample outside the margin boundary must be accepted — pairs
+    /// with `check_peak_within_window_refuses_at_margin_boundary` to pin
+    /// the guard as off-by-zero (refuses exactly at the boundary, accepts
+    /// exactly past it) rather than off-by-one in either direction.
+    #[test]
+    fn check_peak_within_window_accepts_one_sample_past_margin_boundary() {
+        let window_len = 100;
+        let half = window_len / 2;
+        let margin = (TAU_EDGE_MARGIN_FRAC * half as f64).round() as usize;
+
+        assert!(check_peak_within_window(margin + 1, window_len, TAU_EDGE_MARGIN_FRAC).is_ok());
+        assert!(check_peak_within_window(
+            window_len - 1 - margin - 1,
+            window_len,
+            TAU_EDGE_MARGIN_FRAC
+        )
+        .is_ok());
+    }
+
+    /// #340's own motivating number: the rig's measured 43.75 ms round trip
+    /// (4200 samples at 96 kHz) must clear the edge guard, not just a
+    /// dead-centre synthetic peak. Locks in the margin the fix actually
+    /// buys at the operating point that motivated the issue (QA correctness
+    /// issue 2).
+    #[test]
+    fn check_peak_within_window_accepts_the_rigs_measured_round_trip() {
+        let window_len = 9600; // 50 ms half-window @ 96 kHz
+        let half = window_len / 2;
+        let offset_samples = 4200i64; // rig's measured tau, 96 kHz (#340/#277)
+        let peak_idx = (half as i64 + offset_samples) as usize;
+        assert!(
+            check_peak_within_window(peak_idx, window_len, TAU_EDGE_MARGIN_FRAC).is_ok(),
+            "the rig's own measured round trip must be inside the accepted window"
+        );
+    }
+
+    /// Coupled-constant guard (QA correctness issue 1): `TAU_TAIL_S` must
+    /// stay ahead of `TAU_MIN_HALF_WINDOW_S` with margin, or the capture
+    /// can no longer hold the whole gate at high sample rates. Fails on a
+    /// wrong pair (constants inverted) and on an unscored gap (no
+    /// headroom) rather than passing silently either way.
+    // Both bounds below compare two `const`s, so clippy sees a
+    // compile-time-knowable value and suggests a `const {}` assertion
+    // block instead. That would turn this into a build-time check instead
+    // of a `cargo test` result — deliberately kept as a runtime test (the
+    // shape the coupled-constants rule asks for) so it shows up in test
+    // output like the rest of the suite, not just as a build failure.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn tau_tail_s_clears_tau_min_half_window_s_with_margin() {
+        assert!(
+            TAU_TAIL_S > TAU_MIN_HALF_WINDOW_S,
+            "capture tail ({TAU_TAIL_S}s) must exceed the half-window \
+             ({TAU_MIN_HALF_WINDOW_S}s) or the gate can run off the end of the capture"
+        );
+        // Headroom bound: the doc comment on TAU_TAIL_S claims it "stays
+        // well above" the half-window — fail if a future edit erodes that
+        // below the 2x this test treats as the floor for "well above" (a
+        // future edit to either constant must re-justify the number, not
+        // silently drift under it).
+        assert!(
+            TAU_TAIL_S >= 2.0 * TAU_MIN_HALF_WINDOW_S,
+            "tail no longer clears the half-window with the margin the doc comment assumed"
+        );
+    }
 }
