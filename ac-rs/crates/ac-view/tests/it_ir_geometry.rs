@@ -113,7 +113,7 @@ fn ir_polyline_paints_where_the_scene_says() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(&transfer), Some(&ir));
+        draw_view(&view, ui, None, Some(&transfer), &[], Some(&ir));
     });
     harness.run();
 
@@ -181,7 +181,7 @@ fn arrival_marker_line_lands_at_the_scenes_position() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(&transfer), Some(&ir));
+        draw_view(&view, ui, None, Some(&transfer), &[], Some(&ir));
     });
     harness.run();
 
@@ -226,7 +226,7 @@ fn arrival_marker_text_is_painted_verbatim() {
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&view, ui, None, Some(&transfer), Some(&ir));
+        draw_view(&view, ui, None, Some(&transfer), &[], Some(&ir));
     });
     harness.run();
 
@@ -264,7 +264,7 @@ fn ir_panel_toggle_replaces_mag_phase_polylines_through_the_paint_path() {
     let closed = ViewKind::Transfer(TransferViewState::default());
     let mut h_closed = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&closed, ui, None, Some(&transfer), None);
+        draw_view(&closed, ui, None, Some(&transfer), &[], None);
     });
     h_closed.run();
     let closed_lines = extract_line_points(&h_closed.output().shapes);
@@ -283,7 +283,7 @@ fn ir_panel_toggle_replaces_mag_phase_polylines_through_the_paint_path() {
     let open = ir_view();
     let mut h_open = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
-        draw_view(&open, ui, None, Some(&transfer), Some(&ir));
+        draw_view(&open, ui, None, Some(&transfer), &[], Some(&ir));
     });
     h_open.run();
     let open_lines = extract_line_points(&h_open.output().shapes);

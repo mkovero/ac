@@ -89,6 +89,7 @@ pub fn draw_view(
     ui: &mut Ui,
     scene: Option<&Scene>,
     transfer: Option<&ac_scene::TransferScene>,
+    stored: &[(&str, &ac_scene::TransferScene, bool)],
     ir: Option<&ac_scene::IrScene>,
 ) {
     // Reserve the half line the top y-axis tick label hangs into (#245).
@@ -114,7 +115,7 @@ pub fn draw_view(
     ui.add_space(tick_line_h / 2.0);
     match kind {
         ViewKind::Spectrum(state) => draw_spectrum(state, ui, scene),
-        ViewKind::Transfer(state) => draw_transfer(state, ui, transfer, ir),
+        ViewKind::Transfer(state) => draw_transfer(state, ui, transfer, stored, ir),
     }
 }
 
@@ -271,6 +272,70 @@ impl DerotChoice {
 /// owns as of M4c. The banner reads the machine's state and level.
 pub use crate::stimulus::StimState;
 
+/// One stored run loaded for comparison (#321) — a snapshot's H1
+/// derivation plus enough identity to attribute an on-screen trace to the
+/// file it came from, and its own [`ac_scene::Smoothing`] so two overlaid
+/// runs can be smoothed differently. Built once by
+/// [`crate::snapshot_flow::open_stored_transfer_run`]; its
+/// [`ac_scene::TransferScene`] is rebuilt from `derivation` every pass
+/// (never mutated in place), the same "rebuild from held state" discipline
+/// `last_frame` → `transfer_scene` already follows for zoom/pan.
+///
+/// Always drawn self-compensated (`DerotMode::Session`, τ_derot 0) — a
+/// stored run has no notion of "this session's" delay to de-rotate
+/// against, and `transfer.rs`'s own module doc states this is the correct
+/// reading for a stored capture. There is deliberately no per-run derot
+/// field: only the live trace's phase reference is a choice the operator
+/// makes.
+pub struct LoadedRun {
+    /// Attribution (acceptance criterion 1) — the file's own name, never
+    /// a friendlier fabricated one; the operator can go check it on disk.
+    pub label: String,
+    /// RFC3339 UTC capture instant, straight from `SnapshotMeta` —
+    /// disambiguates two runs against the same DUT captured minutes
+    /// apart, where the filename alone might not.
+    pub captured_at_utc: String,
+    pub derivation: ac_core::visualize::pair_derivation::PairDerivation,
+    pub channel_role: String,
+    pub sr: u32,
+    /// This run's own fractional-octave smoothing (acceptance criterion
+    /// 2) — starts off, cycled by `N` while this run has focus. Same
+    /// non-persistence reasoning as the live view's `smoothing` field:
+    /// every load opens at the honest, unsmoothed default.
+    pub smoothing: ac_scene::Smoothing,
+}
+
+impl LoadedRun {
+    pub fn new(
+        label: String,
+        captured_at_utc: String,
+        derivation: ac_core::visualize::pair_derivation::PairDerivation,
+        channel_role: String,
+        sr: u32,
+    ) -> Self {
+        Self {
+            label,
+            captured_at_utc,
+            derivation,
+            channel_role,
+            sr,
+            smoothing: ac_scene::Smoothing::Off,
+        }
+    }
+}
+
+/// Which trace a single-owner readout (delay, per-run smoothing edits)
+/// currently names (#321) — the live trace, or one of `loaded`'s stored
+/// runs by index. `Tab` cycles it; it is the one piece of state that
+/// decides both which trace `N` edits and which trace the delay readout
+/// describes, so neither is ever ambiguous about which curve it belongs
+/// to (acceptance criterion 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Live,
+    Stored(usize),
+}
+
 pub struct TransferViewState {
     pub freq_range: FreqRange,
     pub derot: DerotChoice,
@@ -299,6 +364,14 @@ pub struct TransferViewState {
     /// panel is an on-demand accessory, not a third pane always fighting
     /// the other two for the same screen.
     ir_panel_open: bool,
+    /// Stored runs loaded for comparison (#321), in load order. Unbounded
+    /// on purpose — triage and the architect both left the comparison-set
+    /// size open as a later UX-driven constraint, not an architectural one.
+    pub loaded: Vec<LoadedRun>,
+    /// Which trace `N` (smoothing) and the delay readout currently name.
+    /// Starts on `Live` — a session that has loaded nothing yet reads
+    /// exactly as it did before this issue.
+    pub focus: Focus,
 }
 
 impl Default for TransferViewState {
@@ -319,6 +392,8 @@ impl TransferViewState {
             snapshot_delay_ms: 0.0,
             smoothing: ac_scene::Smoothing::Off,
             ir_panel_open: false,
+            loaded: Vec::new(),
+            focus: Focus::Live,
         }
     }
 
@@ -326,10 +401,59 @@ impl TransferViewState {
         self.derot = self.derot.next();
     }
 
-    /// `N`: cycle smoothing. The order and the labels are `ac-scene`'s — this
-    /// crate holds the choice, it does not define what any setting means.
+    /// `N`: cycle the *focused* trace's smoothing (#321) — the live
+    /// trace's `smoothing` field if focus is `Live`, or the focused
+    /// `LoadedRun`'s own field otherwise. The order and the labels are
+    /// `ac-scene`'s — this crate holds the choice, it does not define
+    /// what any setting means. Editing one trace's field never touches
+    /// another's (acceptance criterion 4) — each lives in its own struct.
     pub fn cycle_smoothing(&mut self) {
-        self.smoothing = self.smoothing.next();
+        match self.focus {
+            Focus::Live => self.smoothing = self.smoothing.next(),
+            Focus::Stored(idx) => {
+                if let Some(run) = self.loaded.get_mut(idx) {
+                    run.smoothing = run.smoothing.next();
+                }
+            }
+        }
+    }
+
+    /// Add a newly opened stored run and move focus onto it — the
+    /// operator just opened it, so it is naturally what `N` and the delay
+    /// readout should name next, the same "just arrived" precedence the
+    /// live view already gives the newest frame.
+    pub fn add_loaded_run(&mut self, run: LoadedRun) {
+        self.loaded.push(run);
+        self.focus = Focus::Stored(self.loaded.len() - 1);
+    }
+
+    /// `Tab`: move focus to the next trace — live, then each stored run
+    /// in load order, wrapping back to live. A no-op (`Live` stays
+    /// `Live`) when nothing is loaded.
+    pub fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Live if self.loaded.is_empty() => Focus::Live,
+            Focus::Live => Focus::Stored(0),
+            Focus::Stored(idx) if idx + 1 < self.loaded.len() => Focus::Stored(idx + 1),
+            Focus::Stored(_) => Focus::Live,
+        };
+    }
+
+    /// `X`: close the focused stored run. A no-op when focus is `Live` —
+    /// the live trace is not something the operator "closes". Focus
+    /// moves to whichever run slides into the closed index, or back to
+    /// `Live` if that was the last one.
+    pub fn close_focused_stored_run(&mut self) {
+        if let Focus::Stored(idx) = self.focus {
+            if idx < self.loaded.len() {
+                self.loaded.remove(idx);
+            }
+            self.focus = if idx < self.loaded.len() {
+                Focus::Stored(idx)
+            } else {
+                Focus::Live
+            };
+        }
     }
 
     /// `P`: force raw phase, or restore the previous non-raw choice.
@@ -342,8 +466,24 @@ impl TransferViewState {
         }
     }
 
+    /// The live trace's de-rotation reference. `DerotChoice::Snapshot`
+    /// can only carry one delay at a time — it tracks whichever stored
+    /// run currently has focus (#321; the architect's brief names this a
+    /// consequence of `DerotMode`'s existing shape, not a new field), so
+    /// changing focus among stored runs changes what the live phase is
+    /// compared against. Falls back to `snapshot_delay_ms` (0.0 until a
+    /// run is loaded, or while focus is `Live`) so behaviour is unchanged
+    /// for a session with nothing loaded.
     pub fn derot_mode(&self) -> ac_scene::DerotMode {
-        self.derot.to_mode(self.snapshot_delay_ms)
+        let snapshot_delay_ms = match self.focus {
+            Focus::Stored(idx) => self
+                .loaded
+                .get(idx)
+                .map(|run| ac_scene::TransferInput::stored_delay_ms(&run.derivation))
+                .unwrap_or(self.snapshot_delay_ms),
+            Focus::Live => self.snapshot_delay_ms,
+        };
+        self.derot.to_mode(snapshot_delay_ms)
     }
 
     /// `H`: toggle the IR panel.
@@ -364,6 +504,7 @@ fn draw_transfer(
     state: &TransferViewState,
     ui: &mut Ui,
     scene: Option<&ac_scene::TransferScene>,
+    stored: &[(&str, &ac_scene::TransferScene, bool)],
     ir: Option<&ac_scene::IrScene>,
 ) {
     let rect = ui.available_rect_before_wrap();
@@ -445,10 +586,23 @@ fn draw_transfer(
         return;
     }
 
+    // Comparison legend (#321): one row per stored run, below the panes.
+    // Reserved only when a stored run is loaded — an operator who has
+    // opened nothing sees exactly the layout this issue found (zero
+    // height cost for the common case). `ROW_H` is declared below the
+    // panes historically; declared here too since the legend band needs
+    // it before the panes are sized.
+    const ROW_H: f32 = 16.0;
+    let legend_band = if stored.is_empty() {
+        0.0
+    } else {
+        (stored.len() as f32 + 1.0) * ROW_H + 4.0
+    };
+
     // Two stacked panes: magnitude (top), phase (bottom). Shared x
     // (log-f); each pane maps its own normalized y over its own band.
     let gap = 8.0;
-    let pane_h = (content.height() - gap) / 2.0;
+    let pane_h = (content.height() - gap - legend_band) / 2.0;
     let mag_vp = Viewport {
         x: content.min.x,
         y: content.min.y,
@@ -471,18 +625,33 @@ fn draw_transfer(
     draw_pane_grid(painter, &scene.phase_axis, phase_vp);
     draw_freq_labels(painter, &scene.freq_axis, phase_vp);
 
-    draw_segments(
-        painter,
-        &scene.magnitude,
-        mag_vp,
-        Stroke::new(1.5, COLOR_SIGNAL),
-    );
-    draw_segments(
-        painter,
-        &scene.phase,
-        phase_vp,
-        Stroke::new(1.5, COLOR_SIGNAL),
-    );
+    // Trace weight/colour is focus, not identity (#321 UX ruling: the
+    // palette has one signal hue on purpose, so N traces cannot each get
+    // their own colour). The focused trace — live or one stored run —
+    // draws full weight in the signal colour; every other trace recedes
+    // to structural grey, dashed for a stored run's existing
+    // live-vs-stored provenance convention (unchanged from before this
+    // trace could ever collide with another).
+    let live_focused = matches!(state.focus, Focus::Live);
+    let live_stroke = if live_focused {
+        Stroke::new(1.5, COLOR_SIGNAL)
+    } else {
+        Stroke::new(1.0, COLOR_STRUCTURAL)
+    };
+    draw_segments(painter, &scene.magnitude, mag_vp, live_stroke, false);
+    draw_segments(painter, &scene.phase, phase_vp, live_stroke, false);
+
+    // Stored runs (#321): dashed overlay, drawn after the live trace so a
+    // focused stored run's full-weight curve is not occluded by it.
+    for (_, stored_scene, focused) in stored {
+        let stroke = if *focused {
+            Stroke::new(1.5, COLOR_SIGNAL)
+        } else {
+            Stroke::new(1.0, COLOR_STRUCTURAL)
+        };
+        draw_segments(painter, &stored_scene.magnitude, mag_vp, stroke, true);
+        draw_segments(painter, &stored_scene.phase, phase_vp, stroke, true);
+    }
 
     // The top of the magnitude pane carries three rows, in this order and
     // for this reason (#224 + #229, ruled on when the two were reviewed as
@@ -505,7 +674,8 @@ fn draw_transfer(
     // the ladder or the font changes. Anchoring the caption *on* row 0 was
     // rejected for the same class of reason — the only gaps wide enough sit
     // between band labels, and those move with sample rate and zoom.
-    const ROW_H: f32 = 16.0;
+    // (`ROW_H` is declared above, before the panes are sized — the legend
+    // band needs it first.)
 
     // Positions and strings are verbatim ac-scene; this crate maps the
     // normalized x and draws, as with every other label. Structural grey
@@ -533,14 +703,68 @@ fn draw_transfer(
         );
     }
 
-    // Delay readout: verbatim ac-scene string.
+    // Delay readout. With nothing loaded this is `scene.delay_readout`
+    // verbatim, unchanged from before this trace could collide with
+    // another. Once a stored run exists, the value switches to whichever
+    // trace is focused and gains an owner tag (acceptance criterion 5:
+    // no readout naming a single measurement may leave its owner
+    // ambiguous) — `delay (<owner>)` is this crate's own chrome text, not
+    // a reformatted measurement, so it does not cross the `computes_nothing`
+    // boundary; the number after it is still ac-scene's string, untouched.
+    let (focused_label, focused_delay): (&str, &str) = match state.focus {
+        Focus::Live => ("live", scene.delay_readout.as_str()),
+        Focus::Stored(idx) => stored
+            .get(idx)
+            .map(|(label, s, _)| (*label, s.delay_readout.as_str()))
+            .unwrap_or(("live", scene.delay_readout.as_str())),
+    };
+    let delay_text = if stored.is_empty() {
+        scene.delay_readout.clone()
+    } else {
+        format!("delay ({focused_label})  {focused_delay}")
+    };
     painter.text(
         content.left_top() + egui::vec2(0.0, 2.0 * ROW_H),
         egui::Align2::LEFT_TOP,
-        &scene.delay_readout,
+        delay_text,
         egui::FontId::default(),
         COLOR_VALUE,
     );
+
+    // Comparison legend (#321): one row for the live trace, one per
+    // stored run, in the band reserved above the panes. Filename +
+    // timestamp (attribution, criterion 1) and that run's own smoothing
+    // caption (criterion 2) — verbatim `ac-scene` string, blank when that
+    // run is unsmoothed, the same "absent means off" convention the
+    // single-trace caption above already uses. `▸` marks focus, the one
+    // signal that also selects what `N` edits and what the delay readout
+    // above names.
+    if !stored.is_empty() {
+        let legend_top = content.max.y - legend_band;
+        let live_marker = if live_focused { "▸ " } else { "  " };
+        painter.text(
+            egui::pos2(content.min.x, legend_top),
+            egui::Align2::LEFT_TOP,
+            format!("{live_marker}live"),
+            egui::FontId::default(),
+            if live_focused {
+                COLOR_VALUE
+            } else {
+                COLOR_LABEL
+            },
+        );
+        for (i, (label, stored_scene, focused)) in stored.iter().enumerate() {
+            let marker = if *focused { "▸ " } else { "  " };
+            let smoothing = stored_scene.smoothing_readout.unwrap_or("");
+            painter.text(
+                egui::pos2(content.min.x, legend_top + ROW_H * (i as f32 + 1.0)),
+                egui::Align2::LEFT_TOP,
+                format!("{marker}{label}  {smoothing}"),
+                egui::FontId::default(),
+                if *focused { COLOR_VALUE } else { COLOR_LABEL },
+            );
+        }
+    }
 
     // Input-level meters: two thin bars at the right edge, M left of R
     // (UX standing requirement), heights normalized by ac-scene. Always
@@ -623,8 +847,16 @@ fn draw_freq_labels(painter: &egui::Painter, axis: &ac_scene::Axis, vp: Viewport
 /// Draw one trace's segments in a pane — one polyline per segment, so a
 /// coherence gap is the absence of a segment (D5), never a line to the
 /// floor. This crate decides nothing about where a gap goes; it stops
-/// drawing where ac-scene stopped emitting.
-fn draw_segments(painter: &egui::Painter, trace: &ac_scene::Trace, vp: Viewport, stroke: Stroke) {
+/// drawing where ac-scene stopped emitting. `dashed` distinguishes a
+/// stored run's provenance (#321) from the live trace, the same
+/// live-solid/snapshot-dashed convention `draw_spectrum` already draws.
+fn draw_segments(
+    painter: &egui::Painter,
+    trace: &ac_scene::Trace,
+    vp: Viewport,
+    stroke: Stroke,
+    dashed: bool,
+) {
     for segment in &trace.segments {
         let pts: Vec<egui::Pos2> = segment
             .iter()
@@ -634,7 +866,13 @@ fn draw_segments(painter: &egui::Painter, trace: &ac_scene::Trace, vp: Viewport,
             })
             .collect();
         if pts.len() > 1 {
-            painter.add(egui::Shape::line(pts, stroke));
+            if dashed {
+                let mut shapes = Vec::new();
+                egui::Shape::dashed_line_many(&pts, stroke, 6.0, 4.0, &mut shapes);
+                painter.extend(shapes);
+            } else {
+                painter.add(egui::Shape::line(pts, stroke));
+            }
         }
     }
 }

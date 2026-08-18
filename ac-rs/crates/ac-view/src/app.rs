@@ -38,6 +38,14 @@ pub struct AcViewApp {
     /// Built when the active view is Transfer; the spectrum `scene` stays
     /// `None` then, and vice versa.
     transfer_scene: Option<ac_scene::TransferScene>,
+    /// One built `TransferScene` per `TransferViewState::loaded` entry
+    /// (#321), index-aligned, rebuilt every pass the same "never mutate,
+    /// always rebuild from held state" discipline `transfer_scene` itself
+    /// follows — each run's `PairDerivation` is static, but the shared
+    /// freq/db range and that run's own `Smoothing` are not, so a
+    /// zoom/pan or an `N` press must reach every loaded run's curve, not
+    /// just the live one.
+    loaded_scenes: Vec<ac_scene::TransferScene>,
     /// The last `visualize/ir` sidecar frame received (#286), kept for
     /// the same zoom/pan-independent-of-new-frame reason `last_frame`
     /// is: today the IR panel has no zoom/pan of its own, but rebuilding
@@ -94,6 +102,7 @@ impl AcViewApp {
             last_frame: None,
             last_scene_ranges: None,
             transfer_scene: None,
+            loaded_scenes: Vec::new(),
             last_ir_frame: None,
             ir_scene: None,
             meters: (
@@ -143,6 +152,15 @@ impl AcViewApp {
     /// changed) cannot: that the changed mode failed to reach the scene.
     pub fn current_transfer_scene(&self) -> Option<&ac_scene::TransferScene> {
         self.transfer_scene.as_ref()
+    }
+
+    /// Every loaded stored run's currently built scene (#321),
+    /// index-aligned with the active view's `TransferViewState::loaded` —
+    /// the same test-support role `current_transfer_scene` plays for the
+    /// live trace, closing the same hole: a `loaded[i].smoothing` change
+    /// that fails to reach the built curve.
+    pub fn current_loaded_scenes(&self) -> &[ac_scene::TransferScene] {
+        &self.loaded_scenes
     }
 
     /// The IR scene currently being drawn (#286), if the IR panel is
@@ -285,21 +303,24 @@ impl AcViewApp {
                     .as_ref()
                     .map(|f| Scene::from_wire_frame(f, ranges.0, ranges.1));
                 self.transfer_scene = None;
+                self.loaded_scenes.clear();
             }
             ViewKind::Transfer(state) => {
                 let freq_range = (state.freq_range.min(), state.freq_range.max());
+                let db_range = (-80.0, 20.0);
                 if let Some(f) = &self.last_frame {
                     let input = ac_scene::TransferInput::from_wire_frame(f);
                     self.transfer_scene = Some(ac_scene::TransferScene::from_input(
                         &input,
                         ac_scene::DisplayModes::new(state.derot_mode(), state.smoothing),
                         freq_range,
-                        (-80.0, 20.0),
+                        db_range,
                         &mut self.meters,
                         &mut self.fault,
                         now_s,
                     ));
                 }
+                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range);
                 self.scene = None;
             }
         }
@@ -404,6 +425,16 @@ impl AcViewApp {
             Action::ToggleIrPanel => {
                 if let ViewKind::Transfer(t) = &mut self.view {
                     t.toggle_ir_panel()
+                }
+            }
+            Action::CycleFocus => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.cycle_focus()
+                }
+            }
+            Action::CloseFocusedRun => {
+                if let ViewKind::Transfer(t) = &mut self.view {
+                    t.close_focused_stored_run()
                 }
             }
             Action::Relock => {
@@ -756,6 +787,7 @@ impl eframe::App for AcViewApp {
                     }
                 }
                 self.transfer_scene = None;
+                self.loaded_scenes.clear();
             }
             ViewKind::Transfer(state) => {
                 // dB range for the magnitude pane is fixed for now; the
@@ -775,6 +807,10 @@ impl eframe::App for AcViewApp {
                         now_s,
                     ));
                 }
+                // Every loaded run rebuilt every pass too (#321) — a
+                // zoom/pan or an `N` press on a stored run must reach its
+                // curve exactly as reliably as the live one's.
+                self.loaded_scenes = rebuild_loaded_scenes(state, freq_range, db_range);
                 self.scene = None;
             }
         }
@@ -785,11 +821,33 @@ impl eframe::App for AcViewApp {
             Some(s) => self.status_for_state(s.connection_state(), std::time::Instant::now()),
         };
         ui.label(status);
+        // Stored-run legend rows (#321): label + built scene + whether it
+        // currently has focus, index-aligned with `loaded_scenes` and
+        // `TransferViewState::loaded`. Empty outside the transfer view or
+        // when nothing is loaded — `draw_view` renders the pre-#321
+        // layout unchanged in that case.
+        let stored_refs: Vec<(&str, &ac_scene::TransferScene, bool)> = match &self.view {
+            ViewKind::Transfer(state) => state
+                .loaded
+                .iter()
+                .zip(self.loaded_scenes.iter())
+                .enumerate()
+                .map(|(i, (run, scene))| {
+                    (
+                        run.label.as_str(),
+                        scene,
+                        matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
+                    )
+                })
+                .collect(),
+            ViewKind::Spectrum(_) => Vec::new(),
+        };
         draw_view(
             &self.view,
             ui,
             self.scene.as_ref(),
             self.transfer_scene.as_ref(),
+            &stored_refs,
             self.ir_scene.as_ref(),
         );
 
@@ -826,6 +884,34 @@ impl eframe::App for AcViewApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+/// Rebuild every loaded stored run's `TransferScene` (#321) from its held
+/// `PairDerivation` and its own `Smoothing`, under the shared freq/db
+/// range every trace in the transfer view is drawn against — the
+/// loaded-runs analogue of the live scene rebuild `ui()` does inline. A
+/// free function (not a method) so it can be called with `state`
+/// borrowed from `&self.view` and its result assigned into a different
+/// field (`self.loaded_scenes`) without a whole-self borrow conflict.
+fn rebuild_loaded_scenes(
+    state: &crate::view::TransferViewState,
+    freq_range: (f64, f64),
+    db_range: (f64, f64),
+) -> Vec<ac_scene::TransferScene> {
+    state
+        .loaded
+        .iter()
+        .map(|run| {
+            crate::snapshot_flow::rederive_transfer_scene(
+                &run.derivation,
+                &run.channel_role,
+                run.sr,
+                ac_scene::DisplayModes::new(ac_scene::DerotMode::Session, run.smoothing),
+                freq_range,
+                db_range,
+            )
+        })
+        .collect()
 }
 
 /// Resolve the transfer session's measurement and reference channels

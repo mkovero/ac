@@ -8,11 +8,13 @@
 use std::path::Path;
 
 use ac_core::snapshot::{read_acsnap, Snapshot};
+use ac_core::visualize::pair_derivation::PairDerivation;
 use ac_core::visualize::weighting_curves::WeightingCurve;
-use ac_scene::Scene;
+use ac_scene::{DisplayModes, Scene, TransferScene};
 use anyhow::{Context, Result};
 use serde_json::json;
 
+use crate::view::LoadedRun;
 use crate::zmq_client::Client;
 
 /// `snapshot` (trigger) + `snapshot_fetch` (chunked, sha256-verified) in
@@ -84,6 +86,88 @@ pub fn rederive_scene(
         freq_range,
         db_range,
     ))
+}
+
+/// Open a local `.acsnap` and derive one pair's H1 into a [`LoadedRun`] —
+/// the transfer-view analogue of `open_local` + [`rederive_scene`] in one
+/// call (#321), since a stored run's identity (filename, capture
+/// timestamp) has to travel with its derivation from the moment it's
+/// opened. `weighting` only affects `PairDerivation::spl`/`spl_weighting`,
+/// neither of which the transfer view reads — `Z` (unweighted) is passed
+/// so the derivation carries an honest "not reprocessed under a chosen
+/// weighting" value rather than one implying an operator picked one.
+///
+/// UI wiring (`F`) is #256's territory, not implemented here — this is
+/// the orchestration side, implemented and tested now, the same
+/// "implemented, not yet wired" pattern `Action::OpenSnapshot` already
+/// documents.
+pub fn open_stored_transfer_run(path: &Path, pair_idx: usize) -> Result<LoadedRun> {
+    let snap = open_local(path)?;
+    let (meas_ch, _ref_ch) = *snap
+        .meta
+        .session
+        .pairs
+        .get(pair_idx)
+        .context("pair index out of range")?;
+    let channel_role = snap
+        .meta
+        .per_channel
+        .iter()
+        .find(|c| c.input_channel == meas_ch)
+        .map(|c| c.role.clone())
+        .unwrap_or_else(|| format!("meas_{meas_ch}"));
+    let derivation = snap.derive_pair(pair_idx, WeightingCurve::Z, None)?;
+    let label = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    Ok(LoadedRun::new(
+        label,
+        snap.meta.captured_at_utc.clone(),
+        derivation,
+        channel_role,
+        snap.meta.sr,
+    ))
+}
+
+/// Build (or rebuild) a stored run's [`TransferScene`] from its held
+/// [`PairDerivation`] under `modes` — the transfer-view analogue of
+/// [`rederive_scene`], called again every time the operator changes that
+/// run's smoothing (#321). A stored run is always drawn self-compensated
+/// (`DerotMode::Session`, τ_derot 0), per `transfer.rs`'s own module doc
+/// and deliverable 3 (#229) — callers pass that mode explicitly rather
+/// than this function assuming it, so the one rule lives at the one call
+/// site that decides it (`TransferViewState::derot`-style state never
+/// touches a stored run).
+///
+/// A stored derivation is a static capture — it has no live meters and no
+/// drive/lock state to report (`TransferInput::from_pair_derivation`
+/// already sets `fault: None`) — so this gives `TransferScene::from_input`
+/// a fresh, throwaway meter/fault pair each call rather than one persisted
+/// across frames: there is nothing here for a decay window to mean.
+pub fn rederive_transfer_scene(
+    derivation: &PairDerivation,
+    channel_role: &str,
+    sr: u32,
+    modes: DisplayModes,
+    freq_range: (f64, f64),
+    db_range: (f64, f64),
+) -> TransferScene {
+    let input = ac_scene::TransferInput::from_pair_derivation(derivation, channel_role, sr);
+    let mut meters = (
+        ac_scene::MeterState::default(),
+        ac_scene::MeterState::default(),
+    );
+    let mut fault = ac_scene::FaultState::default();
+    TransferScene::from_input(
+        &input,
+        modes,
+        freq_range,
+        db_range,
+        &mut meters,
+        &mut fault,
+        0.0,
+    )
 }
 
 #[cfg(test)]

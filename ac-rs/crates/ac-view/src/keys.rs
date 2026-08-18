@@ -70,6 +70,16 @@ pub enum Action {
     /// live-arrival only (the sweep-derived kind is a disjoint data path,
     /// #308). Mnemonic: `H`, this display's own y-axis label.
     ToggleIrPanel,
+    /// Move focus to the next trace — live, then each loaded stored run,
+    /// wrapping back to live (#321). Selects what `N` (smoothing) edits
+    /// and what the delay readout names. Not yet reachable from any
+    /// stored run in a production build — loading one is #256's file
+    /// picker, still a stub — but wired and tested now, same pattern
+    /// `Action::OpenSnapshot` already documents.
+    CycleFocus,
+    /// Close the focused stored run (#321). A no-op while focus is on
+    /// the live trace.
+    CloseFocusedRun,
 
     // -- transfer view: stimulus cluster (reserved, D7/D10) --
     /// Space: Idle→Armed, or stop from Armed/Driving.
@@ -105,8 +115,9 @@ pub struct Binding {
 ///
 /// Key ledger (so the single-pass assignment is auditable at a glance):
 /// global `/` `Q` `S` `F` `←` `→` `I` `O` `K` `L` `A` `D`; spectrum
-/// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` + stimulus `Space` `Enter`
-/// `Esc` `↑` `↓`.
+/// `W` `T` `V`; transfer `P` `R` `N` `G` `E` `H` `Tab` `X` (#321: cycle
+/// trace focus / close a stored run) + stimulus `Space` `Enter` `Esc`
+/// `↑` `↓`.
 pub const BINDINGS: &[Binding] = &[
     // -- global --
     Binding {
@@ -236,6 +247,18 @@ pub const BINDINGS: &[Binding] = &[
         action: Action::ToggleIrPanel,
         scope: Scope::Transfer,
         description: "Toggle IR panel — h(t), live arrival",
+    },
+    Binding {
+        key: Key::Tab,
+        action: Action::CycleFocus,
+        scope: Scope::Transfer,
+        description: "Cycle trace focus (live, then each loaded run)",
+    },
+    Binding {
+        key: Key::X,
+        action: Action::CloseFocusedRun,
+        scope: Scope::Transfer,
+        description: "Close the focused stored run",
     },
     // -- transfer view: stimulus cluster (D7/D10 reserved) --
     Binding {
