@@ -6,6 +6,12 @@ blocks 1, 2 and 3.** Their results are in `work/rig/rig-session-3-results.md`, w
 supersedes the expectations written here — where this file and that one
 disagree, the session is right. What survives is one block, promoted below.
 
+**Updated 2026-08-18: the #243 block's pass criterion is restated.** #277 ran
+on the rig and measured the converter's contribution directly; the old
+criterion ("the residual collapses to ~0") would have read a correct cable
+change as a failure. The wiring for that block is also already in place. See
+the block below and `work/rig/rig-loopback-ir-277-results.md`.
+
 Each block states what it verifies and what a pass looks like, so a run that
 produces a surprise can be told apart from a run that produces a failure.
 
@@ -23,17 +29,46 @@ dropped onset guard must not suppress, so it carries per-frame
 Two things session 3 raised that no block here covers yet:
 
 - **The cable change, and the one measurement that verifies it — #243.** Move
-  the reference out to **playback_6**, through the same external converter as
-  the stimulus, analogue output looped back to a Babyface input. Both legs then
-  traverse Babyface → ADAT → external converter DAC → analogue, and everything
-  up to that point is common-mode.
+  the reference out through the same external converter as the stimulus,
+  analogue output looped back to a Babyface input. Both legs then traverse
+  Babyface → ADAT → external converter DAC → analogue, and everything up to
+  that point is common-mode.
 
-  > **Pass: the 1.1931 ms residual collapses to ~0.** Measure it the same way
-  > it was measured in session 3 — `pairs=[[3,3],[0,3]]`, zero extra cost.
-  > **Fail is informative:** a residual that does not collapse means the
-  > reference is not traversing what it should, and **its size says which
-  > stage was missed.** Until this runs, the metres readout shows the
-  > instrument's own latency as distance — 1.40 m at a taped 1.000 m.
+  **The cable change is already made.** As of 2026-08-18 the rig is patched
+  `playback_7` (ADAT3) → converter → analogue out → `capture_3` (IN3), which
+  is the reference leg this block asks for. This entry named `playback_6`;
+  the channel is incidental, the path is the point. What remains is the
+  measurement, the mic, and the speaker on `playback_5`.
+
+  > **The old pass criterion was "the 1.1931 ms residual collapses to ~0".
+  > That is now known to be wrong, and running against it would read a
+  > correct cable change as a failure.**
+  >
+  > #277 measured the two legs directly at 96 kHz — Farina IR peak and
+  > `jack_iodelay`, agreeing to 0.4 samples. The converter leg costs
+  > **0.125 ms** more than the analogue leg (`work/rig/rig-loopback-ir-277-results.md`,
+  > landing in PR #339). Both legs return through a Babyface ADC, so the ADC
+  > cancels; 0.125 ms is the converter's DAC path minus the Babyface's own.
+  >
+  > The residual decomposes as
+  > `(converter DAC − Babyface DAC) + speaker + mic + estimator bias = 1.1931 ms`.
+  > Moving the reference through the converter cancels the first term and
+  > nothing else.
+  >
+  > **Pass: the residual falls by 0.125 ms — 12 samples at 96 kHz — from
+  > 1.1931 ms to ≈ 1.068 ms.** Measure it the same way session 3 did, with
+  > the pair indices updated for the new reference capture: `pairs=[[2,2],[0,2]]`
+  > if the reference is `capture_3`, at zero extra cost.
+  >
+  > **A collapse to ~0 is now the surprising outcome, not the expected one.**
+  > It would mean either the 0.125 ms electrical measurement is wrong or the
+  > two legs are not traversing what we believe. Informative either way, but
+  > it is no longer the result to hope for.
+  >
+  > **What this will not fix:** roughly 1.07 ms of phantom distance — 37 cm —
+  > survives the cable change, because it was never conversion latency. The
+  > metres readout will still over-read at a taped distance afterwards. That
+  > residue is #343's question, and this session can answer it (below).
 
 - **#251 — rides along with the cable change, deliberately.** 20 s captures at
   3.000 m and 1.000 m with full `delay_evidence.candidates`, to score the
@@ -43,8 +78,24 @@ Two things session 3 raised that no block here covers yet:
   without it.
 
 - **The electrical constant.** `arrival(d) = 1.1931 ms + d/346 m/s`. Measure it
-  in-session at zero cost with `pairs=[[3,3],[0,3]]` — the same call as the
-  #243 verification above, so one measurement serves both.
+  in-session at zero cost with the two-pair call — the same call as the #243
+  verification above, so one measurement serves both. Note the pair indices
+  follow whichever capture carries the reference; session 3's `[[3,3],[0,3]]`
+  was `capture_4`.
+
+- **Attribute the constant — #343, rides along with the #243 run and costs one
+  extra measurement.** With the reference through the converter, conversion is
+  out of the residual and what remains is speaker + mic + estimator bias. Take
+  a Farina IR peak on the same leg at the same taped distance, in the same
+  session, and compare it against the `transfer_stream` delay.
+
+  > **Say which before running:** disagreement of about a millisecond puts the
+  > residue on the estimator — `transfer_stream`'s broadband cross-correlation
+  > against a band-limited system — and it then travels with every distance
+  > readout on every rig, not just this one. Agreement puts it on the
+  > loudspeaker's own acoustic group delay, which is a property of this DUT.
+  > Two taped distances, so flight separates from the constant term rather
+  > than being assumed.
 - **The discarded second arrival — #255.** No rig time needed to decide it;
   session 3's captures are in `audit/rig-session-3/` and the ambiguous case is
   reproducible on demand (two of the room's three speakers energised).
