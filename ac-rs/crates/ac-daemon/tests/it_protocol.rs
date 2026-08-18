@@ -1177,6 +1177,76 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
         "tau_s {tau_s} far from expected {expected} (32-sample fake loopback delay): {done}"
     );
     assert_eq!(done["tau_sample_rate"], json!(48_000), "frame: {done}");
+    // #347: "measured" now means two independently-lifecycled readings
+    // agreed — the fake backend's fixed loopback delay makes both
+    // lifecycles land on the same 32-sample reading, so this must corroborate.
+    assert_eq!(done["tau_agreement_count"], json!(2), "frame: {done}");
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+    // ZMQ.md: tau_delta_samples is present only on disagree_* — an Agree
+    // outcome must not serialize a stray Some(0) (QA #348 correctness 1).
+    assert!(done.get("tau_delta_samples").is_none(), "frame: {done}");
+}
+
+/// QA #348 test-coverage gap: every other disagreement test drives
+/// `compare_tau_readings` or `tau_result` as a pure function, never
+/// `measure_tau_twice` itself — the function that actually spins up two
+/// engine lifecycles and feeds them into the comparison. A bug that mixed
+/// up which lifecycle's `TauConditions` or reading fed the comparison
+/// would pass every other test in this file. Drives it for real through
+/// `calibrate`, using the fake backend's env-var delay/period-size test
+/// hooks (`ac-daemon/src/audio/fake.rs`) to make the two lifecycles land
+/// exactly one `period_size` apart.
+#[test]
+fn calibrate_reports_disagree_period_shift_end_to_end() {
+    let d = Daemon::spawn_with_env(&[
+        ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "32,1056"),
+        ("AC_FAKE_PERIOD_SIZE_OVERRIDE", "1024"),
+    ]);
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    // 1056 - 32 = 1024 samples = exactly one period_size — the graph-
+    // buffering shift the whole PR is about, not a generic fault.
+    assert_eq!(
+        done["tau_state"],
+        json!("disagree_period_shift"),
+        "frame: {done}"
+    );
+    assert_eq!(done["tau_periods"], json!(1), "frame: {done}");
+    assert_eq!(done["tau_delta_samples"], json!(1024), "frame: {done}");
+    assert_eq!(
+        done["tau_s"],
+        json!(null),
+        "a disagreement must not report a τ: {done}"
+    );
+    assert_eq!(done["tau_agreement_count"], json!(0), "frame: {done}");
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_error"].as_str().is_some(), "frame: {done}");
+
+    // Refused, not stored — no entry in tau_history at all.
+    let after = read_cal_entry(&cal_path);
+    assert!(
+        after.get("tau_history").is_none()
+            || after["tau_history"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+        "a disagreement must not append to tau_history: {after}"
+    );
 }
 
 /// #281 QA correctness issue 2: the cheap-refresh criterion (#279: both
@@ -1220,6 +1290,13 @@ fn calibrate_cheap_refresh_still_measures_tau() {
         history.len(),
         1,
         "a cheap-refresh run must still append a tau_history entry: {after}"
+    );
+    // #347: a stored entry must record how many readings agreed — never
+    // `1`, since a lone reading is no longer a storable outcome.
+    assert_eq!(
+        history[0]["agreement_count"],
+        json!(2),
+        "stored entry must record its corroboration count: {after}"
     );
 }
 

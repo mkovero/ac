@@ -189,8 +189,8 @@ fn print_cal_leg(label: &str, data: &serde_json::Value, vrms_key: &str, state_ke
     }
 }
 
-/// Render the `Delay:` leg of a `cal_done` frame (#281) — third leg of the
-/// same block, same `{label:<8}` alignment as `print_cal_leg`'s
+/// Render the `Delay:` leg of a `cal_done` frame (#281/#347) — third leg of
+/// the same block, same `{label:<8}` alignment as `print_cal_leg`'s
 /// Output/Input rows.
 ///
 /// τ has no `(unchanged)` state — unlike the voltage legs, it is not
@@ -201,6 +201,12 @@ fn print_cal_leg(label: &str, data: &serde_json::Value, vrms_key: &str, state_ke
 /// failure #281 exists to close (device/backend/port identity is already
 /// implied by the session and the `[out_in]` key on the line above, so
 /// repeating those here would be redundant, not missing).
+///
+/// #347: a single reading is not a measurement of τ on this stack, so
+/// `calibrate` now runs two independent client lifecycles and refuses
+/// rather than storing on disagreement — `"measured"` names how many
+/// readings agreed, and the two new disagreement states show both raw
+/// readings so an operator can see the evidence, not just the conclusion.
 fn print_tau_leg(data: &serde_json::Value) {
     let state = data.get("tau_state").and_then(|v| v.as_str()).unwrap_or("");
     let sample_rate = data.get("tau_sample_rate").and_then(|v| v.as_u64());
@@ -213,8 +219,17 @@ fn print_tau_leg(data: &serde_json::Value) {
     match state {
         "measured" => match data.get("tau_s").and_then(|v| v.as_f64()) {
             Some(tau_s) => {
+                let n = data
+                    .get("tau_agreement_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let agree = if n > 0 {
+                    format!("{n} readings agree, ")
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  {:<8}{:.4} ms   (measured, {conditions})",
+                    "  {:<8}{:.4} ms   (measured, {agree}{conditions})",
                     "Delay:",
                     tau_s * 1000.0
                 );
@@ -231,6 +246,9 @@ fn print_tau_leg(data: &serde_json::Value) {
                 .unwrap_or("measurement failed");
             println!("  {:<8}not measured ({msg})", "Delay:");
         }
+        "disagree_period_shift" | "disagree_other" => {
+            print_tau_disagreement_leg(state, data, sample_rate);
+        }
         // "not_measured_no_loopback" and anything unrecognised (older
         // daemon without this field): state the observation, not an
         // inferred cause — `is_loopback` is what the daemon saw, not a
@@ -239,6 +257,40 @@ fn print_tau_leg(data: &serde_json::Value) {
             "  {:<8}not measured (loopback not detected this run)",
             "Delay:"
         ),
+    }
+}
+
+/// Render one of the two #347 disagreement states: a period-shift (the
+/// issue's own root cause — a graph-buffering shift, software, not
+/// hardware drift) versus any other mismatch (a different fault class).
+/// Both raw readings are shown, not a compressed delta — the fractional
+/// part staying identical across a period-shift jump is the exact
+/// diagnostic clue #347's rig data uses to prove the fault is software.
+fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate: Option<u64>) {
+    let reading1_s = data.get("tau_reading1_s").and_then(|v| v.as_f64());
+    let reading2_s = data.get("tau_reading2_s").and_then(|v| v.as_f64());
+    let delta_samples = data.get("tau_delta_samples").and_then(|v| v.as_i64());
+    let periods = data.get("tau_periods").and_then(|v| v.as_i64());
+
+    let headline = if state == "disagree_period_shift" {
+        let n = periods.map(|p| p.unsigned_abs()).unwrap_or(0);
+        let plural = if n == 1 { "" } else { "s" };
+        format!("2 readings disagree by exactly {n} period{plural}")
+    } else {
+        "2 readings disagree, not a period multiple".to_string()
+    };
+    println!("  {:<8}not measured ({headline})", "Delay:");
+
+    if let (Some(sr), Some(r1), Some(r2), Some(delta)) =
+        (sample_rate, reading1_s, reading2_s, delta_samples)
+    {
+        let r1_samples = r1 * sr as f64;
+        let r2_samples = r2 * sr as f64;
+        let delta_ms = delta as f64 / sr as f64 * 1000.0;
+        println!(
+            "          {r1_samples:.3} samples \u{2192} {r2_samples:.3} samples  \
+             (\u{394} {delta} samples = {delta_ms:.4} ms at {sr} Hz)"
+        );
     }
 }
 
@@ -332,8 +384,19 @@ fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     let age = ac_core::shared::time::age_from_iso8601(measured_at);
+    // #347: an entry from before this landed has no `agreement_count` and
+    // deserializes to 0 — it must not read the same as a corroborated one.
+    let agreement_count = entry
+        .get("agreement_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let corroboration = if agreement_count >= 2 {
+        format!(", corroborated \u{d7}{agreement_count}")
+    } else {
+        ", uncorroborated \u{2014} single reading".to_string()
+    };
     lines.push(format!(
-        "    Delay:  {:.4} ms   (measured {measured_at}, {age})",
+        "    Delay:  {:.4} ms   (measured {measured_at}, {age}{corroboration})",
         tau_s * 1000.0
     ));
 
@@ -693,6 +756,59 @@ mod tests {
         assert!(
             last.contains("+1 more") && last.contains("cal.json"),
             "got {last:?}"
+        );
+    }
+
+    // ─── run_show τ corroboration rendering — issue #347 ────────────────
+
+    #[test]
+    fn render_tau_history_leg_corroborated_names_the_agreement_count() {
+        let entry = serde_json::json!({
+            "key": "out0_in0",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0, "backend": "jack", "sample_rate": 48000,
+                        "period_size": 128, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.0011931,
+                    "measured_at": "2024-06-15T12:00:00Z",
+                    "method": "farina_short_ess",
+                    "agreement_count": 2
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        assert!(
+            lines[0].contains("corroborated \u{d7}2"),
+            "got {:?}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn render_tau_history_leg_missing_agreement_count_reads_as_uncorroborated() {
+        // Pre-#347 entry: no `agreement_count` field at all. It must not be
+        // indistinguishable from a freshly-corroborated one.
+        let entry = serde_json::json!({
+            "key": "out0_in0",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0, "backend": "jack", "sample_rate": 48000,
+                        "period_size": 128, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.0011931,
+                    "measured_at": "2020-01-01T00:00:00Z",
+                    "method": "farina_short_ess"
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        assert!(
+            lines[0].contains("uncorroborated \u{2014} single reading"),
+            "got {:?}",
+            lines[0]
         );
     }
 
