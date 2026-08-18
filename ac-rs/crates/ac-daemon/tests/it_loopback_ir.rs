@@ -14,6 +14,29 @@
 //! `output_port = "ac-daemon:in"` makes `JackEngine::start()` connect
 //! `ac-daemon:out → ac-daemon:in` directly — no external `jack_connect`
 //! and no system audio devices required (works with `jackd -d dummy`).
+//!
+//! # Running through real converters
+//!
+//! The self-loop above never leaves the daemon's own JACK client: it
+//! exercises the ring, not a converter. To route the sweep through actual
+//! hardware, set both of these to real JACK port names:
+//!
+//! ```text
+//! AC_LOOPBACK_OUT="Babyface Pro Pro:playback_2"   # daemon's out connects here
+//! AC_LOOPBACK_IN="Babyface Pro Pro:capture_4"     # daemon's in connects here
+//! ```
+//!
+//! Unset, both default to the self-loop, so the `jackd -d dummy` runbook in
+//! `ARCHITECTURE.md` is unchanged.
+//!
+//! Setting them puts a stimulus on physical outputs, which is behind the
+//! rig's standing drive-level policy. So when `AC_LOOPBACK_OUT` is set,
+//! `AC_LOOPBACK_LEVEL_DBFS` becomes **mandatory** and the test panics
+//! without it rather than inheriting the self-loop's `-6.0`. Note that
+//! `plot_ir` does not apply the config's `drive_max_dbfs` ceiling (only
+//! `set_drive` does, `handlers/transfer.rs:138`), so this value is the only
+//! thing bounding what reaches the converter — it is not a request the
+//! daemon will clamp.
 
 use std::env;
 use std::fs;
@@ -41,15 +64,125 @@ fn alloc_home() -> PathBuf {
     p
 }
 
-/// Pre-write `$HOME/.config/ac/config.json` so the daemon picks up sticky
-/// port names that self-loop the JACK client (`ac-daemon:out → ac-daemon:in`).
-fn write_loopback_config(home: &Path) {
+/// The self-loop defaults: the daemon's own ports, under one JACK client.
+const SELF_LOOP_OUT: &str = "ac-daemon:in";
+const SELF_LOOP_IN: &str = "ac-daemon:out";
+
+/// Default drive for the self-loop, where nothing physical is driven.
+const SELF_LOOP_LEVEL_DBFS: f64 = -6.0;
+
+/// Sweep duration. Not a free parameter: the linear IR's window is clamped
+/// to the gap between the linear IR and the order-2 IR
+/// (`per_order_window_lens`, `sweep.rs:318`/`:335`), and that gap is
+/// `duration · ln 2 / ln(f2/f1)` seconds. So the window that has to contain
+/// the round trip grows with the sweep, and a chain whose latency exceeds
+/// half the gap puts its own peak outside the window it is measured in.
+const DEFAULT_DURATION_S: f64 = 0.5;
+
+/// Where the sweep goes and where it comes back, and how hard it is driven.
+struct Routing {
+    output_port: String,
+    input_port: String,
+    level_dbfs: f64,
+    duration_s: f64,
+    /// True when the ports came from the environment, i.e. real hardware is
+    /// in the path. Recorded so the assertions can say which chain they ran
+    /// against instead of implying the self-loop.
+    external: bool,
+}
+
+impl Routing {
+    /// Read the routing from the environment, defaulting to the self-loop.
+    ///
+    /// Both port variables must be set together: half a route is a route
+    /// through the wrong thing, and silently completing it with a self-loop
+    /// end would produce a plausible-looking IR of the ring while the
+    /// operator believed they were measuring a converter.
+    fn from_env() -> Self {
+        let out = env::var("AC_LOOPBACK_OUT").ok().filter(|s| !s.is_empty());
+        let inp = env::var("AC_LOOPBACK_IN").ok().filter(|s| !s.is_empty());
+
+        match (out, inp) {
+            (None, None) => Self {
+                output_port: SELF_LOOP_OUT.to_string(),
+                input_port: SELF_LOOP_IN.to_string(),
+                level_dbfs: level_from_env().unwrap_or(SELF_LOOP_LEVEL_DBFS),
+                duration_s: duration_from_env(),
+                external: false,
+            },
+            (Some(output_port), Some(input_port)) => {
+                // Real ports means real emission. Refuse to pick the level.
+                let level_dbfs = level_from_env().expect(
+                    "AC_LOOPBACK_OUT/IN name real JACK ports, so this run drives \
+                     hardware: set AC_LOOPBACK_LEVEL_DBFS explicitly. plot_ir does \
+                     not apply drive_max_dbfs, so this value is the only ceiling.",
+                );
+                Self {
+                    output_port,
+                    input_port,
+                    level_dbfs,
+                    duration_s: duration_from_env(),
+                    external: true,
+                }
+            }
+            (out, inp) => panic!(
+                "AC_LOOPBACK_OUT and AC_LOOPBACK_IN must be set together \
+                 (out={out:?}, in={inp:?}); one alone would route half the \
+                 signal through the daemon's own ports"
+            ),
+        }
+    }
+
+    /// One line naming the chain under test, for the failure messages and
+    /// for the operator's record of which patch produced which number.
+    fn describe(&self) -> String {
+        format!(
+            "{} → {} at {:.1} dBFS, {:.3} s sweep ({})",
+            self.output_port,
+            self.input_port,
+            self.level_dbfs,
+            self.duration_s,
+            if self.external {
+                "external ports"
+            } else {
+                "daemon self-loop"
+            }
+        )
+    }
+}
+
+fn duration_from_env() -> f64 {
+    match env::var("AC_LOOPBACK_DURATION_S")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        None => DEFAULT_DURATION_S,
+        Some(raw) => raw
+            .parse::<f64>()
+            .unwrap_or_else(|e| panic!("AC_LOOPBACK_DURATION_S={raw:?} is not a number: {e}")),
+    }
+}
+
+fn level_from_env() -> Option<f64> {
+    let raw = env::var("AC_LOOPBACK_LEVEL_DBFS")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    Some(
+        raw.parse::<f64>()
+            .unwrap_or_else(|e| panic!("AC_LOOPBACK_LEVEL_DBFS={raw:?} is not a number: {e}")),
+    )
+}
+
+/// Pre-write `$HOME/.config/ac/config.json` so the daemon picks up the sticky
+/// port names the run is routed over — by default the self-loop of the JACK
+/// client (`ac-daemon:out → ac-daemon:in`).
+fn write_loopback_config(home: &Path, routing: &Routing) {
     let cfg = json!({
         "device":           0,
         "output_channel":   0,
         "input_channel":    0,
-        "output_port":      "ac-daemon:in",
-        "input_port":       "ac-daemon:out",
+        "output_port":      routing.output_port,
+        "input_port":       routing.input_port,
         "dbu_ref_vrms":     0.7745966692414834,
         "range_start_hz":   20.0,
         "range_stop_hz":    20_000.0,
@@ -67,10 +200,10 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn spawn_jack() -> Self {
+    fn spawn_jack(routing: &Routing) -> Self {
         let (ctrl, data) = alloc_ports();
         let home = alloc_home();
-        write_loopback_config(&home);
+        write_loopback_config(&home, routing);
 
         let bin = env!("CARGO_BIN_EXE_ac-daemon");
         let child = Command::new(bin)
@@ -204,7 +337,11 @@ impl Client {
 #[test]
 #[ignore = "needs a live JACK server — see ARCHITECTURE.md"]
 fn loopback_ir_recovers_sharp_peak() {
-    let d = Daemon::spawn_jack();
+    let routing = Routing::from_env();
+    let chain = routing.describe();
+    eprintln!("loopback_ir: {chain}");
+
+    let d = Daemon::spawn_jack(&routing);
     let c = Client::new(&d);
 
     // Short sweep so the test stays under ~1 s of audio time. `window_len`
@@ -216,8 +353,8 @@ fn loopback_ir_recovers_sharp_peak() {
         "cmd":        "plot_ir",
         "f1_hz":      50.0,
         "f2_hz":      16_000.0,
-        "duration":   0.5,
-        "level_dbfs": -6.0,
+        "duration":   routing.duration_s,
+        "level_dbfs": routing.level_dbfs,
         "tail_s":     0.2,
         "n_harmonics": 3,
         "window_len":  16_384,
@@ -226,6 +363,8 @@ fn loopback_ir_recovers_sharp_peak() {
 
     let frame = c.wait_for_or_error("measurement/impulse_response", Duration::from_secs(15));
     let data = &frame["data"];
+    let sample_rate_hz = data["sample_rate_hz"].as_f64();
+    let window_len_used = frame["window_len_used"].as_u64();
     let ir: Vec<f64> = data["linear_ir"]
         .as_array()
         .expect("linear_ir array")
@@ -247,26 +386,6 @@ fn loopback_ir_recovers_sharp_peak() {
             acc
         }
     });
-    assert!(
-        peak_abs > 0.0,
-        "all-zero IR — JACK loopback never delivered audio"
-    );
-
-    // The IR peak is the deconvolution delta. `extract_irs` centers the gate
-    // at the sweep endpoint, so the peak nominally sits at `window_len / 2`
-    // — but JACK adds one period of port-to-port latency, shifting it later
-    // by a few hundred to a couple thousand samples. Just require the peak
-    // to land in the upper-middle half of the window (well clear of the
-    // edges where a truncation artefact would manifest).
-    let lo_bound = ir.len() / 4;
-    let hi_bound = 3 * ir.len() / 4;
-    assert!(
-        peak_idx > lo_bound && peak_idx < hi_bound,
-        "peak at index {peak_idx} outside expected range [{lo_bound}, {hi_bound}] \
-         (window_len={}); deconvolution may have failed",
-        ir.len()
-    );
-
     // Floor: max-abs over the leading 1/8 of the IR window. With window_len
     // 16384, that's ~3000 samples ≥ 6000 samples ahead of the peak — far
     // enough that the bandlimited-sinc skirts of the delta have decayed
@@ -277,10 +396,76 @@ fn loopback_ir_recovers_sharp_peak() {
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
     let snr_db = 20.0 * (peak_abs / floor.max(1e-15)).log10();
+
+    // The record the run exists to produce (#277): the three numbers, plus
+    // the peak's offset from the window centre, which is the round-trip
+    // latency of *this* chain and nothing else. Printed before *every*
+    // assertion — rig time is expensive and a failure that has to be
+    // characterised is a failure whose numbers you need. An assertion that
+    // fires first and takes the numbers with it costs another run.
+    let centre = ir.len() / 2;
+    let offset = peak_idx as i64 - centre as i64;
+    eprintln!("--- loopback_ir record ---");
+    eprintln!("chain:        {chain}");
+    eprintln!(
+        "sample_rate:  {}",
+        match sample_rate_hz {
+            Some(sr) => format!("{sr} Hz"),
+            None => "(absent from frame)".to_string(),
+        }
+    );
+    eprintln!(
+        "window_len:   {} (ir len), frame window_len_used {}",
+        ir.len(),
+        match window_len_used {
+            Some(w) => w.to_string(),
+            None => "(absent)".to_string(),
+        }
+    );
+    eprintln!("peak_index:   {peak_idx}");
+    eprintln!("peak_abs:     {peak_abs:.6e}");
+    eprintln!("floor_abs:    {floor:.6e}  (max |x| over leading {far_end} samples)");
+    eprintln!("snr_db:       {snr_db:.2}");
+    eprintln!(
+        "peak_offset:  {offset:+} samples from centre ({}){}",
+        centre,
+        match sample_rate_hz {
+            Some(sr) if sr > 0.0 => format!(" = {:+.4} ms", offset as f64 * 1000.0 / sr),
+            _ => String::new(),
+        }
+    );
+    eprintln!("--------------------------");
+
+    assert!(
+        peak_abs > 0.0,
+        "all-zero IR — loopback never delivered audio over {chain}"
+    );
+
+    // The IR peak is the deconvolution delta. `extract_irs` centres the gate
+    // at the sweep endpoint, so the peak nominally sits at `window_len / 2`
+    // — but JACK adds one period of port-to-port latency, shifting it later.
+    // Through an external converter the shift is larger again, by that
+    // converter's own latency. Require the peak in the upper-middle half of
+    // the window, clear of the edges where a truncation artefact would show.
+    //
+    // NOTE: the window this bound divides is *not* the requested
+    // `window_len`. `per_order_window_lens` clamps it to the gap between the
+    // linear IR and the order-2 IR (`sweep.rs:318`, `:335`), which is
+    // `duration · ln 2 / ln(f2/f1)` seconds — 2884 samples at 48 kHz for the
+    // request below, not 16384. See #277 for the measured consequence.
+    let lo_bound = ir.len() / 4;
+    let hi_bound = 3 * ir.len() / 4;
+    assert!(
+        peak_idx > lo_bound && peak_idx < hi_bound,
+        "peak at index {peak_idx} outside expected range [{lo_bound}, {hi_bound}] \
+         (window_len={}) over {chain}; deconvolution may have failed",
+        ir.len()
+    );
+
     assert!(
         snr_db >= 40.0,
-        "loopback IR floor too high: peak={peak_abs:.3e}, far_max={floor:.3e}, \
-         SNR={snr_db:.1} dB (need ≥ 40 dB)"
+        "loopback IR floor too high over {chain}: peak={peak_abs:.3e}, \
+         far_max={floor:.3e}, SNR={snr_db:.1} dB (need ≥ 40 dB)"
     );
 
     // Drain the trailing report + done frames so Drop doesn't race on shutdown.

@@ -406,6 +406,32 @@ devices required. It then runs a 0.5 s exponential sweep, deconvolves,
 and asserts the recovered linear IR has a dominant peak at least 40 dB
 above the pre-impulse floor and within `len/4` of the IR centre.
 
+**That default routes through no converter.** The self-loop stays inside
+the daemon's own JACK client, so it exercises the ring and the
+deconvolution, not an interface. To put the sweep through real hardware,
+name real ports:
+
+```bash
+AC_LOOPBACK_OUT="Babyface Pro Pro:playback_2" \
+AC_LOOPBACK_IN="Babyface Pro Pro:capture_4" \
+AC_LOOPBACK_LEVEL_DBFS=-40 \
+  cargo test -p ac-daemon --test it_loopback_ir -- --ignored --nocapture
+```
+
+Both port variables must be set together — half a route is a route
+through the wrong thing. `AC_LOOPBACK_LEVEL_DBFS` is **mandatory**
+whenever they are set: naming real ports means driving real outputs, and
+`plot_ir` does not apply the config's `drive_max_dbfs` ceiling (only
+`set_drive` does), so that value is the only limit on what reaches the
+converter. Unset, all three default to the self-loop at −6 dBFS and the
+dummy invocation above is unchanged.
+
+`--nocapture` prints the record block: chain, sample rate, window length,
+peak index, peak magnitude, floor, SNR, and the peak's offset from the
+window centre — the round-trip latency of that chain. The block is
+printed before the SNR assertion, so a failing run still leaves its
+numbers behind.
+
 A CPAL equivalent (e.g. via `snd-aloop` or a PipeWire virtual sink) is
 deferred until the CPAL routing path is fixed (issue #27).
 
