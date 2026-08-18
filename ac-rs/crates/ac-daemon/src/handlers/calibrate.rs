@@ -250,7 +250,10 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
             agreement_count: Some(2),
             reading1_s: Some(reading1_s),
             reading2_s: Some(reading2_s),
-            delta_samples: Some(0),
+            // ZMQ.md: `tau_delta_samples` is present only on disagree_* —
+            // a healthy Agree run must not serialize the field at all
+            // (QA #348 correctness 1).
+            delta_samples: None,
             periods: None,
             error: None,
         },
@@ -837,6 +840,11 @@ mod tests {
         assert_eq!(outcome.agreement_count, Some(2));
         assert_eq!(outcome.error, None);
         assert!(outcome.conditions.is_some());
+        // ZMQ.md: tau_delta_samples is present only on disagree_* — a
+        // healthy Agree run must not carry a stray Some(0) (QA #348
+        // correctness 1).
+        assert_eq!(outcome.delta_samples, None);
+        assert_eq!(outcome.periods, None);
     }
 
     #[test]
