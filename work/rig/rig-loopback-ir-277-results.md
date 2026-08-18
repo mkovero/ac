@@ -74,6 +74,8 @@ noisy.
 
 ## Finding 1 — the test cannot pass, and could not have passed before it reached hardware
 
+**Filed as #341.**
+
 `it_loopback_ir` is red on every configuration tried, including the
 `jackd -d dummy` self-loop its own runbook prescribes. Verified on a pristine
 worktree at `origin/main` `edc298a` with no edit of mine, so this is the
@@ -95,6 +97,8 @@ anywhere in this session is 36.89 dB, on a clean electrical loopback.
 The threshold was never run, so it was never wrong out loud.
 
 ## Finding 2 — `window_len` is a request, and the clamp is what the assertions actually divide
+
+**Filed as #342.**
 
 `per_order_window_lens` clamps each order's window to the gap between it and
 the next order (`sweep.rs:318`, `:335`):
@@ -135,7 +139,12 @@ edge, not because they measure the same thing.
 the 29.4 ms figure has been falsified by a second instrument, not merely
 argued against.
 
-**This is the failure mode to carry into #281.** A τ measured with too short
+**This is the failure mode to carry into #281, and it is live rather than
+hypothetical — filed as #340.** `measure_tau` sweeps 0.2 s from 100 Hz
+(`calibrate.rs:56-64`), which clamps its window to 26.2 ms and so reaches
+13.1 ms past centre, at every sample rate. This rig's τ is 43.75 ms. `ac
+calibrate` cannot measure it, has no edge guard, and would return a pinned
+peak. A τ measured with too short
 a sweep does not error, does not warn, and does not look wrong: it produces a
 stable, repeatable, physically plausible number that is off by 14 ms. Runs 1s
 and 2s reproduce to within 8 samples of each other and would pass any
@@ -175,6 +184,8 @@ rather than measuring it would be wrong by that margin, in the direction of
 reporting the interface as faster than it is.
 
 ## Finding 4 — the converter leg costs 0.125 ms, which is not the 1.1931 ms constant
+
+**Filed as #343.**
 
 The converter leg is **12 samples** longer than the pure analogue leg:
 0.125 ms, stable across repeats, at 96 kHz.
