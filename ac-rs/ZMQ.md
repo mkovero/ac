@@ -869,7 +869,8 @@ Look up a stored calibration entry.
       },
       "tau_s":       <float>,
       "measured_at": "<RFC3339>",
-      "method":      "<string>"
+      "method":      "<string>",
+      "agreement_count": <int>   // #347: readings that corroborated this entry, always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a corroborated one
     }
   ]   // always present, [] when no τ has ever been measured for this key
 }
@@ -1428,17 +1429,23 @@ reading either.
 ```json
 // topic: cal_done
 {
-  "key":               "out0_in0",
-  "vrms_at_0dbfs_out": <float> | null,  // post-scale, projected to 0 dBFS
-  "vrms_at_0dbfs_in":  <float> | null,  // post-scale, projected to 0 dBFS
-  "out_state":         "measured" | "unchanged" | "absent",
-  "in_state":          "measured" | "unchanged" | "absent",
-  "tau_state":         "measured" | "not_measured_no_loopback" | "error",
-  "tau_s":             <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
-  "tau_sample_rate":   <int>,           // condition tau_s was measured/attempted under
-  "tau_period_size":   <int> | null,    // ditto; null on backends that can't report one (not "unknown")
-  "tau_error":         "<message>",     // only present when tau_state == "error"
-  "error":             "<message>"      // only present on partial failure (voltage-cal save)
+  "key":                  "out0_in0",
+  "vrms_at_0dbfs_out":    <float> | null,  // post-scale, projected to 0 dBFS
+  "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
+  "out_state":            "measured" | "unchanged" | "absent",
+  "in_state":             "measured" | "unchanged" | "absent",
+  "tau_state":            "measured" | "not_measured_no_loopback" | "error"
+                           | "disagree_period_shift" | "disagree_other",
+  "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
+  "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
+  "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
+  "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
+  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_*)
+  "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
+  "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
+  "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
+  "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
+  "error":                "<message>"      // only present on partial failure (voltage-cal save)
 }
 ```
 
@@ -1451,16 +1458,23 @@ not only what this run measured, and the `*_state` word says which:
 | `unchanged` | the prompt was skipped; the previously stored value stands |
 | `absent` | the field holds no value — never set, or just cleared |
 
-**τ (interface latency, #281)** is not prompt-driven — it piggybacks on
-the loopback state `cal_prompt` step 2 already established, so there is
+**τ (interface latency, #281/#347)** is not prompt-driven — it piggybacks
+on the loopback state `cal_prompt` step 2 already established, so there is
 no third interactive step and no `unchanged` state (skipping a voltage
-prompt does not affect it):
+prompt does not affect it). #347: a single reading is not a measurement of
+τ on this stack — round-trip latency for a fixed path can vary by exactly
+one period between client lifetimes, invisible within any one lifetime
+(stable to 0.001 frames). `calibrate` therefore always runs τ as **two**
+independent client lifecycles (fresh `start`/`stop` each) and compares
+them before storing anything:
 
 | `tau_state` | meaning |
 |-------------|---------|
-| `measured` | loopback detected this run; a short ESS measured τ and it was appended to `tau_history` |
+| `measured` | loopback detected this run; two independent readings agreed to the whole sample and their average was appended to `tau_history` |
 | `not_measured_no_loopback` | loopback not detected this run — nothing to measure τ against |
-| `error` | loopback was detected but the ESS measurement itself failed (`tau_error` names why); the voltage-cal legs above are unaffected |
+| `error` | loopback was detected but a lifecycle's own measurement failed (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
+| `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
@@ -1469,7 +1483,16 @@ under (present regardless of `tau_state`, including `error`), so a
 does not mean unknown — see `AudioEngine::period_size` in
 `ac-daemon/src/audio/mod.rs`: some backends cannot report a period size
 at all, which is a documented backend limitation, distinct from a period
-size that simply wasn't queried.
+size that simply wasn't queried (and means `disagree_period_shift` can
+never fire on that backend — any disagreement there is `disagree_other`).
+
+On either disagreement state, `tau_reading1_s` / `tau_reading2_s` are the
+raw seconds values from the two lifecycles, shown verbatim rather than
+compressed to a delta — the fractional part staying identical across a
+period-shift jump is the diagnostic clue #347 itself was found from.
+`tau_delta_samples` and (on `disagree_period_shift`) `tau_periods` are
+the already-classified delta, so a client doesn't have to re-derive the
+rounding/period-multiple logic itself.
 
 ---
 

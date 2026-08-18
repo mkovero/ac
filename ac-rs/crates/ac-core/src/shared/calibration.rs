@@ -151,6 +151,14 @@ pub struct TauEntry {
     pub measured_at: String,
     /// Free-text description of the method, e.g. `"farina_short_ess"`.
     pub method: String,
+    /// How many independently-lifecycled readings agreed before this entry
+    /// was stored (#347). `0` on any entry written before this field
+    /// existed — `#[serde(default)]` so those deserialize to `0` rather
+    /// than being indistinguishable from a corroborated one. A caller that
+    /// writes this field must never write `1`: since #347, a lone reading
+    /// is no longer a storable outcome — corroborated entries store `>= 2`.
+    #[serde(default)]
+    pub agreement_count: u32,
 }
 
 /// Why an exact-match τ lookup missed. Names the delta to the nearest
@@ -217,6 +225,108 @@ fn tau_field_value(c: &TauConditions, field: &str) -> String {
         "input_port" => c.input_port.clone(),
         _ => "?".to_string(),
     }
+}
+
+/// Outcome of comparing two independently-lifecycled τ readings (#347). A
+/// single reading is not a measurement of τ on this stack — a
+/// graph-buffering shift of exactly one period is invisible within one
+/// client lifetime and stable to 0.001 frames within it, so nothing short
+/// of a second, separately-lifecycled reading can catch it (see the
+/// module-level "third parallel layer" doc). [`compare_tau_readings`]
+/// decides whether two such readings corroborate each other.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TauComparison {
+    /// The two readings match to the whole sample
+    /// (`round((b - a) * sample_rate) == 0`).
+    Agree,
+    /// The two readings disagree and neither may be stored.
+    /// [`TauDisagreement::periods`] tells a period-shift (software, #347's
+    /// own root cause) apart from any other mismatch (a different fault).
+    Disagree(TauDisagreement),
+}
+
+/// The delta between two disagreeing τ readings, in whole samples, plus
+/// enough of the two raw readings to name in a diagnostic message — see
+/// [`TauDisagreement::message`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TauDisagreement {
+    pub reading1_s: f64,
+    pub reading2_s: f64,
+    /// `round((reading2_s - reading1_s) * sample_rate)`. Always nonzero —
+    /// a zero delta is [`TauComparison::Agree`], not a `TauDisagreement`.
+    pub delta_samples: i64,
+    pub sample_rate: u32,
+    pub period_size: Option<u32>,
+    /// `Some(n)` (`n != 0`) when `delta_samples` is an exact multiple of
+    /// `period_size` — a graph-buffering shift, not hardware drift.
+    /// `None` when it isn't, or `period_size` is unknown for this backend:
+    /// a different fault class, per #347's acceptance criteria.
+    pub periods: Option<i64>,
+}
+
+impl TauDisagreement {
+    /// Diagnostic message naming the delta in both samples (the causal,
+    /// period-quantized unit) and milliseconds (what an operator holds in
+    /// their head) — see #347's acceptance criteria: a message that only
+    /// says "readings differ" would pass on ordinary jitter and miss the
+    /// point.
+    pub fn message(&self) -> String {
+        let delta_ms = self.delta_samples as f64 / self.sample_rate as f64 * 1000.0;
+        match self.periods {
+            Some(n) => {
+                let period = self
+                    .period_size
+                    .expect("periods is Some only when period_size is Some");
+                format!(
+                    "\u{3c4} readings disagree by exactly {} period{} of {period} samples \
+                     ({:.3} samples \u{2192} {:.3} samples, \u{394} {} samples = {delta_ms:.4} \
+                     ms at {} Hz) \u{2014} a graph-buffering shift, not hardware drift",
+                    n.unsigned_abs(),
+                    if n.unsigned_abs() == 1 { "" } else { "s" },
+                    self.reading1_s * self.sample_rate as f64,
+                    self.reading2_s * self.sample_rate as f64,
+                    self.delta_samples,
+                    self.sample_rate,
+                )
+            }
+            None => format!(
+                "\u{3c4} readings disagree, not a period multiple ({:.3} samples \u{2192} \
+                 {:.3} samples, \u{394} {} samples = {delta_ms:.4} ms at {} Hz)",
+                self.reading1_s * self.sample_rate as f64,
+                self.reading2_s * self.sample_rate as f64,
+                self.delta_samples,
+                self.sample_rate,
+            ),
+        }
+    }
+}
+
+/// Compare two independently-lifecycled τ readings (#347) and classify the
+/// result. Works in whole samples, derived directly from the issue's own
+/// rig data (`+1024.000` exact, fractional part unchanged across the
+/// jump): `delta_samples = round((reading2_s - reading1_s) * sample_rate)`.
+pub fn compare_tau_readings(
+    reading1_s: f64,
+    reading2_s: f64,
+    sample_rate: u32,
+    period_size: Option<u32>,
+) -> TauComparison {
+    let delta_samples = ((reading2_s - reading1_s) * sample_rate as f64).round() as i64;
+    if delta_samples == 0 {
+        return TauComparison::Agree;
+    }
+    let periods = period_size.and_then(|p| {
+        let p = p as i64;
+        (p != 0 && delta_samples % p == 0).then_some(delta_samples / p)
+    });
+    TauComparison::Disagree(TauDisagreement {
+        reading1_s,
+        reading2_s,
+        delta_samples,
+        sample_rate,
+        period_size,
+        periods,
+    })
 }
 
 /// Condition fields that differ between `a` and `b`, in a fixed order.
@@ -964,6 +1074,7 @@ mod tests {
             tau_s,
             measured_at: crate::shared::time::now_utc_iso8601(),
             method: "farina_short_ess".to_string(),
+            agreement_count: 2,
         }
     }
 
@@ -1045,6 +1156,99 @@ mod tests {
         assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-30.0));
         assert_eq!(loaded.tau_history.len(), 1);
         assert!((loaded.tau_history[0].tau_s - 0.0011931).abs() < 1e-12);
+    }
+
+    // ─── compare_tau_readings — issue #347 ──────────────────────────────
+
+    #[test]
+    fn compare_tau_readings_exact_match_agrees() {
+        let cmp = compare_tau_readings(0.001, 0.001, 48_000, Some(1024));
+        assert_eq!(cmp, TauComparison::Agree);
+    }
+
+    #[test]
+    fn compare_tau_readings_sub_sample_jitter_still_agrees() {
+        // #347 acceptance: within-lifecycle stability is 0.001 frame; the
+        // comparator must not flag that as a disagreement.
+        let cmp = compare_tau_readings(0.001, 0.001 + 1e-9, 48_000, Some(1024));
+        assert_eq!(cmp, TauComparison::Agree);
+    }
+
+    #[test]
+    fn compare_tau_readings_refuses_on_period_shift_and_names_the_period() {
+        // #347's own rig data: 4262.064 frames -> 5286.064 frames at
+        // 96 kHz, exactly +1024.000 samples = one period, fractional part
+        // unchanged. A test that only checks "readings differ" would pass
+        // on noise and miss the point — assert the period is *named*.
+        let sr = 96_000;
+        let period = 1024u32;
+        let reading1_s = 4262.064 / sr as f64;
+        let reading2_s = 5286.064 / sr as f64;
+        let cmp = compare_tau_readings(reading1_s, reading2_s, sr, Some(period));
+        let TauComparison::Disagree(d) = cmp else {
+            panic!("expected a period-shift disagreement, got {cmp:?}");
+        };
+        assert_eq!(d.delta_samples, 1024);
+        assert_eq!(d.periods, Some(1));
+        let msg = d.message();
+        assert!(
+            msg.contains("1 period"),
+            "message must name the period count: {msg}"
+        );
+        assert!(
+            msg.contains("1024"),
+            "message must name the period size: {msg}"
+        );
+        assert!(
+            msg.contains("10.6667 ms"),
+            "message must name the delta in ms: {msg}"
+        );
+    }
+
+    #[test]
+    fn compare_tau_readings_multi_period_shift_names_the_count() {
+        let sr = 48_000;
+        let period = 512u32;
+        let reading1_s = 1000.0 / sr as f64;
+        let reading2_s = (1000.0 + 1536.0) / sr as f64; // 3 periods
+        let cmp = compare_tau_readings(reading1_s, reading2_s, sr, Some(period));
+        let TauComparison::Disagree(d) = cmp else {
+            panic!("expected a period-shift disagreement, got {cmp:?}");
+        };
+        assert_eq!(d.periods, Some(3));
+        assert!(d.message().contains("3 periods"), "got {}", d.message());
+    }
+
+    #[test]
+    fn compare_tau_readings_non_period_delta_is_a_different_fault() {
+        // #347 acceptance: "a disagreement that is not a multiple of the
+        // period is a different fault and should say so" — not laundered
+        // through the same message as a period-shift.
+        let sr = 96_000;
+        let reading1_s = 4262.064 / sr as f64;
+        let reading2_s = 4290.500 / sr as f64; // delta 28.436 -> rounds to 28
+        let cmp = compare_tau_readings(reading1_s, reading2_s, sr, Some(1024));
+        let TauComparison::Disagree(d) = cmp else {
+            panic!("expected a disagreement, got {cmp:?}");
+        };
+        assert_eq!(d.periods, None);
+        let msg = d.message();
+        assert!(
+            msg.contains("not a period multiple"),
+            "message must say this is a different fault class: {msg}"
+        );
+    }
+
+    #[test]
+    fn compare_tau_readings_unknown_period_size_is_never_a_period_shift() {
+        // A backend that can't report a period size (AudioEngine::
+        // period_size -> None) can never corroborate the period-shift
+        // classification, even if the delta happens to look tidy.
+        let cmp = compare_tau_readings(0.0, 1024.0 / 48_000.0, 48_000, None);
+        let TauComparison::Disagree(d) = cmp else {
+            panic!("expected a disagreement, got {cmp:?}");
+        };
+        assert_eq!(d.periods, None);
     }
 
     #[test]

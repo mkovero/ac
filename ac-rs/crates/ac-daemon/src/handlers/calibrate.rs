@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use ac_core::measurement::sweep::{
     deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
 };
-use ac_core::shared::calibration::{Calibration, MicResponse, TauConditions, TauEntry};
+use ac_core::shared::calibration::{
+    compare_tau_readings, Calibration, MicResponse, TauComparison, TauConditions, TauEntry,
+};
 
 use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
@@ -96,26 +98,182 @@ fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
     Ok(offset_samples as f64 / sr as f64)
 }
 
-/// Turn the loopback flag established at step 2 into the `tau_state` /
-/// `tau_s` / `tau_error` triple `calibrate` reports — the exact decision
-/// #281 QA flagged as untestable because it was inlined in the worker
-/// closure, reachable only through a full daemon spawn. `measure` is only
-/// called when `is_loopback`, matching the worker's original behaviour of
-/// never running the τ sweep on a run with no loopback detected.
-fn tau_result(
-    is_loopback: bool,
-    measure: impl FnOnce() -> anyhow::Result<f64>,
-) -> (&'static str, Option<f64>, Option<String>) {
-    if !is_loopback {
-        return ("not_measured_no_loopback", None, None);
+/// Outcome of one independent τ lifecycle attempt (#347): either both
+/// readings were taken and compared, or a lifecycle itself failed (engine
+/// start / measurement error) before a comparison was possible.
+enum TauAttempt {
+    Compared {
+        conditions: TauConditions,
+        reading1_s: f64,
+        reading2_s: f64,
+        comparison: TauComparison,
+    },
+    Error {
+        conditions: Option<TauConditions>,
+        message: String,
+    },
+}
+
+/// Run `measure_tau` twice, each inside its own fresh engine lifecycle —
+/// `make_engine` → `start` → `measure_tau` → `stop` — and compare the two
+/// readings (#347). Each call is a genuinely new JACK client registration
+/// (`JackEngine::start` calls `Client::new` fresh every time), which is
+/// exactly the boundary the one-period bug lives on: within one lifetime
+/// both a real `jack_iodelay` client and `ac-daemon`'s own workers are
+/// stable to 0.001 frames, so nothing short of a second, separately
+/// re-registered client can catch a shift that only shows up between them.
+fn measure_tau_twice(
+    fake: bool,
+    device: u32,
+    out_port: &str,
+    in_port: &str,
+    amp: f64,
+) -> TauAttempt {
+    let run_once = || -> anyhow::Result<(f64, TauConditions)> {
+        let mut eng = make_engine(fake);
+        eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
+        let conditions = TauConditions {
+            device,
+            backend: eng.backend_name().to_string(),
+            sample_rate: eng.sample_rate(),
+            period_size: eng.period_size(),
+            output_port: out_port.to_string(),
+            input_port: in_port.to_string(),
+        };
+        let reading = measure_tau(&mut *eng, amp);
+        eng.set_silence();
+        eng.stop();
+        reading.map(|t| (t, conditions))
+    };
+
+    let (reading1_s, conditions) = match run_once() {
+        Ok(r) => r,
+        Err(e) => {
+            return TauAttempt::Error {
+                conditions: None,
+                message: format!("\u{3c4} measurement failed (reading 1 of 2): {e}"),
+            }
+        }
+    };
+    let (reading2_s, conditions2) = match run_once() {
+        Ok(r) => r,
+        Err(e) => {
+            return TauAttempt::Error {
+                conditions: Some(conditions),
+                message: format!("\u{3c4} measurement failed (reading 2 of 2): {e}"),
+            }
+        }
+    };
+    let comparison = compare_tau_readings(
+        reading1_s,
+        reading2_s,
+        conditions2.sample_rate,
+        conditions2.period_size,
+    );
+    TauAttempt::Compared {
+        conditions: conditions2,
+        reading1_s,
+        reading2_s,
+        comparison,
     }
-    match measure() {
-        Ok(t) => ("measured", Some(t), None),
-        Err(e) => (
-            "error",
-            None,
-            Some(format!("\u{3c4} measurement failed: {e}")),
-        ),
+}
+
+/// Everything `calibrate` reports about this run's τ attempt — feeds both
+/// the `cal_done` wire frame and, on a corroborated result, the `TauEntry`
+/// appended to `tau_history`. One reading is never a storable outcome
+/// (#347): `state == "measured"` only when two independent lifecycles
+/// agreed, and `tau_s` / `agreement_count` are `Some` only in that case.
+struct TauOutcome {
+    state: &'static str,
+    conditions: Option<TauConditions>,
+    tau_s: Option<f64>,
+    agreement_count: Option<u32>,
+    reading1_s: Option<f64>,
+    reading2_s: Option<f64>,
+    delta_samples: Option<i64>,
+    periods: Option<i64>,
+    error: Option<String>,
+}
+
+impl TauOutcome {
+    fn not_measured_no_loopback() -> Self {
+        Self {
+            state: "not_measured_no_loopback",
+            conditions: None,
+            tau_s: None,
+            agreement_count: None,
+            reading1_s: None,
+            reading2_s: None,
+            delta_samples: None,
+            periods: None,
+            error: None,
+        }
+    }
+}
+
+/// Turn the loopback flag established at step 2 into the [`TauOutcome`]
+/// `calibrate` reports — the exact decision #281 QA flagged as untestable
+/// because it was inlined in the worker closure, reachable only through a
+/// full daemon spawn. `attempt` is only called when `is_loopback`, matching
+/// the worker's original behaviour of never running the τ sweep on a run
+/// with no loopback detected.
+fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
+    if !is_loopback {
+        return TauOutcome::not_measured_no_loopback();
+    }
+    match attempt() {
+        TauAttempt::Error {
+            conditions,
+            message,
+        } => TauOutcome {
+            state: "error",
+            conditions,
+            tau_s: None,
+            agreement_count: None,
+            reading1_s: None,
+            reading2_s: None,
+            delta_samples: None,
+            periods: None,
+            error: Some(message),
+        },
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            comparison: TauComparison::Agree,
+        } => TauOutcome {
+            state: "measured",
+            conditions: Some(conditions),
+            // Both readings agreed to the whole sample — average them
+            // rather than picking one arbitrarily.
+            tau_s: Some((reading1_s + reading2_s) / 2.0),
+            agreement_count: Some(2),
+            reading1_s: Some(reading1_s),
+            reading2_s: Some(reading2_s),
+            delta_samples: Some(0),
+            periods: None,
+            error: None,
+        },
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            comparison: TauComparison::Disagree(d),
+        } => TauOutcome {
+            state: if d.periods.is_some() {
+                "disagree_period_shift"
+            } else {
+                "disagree_other"
+            },
+            conditions: Some(conditions),
+            tau_s: None,
+            agreement_count: None,
+            reading1_s: Some(reading1_s),
+            reading2_s: Some(reading2_s),
+            delta_samples: Some(d.delta_samples),
+            periods: d.periods,
+            error: Some(d.message()),
+        },
     }
 }
 
@@ -251,28 +409,30 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             return;
         }
 
-        // τ (interface latency, #281) — not prompt-driven, so it piggybacks
-        // on the loopback state established above rather than adding a
-        // third interactive step. Runs here, before `eng.stop()`, because
-        // `period_size()` needs a live client. Measured whenever a loopback
-        // was detected this run, regardless of whether either voltage
-        // prompt was answered or skipped — the cheap-refresh path (#279:
-        // both prompts skipped) still refreshes τ.
-        let tau_conditions = TauConditions {
-            device: cfg.device,
-            backend: eng.backend_name().to_string(),
-            sample_rate: eng.sample_rate(),
-            period_size: eng.period_size(),
-            output_port: out_port.clone(),
-            input_port: in_port.clone(),
-        };
-        let (tau_state, tau_s, tau_err) = tau_result(is_loopback, || {
-            let amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
-            measure_tau(&mut *eng, amp)
-        });
+        // Fallback conditions for the `cal_done` wire frame when τ isn't
+        // measured this run (no-loopback, or a lifecycle error before any
+        // conditions were captured) — ZMQ.md requires `tau_sample_rate` /
+        // `tau_period_size` present regardless of `tau_state`.
+        let fallback_sample_rate = eng.sample_rate();
+        let fallback_period_size = eng.period_size();
 
         eng.set_silence();
         eng.stop();
+
+        // τ (interface latency, #281/#347) — not prompt-driven, so it
+        // piggybacks on the loopback state established above rather than
+        // adding a third interactive step. Measured whenever a loopback was
+        // detected this run, regardless of whether either voltage prompt
+        // was answered or skipped — the cheap-refresh path (#279: both
+        // prompts skipped) still refreshes τ. #347: a single reading is not
+        // a measurement of τ on this stack, so this now runs two
+        // independent client lifecycles (`measure_tau_twice`), decoupled
+        // from the voltage-cal `eng` above (already stopped) — see that
+        // function's doc for why the lifecycle boundary matters.
+        let ref_amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
+        let tau_outcome = tau_result(is_loopback, || {
+            measure_tau_twice(fake, cfg.device, &out_port, &in_port, ref_amp)
+        });
 
         // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
         let out_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
@@ -291,32 +451,57 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         if out_state == "measured" || in_state == "measured" {
             cal.ref_dbfs = ref_dbfs;
         }
-        if tau_state == "measured" {
+        if tau_outcome.state == "measured" {
             cal.tau_history.push(TauEntry {
-                conditions: tau_conditions.clone(),
-                tau_s: tau_s.expect("tau_s is Some when tau_state is \"measured\""),
+                conditions: tau_outcome
+                    .conditions
+                    .clone()
+                    .expect("conditions is Some when tau_state is \"measured\""),
+                tau_s: tau_outcome
+                    .tau_s
+                    .expect("tau_s is Some when tau_state is \"measured\""),
                 measured_at: ac_core::shared::time::now_utc_iso8601(),
                 method: TAU_METHOD.to_string(),
+                agreement_count: tau_outcome
+                    .agreement_count
+                    .expect("agreement_count is Some when tau_state is \"measured\""),
             });
         }
         let save_err = cal.save(None).err().map(|e| e.to_string());
 
         let key = cal.key();
+        let (tau_sample_rate, tau_period_size) = match &tau_outcome.conditions {
+            Some(c) => (c.sample_rate, c.period_size),
+            None => (fallback_sample_rate, fallback_period_size),
+        };
         // Values reported are what is now stored, not what this run
         // measured — with `*_state` naming which of the three that is.
         let mut cal_done_frame = json!({
-            "key":               key,
-            "vrms_at_0dbfs_out": cal.vrms_at_0dbfs_out,
-            "vrms_at_0dbfs_in":  cal.vrms_at_0dbfs_in,
-            "out_state":         out_state,
-            "in_state":          in_state,
-            "tau_state":         tau_state,
-            "tau_s":             tau_s,
-            "tau_sample_rate":   tau_conditions.sample_rate,
-            "tau_period_size":   tau_conditions.period_size,
+            "key":                  key,
+            "vrms_at_0dbfs_out":    cal.vrms_at_0dbfs_out,
+            "vrms_at_0dbfs_in":     cal.vrms_at_0dbfs_in,
+            "out_state":            out_state,
+            "in_state":             in_state,
+            "tau_state":            tau_outcome.state,
+            "tau_s":                tau_outcome.tau_s,
+            "tau_sample_rate":      tau_sample_rate,
+            "tau_period_size":      tau_period_size,
+            "tau_agreement_count":  tau_outcome.agreement_count.unwrap_or(0),
         });
-        if let Some(ref e) = tau_err {
+        if let Some(ref e) = tau_outcome.error {
             cal_done_frame["tau_error"] = json!(e);
+        }
+        if let Some(r1) = tau_outcome.reading1_s {
+            cal_done_frame["tau_reading1_s"] = json!(r1);
+        }
+        if let Some(r2) = tau_outcome.reading2_s {
+            cal_done_frame["tau_reading2_s"] = json!(r2);
+        }
+        if let Some(d) = tau_outcome.delta_samples {
+            cal_done_frame["tau_delta_samples"] = json!(d);
+        }
+        if let Some(p) = tau_outcome.periods {
+            cal_done_frame["tau_periods"] = json!(p);
         }
         if let Some(ref e) = save_err {
             cal_done_frame["error"] = json!(e);
@@ -600,40 +785,123 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
 mod tests {
     use super::*;
 
+    fn dummy_conditions() -> TauConditions {
+        TauConditions {
+            device: 0,
+            backend: "fake".to_string(),
+            sample_rate: 48_000,
+            period_size: Some(1024),
+            output_port: "out".to_string(),
+            input_port: "in".to_string(),
+        }
+    }
+
     /// #281 QA correctness issue 3: the no-loopback path is hard to drive
     /// end-to-end under `--fake-audio` (the fake backend's step-2 capture
     /// always reads as loopback-shaped), so pin the decision down directly
-    /// instead. `measure` must not run at all when there's no loopback.
+    /// instead. `attempt` must not run at all when there's no loopback.
     #[test]
     fn tau_result_no_loopback_short_circuits_without_measuring() {
         let mut called = false;
-        let (state, tau_s, err) = tau_result(false, || {
+        let outcome = tau_result(false, || {
             called = true;
-            Ok(0.001)
+            TauAttempt::Compared {
+                conditions: dummy_conditions(),
+                reading1_s: 0.001,
+                reading2_s: 0.001,
+                comparison: TauComparison::Agree,
+            }
         });
-        assert_eq!(state, "not_measured_no_loopback");
-        assert_eq!(tau_s, None);
-        assert_eq!(err, None);
+        assert_eq!(outcome.state, "not_measured_no_loopback");
+        assert_eq!(outcome.tau_s, None);
+        assert_eq!(outcome.error, None);
         assert!(
             !called,
-            "measure must not run when no loopback was detected"
+            "attempt must not run when no loopback was detected"
         );
     }
 
+    /// #347: two independent readings agreeing is what "measured" means
+    /// now — a single reading is no longer a storable outcome, so
+    /// `agreement_count` must always be `Some(2)` alongside it.
     #[test]
-    fn tau_result_loopback_ok_reports_measured() {
-        let (state, tau_s, err) = tau_result(true, || Ok(0.000_667));
-        assert_eq!(state, "measured");
-        assert_eq!(tau_s, Some(0.000_667));
-        assert_eq!(err, None);
+    fn tau_result_agreeing_readings_reports_measured_with_agreement_count() {
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            comparison: TauComparison::Agree,
+        });
+        assert_eq!(outcome.state, "measured");
+        assert_eq!(outcome.tau_s, Some(0.000_667));
+        assert_eq!(outcome.agreement_count, Some(2));
+        assert_eq!(outcome.error, None);
+        assert!(outcome.conditions.is_some());
+    }
+
+    #[test]
+    fn tau_result_averages_two_agreeing_readings() {
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001_000_00,
+            reading2_s: 0.001_000_02,
+            comparison: TauComparison::Agree,
+        });
+        let tau_s = outcome.tau_s.expect("measured");
+        assert!((tau_s - 0.001_000_01).abs() < 1e-9);
+    }
+
+    /// #347 acceptance criterion: "two synthetic readings one period_size
+    /// apart are refused, with the period named in the message" — rig data
+    /// from the issue body (`4262.064 -> 5286.064` at 96 kHz, +1024
+    /// exactly).
+    #[test]
+    fn tau_result_period_shift_disagreement_refuses_and_names_the_period() {
+        let comparison =
+            compare_tau_readings(4262.064 / 96_000.0, 5286.064 / 96_000.0, 96_000, Some(1024));
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 4262.064 / 96_000.0,
+            reading2_s: 5286.064 / 96_000.0,
+            comparison,
+        });
+        assert_eq!(outcome.state, "disagree_period_shift");
+        assert_eq!(outcome.tau_s, None);
+        assert_eq!(outcome.agreement_count, None);
+        assert_eq!(outcome.periods, Some(1));
+        let msg = outcome.error.expect("disagreement carries a message");
+        assert!(msg.contains("1 period"), "got {msg}");
+        assert!(msg.contains("1024"), "got {msg}");
+    }
+
+    /// #347 acceptance criterion: a disagreement that is *not* a period
+    /// multiple is a different fault and must say so, not read as the same
+    /// "mismatch" as a period-shift.
+    #[test]
+    fn tau_result_non_period_disagreement_is_a_different_state() {
+        let comparison = compare_tau_readings(0.0, 0.000_5, 48_000, Some(1024));
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.0,
+            reading2_s: 0.000_5,
+            comparison,
+        });
+        assert_eq!(outcome.state, "disagree_other");
+        assert_eq!(outcome.tau_s, None);
+        assert_eq!(outcome.periods, None);
+        let msg = outcome.error.expect("disagreement carries a message");
+        assert!(msg.contains("not a period multiple"), "got {msg}");
     }
 
     #[test]
     fn tau_result_loopback_err_reports_error_state_and_message() {
-        let (state, tau_s, err) = tau_result(true, || Err(anyhow::anyhow!("timeout")));
-        assert_eq!(state, "error");
-        assert_eq!(tau_s, None);
-        let msg = err.expect("error message present on failure");
+        let outcome = tau_result(true, || TauAttempt::Error {
+            conditions: None,
+            message: "\u{3c4} measurement failed (reading 1 of 2): timeout".to_string(),
+        });
+        assert_eq!(outcome.state, "error");
+        assert_eq!(outcome.tau_s, None);
+        let msg = outcome.error.expect("error message present on failure");
         assert!(
             msg.contains("timeout"),
             "error message should name the failure: {msg}"

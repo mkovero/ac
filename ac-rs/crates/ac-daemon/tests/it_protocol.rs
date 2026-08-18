@@ -1177,6 +1177,12 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
         "tau_s {tau_s} far from expected {expected} (32-sample fake loopback delay): {done}"
     );
     assert_eq!(done["tau_sample_rate"], json!(48_000), "frame: {done}");
+    // #347: "measured" now means two independently-lifecycled readings
+    // agreed — the fake backend's fixed loopback delay makes both
+    // lifecycles land on the same 32-sample reading, so this must corroborate.
+    assert_eq!(done["tau_agreement_count"], json!(2), "frame: {done}");
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
 }
 
 /// #281 QA correctness issue 2: the cheap-refresh criterion (#279: both
@@ -1220,6 +1226,13 @@ fn calibrate_cheap_refresh_still_measures_tau() {
         history.len(),
         1,
         "a cheap-refresh run must still append a tau_history entry: {after}"
+    );
+    // #347: a stored entry must record how many readings agreed — never
+    // `1`, since a lone reading is no longer a storable outcome.
+    assert_eq!(
+        history[0]["agreement_count"],
+        json!(2),
+        "stored entry must record its corroboration count: {after}"
     );
 }
 
