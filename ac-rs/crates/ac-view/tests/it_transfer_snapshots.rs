@@ -29,7 +29,7 @@ use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
     Smoothing, Source, TransferInput, TransferScene,
 };
-use ac_view::view::{draw_view, SpectrumViewState, StimState, TransferViewState, ViewKind};
+use ac_view::view::{draw_view, Focus, SpectrumViewState, StimState, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -211,6 +211,36 @@ fn snapshot_transfer_ir_panel() {
     ac_view::fonts::install(&h.ctx);
     h.run();
     h.snapshot("transfer_ir_panel");
+}
+
+/// QA #336's outstanding blocker on this PR (#321): the two fixed
+/// correctness issues (stored runs invisible with no live scene; two
+/// same-named runs indistinguishable in the legend) painted through the
+/// real wgpu adapter, not just `it_trace_comparison_paint.rs`'s no-GPU
+/// kittest harness — this is the human-viewable A3 evidence the earlier
+/// review round asked for and the dev's session couldn't reach. Both
+/// stored runs share the label `run.acsnap` on purpose, so the legend's
+/// two timestamp-suffixed rows are themselves the evidence for issue 2;
+/// `transfer: None` (no live scene at all) is the evidence for issue 1.
+#[test]
+#[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
+fn snapshot_transfer_stored_comparison_no_live() {
+    let run_a = transfer_scene();
+    let run_b = transfer_scene();
+    let mut state = TransferViewState::new(-10.0, -20.0);
+    state.focus = Focus::Stored(0);
+    let view = ViewKind::Transfer(state);
+    let stored: Vec<(&str, &str, &TransferScene, bool)> = vec![
+        ("run.acsnap", "2026-08-01T00:00:00Z", &run_a, true),
+        ("run.acsnap", "2026-08-02T00:00:00Z", &run_b, false),
+    ];
+    let mut h = Harness::builder()
+        .with_size(SIZE)
+        .wgpu()
+        .build_ui(|ui| draw_view(&view, ui, None, None, &stored, None));
+    ac_view::fonts::install(&h.ctx);
+    h.run();
+    h.snapshot("transfer_stored_comparison_no_live");
 }
 
 #[test]
