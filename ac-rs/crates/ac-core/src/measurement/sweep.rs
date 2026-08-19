@@ -247,6 +247,12 @@ pub struct DeconvolvedIrs {
     /// decision, so it stays populated for an order whose gate fell off
     /// the front of `full` and therefore has empty `samples`.
     pub window_len_used: Vec<usize>,
+    /// The sweep parameters `extract_irs` was called with. These set the
+    /// adjacent-harmonic-order gap (`Δt_k = duration_s · ln(k) /
+    /// ln(f2_hz/f1_hz)`) that [`Self::clamp_note`] names as the reason for
+    /// any clamp — kept here rather than re-threaded through the call site
+    /// so the note can be produced from `self` alone.
+    pub params: SweepParams,
 }
 
 impl DeconvolvedIrs {
@@ -262,6 +268,11 @@ impl DeconvolvedIrs {
     /// honoured for every order. Meant for `MeasurementReport.notes`: a
     /// shortened gate changes what the harmonic IRs mean, so it must not
     /// reach the operator as a silent substitution.
+    ///
+    /// Names the reason (the adjacent-harmonic-order gap) and the sweep
+    /// parameters that set it (#342) — a caller who only sees "clamped to
+    /// N samples" has no knob to turn; one who sees `duration_s`/`f1_hz`/
+    /// `f2_hz` does.
     pub fn clamp_note(&self) -> Option<String> {
         let clamped: Vec<String> = self
             .window_len_used
@@ -276,9 +287,16 @@ impl DeconvolvedIrs {
         Some(format!(
             "harmonic gate window clamped below the requested {} samples so \
              adjacent orders do not overlap: {}. Orders not listed used the \
-             requested length.",
+             requested length. The adjacent-harmonic-order gap is set by \
+             f1_hz={} Hz, f2_hz={} Hz, duration_s={} s (sample_rate={} Hz) \
+             — widen it by increasing duration_s or narrowing the \
+             f2_hz/f1_hz span.",
             self.window_len_requested,
-            clamped.join(", ")
+            clamped.join(", "),
+            self.params.f1_hz,
+            self.params.f2_hz,
+            self.params.duration_s,
+            self.params.sample_rate,
         ))
     }
 }
@@ -402,6 +420,7 @@ pub fn extract_irs(
         harmonics,
         window_len_requested: window_len,
         window_len_used,
+        params: *p,
     })
 }
 
@@ -1184,6 +1203,32 @@ mod tests {
             !note.contains("order 1 \u{2192}"),
             "order 1 was not clamped and must not be listed: {note}"
         );
+    }
+
+    #[test]
+    fn clamp_note_carries_the_gap_reason_and_its_parameters() {
+        // #342: "clamped to N samples" alone gives the operator no knob to
+        // turn. The note must also say *why* — the adjacent-harmonic-order
+        // gap — and the sweep parameters that set it, so the operator knows
+        // duration_s/f1_hz/f2_hz is what to change.
+        let (p, full) = deconvolved_default();
+        let irs = extract_irs(&full, &p, 5, 4096).unwrap();
+        let note = irs.clamp_note().expect("orders 2..5 are clamped at 4096");
+        assert!(
+            note.to_lowercase().contains("gap"),
+            "note should name the adjacent-harmonic-order gap as the reason: {note}"
+        );
+        for needle in [
+            format!("f1_hz={}", p.f1_hz),
+            format!("f2_hz={}", p.f2_hz),
+            format!("duration_s={}", p.duration_s),
+        ] {
+            assert!(
+                note.contains(&needle),
+                "note should carry `{needle}` so the operator knows which \
+                 knob widens the gap: {note}"
+            );
+        }
     }
 
     #[test]
