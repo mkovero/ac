@@ -18,7 +18,7 @@ use ac_core::visualize::transfer::impulse_response_from_h;
 
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{time_axis, time_to_x, Axis};
-use crate::transfer::{format_delay_readout, SPEED_OF_SOUND_DEFAULT_M_S};
+use crate::transfer::{format_delay_readout_plain, SPEED_OF_SOUND_DEFAULT_M_S};
 use crate::wire::IrWireFrame;
 
 /// The header line every IR panel draws verbatim, top of the pane.
@@ -216,7 +216,7 @@ impl IrScene {
             } else {
                 0.5
             },
-            text: format_delay_readout(
+            text: format_delay_readout_plain(
                 input.delay_ms,
                 input.delay_locked,
                 input
@@ -298,9 +298,9 @@ mod tests {
         assert_eq!(labels, vec!["-500 ms", "0", "+500 ms"]);
     }
 
-    // Arrival marker text is byte-identical to `format_delay_readout`'s
-    // own output — proves this module calls it rather than
-    // reimplementing the "no metres before lock" rule.
+    // Arrival marker text is byte-identical to
+    // `format_delay_readout_plain`'s own output — proves this module calls
+    // it rather than reimplementing the "no metres before lock" rule.
     #[test]
     fn arrival_marker_reuses_format_delay_readout_verbatim() {
         let mut input = locked_input(vec![0.0, 1.0, -1.0, 0.0]);
@@ -309,7 +309,7 @@ mod tests {
         let scene = IrScene::from_input(&input);
         assert_eq!(
             scene.arrival.text,
-            format_delay_readout(4.82, Some(true), SPEED_OF_SOUND_DEFAULT_M_S)
+            format_delay_readout_plain(4.82, Some(true), SPEED_OF_SOUND_DEFAULT_M_S)
         );
         assert!(scene.arrival.text.contains("4.82 ms"));
         assert!(scene.arrival.text.contains('m'));

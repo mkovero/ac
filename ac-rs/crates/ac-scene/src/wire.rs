@@ -214,6 +214,19 @@ pub struct WireFrame {
     /// #238 fixed, and reachable only in the sessions #226 exists for.
     #[serde(default)]
     pub delay_attempts: u32,
+    /// This pair's distance-calibration constant (#243), when the session
+    /// named a `distance_setup_id` and one was found for this
+    /// `(ref_channel, setup_id)`. `None` covers both a daemon predating the
+    /// field and a session that named no setup id — either way, the delay
+    /// readout's metres figure is not shown (see `crate::transfer`).
+    #[serde(default)]
+    pub distance_cal: Option<WireDistanceCal>,
+    /// Session-scoped plausibility ceiling for the delay readout's metres
+    /// figure (#243), in metres. An operator-supplied sanity bound, not
+    /// derived — `None` disables the plausibility check entirely rather
+    /// than guessing a room size.
+    #[serde(default)]
+    pub distance_plausible_max_m: Option<f64>,
 
     // ---- input level meters (§4.2) ----
     /// Raw capture peak, `20·log10(max|sample|)` over the frame's
@@ -253,6 +266,18 @@ pub struct WireFrame {
     /// peaks from reading as silence.
     #[serde(default)]
     pub drive: Option<WireDrive>,
+}
+
+/// A pair's stored distance-calibration constant, as carried on the wire
+/// (#243). See [`WireFrame::distance_cal`] and `crate::transfer`'s
+/// `DistanceCalibration`, which this adapts into.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireDistanceCal {
+    pub constant_ms: f64,
+    pub setup_id: String,
+    pub captured_at: String,
+    #[serde(default)]
+    pub captured_distance_m: Option<f64>,
 }
 
 impl MtwColumns {

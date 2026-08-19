@@ -5,6 +5,7 @@
 //! segment-split unit test: this proves the split survives to the
 //! painted polyline.
 
+use ac_scene::transfer::DistanceCalibration;
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
     TransferScene,
@@ -36,6 +37,10 @@ fn masked_scene() -> TransferScene {
         delay_ms: 0.0,
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: None,
         ref_peak_dbfs: None,
         channel_role: "meas_0".to_string(),
@@ -153,6 +158,10 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         delay_ms: 0.0,
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -259,6 +268,10 @@ fn the_persistent_row_paints_its_instruction() {
             delay_ms: 0.0,
             delay_locked: Some(true),
             speed_of_sound_m_s: None,
+            meas_channel: 0,
+            ref_channel: 1,
+            distance_cal: None,
+            distance_plausible_max_m: None,
             meas_peak_dbfs: Some(-30.0),
             ref_peak_dbfs: Some(-14.5),
             channel_role: "meas_0".to_string(),
@@ -429,8 +442,18 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         // the band row and the readout at its *widest* — and the metres
         // figure is what makes it wide. An unlocked fixture would silently
         // narrow the string and the layout test would stop proving anything.
+        // Likewise a stored distance calibration (#243) — without one the
+        // readout is ms-only regardless of lock, which is narrower still.
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: Some(DistanceCalibration {
+            constant_ms: 0.0,
+            setup_id: "fixture".to_string(),
+            captured_at: "2026-01-01T00:00:00Z".to_string(),
+        }),
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),

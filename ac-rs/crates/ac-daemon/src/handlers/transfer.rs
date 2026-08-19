@@ -312,6 +312,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
+    // Distance-calibration selector (#243). Absent → every pair's
+    // `distance_cal` is `None` for the whole session, which is the safe
+    // default: the delay readout's metres figure stays withheld rather
+    // than being computed against a guessed constant. Present-but-
+    // unresolvable is validated synchronously below, not left to degrade
+    // mid-session.
+    let distance_setup_id: Option<String> = cmd
+        .get("distance_setup_id")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    // Session-scoped plausibility ceiling for the same readout, in metres
+    // (#243). No default — an unset ceiling disables the check rather than
+    // guessing a room size.
+    let distance_plausible_max_m: Option<f64> =
+        cmd.get("distance_plausible_max_m").and_then(Value::as_f64);
+
     let cfg = state.cfg.lock().unwrap().clone();
     let capture_ports = super::cached_capture_ports(state);
 
@@ -393,6 +409,27 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
+    // Distance-calibration validation (#243): a `distance_setup_id` that
+    // does not resolve for every pair refuses the whole request
+    // synchronously, same discipline as the mic-curve check above and as
+    // `Calibration::tau_for`'s own refusal — a stale or wrong setup id must
+    // never silently degrade a running session to ms-only or, worse, to
+    // the nearest unrelated entry.
+    if let Some(setup_id) = distance_setup_id.as_deref() {
+        for &(meas_ch, ref_ch) in &pairs {
+            let cal = Calibration::load_or_new(out_ch, meas_ch, None);
+            if let Err(refusal) = cal.distance_cal_for(ref_ch, setup_id) {
+                return json!({
+                    "ok": false,
+                    "error": format!(
+                        "distance_setup_id {setup_id:?} for pair meas{meas_ch}/ref{ref_ch}: {}",
+                        refusal.message()
+                    ),
+                });
+            }
+        }
+    }
+
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
@@ -438,6 +475,24 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .iter()
         .map(|&(_, r)| Calibration::load(out_ch, r, None).ok().flatten())
         .collect();
+
+    // This pair's stored distance-calibration constant (#243), resolved
+    // once at worker start — already validated above, so this lookup
+    // cannot fail here. `None` when the session named no
+    // `distance_setup_id`.
+    let pair_distance_cals: Vec<Option<ac_core::shared::calibration::DistanceCalEntry>> =
+        match distance_setup_id.as_deref() {
+            None => vec![None; pairs.len()],
+            Some(setup_id) => pairs
+                .iter()
+                .map(|&(meas, r)| {
+                    Calibration::load_or_new(out_ch, meas, None)
+                        .distance_cal_for(r, setup_id)
+                        .ok()
+                        .cloned()
+                })
+                .collect(),
+        };
 
     // Snapshot ring (handoff: snapshot-backend M1). Per-unique-channel
     // calibration (not per-pair — a channel used in >1 pair gets one
@@ -1070,8 +1125,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .zip(pair_meas_curves.par_iter())
                 .zip(pair_meas_cals.par_iter())
                 .zip(pair_ref_cals.par_iter())
+                .zip(pair_distance_cals.par_iter())
                 .filter_map(
-                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
+                    |((((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt), distance_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -1336,6 +1392,22 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             // report writer would, and so a captured frame
                             // records what it was converted with.
                             "speed_of_sound_m_s": speed_of_sound_m_s,
+                            // This pair's stored distance-calibration
+                            // constant (#243), or `null` when the session
+                            // named no `distance_setup_id` or none was
+                            // found — either way the delay readout's
+                            // metres figure stays withheld.
+                            "distance_cal": distance_cal_opt.as_ref().map(|e| json!({
+                                "constant_ms": e.constant_ms,
+                                "setup_id": e.setup_id,
+                                "captured_at": e.captured_at,
+                                "captured_distance_m": e.captured_distance_m,
+                            })).unwrap_or(Value::Null),
+                            // Session-scoped plausibility ceiling for the
+                            // same readout (#243) — an operator-supplied
+                            // sanity bound, not derived; `null` disables
+                            // the check.
+                            "distance_plausible_max_m": distance_plausible_max_m,
                             // Read by position rather than zipped into the
                             // chain above: it is a scalar the closure only
                             // reads, and the zip is already seven deep.

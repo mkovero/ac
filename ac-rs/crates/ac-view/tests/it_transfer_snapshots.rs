@@ -70,11 +70,18 @@ fn transfer_scene() -> TransferScene {
         phase_deg,
         coherence,
         delay_ms: 2.5,
-        // Locked with no frame-supplied speed, so the readout is the same
-        // "2.50 ms  (0.86 m)" these reference images were taken against —
-        // #243 changes what an *unlocked* pair renders, not this one.
+        // Locked, no frame-supplied speed and no stored distance
+        // calibration — #243 changed this reference image's own readout
+        // from "2.50 ms  (0.86 m)" to ms-only plus a "not calibrated"
+        // line, since a metres figure with no per-pair constant is exactly
+        // the defect #243 fixes. See this file's module doc: references
+        // need regenerating on the real adapter after this change.
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-6.0),
         ref_peak_dbfs: Some(-14.0),
         channel_role: "meas_0".to_string(),
