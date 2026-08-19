@@ -72,6 +72,10 @@ qa_loop() {
         echo "     two agents failing to converge is signal. read the reviews."
         return 0
       fi
+      if has requires-rig "$ls"; then
+        echo "  #$n PR #$pr: carries requires-rig — revising the code does not"
+        echo "     retire the measurement; the label stays for you to clear."
+      fi
       echo "  #$n PR #$pr: revising (round $round)"
       "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
       gh_retry gh pr edit "$pr" -R "$AC_REPO" \
@@ -85,6 +89,13 @@ qa_loop() {
     # Already reviewed at this exact tip and qa raised nothing: that is a pass.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
+      if has requires-rig "$ls"; then
+        echo "  #$n PR #$pr: qa reviewed $head — approved, but REQUIRES RIG"
+        echo "     a measurement is outstanding. the label is human-clear only:"
+        echo "     read the review's 'rig verification required' field, run the"
+        echo "     session, then: gh pr edit $pr -R $AC_REPO --remove-label requires-rig"
+        STATE=needs-rig; return 0
+      fi
       echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
       STATE=awaiting-merge; return 0
     fi
@@ -102,7 +113,17 @@ qa_loop() {
 
     ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
-    has needs-work "$ls"       || { echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"; STATE=awaiting-merge; return 0; }
+    if ! has needs-work "$ls"; then
+      if has requires-rig "$ls"; then
+        echo "  #$n PR #$pr: approved, but REQUIRES RIG — measurement outstanding"
+        echo "     see the review's 'rig verification required' field."
+        STATE=needs-rig
+      else
+        echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"
+        STATE=awaiting-merge
+      fi
+      return 0
+    fi
   done
 }
 
@@ -245,6 +266,9 @@ drive_epic() {
         echo "  #$c is ready for your merge. Stopping here."
         echo "  Later children branch from main and would not see #$c's work."
         echo "  Merge it, then rerun: master.sh $e"
+        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+      needs-rig)
+        echo "  #$c needs a rig measurement — stopping epic."
         [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
       needs-human|blocked)
         echo "  #$c needs you — stopping epic."

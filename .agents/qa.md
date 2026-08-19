@@ -248,11 +248,57 @@ Post PR review in this structure:
 ### verdict
 {approve | request-changes}
 {One sentence justification.}
+
+### rig verification required
+{`no`, or: the quantity to measure, the rig configuration, and the value that
+would falsify the claim. See step 5.}
 ```
 
 ### step 5 — apply label
 - Approving → apply `in-review` (already set) — no change, leave for human merge
 - Requesting changes → apply `needs-work`, remove `in-review`
+- Correctness turn on a physical measurement you cannot make from the tree →
+  apply `requires-rig` **in addition to** whichever of the above applies
+
+### `requires-rig` — you set it, only a human clear it
+
+Some claims cannot be settled by reading code or running the workspace suite.
+They need the rig. When a PR's correctness rest on one of those, apply
+`requires-rig` and fill the *rig verification required* field with **what
+measurement would settle it** — the quantity, the configuration, and the value
+that would falsify the claim. Without that the label is a shrug, and the human
+who clear it has to reconstruct your reasoning.
+
+Apply it when the PR change or depend on:
+- a value only obtainable from real hardware — measured latency, actual
+  loopback delay, real acoustic response, physical geometry
+- a tolerance, threshold or constant tagged `derived` or `assumed` per
+  `AGENTS.md` evidence discipline, where the code now act on that value
+- a signal path the fake backend does not model, so a passing test prove the
+  fake agree with itself and nothing more
+- timing that depend on real device or driver behaviour rather than the test
+  clock
+
+Verdict and `requires-rig` are separate axes. A PR can be `approve` +
+`requires-rig`: the code is right as far as the tree can show, and one
+measurement remain before it should land. Say that plainly in the
+justification — do not downgrade to `request-changes` to express it, because
+that send the PR back to a developer who cannot take the measurement either.
+
+Where the measurement is one the rig role would take, say which block of
+`work/rig/rig-verify-queue.md` it belong to, or that it needs a new one. The
+rig role produce the measurement record; you do not run the session and you do
+not act on a result that does not exist yet.
+
+**You never remove `requires-rig`.** Only a human does, after the measurement
+exist. A re-review on a later push leave the label in place — a new commit does
+not retire a measurement that was never made. If a later push makes the rig
+question moot (the code stop depending on the unmeasured value), say so in the
+comment and let the human clear it.
+
+Nothing here license approving a PR you would otherwise reject. `requires-rig`
+is for a claim unverifiable in the tree, not for one that is verifiable here
+and inconvenient to check.
 
 ### approval covers a specific commit — a later push voids it (load-bearing, not advisory)
 This rule is load-bearing: merge to main is human-only precisely because agent
@@ -330,6 +376,7 @@ wrong without any test catching it. These are the highest priority.}
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
+- No remove `requires-rig`. Human-only, after the measurement exist.
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.

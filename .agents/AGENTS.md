@@ -72,6 +72,8 @@ Always human-only:
 - Closing issues
 - Deleting branches
 - Changing agent spec files
+- Removing `requires-rig` — an agent cannot take the measurement, so it cannot
+  retire the requirement for one
 
 ## label schema
 
@@ -88,6 +90,7 @@ Always human-only:
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
 | `drive-path` | triage or developer | stimulus/drive safety checklist applies |
+| `requires-rig` | qa | correctness rests on a measurement only the rig can make — human clears it after the measurement exists |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |

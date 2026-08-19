@@ -25,12 +25,13 @@ disp=$(gh_retry gh issue list -R "$R" --state open --label ready-to-implement \
        --jq '.[] | select(.labels|map(.name)|index("blocked")|not) | "- #\(.number) \(.title)"')
 [[ -n $disp ]] && printf '\n## dispatchable\n%s\n' "$disp"
 
+section requires-rig      "awaiting a rig measurement — only you can clear these"
 section blocks-others     "blocking other work — clear these first"
 section blocked           "blocked (lift condition is in the comment that applied it)"
 section needs-discussion  "needs human input"
 section needs-design      "awaiting architect"
 section needs-work        "QA sent back"
 
-prs=$(gh_retry gh pr list -R "$R" --json number,title,isDraft \
-      --jq '.[] | "- #\(.number) \(.title)\(if .isDraft then " (draft)" else "" end)"')
+prs=$(gh_retry gh pr list -R "$R" --json number,title,isDraft,labels \
+      --jq '.[] | "- #\(.number) \(.title)\(if .isDraft then " (draft)" else "" end)\(if (.labels|map(.name)|index("requires-rig")) then "  [REQUIRES RIG]" else "" end)"')
 [[ -n $prs ]] && printf '\n## open PRs\n%s\n' "$prs"
