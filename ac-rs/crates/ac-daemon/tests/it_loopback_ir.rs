@@ -364,7 +364,11 @@ fn loopback_ir_recovers_sharp_peak() {
     let frame = c.wait_for_or_error("measurement/impulse_response", Duration::from_secs(15));
     let data = &frame["data"];
     let sample_rate_hz = data["sample_rate_hz"].as_f64();
-    let window_len_used = frame["window_len_used"].as_u64();
+    // `window_len_used` is an array, one entry per harmonic order (order 1
+    // first) — see ZMQ.md and `sweep.rs`'s `DeconvolvedIrs::window_len_used`.
+    // Index [0] is the linear IR's actual gate length, which is what the
+    // peak-position bound below is derived from.
+    let window_len_used = frame["window_len_used"][0].as_u64();
     let ir: Vec<f64> = data["linear_ir"]
         .as_array()
         .expect("linear_ir array")
@@ -374,6 +378,17 @@ fn loopback_ir_recovers_sharp_peak() {
     assert!(
         ir.len() >= 256,
         "linear_ir suspiciously short: {}",
+        ir.len()
+    );
+    // The frame's declared gate length must match the array it describes.
+    // Silently receiving a shorter `linear_ir` than `window_len_used[0]`
+    // says (or vice versa) would make every bound below wrong without any
+    // assertion catching it — see #341 acceptance criterion 5.
+    assert_eq!(
+        window_len_used,
+        Some(ir.len() as u64),
+        "window_len_used[0] ({window_len_used:?}) disagrees with linear_ir \
+         length {} over {chain}",
         ir.len()
     );
 
@@ -441,31 +456,63 @@ fn loopback_ir_recovers_sharp_peak() {
         "all-zero IR — loopback never delivered audio over {chain}"
     );
 
+    // Maximum acceptable round-trip latency, in seconds. #277 measured
+    // 43.75 ms on the reference rig (Babyface Pro leg, 96 kHz, 2.0 s sweep —
+    // ARCHITECTURE.md's "Loopback IR runbook"). This is that figure with
+    // ~37% headroom for rig-to-rig jitter, not a bound fitted to one run.
+    // If a chain ever needs more than this, the number moves and this
+    // comment's citation moves with it — it must never grow silently.
+    const MAX_ROUND_TRIP_S: f64 = 0.060;
+
     // The IR peak is the deconvolution delta. `extract_irs` centres the gate
-    // at the sweep endpoint, so the peak nominally sits at `window_len / 2`
-    // — but JACK adds one period of port-to-port latency, shifting it later.
-    // Through an external converter the shift is larger again, by that
-    // converter's own latency. Require the peak in the upper-middle half of
-    // the window, clear of the edges where a truncation artefact would show.
+    // at the sweep endpoint, so the peak nominally sits at `centre` (=
+    // `ir.len() / 2`) — but JACK adds at least one period of port-to-port
+    // latency, and an external converter adds its own latency on top,
+    // shifting the peak later. Latency only ever adds delay, so the peak
+    // cannot legitimately land before `centre`; `lo_bound` gives a small
+    // rounding tolerance rather than requiring the peak at-or-after `centre`
+    // exactly. `hi_bound` admits up to `MAX_ROUND_TRIP_S` of round trip,
+    // capped at the window's own last sample — a window too short to
+    // express that margin is already bounded by its own length, not by
+    // this constant.
     //
-    // NOTE: the window this bound divides is *not* the requested
-    // `window_len`. `per_order_window_lens` clamps it to the gap between the
-    // linear IR and the order-2 IR (`sweep.rs:318`, `:335`), which is
-    // `duration · ln 2 / ln(f2/f1)` seconds — 2884 samples at 48 kHz for the
-    // request below, not 16384. See #277 for the measured consequence.
-    let lo_bound = ir.len() / 4;
-    let hi_bound = 3 * ir.len() / 4;
+    // The window this bound divides is `ir.len()` — the gate length
+    // `extract_irs` actually returned (checked equal to `window_len_used[0]`
+    // above), not the `window_len` requested above. `per_order_window_lens`
+    // clamps it to the gap between the linear IR and the order-2 IR
+    // (`sweep.rs:318`, `:335`), which is `duration · ln 2 / ln(f2/f1)`
+    // seconds — 2884 samples at 48 kHz for the request above, not 16384.
+    // See #277/#341 for the measured consequence of dividing the wrong one.
+    let sample_rate_hz = sample_rate_hz.unwrap_or_else(|| {
+        panic!("sample_rate_hz absent from frame over {chain}; can't derive the round-trip bound")
+    });
+    let low_margin_samples = ((0.001 * sample_rate_hz).round() as usize).max(1);
+    let hi_margin_samples = (MAX_ROUND_TRIP_S * sample_rate_hz).round() as usize;
+    let lo_bound = centre.saturating_sub(low_margin_samples);
+    let hi_bound = (centre + hi_margin_samples).min(ir.len().saturating_sub(1));
     assert!(
         peak_idx > lo_bound && peak_idx < hi_bound,
         "peak at index {peak_idx} outside expected range [{lo_bound}, {hi_bound}] \
-         (window_len={}) over {chain}; deconvolution may have failed",
-        ir.len()
+         (window_len={}, centre={centre}, max_round_trip={:.1} ms) over {chain}; \
+         deconvolution may have failed",
+        ir.len(),
+        MAX_ROUND_TRIP_S * 1000.0,
     );
 
+    // SNR floor. `jackd -d dummy` is a bit-exact digital loopback — no
+    // physical noise at all — so its SNR is a ceiling set purely by
+    // deconvolution/windowing artefacts, not a noise floor a converter could
+    // beat. Measured on that bit-exact path at these sweep parameters
+    // (#277/#341): 33.37 dB at 48 kHz, 28.90 dB at 96 kHz. The gate sits
+    // below the lower of those with ~4 dB margin for run-to-run jitter. Real
+    // hardware with a longer sweep measures higher still — 36.89 dB on a
+    // clean electrical loopback with a 2.0 s sweep (#277) — so this floor
+    // stays reachable everywhere, not just on dummy.
+    const SNR_FLOOR_DB: f64 = 25.0;
     assert!(
-        snr_db >= 40.0,
+        snr_db >= SNR_FLOOR_DB,
         "loopback IR floor too high over {chain}: peak={peak_abs:.3e}, \
-         far_max={floor:.3e}, SNR={snr_db:.1} dB (need ≥ 40 dB)"
+         far_max={floor:.3e}, SNR={snr_db:.1} dB (need ≥ {SNR_FLOOR_DB} dB)"
     );
 
     // Drain the trailing report + done frames so Drop doesn't race on shutdown.
