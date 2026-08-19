@@ -1375,6 +1375,64 @@ mod tests {
         assert!(bounded.onset_rule.contains("causal bound enforced"));
     }
 
+    /// #346 (QA on #352, correctness issue 2): `floor_rms`'s guard band
+    /// (`(window_len / 32).max(8)`, pre-existing, reused unchanged for
+    /// `estimate_onset`'s threshold) is sized off `window_len` alone —
+    /// nothing ties it to how wide the peak's own sustained-energy run
+    /// actually is. When that run is wider than the guard, it bleeds into
+    /// `pre_region`, `floor_rms` inflates, `estimate_onset`'s threshold
+    /// rises with it, and the backward search can stop at (or near) the
+    /// peak instead of the true onset — silently reproducing the very
+    /// peak-as-arrival bug #346 exists to fix, for a signal shape the
+    /// guard band was not sized for.
+    ///
+    /// This test pins that known coupling rather than leaving it
+    /// unrecorded (see `coupled-constants-need-a-test`): a small window
+    /// (guard = 8, `window_len` = 256) with a sustained run wide enough to
+    /// bleed past it. Fixing the guard/margin interaction itself is
+    /// tracked separately — issue #353 — rather than folded into this
+    /// revision: `pre_region`/`floor_rms` also feeds the reported
+    /// `pre_impulse_snr_db` field, so widening its scope here would go
+    /// beyond a review-response revision and past what the architect's
+    /// #346 design review actually signed off ("reuse
+    /// [pre_region/floor_rms], don't recompute it a second way").
+    #[test]
+    fn ir_stats_onset_threshold_is_coupled_to_the_guard_band_a_wide_lobe_can_break() {
+        let window_len = 256;
+        let sr = 48_000u32;
+        let noise = 0.001;
+        let peak_true = 160;
+        let onset_true = 100; // 60 samples wide — wider than guard = 8
+        let mut ir = vec![noise; window_len];
+        for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
+            *v = 0.3;
+        }
+        ir[peak_true] = 1.0;
+
+        let r = ir_report_with_custom_ir(ir, sr);
+        let stats = r.ir_stats().unwrap();
+        // What a correctly-isolated floor would find: the search should
+        // land at `onset_true`. It doesn't — the lobe's own bleed into
+        // `pre_region` inflates `floor_rms` enough that the backward walk
+        // never leaves the peak. Pinning the actual (defective) value so
+        // a change to the guard/margin coupling shows up here as an
+        // intentional, reviewed diff rather than a silent behaviour
+        // change.
+        assert_ne!(
+            stats.onset_index, onset_true,
+            "if this now equals onset_true, the guard/margin coupling has \
+             been fixed — update this test's assertions and its doc \
+             comment, and close the follow-up issue this test references"
+        );
+        assert_eq!(
+            stats.onset_index, peak_true,
+            "known coupling: a lobe wider than the fixed guard band \
+             inflates floor_rms enough that estimate_onset's threshold \
+             exceeds the lobe's own amplitude, so the backward search \
+             never leaves the peak"
+        );
+    }
+
     // ─── `ir_arrival_distance` (#283) ─────────────────────────────────
 
     fn measured_tau(tau_s: f64) -> InterfaceLatency {

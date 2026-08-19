@@ -1702,17 +1702,24 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // `argmax|h|`, while `ir_arrival_distance()`'s arrival is now
     // `estimate_onset`-derived. The two captures' differing sweep
     // bandwidth means their bandlimited-deconvolution skirts differ too,
-    // so they no longer cancel to the pre-#346 tightness — measured here
-    // at ~0.093 m for this fixture's 200 Hz–8 kHz / 1024-sample window,
-    // not measurement noise. #351 tracks reconciling the two estimators;
-    // this tolerance is widened only enough to accommodate that known,
-    // tracked gap, not to hide a further regression.
+    // so they no longer cancel to the pre-#346 tightness. #351 tracks
+    // reconciling the two estimators.
+    //
+    // Pinned tight around this fixture's known, computable answer (QA on
+    // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
+    // exact value could hide up to 0.15 m of unrelated regression) rather
+    // than left as an open-ended bound — this fixture is deterministic
+    // (fake backend, fixed 200 Hz–8 kHz / 1024-sample window), so its
+    // exact phantom distance is a known quantity, not measurement noise.
+    const EXPECTED_PHANTOM_DISTANCE_M: f64 = -0.0929;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     match report.ir_arrival_distance() {
         ac_core::measurement::report::ArrivalDistance::Known { distance_m, .. } => assert!(
-            distance_m.abs() < 0.15,
-            "fake loopback has no acoustic path, got {distance_m} m (see #351)"
+            (distance_m - EXPECTED_PHANTOM_DISTANCE_M).abs() < 0.01,
+            "fake loopback has no acoustic path; expected the known #351 \
+             phantom distance ({EXPECTED_PHANTOM_DISTANCE_M} m ± 0.01), got \
+             {distance_m} m"
         ),
         other => panic!("expected a known distance, got {other:?}"),
     }
