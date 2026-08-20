@@ -237,6 +237,45 @@ where the issue itself stands rather than trusting this line. **Ring mode is
 not the way to rehearse it**: `fake_ring` still points every ref ring at one
 channel, which is #204.
 
+- **#243's own acceptance criterion 7 — a corrected metres readout against a
+  taped move.** QA on PR #356 (2026-08-20) flagged this as unverified: nothing
+  in the tree runs the built `distance_cal` subtraction against a physical
+  distance change. Tape a **2.000 m** reference (a new position, distinct from
+  the existing 1.000 m calibration fixture and the #251/electrical-constant
+  captures above), name the capture's `distance_setup_id`, lock, and read
+  `format_delay_readout`'s metres figure back against the tape.
+
+  > **Pass: the corrected metres figure agrees with 2.000 m to within 5 mm.**
+  > Use the same reference leg and wiring the #243 block above already has in
+  > place — no new patching, just a second taped distance under the same
+  > `setup_id` discipline `distance_cal_for` enforces (a constant captured at
+  > 1.000 m must not be silently applied at 2.000 m; this run is what proves
+  > the corrected number, not just the refusal-on-mismatch path already
+  > covered by unit tests).
+
+- **Regenerate `ac-view`'s transfer snapshots — again, for #356 specifically.**
+  The five PNGs in `ac-rs/crates/ac-view/tests/snapshots/` were last
+  regenerated 2026-08-18 at `3c05c03` (see `it_transfer_snapshots.rs`'s module
+  doc). PR #356 wires two new rows into `draw_view`'s delay-readout block —
+  the calibration-provenance line and the plausibility-warning line — so
+  `transfer_live_masked_gap.png` (the only one of the five built from a scene
+  that ever sets `distance_cal`/`distance_plausible_max_m`) is stale a second
+  time, on top of the staleness the module doc already documents for the
+  ms-only wording change. The other four references are unaffected — none of
+  their fixtures set a distance calibration, so the two new rows never draw
+  in them.
+
+  ```
+  UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots \
+      -- --ignored --test-threads=1
+  ```
+
+  > **Pass: `transfer_live_masked_gap.png` regenerated and committed, box +
+  > date + commit recorded in `it_transfer_snapshots.rs`'s module doc, and a
+  > second plain (non-`UPDATE_SNAPSHOTS`) run green.** Same no-emission,
+  > no-mic, outside-the-acoustic-budget scheduling as the #245 regeneration
+  > block above — this is a wgpu render check on the box, nothing more.
+
 ---
 
 ## Before anything: the rig's own defects

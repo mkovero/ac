@@ -743,13 +743,39 @@ fn draw_transfer(
     // `Focus::Live` with no live scene (nothing loaded yet either, or a
     // stored-only session that hasn't cycled focus) draws no readout at
     // all — there is no measurement to attribute.
-    let focused: Option<(&str, &str)> = match state.focus {
-        Focus::Live => scene.map(|s| ("live", s.delay_readout.as_str())),
-        Focus::Stored(idx) => stored
-            .get(idx)
-            .map(|(label, _, s, _)| (*label, s.delay_readout.as_str())),
+    //
+    // Two more rows, both verbatim `ac-scene` strings, both gated on the
+    // same focused trace (QA #356 correctness issue 1 — these two fields
+    // existed on `TransferScene` since #243 but nothing here read them,
+    // so a calibrated reading and an uncalibrated one painted identically
+    // and the over-read warning never reached the screen):
+    //   row 3   delay_calibration   which stored constant (if any) the
+    //           metres figure on row 2 came from, or "not calibrated" —
+    //           absent only while unlocked, same "nothing to attribute"
+    //           convention as the readout above.
+    //   row 4   delay_warning       present only when a calibrated metres
+    //           figure exceeds the session's plausibility ceiling. Drawn
+    //           in the ember (never colour-only: the string itself names
+    //           the fault, same rule the fault indicator below follows).
+    let focused: Option<(&str, &str, Option<&str>, Option<&str>)> = match state.focus {
+        Focus::Live => scene.map(|s| {
+            (
+                "live",
+                s.delay_readout.as_str(),
+                s.delay_calibration.as_deref(),
+                s.delay_warning.as_deref(),
+            )
+        }),
+        Focus::Stored(idx) => stored.get(idx).map(|(label, _, s, _)| {
+            (
+                *label,
+                s.delay_readout.as_str(),
+                s.delay_calibration.as_deref(),
+                s.delay_warning.as_deref(),
+            )
+        }),
     };
-    if let Some((focused_label, focused_delay)) = focused {
+    if let Some((focused_label, focused_delay, calibration, warning)) = focused {
         let delay_text = if stored.is_empty() {
             focused_delay.to_string()
         } else {
@@ -762,6 +788,24 @@ fn draw_transfer(
             egui::FontId::default(),
             COLOR_VALUE,
         );
+        if let Some(calibration) = calibration {
+            painter.text(
+                content.left_top() + egui::vec2(0.0, 3.0 * ROW_H),
+                egui::Align2::LEFT_TOP,
+                calibration,
+                egui::FontId::default(),
+                COLOR_LABEL,
+            );
+        }
+        if let Some(warning) = warning {
+            painter.text(
+                content.left_top() + egui::vec2(0.0, 4.0 * ROW_H),
+                egui::Align2::LEFT_TOP,
+                warning,
+                egui::FontId::default(),
+                COLOR_SIGNAL,
+            );
+        }
     }
 
     // Comparison legend (#321): one row for the live trace, one per
