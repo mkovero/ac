@@ -253,28 +253,47 @@ channel, which is #204.
   > the corrected number, not just the refusal-on-mismatch path already
   > covered by unit tests).
 
-- **Regenerate `ac-view`'s transfer snapshots — again, for #356 specifically.**
-  The five PNGs in `ac-rs/crates/ac-view/tests/snapshots/` were last
-  regenerated 2026-08-18 at `3c05c03` (see `it_transfer_snapshots.rs`'s module
-  doc). PR #356 wires two new rows into `draw_view`'s delay-readout block —
-  the calibration-provenance line and the plausibility-warning line — so
-  `transfer_live_masked_gap.png` (the only one of the five built from a scene
-  that ever sets `distance_cal`/`distance_plausible_max_m`) is stale a second
-  time, on top of the staleness the module doc already documents for the
-  ms-only wording change. The other four references are unaffected — none of
-  their fixtures set a distance calibration, so the two new rows never draw
-  in them.
+- **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
+  one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
+  `e0e9341` (built with `RUSTFLAGS="-C target-cpu=native"`, no `mold` on
+  that box — see rig-build-rustflags note if repeating this):
+  `UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots --
+  --ignored --test-threads=1`, then a plain rerun, green. Box + date +
+  commit recorded in `it_transfer_snapshots.rs`'s module doc.
 
-  ```
-  UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots \
-      -- --ignored --test-threads=1
-  ```
+  Correcting the prior entry's premise: **4 of the 5 references moved, not
+  1.** None of the five fixtures set `distance_cal` before this pass —
+  `transfer_armed_banner.png`, `transfer_driving_banner.png`, and
+  `transfer_stored_comparison_no_live.png` were already stale from #243's
+  ms-only wording change alone (confirmed empirically: `git diff --stat`
+  before vs. after regen). `transfer_ir_panel.png` is the only byte-stable
+  one, since its readout is replaced by the IR panel. Separately,
+  `snapshot_transfer_live_masked_gap`'s fixture was extended (this pass) to
+  actually set `distance_cal` + an exceeded `distance_plausible_max_m`, so
+  its reference now paints both new rows — closing the gap that no
+  existing fixture exercised them at all.
 
-  > **Pass: `transfer_live_masked_gap.png` regenerated and committed, box +
-  > date + commit recorded in `it_transfer_snapshots.rs`'s module doc, and a
-  > second plain (non-`UPDATE_SNAPSHOTS`) run green.** Same no-emission,
-  > no-mic, outside-the-acoustic-budget scheduling as the #245 regeneration
-  > block above — this is a wgpu render check on the box, nothing more.
+  > **Finding, not yet resolved: the two new rows visibly collide with the
+  > pane's own content.** Cropped and inspected the regenerated
+  > `transfer_live_masked_gap.png` directly (960×420, top-left 400×150
+  > region). Row 2 (delay readout) sits on the 0 dB gridline; row 3
+  > (`delay_calibration`) has the live magnitude trace drawn across its
+  > baseline; row 4 (`delay_warning`) sits on the −20 dB gridline. All
+  > three rows are still legible — painted after the trace/grid so they're
+  > on top, not erased — but visually busy in a way rows 0–2 alone were
+  > not. This matches the *risk* QA #356 named (rows 3/4 use the same
+  > pane-top overlay origin as rows 0–2, extended twice as deep) and
+  > confirms it actually fires for a plausible mid-slope magnitude curve,
+  > not just as a theoretical edge case. Root cause is the overlay's
+  > shared-origin-with-the-plot convention (pre-existing since row 0),
+  > not a bug introduced fresh by #356's two-row addition — but two more
+  > rows measurably raises how often it's hit. Whether that's acceptable
+  > (legible-on-top is the existing house style) or needs a layout change
+  > (background chip, reserved margin, or clipping the trace under the
+  > text) is a display-truth design call, not a mechanical one — flagged
+  > for the architect/QA rather than guessed at here. Referenced PNG is
+  > the ground truth; look at it directly rather than trusting this
+  > description.
 
 ---
 
