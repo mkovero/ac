@@ -594,6 +594,13 @@ impl MeasurementReport {
     /// pre-impulse SNR, and the time gate's low-frequency limit. `None`
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
+    ///
+    /// Arrival (`delay_samples`/`arrival_s`) is derived from an onset
+    /// estimate ([`crate::measurement::sweep::estimate_onset`]), not from
+    /// the IR's magnitude peak — see `IrStats::onset_index`'s doc for why
+    /// (#346). When this report carries both a measured interface latency
+    /// and a recorded `position.distance_m`, the onset estimate is bound
+    /// to reject any candidate earlier than pure flight time allows.
     pub fn ir_stats(&self) -> Option<IrStats> {
         let payload = self
             .data
@@ -626,29 +633,65 @@ impl MeasurementReport {
 
         // `extract_irs` (`measurement::sweep`) centres the gate at the
         // sweep endpoint — the position an identity (zero-delay) system
-        // would peak at — so the peak's offset from the window centre
-        // *is* the measured round-trip delay in samples.
+        // would peak at.
         let centre = window_len / 2;
-        let delay_samples = peak_index as i64 - centre as i64;
-        let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
 
         // Pre-impulse noise floor: everything strictly before the peak,
         // minus a small guard band so the peak's own skirt doesn't bias
-        // the floor estimate upward.
+        // the floor estimate upward. Computed before the onset estimate
+        // below, which is scaled off this same floor rather than a
+        // percent of the peak (#346).
         let guard = (window_len / 32).max(8);
         let pre_end = peak_index.saturating_sub(guard);
         let pre_region = &linear_ir[..pre_end];
-        let pre_impulse_snr_db = if pre_region.is_empty() {
-            f64::INFINITY
+        let floor_rms = if pre_region.is_empty() {
+            0.0
         } else {
             let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
-            let rms = mean_sq.sqrt();
-            if rms > 0.0 {
-                20.0 * (peak_magnitude / rms).log10()
-            } else {
-                f64::INFINITY
-            }
+            mean_sq.sqrt()
         };
+        let pre_impulse_snr_db = if pre_region.is_empty() {
+            f64::INFINITY
+        } else if floor_rms > 0.0 {
+            20.0 * (peak_magnitude / floor_rms).log10()
+        } else {
+            f64::INFINITY
+        };
+
+        // The earliest sample known geometry admits as an onset (pure
+        // flight time, converted to a sample index) — only computable
+        // when both a measured τ and a recorded distance are present for
+        // this capture. `None` otherwise, and `estimate_onset`'s `rule`
+        // says so (#346 architect review, option A).
+        let min_admissible_index = match (
+            &self.interface_latency,
+            self.position.as_ref().and_then(|p| p.distance_m),
+        ) {
+            (Some(InterfaceLatency::Measured(tau)), Some(distance_m)) => {
+                let c = crate::shared::conversions::speed_of_sound_from_config(
+                    self.position.as_ref().and_then(|p| p.temperature_c),
+                );
+                let bound_offset = (tau.tau_s + distance_m / c) * *sample_rate_hz as f64;
+                Some((centre as f64 + bound_offset).round().max(0.0) as usize)
+            }
+            _ => None,
+        };
+
+        let onset = crate::measurement::sweep::estimate_onset(
+            linear_ir,
+            peak_index,
+            floor_rms,
+            min_admissible_index,
+        );
+        let onset_index = onset.index;
+        let onset_rule = onset.rule;
+
+        // The onset's offset from the window centre is the arrival —
+        // not `peak_index`'s (#346): on a multi-way loudspeaker the
+        // largest sample sits at a fixed group-delay offset past the
+        // wavefront that actually left the baffle first.
+        let delay_samples = onset_index as i64 - centre as i64;
+        let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
 
         // Prefer the gate the producer actually applied. #280 stores
         // `f_low_hz` on the payload precisely so a reader does not
@@ -669,6 +712,8 @@ impl MeasurementReport {
             window_len,
             peak_index,
             peak_magnitude,
+            onset_index,
+            onset_rule,
             delay_samples,
             arrival_s,
             pre_impulse_snr_db,
@@ -765,13 +810,27 @@ pub struct IrStats {
     pub sample_rate_hz: u32,
     /// Length of the gated linear IR, in samples.
     pub window_len: usize,
-    /// Index of the peak-magnitude sample within the gated IR.
+    /// Index of the peak-magnitude sample within the gated IR. Kept as a
+    /// diagnostic — since #346 this is **not** what `delay_samples` /
+    /// `arrival_s` are derived from; on a multi-way loudspeaker the
+    /// largest sample sits at a fixed group-delay offset past the actual
+    /// wavefront (see [`crate::measurement::sweep::estimate_onset`]).
     pub peak_index: usize,
     /// `|linear_ir[peak_index]|`.
     pub peak_magnitude: f64,
-    /// `peak_index - window_len / 2` — signed offset of the peak from the
-    /// gate centre, in samples. Positive means the response arrived after
-    /// the zero-delay reference position.
+    /// Index of the estimated onset within the gated IR — see
+    /// [`crate::measurement::sweep::estimate_onset`]. `delay_samples` and
+    /// `arrival_s` are derived from this, not from `peak_index` (#346).
+    pub onset_index: usize,
+    /// The rule that produced `onset_index`, from
+    /// [`crate::measurement::sweep::OnsetEstimate::rule`] — states
+    /// whether a causal bound (known geometry) was enforced. Travels with
+    /// `arrival_s` so a persisted number can be told apart from a bare
+    /// peak read a year later (#346 acceptance criterion 4).
+    pub onset_rule: String,
+    /// `onset_index - window_len / 2` — signed offset of the estimated
+    /// onset from the gate centre, in samples. Positive means the
+    /// response arrived after the zero-delay reference position.
     pub delay_samples: i64,
     /// `delay_samples / sample_rate_hz` — arrival time relative to the
     /// gate's zero-delay reference. This is **not** acoustic path delay:
@@ -1084,6 +1143,27 @@ mod tests {
         r
     }
 
+    /// Companion to [`ir_report_with_peak`] for tests (#346) that need a
+    /// hand-built `linear_ir` shape rather than a single spike over flat
+    /// noise — e.g. sustained onset energy distinct from the peak.
+    fn ir_report_with_custom_ir(linear_ir: Vec<f64>, sample_rate_hz: u32) -> MeasurementReport {
+        let mut r = sample_impulse_response_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir,
+                noise_tail_start_s: None,
+                harmonics: vec![],
+            },
+            standard: Vec::new(),
+            gate: None,
+        }];
+        r
+    }
+
     #[test]
     fn ir_stats_reports_delay_samples_relative_to_gate_centre() {
         // Peak 32 samples after the window centre — the fake backend's
@@ -1208,6 +1288,149 @@ mod tests {
             gate: None,
         }];
         assert!(r.ir_stats().is_none());
+    }
+
+    /// #346: `delay_samples`/`arrival_s` must be onset-derived, not
+    /// peak-derived. Test against the rejected implementation — a
+    /// synthetic multi-way-like IR where sustained onset energy sits well
+    /// before a group-delay-inflated peak, with the peak position
+    /// computed here directly (not just asserted "close to the true
+    /// arrival", which the old behaviour would also pass).
+    #[test]
+    fn ir_stats_arrival_is_onset_derived_not_peak_derived() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let noise = 0.001;
+        let peak_true = centre + 100;
+        let onset_true = peak_true - 20; // within the guard band before the peak
+        let mut ir: Vec<f64> = vec![noise; window_len];
+        for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
+            *v = 0.3;
+        }
+        ir[peak_true] = 1.0;
+
+        let peak_index = ir
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!(
+            peak_index, peak_true,
+            "test setup: peak must be at peak_true"
+        );
+
+        let r = ir_report_with_custom_ir(ir, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.peak_index, peak_true, "peak_index stays diagnostic");
+        assert_eq!(stats.onset_index, onset_true);
+        assert_ne!(
+            stats.delay_samples,
+            peak_true as i64 - centre as i64,
+            "arrival must not be the peak-derived delay — #346"
+        );
+        assert_eq!(stats.delay_samples, onset_true as i64 - centre as i64);
+        assert!(stats.onset_rule.contains("no causal bound"));
+    }
+
+    /// #346: when a report carries both a measured interface latency and
+    /// a recorded `position.distance_m`, `ir_stats` must convert them
+    /// into a causal bound and enforce it — proven by picking a bound
+    /// that actively clamps the estimate away from what the unbounded
+    /// search alone would return.
+    #[test]
+    fn ir_stats_wires_a_causal_bound_from_position_and_interface_latency() {
+        let window_len = 1024;
+        let sr = 48_000u32;
+        let centre = window_len / 2;
+        let noise = 0.001;
+        let peak_true = centre + 100;
+        let onset_true = peak_true - 20;
+        let mut ir = vec![noise; window_len];
+        for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
+            *v = 0.3;
+        }
+        ir[peak_true] = 1.0;
+
+        let mut r = ir_report_with_custom_ir(ir, sr);
+        let unbounded = r.ir_stats().unwrap();
+        assert_eq!(unbounded.onset_index, onset_true);
+
+        // Pure-flight bound at `peak_true - 12` — inside the sustained
+        // onset run, so it actively clamps the estimate rather than
+        // agreeing with the unbounded answer by coincidence.
+        let bound_index = peak_true - 12;
+        let bound_offset_samples = (bound_index - centre) as f64;
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some(bound_offset_samples / sr as f64 * c),
+            ..Default::default()
+        });
+        r.interface_latency = Some(measured_tau(0.0));
+
+        let bounded = r.ir_stats().unwrap();
+        assert_eq!(bounded.onset_index, bound_index);
+        assert_ne!(bounded.onset_index, unbounded.onset_index);
+        assert!(bounded.onset_rule.contains("causal bound enforced"));
+    }
+
+    /// #346 (QA on #352, correctness issue 2): `floor_rms`'s guard band
+    /// (`(window_len / 32).max(8)`, pre-existing, reused unchanged for
+    /// `estimate_onset`'s threshold) is sized off `window_len` alone —
+    /// nothing ties it to how wide the peak's own sustained-energy run
+    /// actually is. When that run is wider than the guard, it bleeds into
+    /// `pre_region`, `floor_rms` inflates, `estimate_onset`'s threshold
+    /// rises with it, and the backward search can stop at (or near) the
+    /// peak instead of the true onset — silently reproducing the very
+    /// peak-as-arrival bug #346 exists to fix, for a signal shape the
+    /// guard band was not sized for.
+    ///
+    /// This test pins that known coupling rather than leaving it
+    /// unrecorded (see `coupled-constants-need-a-test`): a small window
+    /// (guard = 8, `window_len` = 256) with a sustained run wide enough to
+    /// bleed past it. Fixing the guard/margin interaction itself is
+    /// tracked separately — issue #353 — rather than folded into this
+    /// revision: `pre_region`/`floor_rms` also feeds the reported
+    /// `pre_impulse_snr_db` field, so widening its scope here would go
+    /// beyond a review-response revision and past what the architect's
+    /// #346 design review actually signed off ("reuse
+    /// [pre_region/floor_rms], don't recompute it a second way").
+    #[test]
+    fn ir_stats_onset_threshold_is_coupled_to_the_guard_band_a_wide_lobe_can_break() {
+        let window_len = 256;
+        let sr = 48_000u32;
+        let noise = 0.001;
+        let peak_true = 160;
+        let onset_true = 100; // 60 samples wide — wider than guard = 8
+        let mut ir = vec![noise; window_len];
+        for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
+            *v = 0.3;
+        }
+        ir[peak_true] = 1.0;
+
+        let r = ir_report_with_custom_ir(ir, sr);
+        let stats = r.ir_stats().unwrap();
+        // What a correctly-isolated floor would find: the search should
+        // land at `onset_true`. It doesn't — the lobe's own bleed into
+        // `pre_region` inflates `floor_rms` enough that the backward walk
+        // never leaves the peak. Pinning the actual (defective) value so
+        // a change to the guard/margin coupling shows up here as an
+        // intentional, reviewed diff rather than a silent behaviour
+        // change.
+        assert_ne!(
+            stats.onset_index, onset_true,
+            "if this now equals onset_true, the guard/margin coupling has \
+             been fixed — update this test's assertions and its doc \
+             comment, and close the follow-up issue this test references"
+        );
+        assert_eq!(
+            stats.onset_index, peak_true,
+            "known coupling: a lobe wider than the fixed guard band \
+             inflates floor_rms enough that estimate_onset's threshold \
+             exceeds the lobe's own amplitude, so the backward search \
+             never leaves the peak"
+        );
     }
 
     // ─── `ir_arrival_distance` (#283) ─────────────────────────────────

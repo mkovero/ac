@@ -618,6 +618,86 @@ pub fn check_tail_decay(full: &[f64], p: &SweepParams, tail_s: f64) -> Result<Ta
     })
 }
 
+/// Result of [`estimate_onset`]: the onset sample index plus the rule
+/// that produced it, so a persisted arrival can be told apart from a
+/// bare peak read a year later (#346, acceptance criterion 4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnsetEstimate {
+    pub index: usize,
+    pub rule: String,
+}
+
+/// Margin above the pre-impulse noise floor an IR sample must clear to
+/// count as the wavefront rather than deconvolution leakage, in dB.
+/// Floor-relative, not a percent of peak: issue #346's own rig table is
+/// why — a percent-of-peak threshold on a multi-way loudspeaker crosses
+/// *inside* the bandlimited deconvolution's pre-ringing (10%/25% of peak
+/// land before sound could physically have arrived), because pre-ringing
+/// energy is bounded by the leakage floor, not scaled to a group-delay-
+/// inflated peak. A floor-relative margin separates the two where a
+/// peak-relative one cannot.
+///
+/// Starting value translated from the issue's own 10%/25%-of-peak
+/// observations; #346 acceptance criterion 5 (rig verification against
+/// the two taped positions) is what is meant to calibrate this, not a
+/// guess reviewed by eye. Not yet run against rig data from this
+/// environment — see the issue's open questions.
+pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
+
+/// Estimate the wavefront onset in a deconvolved impulse response `ir`,
+/// given its magnitude peak at `peak_index` and the RMS `floor_rms` of
+/// the pre-impulse noise floor (see
+/// [`crate::measurement::report::MeasurementReport::ir_stats`]).
+///
+/// Not `argmax|h|` (issue #346): on a multi-way loudspeaker the sample of
+/// largest magnitude sits at a fixed group-delay offset past the
+/// wavefront that actually left the baffle first — LF and crossover
+/// phase pull the peak later, by an amount that does not shrink with
+/// distance (it cancels in an increment between two positions but
+/// persists in the absolute, per the issue's rig table).
+///
+/// Rule: starting at `peak_index`, walk backward while each preceding
+/// sample's magnitude exceeds `floor_rms` scaled up by
+/// [`ONSET_FLOOR_MARGIN_DB`]. The returned index is the earliest sample
+/// of that continuous above-threshold run ending at the peak.
+///
+/// `min_admissible_index`, when supplied, is the earliest sample the
+/// measurement's own known geometry allows an onset to occupy (pure
+/// flight time converted to a sample index). The backward search never
+/// crosses below it — a run that would otherwise extend earlier than
+/// pure flight allows is clamped there instead, rejecting the non-causal
+/// portion rather than returning it (this is what makes a bandlimited
+/// pre-ring crossing that a naive percent-of-peak threshold would return
+/// non-causally instead land on the physically admissible bound). When
+/// `min_admissible_index` is `None` the bound cannot be enforced (no
+/// geometry known for this capture) and `rule` says so, so a reader can
+/// tell a geometry-checked onset from a best-effort one.
+pub fn estimate_onset(
+    ir: &[f64],
+    peak_index: usize,
+    floor_rms: f64,
+    min_admissible_index: Option<usize>,
+) -> OnsetEstimate {
+    let threshold = floor_rms * 10f64.powf(ONSET_FLOOR_MARGIN_DB / 20.0);
+    let start = peak_index.min(ir.len().saturating_sub(1));
+    let lower_bound = min_admissible_index.unwrap_or(0).min(start);
+    let mut onset = start;
+    while onset > lower_bound && ir[onset - 1].abs() > threshold {
+        onset -= 1;
+    }
+    let rule = match min_admissible_index {
+        Some(bound) => format!(
+            "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
+             RMS), causal bound enforced at sample {bound}"
+        ),
+        None => format!(
+            "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
+             RMS), no causal bound (geometry not known for this capture)"
+        ),
+    };
+    OnsetEstimate { index: onset, rule }
+}
+
 /// Citation for a `MeasurementReport` emitted from a Farina-sweep run.
 ///
 /// Two standards apply, for two different things. The theoretical basis —
@@ -1570,5 +1650,92 @@ mod tests {
             "gated payload's citation must not carry ISO 18233: {c:?}"
         );
         assert!(!c.verified);
+    }
+
+    // ─── estimate_onset (#346) ─────────────────────────────────────────
+
+    /// Test against the rejected implementation (#346 acceptance
+    /// criterion 2): a synthetic IR with realistic multi-way group delay
+    /// — sustained energy from the true onset through to a magnitude
+    /// peak that sits well after it, standing in for LF/crossover group
+    /// delay pulling the largest sample later than the wavefront. The
+    /// estimator must not fall back to `argmax|h|`.
+    #[test]
+    fn onset_estimate_rejects_the_peak_the_way_346_names_as_wrong() {
+        let floor = 0.001;
+        let onset_true = 200usize;
+        let peak_index = 260usize;
+        let mut ir = vec![floor; 512];
+        for v in ir.iter_mut().take(peak_index + 1).skip(onset_true) {
+            *v = 0.3;
+        }
+        ir[peak_index] = 1.0; // the actual magnitude maximum
+        let est = estimate_onset(&ir, peak_index, floor, None);
+        assert_eq!(est.index, onset_true);
+        assert_ne!(
+            est.index, peak_index,
+            "must not fall back to argmax|h| — #346"
+        );
+    }
+
+    /// #346 acceptance criterion 3: a synthetic case with bandlimited
+    /// pre-ringing where an unbounded threshold scan lands non-causally
+    /// (computed here directly, per "test against the rejected
+    /// implementation") — energy above the floor+margin threshold runs
+    /// continuously from before the causal bound straight through to the
+    /// peak, with no natural gap for a floor-relative scan to stop at on
+    /// its own. Supplying the causal bound must clamp the estimate to it.
+    #[test]
+    fn onset_estimate_rejects_bandlimited_preringing_below_the_causal_bound() {
+        let floor = 0.001;
+        let peak_index = 300usize;
+        let bound = 280usize; // earliest sample pure flight time allows
+        let mut ir = vec![floor; 512];
+        for v in ir.iter_mut().take(peak_index + 1).skip(245) {
+            *v = 0.3;
+        }
+        ir[peak_index] = 1.0;
+
+        let unbounded = estimate_onset(&ir, peak_index, floor, None);
+        assert!(
+            unbounded.index < bound,
+            "test setup: unbounded scan must land non-causally, got {}",
+            unbounded.index
+        );
+
+        let bounded = estimate_onset(&ir, peak_index, floor, Some(bound));
+        assert_eq!(
+            bounded.index, bound,
+            "causal bound must clamp the non-causal pre-ring crossing"
+        );
+        assert!(bounded.rule.contains("causal bound enforced"));
+    }
+
+    /// #346 acceptance criterion 4: the rule string must say whether a
+    /// causal bound was actually enforced, so a persisted number can be
+    /// told apart from a best-effort one.
+    #[test]
+    fn onset_rule_states_whether_a_causal_bound_was_enforced() {
+        let floor = 0.001;
+        let mut ir = vec![floor; 100];
+        ir[50] = 1.0;
+        let with_bound = estimate_onset(&ir, 50, floor, Some(10));
+        let without_bound = estimate_onset(&ir, 50, floor, None);
+        assert_ne!(with_bound.rule, without_bound.rule);
+        assert!(with_bound
+            .rule
+            .contains("causal bound enforced at sample 10"));
+        assert!(without_bound.rule.contains("no causal bound"));
+    }
+
+    #[test]
+    fn onset_estimate_stays_at_peak_when_nothing_precedes_it_above_floor() {
+        // No sustained run above threshold behind the peak: the earliest
+        // admissible onset is the peak itself.
+        let floor = 0.01;
+        let mut ir = vec![floor; 200];
+        ir[150] = 1.0;
+        let est = estimate_onset(&ir, 150, floor, None);
+        assert_eq!(est.index, 150);
     }
 }

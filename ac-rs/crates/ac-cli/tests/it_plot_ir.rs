@@ -195,16 +195,30 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
     ]);
 
-    // ── printed arrival matches the fake backend's known delay ────────
-    // The gate re-centres the linear IR on the sweep endpoint, so a
-    // 32-sample loopback shows up as a +32-sample offset from centre.
-    // Tolerance is for finite-window deconvolution, not for the constant:
-    // a regression that lost the delay entirely would read 0.
+    // ── printed arrival is onset-derived, not peak-derived (#346) ─────
+    // The gate re-centres the linear IR on the sweep endpoint, so the
+    // fake backend's 32-sample loopback still shows up as the *peak's*
+    // offset from centre — but `arrival` now comes from
+    // `estimate_onset`, which walks backward from the peak into its own
+    // bandlimited main-lobe skirt whenever that skirt clears the
+    // floor+margin threshold. No geometry is recorded for this run, so
+    // no causal bound applies and the onset can legitimately land before
+    // the peak. It can never land at or after the peak plus this
+    // fixture's window, and a regression that lost the delay entirely
+    // would read ~0.
     let arrival = printed_arrival_samples(&stdout);
-    assert!(
-        (arrival - FAKE_LOOPBACK_DELAY_SAMPLES).abs() <= 8,
-        "printed arrival {arrival} samples, expected ~{FAKE_LOOPBACK_DELAY_SAMPLES} \
-         (fake loopback delay):\n{stdout}"
+    // Pinned exact, not just bounded (QA on #352): this fixture's IR shape
+    // is deterministic (fake backend, fixed 200hz/8000hz/1024win sweep),
+    // so `estimate_onset`'s answer for it is a known, computable value —
+    // pinning it the way the old test pinned the peak catches a
+    // regression in the estimator's exact behaviour, not only a sign or
+    // bound violation. Recompute if the fixture's stimulus parameters
+    // above ever change.
+    const EXPECTED_ONSET_SAMPLES: i64 = 19;
+    assert_eq!(
+        arrival, EXPECTED_ONSET_SAMPLES,
+        "printed arrival should be the fake backend's exact onset sample \
+         for this fixture, not just somewhere in (0, {FAKE_LOOPBACK_DELAY_SAMPLES}]:\n{stdout}"
     );
 
     // ── the rest of the printed summary ───────────────────────────────
@@ -214,6 +228,18 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
+    // #346 AC4 (QA on #352): the onset rule must reach the terminal, and
+    // the peak line must be marked diagnostic now that it can legitimately
+    // disagree with arrival — a silent divergence between the two would
+    // read as a bug in the tool rather than the fix working.
+    assert!(
+        stdout.contains("onset: backward threshold from floor, no causal bound"),
+        "printed summary missing the onset rule line (AC4):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(diagnostic \u{2014} not arrival)"),
+        "peak line must be marked diagnostic now arrival can diverge from it:\n{stdout}"
+    );
     // No τ is calibrated in this rig, so distance must be refused by
     // name — never derived from the uncorrected arrival above.
     assert!(

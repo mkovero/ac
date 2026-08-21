@@ -217,6 +217,28 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
+/// Derives the short terminal tag from `IrStats::onset_rule`'s full
+/// sentence (#346 AC4). The `distance` line immediately below already
+/// states *why* no causal bound applies (no τ this run) when that's the
+/// case, so — per the issue's UX comment's own recommendation for the
+/// width problem — this only needs to say whether a bound was enforced,
+/// not restate the reason. Falls back to the full string verbatim if its
+/// shape ever changes underneath this, so a reader never sees nothing.
+fn short_onset_rule(rule: &str) -> String {
+    if let Some(at) = rule.find("causal bound enforced at sample ") {
+        let bound = &rule[at + "causal bound enforced at sample ".len()..];
+        let bound = bound
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("");
+        format!("backward threshold from floor, causal bound enforced at sample {bound}")
+    } else if rule.contains("no causal bound") {
+        "backward threshold from floor, no causal bound".to_string()
+    } else {
+        rule.to_string()
+    }
+}
+
 /// The #283 read-out: arrival, arrival as distance, peak, pre-impulse
 /// SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
@@ -247,6 +269,18 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         stats.arrival_s * 1000.0,
         stats.sample_rate_hz,
     );
+    // #346 AC4 / issue's UX comment: the rule that produced `arrival` must
+    // reach the terminal, not stop at the JSON — a reader a year from now
+    // must be able to tell a geometry-checked onset from a best-effort
+    // one from the same line a human actually looks at. Printed as a
+    // short derived tag rather than `onset_rule` verbatim (the UX
+    // comment's own worst-case-width check found the full sentence runs
+    // past 80 columns at this indent); the untruncated rule still rides
+    // the persisted JSON via `IrStats::onset_rule`.
+    println!(
+        "                onset: {}",
+        short_onset_rule(&stats.onset_rule)
+    );
     // The AC's load-bearing case: without a τ measured under this run's
     // exact conditions there is no distance, and the reason is printed
     // rather than the arrival being quietly reused as one.
@@ -265,7 +299,7 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         }
     }
     println!(
-        "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
+        "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}  (diagnostic \u{2014} not arrival)",
         stats.peak_magnitude,
         20.0 * stats.peak_magnitude.max(1e-12).log10(),
         stats.peak_index,
