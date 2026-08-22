@@ -5,6 +5,7 @@
 //! segment-split unit test: this proves the split survives to the
 //! painted polyline.
 
+use ac_scene::transfer::DistanceCalibration;
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
     TransferScene,
@@ -36,6 +37,10 @@ fn masked_scene() -> TransferScene {
         delay_ms: 0.0,
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: None,
         ref_peak_dbfs: None,
         channel_role: "meas_0".to_string(),
@@ -153,6 +158,10 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         delay_ms: 0.0,
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -259,6 +268,10 @@ fn the_persistent_row_paints_its_instruction() {
             delay_ms: 0.0,
             delay_locked: Some(true),
             speed_of_sound_m_s: None,
+            meas_channel: 0,
+            ref_channel: 1,
+            distance_cal: None,
+            distance_plausible_max_m: None,
             meas_peak_dbfs: Some(-30.0),
             ref_peak_dbfs: Some(-14.5),
             channel_role: "meas_0".to_string(),
@@ -429,8 +442,18 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         // the band row and the readout at its *widest* — and the metres
         // figure is what makes it wide. An unlocked fixture would silently
         // narrow the string and the layout test would stop proving anything.
+        // Likewise a stored distance calibration (#243) — without one the
+        // readout is ms-only regardless of lock, which is narrower still.
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: Some(DistanceCalibration {
+            constant_ms: 0.0,
+            setup_id: "fixture".to_string(),
+            captured_at: "2026-01-01T00:00:00Z".to_string(),
+        }),
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -517,6 +540,95 @@ fn band_labels_are_painted_verbatim_at_the_scenes_band_centres() {
         (centres[1] - arithmetic_px).abs() > 10.0,
         "the middle band was painted at its arithmetic centre ({arithmetic_px} px), \
          not its geometric one ({predicted} px)"
+    );
+}
+
+/// A scene with a stored distance calibration (#243), locked, so
+/// `delay_calibration` is `Some("cal ...")`; `distance_plausible_max_m`
+/// pinned at `0.0` so the corrected metres figure — necessarily positive —
+/// trips `delay_warning` regardless of the fixture's speed-of-sound default.
+fn scene_with_distance_cal(plausible_max_m: Option<f64>) -> TransferScene {
+    let inp = TransferInput {
+        freqs: freqs(),
+        magnitude_db: vec![0.0; N],
+        phase_deg: vec![0.0; N],
+        coherence: vec![0.9; N],
+        delay_ms: 4.08,
+        delay_locked: Some(true),
+        speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 3,
+        distance_cal: Some(DistanceCalibration {
+            constant_ms: 1.0615,
+            setup_id: "mic1".to_string(),
+            captured_at: "2026-08-18T00:00:00Z".to_string(),
+        }),
+        distance_plausible_max_m: plausible_max_m,
+        meas_peak_dbfs: Some(-30.0),
+        ref_peak_dbfs: Some(-14.5),
+        channel_role: "meas_0".to_string(),
+        source: Source::Live,
+        sr: 48_000,
+        column_df: Vec::new(),
+        column_window_s: Vec::new(),
+        column_n: Vec::new(),
+        column_bins: Vec::new(),
+        stages: Vec::new(),
+        fault: None,
+    };
+    let mut meters = (MeterState::default(), MeterState::default());
+    TransferScene::from_input(
+        &inp,
+        DisplayModes::new(DerotMode::Session, Smoothing::Off),
+        FREQ_RANGE,
+        DB_RANGE,
+        &mut meters,
+        &mut FaultState::default(),
+        0.0,
+    )
+}
+
+/// QA #356 correctness issue 1: `TransferScene::delay_calibration` and
+/// `delay_warning` existed since #243 but nothing in this crate read them —
+/// a calibrated reading and an uncalibrated one painted identically, and
+/// the over-read warning never reached the screen. This proves both rows
+/// survive to the painted output, the same "scene field, then paint" split
+/// `a_fault_row_is_painted_verbatim_from_ac_scene` already uses for faults.
+#[test]
+fn the_calibration_and_warning_lines_reach_the_painted_output() {
+    let scene = scene_with_distance_cal(Some(0.0));
+    let calibration = scene
+        .delay_calibration
+        .as_deref()
+        .expect("locked + stored cal ⇒ Some");
+    let warning = scene
+        .delay_warning
+        .as_deref()
+        .expect("plausible_max_m: Some(0.0) ⇒ any positive metres reading trips it");
+
+    let texts = painted_texts(&scene);
+    assert!(
+        texts.iter().any(|t| t == calibration),
+        "calibration provenance line was not painted; texts on screen: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == warning),
+        "plausibility warning was not painted; texts on screen: {texts:?}"
+    );
+}
+
+/// The warning is absent under the plausible bound, and painting it is
+/// gated the same way — its line must not appear when `ac-scene` did not
+/// produce one.
+#[test]
+fn no_warning_line_is_painted_when_the_reading_is_plausible() {
+    let scene = scene_with_distance_cal(Some(1.5));
+    assert_eq!(scene.delay_warning, None, "fixture should not warn");
+
+    let texts = painted_texts(&scene);
+    assert!(
+        !texts.iter().any(|t| t.contains("exceeds plausible bound")),
+        "a warning line was painted despite no `delay_warning` on the scene: {texts:?}"
     );
 }
 

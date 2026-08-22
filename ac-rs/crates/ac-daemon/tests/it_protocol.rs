@@ -2642,6 +2642,164 @@ fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
 }
 
 // ---------------------------------------------------------------------------
+// distance calibration (#243) — the per-pair constant the delay readout's
+// ms -> m conversion is gated on.
+// ---------------------------------------------------------------------------
+
+/// Seed `cal.json` with a `distance_cal_history` entry for `out0_in0`,
+/// `ref_channel: 1`, `setup_id: "mic1"` — same shape as
+/// `get_and_list_calibrations_carry_tau_history`'s seed, minimal fields only.
+fn seed_distance_cal(d: &Daemon) {
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let seeded = json!({
+        "out0_in0": {
+            "output_channel":                   0,
+            "input_channel":                    0,
+            "ref_freq":                         1000.0,
+            "vrms_at_0dbfs_out":                null,
+            "vrms_at_0dbfs_in":                 null,
+            "ref_dbfs":                         -10.0,
+            "mic_sensitivity_dbfs_at_94db_spl": null,
+            "mic_response":                     null,
+            "tau_history":                      [],
+            "distance_cal_history": [
+                {
+                    "ref_channel":         1,
+                    "setup_id":            "mic1",
+                    "constant_ms":         1.0615,
+                    "captured_at":         "2026-08-18T11:35:14Z",
+                    "captured_distance_m": 1.0
+                }
+            ]
+        }
+    });
+    fs::write(&cal_path, serde_json::to_vec_pretty(&seeded).unwrap()).expect("seed cal.json");
+}
+
+#[test]
+fn transfer_stream_distance_cal_reaches_the_frame_when_the_setup_id_matches() {
+    let d = Daemon::spawn();
+    seed_distance_cal(&d);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "distance_setup_id": "mic1", "distance_plausible_max_m": 5.0,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                frame = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no transfer_stream frame within 10 s");
+
+    assert_eq!(
+        frame["distance_cal"]["constant_ms"],
+        json!(1.0615),
+        "{frame}"
+    );
+    assert_eq!(frame["distance_cal"]["setup_id"], json!("mic1"), "{frame}");
+    assert_eq!(
+        frame["distance_cal"]["captured_at"],
+        json!("2026-08-18T11:35:14Z"),
+        "{frame}"
+    );
+    assert_eq!(frame["distance_plausible_max_m"], json!(5.0), "{frame}");
+}
+
+#[test]
+fn transfer_stream_omits_distance_cal_when_no_setup_id_is_requested() {
+    // A stored constant existing on disk must not be applied silently —
+    // the session has to name the setup id it wants. This is the "pair
+    // with no stored constant" acceptance test from the session's point
+    // of view: no request, no lookup, `distance_cal: null` regardless of
+    // what cal.json holds.
+    let d = Daemon::spawn();
+    seed_distance_cal(&d);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                frame = Some(v);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let frame = frame.expect("no transfer_stream frame within 10 s");
+
+    assert_eq!(frame["distance_cal"], Value::Null, "{frame}");
+    assert_eq!(frame["distance_plausible_max_m"], Value::Null, "{frame}");
+}
+
+#[test]
+fn transfer_stream_refuses_an_unresolvable_distance_setup_id() {
+    // A `distance_setup_id` that does not match what's stored — wrong id,
+    // or none stored at all — must refuse the whole request synchronously
+    // rather than launching a session that silently never finds one.
+    let d = Daemon::spawn();
+    seed_distance_cal(&d); // stores "mic1" only
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "distance_setup_id": "mic2-moved",
+    }));
+    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
+    let err = r["error"].as_str().expect("error string");
+    assert!(
+        err.contains("mic2-moved"),
+        "must name the requested id: {err}"
+    );
+    assert!(
+        err.contains("mic1"),
+        "must name the stored id it differs from: {err}"
+    );
+}
+
+#[test]
+fn transfer_stream_refuses_a_distance_setup_id_with_no_history_at_all() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "distance_setup_id": "mic1",
+    }));
+    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains("mic1"),
+        "must name the requested id: {r:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // server_enable / server_disable — toggle listen_mode between local and
 // public and check the reported bind_addr. #52.
 // ---------------------------------------------------------------------------

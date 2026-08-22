@@ -43,6 +43,10 @@ fn input(freqs: Vec<f64>, phase_deg: Vec<f64>, delay_ms: f64) -> TransferInput {
         // entitled to state a distance for them.
         delay_locked: Some(true),
         speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
+        distance_cal: None,
+        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-6.0206),
         ref_peak_dbfs: Some(-6.0206),
         channel_role: "meas_0".to_string(),
@@ -114,7 +118,14 @@ fn f1_prime_session_mode_shows_the_wire_untouched_and_raw_mode_undoes_it() {
     assert!((phase_deg_at(&s, 0, 1) - 135.0).abs() < 1e-9); // 250 Hz: −225 → +135
     assert!((phase_deg_at(&s, 0, 2) - 180.0).abs() < 1e-9); // 1 kHz: −900 → +180
 
-    assert_eq!(s.delay_readout, "2.50 ms  (0.86 m)");
+    // #243: metres require a stored per-pair distance calibration, which
+    // this fixture's `input()` helper does not carry — ms only, plus a
+    // line naming the pair as uncalibrated.
+    assert_eq!(s.delay_readout, "2.50 ms");
+    assert_eq!(
+        s.delay_calibration.as_deref(),
+        Some("not calibrated — pair meas0↔ref1")
+    );
 }
 
 // ---------------------------------------------------------------------

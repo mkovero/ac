@@ -29,7 +29,7 @@ use crate::ir::ArrivalMarker;
 use crate::readout::format_sweep_ir_header;
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{time_axis, time_to_x, Axis};
-use crate::transfer::{format_delay_readout, SPEED_OF_SOUND_DEFAULT_M_S};
+use crate::transfer::{format_delay_readout_plain, SPEED_OF_SOUND_DEFAULT_M_S};
 
 /// Mirrors [`crate::ir::IrScene`]'s own downsample target — display
 /// column density, not a shared constant. See that module's doc on its
@@ -225,11 +225,11 @@ impl SweepIrScene {
             } else {
                 0.5
             },
-            // `format_delay_readout`'s own `delay_ms >= 0.0` guard means a
-            // peak that lands before the gate's zero-delay reference (or,
-            // in the `Known` branch, before τ) still prints ms-only
-            // rather than fabricating a negative distance.
-            text: format_delay_readout(readout_delay_ms, delay_locked, speed_of_sound_m_s),
+            // `format_delay_readout_plain`'s own `delay_ms >= 0.0` guard
+            // means a peak that lands before the gate's zero-delay
+            // reference (or, in the `Known` branch, before τ) still prints
+            // ms-only rather than fabricating a negative distance.
+            text: format_delay_readout_plain(readout_delay_ms, delay_locked, speed_of_sound_m_s),
         };
 
         // The recorded gate start, not `gate_window_s / 2`: the daemon's
@@ -441,7 +441,7 @@ mod tests {
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        let want = format_delay_readout(
+        let want = format_delay_readout_plain(
             stats.arrival_s * 1000.0,
             Some(false),
             SPEED_OF_SOUND_DEFAULT_M_S,
@@ -486,7 +486,7 @@ mod tests {
             (corrected_ms - 0.15).abs() < 1e-9,
             "expected 0.25ms - 0.1ms = 0.15ms, got {corrected_ms}"
         );
-        let want = format_delay_readout(corrected_ms, Some(true), speed_of_sound_m_s);
+        let want = format_delay_readout_plain(corrected_ms, Some(true), speed_of_sound_m_s);
         assert_eq!(scene.arrival.text, want);
         // Not the uncorrected round-trip figure (#283's forbidden case).
         assert_ne!(

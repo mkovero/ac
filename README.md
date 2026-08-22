@@ -117,30 +117,48 @@ survives in that difference and is indistinguishable from distance.
 
 Wired this way, everything up to the converter's analogue output is
 common-mode and cancels: interface, transport (ADAT/MADI/USB), converter
-DAC, sample rate, buffer size. What is left in the delay is only what the
-acoustic branch genuinely adds — amplifier, speaker DSP, driver origin,
-flight through air, microphone and preamp — so the delay *is* the arrival
-time and the metres figure means what it says. This is also how REW, Open
-Sound Meter and Smaart expect to be wired.
+DAC, sample rate, buffer size. This is also how REW, Open Sound Meter and
+Smaart expect to be wired.
 
 Take the reference from a *different* converter than the stimulus and the
-transport and DAC of the acoustic leg stay in the residual. On the rig
+transport and DAC of the acoustic leg stay in the residual too. On the rig
 behind #243 — reference out the interface's own DAC, stimulus out over ADAT
-through an external converter — that residual was **1.1931 ms**, which the
-readout paints as **41 cm of room that is not there**, with a mic taped at
-1.000 m reading 1.40 m. Nothing on screen says so: the number is plausible,
-stable, and wrong. Only the wiring fixes it.
+through an external converter — that piece of the residual was **1.1931
+ms**, which the readout painted as **41 cm of room that is not there**, with
+a mic taped at 1.000 m reading 1.40 m. Correcting the wiring dropped it to
+the predicted 1.0615 ms (rig session, 2026-08-18) — but did not zero it.
 
-Deliberately *not* subtracted, under any wiring: **speaker DSP latency
-belongs to the device under test, not to the instrument.** Correct wiring
-leaves it in the measurement, which is what an operator aligning a system
-wants to see. A stored instrument constant would have removed it silently
-along with the transport delay.
+**Wiring alone does not make the delay equal to the arrival time.** What
+survived the cable fix decomposed into 46.0 samples of converter-channel
+asymmetry (a second, smaller wiring artifact) and 55.9 samples — 0.58 ms,
+20 cm — of loudspeaker acoustic centre plus microphone capsule offset. That
+second term is not a wiring defect: it is a real property of *this*
+loudspeaker and *this* mic position, and it moves the moment either does.
+No cable change removes it, and describing it as "interface latency" would
+be wrong in the same way the original 1.1931 ms figure was.
 
-The metres figure appears only once the pair has a measured lock. Before
-that the readout shows milliseconds alone rather than converting the
-placeholder `0.00 ms` into a distance; an unlocked pair is named by the
-view's `NO LOCK` indicator.
+**Deliberately *not* subtracted, under any wiring, by any mechanism below:
+speaker DSP latency belongs to the device under test, not to the
+instrument.** A stored constant that swallowed it would misrepresent the
+DUT to whoever reads the metres figure later.
+
+A per-`(meas_channel, ref_channel)` calibration constant closes the rest of
+the gap. Capture a lock at a taped, known distance, tag it with a
+`distance_setup_id` naming the acoustic setup (which mic, which
+loudspeaker, which position), and store the difference between the locked
+delay and the flight time the taped distance predicts. `transfer_stream`
+honours it only when asked for by that exact `distance_setup_id` — asking
+for one that does not match what is stored refuses the request rather than
+applying a stale value, because the constant is geometry, not wiring, and a
+speaker or mic swap invalidates it silently otherwise.
+
+The metres figure appears only once the pair has a measured lock **and** a
+matching stored constant. Before a lock the readout shows milliseconds
+alone rather than converting the placeholder `0.00 ms` into a distance; an
+unlocked pair is named by the view's `NO LOCK` indicator. Locked but
+uncalibrated, the readout still shows milliseconds alone, plus a line
+naming the pair as not calibrated — a missing constant is never treated as
+zero.
 
 Set the room temperature so the conversion uses the right speed of sound:
 
