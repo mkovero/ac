@@ -10,7 +10,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 | `.agents/architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
-| `audit.md` | audit coordinator — orchestrates full codebase audit | manual invocation |
+| `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved` |
 | `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | manual invocation |
 
 ## invocation
@@ -19,10 +19,8 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 Pass agent file as context beside issue or PR:
 
 ```bash
-# full audit (run specialists in sequence, then coordinator)
-claude "audit the codebase as architect" --context .agents/architect.md > audit/architect-raw.md
-claude "audit the codebase as qa"        --context .agents/qa.md        > audit/qa-raw.md
-claude "You are the audit coordinator. Read .agents/audit.md then read audit/architect-raw.md and audit/qa-raw.md and produce the consolidated audit report."
+# triage a new issue
+claude --context .agents/triage.md \
   "triage issue #42: https://github.com/mkovero/ac/issues/42"
 
 # implement a ready issue
@@ -37,6 +35,20 @@ claude --context .agents/qa.md \
 claude --system-prompt-file .agents/rig.md \
   "run rig session against work/rig/rig-verify-queue.md block 4"
 ```
+
+### codex (independent QA)
+The second review does not run under Claude — that is the point of it. Codex
+reads the root `AGENTS.md` symlink automatically, so only the role file is
+named:
+
+```bash
+codex exec "Independent QA review of PR #43 in mkovero/ac.
+Read AGENTS.md, then .agents/codex-qa.md, then follow codex-qa.md."
+```
+
+`.agents/bin/codex-qa-run.sh` walks the whole queue. Root `AGENTS.md` is a
+symlink to this file; see `.agents/codex-qa.md` for why the tooling must be
+kept from writing through it.
 
 Claude Code need GitHub MCP server connected for issue/PR read-write:
 ```bash
@@ -54,7 +66,7 @@ Example trigger: label applied → run triage or developer agent.
 new issue
   └─ triage
        ├─ needs-design → architect → ready-to-implement
-       └─ ready-to-implement → developer → PR → qa → human merge
+       └─ ready-to-implement → developer → PR → qa → codex-qa → human merge
 
 ambiguous issue
   └─ triage applies needs-clarification → wait for reporter
@@ -68,7 +80,13 @@ PRs touching stimulus/drive (`set_drive`, arm/fire state machine, keepalive):
 Always human-only:
 - Merging PRs to main — an agent reviewing another agent's PR shares the same
   specs, the same failure modes, and the same blind spots, so that review is
-  not an independent check; merge needs one.
+  not an independent check; merge needs one. Codex QA reduces the common mode
+  (different model, different harness, no sight of the Claude review until its
+  own findings are formed) but does not remove it, so merge stays human.
+  **Merge only when both `claude-approved` and `codex-approved` are present
+  and both approve comments postdate the last commit on the branch.** A label
+  is a claim about a tip; read the timestamps rather than trusting the label,
+  same posture as the rig interlocks.
 - Closing issues
 - Deleting branches
 - Changing agent spec files
@@ -85,7 +103,9 @@ Always human-only:
 | `design-approved` | architect | design decided, ready for dev |
 | `ready-to-implement` | triage or architect | developer can pick up |
 | `in-review` | developer (via PR) | PR open |
-| `needs-work` | qa | PR has issues, developer must revise |
+| `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed** |
+| `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed |
+| `needs-work` | qa **or** codex-qa | PR has issues, developer must revise |
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
@@ -95,6 +115,41 @@ Always human-only:
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
 | `agent:qa` | qa | audit trail |
+
+codex-qa has no `agent:` row. It sets `codex-approved` and `needs-work` and
+nothing else; its `<!-- agent: codex-qa -->` comment marker is the audit trail,
+so a fifth `agent:` label would be a second record of the same fact and one
+more label for a reviewer to keep in sync.
+
+### the two approval labels are one gate each, and neither is the merge gate
+
+`claude-approved` and `codex-approved` are set by different reviewers running
+under different models, and both must be present for a human to merge (see
+human gates). Neither agent may set the other's label.
+
+**Clearing is asymmetric, deliberately.** `codex-approved` is cleared by
+codex-qa itself on a later fail. `claude-approved` is cleared by *whoever
+pushes to the branch after it was applied* — the pusher, not the reviewer,
+because the push is what invalidates it and the reviewer is not watching. This
+is the label-level expression of qa.md's post-approval rule; the rule is the
+authority, the label only tracks it.
+
+A useful consequence, free rather than designed: QA never pairs
+`claude-approved` with a request-changes verdict, so the label pair encodes
+which reviewer objected.
+
+- `needs-work` alone → a Claude QA finding.
+- `claude-approved` + `needs-work` → a Codex finding, unambiguously.
+
+`in-review` and `requires-rig` compose unchanged; Codex touches neither.
+`in-review` + `needs-work` can now coexist, in the Codex-fail case only. That
+is accepted drift: nothing currently routes on the *absence* of `in-review` as
+"developer attention needed", and anything added later that does would break
+here.
+
+Only a fresh Claude QA pass restores `claude-approved`, so a Codex-failed PR
+cannot re-enter the Codex queue until Claude QA has re-reviewed it. The queue
+predicate is the interlock — there is no separate mechanism to keep in sync.
 
 ### `blocked` and `blocks-others` are opposite relations
 
@@ -220,6 +275,52 @@ Corollaries:
   the source document. When reporting what a verification pass found, separate
   *corrected*, *added*, and *checked and unchanged* — this is the project's own
   harm-statistic discipline turned on the verification process itself.
+
+### repowise — a locator, with one exception
+
+This repo is indexed by repowise, and its tools are available to every role.
+They exist to cut the *exploration* cost — the candidate reads that find the
+right file — not to replace the read that a finding rests on.
+
+**The line:**
+
+- **`get_symbol` returns raw source bytes with exact line bounds. When
+  `_meta.indexed_commit` equals HEAD of the tree under review, a `get_symbol`
+  result counts as having opened that span** — it *is* the tree, arrived at
+  more cheaply than `Read` plus offset arithmetic. This is the exception, and
+  it is conditional on the commit matching.
+- **Everything else repowise returns is a locator.** `get_context`,
+  `get_answer`, `get_risk`, `get_change_risk`, `get_health`, `get_dead_code`,
+  `search_codebase`, `get_why`, and the wiki are summaries or scores. No
+  finding, no acceptance criterion, no citation and no approval rests on one.
+  The file it points at gets opened — by `Read`, or by `get_symbol` at HEAD —
+  or the claim does not get made.
+- **Index behind HEAD → the exception lapses.** Every result is approximate
+  and `get_symbol` loses verified-read status until the index is resynced
+  (`repowise update`). `indexed_commit` is what makes staleness observable
+  instead of silent, which makes checking it load-bearing rather than hygiene.
+
+This is `qa.md`'s existing rule — "a `Grep` hit is a candidate, not a verified
+read" — restated for a tool that returns prose instead of line numbers, and it
+is the same rule for the same reason: a summary is an assertion about the tree
+by something that is not the tree.
+
+**A savings mechanism may compress a locator; it may not compress evidence.**
+repowise ships hooks that rewrite tool results in flight. `search_digest`
+compacts search output, and search results are already locators here, so it
+costs nothing this rule depends on. `read_skeleton` makes a `Read` return a
+skeleton instead of file bytes — summarized content arriving through the exact
+channel this section designates as verified, and arriving invisibly, since
+nothing in the result says it is a summary. It is therefore off, and any
+future hook is judged on the same line. `repowise distill`, which compacts the
+output of `cargo test` and `clippy`, is unaffected: a command's stdout is not
+a file read.
+
+**Common mode.** Claude QA and Codex QA query the same index. A wrong entry in
+it is wrong for both, which is exactly the correlation the second review
+exists to break. Ground findings in the tree and the diff, never in the shared
+index — this is why the exception above is narrow and conditional rather than
+a general "trust the index".
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

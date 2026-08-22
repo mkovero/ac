@@ -101,6 +101,11 @@ to them. Both set → ux comment first, architect still own promotion to
 Epic (multiple independent work pieces) → `epic`.
 Break into sub-issues, reference them in comment before labeling parent `epic`.
 
+`get_context` and `get_risk` may inform the "files likely affected" line —
+they are cheaper than exploring the tree, and that line is best-effort either
+way. It stays best-effort: a repowise result is a locator (`AGENTS.md`), so it
+never turns into an acceptance criterion or a claim about how the code works.
+
 ## hard constraints
 - No code or pseudocode in spec comments.
 - Never close issues.

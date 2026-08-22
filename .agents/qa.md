@@ -158,12 +158,34 @@ coverage is a correctness issue, reported in that section below, not folded
 into this one.
 
 ### step 2 — review the diff
+
+Before opening files, run the two repowise calls that take the range you
+already have. Both are locators under `AGENTS.md`'s repowise rule — they say
+where to look, never what is true:
+
+- `get_risk(targets, changed_files=<the PR's files>)` — read its `directive`
+  first. `missing_cochanges` on a daemon-handler diff that does not touch
+  `ac-cli`/`ac-view` is the wire-schema check firing before any file opens.
+  `will_break`, `missing_tests` and `tests_to_run` are leads to verify.
+- `get_change_risk("<base>..<head>")` — scores the range rather than the paths.
+  Lead with `risk_percentile`.
+
+**A clean report licenses nothing.** The checklist below runs in full either
+way; these calls change the order you read in, not whether you read. A finding
+that cites either without an opened file is not a finding.
+
 Check:
 - **correctness** — implementation do what spec says?
 - **numerical correctness** — estimator/measurement code: window sizes, normalization factors, array indices correct?
 - **wire schema** — `ac-daemon`'s published frame changed → do `ac-cli` and `ac-view` match? (`ac-rs/ZMQ.md`)
 
-Cross-crate check (schema match, existing helper, pattern used elsewhere) → `Grep` for the specific symbol, then `Read` the hit. Shell readers and searchers denied by `.claude/settings.json`; do not work around them.
+Cross-crate check (schema match, existing helper, pattern used elsewhere) →
+`get_context` on the symbol with `include=["callers"]`, then `get_symbol` on
+each hit. When `_meta.indexed_commit` equals the tip you are reviewing, that
+`get_symbol` result *is* the verified read and no `Read` is needed; when it
+does not, or when the tool is unavailable, fall back to `Grep` for the symbol
+then `Read` the hit. Shell readers and searchers denied by
+`.claude/settings.json`; do not work around them.
 - **error handling** — Results propagated, not silently unwrapped?
 - **test coverage** — new code paths exercised by tests?
 - **coupled constants** — PR introduce or change a constant whose correct
@@ -208,6 +230,10 @@ Each new test:
 - Measurement functions: numeric assertions with tight tolerances?
   Example: `assert!((result.thd - 0.0023).abs() < 1e-4)` not just `assert!(result.thd > 0.0)`
 - CLI behavior: output strings or exit codes asserted?
+
+`get_health` untested-hotspot entries are a useful pointer to where a missing
+test would matter most — a locator for this step, not a finding in it. A file
+it flags still gets opened before the review says anything about its coverage.
 
 Tests missing or weak → write missing tests yourself, include in review comment as suggested additions.
 
@@ -255,10 +281,18 @@ would falsify the claim. See step 5.}
 ```
 
 ### step 5 — apply label
-- Approving → apply `in-review` (already set) — no change, leave for human merge
-- Requesting changes → apply `needs-work`, remove `in-review`
+- Approving → apply `claude-approved`, leave `in-review` in place
+- Requesting changes → apply `needs-work`, remove `in-review`. Do **not** apply
+  `claude-approved`; the pairing of `claude-approved` with a request-changes
+  verdict is what tells a reader the finding came from Codex, so never produce
+  it here.
 - Correctness turn on a physical measurement you cannot make from the tree →
   apply `requires-rig` **in addition to** whichever of the above applies
+
+`claude-approved` is not a merge signal. It puts the PR in the Codex queue
+(`.agents/codex-qa.md`); merge needs `codex-approved` as well, and needs a
+human. You never set or clear `codex-approved` — if you disagree with a Codex
+finding, say so in your review comment and leave the label alone.
 
 ### `requires-rig` — you set it, only a human clear it
 
@@ -304,74 +338,19 @@ and inconvenient to check.
 This rule is load-bearing: merge to main is human-only precisely because agent
 review is not independent (see `AGENTS.md` human gates), so this is the one
 mechanism stopping an approved-then-amended PR from reaching that human merge
-unreviewed. `agent:qa` approval attest to tree **at commit it reviewed**, not branch forever. **Any commit pushed after approval revert PR to `needs-work` and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. Rule exist because real one slipped through: #197's closure-evidence commit landed on `main` unformatted and CI-red *after* approval (#199). Relay between "approved" and "merged" is seam like any other — close structurally, not by remembering to re-check.
+unreviewed. `agent:qa` approval attest to tree **at commit it reviewed**, not branch forever. **Any commit pushed after approval revert PR to `needs-work`, remove
+`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. Rule exist because real one slipped through: #197's closure-evidence commit landed on `main` unformatted and CI-red *after* approval (#199). Relay between "approved" and "merged" is seam like any other — close structurally, not by remembering to re-check.
 
-## audit mode
+Removing `claude-approved` is part of the rule, not bookkeeping after it. The
+label is what puts a PR in the Codex queue and what a human reads at the merge
+gate, so a stale one produces an independent review of a tree nobody approved,
+and a merge gate satisfied by a label that describes an older commit. Whoever
+pushes removes it (`developer.md` carries the same instruction from the other
+side); this re-review removes it if the pusher did not. Codex checks the
+timestamps as well — three places, because the failure is silent in all of
+them.
 
-Invoked with "audit the codebase as qa" → do this instead of normal PR-review flow. Read-only — no issues, no PRs.
-
-Read full test suite + all measurement-producing code. Produce structured findings report covering test coverage + standards conformance.
-
-### test coverage map
-Each module, list:
-- What tested (function/behaviour level, not line coverage)
-- What not tested but should be
-- Tests asserting too weakly (runs without panic vs. asserts value)
-
-Watch close:
-- Numerical results from `ac-core/visualize/transfer.rs` and `ac-core/measurement/thd.rs` — assertions tight enough to catch wrong normalization factor?
-- Error paths — hardware fault conditions tested at all?
-- Wire schema — test that `ac-cli` and `ac-view` correctly parse what `ac-daemon` publish?
-
-### standards conformance scan
-Walk **each Tier 1 module** (`ac-core/measurement/*` — filterbank, weighting,
-thd, ccir468, loudness, ir, report) and check every value it produces against
-the applicable standard from `stddocs/` (use the standards table in this spec).
-Tier 2 (`ac-core/visualize/*`) is live analysis and enters no conformance
-artifact — cover it for numerical correctness, not standards conformance.
-
-**The failing case, so this can come back negative:** a value whose computation
-matches the standard but whose unit, reference or qualifier does not — #128
-(THD/THD+N shown without `dB re fundamental`) and #117 (BS.468-4 quasi-peak
-cited without the Table-2 burst tolerances being tested) are both this shape.
-A conformance scan that reports "clean" without naming a value it checked and
-what it checked it against has not run.
-
-Flag any value that is:
-- computed correctly but labelled incorrectly
-- computed in way that may not match standard's methodology
-- missing required qualifier (weighting, reference, measurement condition)
-
-Uncertain → not definite violation. Use `? — needs verification` for anything needing deeper analysis.
-
-### report format
-```
-## qa audit — {date}
-
-### test coverage map
-| module | what is tested | what is missing | weak assertions |
-|---|---|---|---|
-| ac-core/visualize/transfer.rs | ... | ... | ... |
-| ac-core/measurement/thd.rs | | | |
-| ac-core/measurement/loudness.rs | | | |
-| ac-daemon/handlers | | | |
-| ac-scene | | | |
-| ac-view | | | |
-
-### standards conformance
-| output value | module | standard | clause | status | notes |
-|---|---|---|---|---|---|
-| THD+N % | ac-core/measurement/thd.rs | AES-17-2015 | §6.3 | ✓ / ✗ / ? | |
-
-### critical gaps
-{Test coverage or standards issues that could cause a measurement to be
-wrong without any test catching it. These are the highest priority.}
-
-### what is well covered
-{areas with solid test coverage and correct standards conformance}
-```
-
-
+## hard constraints
 - No implementation changes yourself (except suggested test additions in comment).
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
