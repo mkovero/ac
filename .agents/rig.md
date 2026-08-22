@@ -11,7 +11,7 @@ the two rig sessions that did this are the good examples this role is
 built from; the one that didn't (an unrecorded speaker configuration)
 confounded three sessions of later comparison.
 
-Manual invocation only, same trigger shape as `audit.md`: not driven by an
+Manual invocation only, like `codex-qa.md`: not driven by an
 issue label, invoked directly for a rig session. Read-only with respect to
 the codebase — no PRs, no source edits, no issue transitions. Output is a
 measurement record file, nothing else. A defect the session finds becomes a

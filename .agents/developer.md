@@ -63,7 +63,22 @@ that trips over it.
 Read full triage spec comment + architect comment (if present).
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
-Locating code → `Glob` and `Grep` tools, then `Read`. Shell readers and searchers (`cat`, `sed`, `grep`, `find`) denied by `.claude/settings.json`; do not work around them.
+Locating code → repowise first: `get_context` on the files you expect to
+touch, then `get_risk` on that list to surface co-change partners you did not
+expect. Build the step-1 file list from the graph rather than from
+Grep-and-read exploration — that exploration is the expensive part of this
+step, and the graph already holds the answer.
+
+`Glob`, `Grep` and `Read` remain the fallback, and remain what you use when
+repowise is unavailable or its index is behind HEAD. Shell readers and
+searchers (`cat`, `grep`, `find`) denied by `.claude/settings.json`; do not
+work around them. Check the deny list rather than this sentence for the
+current set — it is the authority and it changes.
+
+Both are locators. A repowise result puts a file on your list; it does not tell
+you what the file does. `get_risk` naming a co-change partner is a reason to
+open that file, and — like a `Grep` hit — not a licence to widen scope past
+what the spec justifies. See `AGENTS.md`'s repowise rule.
 
 ### step 2 — branch
 ```bash
@@ -82,10 +97,16 @@ Broken or unclear thing outside issue scope:
 
 ### step 4 — verify
 ```bash
-cargo test 2>&1 | tail -20     # paste summary in PR body
-cargo clippy -- -D warnings    # must be zero new warnings
+repowise distill cargo test    # paste summary in PR body
+repowise distill cargo clippy -- -D warnings   # must be zero new warnings
 cargo fmt --check              # must pass
 ```
+
+`repowise distill` preserves the exit code and puts errors first; omitted
+output is recoverable via `repowise expand <ref>` — never re-run the command to
+see it. Plain `cargo test 2>&1 | tail -20` remains correct if distill is
+unavailable. This is command output, not a file read, so nothing in
+`AGENTS.md`'s repowise rule applies to it.
 
 Check fails → fix before opening PR. No PRs with failing tests.
 
@@ -121,6 +142,36 @@ closes #{N}
 {anything you are uncertain about — be specific}
 ```
 
+## codex-finding mode
+
+Invoked as `"fix Codex findings on PR #N"` → do this instead of the issue flow
+above. The PR exists, Claude QA passed it, and an independent Codex review
+found something.
+
+1. **Read the newest `<!-- agent: codex-qa -->` comment on the PR.** It is the
+   spec for this invocation. The original issue spec still bounds scope — a
+   Codex finding is a defect report against work already specified, not a new
+   requirement, and it does not authorise touching files the issue never
+   justified.
+2. **Remove `claude-approved` and `needs-work`.** The first because you are
+   about to invalidate it; the second because you have picked the work up.
+3. **Fix on the existing PR branch.** No new branch, no new PR — one PR per
+   issue still holds. Normal hard constraints apply, and step 4's full verify
+   gate runs again against the new tip.
+4. **Push. Restore no labels.** You do not re-apply `claude-approved`; only a
+   Claude QA re-review does, under the post-approval rule in `qa.md`. When it
+   does, the PR re-enters the Codex queue by itself, because the queue is
+   `claude-approved` and not `codex-approved`. There is nothing to notify and
+   nothing to remember.
+
+**Disagreeing with a finding is a valid outcome, and it stops here.** Comment
+on the PR with your evidence — the file you opened, the test, the reason the
+finding does not hold — and stop. Do not fix it anyway, and do not argue it to
+a conclusion. The disagreement goes to a human. Two agents negotiating their
+way to agreement is precisely the failure mode an independent second review
+exists to prevent, and it is the one outcome that would make the whole
+arrangement worthless while looking like it worked.
+
 ## hard constraints
 - Touch only files justified by spec + listed in step 1.
 - Search result is evidence about location, not licence to widen scope. Turn up file outside step 1 list → same rule: stop, comment on issue.
@@ -128,5 +179,13 @@ closes #{N}
 - No TODO comments. Implement it or open follow-up issue.
 - No commented-out code.
 - Issue ambiguous at implementation time → comment on issue, stop. Do not guess and implement wrong thing.
+- **Pushing to a PR branch that carries `claude-approved` → remove
+  `claude-approved` in the same action.** Applies to every push in every mode:
+  the issue flow, codex-finding mode, a one-line fixup, a `cargo fmt` reflow.
+  The label attests to a specific commit (`qa.md`, post-approval rule) and the
+  human merge gate reads it, so a push that leaves it standing hands a reviewer
+  an approval of a tree that no longer exists. Whether the commit "looks
+  harmless" is not a criterion — the gate cannot distinguish a whitespace
+  change from a logic change by trust, only by running.
 - Do not merge. Do not close issue. PR closes it automatically on merge.
 - One PR per issue. No bundling unrelated changes.
