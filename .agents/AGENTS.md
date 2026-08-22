@@ -6,7 +6,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 
 | file | role | trigger |
 |---|---|---|
-| `triage.md` | PM — writes specs, routes issues | new issue opened |
+| `.agents/triage.md` | PM — writes specs, routes issues | new issue opened |
 | `.agents/architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
