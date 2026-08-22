@@ -243,6 +243,34 @@ channel, which is #204.
 
 Not caused by any branch. Each cost a session's time.
 
+0. **Do not build on 192.168.9.25.** It is the hypervisor host the development
+   VM runs on. Four `cargo build --release` runs there on 2026-08-22 caused the
+   host's OOM killer to take a running 24 GB guest; the audio stack survived by
+   luck. Build on the VM, copy binaries over, and take the sha256 **after** the
+   copy. Integration tests travel the same way (`cargo test --no-run` produces a
+   self-contained binary), so the rig needs no toolchain at all. Two build traps
+   found the same day: a *shared* `CARGO_TARGET_DIR` across worktrees goes
+   false-fresh (three of four refs reported `Finished in 0.3s` without
+   compiling, and one binary was copied out under four names with four identical
+   hashes), while *separate* target dirs make binaries differ by sha256 even
+   when the code is identical, because absolute paths are baked into panic
+   messages. Identical hashes across refs that should differ is the alarming
+   direction; differing hashes across refs that should match is benign.
+4. **`ac plot` with no arguments runs a measurement.** It is not a usage query:
+   it auto-spawns a daemon and sweeps 20 Hz–20 kHz out `cfg.output_channel` at
+   the CLI default of **−20 dBFS**, unclamped. `ac --help` is the only form that
+   prints usage without emitting. Read the parser source instead of probing the
+   CLI on a live rig. (`ac-daemon` likewise does not reject unknown flags —
+   `--help` starts a server.)
+5. **`ac calibrate`'s `output_channel` argument does not route** — #358. It
+   selects the storage key only; the tone goes to `cfg.output_channel`. Set the
+   channel in the config, or pass sticky `output_port`/`input_port` names. The
+   symptom is "loopback not detected this run" on a cable that is fine.
+6. **`/home/mui/rig2-home/.config/ac/cal.json` carries a mislabeled entry** as
+   of 2026-08-22: key `out1_in3` written while `playback_5` was driven (#358).
+   No `tau_history`, so nothing reads a wrong τ from it, but it claims a pair
+   that was never measured. Left in place — it is the operator's file.
+
 1. **`~/.config/ac/config.json` has `reference_channel: 2`**, which points at
    `capture_3` — digitally silent on this wiring. Anything run as the
    operator's own user reports `NO REFERENCE`. Correct values for the current
