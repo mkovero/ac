@@ -27,6 +27,7 @@ ac-rs/crates/ac-view/tests/snapshots/*.diff.png
 pytest-of-mui/
 stddocs
 /.cargo/
-/.repowise/
 .claude/CLAUDE.md
 .mcp.json
+# repowise API keys (local)
+.repowise/.env

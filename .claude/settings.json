@@ -2,7 +2,6 @@
   "permissions": {
     "deny": [
       "Task(Explore)",
-      "Bash(sed:*)",
       "Bash(awk:*)",
       "Bash(less:*)",
       "Bash(more:*)",
@@ -29,6 +28,7 @@
       "Bash(cargo:*)",
       "Bash(git:*)",
       "Bash(gh:*)",
+      "Bash(sed:*)",
       "Bash(python3:*)",
       "Bash(head:*)",
       "Bash(tail:*)",

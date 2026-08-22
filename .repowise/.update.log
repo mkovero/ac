@@ -1,0 +1,156 @@
+
+--- post-commit hook fired at Fri Aug 21 02:20:41 AM UTC 2026 for HEAD 6c0fffe60f09aaee95fbcceb9d0aa03925ddcda6 ---
+repowise update · ac
+c6af6228..6c0fffe6
+Config files changed — re-running health analysis.
+2 changed · 2 added
+       added  .codex/qa-instructions.md
+       added  bin/codex-qa.sh
+Framework edges added: 25
+Dynamic hint edges added: 113
+Pages to regenerate: 2
+Health analysis (partial): 2 files, 0 findings
+Dead code findings: 32
+Knowledge graph refreshed: 7 layers, 12 tour steps
+Related pages refreshed on 73 pages
+Health re-score: 423 files, 1373 findings
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── {^ ^}  repowise index-only update complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   Files changed           2                                                                                                                                                                                                                                                                                                                                                                                  │
+│   Graph                   5,585 nodes · 10,881 edges                                                                                                                                                                                                                                                                                                                                                         │
+│   Dead code               0 unreachable · 0 unused exports                                                                                                                                                                                                                                                                                                                                                   │
+│   Git history             2 files refreshed                                                                                                                                                                                                                                                                                                                                                                  │
+│   Elapsed                 1m 1s                                                                                                                                                                                                                                                                                                                                                                              │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   What's next:                                                                                                                                                                                                                                                                                                                                                                                               │
+│   repowise serve              browse the index at localhost:3000                                                                                                                                                                                                                                                                                                                                             │
+│   repowise generate           upgrade the wiki to model-written prose (needs a key)                                                                                                                                                                                                                                                                                                                          │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✓ VS Code MCP configured (/home/mui/src/ac/.vscode/mcp.json)
+  ✓ VS Code extension recommended (/home/mui/src/ac/.vscode/extensions.json)
+
+--- post-commit hook fired at Fri Aug 21 02:24:43 AM UTC 2026 for HEAD f4fe468dd728bad651aaef90d6dea0d3a71214f4 ---
+repowise update · ac
+6c0fffe6..f4fe468d
+1 changed · 1 modified
+    modified  .gitignore
+Framework edges added: 25
+Dynamic hint edges added: 113
+Pages to regenerate: 1
+Health analysis (partial): 1 files, 0 findings
+Dead code findings: 32
+Knowledge graph refreshed: 7 layers, 12 tour steps
+Related pages refreshed on 8 pages
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── {^ ^}  repowise index-only update complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   Files changed           1                                                                                                                                                                                                                                                                                                                                                                                  │
+│   Graph                   5,581 nodes · 10,879 edges                                                                                                                                                                                                                                                                                                                                                         │
+│   Dead code               0 unreachable · 0 unused exports                                                                                                                                                                                                                                                                                                                                                   │
+│   Git history             1 files refreshed                                                                                                                                                                                                                                                                                                                                                                  │
+│   Elapsed                 48.2s                                                                                                                                                                                                                                                                                                                                                                              │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   What's next:                                                                                                                                                                                                                                                                                                                                                                                               │
+│   repowise serve              browse the index at localhost:3000                                                                                                                                                                                                                                                                                                                                             │
+│   repowise generate           upgrade the wiki to model-written prose (needs a key)                                                                                                                                                                                                                                                                                                                          │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✓ VS Code MCP configured (/home/mui/src/ac/.vscode/mcp.json)
+  ✓ VS Code extension recommended (/home/mui/src/ac/.vscode/extensions.json)
+
+--- post-commit hook fired at Fri Aug 21 02:36:34 AM UTC 2026 for HEAD 0ef2c8158870c318a8d148ee312435436abc8b7e ---
+repowise update · ac
+f4fe468d..0ef2c815
+1 changed · 1 modified
+    modified  bin/codex-qa.sh
+Framework edges added: 25
+Dynamic hint edges added: 113
+Pages to regenerate: 1
+Health analysis (partial): 1 files, 0 findings
+Dead code findings: 32
+Knowledge graph refreshed: 7 layers, 12 tour steps
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── {^ ^}  repowise index-only update complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   Files changed           1                                                                                                                                                                                                                                                                                                                                                                                  │
+│   Graph                   5,581 nodes · 10,879 edges                                                                                                                                                                                                                                                                                                                                                         │
+│   Dead code               0 unreachable · 0 unused exports                                                                                                                                                                                                                                                                                                                                                   │
+│   Git history             1 files refreshed                                                                                                                                                                                                                                                                                                                                                                  │
+│   Elapsed                 39.8s                                                                                                                                                                                                                                                                                                                                                                              │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   What's next:                                                                                                                                                                                                                                                                                                                                                                                               │
+│   repowise serve              browse the index at localhost:3000                                                                                                                                                                                                                                                                                                                                             │
+│   repowise generate           upgrade the wiki to model-written prose (needs a key)                                                                                                                                                                                                                                                                                                                          │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✓ VS Code MCP configured (/home/mui/src/ac/.vscode/mcp.json)
+  ✓ VS Code extension recommended (/home/mui/src/ac/.vscode/extensions.json)
+
+--- post-commit hook fired at Sat Aug 22 07:03:13 PM UTC 2026 for HEAD ef1a2daf0885d90f3e99597749e028dba820ff81 ---
+repowise update · ac
+0ef2c815..ef1a2daf
+4 changed · 1 modified, 3 added
+       added  work/rig/rig-2026-08-22-onset-distance-results.md
+       added  work/rig/rig-2026-08-22-tau-loopback-results.md
+       added  work/rig/rig-test-plan.md
+    modified  work/rig/rig-verify-queue.md
+Framework edges added: 25
+Dynamic hint edges added: 113
+Pages to regenerate: 4
+Health analysis (partial): 4 files, 1 findings
+Dead code findings: 32
+Knowledge graph refreshed: 7 layers, 12 tour steps
+Related pages refreshed on 15 pages
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── {^ ^}  repowise index-only update complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   Files changed           4                                                                                                                                                                                                                                                                                                                                                                                  │
+│   Graph                   5,589 nodes · 10,881 edges                                                                                                                                                                                                                                                                                                                                                         │
+│   Dead code               0 unreachable · 0 unused exports                                                                                                                                                                                                                                                                                                                                                   │
+│   Git history             4 files refreshed                                                                                                                                                                                                                                                                                                                                                                  │
+│   Elapsed                 55.2s                                                                                                                                                                                                                                                                                                                                                                              │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   What's next:                                                                                                                                                                                                                                                                                                                                                                                               │
+│   repowise serve              browse the index at localhost:3000                                                                                                                                                                                                                                                                                                                                             │
+│   repowise generate           upgrade the wiki to model-written prose (needs a key)                                                                                                                                                                                                                                                                                                                          │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✓ VS Code MCP configured (/home/mui/src/ac/.vscode/mcp.json)
+  ✓ VS Code extension recommended (/home/mui/src/ac/.vscode/extensions.json)
+
+--- post-commit hook fired at Sat Aug 22 08:06:48 PM UTC 2026 for HEAD 427ccc1c8dabf5e805c2f192b5a6149e55a2b3f5 ---
+repowise update · ac
+ef1a2daf..427ccc1c
+2 changed · 2 added
+       added  work/handoff/unstable-periods-handover.md
+       added  work/rig/rig-2026-08-22-tau-window-350-results.md
+Framework edges added: 25
+Dynamic hint edges added: 113
+Pages to regenerate: 2
+Health analysis (partial): 2 files, 0 findings
+Dead code findings: 32
+Knowledge graph refreshed: 7 layers, 12 tour steps
+Related pages refreshed on 10 pages
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── {^ ^}  repowise index-only update complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   Files changed           2                                                                                                                                                                                                                                                                                                                                                                                  │
+│   Graph                   5,595 nodes · 10,884 edges                                                                                                                                                                                                                                                                                                                                                         │
+│   Dead code               0 unreachable · 0 unused exports                                                                                                                                                                                                                                                                                                                                                   │
+│   Git history             2 files refreshed                                                                                                                                                                                                                                                                                                                                                                  │
+│   Elapsed                 49.2s                                                                                                                                                                                                                                                                                                                                                                              │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+│   What's next:                                                                                                                                                                                                                                                                                                                                                                                               │
+│   repowise serve              browse the index at localhost:3000                                                                                                                                                                                                                                                                                                                                             │
+│   repowise generate           upgrade the wiki to model-written prose (needs a key)                                                                                                                                                                                                                                                                                                                          │
+│                                                                                                                                                                                                                                                                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+  ✓ VS Code MCP configured (/home/mui/src/ac/.vscode/mcp.json)
+  ✓ VS Code extension recommended (/home/mui/src/ac/.vscode/extensions.json)

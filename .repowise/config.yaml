@@ -1,0 +1,11 @@
+embedder: mock
+editor_files:
+  agents_md: false
+distill:
+  commands:
+    enabled: true
+hooks:
+  read_skeleton: false
+  search_digest: true
+provider: anthropic
+model: claude-haiku-4-5-20251001
