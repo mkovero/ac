@@ -13,7 +13,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
-use super::super::{busy_guard, resolve_input, send_pub, spawn_worker};
+use super::super::{busy_guard, cfg_guard, resolve_input, send_pub, spawn_worker};
 
 /// Emit a `measurement/loudness` sidecar frame for one channel. Kept
 /// out of the worker body so the FFT / CWT / CQT / reassigned analysis
@@ -326,6 +326,7 @@ fn dbfs_to_amplitude(dbfs: f64) -> f64 {
 
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
+    cfg_guard!(state);
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
     // Fake-audio-only stimulus knobs for the display-truth harness (#170,
     // `ac test software`). Ignored entirely on real backends — the harness

@@ -91,6 +91,12 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         } else if topic == "cal_done" {
             let key = data.get("key").and_then(|v| v.as_str()).unwrap_or("?");
             println!("\n  Calibration saved: [{key}]");
+            if let (Some(out), Some(inp)) = (
+                data.get("output_port").and_then(|v| v.as_str()),
+                data.get("input_port").and_then(|v| v.as_str()),
+            ) {
+                println!("  Output: {out}  \u{2192}  Input: {inp}");
+            }
             print_cal_leg("Output", &data, "vrms_at_0dbfs_out", "out_state");
             print_cal_leg("Input", &data, "vrms_at_0dbfs_in", "in_state");
             print_tau_leg(&data);

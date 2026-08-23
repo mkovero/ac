@@ -11,10 +11,13 @@ use serde_json::{json, Value};
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{apply_drive_ceiling, busy_guard, resolve_output, send_pub, spawn_worker};
+use super::super::{
+    apply_drive_ceiling, busy_guard, cfg_guard, resolve_output, send_pub, spawn_worker,
+};
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_level");
+    cfg_guard!(state);
     let freq_hz = match cmd.get("freq_hz").and_then(Value::as_f64) {
         Some(v) => v,
         None => return json!({"ok": false, "error": "missing freq_hz"}),
@@ -89,6 +92,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_frequency");
+    cfg_guard!(state);
     let start_hz = cmd.get("start_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let stop_hz = cmd
         .get("stop_hz")

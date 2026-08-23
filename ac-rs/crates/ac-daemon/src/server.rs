@@ -27,6 +27,14 @@ const PUB_BACKLOG_WARN: usize = 1_000;
 #[derive(Clone)]
 pub struct ServerState {
     pub cfg: Arc<Mutex<ac_core::config::Config>>,
+    /// Set when the last per-request reload of `config.json` (#370, in
+    /// `dispatch()`) failed — bad JSON, or a file caught mid-write. `cfg`
+    /// above keeps the last-good value in this case; routing-affecting
+    /// handlers check this via `cfg_guard!` and refuse rather than serve
+    /// against config the daemon can no longer confirm is current.
+    /// Cleared on the next reload that succeeds — self-healing, no restart
+    /// needed once the file is fixed.
+    pub cfg_error: Arc<Mutex<Option<String>>>,
     pub workers: Arc<Mutex<HashMap<String, WorkerHandle>>>,
     /// Worker threads → main thread → PUB socket.
     pub pub_tx: Sender<Vec<u8>>,
@@ -184,6 +192,7 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
 
     let state = ServerState {
         cfg: Arc::new(Mutex::new(cfg)),
+        cfg_error: Arc::new(Mutex::new(None)),
         workers: Arc::new(Mutex::new(HashMap::new())),
         pub_tx,
         src_mtime: crate::binary_mtime(),
@@ -378,6 +387,29 @@ fn dispatch(
 ) -> Value {
     while let Ok(frame) = pub_rx.try_recv() {
         data_sock.send(frame, 0).ok();
+    }
+
+    // #370: reload config.json on every request, before it reaches a
+    // handler. An auto-spawned daemon outlives the `ac` invocation that
+    // spawned it, so without this a config edit made between two `ac`
+    // commands never reaches an already-running daemon — it keeps serving
+    // the config it started with, silently. Routing fields are already
+    // re-resolved per request via `resolve_input`/`resolve_output`, so
+    // reloading here completes that design rather than fighting it.
+    // Single-threaded REP loop: no race with a handler's `cfg.lock().clone()`.
+    match ac_core::config::load(None) {
+        Ok(cfg) => {
+            *state.cfg.lock().unwrap() = cfg;
+            *state.cfg_error.lock().unwrap() = None;
+        }
+        Err(e) => {
+            // Keep the last-good in-memory config; record the failure so
+            // routing-affecting handlers can refuse via `cfg_guard!`
+            // instead of silently serving against config.json's last-known
+            // state. `status`/`quit`/etc. are unaffected — the operator can
+            // still reach the daemon to find out what's wrong.
+            *state.cfg_error.lock().unwrap() = Some(format!("{e:#}"));
+        }
     }
 
     let cmd: Value = match serde_json::from_slice(raw) {

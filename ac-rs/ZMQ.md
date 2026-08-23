@@ -1494,9 +1494,19 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
-  "error":                "<message>"      // only present on partial failure (voltage-cal save)
+  "error":                "<message>",     // only present on partial failure (voltage-cal save)
+  "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
+  "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
 }
 ```
+
+`input_port` / `output_port` are what `resolve_input`/`resolve_output` actually
+resolved this run — the same values the tone was played on and the capture
+was taken from. A config edit between two `calibrate` runs against one
+long-lived (auto-spawned) daemon changes these on the very next run (#370);
+before this field existed the two runs were indistinguishable on the wire,
+which is how a channel scan against one daemon read ten identical results
+as the physical answer instead of the daemon never having reloaded.
 
 The `vrms_at_0dbfs_*` fields report what is **stored after this run**,
 not only what this run measured, and the `*_state` word says which:
@@ -2596,6 +2606,36 @@ When the guard fires:
 // topic: error
 { "cmd": "<name>", "message": "<exception string>" }
 ```
+
+### Unparseable config.json (#370)
+```json
+{ "ok": false, "error": "config.json: <parse error>" }
+```
+`config.json` is reloaded from disk before every CTRL request (see
+"Config reload" below). If the reload fails — bad JSON, or a file caught
+mid-write — routing-affecting commands (anything that resolves a port from
+config: `calibrate`, `calibrate_spl`, `plot`, `plot_level`, `plot_ir`,
+`generate`, `generate_pink`, `sweep_level`, `sweep_frequency`,
+`monitor_spectrum`, `transfer_stream`, `test_hardware`, `test_dut`) refuse
+with this shape instead of silently serving the last-known-good in-memory
+config. Non-routing commands (`status`, `quit`, `devices`, …) are
+unaffected, so the daemon stays reachable to diagnose the broken file. The
+error clears itself on the next reload after the file is fixed — no
+restart needed.
+
+---
+
+## Config reload
+
+Before every CTRL request `dispatch()` re-reads `config.json` from disk and
+replaces the in-memory `Config` (`server.rs`). This closes the gap where an
+auto-spawned daemon outlives the `ac` command that spawned it: a config
+edit made between two `ac` invocations reaches the very next command
+against that daemon, not only a freshly-spawned process (#370). Routing
+fields (`*_channel`, `*_port`) are already re-resolved per request via
+`resolve_input`/`resolve_output`, so this completes that design rather than
+adding a competing cache. See "Unparseable config.json" above for the
+failure mode.
 
 ---
 

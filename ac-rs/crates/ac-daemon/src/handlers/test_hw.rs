@@ -13,13 +13,14 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, capture_rms, read_dmm_vrms, ref_output_migration_warning,
+    analyze_mono, busy_guard, capture_rms, cfg_guard, read_dmm_vrms, ref_output_migration_warning,
     resolve_input, resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
     spawn_worker, std_dev, TestResult,
 };
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "test_hardware");
+    cfg_guard!(state);
 
     let cfg = state.cfg.lock().unwrap().clone();
 

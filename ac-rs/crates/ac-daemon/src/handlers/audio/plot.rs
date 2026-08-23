@@ -26,13 +26,14 @@ use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal,
-    spawn_worker, sweep_point_frame, Tier1Ctx,
+    apply_drive_ceiling, busy_guard, cfg_guard, resolve_input, resolve_output, send_pub,
+    snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
 };
 use crate::handlers::mic;
 
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
+    cfg_guard!(state);
     let start_hz = cmd.get("start_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let stop_hz = cmd
         .get("stop_hz")
@@ -295,6 +296,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_level");
+    cfg_guard!(state);
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
     let start_dbfs = cmd
         .get("start_dbfs")
@@ -595,6 +597,7 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// bails. See ARCHITECTURE.md.
 pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_ir");
+    cfg_guard!(state);
     let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
