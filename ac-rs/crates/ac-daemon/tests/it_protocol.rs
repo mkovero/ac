@@ -3027,6 +3027,88 @@ fn transfer_stream_refuses_a_distance_setup_id_with_no_history_at_all() {
     );
 }
 
+/// #373 — a self-pair (`meas_channel == ref_channel`) has no acoustic path
+/// and therefore can never have a distance calibration to resolve. A
+/// `distance_setup_id` naming that pair alongside a resolvable acoustic
+/// pair must accept the session — the rig's standing shape,
+/// `pairs = [[0,1],[1,1]]`, is the acoustic pair from `seed_distance_cal`
+/// carried next to the self-pair control channel.
+#[test]
+fn transfer_stream_accepts_self_pair_alongside_resolvable_acoustic_pair() {
+    let d = Daemon::spawn();
+    seed_distance_cal(&d); // out0_in0, ref_channel 1, setup_id "mic1"
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "pairs": [[0, 1], [1, 1]],
+        "distance_setup_id": "mic1",
+    }));
+    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
+
+    let mut acoustic_frame: Option<Value> = None;
+    let mut self_frame: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && (acoustic_frame.is_none() || self_frame.is_none()) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+                match (v["meas_channel"].as_u64(), v["ref_channel"].as_u64()) {
+                    (Some(0), Some(1)) => acoustic_frame = Some(v),
+                    (Some(1), Some(1)) => self_frame = Some(v),
+                    _ => {}
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let _ = c.call(json!({"cmd": "stop"}));
+    let acoustic_frame = acoustic_frame.expect("no meas0/ref1 frame within 10 s");
+    let self_frame = self_frame.expect("no meas1/ref1 self-pair frame within 10 s");
+
+    // Independent per pair, in the same session: the acoustic pair carries
+    // the resolved constant, the self-pair carries null — one pair's
+    // resolution never leaks into or is borrowed by the other.
+    assert_eq!(
+        acoustic_frame["distance_cal"]["constant_ms"],
+        json!(1.0615),
+        "{acoustic_frame}"
+    );
+    assert_eq!(
+        self_frame["distance_cal"],
+        Value::Null,
+        "self-pair must carry no invented, borrowed, or nearest-matched \
+         constant: {self_frame}"
+    );
+}
+
+/// #373 — the self-pair exemption must not weaken the existing refusal
+/// discipline: a non-self pair that cannot resolve the requested setup id
+/// still refuses the whole request synchronously, self-pair present or not.
+#[test]
+fn transfer_stream_still_refuses_unresolvable_acoustic_pair_with_self_pair_present() {
+    let d = Daemon::spawn();
+    seed_distance_cal(&d); // stores "mic1" for ref_channel 1 only
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "pairs": [[0, 1], [1, 1]],
+        "distance_setup_id": "mic2-moved",
+    }));
+    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
+    let err = r["error"].as_str().expect("error string");
+    assert!(
+        err.contains("meas0/ref1"),
+        "must name the acoustic pair that failed, not the self-pair: {err}"
+    );
+    assert!(
+        err.contains("mic2-moved") && err.contains("mic1"),
+        "must name the requested and stored ids: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // server_enable / server_disable — toggle listen_mode between local and
 // public and check the reported bind_addr. #52.

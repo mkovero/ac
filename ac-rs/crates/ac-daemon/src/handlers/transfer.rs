@@ -423,8 +423,18 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // `Calibration::tau_for`'s own refusal — a stale or wrong setup id must
     // never silently degrade a running session to ms-only or, worse, to
     // the nearest unrelated entry.
+    //
+    // A self-pair (#373, `meas_ch == ref_ch`) is exempt: it is the
+    // reference channel correlated against itself, has no acoustic path,
+    // and therefore can never have a distance calibration to resolve.
+    // Skipping it here — rather than resolving something for it — is what
+    // lets `pairs = [[0,2],[2,2]]` (an acoustic pair alongside the
+    // common-mode-buffering control pair) carry a distance readout at all.
     if let Some(setup_id) = distance_setup_id.as_deref() {
         for &(meas_ch, ref_ch) in &pairs {
+            if meas_ch == ref_ch {
+                continue;
+            }
             let cal = Calibration::load_or_new(out_ch, meas_ch, None);
             if let Err(refusal) = cal.distance_cal_for(ref_ch, setup_id) {
                 return json!({
@@ -488,12 +498,20 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // once at worker start — already validated above, so this lookup
     // cannot fail here. `None` when the session named no
     // `distance_setup_id`.
+    //
+    // A self-pair (#373) is skipped, same as in validation: it was never
+    // resolved above and has no constant to find, so `None` (wire
+    // `distance_cal: null`) is the honest value — never invented, borrowed
+    // from another pair, or nearest-matched.
     let pair_distance_cals: Vec<Option<ac_core::shared::calibration::DistanceCalEntry>> =
         match distance_setup_id.as_deref() {
             None => vec![None; pairs.len()],
             Some(setup_id) => pairs
                 .iter()
                 .map(|&(meas, r)| {
+                    if meas == r {
+                        return None;
+                    }
                     Calibration::load_or_new(out_ch, meas, None)
                         .distance_cal_for(r, setup_id)
                         .ok()
