@@ -17,7 +17,7 @@ use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, capture_rms, read_dmm_vrms, resolve_input,
+    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, read_dmm_vrms, resolve_input,
     resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, CalReply,
 };
 
@@ -443,6 +443,7 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
 
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
+    cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let out_ch = cmd
         .get("output_channel")
@@ -674,6 +675,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             "tau_sample_rate":      tau_sample_rate,
             "tau_period_size":      tau_period_size,
             "tau_agreement_count":  tau_outcome.agreement_count.unwrap_or(0),
+            // #370: the port names actually resolved server-side for this
+            // run, not the client's copy of the request — the reporter's
+            // repro was ten identical readings because the ports actually
+            // in use never surfaced anywhere.
+            "input_port":           in_port,
+            "output_port":          out_port,
         });
         if let Some(ref e) = tau_outcome.error {
             cal_done_frame["tau_error"] = json!(e);
@@ -865,6 +872,7 @@ pub fn set_mic_correction_enabled(state: &ServerState, cmd: &Value) -> Value {
 ///   4. emit `cal_done` with the captured dBFS, then `done` / `error`.
 pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate_spl");
+    cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let out_ch = cmd
         .get("output_channel")

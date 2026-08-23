@@ -1141,6 +1141,118 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     assert!((stored_out - expected_out).abs() < 1e-6);
 }
 
+/// Drive a `calibrate` run to completion, skipping every voltage prompt
+/// (`vrms: null`), and return the `cal_done` payload. `cmd` supplies any
+/// extra fields (`output_channel` / `input_channel` / `ref_dbfs`) merged
+/// into the `calibrate` request.
+fn run_calibrate_skip_all(c: &Client, mut cmd: Value) -> Value {
+    cmd["cmd"] = json!("calibrate");
+    let r = c.call(cmd);
+    assert_eq!(r["ok"], json!(true), "calibrate ack: {r}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((topic, _)) if topic == "cal_prompt" => {
+                let _ = c.call(json!({"cmd":"cal_reply", "vrms": null}));
+            }
+            Some((topic, payload)) if topic == "cal_done" => return payload,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    panic!("calibrate run never reached cal_done");
+}
+
+/// #370, acceptance criterion 1: `cal_done` carries the resolved input/output
+/// port names actually used — server-side, not the client's copy of the
+/// request — so a scan across channels stops reading as a flat, plausible
+/// result when every run actually measured the same port.
+#[test]
+fn cal_done_reports_resolved_ports() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let done = run_calibrate_skip_all(&c, json!({"output_channel": 2, "input_channel": 3}));
+    assert_eq!(
+        done["output_port"],
+        json!("fake:playback_2"),
+        "cal_done: {done}"
+    );
+    assert_eq!(
+        done["input_port"],
+        json!("fake:capture_3"),
+        "cal_done: {done}"
+    );
+}
+
+/// #370, acceptance criterion 3 (the failing case named in the triage spec):
+/// a config.json edit made between two measurements against one long-lived
+/// daemon must reach the second one. Before the per-request reload in
+/// `dispatch()`, this is exactly the reporter's repro — an auto-spawned
+/// daemon outlives the `ac` command that spawned it, so a channel-scan
+/// script editing `input_channel` between runs silently re-measured the
+/// first channel every time.
+#[test]
+fn calibrate_picks_up_a_config_edit_made_between_two_runs() {
+    let d = Daemon::spawn_with_config(Some(json!({"input_channel": 1})));
+    let c = Client::new(&d);
+
+    let done1 = run_calibrate_skip_all(&c, json!({}));
+    assert_eq!(
+        done1["input_port"],
+        json!("fake:capture_1"),
+        "first run: {done1}"
+    );
+
+    // Same daemon process, no restart — just the config file changing
+    // underneath it, exactly as an operator's editor would.
+    let cfg_path = d.home.join(".config").join("ac").join("config.json");
+    fs::write(
+        &cfg_path,
+        serde_json::to_vec_pretty(&json!({"input_channel": 2})).unwrap(),
+    )
+    .expect("rewrite config.json");
+
+    let done2 = run_calibrate_skip_all(&c, json!({}));
+    assert_eq!(
+        done2["input_port"],
+        json!("fake:capture_2"),
+        "second run: {done2}"
+    );
+    assert_ne!(
+        done1["input_port"], done2["input_port"],
+        "config edit between runs must change the resolved input port"
+    );
+}
+
+/// #370, acceptance criterion 4: where the running daemon cannot serve the
+/// current on-disk config (unparseable JSON, e.g. a file caught mid-write),
+/// a routing command must say so and refuse rather than silently serving
+/// against the last-known-good in-memory config. Non-routing commands
+/// (`status`) stay reachable so the operator can tell what's wrong without
+/// a restart.
+#[test]
+fn routing_command_refuses_when_config_json_is_unparseable() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let cfg_path = d.home.join(".config").join("ac").join("config.json");
+    fs::write(&cfg_path, b"{ not json").expect("write malformed config.json");
+
+    let r = c.call(json!({"cmd": "calibrate"}));
+    assert_eq!(r["ok"], json!(false), "expected refusal: {r}");
+    assert!(
+        r["error"].as_str().unwrap_or("").contains("config.json"),
+        "error should name config.json: {r}"
+    );
+
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(s["ok"], json!(true), "status must still answer: {s}");
+}
+
 /// #281 QA correctness issue 1: `measure_tau`'s sweep→deconvolve→peak→seconds
 /// path had zero test coverage — the only τ tests (`calibration.rs`)
 /// construct `TauEntry`/`TauConditions` directly and never call

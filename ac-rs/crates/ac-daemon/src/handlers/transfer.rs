@@ -13,8 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output,
-    resolve_ref_output, send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, read_dmm_vrms, ref_output_migration_warning,
+    resolve_output, resolve_ref_output, send_pub, spawn_worker,
 };
 
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
@@ -197,6 +197,7 @@ fn flush_pair(
 
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
+    cfg_guard!(state);
 
     // `drive` controls whether the daemon plays pink noise on the output
     // while capturing. Default `false` — the UI wants a purely passive H1
