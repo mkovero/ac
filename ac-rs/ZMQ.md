@@ -1483,7 +1483,7 @@ reading either.
   "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
-  "tau_state":            "measured" | "not_measured_no_loopback" | "error"
+  "tau_state":            "measured" | "not_measured_low_snr" | "error"
                            | "disagree_period_shift" | "disagree_other",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
@@ -1494,6 +1494,8 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, absent on error
+  "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
   "error":                "<message>"      // only present on partial failure (voltage-cal save)
 }
 ```
@@ -1507,33 +1509,55 @@ not only what this run measured, and the `*_state` word says which:
 | `unchanged` | the prompt was skipped; the previously stored value stands |
 | `absent` | the field holds no value — never set, or just cleared |
 
-**τ (interface latency, #281/#347)** is not prompt-driven — it piggybacks
-on the loopback state `cal_prompt` step 2 already established, so there is
-no third interactive step and no `unchanged` state (skipping a voltage
+**τ (interface latency, #281/#347)** is not prompt-driven — it is not a
+third interactive step and has no `unchanged` state (skipping a voltage
 prompt does not affect it). #347: a single reading is not a measurement of
 τ on this stack — round-trip latency for a fixed path can vary by exactly
 one period between client lifetimes, invisible within any one lifetime
 (stable to 0.001 frames). `calibrate` therefore always runs τ as **two**
 independent client lifecycles (fresh `start`/`stop` each) and compares
-them before storing anything:
+them before storing anything.
+
+**#368**: τ used to run only when `cal_prompt` step 2's `loopback` flag
+was `true` — a captured-level proxy for "is this cable patched" that a
+loopback 3 dB hot or 4 dB low both failed even though both carried a real,
+measurable arrival, and that a loud but uncorrelated interferer could
+still pass. τ is now attempted unconditionally; the gate lives inside the
+measurement itself, on the deconvolved peak's own pre-impulse SNR, which
+is the quantity that actually distinguishes "patched" from "not patched."
+`cal_prompt` step 2's own `loopback` flag is unchanged and keeps gating
+only whether the DMM prompt pre-fills the output reading — a separate,
+still-unity-keyed decision.
 
 | `tau_state` | meaning |
 |-------------|---------|
-| `measured` | loopback detected this run; two independent readings agreed to the whole sample and their average was appended to `tau_history` |
-| `not_measured_no_loopback` | loopback not detected this run — nothing to measure τ against |
-| `error` | loopback was detected but a lifecycle's own measurement failed (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `measured` | two independent readings agreed to the whole sample and their average was appended to `tau_history` |
+| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR — not distinguishable from noise, so nothing was measured |
+| `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
-`not_measured_no_loopback` or `error` result is still legible against
+`not_measured_low_snr` or `error` result is still legible against
 `cal.json` history without a second round trip. `tau_period_size: null`
 does not mean unknown — see `AudioEngine::period_size` in
 `ac-daemon/src/audio/mod.rs`: some backends cannot report a period size
 at all, which is a documented backend limitation, distinct from a period
 size that simply wasn't queried (and means `disagree_period_shift` can
 never fire on that backend — any disagreement there is `disagree_other`).
+
+`tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
+every state where at least one lifecycle reached deconvolution
+(`measured`, `not_measured_low_snr`, `disagree_*`) and absent on `error`,
+which can fail before a peak was ever located. On `measured` and
+`disagree_*`, the SNR reported is the worse (lower) of the two
+lifecycles' — both necessarily cleared the threshold, since a lifecycle
+that didn't would have produced `not_measured_low_snr` instead, so this is
+a diagnostic figure alongside the result rather than a second gate.
+`tau_snr_threshold_db` is a derived constant (see
+`ac-daemon/src/handlers/calibrate.rs`'s `TAU_SNR_THRESHOLD_DB` doc
+comment for its provenance), not measured on this exact sweep.
 
 On either disagreement state, `tau_reading1_s` / `tau_reading2_s` are the
 raw seconds values from the two lifecycles, shown verbatim rather than

@@ -153,6 +153,42 @@ fn period_size_override() -> Option<u32> {
     })
 }
 
+/// Opt-in, fake-only test hooks (#368): let an external integration test
+/// simulate a low/no-SNR capture — the muted-route rig case #368's AC3
+/// needs reachable under `--fake-audio`, which by default always returns a
+/// clean, noiseless delayed copy of the played signal (the loopback shape
+/// every other τ test relies on).
+///
+/// `AC_FAKE_TAU_GAIN_OVERRIDE`: scales the played-signal copy that would
+/// otherwise land unattenuated at `delay_samples`. `1.0` (unset) keeps the
+/// existing unity loopback; `0.0` simulates a fully muted route.
+/// `AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE`: peak amplitude of broadband
+/// dither added to every sample of `play_and_capture`'s output. `0.0`
+/// (unset) is byte-identical to pre-#368 behaviour — with the gain also at
+/// its default, `out[j] = 0.0 + s * 1.0 == s`. Combined with a `0.0` gain,
+/// the deconvolved IR then contains only the dither at every position, so
+/// the peak the daemon finds is indistinguishable from its own noise
+/// floor, matching a real muted route's low pre-impulse SNR.
+fn tau_gain_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_GAIN_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0)
+    })
+}
+
+fn tau_noise_amplitude_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0)
+    })
+}
+
 /// Which shared drain sequence a ring-mode capture should run. The variants
 /// differ only in whether they clear before waiting and how many channels
 /// they return — the point of routing all four through one enum is that the
@@ -747,13 +783,28 @@ impl AudioEngine for FakeEngine {
     /// peaks at the expected offset.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         let delay_samples = next_loopback_delay_samples();
+        let gain = tau_gain_override();
+        let noise_amp = tau_noise_amplitude_override();
         let tail = (tail_s * self.sample_rate as f64).round() as usize;
         let total = samples.len() + tail;
         let mut out = vec![0.0f32; total];
+        if noise_amp > 0.0 {
+            // Deterministic LCG (same constants as `Stimulus::Noise` above),
+            // seeded from the delay so distinct fake sessions get distinct
+            // dither rather than sharing one repeated sequence.
+            let mut state: u64 = 0x9E3779B97F4A7C15 ^ (delay_samples as u64);
+            for v in out.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                *v = (noise_amp as f64 * u) as f32;
+            }
+        }
         for (i, &s) in samples.iter().enumerate() {
             let j = i + delay_samples;
             if j < total {
-                out[j] = s;
+                out[j] += s * gain;
             }
         }
         Ok(out)

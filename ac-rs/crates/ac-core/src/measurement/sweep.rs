@@ -424,6 +424,34 @@ pub fn extract_irs(
     })
 }
 
+/// Pre-impulse SNR of a linear impulse response, in dB: the located peak's
+/// magnitude over the RMS of everything strictly before it, minus a small
+/// guard band (`(ir.len() / 32).max(8)` samples) so the peak's own skirt
+/// doesn't bias the floor estimate upward. `f64::INFINITY` when the
+/// pre-peak region is empty or measures true silence (zero RMS).
+///
+/// Lifted out of `report.rs::ir_stats()` (#368) so `ac-daemon`'s τ gate can
+/// call the same formula on the same quantity — "does the deconvolution
+/// find a peak with adequate SNR" — rather than keeping two copies of one
+/// calculation that could drift apart. `peak_index` is the caller's own
+/// argmax over `ir`; this does not recompute it.
+pub fn pre_impulse_snr_db(ir: &[f64], peak_index: usize) -> f64 {
+    let guard = (ir.len() / 32).max(8);
+    let pre_end = peak_index.saturating_sub(guard);
+    let pre_region = &ir[..pre_end.min(ir.len())];
+    if pre_region.is_empty() {
+        return f64::INFINITY;
+    }
+    let peak_magnitude = ir.get(peak_index).map(|v| v.abs()).unwrap_or(0.0);
+    let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
+    let rms = mean_sq.sqrt();
+    if rms > 0.0 {
+        20.0 * (peak_magnitude / rms).log10()
+    } else {
+        f64::INFINITY
+    }
+}
+
 /// Return `window_len` samples centred on `centre` within `buf`, padding
 /// with zeros outside the buffer. The IR peak is placed at
 /// `window_len / 2`.

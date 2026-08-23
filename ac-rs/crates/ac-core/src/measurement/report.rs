@@ -634,21 +634,10 @@ impl MeasurementReport {
 
         // Pre-impulse noise floor: everything strictly before the peak,
         // minus a small guard band so the peak's own skirt doesn't bias
-        // the floor estimate upward.
-        let guard = (window_len / 32).max(8);
-        let pre_end = peak_index.saturating_sub(guard);
-        let pre_region = &linear_ir[..pre_end];
-        let pre_impulse_snr_db = if pre_region.is_empty() {
-            f64::INFINITY
-        } else {
-            let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
-            let rms = mean_sq.sqrt();
-            if rms > 0.0 {
-                20.0 * (peak_magnitude / rms).log10()
-            } else {
-                f64::INFINITY
-            }
-        };
+        // the floor estimate upward. Shared with `ac-daemon`'s τ gate
+        // (#368) via `sweep::pre_impulse_snr_db` — one formula, not two.
+        let pre_impulse_snr_db =
+            crate::measurement::sweep::pre_impulse_snr_db(linear_ir, peak_index);
 
         // Prefer the gate the producer actually applied. #280 stores
         // `f_low_hz` on the payload precisely so a reader does not
