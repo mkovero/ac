@@ -48,6 +48,27 @@ use serde::{Deserialize, Serialize};
 ///   a distance from an uncorrected arrival.
 pub const SCHEMA_VERSION: u32 = 5;
 
+/// Minimum pre-impulse SNR, in dB, below which a deconvolution is
+/// reported as failed rather than as a result (#376). Below this floor
+/// the linear-IR peak is not reliably the system response — it can land
+/// wherever the pre-impulse noise floor happens to be largest, producing
+/// a plausible-looking arrival/distance from noise.
+///
+/// Value: 18.0 dB — the worst observed *bad* capture in the rig table
+/// that motivated #376 (`audit/rig-353-2026-08-23/ladder-3m.log`,
+/// −42 dBFS drive, pre-impulse SNR up to 16.5 dB with a peak index far
+/// from the true arrival) plus a 1.5 dB margin. The same table's worst
+/// observed *good* capture (−36 dBFS drive) reaches down to 14.5 dB, so
+/// no single threshold separates this dataset cleanly — 18.0 dB is set
+/// at or above the worst bad case rather than at the overlap's midpoint,
+/// so a false refusal (cheap: re-run) is preferred over a false accept
+/// (expensive: a silently wrong logged distance). This also means some
+/// borderline-good low-drive captures near the boundary will be
+/// refused — low drive is the operator-encouraged *safe* choice under
+/// the rig's emission consent rules, so that blind spot is real and
+/// documented here rather than picked by eye.
+pub const PRE_IMPULSE_SNR_MIN_DB: f64 = 18.0;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
     pub schema_version: u32,
@@ -664,6 +685,22 @@ impl MeasurementReport {
             }
         };
 
+        // A capture whose pre-impulse SNR cannot be compared against the
+        // threshold at all (no measurable floor, or a zero peak) fails
+        // closed rather than passing by default — absence of proof of a
+        // good floor is not the same as proof of one (#376).
+        let verdict = if !pre_impulse_snr_db.is_finite() {
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (silence)".to_string(),
+            }
+        } else if pre_impulse_snr_db < PRE_IMPULSE_SNR_MIN_DB {
+            IrVerdict::Failed {
+                reason: "pre-impulse SNR below threshold".to_string(),
+            }
+        } else {
+            IrVerdict::Ok
+        };
+
         Some(IrStats {
             sample_rate_hz: *sample_rate_hz,
             window_len,
@@ -675,6 +712,7 @@ impl MeasurementReport {
             gate_window_s,
             gate_f_low_hz,
             gate_window_kind,
+            verdict,
         })
     }
 
@@ -793,6 +831,24 @@ pub struct IrStats {
     /// gate — an inference from `extract_irs`, flagged as such so a
     /// reader does not mistake it for a recorded value.
     pub gate_window_kind: String,
+    /// Whether this capture's peak is trustworthy enough to present as a
+    /// result, per [`PRE_IMPULSE_SNR_MIN_DB`] (#376). Computed once here
+    /// so `ac-cli`'s text read-out and `ac-scene`'s sweep-IR panel read
+    /// the same verdict rather than each re-deriving their own rule from
+    /// [`Self::pre_impulse_snr_db`].
+    pub verdict: IrVerdict,
+}
+
+/// Verdict on whether an [`IrStats`] peak is a trustworthy deconvolution
+/// result or noise-floor pickup masquerading as one (#376). `Failed`
+/// never carries a computed arrival, distance, or peak-as-result — only
+/// the reason, naming what to check without asserting a cause (drive
+/// level, mic gain, distance, room noise are all plausible; the
+/// instrument cannot tell which).
+#[derive(Debug, Clone, PartialEq)]
+pub enum IrVerdict {
+    Ok,
+    Failed { reason: String },
 }
 
 #[cfg(test)]
@@ -1165,6 +1221,54 @@ mod tests {
         assert!((stats.gate_window_s - 0.05).abs() < 1e-12);
         assert!((stats.gate_f_low_hz - 20.0).abs() < 1e-9);
         assert_eq!(stats.gate_window_kind, "half-hann");
+    }
+
+    // ─── `IrStats::verdict` (#376) ─────────────────────────────────────
+
+    #[test]
+    fn ir_stats_verdict_ok_when_snr_clears_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.1 floor -> 20*log10(10) = 20 dB, above the
+        // 18.0 dB threshold.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_snr_is_below_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.2 floor -> 20*log10(5) \u{2248} 14.0 dB,
+        // below the 18.0 dB threshold — the #376 failure shape: a plausible
+        // number, but a noise-floor-scale peak.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.2, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "pre-impulse SNR below threshold".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_on_non_finite_snr() {
+        // True silence before the peak -> +inf SNR, which cannot be
+        // compared against the threshold at all. Absence of proof of a
+        // good floor must fail closed, not pass by default.
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(stats.pre_impulse_snr_db.is_infinite());
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (silence)".to_string()
+            }
+        );
     }
 
     #[test]

@@ -45,25 +45,35 @@ fn base_report() -> MeasurementReport {
     }
 }
 
-/// Five samples at sr=4kHz (dt=0.25ms), peak at index 1 (+1.0) and
-/// trough at index 3 (-0.5) — known vertical extremes, same fixture
-/// discipline `it_ir_geometry.rs::ir_scene` uses.
+/// 20 samples at sr=4kHz (dt=0.25ms) — not 5, as this fixture used
+/// before #376: `ir_stats`'s fixed 8-sample pre-impulse guard band
+/// empties the pre-impulse region entirely for any window this small
+/// regardless of content, which now reads as `IrVerdict::Failed`
+/// (`LowPreImpulseSnr`) rather than building a scene at all. A `0.001`
+/// noise floor everywhere except a peak at index 9 (+1.0, one sample
+/// before the window centre) and a trough at index 11 (-0.5, one after)
+/// gives known vertical extremes — same fixture discipline
+/// `it_ir_geometry.rs::ir_scene` uses — with ~60 dB pre-impulse SNR,
+/// comfortably clear of the 18.0 dB threshold.
 fn gated_report() -> MeasurementReport {
     let mut r = base_report();
+    let mut linear_ir = vec![0.001; 20];
+    linear_ir[9] = 1.0;
+    linear_ir[11] = -0.5;
     r.data.push(MeasurementPayload {
         data: MeasurementData::ImpulseResponse {
             sample_rate_hz: 4_000,
             f1_hz: 20.0,
             f2_hz: 20_000.0,
             duration_s: 1.0,
-            linear_ir: vec![0.0, 1.0, 0.0, -0.5, 0.0],
+            linear_ir,
             harmonics: vec![],
             noise_tail_start_s: None,
         },
         standard: vec![],
         gate: Some(GateParams {
-            gate_start_s: -0.000625,
-            gate_length_s: 0.00125,
+            gate_start_s: -0.0025,
+            gate_length_s: 0.005,
             window_kind: "rectangular".into(),
             f_low_hz: 800.0,
         }),
@@ -142,17 +152,17 @@ fn a_load_failure_paints_its_own_header_and_detail_not_a_trace() {
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(400.0, 300.0));
             let rect = ui.available_rect_before_wrap();
-            draw_sweep_ir_panel(ui.painter(), rect, Err(fault));
+            draw_sweep_ir_panel(ui.painter(), rect, Err(fault.clone()));
         });
         harness.run();
 
         let texts = painted_texts(&harness.output().shapes);
         assert!(
-            texts.iter().any(|t| t == fault.header()),
+            texts.iter().any(|t| t == &fault.header()),
             "{fault:?}'s header not painted; texts on screen: {texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t == fault.detail()),
+            texts.iter().any(|t| t == &fault.detail()),
             "{fault:?}'s detail not painted; texts on screen: {texts:?}"
         );
         let line_count = line_like_shape_count(&harness.output().shapes);
