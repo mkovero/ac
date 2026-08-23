@@ -626,9 +626,11 @@ pub struct OnsetEstimate {
 pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 
 /// Estimate the wavefront onset in a deconvolved impulse response `ir`,
-/// given its magnitude peak at `peak_index` and the RMS `floor_rms` of
-/// the pre-impulse noise floor (see
-/// [`crate::measurement::report::MeasurementReport::ir_stats`]).
+/// given its magnitude peak at `peak_index` and a `floor` of the
+/// pre-impulse noise (see
+/// [`crate::measurement::report::MeasurementReport::ir_stats`], which
+/// passes its median-based, contamination-robust floor here rather than
+/// a plain RMS one — #353).
 ///
 /// Not `argmax|h|` (issue #346): on a multi-way loudspeaker the sample of
 /// largest magnitude sits at a fixed group-delay offset past the
@@ -638,9 +640,13 @@ pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 /// persists in the absolute, per the issue's rig table).
 ///
 /// Rule: starting at `peak_index`, walk backward while each preceding
-/// sample's magnitude exceeds `floor_rms` scaled up by
+/// sample's magnitude exceeds `floor` scaled up by
 /// [`ONSET_FLOOR_MARGIN_DB`]. The returned index is the earliest sample
-/// of that continuous above-threshold run ending at the peak.
+/// of that continuous above-threshold run ending at the peak. If no
+/// preceding sample clears the threshold, the walk does not move at all
+/// and the returned index is `peak_index` — `rule` says so explicitly
+/// (#353), since that value is otherwise indistinguishable from a
+/// capture whose true onset happens to sit at the peak.
 ///
 /// `min_admissible_index`, when supplied, is the earliest sample the
 /// measurement's own known geometry allows an onset to occupy (pure
@@ -656,26 +662,37 @@ pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 pub fn estimate_onset(
     ir: &[f64],
     peak_index: usize,
-    floor_rms: f64,
+    floor: f64,
     min_admissible_index: Option<usize>,
 ) -> OnsetEstimate {
-    let threshold = floor_rms * 10f64.powf(ONSET_FLOOR_MARGIN_DB / 20.0);
+    let threshold = floor * 10f64.powf(ONSET_FLOOR_MARGIN_DB / 20.0);
     let start = peak_index.min(ir.len().saturating_sub(1));
     let lower_bound = min_admissible_index.unwrap_or(0).min(start);
     let mut onset = start;
     while onset > lower_bound && ir[onset - 1].abs() > threshold {
         onset -= 1;
     }
-    let rule = match min_admissible_index {
+    let mut rule = match min_admissible_index {
         Some(bound) => format!(
             "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
-             RMS), causal bound enforced at sample {bound}"
+             median magnitude), causal bound enforced at sample {bound}"
         ),
         None => format!(
             "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
-             RMS), no causal bound (geometry not known for this capture)"
+             median magnitude), no causal bound (geometry not known for this capture)"
         ),
     };
+    // Distinct from a causal bound sitting exactly at `start`: that case
+    // also leaves `onset == start`, but a preceding sample did clear the
+    // threshold and `rule`'s bound clause already says why the walk
+    // stopped. This appends only when nothing below `start` was above
+    // threshold in the first place (#353) — the search never had anywhere
+    // to go, so the returned index is `peak_index` by exhaustion, not by
+    // an enforced bound.
+    let threshold_cleared_at_start = start > 0 && ir[start - 1].abs() > threshold;
+    if onset == start && !threshold_cleared_at_start {
+        rule.push_str("; no sample cleared the threshold — index is the peak, not an onset");
+    }
     OnsetEstimate { index: onset, rule }
 }
 
@@ -1692,5 +1709,48 @@ mod tests {
         ir[150] = 1.0;
         let est = estimate_onset(&ir, 150, floor, None);
         assert_eq!(est.index, 150);
+    }
+
+    /// QA (PR #377): the breakdown admission is the load-bearing addition
+    /// per the UX design comment ("has to reach the line the operator
+    /// reads, or the failure stays silent where it costs something"), and
+    /// had no test asserting its string content before this. Pins the
+    /// exact substring `short_onset_rule` (ac-cli) matches on, so a typo
+    /// in either place breaks a test instead of silently dropping the
+    /// warning at the terminal.
+    #[test]
+    fn onset_rule_names_the_breakdown_when_nothing_cleared_the_threshold() {
+        let floor = 0.02;
+        let mut ir = vec![0.05; 200]; // below threshold = floor * 10^(12/20) ≈ 0.0796
+        ir[150] = 1.0;
+        let est = estimate_onset(&ir, 150, floor, None);
+        assert_eq!(est.index, 150);
+        assert!(
+            est.rule
+                .contains("no sample cleared the threshold — index is the peak, not an onset"),
+            "rule string missing the breakdown admission: {}",
+            est.rule
+        );
+    }
+
+    /// QA (PR #377): a causal bound landing exactly at `start` also leaves
+    /// `onset == start`, but for a different reason — a preceding sample
+    /// did clear the threshold, and the walk was stopped by the bound, not
+    /// exhausted. The breakdown suffix must not appear in that case, or a
+    /// bound-caused non-move reads as "nothing above floor" instead of
+    /// "flight time forbids going earlier".
+    #[test]
+    fn onset_rule_does_not_claim_breakdown_when_a_causal_bound_is_the_reason() {
+        let floor = 0.001;
+        let mut ir = vec![0.05; 200]; // above threshold = floor * 10^(12/20) ≈ 0.00398
+        ir[150] = 1.0;
+        let est = estimate_onset(&ir, 150, floor, Some(150));
+        assert_eq!(est.index, 150);
+        assert!(
+            !est.rule.contains("no sample cleared the threshold"),
+            "bound-caused non-move mislabeled as breakdown: {}",
+            est.rule
+        );
+        assert!(est.rule.contains("causal bound enforced"));
     }
 }
