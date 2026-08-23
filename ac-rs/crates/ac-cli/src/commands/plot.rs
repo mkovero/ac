@@ -520,3 +520,62 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
         eprintln!("  monitor: tui error: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::short_onset_rule;
+
+    /// QA (PR #377): `short_onset_rule`'s breakdown branch had no test
+    /// naming its output — a typo in the `.contains("no sample cleared
+    /// the threshold")` match here, or in the string it matches against
+    /// in `ac_core::measurement::sweep::estimate_onset`, would fall
+    /// through to the bound-clause branch instead, silently dropping the
+    /// operator-facing warning at the terminal.
+    #[test]
+    fn short_onset_rule_surfaces_the_breakdown_line() {
+        let rule = "backward threshold from floor (12 dB above pre-impulse median magnitude), \
+                    no causal bound (geometry not known for this capture); no sample cleared \
+                    the threshold — index is the peak, not an onset";
+        let lines = short_onset_rule(rule);
+        assert_eq!(
+            lines,
+            vec![
+                "median floor +12 dB, backward walk".to_string(),
+                "no sample above floor — arrival is peak-derived".to_string(),
+            ]
+        );
+    }
+
+    /// Companion case: the breakdown clause must supersede the bound
+    /// clause even when a causal bound *was* enforced (per `sweep.rs`'s
+    /// doc comment, the breakdown suffix only appears when the walk never
+    /// moved at all, which makes the bound clause moot either way).
+    #[test]
+    fn short_onset_rule_breakdown_supersedes_bound_clause() {
+        let rule = "backward threshold from floor (12 dB above pre-impulse median magnitude), \
+                    causal bound enforced at sample 42; no sample cleared the threshold — \
+                    index is the peak, not an onset";
+        let lines = short_onset_rule(rule);
+        assert_eq!(
+            lines,
+            vec![
+                "median floor +12 dB, backward walk".to_string(),
+                "no sample above floor — arrival is peak-derived".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn short_onset_rule_reports_enforced_bound() {
+        let rule = "backward threshold from floor (12 dB above pre-impulse median magnitude), \
+                    causal bound enforced at sample 42";
+        let lines = short_onset_rule(rule);
+        assert_eq!(
+            lines,
+            vec![
+                "median floor +12 dB, backward walk".to_string(),
+                "causal bound enforced at sample 42".to_string(),
+            ]
+        );
+    }
+}
