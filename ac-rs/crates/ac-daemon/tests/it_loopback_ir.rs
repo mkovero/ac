@@ -32,11 +32,13 @@
 //! Setting them puts a stimulus on physical outputs, which is behind the
 //! rig's standing drive-level policy. So when `AC_LOOPBACK_OUT` is set,
 //! `AC_LOOPBACK_LEVEL_DBFS` becomes **mandatory** and the test panics
-//! without it rather than inheriting the self-loop's `-6.0`. Note that
-//! `plot_ir` does not apply the config's `drive_max_dbfs` ceiling (only
-//! `set_drive` does, `handlers/transfer.rs:138`), so this value is the only
-//! thing bounding what reaches the converter — it is not a request the
-//! daemon will clamp.
+//! without it rather than inheriting the self-loop's `-6.0`. As of #360,
+//! `plot_ir` clamps its requested level to the config's `drive_max_dbfs`
+//! ceiling the same way `set_drive` always has (`handlers/mod.rs`'s
+//! `apply_drive_ceiling`) — so this value is a request, not the only thing
+//! bounding what reaches the converter, but it should still be set
+//! explicitly here rather than relying on whatever ceiling happens to be
+//! configured on the box this runs against.
 
 use std::env;
 use std::fs;

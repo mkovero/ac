@@ -427,6 +427,9 @@ Do not approve unless ALL of the following are demonstrated by tests, not by rea
 - [ ] Panic stop works from BOTH armed and driving states (state-machine tests).
 - [ ] Dead-man: drive drops within 1.5 s of keepalive silence (integration test,
       fake-audio); the session itself keeps running.
-- [ ] Level is clamped to `drive_max_dbfs` at every entry point (arrow keys, overlay,
-      CTRL command) — test each entry point, not one representative.
+- [ ] Level is clamped to `drive_max_dbfs` at every entry point — UI (arrow keys,
+      overlay), CTRL `set_drive`, and every daemon command that puts a stimulus on a
+      physical output (`plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`,
+      `sweep_level`, `sweep_frequency`, `calibrate`, and `transfer_stream`'s own
+      self-driving `level_dbfs` — #360) — test each entry point, not one representative.
 - [ ] `set_drive off` silences output within one audio block (fake-audio energy test).

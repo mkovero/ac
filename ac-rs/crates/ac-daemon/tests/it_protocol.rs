@@ -1630,6 +1630,234 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
+// ---------------------------------------------------------------------
+// Drive ceiling (#360) — plot_ir and calibrate previously emitted an
+// unclamped level; both are commands whose whole point is to put a
+// stimulus on a physical output, and `drive_max_dbfs` governed neither.
+// ---------------------------------------------------------------------
+
+/// `plot_ir` clamps its requested level to `drive_max_dbfs`.
+///
+/// The deconvolved IR itself cannot be used as the observable here: the
+/// handler deliberately re-scales the recovered impulse response by
+/// `1/amp` (`plot.rs`, "so the reported IR has unity peak for an identity
+/// loopback regardless of `level_dbfs`"), and the fake backend's
+/// `play_and_capture` is a noiseless echo of exactly what was played — so
+/// on this backend the published IR is invariant to level by construction,
+/// clamped or not, and asserting on it would prove nothing.
+///
+/// `report.stimulus.level_dbfs` is emitted from inside the worker, after
+/// the capture, from the same binding that scaled the actually-played
+/// sweep (`let amp = dbfs_to_amplitude(level_dbfs)`) — a different
+/// computation from the synchronous CTRL reply, so this does not just
+/// re-check the same echo twice under two names.
+#[test]
+fn plot_ir_clamps_level_to_drive_max_dbfs() {
+    const CEILING_DBFS: f64 = -35.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": 12.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["level_dbfs"],
+        json!(CEILING_DBFS),
+        "sync reply must echo the applied (clamped) level, not the request: {r}"
+    );
+
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let applied = v["report"]["stimulus"]["level_dbfs"]
+        .as_f64()
+        .expect("stimulus.level_dbfs");
+    assert!(
+        (applied - CEILING_DBFS).abs() < 1e-9,
+        "report recorded level {applied}, requested 12.0 dBFS against a {CEILING_DBFS} \
+         ceiling — plot_ir emitted the raw request instead of the clamped level"
+    );
+}
+
+/// `calibrate` clamps its `ref_dbfs` to `drive_max_dbfs`, and an omitted
+/// `ref_dbfs` defaults to the ceiling rather than a hardcoded -10.0.
+///
+/// `cal_prompt` step 2's `captured_dbfs` is a genuine round trip through
+/// the fake engine — `capture_rms` reads back whatever `eng.set_tone` was
+/// actually given, via the same capture path `analyze_mono` and `plot`
+/// use — not a re-statement of the request. A sine's RMS sits ~3.01 dB
+/// below its peak amplitude, so a tone actually played at the ceiling
+/// reads back at `ceiling - 3.01`, not at the ~-3.0 dBFS a full-scale,
+/// unclamped 0 dBFS request would produce — the two are far enough apart
+/// that a clamp that silently didn't apply cannot pass this by accident.
+#[test]
+fn calibrate_default_and_explicit_ref_dbfs_are_clamped_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -25.0;
+    const PEAK_TO_RMS_DB: f64 = 3.0103; // 20·log10(√2)
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    // No `ref_dbfs` at all: must default to the session ceiling, not the
+    // historical hardcoded -10.0 (#360 acceptance criterion 2).
+    let r = c.call(json!({"cmd": "calibrate", "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["ref_dbfs"],
+        json!(CEILING_DBFS),
+        "an omitted ref_dbfs must default to drive_max_dbfs: {r}"
+    );
+
+    let step1 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+
+    let step2 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
+    let expected = CEILING_DBFS - PEAK_TO_RMS_DB;
+    assert!(
+        (captured_dbfs - expected).abs() < 1.5,
+        "captured {captured_dbfs} dBFS does not match a tone actually played at the \
+         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — the default was not clamped \
+         before the tone was set"
+    );
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5));
+
+    // Explicit request above the ceiling: also clamped, defense in depth.
+    let r = c.call(json!({
+        "cmd": "calibrate", "ref_dbfs": 0.0, "output_channel": 0, "input_channel": 0,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["ref_dbfs"],
+        json!(CEILING_DBFS),
+        "an explicit ref_dbfs above the ceiling must be clamped: {r}"
+    );
+    let step1 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    let step2 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
+    assert!(
+        (captured_dbfs - expected).abs() < 1.5,
+        "captured {captured_dbfs} dBFS does not match a tone actually played at the \
+         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — an explicit request above \
+         the ceiling reached the engine unclamped"
+    );
+}
+
+/// The remaining #360 call sites (`generate`, `generate_pink`,
+/// `sweep_level`, `sweep_frequency`, `plot`, `plot_level`) all echo the
+/// applied level on their sync reply, same as `plot_ir`/`calibrate` above
+/// and `set_drive` before them. One clamp-above-ceiling check per command
+/// — the shared `apply_drive_ceiling` chokepoint itself is unit-tested in
+/// `handlers/mod.rs`, so this is coverage that each site actually calls it,
+/// not a re-test of the clamp arithmetic.
+#[test]
+fn generate_and_generate_pink_clamp_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "generate", "freq_hz": 1000.0, "level_dbfs": 6.0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    let r = c.call(json!({"cmd": "generate_pink", "level_dbfs": 6.0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+}
+
+#[test]
+fn sweep_level_clamps_each_ramp_point_and_echoes_the_applied_range() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    // Entire requested range sits above the ceiling — the degenerate case
+    // where the ramp's applied shape collapses to a flat line at the
+    // ceiling (UX spec, issue #360).
+    let r = c.call(json!({
+        "cmd": "sweep_level", "freq_hz": 1000.0,
+        "start_dbfs": -10.0, "stop_dbfs": 6.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(CEILING_DBFS), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+
+    // Partial overlap: only the top end is clamped.
+    let r = c.call(json!({
+        "cmd": "sweep_level", "freq_hz": 1000.0,
+        "start_dbfs": -40.0, "stop_dbfs": -10.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(-40.0), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+#[test]
+fn sweep_frequency_clamps_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "sweep_frequency", "start_hz": 100.0, "stop_hz": 200.0,
+        "level_dbfs": 6.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+#[test]
+fn plot_clamps_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "plot", "start_hz": 500.0, "stop_hz": 600.0,
+        "level_dbfs": 6.0, "ppd": 2, "duration": 0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+}
+
+#[test]
+fn plot_level_clamps_the_range_and_echoes_it_applied() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "plot_level", "freq_hz": 1000.0,
+        "start_dbfs": -40.0, "stop_dbfs": -10.0, "steps": 3, "duration": 0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(-40.0), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+}
+
 /// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
 /// the entry it must hit was written by `calibrate`. Nothing but a test
 /// couples those two condition tuples — they are built in different

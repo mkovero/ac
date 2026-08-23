@@ -13,8 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output, resolve_ref_output,
-    send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output,
+    resolve_ref_output, send_pub, spawn_worker,
 };
 
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
@@ -329,6 +329,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         cmd.get("distance_plausible_max_m").and_then(Value::as_f64);
 
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: a second, independent unclamped path from the same field
+    // `set_drive` already clamps — this seeds `DriveState` directly when
+    // `drive: true`, and is never touched by `set_drive`'s own clamp
+    // unless the client calls it again later. Clamped here, before the
+    // `DriveState::new` construction below, so the stored state never
+    // holds an unclamped value regardless of whether `set_drive` is ever
+    // called in this session.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
     let capture_ports = super::cached_capture_ports(state);
 
     // Resolve each unique capture channel to a port name once. `unique_ports`
