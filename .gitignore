@@ -29,5 +29,6 @@ stddocs
 /.cargo/
 .claude/CLAUDE.md
 .mcp.json
+/.repowise/
 # repowise API keys (local)
 .repowise/.env
