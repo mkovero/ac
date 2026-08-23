@@ -253,6 +253,47 @@ channel, which is #204.
   > the corrected number, not just the refusal-on-mismatch path already
   > covered by unit tests).
 
+  **Ran 2026-08-23 against PR #356 at `647d115`. Deviation 23 mm — a pass at
+  the only bar the ground truth supports, and 5 mm is not that bar.** Full
+  record in `work/rig/rig-243-criterion7-results.md`. Constant derived at a
+  taped 3.000 m, verified at a taped 1.000 m: readout 1.023 m.
+
+  > **The 5 mm bar is not scoreable by tape and should be restated at ~5 cm.**
+  > The mic is physically moved between positions and measured by hand.
+  > Operator, 2026-08-23: *"you can expect +-5cm accuracy at the best there.
+  > anything <1cm is pure luck and very very good guess. this is the fact
+  > until laser and temperature meter makes itself known someday (dont stay
+  > waiting)."*
+  >
+  > Tape placement therefore dominates every other term by 10×: **±50 mm**,
+  > against 3.6 mm of sample quantisation and 3.5 mm per °C. A 5 mm criterion
+  > cannot be certified against a ±50 mm ruler. The 4.7 mm precedent in
+  > `rig-243-343-results.md` is one lucky draw from that distribution, not a
+  > demonstrated capability — and 23 mm is indistinguishable from it.
+
+  **`rig-test-plan.md`'s AC7 bands need the tape term added.** Its
+  `≤1.5 mm / 1.5–8.5 mm / >8.5 mm` table prices temperature and treats the
+  tape as exact, making it finer than its own ground truth by more than 10×.
+  Same applies to any taped-distance criterion it scores.
+
+  **What the run did establish.** The measurements are clean: both positions
+  locked to a single sample value across every frame of two independent
+  sessions each (925 smp at 3.000 m, 378 smp at 1.000 m), and the zero-flight
+  control pair locked at exactly 0 samples throughout. Three implementation
+  gaps were filed — #371 (nothing in the tree creates a `DistanceCalEntry`),
+  #372 (the calibrated readout and its plausibility warning are unreachable
+  from any shipped UI), #373 (`distance_setup_id` refuses the whole session
+  over a self-pair). None depend on the tolerance.
+
+  **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
+  to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
+  survives in the form `rig-test-plan.md` already recommends:
+  `|Δt_onset − Δt_transfer_stream| ≤ 1.3 samples`, each estimator's own
+  increment between the two positions, compared in the time domain where tape
+  and `c` both drop out. Both estimators see the same physical move whatever
+  the tape says it was. That is the only valid form here, not merely a
+  stronger one.
+
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
   `e0e9341` (built with `RUSTFLAGS="-C target-cpu=native"`, no `mold` on
