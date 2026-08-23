@@ -1,8 +1,10 @@
 # Continuation point — 2026-08-23 rig session (jackd direct)
 
 **Written:** 2026-08-23, mid-session, at a resource limit.
-**Expires:** when the four issues below are filed and the rig doc is committed.
-Delete it then — everything durable lives in
+**Expires:** when the one-cable-move measurement below is taken, or when
+#367-#370 are resolved. The issues are filed and the rig doc is committed
+(branch `rig-2026-08-23-jackd-direct`), so what remains here is the open
+measurement and the rig-state table. Delete it then — everything durable lives in
 `work/rig/rig-2026-08-23-jackd-direct-results.md`, which is the record; this
 file is only the "where I was standing" note.
 
@@ -50,9 +52,9 @@ is a lot for passive analogue gear, so this is worth settling rather than
 assuming. Method: isolated `HOME`, sticky `output_port`/`input_port`, never the
 positional `output N input N` form (#358 misroutes it).
 
-## Four issues to file, none filed yet
+## Four issues, all filed 2026-08-23
 
-1. **Derived τ instead of refusal.** `resolve_tau` (`handlers/audio/plot.rs:518`)
+1. **#367 — derived τ instead of refusal.** `resolve_tau` (`handlers/audio/plot.rs:518`)
    never falls back, by #281/#283 design, so `plot ir` on the acoustic path
    prints `distance unavailable` forever — `cal.json` is keyed per channel pair
    and `tau_for` additionally demands exact port-name match. But `tau_for`
@@ -61,25 +63,25 @@ positional `output N input N` form (#358 misroutes it).
    known sign. Proposal: a third `InterfaceLatency` state that reports the
    distance using the nearest τ, names the differing conditions, and bounds the
    error directionally — instead of refusing and reporting nothing.
-2. **The ±2 dB unity gate, and its message.** `handlers/calibrate.rs:428`
+2. **#368 — the ±2 dB unity gate, and its message.** `handlers/calibrate.rs:428`
    requires capture within ±2 dB of drive − 3.01 dB. It refused three correct
    loopbacks this session (muted route, +3.01 dB hot, −4.19 dB low), each time
    printing `loopback not detected this run` — which names a cause the
    instrument cannot know. τ is a timing measurement; peak position does not
    depend on level. The window is far too tight for "is a cable patched", and
    on the master-section pair the level depends on an analogue fader position.
-3. **`calibrate` ignores the xrun counter.** `plot`, `test` and `monitor_tui`
+3. **#369 — `calibrate` ignores the xrun counter.** `plot`, `test` and `monitor_tui`
    all report one; the JACK backend maintains it (`jack_backend.rs:229`,
    exposed `:549`); τ does not. At period 64 an xrun inside the 0.35 s sweep
    corrupts the IR and τ returns a bare number. Latent, not observed —
    `ac-daemon` ran 130 lifetimes clean.
-4. **The auto-spawned daemon caches config at startup.** A config edit between
+4. **#370 — the auto-spawned daemon caches config at startup.** A config edit between
    runs does not reach a daemon that is already up, so a scan loop silently
    re-measures the first channel. It produced ten identical readings that
    looked like a clean negative result. Same family as the port-5556 trap: a
    long-lived daemon under an isolated `HOME` answering on the standard port.
 
-## Uncommitted, in the worktree
+## Committed on branch `rig-2026-08-23-jackd-direct` (pushed)
 
 - `work/rig/rig-2026-08-23-jackd-direct-results.md` — new, the full record.
 - `work/handoff/unstable-periods-handover.md` — expiry banner added.
@@ -88,8 +90,8 @@ positional `output N input N` form (#358 misroutes it).
   clean. Not built or tested beyond that.
 - this file.
 
-Nothing is committed and no branch was created. Repo is a shared checkout with
-concurrent sessions, so committing to a branch is the safer resting state.
+Commit `00432b6`, branched from `main` at `9377fa4`, pushed to origin. No PR
+opened.
 
 ## Two mistakes recorded so they are not repeated
 
