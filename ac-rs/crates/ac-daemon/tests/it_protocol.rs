@@ -1244,9 +1244,17 @@ fn routing_command_refuses_when_config_json_is_unparseable() {
 
     let r = c.call(json!({"cmd": "calibrate"}));
     assert_eq!(r["ok"], json!(false), "expected refusal: {r}");
+    let err = r["error"].as_str().unwrap_or("");
     assert!(
-        r["error"].as_str().unwrap_or("").contains("config.json"),
+        err.contains("config.json"),
         "error should name config.json: {r}"
+    );
+    // `{e:#}` (not `{e}`) on the reload's Err arm: the reply must carry the
+    // actual parse failure, not just the file path — that's what makes the
+    // refusal diagnosable rather than merely visible.
+    assert!(
+        err.contains("line") || err.contains("column") || err.to_lowercase().contains("expected"),
+        "error should name *why* config.json failed to parse, not just that it did: {r}"
     );
 
     let s = c.call(json!({"cmd": "status"}));

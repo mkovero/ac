@@ -408,7 +408,7 @@ fn dispatch(
             // instead of silently serving against config.json's last-known
             // state. `status`/`quit`/etc. are unaffected — the operator can
             // still reach the daemon to find out what's wrong.
-            *state.cfg_error.lock().unwrap() = Some(e.to_string());
+            *state.cfg_error.lock().unwrap() = Some(format!("{e:#}"));
         }
     }
 
