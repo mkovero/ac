@@ -626,9 +626,11 @@ pub struct OnsetEstimate {
 pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 
 /// Estimate the wavefront onset in a deconvolved impulse response `ir`,
-/// given its magnitude peak at `peak_index` and the RMS `floor_rms` of
-/// the pre-impulse noise floor (see
-/// [`crate::measurement::report::MeasurementReport::ir_stats`]).
+/// given its magnitude peak at `peak_index` and a `floor` of the
+/// pre-impulse noise (see
+/// [`crate::measurement::report::MeasurementReport::ir_stats`], which
+/// passes its median-based, contamination-robust floor here rather than
+/// a plain RMS one — #353).
 ///
 /// Not `argmax|h|` (issue #346): on a multi-way loudspeaker the sample of
 /// largest magnitude sits at a fixed group-delay offset past the
@@ -638,9 +640,13 @@ pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 /// persists in the absolute, per the issue's rig table).
 ///
 /// Rule: starting at `peak_index`, walk backward while each preceding
-/// sample's magnitude exceeds `floor_rms` scaled up by
+/// sample's magnitude exceeds `floor` scaled up by
 /// [`ONSET_FLOOR_MARGIN_DB`]. The returned index is the earliest sample
-/// of that continuous above-threshold run ending at the peak.
+/// of that continuous above-threshold run ending at the peak. If no
+/// preceding sample clears the threshold, the walk does not move at all
+/// and the returned index is `peak_index` — `rule` says so explicitly
+/// (#353), since that value is otherwise indistinguishable from a
+/// capture whose true onset happens to sit at the peak.
 ///
 /// `min_admissible_index`, when supplied, is the earliest sample the
 /// measurement's own known geometry allows an onset to occupy (pure
@@ -656,26 +662,37 @@ pub const ONSET_FLOOR_MARGIN_DB: f64 = 12.0;
 pub fn estimate_onset(
     ir: &[f64],
     peak_index: usize,
-    floor_rms: f64,
+    floor: f64,
     min_admissible_index: Option<usize>,
 ) -> OnsetEstimate {
-    let threshold = floor_rms * 10f64.powf(ONSET_FLOOR_MARGIN_DB / 20.0);
+    let threshold = floor * 10f64.powf(ONSET_FLOOR_MARGIN_DB / 20.0);
     let start = peak_index.min(ir.len().saturating_sub(1));
     let lower_bound = min_admissible_index.unwrap_or(0).min(start);
     let mut onset = start;
     while onset > lower_bound && ir[onset - 1].abs() > threshold {
         onset -= 1;
     }
-    let rule = match min_admissible_index {
+    let mut rule = match min_admissible_index {
         Some(bound) => format!(
             "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
-             RMS), causal bound enforced at sample {bound}"
+             median magnitude), causal bound enforced at sample {bound}"
         ),
         None => format!(
             "backward threshold from floor ({ONSET_FLOOR_MARGIN_DB:.0} dB above pre-impulse \
-             RMS), no causal bound (geometry not known for this capture)"
+             median magnitude), no causal bound (geometry not known for this capture)"
         ),
     };
+    // Distinct from a causal bound sitting exactly at `start`: that case
+    // also leaves `onset == start`, but a preceding sample did clear the
+    // threshold and `rule`'s bound clause already says why the walk
+    // stopped. This appends only when nothing below `start` was above
+    // threshold in the first place (#353) — the search never had anywhere
+    // to go, so the returned index is `peak_index` by exhaustion, not by
+    // an enforced bound.
+    let threshold_cleared_at_start = start > 0 && ir[start - 1].abs() > threshold;
+    if onset == start && !threshold_cleared_at_start {
+        rule.push_str("; no sample cleared the threshold — index is the peak, not an onset");
+    }
     OnsetEstimate { index: onset, rule }
 }
 

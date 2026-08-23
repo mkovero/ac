@@ -213,8 +213,13 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // pinning it the way the old test pinned the peak catches a
     // regression in the estimator's exact behaviour, not only a sign or
     // bound violation. Recompute if the fixture's stimulus parameters
-    // above ever change.
-    const EXPECTED_ONSET_SAMPLES: i64 = 19;
+    // above ever change. Value moved 19 → 17 under #353 (option A′):
+    // this fixture's real pre-impulse region is not pure Gaussian noise
+    // (log-sweep deconvolution artefacts sit at negative time), so the
+    // median-based floor legitimately disagrees with the old RMS floor by
+    // a couple of samples even without gross contamination — expected per
+    // the architect's own review, not a regression.
+    const EXPECTED_ONSET_SAMPLES: i64 = 17;
     assert_eq!(
         arrival, EXPECTED_ONSET_SAMPLES,
         "printed arrival should be the fake backend's exact onset sample \
@@ -232,9 +237,17 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // the peak line must be marked diagnostic now that it can legitimately
     // disagree with arrival — a silent divergence between the two would
     // read as a bug in the tool rather than the fix working.
+    // #353 (UX revision 2): the onset rule now prints as two lines — the
+    // statistic/margin, then the causal-bound clause — since option A′
+    // switched the threshold to a median floor and the old single-line
+    // form ran past 80 columns at large sample indices.
     assert!(
-        stdout.contains("onset: backward threshold from floor, no causal bound"),
+        stdout.contains("onset: median floor +12 dB, backward walk"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("no causal bound (geometry not known)"),
+        "printed summary missing the causal-bound clause (AC4):\n{stdout}"
     );
     assert!(
         stdout.contains("(diagnostic \u{2014} not arrival)"),

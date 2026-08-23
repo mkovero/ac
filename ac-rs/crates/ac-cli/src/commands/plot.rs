@@ -218,25 +218,40 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
 }
 
 /// Derives the short terminal tag from `IrStats::onset_rule`'s full
-/// sentence (#346 AC4). The `distance` line immediately below already
-/// states *why* no causal bound applies (no τ this run) when that's the
-/// case, so — per the issue's UX comment's own recommendation for the
-/// width problem — this only needs to say whether a bound was enforced,
-/// not restate the reason. Falls back to the full string verbatim if its
+/// sentence (#346 AC4 / #353 UX revision 2, since option A′ switched the
+/// threshold to a median floor and the old single-line form ran past 80
+/// columns at large sample indices). Returns 2 lines: the statistic and
+/// margin the threshold used, then whichever of three mutually exclusive
+/// facts matters most — a causal bound was enforced, no causal bound
+/// could be checked (the `distance` line below already states why: no τ
+/// this run), or (#353) no sample cleared the threshold at all, so the
+/// returned index is the peak rather than a detected onset. The last case
+/// supersedes the bound clause: when nothing moved, whether a bound was
+/// known never mattered. Falls back to the full string verbatim if its
 /// shape ever changes underneath this, so a reader never sees nothing.
-fn short_onset_rule(rule: &str) -> String {
+fn short_onset_rule(rule: &str) -> Vec<String> {
+    let intro = format!(
+        "median floor +{:.0} dB, backward walk",
+        ac_core::measurement::sweep::ONSET_FLOOR_MARGIN_DB
+    );
+    if rule.contains("no sample cleared the threshold") {
+        return vec![
+            intro,
+            "no sample above floor — arrival is peak-derived".to_string(),
+        ];
+    }
     if let Some(at) = rule.find("causal bound enforced at sample ") {
         let bound = &rule[at + "causal bound enforced at sample ".len()..];
         let bound = bound
             .split(|c: char| !c.is_ascii_digit())
             .next()
             .unwrap_or("");
-        format!("backward threshold from floor, causal bound enforced at sample {bound}")
-    } else if rule.contains("no causal bound") {
-        "backward threshold from floor, no causal bound".to_string()
-    } else {
-        rule.to_string()
+        return vec![intro, format!("causal bound enforced at sample {bound}")];
     }
+    if rule.contains("no causal bound") {
+        return vec![intro, "no causal bound (geometry not known)".to_string()];
+    }
+    vec![rule.to_string()]
 }
 
 /// The #283 read-out: arrival, arrival as distance, peak, pre-impulse
@@ -277,10 +292,12 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     // comment's own worst-case-width check found the full sentence runs
     // past 80 columns at this indent); the untruncated rule still rides
     // the persisted JSON via `IrStats::onset_rule`.
-    println!(
-        "                onset: {}",
-        short_onset_rule(&stats.onset_rule)
-    );
+    let onset_lines = short_onset_rule(&stats.onset_rule);
+    println!("                onset: {}", onset_lines[0]);
+    let continuation_indent = " ".repeat("                onset: ".len());
+    for line in &onset_lines[1..] {
+        println!("{continuation_indent}{line}");
+    }
     // The AC's load-bearing case: without a τ measured under this run's
     // exact conditions there is no distance, and the reason is printed
     // rather than the arrival being quietly reused as one.
@@ -304,8 +321,17 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         20.0 * stats.peak_magnitude.max(1e-12).log10(),
         stats.peak_index,
     );
+    // #353: `pre_impulse_snr_db` stays defined against the RMS floor
+    // (unchanged, #346 architect review), but `onset` above now uses a
+    // separate median floor — the two live three lines apart under the
+    // same heading, so a reader who assumes they match is misled on any
+    // contaminated capture (this SNR reads low there; it keeps the
+    // inflated RMS floor by design).
     if stats.pre_impulse_snr_db.is_finite() {
-        println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
+        println!(
+            "  pre-imp SNR   {:.1} dB  (re RMS floor; onset uses median)",
+            stats.pre_impulse_snr_db
+        );
     } else {
         println!("  pre-imp SNR   no measurable pre-impulse floor (silence)");
     }

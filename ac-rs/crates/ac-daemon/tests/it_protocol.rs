@@ -1711,7 +1711,12 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // than left as an open-ended bound — this fixture is deterministic
     // (fake backend, fixed 200 Hz–8 kHz / 1024-sample window), so its
     // exact phantom distance is a known quantity, not measurement noise.
-    const EXPECTED_PHANTOM_DISTANCE_M: f64 = -0.0929;
+    // Value moved -0.0929 → -0.1072 under #353 (option A′): `ir_stats`'s
+    // onset threshold switched from an RMS to a median pre-impulse floor,
+    // which shifts `estimate_onset`'s answer by a couple of samples on
+    // this real (non-Gaussian) fixture even without gross contamination —
+    // expected per the architect's own review, not a regression.
+    const EXPECTED_PHANTOM_DISTANCE_M: f64 = -0.1072;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     match report.ir_arrival_distance() {
