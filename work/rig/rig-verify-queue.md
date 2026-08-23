@@ -253,6 +253,40 @@ channel, which is #204.
   > the corrected number, not just the refusal-on-mismatch path already
   > covered by unit tests).
 
+  **Ran 2026-08-23 against PR #356 at `647d115`. Result: FAIL, 23 mm.** Full
+  record in `work/rig/rig-243-criterion7-results.md`. Constant derived at a
+  taped 3.000 m, verified at a taped 1.000 m: readout 1.023 m, |X| = 23 mm,
+  outside `rig-test-plan.md`'s `> 8.5 mm → fail` band — no temperature in the
+  plausible range rescues it. The back-solve agrees: `c = 2.000 m / Δt` gives
+  351.0 m/s → 32.5 °C, outside both the operator's stated 25–27 °C and the
+  plan's 20–30 °C sanity band, so temperature alone cannot account for it.
+
+  > **The bar stays at 5 mm.** It is grounded — `rig-243-343-results.md`
+  > records `transfer_stream` agreeing with the tape to 4.7 mm on this same
+  > 2.000 m increment. An earlier revision of the results file restated the
+  > criterion at 5 cm on the claim that 5 mm was an unmeasured slip; that
+  > claim was wrong and is corrected in place. Moving this bar is the
+  > operator's call with the 4.7 mm precedent in hand, not a QA convenience.
+
+  **What the run did establish.** The measurements are clean: both positions
+  locked to a single sample value across every frame of two independent
+  sessions each (925 smp at 3.000 m, 378 smp at 1.000 m), and the zero-flight
+  control pair locked at exactly 0 samples throughout. Three implementation
+  gaps were filed — #371 (nothing in the tree creates a `DistanceCalEntry`),
+  #372 (the calibrated readout and its plausibility warning are unreachable
+  from any shipped UI), #373 (`distance_setup_id` refuses the whole session
+  over a self-pair). None depend on the tolerance.
+
+  **Open, and it reaches #346/#352.** The 4.7 mm precedent and this session's
+  23 mm are the same estimator, same two taped positions, same rig, 5× apart.
+  The visible difference is the stack — this ran on the 2026-08-23
+  jackd-direct configuration at period 64 / 2, and the 4.7 mm predates it —
+  and each position is necessarily its own session (#226: the lock is cached),
+  so the increment spans two JACK client lifetimes and per-client offsets do
+  not cancel in it. **#346 AC5 is defined relative to `transfer_stream`'s
+  4.7 mm, so that reference needs re-baselining before PR #352 can be scored
+  against it.** Settling this needs a third taped distance and a thermometer.
+
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
   `e0e9341` (built with `RUSTFLAGS="-C target-cpu=native"`, no `mold` on

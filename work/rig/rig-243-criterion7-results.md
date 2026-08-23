@@ -42,43 +42,78 @@ Stored by hand into `~/rig243-home/.config/ac/cal.json` under key
 
 ## Verdict
 
-**Pass at 5 cm. Fail at the 5 mm the criterion as written asks for.**
+**FAIL**, by the scoring bands `work/rig/rig-test-plan.md` registered for
+AC7 before the session.
 
 Readout at the taped 1.000 m verification point: **1.023 m**, error
-**+23 mm**.
+**|X| = 23 mm**.
 
-The 5 mm bar is not physically meetable on this rig and should be restated:
+| measured \|X\| | verdict |
+|---|---|
+| ≤ 1.5 mm | pass — holds across the whole 25–27 °C band |
+| 1.5–8.5 mm | decline to conclude — depends on unmeasured temperature |
+| **> 8.5 mm** | **fail — no temperature in the band rescues it** |
+
+The bands exist because no thermometer was available and `c` moves 3.5 mm per
+°C over a 2.000 m increment. 23 mm sits well outside the range any plausible
+room temperature could explain, so this is a fail rather than a
+decline-to-conclude.
+
+> **An earlier revision of this file recorded a pass "at 5 cm" and claimed the
+> 5 mm bar was an arithmetic slip with no measurement behind it. Both claims
+> were wrong** and are corrected here rather than deleted.
+>
+> 5 mm is grounded: `work/rig/rig-243-343-results.md` records `transfer_stream`
+> agreeing with the tape to **4.7 mm over a taped 2.000 m move**, and #346
+> cites it as an established result. The "3–5 cm at six positions" figure in
+> #243's body is *absolute* position accuracy; 4.7 mm is *increment* accuracy,
+> and an increment cancels every constant term. AC7 scores an increment, so
+> 4.7 mm is the right comparison and `provenance: measured` is correct.
+>
+> The physical-limits arithmetic below is sound and matches the test plan's own
+> figure — but it argues that 5 mm is *hard to control*, not that it is
+> unreachable. It has been reached once on this rig.
+
+Terms that make 5 mm hard to hold without a thermometer:
 
 - One sample at 96 kHz is **3.6 mm**. The bar is ±1.4 samples.
-- Temperature costs **~3.4 mm/°C** over a 2.000 m move. With no thermometer
-  in the loop, ±1.5 °C spends the entire budget — the gate would be scoring
-  the operator's guess at room temperature, not the instrument.
+- Temperature costs **~3.5 mm/°C** over a 2.000 m increment, so ±1 °C eats
+  most of the budget before the instrument is considered — the test plan says
+  exactly this.
 - Taping to 1 mm against a mic capsule whose acoustic reference point is not
   marked is not a real measurement.
 
-5 cm is not a climbdown to make this pass: it is **this rig's own
-demonstrated figure**. Rig session 3 fitted the constant at 1.000 m and
-checked five further positions, every on-axis one agreeing to ≤5 cm. The
-5 mm number originates in the issue's UX comment reasoning about how many
-decimal places to print, and was promoted from a display-precision argument
-into an acceptance criterion without a measurement behind it.
-
-At 5 cm the observed 23 mm passes with better than half the tolerance in
-hand, and the temperature term would need to be ~15 °C wrong to threaten it.
-
-### The residual, for the record
+### The residual — and the check that says temperature is not the answer
 
 Taking both taped positions together, 2.000 m of air cost 5.697917 ms,
 implying **c = 351.01 m/s** against the assumed 347.056 — a 1.14% scale
-error, which is the whole of the 23 mm. Reconciling it would need the room
-at 32.5 °C rather than the configured 26.0.
+error, or 6.3 samples, which is the whole of the 23 mm.
 
-Three candidates, not separable from two positions: a stale `temperature_c`;
-a distance-proportional estimator bias (a constant one cancels into
-`constant_ms`, only a scaling one survives); or 23 mm of tape error over the
-move. **Not chased** — at a 5 cm bar it does not change the verdict, and
-settling it needs a third taped position and a real thermometer. Worth its
-own block only if the criterion is ever tightened again.
+The test plan asks for the back-solve as a sanity check: `c = 2.000 m / Δt`,
+then `T = (c − 331.3) / 0.606`, with the rule that a result outside 20–30 °C
+means "something is wrong with one of them and that is a finding worth the
+capture". This session lands at **T = 32.5 °C**, outside the operator's stated
+25–27 °C *and* outside the 20–30 °C band.
+
+**So temperature alone cannot account for the 23 mm.** What remains: a
+distance-proportional estimator bias, tape error over the move, or a change in
+the measurement conditions since the 4.7 mm figure was taken.
+
+**New, and load-bearing beyond this issue.** The 4.7 mm figure and this
+session's 23 mm are the same estimator, the same two taped positions, the same
+rig — 5× apart. The visible difference is the stack: this ran on the
+2026-08-23 jackd-direct configuration at period 64 / 2, and the 4.7 mm
+predates it. Note also that each position is necessarily its own
+`transfer_stream` session, because the lock is cached per session (#226), so
+the increment is measured across two JACK client lifetimes and per-client
+latency offsets do not cancel in it by construction.
+
+**This bears on #346/#352.** AC5's criterion is defined *relative to*
+`transfer_stream`'s 4.7 mm. If `transfer_stream`'s increment accuracy at this
+rig is now 23 mm, AC5's reference point has moved and needs re-baselining
+before PR #352 can be scored against it at all.
+
+Settling any of this needs a third taped distance and an actual thermometer.
 
 ## Findings against PR #356
 
