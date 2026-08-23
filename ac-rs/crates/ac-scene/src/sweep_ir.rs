@@ -617,17 +617,25 @@ mod tests {
 
     /// A gated report whose pre-impulse SNR is below the #376 threshold
     /// fails with `LowPreImpulseSnr`, before any trace or arrival is
-    /// built. Noise is large relative to the peak (0.2 against 1.0 ->
-    /// ~14 dB, below the 18.0 dB threshold).
+    /// built. 20 samples, not 5: `ir_stats`'s guard band is
+    /// `(window_len / 32).max(8) = 8` for any window under 256 samples, so
+    /// a peak inside the first 8 samples empties `pre_region` and lands
+    /// in the *non-finite*-SNR failure path instead of this one — a
+    /// 5-sample fixture with the peak at index 2 did exactly that (#387
+    /// QA test-coverage gap). Peak at index 10 leaves a 2-sample
+    /// pre-region of 0.2 against a 1.0 peak -> ~14 dB, below the 18.0 dB
+    /// threshold, and finite.
     fn gated_report_with_low_snr() -> MeasurementReport {
         let mut r = base_report();
+        let mut linear_ir = vec![0.2; 20];
+        linear_ir[10] = 1.0;
         r.data.push(MeasurementPayload {
             data: MeasurementData::ImpulseResponse {
                 sample_rate_hz: 4_000,
                 f1_hz: 20.0,
                 f2_hz: 20_000.0,
                 duration_s: 1.0,
-                linear_ir: vec![0.2, 0.2, 1.0, 0.2, 0.2],
+                linear_ir,
                 harmonics: vec![],
                 noise_tail_start_s: None,
             },
@@ -641,6 +649,20 @@ mod tests {
     fn low_pre_impulse_snr_fails_before_building_a_scene() {
         let r = gated_report_with_low_snr();
         let stats = r.ir_stats().unwrap();
+        // The fixture must exercise the *finite*-below-threshold branch,
+        // not the non-finite one (#387 QA test-coverage gap) — otherwise
+        // the assertion below is tautological against whatever `ir_stats`
+        // happens to compute, rather than checking this scene path
+        // against a known value.
+        assert!(
+            stats.pre_impulse_snr_db.is_finite(),
+            "fixture must exercise the finite branch: {stats:?}"
+        );
+        assert!(
+            (stats.pre_impulse_snr_db - 13.98).abs() < 0.5,
+            "pre_impulse_snr_db = {}",
+            stats.pre_impulse_snr_db
+        );
         let ac_core::measurement::report::IrVerdict::Failed { .. } = &stats.verdict else {
             panic!("fixture must exercise the #376 failure path: {stats:?}");
         };

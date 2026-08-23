@@ -54,11 +54,16 @@ pub const SCHEMA_VERSION: u32 = 5;
 /// wherever the pre-impulse noise floor happens to be largest, producing
 /// a plausible-looking arrival/distance from noise.
 ///
-/// Value: 18.0 dB — the worst observed *bad* capture in the rig table
-/// that motivated #376 (`audit/rig-353-2026-08-23/ladder-3m.log`,
-/// −42 dBFS drive, pre-impulse SNR up to 16.5 dB with a peak index far
-/// from the true arrival) plus a 1.5 dB margin. The same table's worst
-/// observed *good* capture (−36 dBFS drive) reaches down to 14.5 dB, so
+/// Value: 18.0 dB — the worst observed *bad* capture in the rig table in
+/// the #376 issue body (−42 dBFS drive, pre-impulse SNR up to 16.5 dB with
+/// a peak index far from the true arrival) plus a 1.5 dB margin. The raw
+/// log and results doc the issue body itself cites for that table
+/// (`audit/rig-353-2026-08-23/ladder-3m.log`,
+/// `work/rig/rig-2026-08-23-onset-353-results.md`) never landed in this
+/// repo — the table reproduced in the issue is the only source checked
+/// here; do not add a citation to either path without confirming the file
+/// exists first. The same table's worst observed *good* capture (−36 dBFS
+/// drive) reaches down to 14.5 dB, so
 /// no single threshold separates this dataset cleanly — 18.0 dB is set
 /// at or above the worst bad case rather than at the overlap's midpoint,
 /// so a false refusal (cheap: re-run) is preferred over a false accept
@@ -685,13 +690,26 @@ impl MeasurementReport {
             }
         };
 
-        // A capture whose pre-impulse SNR cannot be compared against the
-        // threshold at all (no measurable floor, or a zero peak) fails
-        // closed rather than passing by default — absence of proof of a
-        // good floor is not the same as proof of one (#376).
-        let verdict = if !pre_impulse_snr_db.is_finite() {
+        // `pre_impulse_snr_db` goes to +inf two different ways, and only
+        // one of them is a failure. A zero floor against a nonzero peak
+        // (`rms == 0.0`, `pre_region` nonempty) is the *best* possible
+        // capture — infinite SNR, not an unmeasurable one — and clears any
+        // finite threshold below, so it falls through to the ordinary
+        // threshold comparison rather than being special-cased out. What
+        // fails closed is the case with nothing to measure at all: an
+        // empty `pre_region` (the guard band consumed the whole pre-peak
+        // window) or a zero peak (nothing captured, so there is no signal
+        // to compare a floor against either) — absence of proof of a good
+        // floor is not the same as proof of one (#376).
+        let verdict = if peak_magnitude == 0.0 {
             IrVerdict::Failed {
-                reason: "no measurable pre-impulse floor (silence)".to_string(),
+                reason: "no signal captured (linear IR is all zero)".to_string(),
+            }
+        } else if pre_region.is_empty() {
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string(),
             }
         } else if pre_impulse_snr_db < PRE_IMPULSE_SNR_MIN_DB {
             IrVerdict::Failed {
@@ -1254,19 +1272,50 @@ mod tests {
     }
 
     #[test]
-    fn ir_stats_verdict_failed_on_non_finite_snr() {
-        // True silence before the peak -> +inf SNR, which cannot be
-        // compared against the threshold at all. Absence of proof of a
-        // good floor must fail closed, not pass by default.
+    fn ir_stats_verdict_ok_on_a_perfectly_clean_capture() {
+        // A zero floor against a nonzero peak is +inf SNR, but it is the
+        // *best* possible capture, not an unmeasurable one — the floor was
+        // measured, and it measured to exactly zero. This must not be
+        // confused with a genuine failure (#387 QA correctness #1).
         let window_len = 1024;
         let centre = window_len / 2;
         let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
         let stats = r.ir_stats().unwrap();
         assert!(stats.pre_impulse_snr_db.is_infinite());
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_nothing_was_captured() {
+        // Peak magnitude itself is zero -> the whole linear IR is zero,
+        // i.e. there is no signal to compare a floor against at all. This
+        // is the genuine "no measurable floor" failure, distinct from the
+        // clean-capture case above.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, window_len / 2, 0.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
         assert_eq!(
             stats.verdict,
             IrVerdict::Failed {
-                reason: "no measurable pre-impulse floor (silence)".to_string()
+                reason: "no signal captured (linear IR is all zero)".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_guard_band_consumes_the_whole_pre_region() {
+        // Peak sits inside the guard band from the start of the window, so
+        // `pre_region` is empty — there is no data at all to measure a
+        // floor from, regardless of what the peak itself looks like.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, 3, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string()
             }
         );
     }

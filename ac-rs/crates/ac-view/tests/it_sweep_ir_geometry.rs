@@ -143,12 +143,18 @@ fn a_gated_report_paints_the_header_trace_and_arrival_readout() {
     );
 }
 
-/// The two failure modes paint distinct header and detail strings —
+/// The three failure modes paint distinct header and detail strings —
 /// never a merged "cannot open" message, and never the success frame's
 /// trace.
 #[test]
 fn a_load_failure_paints_its_own_header_and_detail_not_a_trace() {
-    for fault in [SweepIrFault::NotASweepDerivedIr, SweepIrFault::NoGate] {
+    for fault in [
+        SweepIrFault::NotASweepDerivedIr,
+        SweepIrFault::NoGate,
+        SweepIrFault::LowPreImpulseSnr {
+            pre_impulse_snr_db: 9.7,
+        },
+    ] {
         let mut harness = Harness::new_ui(|ui| {
             ui.set_min_size(egui::vec2(400.0, 300.0));
             let rect = ui.available_rect_before_wrap();
@@ -173,13 +179,51 @@ fn a_load_failure_paints_its_own_header_and_detail_not_a_trace() {
     }
 }
 
-/// The two failure modes are visually distinguishable from each other —
+/// The three failure modes are visually distinguishable from each other —
 /// same requirement the UX comment states for "cannot open" collapsing
 /// into one message.
 #[test]
 fn the_two_failure_modes_paint_different_headers() {
+    let low_snr = SweepIrFault::LowPreImpulseSnr {
+        pre_impulse_snr_db: 9.7,
+    };
     assert_ne!(
         SweepIrFault::NotASweepDerivedIr.header(),
         SweepIrFault::NoGate.header()
+    );
+    assert_ne!(SweepIrFault::NotASweepDerivedIr.header(), low_snr.header());
+    assert_ne!(SweepIrFault::NoGate.header(), low_snr.header());
+}
+
+/// The new #376 fault variant renders through the same panel as the
+/// other two — the interpolated header/detail string actually reaches
+/// the screen, and it paints no trace, the same on-screen shape the
+/// other two failure modes are held to above (#387 QA test-coverage
+/// gap: this variant had no `ac-view` paint coverage of its own).
+#[test]
+fn a_low_snr_failure_paints_its_own_header_and_detail_not_a_trace() {
+    let fault = SweepIrFault::LowPreImpulseSnr {
+        pre_impulse_snr_db: 9.7,
+    };
+    let mut harness = Harness::new_ui(|ui| {
+        ui.set_min_size(egui::vec2(400.0, 300.0));
+        let rect = ui.available_rect_before_wrap();
+        draw_sweep_ir_panel(ui.painter(), rect, Err(fault.clone()));
+    });
+    harness.run();
+
+    let texts = painted_texts(&harness.output().shapes);
+    assert!(
+        texts.iter().any(|t| t == &fault.header()),
+        "header not painted; texts on screen: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == &fault.detail()),
+        "detail not painted; texts on screen: {texts:?}"
+    );
+    let line_count = line_like_shape_count(&harness.output().shapes);
+    assert_eq!(
+        line_count, 0,
+        "LowPreImpulseSnr painted a trace or marker line; expected header/detail text only"
     );
 }

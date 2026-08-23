@@ -294,8 +294,16 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         } else {
             println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
         }
+    } else if let IrVerdict::Failed { reason } = &stats.verdict {
+        // Non-finite here means `ir_stats` had nothing to measure a floor
+        // from at all (see the reason already printed in the banner
+        // above) — restate it rather than a generic "silence" that would
+        // misdescribe a zero-peak or guard-band-exhausted capture alike.
+        println!("  pre-imp SNR   {reason}");
     } else {
-        println!("  pre-imp SNR   no measurable pre-impulse floor (silence)");
+        // Non-finite but `Ok`: a zero floor against a nonzero peak is the
+        // best possible capture, not an unmeasurable one.
+        println!("  pre-imp SNR   \u{221e} dB  (zero measured floor)");
     }
     println!(
         "  gate          {} window, {} samples ({:.2} ms) → f_low {:.1} Hz",
