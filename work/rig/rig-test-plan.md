@@ -376,6 +376,37 @@ increment cancels every constant term (converter asymmetry, acoustic centre,
 capsule) and is the only external truth available. The absolute is not an
 independent check — the constant is derived from these same measurements.
 
+> **Correction, 2026-08-23 — this section omits the dominant term, and every
+> band below that scores a taped distance inherits the omission.**
+>
+> The mic is *physically moved* between the 1 m and 3 m positions and the
+> distance is measured **by hand** each time. Operator: *"you can expect +-5cm
+> accuracy at the best there. anything <1cm is pure luck and very very good
+> guess. this is the fact until laser and temperature meter makes itself known
+> someday (dont stay waiting)."*
+>
+> | term over a 2.000 m increment | magnitude |
+> |---|---|
+> | **tape placement, hand-measured** | **±50 mm** |
+> | sample quantisation @ 96 kHz | 3.6 mm |
+> | temperature, ±1 °C | 3.5 mm |
+>
+> Tape placement dominates by more than 10×. **No criterion stated in
+> millimetres can be certified against it**, so the AC7 bands below
+> (`≤1.5 mm` / `1.5–8.5 mm` / `>8.5 mm`) are finer than their own ground truth
+> and cannot be applied as written; #346 AC5's 4.7 mm is likewise one lucky
+> draw from a ±50 mm distribution rather than a demonstrated capability.
+>
+> What survives, and it is the important half: **the c-free
+> estimator-against-estimator comparison below is not merely the stronger
+> option, it is the only valid one**, because it removes the tape entirely.
+> Both estimators see the same physical move whatever the tape says it was.
+> Taped-distance criteria should be restated at ~5 cm, or replaced by the
+> time-domain form. Do not wait for a laser to score what is already
+> scoreable.
+>
+> See `work/rig/rig-243-criterion7-results.md`.
+
 ### Temperature: no thermometer this session (2026-08-22)
 
 `c` moves 0.606 m/s per °C, which over a 2.000 m increment is **3.5 mm per

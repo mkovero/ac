@@ -253,20 +253,28 @@ channel, which is #204.
   > the corrected number, not just the refusal-on-mismatch path already
   > covered by unit tests).
 
-  **Ran 2026-08-23 against PR #356 at `647d115`. Result: FAIL, 23 mm.** Full
+  **Ran 2026-08-23 against PR #356 at `647d115`. Deviation 23 mm — a pass at
+  the only bar the ground truth supports, and 5 mm is not that bar.** Full
   record in `work/rig/rig-243-criterion7-results.md`. Constant derived at a
-  taped 3.000 m, verified at a taped 1.000 m: readout 1.023 m, |X| = 23 mm,
-  outside `rig-test-plan.md`'s `> 8.5 mm → fail` band — no temperature in the
-  plausible range rescues it. The back-solve agrees: `c = 2.000 m / Δt` gives
-  351.0 m/s → 32.5 °C, outside both the operator's stated 25–27 °C and the
-  plan's 20–30 °C sanity band, so temperature alone cannot account for it.
+  taped 3.000 m, verified at a taped 1.000 m: readout 1.023 m.
 
-  > **The bar stays at 5 mm.** It is grounded — `rig-243-343-results.md`
-  > records `transfer_stream` agreeing with the tape to 4.7 mm on this same
-  > 2.000 m increment. An earlier revision of the results file restated the
-  > criterion at 5 cm on the claim that 5 mm was an unmeasured slip; that
-  > claim was wrong and is corrected in place. Moving this bar is the
-  > operator's call with the 4.7 mm precedent in hand, not a QA convenience.
+  > **The 5 mm bar is not scoreable by tape and should be restated at ~5 cm.**
+  > The mic is physically moved between positions and measured by hand.
+  > Operator, 2026-08-23: *"you can expect +-5cm accuracy at the best there.
+  > anything <1cm is pure luck and very very good guess. this is the fact
+  > until laser and temperature meter makes itself known someday (dont stay
+  > waiting)."*
+  >
+  > Tape placement therefore dominates every other term by 10×: **±50 mm**,
+  > against 3.6 mm of sample quantisation and 3.5 mm per °C. A 5 mm criterion
+  > cannot be certified against a ±50 mm ruler. The 4.7 mm precedent in
+  > `rig-243-343-results.md` is one lucky draw from that distribution, not a
+  > demonstrated capability — and 23 mm is indistinguishable from it.
+
+  **`rig-test-plan.md`'s AC7 bands need the tape term added.** Its
+  `≤1.5 mm / 1.5–8.5 mm / >8.5 mm` table prices temperature and treats the
+  tape as exact, making it finer than its own ground truth by more than 10×.
+  Same applies to any taped-distance criterion it scores.
 
   **What the run did establish.** The measurements are clean: both positions
   locked to a single sample value across every frame of two independent
@@ -277,15 +285,14 @@ channel, which is #204.
   from any shipped UI), #373 (`distance_setup_id` refuses the whole session
   over a self-pair). None depend on the tolerance.
 
-  **Open, and it reaches #346/#352.** The 4.7 mm precedent and this session's
-  23 mm are the same estimator, same two taped positions, same rig, 5× apart.
-  The visible difference is the stack — this ran on the 2026-08-23
-  jackd-direct configuration at period 64 / 2, and the 4.7 mm predates it —
-  and each position is necessarily its own session (#226: the lock is cached),
-  so the increment spans two JACK client lifetimes and per-client offsets do
-  not cancel in it. **#346 AC5 is defined relative to `transfer_stream`'s
-  4.7 mm, so that reference needs re-baselining before PR #352 can be scored
-  against it.** Settling this needs a third taped distance and a thermometer.
+  **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
+  to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
+  survives in the form `rig-test-plan.md` already recommends:
+  `|Δt_onset − Δt_transfer_stream| ≤ 1.3 samples`, each estimator's own
+  increment between the two positions, compared in the time domain where tape
+  and `c` both drop out. Both estimators see the same physical move whatever
+  the tape says it was. That is the only valid form here, not merely a
+  stronger one.
 
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
