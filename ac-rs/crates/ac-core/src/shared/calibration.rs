@@ -40,6 +40,25 @@
 //! `monitor.rs`. Both were confirmed red against a deliberately composed
 //! derivation before landing.
 //!
+//! # A fourth parallel layer: distance calibration, issue #243
+//!
+//! [`Calibration::distance_cal_history`] is a fourth layer under the same
+//! rule, stored alongside τ under the `(output_channel, meas_channel)` key a
+//! `transfer_stream` pair already loads. It is **not** interface latency —
+//! rig measurement showed it dominated by loudspeaker and microphone
+//! geometry (46.0 samples of converter-channel asymmetry against 55.9
+//! samples of acoustic centre + capsule offset, at 96 kHz) — so unlike τ it
+//! is not addressed by `(device, backend, sample_rate, period_size, port)`.
+//! It is addressed by `(ref_channel, setup_id)`: the second capture channel
+//! this pair measures against, and a free-text tag naming the acoustic setup
+//! (which mic, which loudspeaker, which position) the constant was captured
+//! under. [`Calibration::distance_cal_for`] is exact-match on both, same
+//! refuse-rather-than-degrade discipline as [`Calibration::tau_for`] — a
+//! constant captured for one loudspeaker silently applied to another after a
+//! swap is exactly the failure this issue was filed to stop, so a
+//! `setup_id` mismatch refuses and names the delta rather than falling back
+//! to the nearest entry.
+//!
 //! **The invariant is that SPL does not move — never that it moves by
 //! some amount when broken.** The symptom's size is
 //! `20·log10(vrms_at_0dbfs_in)`, which is bounded below by nothing: a rig
@@ -116,6 +135,11 @@ pub struct CalibrationEntry {
     /// [`Calibration::tau_history`]. Append-only; never overwritten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tau_history: Vec<TauEntry>,
+    /// Distance-calibration constant history — see
+    /// [`Calibration::distance_cal_history`]. Append-only; never
+    /// overwritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distance_cal_history: Vec<DistanceCalEntry>,
 }
 
 /// Conditions τ (interface round-trip latency) was measured under. τ is a
@@ -353,6 +377,88 @@ fn tau_diff_fields(a: &TauConditions, b: &TauConditions) -> Vec<&'static str> {
     out
 }
 
+/// One distance-calibration constant: the delay this pair's lock includes
+/// that never travelled through air — converter/DUT latency and the
+/// loudspeaker/mic geometry alike — captured against a taped reference
+/// distance. See the module-level "fourth parallel layer" doc.
+///
+/// Stored under [`Calibration::distance_cal_history`], keyed at lookup by
+/// `(ref_channel, setup_id)` via [`Calibration::distance_cal_for`].
+/// Append-only, like [`Calibration::tau_history`] — entries are never
+/// overwritten, so a stale value never silently replaces a good one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DistanceCalEntry {
+    /// The second capture channel this pair measures against — together
+    /// with the `(output_channel, meas_channel)` key `Calibration` is
+    /// stored under, this identifies the pair.
+    pub ref_channel: u32,
+    /// Free-text identifier for the acoustic setup this constant was
+    /// captured under (which mic, which loudspeaker, which position).
+    /// Exact-matched, never fuzzy-matched — the whole point of the field is
+    /// that a setup change is detectable, not smoothed over.
+    pub setup_id: String,
+    /// The flight-time offset to subtract from a locked `delay_ms` before
+    /// the ms → m conversion, in milliseconds. Positive: the locked delay
+    /// includes this much that is not travel time.
+    pub constant_ms: f64,
+    /// RFC3339 timestamp of the capture.
+    pub captured_at: String,
+    /// The taped distance the capture was made at, if recorded. Purely
+    /// informational — [`Self::constant_ms`] is the value consumers use;
+    /// this is what lets a reader tell a fresh capture from a stale one
+    /// without re-deriving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_distance_m: Option<f64>,
+}
+
+/// Why an exact-match distance-calibration lookup missed. Same shape as
+/// [`TauRefusal`] and for the same reason: name the delta to the nearest
+/// stored entry rather than silently interpolating, falling back to
+/// "closest", or proceeding uncorrected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistanceCalRefusal {
+    pub requested_ref_channel: u32,
+    pub requested_setup_id: String,
+    /// Nearest entry by fewest differing fields (`ref_channel`, `setup_id`),
+    /// ties broken by most recent `captured_at`. `None` when no entry
+    /// exists at all for this calibration key.
+    pub nearest: Option<DistanceCalEntry>,
+}
+
+impl DistanceCalRefusal {
+    /// Diagnostic message naming the delta — see [`TauRefusal::message`].
+    pub fn message(&self) -> String {
+        match &self.nearest {
+            None => format!(
+                "no distance calibration recorded for ref channel {} yet \u{2014} capture one \
+                 at a taped distance before requesting setup {:?}",
+                self.requested_ref_channel, self.requested_setup_id
+            ),
+            Some(nearest) => {
+                let mut deltas = Vec::new();
+                if nearest.ref_channel != self.requested_ref_channel {
+                    deltas.push(format!(
+                        "ref_channel (requested {}, stored {})",
+                        self.requested_ref_channel, nearest.ref_channel
+                    ));
+                }
+                if nearest.setup_id != self.requested_setup_id {
+                    deltas.push(format!(
+                        "setup_id (requested {:?}, stored {:?})",
+                        self.requested_setup_id, nearest.setup_id
+                    ));
+                }
+                format!(
+                    "no distance calibration entry for these exact conditions; nearest stored \
+                     entry (captured {}) differs in {}",
+                    nearest.captured_at,
+                    deltas.join(", ")
+                )
+            }
+        }
+    }
+}
+
 /// Parsed and validated mic frequency-response correction curve.
 ///
 /// `freqs_hz[i]` is monotonically increasing (asserted on import). At any
@@ -510,6 +616,18 @@ pub struct Calibration {
     /// Interface-latency (τ) measurement history for this channel pair.
     /// Append-only — see [`TauEntry`] / [`Calibration::tau_for`].
     pub tau_history: Vec<TauEntry>,
+    /// Distance-calibration constant history for this measurement channel,
+    /// across whichever reference channels and acoustic setups it has been
+    /// captured against. Append-only — see [`DistanceCalEntry`] /
+    /// [`Calibration::distance_cal_for`].
+    ///
+    /// `#[serde(default)]` — unlike every other field on this struct — so a
+    /// `.acsnap` captured before this issue, whose embedded `Calibration`
+    /// carries no such field at all, still deserializes: an empty history
+    /// is the honest value for a channel this feature predates, not a
+    /// default masking a real one.
+    #[serde(default)]
+    pub distance_cal_history: Vec<DistanceCalEntry>,
 }
 
 /// Reference SPL of an acoustic pistonphone calibrator. ANSI S1.40 / IEC
@@ -530,6 +648,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl: None,
             mic_response: None,
             tau_history: Vec::new(),
+            distance_cal_history: Vec::new(),
         }
     }
 
@@ -615,6 +734,49 @@ impl Calibration {
         }))
     }
 
+    /// Exact-match distance-calibration lookup on `(ref_channel, setup_id)`.
+    /// Refuses rather than interpolating or falling back to "closest" or
+    /// "most recent" — a constant captured under one loudspeaker or mic
+    /// position silently applied to another is the failure issue #243 was
+    /// filed about, so a miss must say so and name the delta, not degrade.
+    pub fn distance_cal_for(
+        &self,
+        ref_channel: u32,
+        setup_id: &str,
+    ) -> Result<&DistanceCalEntry, Box<DistanceCalRefusal>> {
+        if let Some(hit) = self
+            .distance_cal_history
+            .iter()
+            .find(|e| e.ref_channel == ref_channel && e.setup_id == setup_id)
+        {
+            return Ok(hit);
+        }
+        let mut nearest: Option<&DistanceCalEntry> = None;
+        for e in &self.distance_cal_history {
+            let n_diff = (e.ref_channel != ref_channel) as u8 + (e.setup_id != setup_id) as u8;
+            let best_diff = nearest
+                .map(|n| (n.ref_channel != ref_channel) as u8 + (n.setup_id != setup_id) as u8);
+            let better = match best_diff {
+                None => true,
+                Some(best) => {
+                    n_diff < best
+                        || (n_diff == best
+                            && nearest
+                                .map(|n| e.captured_at > n.captured_at)
+                                .unwrap_or(true))
+                }
+            };
+            if better {
+                nearest = Some(e);
+            }
+        }
+        Err(Box::new(DistanceCalRefusal {
+            requested_ref_channel: ref_channel,
+            requested_setup_id: setup_id.to_string(),
+            nearest: nearest.cloned(),
+        }))
+    }
+
     // -----------------------------------------------------------------------
     // Persistence
     // -----------------------------------------------------------------------
@@ -649,6 +811,7 @@ impl Calibration {
                 mic_sensitivity_dbfs_at_94db_spl: self.mic_sensitivity_dbfs_at_94db_spl,
                 mic_response: self.mic_response.clone(),
                 tau_history: self.tau_history.clone(),
+                distance_cal_history: self.distance_cal_history.clone(),
             },
         );
 
@@ -739,6 +902,7 @@ impl Calibration {
             mic_sensitivity_dbfs_at_94db_spl: e.mic_sensitivity_dbfs_at_94db_spl,
             mic_response: e.mic_response.clone(),
             tau_history: e.tau_history.clone(),
+            distance_cal_history: e.distance_cal_history.clone(),
         }
     }
 
@@ -1156,6 +1320,128 @@ mod tests {
         assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-30.0));
         assert_eq!(loaded.tau_history.len(), 1);
         assert!((loaded.tau_history[0].tau_s - 0.0011931).abs() < 1e-12);
+    }
+
+    // ─── distance calibration — issue #243 ──────────────────────────────
+
+    fn dummy_distance_entry(
+        ref_channel: u32,
+        setup_id: &str,
+        constant_ms: f64,
+    ) -> DistanceCalEntry {
+        DistanceCalEntry {
+            ref_channel,
+            setup_id: setup_id.to_string(),
+            constant_ms,
+            captured_at: crate::shared::time::now_utc_iso8601(),
+            captured_distance_m: Some(1.0),
+        }
+    }
+
+    #[test]
+    fn distance_cal_for_exact_match_hits() {
+        let mut cal = Calibration::new(0, 0);
+        cal.distance_cal_history
+            .push(dummy_distance_entry(3, "mic1", 1.0615));
+        let hit = cal
+            .distance_cal_for(3, "mic1")
+            .expect("exact match should hit");
+        assert!((hit.constant_ms - 1.0615).abs() < 1e-12);
+    }
+
+    #[test]
+    fn distance_cal_for_refuses_on_setup_change_and_names_the_delta() {
+        // The failure this issue was filed to stop: a constant captured
+        // for one loudspeaker/mic position silently applied after either
+        // moves. A setup_id mismatch must refuse, not degrade to the
+        // stored value.
+        let mut cal = Calibration::new(0, 0);
+        cal.distance_cal_history
+            .push(dummy_distance_entry(3, "mic1", 1.0615));
+
+        let refusal = cal
+            .distance_cal_for(3, "mic2")
+            .expect_err("setup_id mismatch must refuse, not degrade");
+        assert_eq!(refusal.nearest.as_ref().unwrap().constant_ms, 1.0615);
+        let msg = refusal.message();
+        assert!(
+            msg.contains("setup_id"),
+            "message must name the differing field: {msg}"
+        );
+        assert!(
+            msg.contains("\"mic2\""),
+            "message must name the requested value: {msg}"
+        );
+        assert!(
+            msg.contains("\"mic1\""),
+            "message must name the stored value: {msg}"
+        );
+    }
+
+    #[test]
+    fn distance_cal_for_refuses_on_ref_channel_change() {
+        let mut cal = Calibration::new(0, 0);
+        cal.distance_cal_history
+            .push(dummy_distance_entry(3, "mic1", 1.0615));
+
+        let refusal = cal
+            .distance_cal_for(4, "mic1")
+            .expect_err("ref_channel mismatch must refuse");
+        let msg = refusal.message();
+        assert!(msg.contains("ref_channel"), "got {msg}");
+    }
+
+    #[test]
+    fn distance_cal_for_refuses_with_no_nearest_when_history_is_empty() {
+        let cal = Calibration::new(0, 0);
+        let refusal = cal.distance_cal_for(3, "mic1").unwrap_err();
+        assert!(refusal.nearest.is_none());
+        assert!(refusal.message().contains("no distance calibration"));
+    }
+
+    #[test]
+    fn distance_cal_history_round_trips_alongside_other_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+
+        let mut a = Calibration::new(0, 0);
+        a.vrms_at_0dbfs_out = Some(1.234);
+        a.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+        a.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0011931));
+        a.save(Some(&path)).unwrap();
+
+        let mut b = Calibration::load_or_new(0, 0, Some(&path));
+        b.distance_cal_history
+            .push(dummy_distance_entry(3, "mic1", 1.0615));
+        b.save(Some(&path)).unwrap();
+
+        let loaded = Calibration::load(0, 0, Some(&path)).unwrap().unwrap();
+        assert_eq!(loaded.vrms_at_0dbfs_out, Some(1.234));
+        assert_eq!(loaded.mic_sensitivity_dbfs_at_94db_spl, Some(-30.0));
+        assert_eq!(loaded.tau_history.len(), 1);
+        assert_eq!(loaded.distance_cal_history.len(), 1);
+        assert!((loaded.distance_cal_history[0].constant_ms - 1.0615).abs() < 1e-12);
+    }
+
+    #[test]
+    fn distance_cal_history_does_not_affect_voltage_spl_or_tau() {
+        let mut cal = Calibration::new(0, 0);
+        cal.vrms_at_0dbfs_out = Some(1.234);
+        cal.mic_sensitivity_dbfs_at_94db_spl = Some(-30.0);
+        cal.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0011931));
+
+        let out_before = cal.out_vrms(-6.0);
+        let spl_before = cal.dbfs_to_dbspl(-20.0);
+        let tau_before = cal.tau_for(&dummy_conditions()).ok().cloned();
+
+        cal.distance_cal_history
+            .push(dummy_distance_entry(3, "mic1", 1.0615));
+
+        assert_eq!(cal.out_vrms(-6.0), out_before);
+        assert_eq!(cal.dbfs_to_dbspl(-20.0), spl_before);
+        assert_eq!(cal.tau_for(&dummy_conditions()).ok().cloned(), tau_before);
     }
 
     // ─── compare_tau_readings — issue #347 ──────────────────────────────
