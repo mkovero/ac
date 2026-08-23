@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{busy_guard, resolve_output, send_pub, spawn_worker};
+use super::super::{apply_drive_ceiling, busy_guard, resolve_output, send_pub, spawn_worker};
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "sweep_level");
@@ -19,6 +19,12 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         Some(v) => v,
         None => return json!({"ok": false, "error": "missing freq_hz"}),
     };
+    // Raw request, unclamped: this is the shape of the ramp, not the level
+    // that reaches the engine. Each computed point on the ramp is clamped
+    // individually below (#360) — a sweep whose top end exceeds the
+    // ceiling flattens there rather than running unclamped or being
+    // refused outright, mirroring `set_drive`'s "clamp is normal
+    // operation" discipline.
     let start_dbfs = cmd
         .get("start_dbfs")
         .and_then(Value::as_f64)
@@ -26,11 +32,16 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
+    let ceiling = cfg.drive_max_dbfs;
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let out_port_reply = out_port.clone();
+    // Applied endpoints echoed on the sync reply — monotone under a `min`
+    // clamp, so this is exactly the range the ramp actually covers.
+    let start_dbfs_applied = apply_drive_ceiling(ceiling, start_dbfs);
+    let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -45,7 +56,8 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
             );
             return;
         }
-        let start_amp = ac_core::shared::generator::dbfs_to_amplitude(start_dbfs);
+        let start_amp =
+            ac_core::shared::generator::dbfs_to_amplitude(apply_drive_ceiling(ceiling, start_dbfs));
         eng.set_tone(freq_hz, start_amp);
         let t0 = std::time::Instant::now();
         while !stop.load(Ordering::Relaxed) {
@@ -54,7 +66,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
                 break;
             }
             let t = elapsed / duration;
-            let db = start_dbfs + (stop_dbfs - start_dbfs) * t;
+            let db = apply_drive_ceiling(ceiling, start_dbfs + (stop_dbfs - start_dbfs) * t);
             eng.set_tone(freq_hz, ac_core::shared::generator::dbfs_to_amplitude(db));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -67,7 +79,12 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_level".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply})
+    json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "start_dbfs": start_dbfs_applied,
+        "stop_dbfs": stop_dbfs_applied,
+    })
 }
 
 pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
@@ -83,6 +100,8 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(-10.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: `sweep_frequency` puts a stimulus on a physical output.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -124,5 +143,5 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_frequency".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply})
+    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs})
 }

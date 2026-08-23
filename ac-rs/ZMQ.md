@@ -932,10 +932,19 @@ its CLI parent noun moved.
 }
 ```
 
+`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
+ceiling (#360) — each point on the ramp individually, not just the
+endpoints, so a range whose top end exceeds the ceiling flattens there
+rather than running unclamped.
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>" }
+{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float> }
 ```
+
+`start_dbfs`/`stop_dbfs` in the reply are the *applied* endpoints — what
+was requested clamped to the ceiling — same convention as `set_drive`'s
+`level_dbfs` echo.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -967,10 +976,15 @@ is a deprecated alias). Wire `cmd` unchanged — same reasoning as
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>" }
+{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value after the clamp — same
+convention as `set_drive`.
 
 **DATA**
 ```json
@@ -1020,6 +1034,10 @@ only the default trait impl bails.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
+before #360 this was the one command besides `calibrate` that emitted
+whatever was asked for with nothing bounding it.
+
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
 orders must not overlap, so each order's gate is clamped down to the
 sample distance to its nearest neighbouring order; the linear IR, whose
@@ -1030,8 +1048,11 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>" }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied (clamped) level, and the report's
+`stimulus.level_dbfs` field (below) is the same applied value.
 
 **DATA**
 ```json
@@ -1125,10 +1146,16 @@ captures + analyses the loopback. Emits one `measurement/frequency_response/poin
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>" }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value; each
+`measurement/frequency_response/point` frame's `drive_db` (below) is the
+same applied value.
 
 **DATA** — one per frequency:
 ```json
@@ -1160,13 +1187,20 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
 }
 ```
 
+`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
+ceiling (#360), each computed step individually — a range whose top end
+exceeds the ceiling flattens there rather than running unclamped.
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>" }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float> }
 ```
 
+`start_dbfs`/`stop_dbfs` in the reply are the applied endpoints.
+
 **DATA** — one per level step (measurement/frequency_response/point frame, `"cmd": "plot_level"`,
-includes `"freq_hz"` and `"drive_db"` fields).
+includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
+post-clamp level for that step).
 
 **DATA** — terminal:
 ```json
@@ -1319,10 +1353,14 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...] }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1347,10 +1385,14 @@ Plays continuous pink noise until stopped.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...] }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value.
 
 **DATA** — terminal after `stop`:
 ```json
@@ -1369,16 +1411,23 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 ```json
 {
   "cmd":            "calibrate",
-  "ref_dbfs":       <float>,   // optional, default -10.0
+  "ref_dbfs":       <float>,   // optional, default: the session's drive_max_dbfs
   "output_channel": <int>,     // optional, defaults to config
   "input_channel":  <int>      // optional, defaults to config
 }
 ```
 
+`ref_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
+an omitted value now defaults to that same ceiling rather than a
+hardcoded -10.0, so it can never itself sit above the config it is
+supposed to respect.
+
 **Reply**
 ```json
-{ "ok": true }
+{ "ok": true, "ref_dbfs": <float> }
 ```
+
+`ref_dbfs` in the reply is the applied (clamped, or defaulted) value.
 
 **DATA — `cal_prompt`** (step 1: output voltage at the DAC, while a
 1 kHz tone is playing at `ref_dbfs`):
@@ -1771,7 +1820,8 @@ every other observable looking correct.
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
   "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
                              //   silent until `set_drive`. Implied by drive=true.
-  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10
+  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10; clamped to
+                             //   drive_max_dbfs (#360) before it seeds the drive state
 
   // Either the multi-pair form …
   "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],

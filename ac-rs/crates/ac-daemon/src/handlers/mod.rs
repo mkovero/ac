@@ -113,6 +113,27 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Drive ceiling (#360)
+// ---------------------------------------------------------------------------
+
+/// Clamp a requested dBFS level to the session's `drive_max_dbfs` ceiling.
+///
+/// Mirrors `set_drive`'s inline clamp (`transfer.rs`, `level.min(ceiling)`):
+/// clamping is normal operation, not an error, so a stimulus command that
+/// fails instead of applying a safe level is a worse field failure than one
+/// that quietly applies the ceiling. Every command that turns a requested
+/// dBFS into an emitted amplitude runs its value through this single
+/// chokepoint immediately after parsing — before #360, `set_drive` was the
+/// only one that did, and `plot_ir`/`calibrate` emitted whatever was asked
+/// for with nothing bounding it (issue #360).
+///
+/// The return value is always the value to actually use — callers echo it
+/// back on the wire as the *applied* level, never the raw request.
+pub(super) fn apply_drive_ceiling(ceiling_dbfs: f64, requested_dbfs: f64) -> f64 {
+    requested_dbfs.min(ceiling_dbfs)
+}
+
+// ---------------------------------------------------------------------------
 // Port cache (Issue #30)
 //
 // JACK port queries open a fresh `ac-daemon-probe` client every call, which
@@ -707,5 +728,30 @@ pub(super) fn median(vals: &[f64]) -> f64 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::apply_drive_ceiling;
+
+    #[test]
+    fn passes_through_below_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -25.0), -25.0);
+    }
+
+    #[test]
+    fn clamps_above_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -3.0), -10.0);
+    }
+
+    #[test]
+    fn passes_through_exactly_at_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -10.0), -10.0);
+    }
+
+    #[test]
+    fn clamps_a_positive_request() {
+        assert_eq!(apply_drive_ceiling(-30.0, 6.0), -30.0);
     }
 }

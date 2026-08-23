@@ -64,9 +64,14 @@ survived contact with this rig and what didn't:
 
 ### step 2 — obtain emission consent
 No drive/emission proceeds without **explicit per-run operator consent**,
-obtained before this session's first `set_drive on` — see hard constraints
-below for the ceiling and its exception mechanism. Record what was
-consented to (ceiling, duration if bounded) in the resulting file.
+obtained before this session's first stimulus command — `set_drive on`,
+`plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`, `sweep_level`,
+`sweep_frequency`, or `calibrate` all put a signal on a physical output
+(#360 closed the gap where `plot_ir` and `calibrate` did not honour
+`drive_max_dbfs`; do not read this list as still narrower than the code).
+See hard constraints below for the ceiling and its exception mechanism.
+Record what was consented to (ceiling, duration if bounded) in the
+resulting file.
 
 ### step 3 — run session
 Execute the queued block(s) or ad-hoc procedure as directed. For each run:
