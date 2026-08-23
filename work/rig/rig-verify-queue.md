@@ -26,6 +26,23 @@ only planned run producing a legitimately gated ring, which is the case the
 dropped onset guard must not suppress, so it carries per-frame
 `median_value` / `negative_lag_median` as well. Full statement in block 4.
 
+- **#368's `TAU_SNR_THRESHOLD_DB` constant — QA on PR #384 (2026-08-23)
+  flagged it `derived`, not measured on the sweep configuration it gates.**
+  Its two anchors (33.8–83.5 dB electrical loopback, ~16 dB #376 acoustic
+  cliff) come from a different window-length rig session
+  (`rig-2026-08-22-tau-window-350-results.md`) and a different, longer-ESS
+  acoustic path — neither is `calibrate`'s own short-ESS electrical τ path.
+
+  Run `calibrate`'s actual τ path against the three cases the issue
+  measured: hot loopback (+3.01 dB), low-gain loopback (-4.19 dB), muted
+  route (-83.8 dBFS). Record `tau_pre_impulse_snr_db` for each.
+
+  > **Pass: both real loopbacks read at or above 24 dB, and the muted
+  > route reads below it.** Either real loopback's SNR coming back under
+  > 24 dB would wrongly refuse a working cable; the muted route's SNR
+  > coming back over 24 dB would wrongly accept noise as a peak. Both are
+  > falsifications of the current constant, not readouts to shrug past.
+
 Two things session 3 raised that no block here covers yet:
 
 - **The cable change, and the one measurement that verifies it — #243.** Move

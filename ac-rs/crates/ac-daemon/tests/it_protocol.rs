@@ -1266,6 +1266,45 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
     );
 }
 
+/// #368 AC8 (QA request-changes on PR #384): closes the gap the muted-route
+/// test alone leaves. `calibrate_measures_tau_against_fake_loopback_delay`
+/// above passes at the fake backend's default unity gain — exactly the one
+/// case the old `is_loopback` ±2 dB gate already handled correctly, so it
+/// cannot tell "measured because SNR is genuinely adequate" apart from
+/// "measured because the gate was deleted" for any off-unity level. This
+/// drives the +3.01 dB hot loopback from the issue's own rig case (drive
+/// -30 dBFS, captured -30.0 dBFS) through `AC_FAKE_TAU_GAIN_OVERRIDE` and
+/// asserts `measured` — a regression that reintroduced any captured-level
+/// check keyed near unity would fail this without touching the muted-route
+/// test.
+#[test]
+fn calibrate_measures_tau_on_hot_off_unity_fake_loopback() {
+    let d = Daemon::spawn_with_env(&[
+        ("AC_FAKE_TAU_GAIN_OVERRIDE", "1.4142135623730951"), // +3.01 dB
+    ]);
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -30.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    assert_eq!(
+        done["tau_state"],
+        json!("measured"),
+        "3.01 dB hot must not be refused (#368 AC1): {done}"
+    );
+    assert!(done["tau_s"].as_f64().is_some(), "frame: {done}");
+}
+
 /// QA #348 test-coverage gap: every other disagreement test drives
 /// `compare_tau_readings` or `tau_result` as a pure function, never
 /// `measure_tau_twice` itself — the function that actually spins up two
