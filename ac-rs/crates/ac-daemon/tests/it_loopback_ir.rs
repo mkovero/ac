@@ -19,11 +19,15 @@
 //!
 //! The self-loop above never leaves the daemon's own JACK client: it
 //! exercises the ring, not a converter. To route the sweep through actual
-//! hardware, set both of these to real JACK port names:
+//! hardware, set both of these to real JACK port names
+//! (those below are the reference rig under plain `jackd -d alsa`;
+//! under pipewire-jack the same connectors appear as
+//! `Babyface Pro Pro:playback_2` / `:capture_4` — ask `jack_lsp`, do not
+//! assume either form):
 //!
 //! ```text
-//! AC_LOOPBACK_OUT="Babyface Pro Pro:playback_2"   # daemon's out connects here
-//! AC_LOOPBACK_IN="Babyface Pro Pro:capture_4"     # daemon's in connects here
+//! AC_LOOPBACK_OUT="system:playback_2"   # daemon's out connects here
+//! AC_LOOPBACK_IN="system:capture_4"     # daemon's in connects here
 //! ```
 //!
 //! Unset, both default to the self-loop, so the `jackd -d dummy` runbook in

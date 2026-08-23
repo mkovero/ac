@@ -8,6 +8,16 @@ Reproduction is given both with and without `ac` binaries.
 **Expires:** when the mechanism is identified. Nothing in this file is a
 conclusion about a fix.
 
+> **EXPIRED 2026-08-23 — the mechanism was PipeWire.** The operator removed
+> pipewire-jack; `jackd` now drives ALSA directly (period 64) and the jump is
+> gone: 65 `ac calibrate` runs / 130 client lifetimes returned one value, with
+> `jack_iodelay` agreeing to 0.18 samples. `rme-re` is exonerated, as the
+> "Where I would look first" section argued it would be. Do not hand this file
+> onward as an open question. Two numbers in it are also now wrong on this rig:
+> the round trip is **4.4167 ms**, not 43.75 ms, and the "2152-sample converter
+> + USB remainder" was itself mostly PipeWire — real converter + USB is ≈ 3.1 ms.
+> Full record: `work/rig/rig-2026-08-23-jackd-direct-results.md`.
+
 ---
 
 ## The claim, in one paragraph
