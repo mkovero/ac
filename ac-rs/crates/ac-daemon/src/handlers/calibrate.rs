@@ -17,8 +17,8 @@ use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output,
-    rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, CalReply,
+    apply_drive_ceiling, busy_guard, capture_rms, read_dmm_vrms, resolve_input,
+    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, CalReply,
 };
 
 /// Apply one prompt's reply to one stored voltage field and report which
@@ -468,7 +468,18 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
-    let out_port = match resolve_output(&cfg, state) {
+    // #358: `out_ch` above already keys the saved calibration entry — it
+    // must also decide which port the tone actually leaves on, or the key
+    // and the port can name different channels (rig repro: key `out1_in3`,
+    // tone on the sticky-resolved `cfg.output_channel` port, capture on a
+    // dead loopback return). `resolve_output_by_channel` is the same
+    // explicit-wins-over-sticky rule `generate`'s multi-channel form
+    // already uses (`resolve_channels` in `audio/generate.rs`): an
+    // explicit channel that differs from `cfg.output_channel` is resolved
+    // by index, bypassing `cfg.output_port`; a channel that matches falls
+    // through to `resolve_output`, so an unrelated sticky port is left
+    // alone when the caller didn't ask to override anything.
+    let out_port = match resolve_output_by_channel(&cfg, state, out_ch) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
