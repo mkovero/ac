@@ -27,6 +27,11 @@ chrono      = { version = "0.4", default-features = false, features = ["clock"] 
 default    = ["jack-audio", "cpal-audio"]
 jack-audio = ["dep:jack"]
 cpal-audio = ["dep:cpal"]
+# Rig instrument only (#350): lets AC_TAU_HALF_WINDOW_S / AC_TAU_EDGE_MARGIN_FRAC
+# override the compiled-in tau window constants, and logs per-reading peak/floor
+# SNR. Off by default so a production daemon cannot be perturbed by its
+# environment.
+tau-window-override = []
 
 [dev-dependencies]
 sha2 = "0.11.0"
