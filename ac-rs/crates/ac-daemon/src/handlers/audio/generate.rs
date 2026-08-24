@@ -8,8 +8,8 @@ use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, resolve_output, resolve_output_by_channel, send_pub,
-    spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, resolve_output, resolve_output_by_channel,
+    send_pub, spawn_worker,
 };
 
 /// Resolve the `channels` field in a generate command into playback ports.
@@ -50,6 +50,7 @@ fn resolve_channels(
 
 pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate");
+    cfg_guard!(state);
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
     let level_dbfs = cmd
         .get("level_dbfs")
@@ -101,6 +102,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate_pink");
+    cfg_guard!(state);
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)

@@ -13,13 +13,14 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, median, ref_output_migration_warning,
-    resolve_input, resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
-    spawn_worker, TestResult,
+    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, cfg_guard, median,
+    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
+    resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
 
 pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "test_dut");
+    cfg_guard!(state);
 
     let cfg = state.cfg.lock().unwrap().clone();
 

@@ -18,7 +18,6 @@ use ac_core::visualize::transfer::impulse_response_from_h;
 
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{time_axis, time_to_x, Axis};
-use crate::transfer::{format_delay_readout_plain, SPEED_OF_SOUND_DEFAULT_M_S};
 use crate::wire::IrWireFrame;
 
 /// The header line every IR panel draws verbatim, top of the pane.
@@ -57,7 +56,6 @@ pub struct IrInput {
     pub delay_ms: f64,
     /// [`crate::wire::WireFrame::delay_locked`]'s three-way meaning.
     pub delay_locked: Option<bool>,
-    pub speed_of_sound_m_s: Option<f64>,
     pub channel_role: String,
     pub source: Source,
     pub sr: u32,
@@ -72,10 +70,6 @@ impl IrInput {
             t_origin_ms: frame.t_origin_ms,
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
-            // The `visualize/ir` sidecar carries no speed-of-sound field
-            // of its own (`ZMQ.md:2094`) — the readout falls back to the
-            // default, same as a `WireFrame` predating #243.
-            speed_of_sound_m_s: None,
             channel_role: format!("meas_{}", frame.meas_channel),
             source: Source::Live,
             sr: frame.sr,
@@ -98,11 +92,8 @@ impl IrInput {
             t_origin_ms,
             delay_ms: d.h1.delay_ms,
             // A `PairDerivation` records no lock verdict (same reasoning
-            // as `TransferInput::from_pair_derivation`) — `None` reads
-            // through `format_delay_readout` as milliseconds without
-            // metres.
+            // as `TransferInput::from_pair_derivation`).
             delay_locked: None,
-            speed_of_sound_m_s: None,
             channel_role: channel_role.to_string(),
             source: Source::Snapshot,
             sr,
@@ -121,11 +112,7 @@ pub struct ArrivalMarker {
     /// over-range value): pinning it to the pane edge would fabricate a
     /// position at exactly the moment the true one doesn't fit.
     pub position: f64,
-    /// `"4.82 ms  (1.66 m)"` or, unlocked, `"0.00 ms"` —
-    /// [`format_delay_readout`], reused verbatim rather than
-    /// reimplemented (the design's explicit instruction: this display
-    /// inherits the "no metres before lock" rule, it does not re-decide
-    /// it).
+    /// `"4.82 ms"` — the frame's own delay, milliseconds only (#391).
     pub text: String,
 }
 
@@ -216,13 +203,7 @@ impl IrScene {
             } else {
                 0.5
             },
-            text: format_delay_readout_plain(
-                input.delay_ms,
-                input.delay_locked,
-                input
-                    .speed_of_sound_m_s
-                    .unwrap_or(SPEED_OF_SOUND_DEFAULT_M_S),
-            ),
+            text: format!("{:.2} ms", input.delay_ms),
         };
 
         IrScene {
@@ -249,7 +230,6 @@ mod tests {
             t_origin_ms: -500.0,
             delay_ms: 0.0,
             delay_locked: Some(true),
-            speed_of_sound_m_s: None,
             channel_role: "meas_0".to_string(),
             source: Source::Live,
             sr: 48_000,
@@ -298,25 +278,19 @@ mod tests {
         assert_eq!(labels, vec!["-500 ms", "0", "+500 ms"]);
     }
 
-    // Arrival marker text is byte-identical to
-    // `format_delay_readout_plain`'s own output — proves this module calls
-    // it rather than reimplementing the "no metres before lock" rule.
+    // Arrival marker text is always ms-only (#391) — no metres, and no
+    // dependency on `delay_locked`.
     #[test]
-    fn arrival_marker_reuses_format_delay_readout_verbatim() {
+    fn arrival_marker_prints_ms_only() {
         let mut input = locked_input(vec![0.0, 1.0, -1.0, 0.0]);
         input.delay_ms = 4.82;
         input.delay_locked = Some(true);
         let scene = IrScene::from_input(&input);
-        assert_eq!(
-            scene.arrival.text,
-            format_delay_readout_plain(4.82, Some(true), SPEED_OF_SOUND_DEFAULT_M_S)
-        );
-        assert!(scene.arrival.text.contains("4.82 ms"));
-        assert!(scene.arrival.text.contains('m'));
+        assert_eq!(scene.arrival.text, "4.82 ms");
     }
 
     #[test]
-    fn arrival_marker_drops_metres_when_unlocked() {
+    fn arrival_marker_prints_ms_only_when_unlocked_too() {
         let mut input = locked_input(vec![0.0, 1.0, -1.0, 0.0]);
         input.delay_ms = 0.0;
         input.delay_locked = Some(false);

@@ -424,6 +424,18 @@ pub fn extract_irs(
     })
 }
 
+/// Number of samples [`pre_impulse_snr_db`] measures its noise floor over:
+/// everything strictly before `peak_index`, minus the guard band. Zero when
+/// the guard band consumes the whole pre-peak window, which is the case
+/// `pre_impulse_snr_db` answers with `f64::INFINITY` — a caller that must
+/// distinguish "infinite because the floor is silent" from "infinite
+/// because there was no floor to measure" (`report.rs::ir_stats`, #376)
+/// checks this rather than keeping its own copy of the guard arithmetic.
+pub fn pre_impulse_region_len(ir_len: usize, peak_index: usize) -> usize {
+    let guard = (ir_len / 32).max(8);
+    peak_index.saturating_sub(guard).min(ir_len)
+}
+
 /// Pre-impulse SNR of a linear impulse response, in dB: the located peak's
 /// magnitude over the RMS of everything strictly before it, minus a small
 /// guard band (`(ir.len() / 32).max(8)` samples) so the peak's own skirt
@@ -436,9 +448,7 @@ pub fn extract_irs(
 /// calculation that could drift apart. `peak_index` is the caller's own
 /// argmax over `ir`; this does not recompute it.
 pub fn pre_impulse_snr_db(ir: &[f64], peak_index: usize) -> f64 {
-    let guard = (ir.len() / 32).max(8);
-    let pre_end = peak_index.saturating_sub(guard);
-    let pre_region = &ir[..pre_end.min(ir.len())];
+    let pre_region = &ir[..pre_impulse_region_len(ir.len(), peak_index)];
     if pre_region.is_empty() {
         return f64::INFINITY;
     }

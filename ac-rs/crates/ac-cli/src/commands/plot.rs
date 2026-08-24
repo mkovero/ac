@@ -217,13 +217,14 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
-/// The #283 read-out: arrival, arrival as distance, peak, pre-impulse
-/// SNR, and the gate that produced them — decoded from the
+/// The read-out: arrival (samples and ms, re gate centre), peak,
+/// pre-impulse SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
 /// frame, so the printed numbers and the archived ones are the same
-/// numbers by construction.
+/// numbers by construction. No distance figure — #391 removed the
+/// ms → m conversion this used to also print.
 fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::config::Config) {
-    use ac_core::measurement::report::{ArrivalDistance, MeasurementReport};
+    use ac_core::measurement::report::{IrVerdict, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB};
 
     let Some(value) = report_frame.and_then(|f| f.get("report")) else {
         eprintln!("  !! no measurement/report frame — nothing to summarise");
@@ -241,28 +242,21 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         return;
     };
 
-    println!(
-        "  arrival       {:+} samples  ({:+.3} ms re gate centre @ {} Hz)",
-        stats.delay_samples,
-        stats.arrival_s * 1000.0,
-        stats.sample_rate_hz,
-    );
-    // The AC's load-bearing case: without a τ measured under this run's
-    // exact conditions there is no distance, and the reason is printed
-    // rather than the arrival being quietly reused as one.
-    match report.ir_arrival_distance() {
-        ArrivalDistance::Known {
-            distance_m,
-            speed_of_sound_m_s,
-            provenance,
-            ..
-        } => {
-            println!("  distance      {distance_m:.3} m  (c = {speed_of_sound_m_s:.1} m/s)");
-            println!("                {provenance}");
-        }
-        ArrivalDistance::Unavailable { reason } => {
-            println!("  distance      unavailable — {reason}");
-        }
+    // A capture whose peak cannot be trusted (#376) is reported as
+    // failed, not as a result with a number in it: no arrival line —
+    // that is the exact plausible-looking wrong-number shape the issue
+    // exists to close.
+    if let IrVerdict::Failed { reason } = &stats.verdict {
+        println!("  DECONVOLUTION FAILED \u{2014} {reason}");
+        println!("                check: drive level, mic gain, distance, room noise");
+        println!();
+    } else {
+        println!(
+            "  arrival       {:+} samples  ({:+.3} ms re gate centre @ {} Hz)",
+            stats.delay_samples,
+            stats.arrival_s * 1000.0,
+            stats.sample_rate_hz,
+        );
     }
     println!(
         "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
@@ -270,10 +264,28 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         20.0 * stats.peak_magnitude.max(1e-12).log10(),
         stats.peak_index,
     );
+    if matches!(stats.verdict, IrVerdict::Failed { .. }) {
+        println!("                diagnostic only \u{2014} not a valid arrival");
+    }
     if stats.pre_impulse_snr_db.is_finite() {
-        println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
+        if matches!(stats.verdict, IrVerdict::Failed { .. }) {
+            println!(
+                "  pre-imp SNR   {:.1} dB  (required \u{2265} {:.1} dB, threshold set from rig data)",
+                stats.pre_impulse_snr_db, PRE_IMPULSE_SNR_MIN_DB,
+            );
+        } else {
+            println!("  pre-imp SNR   {:.1} dB", stats.pre_impulse_snr_db);
+        }
+    } else if let IrVerdict::Failed { reason } = &stats.verdict {
+        // Non-finite here means `ir_stats` had nothing to measure a floor
+        // from at all (see the reason already printed in the banner
+        // above) — restate it rather than a generic "silence" that would
+        // misdescribe a zero-peak or guard-band-exhausted capture alike.
+        println!("  pre-imp SNR   {reason}");
     } else {
-        println!("  pre-imp SNR   no measurable pre-impulse floor (silence)");
+        // Non-finite but `Ok`: a zero floor against a nonzero peak is the
+        // best possible capture, not an unmeasurable one.
+        println!("  pre-imp SNR   \u{221e} dB  (zero measured floor)");
     }
     println!(
         "  gate          {} window, {} samples ({:.2} ms) → f_low {:.1} Hz",

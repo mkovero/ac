@@ -733,49 +733,24 @@ fn draw_transfer(
     }
 
     // Delay readout. With nothing loaded this is `scene.delay_readout`
-    // verbatim, unchanged from before this trace could collide with
-    // another. Once a stored run exists, the value switches to whichever
-    // trace is focused and gains an owner tag (acceptance criterion 5:
-    // no readout naming a single measurement may leave its owner
-    // ambiguous) — `delay (<owner>)` is this crate's own chrome text, not
-    // a reformatted measurement, so it does not cross the `computes_nothing`
-    // boundary; the number after it is still ac-scene's string, untouched.
+    // verbatim (ms only — #391 removed the metres conversion this used to
+    // also carry, and the calibration/warning rows that came with it).
+    // Once a stored run exists, the value switches to whichever trace is
+    // focused and gains an owner tag (acceptance criterion 5: no readout
+    // naming a single measurement may leave its owner ambiguous) —
+    // `delay (<owner>)` is this crate's own chrome text, not a reformatted
+    // measurement, so it does not cross the `computes_nothing` boundary;
+    // the number after it is still ac-scene's string, untouched.
     // `Focus::Live` with no live scene (nothing loaded yet either, or a
     // stored-only session that hasn't cycled focus) draws no readout at
     // all — there is no measurement to attribute.
-    //
-    // Two more rows, both verbatim `ac-scene` strings, both gated on the
-    // same focused trace (QA #356 correctness issue 1 — these two fields
-    // existed on `TransferScene` since #243 but nothing here read them,
-    // so a calibrated reading and an uncalibrated one painted identically
-    // and the over-read warning never reached the screen):
-    //   row 3   delay_calibration   which stored constant (if any) the
-    //           metres figure on row 2 came from, or "not calibrated" —
-    //           absent only while unlocked, same "nothing to attribute"
-    //           convention as the readout above.
-    //   row 4   delay_warning       present only when a calibrated metres
-    //           figure exceeds the session's plausibility ceiling. Drawn
-    //           in the ember (never colour-only: the string itself names
-    //           the fault, same rule the fault indicator below follows).
-    let focused: Option<(&str, &str, Option<&str>, Option<&str>)> = match state.focus {
-        Focus::Live => scene.map(|s| {
-            (
-                "live",
-                s.delay_readout.as_str(),
-                s.delay_calibration.as_deref(),
-                s.delay_warning.as_deref(),
-            )
-        }),
-        Focus::Stored(idx) => stored.get(idx).map(|(label, _, s, _)| {
-            (
-                *label,
-                s.delay_readout.as_str(),
-                s.delay_calibration.as_deref(),
-                s.delay_warning.as_deref(),
-            )
-        }),
+    let focused: Option<(&str, &str)> = match state.focus {
+        Focus::Live => scene.map(|s| ("live", s.delay_readout.as_str())),
+        Focus::Stored(idx) => stored
+            .get(idx)
+            .map(|(label, _, s, _)| (*label, s.delay_readout.as_str())),
     };
-    if let Some((focused_label, focused_delay, calibration, warning)) = focused {
+    if let Some((focused_label, focused_delay)) = focused {
         let delay_text = if stored.is_empty() {
             focused_delay.to_string()
         } else {
@@ -788,24 +763,6 @@ fn draw_transfer(
             egui::FontId::default(),
             COLOR_VALUE,
         );
-        if let Some(calibration) = calibration {
-            painter.text(
-                content.left_top() + egui::vec2(0.0, 3.0 * ROW_H),
-                egui::Align2::LEFT_TOP,
-                calibration,
-                egui::FontId::default(),
-                COLOR_LABEL,
-            );
-        }
-        if let Some(warning) = warning {
-            painter.text(
-                content.left_top() + egui::vec2(0.0, 4.0 * ROW_H),
-                egui::Align2::LEFT_TOP,
-                warning,
-                egui::FontId::default(),
-                COLOR_SIGNAL,
-            );
-        }
     }
 
     // Comparison legend (#321): one row for the live trace, one per
@@ -1034,7 +991,7 @@ pub fn draw_sweep_ir_panel(
             // replaces a good one"), plus the fault's own detail text —
             // names what to check, never a cause (`SweepIrFault::detail`'s
             // doc).
-            draw_ir_header(painter, rect, fault.header());
+            draw_ir_header(painter, rect, &fault.header());
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,

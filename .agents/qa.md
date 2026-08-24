@@ -272,8 +272,13 @@ Post PR review in this structure:
 {Any files touched outside spec scope. If none: "none."}
 
 ### verdict
-{approve | request-changes}
+{approve | request-changes | request-changes: design}
 {One sentence justification.}
+
+### sent back to
+{`no`, or: `architect` | `ux`, and the one decision that has to be settled
+before this PR can be revised. Omit the section entirely when the verdict is
+not `request-changes: design`. See step 5.}
 
 ### rig verification required
 {`no`, or: the quantity to measure, the rig configuration, and the value that
@@ -288,11 +293,54 @@ would falsify the claim. See step 5.}
   it here.
 - Correctness turn on a physical measurement you cannot make from the tree →
   apply `requires-rig` **in addition to** whichever of the above applies
+- The defect is in the **design**, not the implementation → apply `needs-work`
+  as above, and additionally apply `needs-design` **on the issue** (or
+  `needs-ux` on the issue, where the thing that is wrong is what the operator
+  sees). See below — this is a different verdict from a correctness finding and
+  routes elsewhere.
 
 `claude-approved` is not a merge signal. It puts the PR in the Codex queue
 (`.agents/codex-qa.md`); merge needs `codex-approved` as well, and needs a
 human. You never set or clear `codex-approved` — if you disagree with a Codex
 finding, say so in your review comment and leave the label alone.
+
+### sending it back to architect or ux — the design is wrong, not the code
+
+Most findings are "the implementation does not do what the spec says". Some are
+"the implementation does exactly what the spec says, and the spec is wrong".
+Revising the PR against the same design cannot fix the second kind, and a
+developer told to address your points will try anyway — which is how a wrong
+boundary gets three rounds of polish and merges.
+
+Apply `needs-design` on the **issue** when the finding is one of:
+
+- the change puts logic on the wrong side of a boundary (`ac-scene`/`ac-view`,
+  Tier 1/Tier 2, `ac-core` reaching for a socket)
+- the wire schema change is not one both consumers can carry
+- an estimator or calibration decision the architect signed off does not hold,
+  or was never made and the developer made it implicitly
+- two acceptance criteria cannot both be satisfied as written
+
+Apply `needs-ux` on the **issue** when the finding is that what the operator
+sees is wrong — a value shown without its unit or reference, a fault with no
+surface, a readout whose format the spec never fixed and the developer chose.
+
+Three rules on this:
+
+- **The label goes on the issue, not the PR.** Architect and ux act on issues,
+  and the design comment belong on the issue where the spec is. A `needs-design`
+  label on a PR is read by nothing and cleared by nobody.
+- **Keep `needs-work` on the PR as well.** The PR is still not mergeable, and
+  the label that says so is the one the developer route on.
+- **Name the decision, do not make it.** Your review comment say what the design
+  has to settle and what evidence bear on it. It does not say what the answer is
+  — that is the architect's or ux's output, and a reviewer that supplies it has
+  turned a handback into a second design pass by the same agent that found the
+  problem.
+
+This is a heavier verdict than request-changes and it costs a full re-review at
+the same tip. A finding you can state as "this line is wrong" is not one of
+these. Use it when you can state what the *spec* got wrong.
 
 ### `requires-rig` — you set it, only a human clear it
 

@@ -96,6 +96,26 @@ macro_rules! busy_guard {
 pub(super) use busy_guard;
 
 // ---------------------------------------------------------------------------
+// Config-freshness guard (#370)
+// ---------------------------------------------------------------------------
+
+/// Refuse a routing-affecting command when the last per-request
+/// `config.json` reload (`dispatch()` in `server.rs`) failed. Modeled on
+/// `busy_guard!` — same shape (early-return `{"ok": false, ...}`), different
+/// condition. Only handlers that resolve ports from `cfg` (directly or via
+/// `resolve_input`/`resolve_output`/`resolve_channels`/`resolve_ref_*`) need
+/// this — a command that cannot name which port it used is worse than one
+/// that refuses outright.
+macro_rules! cfg_guard {
+    ($state:expr) => {
+        if let Some(msg) = $state.cfg_error.lock().unwrap().clone() {
+            return ::serde_json::json!({"ok": false, "error": format!("config.json: {msg}")});
+        }
+    };
+}
+pub(super) use cfg_guard;
+
+// ---------------------------------------------------------------------------
 // Worker spawn
 // ---------------------------------------------------------------------------
 
@@ -776,6 +796,7 @@ mod resolve_output_by_channel_tests {
         let (rebind_tx, _rebind_rx) = crossbeam_channel::unbounded();
         ServerState {
             cfg: Arc::new(Mutex::new(Config::default())),
+            cfg_error: Arc::new(Mutex::new(None)),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pub_tx,
             src_mtime: 0.0,

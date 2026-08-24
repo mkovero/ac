@@ -13,8 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output,
-    resolve_ref_output, send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, read_dmm_vrms, ref_output_migration_warning,
+    resolve_output, resolve_ref_output, send_pub, spawn_worker,
 };
 
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
@@ -197,6 +197,7 @@ fn flush_pair(
 
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
+    cfg_guard!(state);
 
     // `drive` controls whether the daemon plays pink noise on the output
     // while capturing. Default `false` — the UI wants a purely passive H1
@@ -312,22 +313,6 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     };
 
-    // Distance-calibration selector (#243). Absent → every pair's
-    // `distance_cal` is `None` for the whole session, which is the safe
-    // default: the delay readout's metres figure stays withheld rather
-    // than being computed against a guessed constant. Present-but-
-    // unresolvable is validated synchronously below, not left to degrade
-    // mid-session.
-    let distance_setup_id: Option<String> = cmd
-        .get("distance_setup_id")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-    // Session-scoped plausibility ceiling for the same readout, in metres
-    // (#243). No default — an unset ceiling disables the check rather than
-    // guessing a room size.
-    let distance_plausible_max_m: Option<f64> =
-        cmd.get("distance_plausible_max_m").and_then(Value::as_f64);
-
     let cfg = state.cfg.lock().unwrap().clone();
     // #360: a second, independent unclamped path from the same field
     // `set_drive` already clamps — this seeds `DriveState` directly when
@@ -417,47 +402,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
-    // Distance-calibration validation (#243): a `distance_setup_id` that
-    // does not resolve for every pair refuses the whole request
-    // synchronously, same discipline as the mic-curve check above and as
-    // `Calibration::tau_for`'s own refusal — a stale or wrong setup id must
-    // never silently degrade a running session to ms-only or, worse, to
-    // the nearest unrelated entry.
-    //
-    // A self-pair (#373, `meas_ch == ref_ch`) is exempt: it is the
-    // reference channel correlated against itself, has no acoustic path,
-    // and therefore can never have a distance calibration to resolve.
-    // Skipping it here — rather than resolving something for it — is what
-    // lets `pairs = [[0,2],[2,2]]` (an acoustic pair alongside the
-    // common-mode-buffering control pair) carry a distance readout at all.
-    if let Some(setup_id) = distance_setup_id.as_deref() {
-        for &(meas_ch, ref_ch) in &pairs {
-            if meas_ch == ref_ch {
-                continue;
-            }
-            let cal = Calibration::load_or_new(out_ch, meas_ch, None);
-            if let Err(refusal) = cal.distance_cal_for(ref_ch, setup_id) {
-                return json!({
-                    "ok": false,
-                    "error": format!(
-                        "distance_setup_id {setup_id:?} for pair meas{meas_ch}/ref{ref_ch}: {}",
-                        refusal.message()
-                    ),
-                });
-            }
-        }
-    }
-
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
-
-    // Speed of sound for the delay readout's ms → m conversion (#243),
-    // resolved from config here rather than per frame: the room's
-    // temperature does not change during a session, and reading it once
-    // means every frame in a session converts with the same constant.
-    let speed_of_sound_m_s =
-        ac_core::shared::conversions::speed_of_sound_from_config(cfg.temperature_c);
 
     let out_port_r = out_port.clone();
     let meas_port_r = unique_ports.first().cloned().unwrap_or_default();
@@ -493,32 +440,6 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .iter()
         .map(|&(_, r)| Calibration::load(out_ch, r, None).ok().flatten())
         .collect();
-
-    // This pair's stored distance-calibration constant (#243), resolved
-    // once at worker start — already validated above, so this lookup
-    // cannot fail here. `None` when the session named no
-    // `distance_setup_id`.
-    //
-    // A self-pair (#373) is skipped, same as in validation: it was never
-    // resolved above and has no constant to find, so `None` (wire
-    // `distance_cal: null`) is the honest value — never invented, borrowed
-    // from another pair, or nearest-matched.
-    let pair_distance_cals: Vec<Option<ac_core::shared::calibration::DistanceCalEntry>> =
-        match distance_setup_id.as_deref() {
-            None => vec![None; pairs.len()],
-            Some(setup_id) => pairs
-                .iter()
-                .map(|&(meas, r)| {
-                    if meas == r {
-                        return None;
-                    }
-                    Calibration::load_or_new(out_ch, meas, None)
-                        .distance_cal_for(r, setup_id)
-                        .ok()
-                        .cloned()
-                })
-                .collect(),
-        };
 
     // Snapshot ring (handoff: snapshot-backend M1). Per-unique-channel
     // calibration (not per-pair — a channel used in >1 pair gets one
@@ -1151,9 +1072,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 .zip(pair_meas_curves.par_iter())
                 .zip(pair_meas_cals.par_iter())
                 .zip(pair_ref_cals.par_iter())
-                .zip(pair_distance_cals.par_iter())
                 .filter_map(
-                    |((((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt), distance_cal_opt)| {
+                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -1411,32 +1331,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
-                            // Derived once at worker start from the
-                            // configured room temperature (#243). Shipped
-                            // per frame rather than left to the view so the
-                            // display converts with the same constant a
-                            // report writer would, and so a captured frame
-                            // records what it was converted with.
-                            "speed_of_sound_m_s": speed_of_sound_m_s,
-                            // This pair's stored distance-calibration
-                            // constant (#243), or `null` when the session
-                            // named no `distance_setup_id` or none was
-                            // found — either way the delay readout's
-                            // metres figure stays withheld.
-                            "distance_cal": distance_cal_opt.as_ref().map(|e| json!({
-                                "constant_ms": e.constant_ms,
-                                "setup_id": e.setup_id,
-                                "captured_at": e.captured_at,
-                                "captured_distance_m": e.captured_distance_m,
-                            })).unwrap_or(Value::Null),
-                            // Session-scoped plausibility ceiling for the
-                            // same readout (#243) — an operator-supplied
-                            // sanity bound, not derived; `null` disables
-                            // the check.
-                            "distance_plausible_max_m": distance_plausible_max_m,
                             // Read by position rather than zipped into the
                             // chain above: it is a scalar the closure only
-                            // reads, and the zip is already seven deep.
+                            // reads, and the zip is already six deep.
                             "delay_attempts":  pair_delay_attempts.get(pos).copied().unwrap_or(0),
                             "delay_evidence":  prom_opt,
                             "meas_peak_dbfs":  meas_peak,
