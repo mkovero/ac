@@ -43,9 +43,10 @@ use serde::{Deserialize, Serialize};
 ///   length, since τ is a property of the *(device, backend, sample
 ///   rate, period size, port pair)* tuple and is not recoverable from
 ///   the report otherwise (#283, consuming #281). Reports written at
-///   v1-v4 decode unchanged: the field defaults to `None`, which
-///   `ir_arrival_distance` reports as unavailable rather than deriving
-///   a distance from an uncorrected arrival.
+///   v1-v4 decode unchanged: the field defaults to `None`, which readers
+///   treat as no τ-corrected flight time being derivable from the
+///   uncorrected arrival (#391 — the ms → m conversion this used to feed
+///   is gone; τ itself, and this field, are not).
 pub const SCHEMA_VERSION: u32 = 5;
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
@@ -733,86 +734,6 @@ impl MeasurementReport {
             verdict,
         })
     }
-
-    /// Arrival converted to an acoustic path length, in metres, or the
-    /// reason it cannot be.
-    ///
-    /// The arrival [`IrStats::arrival_s`] reports is a *round-trip* figure:
-    /// it still contains the interface's own latency (τ). Subtracting a τ
-    /// measured under this run's exact conditions is the only thing that
-    /// turns it into a path length, so this returns
-    /// [`ArrivalDistance::Unavailable`] — never a number — when the report
-    /// carries no τ. Speed of sound comes from `position.temperature_c`
-    /// when the capture recorded one, else the 20 °C default (see
-    /// [`crate::shared::conversions::speed_of_sound_from_config`]).
-    pub fn ir_arrival_distance(&self) -> ArrivalDistance {
-        let Some(stats) = self.ir_stats() else {
-            return ArrivalDistance::Unavailable {
-                reason: "report carries no impulse-response payload".to_string(),
-            };
-        };
-        let tau = match &self.interface_latency {
-            Some(InterfaceLatency::Measured(m)) => m,
-            Some(InterfaceLatency::Unavailable { reason }) => {
-                return ArrivalDistance::Unavailable {
-                    reason: reason.clone(),
-                }
-            }
-            None => {
-                return ArrivalDistance::Unavailable {
-                    reason: "no interface latency (\u{3c4}) recorded with this measurement"
-                        .to_string(),
-                }
-            }
-        };
-        let c = crate::shared::conversions::speed_of_sound_from_config(
-            self.position.as_ref().and_then(|p| p.temperature_c),
-        );
-        ArrivalDistance::Known {
-            distance_m: (stats.arrival_s - tau.tau_s) * c,
-            speed_of_sound_m_s: c,
-            tau_s: tau.tau_s,
-            provenance: m_provenance(tau),
-        }
-    }
-}
-
-/// One-line provenance for a τ used in a distance derivation: when it was
-/// measured, by what method, and under which conditions. Named in full
-/// because a distance derived from someone else's τ is a different number
-/// — see [`crate::shared::calibration::TauConditions`].
-fn m_provenance(m: &MeasuredLatency) -> String {
-    format!(
-        "\u{3c4} = {:.4} ms, measured {} by {} on {} backend @ {} Hz, period {}, {} \u{2192} {}",
-        m.tau_s * 1000.0,
-        m.measured_at,
-        m.method,
-        m.backend,
-        m.sample_rate_hz,
-        m.period_size
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "n/a".to_string()),
-        m.output_port,
-        m.input_port,
-    )
-}
-
-/// Result of converting an IR arrival into an acoustic path length. A
-/// distance is either derived from a named τ or explicitly unavailable —
-/// there is deliberately no third case that returns an uncorrected
-/// arrival as if it were a distance (#283).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ArrivalDistance {
-    Known {
-        distance_m: f64,
-        speed_of_sound_m_s: f64,
-        tau_s: f64,
-        /// Human-readable τ provenance, for printing next to the number.
-        provenance: String,
-    },
-    Unavailable {
-        reason: String,
-    },
 }
 
 /// See [`MeasurementReport::ir_stats`].
@@ -1363,7 +1284,7 @@ mod tests {
         assert!(r.ir_stats().is_none());
     }
 
-    // ─── `ir_arrival_distance` (#283) ─────────────────────────────────
+    // ─── interface latency (τ), archived alongside the arrival ─────────
 
     fn measured_tau(tau_s: f64) -> InterfaceLatency {
         InterfaceLatency::Measured(MeasuredLatency {
@@ -1376,96 +1297,6 @@ mod tests {
             output_port: "out1".into(),
             input_port: "in1".into(),
         })
-    }
-
-    /// The rig's own converter constant: arrival(d) = 1.1931 ms + d/c.
-    /// An arrival of τ + 1 m/c must come back as 1 m — the τ subtraction
-    /// is the whole content of the conversion.
-    #[test]
-    fn arrival_distance_subtracts_tau_before_converting() {
-        let tau_s = 0.0011931;
-        let sr = 48_000.0;
-        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
-        let want_m = 1.0;
-        // Round to whole samples, as a real peak index would be.
-        let delay = ((tau_s + want_m / c) * sr).round() as usize;
-        let window_len = 4_096;
-        let mut r = ir_report_with_peak(window_len, window_len / 2 + delay, 1.0, 0.0, 48_000);
-        r.position = Some(PositionSnapshot {
-            temperature_c: Some(20.0),
-            ..Default::default()
-        });
-        r.interface_latency = Some(measured_tau(tau_s));
-
-        let ArrivalDistance::Known {
-            distance_m,
-            provenance,
-            ..
-        } = r.ir_arrival_distance()
-        else {
-            panic!("distance should be known when tau is recorded");
-        };
-        // One sample at 48 kHz is ~7 mm of path; allow that quantisation.
-        assert!(
-            (distance_m - want_m).abs() < 0.01,
-            "distance_m = {distance_m}"
-        );
-        // The AC requires the provenance be *named*, not just applied.
-        assert!(provenance.contains("farina_short_ess"), "{provenance}");
-        assert!(provenance.contains("2026-08-15T00:00:00Z"), "{provenance}");
-        assert!(provenance.contains("fake"), "{provenance}");
-    }
-
-    /// The load-bearing refusal: no τ must never fall through to a
-    /// distance computed from the uncorrected arrival. At 48 kHz a
-    /// 1.1931 ms τ is 57 samples — roughly 0.41 m of phantom path — so a
-    /// fallthrough would be a plausible-looking wrong number, not an
-    /// obvious one.
-    #[test]
-    fn arrival_distance_unavailable_without_tau() {
-        let window_len = 4_096;
-        let r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
-        assert!(r.interface_latency.is_none());
-        match r.ir_arrival_distance() {
-            ArrivalDistance::Unavailable { reason } => {
-                assert!(reason.contains("\u{3c4}"), "reason must name τ: {reason}")
-            }
-            ArrivalDistance::Known { distance_m, .. } => {
-                panic!("derived {distance_m} m from an uncorrected arrival")
-            }
-        }
-    }
-
-    /// A recorded refusal carries its reason through to the reader
-    /// instead of being flattened into a generic "no τ".
-    #[test]
-    fn arrival_distance_propagates_a_recorded_refusal_reason() {
-        let window_len = 4_096;
-        let mut r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
-        r.interface_latency = Some(InterfaceLatency::Unavailable {
-            reason: "nearest stored entry differs in period_size (requested 512, stored 1024)"
-                .into(),
-        });
-        match r.ir_arrival_distance() {
-            ArrivalDistance::Unavailable { reason } => assert!(reason.contains("period_size")),
-            other => panic!("expected unavailable, got {other:?}"),
-        }
-    }
-
-    /// v1-v4 archives decode with `interface_latency` absent, and must
-    /// land on the refusal — not on a distance derived without a τ.
-    #[test]
-    fn legacy_report_without_interface_latency_decodes_and_refuses_distance() {
-        let r = ir_report_with_peak(4_096, 4_096 / 2 + 57, 1.0, 0.0, 48_000);
-        let mut v: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
-        v["schema_version"] = serde_json::json!(4);
-        assert!(v.get("interface_latency").is_none(), "None must not encode");
-        let back: MeasurementReport = serde_json::from_value(v).unwrap();
-        assert!(back.interface_latency.is_none());
-        assert!(matches!(
-            back.ir_arrival_distance(),
-            ArrivalDistance::Unavailable { .. }
-        ));
     }
 
     #[test]

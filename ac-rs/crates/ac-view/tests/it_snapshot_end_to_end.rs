@@ -92,7 +92,6 @@ fn rederive_scene_under_a_different_weighting_matches_m1_5_known_offset() {
         mic_sensitivity_dbfs_at_94db_spl: Some(-20.0),
         mic_response: None,
         tau_history: Vec::new(),
-        distance_cal_history: Vec::new(),
     };
     let meta = SnapshotMeta {
         format_version: FORMAT_VERSION,

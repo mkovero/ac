@@ -217,15 +217,14 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
-/// The #283 read-out: arrival, arrival as distance, peak, pre-impulse
-/// SNR, and the gate that produced them — decoded from the
+/// The read-out: arrival (samples and ms, re gate centre), peak,
+/// pre-impulse SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
 /// frame, so the printed numbers and the archived ones are the same
-/// numbers by construction.
+/// numbers by construction. No distance figure — #391 removed the
+/// ms → m conversion this used to also print.
 fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::config::Config) {
-    use ac_core::measurement::report::{
-        ArrivalDistance, IrVerdict, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
-    };
+    use ac_core::measurement::report::{IrVerdict, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB};
 
     let Some(value) = report_frame.and_then(|f| f.get("report")) else {
         eprintln!("  !! no measurement/report frame — nothing to summarise");
@@ -244,9 +243,9 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     };
 
     // A capture whose peak cannot be trusted (#376) is reported as
-    // failed, not as a result with a number in it: no arrival, no
-    // distance — those two lines are the exact plausible-looking
-    // wrong-number shape the issue exists to close.
+    // failed, not as a result with a number in it: no arrival line —
+    // that is the exact plausible-looking wrong-number shape the issue
+    // exists to close.
     if let IrVerdict::Failed { reason } = &stats.verdict {
         println!("  DECONVOLUTION FAILED \u{2014} {reason}");
         println!("                check: drive level, mic gain, distance, room noise");
@@ -258,23 +257,6 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
             stats.arrival_s * 1000.0,
             stats.sample_rate_hz,
         );
-        // The AC's load-bearing case: without a τ measured under this
-        // run's exact conditions there is no distance, and the reason is
-        // printed rather than the arrival being quietly reused as one.
-        match report.ir_arrival_distance() {
-            ArrivalDistance::Known {
-                distance_m,
-                speed_of_sound_m_s,
-                provenance,
-                ..
-            } => {
-                println!("  distance      {distance_m:.3} m  (c = {speed_of_sound_m_s:.1} m/s)");
-                println!("                {provenance}");
-            }
-            ArrivalDistance::Unavailable { reason } => {
-                println!("  distance      unavailable — {reason}");
-            }
-        }
     }
     println!(
         "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
