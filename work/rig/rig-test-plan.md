@@ -473,6 +473,17 @@ scatter was `sd 0` across `n=3` fresh locks at each taped position in the
 sample resolution at that repeat count, and negligible next to any candidate
 estimator's `se`.
 
+> **Record not in this repo, 2026-08-24 (QA on #375's PR).** `rig-2026-08-23-onset-353-results.md`
+> and its raw logs `audit/rig-353-2026-08-23/` are cited here and in #378, but
+> neither is committed to `main` or any branch of this repo (`git log --all`
+> for both paths returns nothing). The n=12/n=3 table below is reproduced
+> verbatim from #375's and #378's issue-body text, not read from a file this
+> page's reader can open. If the session record lives elsewhere (rig-machine
+> `audit/`, not yet copied in per the "spec docs arrive by copy" convention),
+> cite that location here; if it needs committing, commit it alongside a fix
+> to this flag. Until then this table is load-bearing on an uncommitted
+> record.
+
 **This bar assumes `se(Δt_est)` is estimated from n=12 captures at each of the
 two taped positions**, per the 2026-08-23 session table (also quoted in #378):
 
@@ -490,6 +501,12 @@ explanation for a disagreement (>99.7% under a normal approximation): a result
 inside it cannot be distinguished from agreement using only the estimator's
 own measured scatter, and one outside it is a finding independent of tape,
 temperature, or `c`.
+
+> **Multiplier not yet accepted, 2026-08-24.** 3σ is this derivation's own
+> proposed convention, not a value #375 or the architect's implementation note
+> hands down. It needs a human comment on #375 accepting 3σ specifically (or
+> naming a different multiplier) before this bar is treated as settled rather
+> than proposed.
 
 Applying this bar to #346 AC5 and restating the verdict is AC4 of #375, and is
 deferred to #378: #378 is expected to move the onset's own increment and
