@@ -1034,7 +1034,7 @@ pub fn draw_sweep_ir_panel(
             // replaces a good one"), plus the fault's own detail text —
             // names what to check, never a cause (`SweepIrFault::detail`'s
             // doc).
-            draw_ir_header(painter, rect, fault.header());
+            draw_ir_header(painter, rect, &fault.header());
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
