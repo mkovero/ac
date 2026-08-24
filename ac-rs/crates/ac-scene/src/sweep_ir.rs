@@ -65,10 +65,18 @@ pub enum SweepIrFault {
     /// pre-impulse SNR too low, or non-finite, to trust the peak as a
     /// deconvolution result rather than noise-floor pickup. Carries the
     /// measured `pre_impulse_snr_db` so `header`/`detail` can show the
-    /// same number a reader would see in `ac plot ir`'s text read-out —
-    /// both consumers read the one verdict `ir_stats` computes, so they
-    /// cannot disagree about what counts as failed.
-    LowPreImpulseSnr { pre_impulse_snr_db: f64 },
+    /// same number a reader would see in `ac plot ir`'s text read-out,
+    /// and the `IrVerdict::Failed` `reason` string verbatim — not a
+    /// second, independently worded guess at it — so the non-finite case
+    /// (which covers two different causes: no signal at all, or the
+    /// guard band consuming the whole pre-region) reads identically here
+    /// and in `ac-cli`'s `print_ir_report`. Both consumers read the one
+    /// verdict `ir_stats` computes, so they cannot disagree about what
+    /// counts as failed, or about why (#387 QA finding).
+    LowPreImpulseSnr {
+        pre_impulse_snr_db: f64,
+        reason: String,
+    },
 }
 
 impl SweepIrFault {
@@ -79,14 +87,22 @@ impl SweepIrFault {
         match self {
             SweepIrFault::NotASweepDerivedIr => "IR — file open failed".to_string(),
             SweepIrFault::NoGate => "IR — sweep-derived     no gate on this report".to_string(),
-            SweepIrFault::LowPreImpulseSnr { pre_impulse_snr_db } => {
+            SweepIrFault::LowPreImpulseSnr {
+                pre_impulse_snr_db,
+                reason,
+            } => {
                 if pre_impulse_snr_db.is_finite() {
                     format!(
                         "IR — sweep-derived     pre-imp SNR {pre_impulse_snr_db:.1} dB, below \
                          {PRE_IMPULSE_SNR_MIN_DB:.1} dB threshold"
                     )
                 } else {
-                    "IR — sweep-derived     no measurable pre-impulse floor".to_string()
+                    // `reason` is `IrVerdict::Failed`'s own text — names
+                    // the actual cause (no signal at all, vs. the guard
+                    // band consuming the whole pre-region) instead of a
+                    // single hardcoded "(silence)" that was wrong for one
+                    // of the two (#387 QA finding).
+                    format!("IR — sweep-derived     {reason}")
                 }
             }
         }
@@ -109,7 +125,10 @@ impl SweepIrFault {
                  not an ungated sweep"
                     .to_string()
             }
-            SweepIrFault::LowPreImpulseSnr { pre_impulse_snr_db } => {
+            SweepIrFault::LowPreImpulseSnr {
+                pre_impulse_snr_db,
+                reason,
+            } => {
                 if pre_impulse_snr_db.is_finite() {
                     format!(
                         "pre-impulse SNR {pre_impulse_snr_db:.1} dB below required \
@@ -117,9 +136,9 @@ impl SweepIrFault {
                          distance, room noise"
                     )
                 } else {
-                    "no measurable pre-impulse floor (silence) — check drive level, mic gain, \
-                     distance, room noise"
-                        .to_string()
+                    // Same `reason` text as `header()` above, not a
+                    // hardcoded "(silence)" — see that arm's comment.
+                    format!("{reason} — check drive level, mic gain, distance, room noise")
                 }
             }
         }
@@ -178,9 +197,10 @@ impl SweepIrScene {
         // A capture whose peak isn't trustworthy fails here, before any
         // trace or arrival geometry is built — same rule #376 applies to
         // the CLI text read-out (`ac-cli`'s `print_ir_report`).
-        if matches!(stats.verdict, IrVerdict::Failed { .. }) {
+        if let IrVerdict::Failed { reason } = &stats.verdict {
             return Err(SweepIrFault::LowPreImpulseSnr {
                 pre_impulse_snr_db: stats.pre_impulse_snr_db,
+                reason: reason.clone(),
             });
         }
 
@@ -610,7 +630,10 @@ mod tests {
         assert_eq!(
             SweepIrScene::from_report(&r),
             Err(SweepIrFault::LowPreImpulseSnr {
-                pre_impulse_snr_db: f64::INFINITY
+                pre_impulse_snr_db: f64::INFINITY,
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string(),
             })
         );
     }
@@ -663,13 +686,14 @@ mod tests {
             "pre_impulse_snr_db = {}",
             stats.pre_impulse_snr_db
         );
-        let ac_core::measurement::report::IrVerdict::Failed { .. } = &stats.verdict else {
+        let ac_core::measurement::report::IrVerdict::Failed { reason } = &stats.verdict else {
             panic!("fixture must exercise the #376 failure path: {stats:?}");
         };
         assert_eq!(
             SweepIrScene::from_report(&r),
             Err(SweepIrFault::LowPreImpulseSnr {
-                pre_impulse_snr_db: stats.pre_impulse_snr_db
+                pre_impulse_snr_db: stats.pre_impulse_snr_db,
+                reason: reason.clone(),
             })
         );
     }
@@ -678,6 +702,7 @@ mod tests {
     fn low_pre_impulse_snr_header_and_detail_carry_the_measured_and_required_values() {
         let fault = SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: 9.7,
+            reason: "pre-impulse SNR below threshold".to_string(),
         };
         assert!(fault.header().contains("9.7 dB"));
         assert!(fault.header().contains("18.0 dB threshold"));
@@ -686,14 +711,41 @@ mod tests {
         assert!(fault.detail().contains("check drive level"));
     }
 
+    /// The non-finite branch has two distinguishable causes — no signal
+    /// captured at all, vs. the guard band consuming the whole
+    /// pre-region — and `header`/`detail` must name each by its actual
+    /// `IrVerdict::Failed` `reason`, not a single hardcoded "(silence)"
+    /// that was wrong for the guard-band case (#387 QA finding: this
+    /// test previously asserted the wrong label and could not have
+    /// caught that).
     #[test]
-    fn low_pre_impulse_snr_non_finite_names_silence_not_a_number() {
-        let fault = SweepIrFault::LowPreImpulseSnr {
+    fn low_pre_impulse_snr_non_finite_names_the_actual_reason_not_a_fixed_label() {
+        let no_signal = SweepIrFault::LowPreImpulseSnr {
             pre_impulse_snr_db: f64::INFINITY,
+            reason: "no signal captured (linear IR is all zero)".to_string(),
         };
-        assert!(fault.header().contains("no measurable pre-impulse floor"));
-        assert!(fault.detail().contains("silence"));
-        assert!(fault.detail().contains("check drive level"));
+        let guard_band = SweepIrFault::LowPreImpulseSnr {
+            pre_impulse_snr_db: f64::INFINITY,
+            reason: "no measurable pre-impulse floor (peak too close to \
+                     the start of the gated window)"
+                .to_string(),
+        };
+        assert!(no_signal.header().contains("no signal captured"));
+        assert!(guard_band
+            .header()
+            .contains("peak too close to the start of the gated window"));
+        assert!(no_signal.detail().contains("no signal captured"));
+        assert!(guard_band
+            .detail()
+            .contains("peak too close to the start of the gated window"));
+        assert!(no_signal.detail().contains("check drive level"));
+        assert!(guard_band.detail().contains("check drive level"));
+        // The two causes must not collapse into one string, and neither
+        // may claim silence — the peak was measurable in both cases.
+        assert_ne!(no_signal.header(), guard_band.header());
+        assert_ne!(no_signal.detail(), guard_band.detail());
+        assert!(!no_signal.detail().contains("silence"));
+        assert!(!guard_band.detail().contains("silence"));
     }
 
     #[test]
