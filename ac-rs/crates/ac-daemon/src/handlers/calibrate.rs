@@ -267,6 +267,11 @@ enum TauAttempt {
         conditions: TauConditions,
         reading1_s: f64,
         reading2_s: f64,
+        // #369: xruns crossed during each reading's own lifecycle, kept
+        // per-reading rather than summed so a dirty pair is attributable
+        // to reading 1 or reading 2, not just "the run".
+        reading1_xruns: u32,
+        reading2_xruns: u32,
         comparison: TauComparison,
     },
     Error {
@@ -290,7 +295,13 @@ fn measure_tau_twice(
     in_port: &str,
     amp: f64,
 ) -> TauAttempt {
-    let run_once = || -> anyhow::Result<(f64, TauConditions)> {
+    // (t, conditions, xruns) — the xrun count is `eng.xruns()` sampled
+    // immediately before and after the `measure_tau` call, i.e. scoped to
+    // the sweep-plus-tail I/O call and nothing else in the lifecycle (#369
+    // architect note: this is the only I/O call `measure_tau`'s body makes,
+    // so bracketing the function call already excludes `start`'s JACK
+    // client registration from the count).
+    let run_once = || -> anyhow::Result<(f64, TauConditions, u32)> {
         let mut eng = make_engine(fake);
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
@@ -301,13 +312,15 @@ fn measure_tau_twice(
             output_port: out_port.to_string(),
             input_port: in_port.to_string(),
         };
+        let xruns_before = eng.xruns();
         let reading = measure_tau(&mut *eng, amp);
+        let xruns = eng.xruns().saturating_sub(xruns_before);
         eng.set_silence();
         eng.stop();
-        reading.map(|t| (t, conditions))
+        reading.map(|t| (t, conditions, xruns))
     };
 
-    let (reading1_s, conditions) = match run_once() {
+    let (reading1_s, conditions, reading1_xruns) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return TauAttempt::Error {
@@ -316,7 +329,7 @@ fn measure_tau_twice(
             }
         }
     };
-    let (reading2_s, conditions2) = match run_once() {
+    let (reading2_s, conditions2, reading2_xruns) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return TauAttempt::Error {
@@ -335,6 +348,8 @@ fn measure_tau_twice(
         conditions: conditions2,
         reading1_s,
         reading2_s,
+        reading1_xruns,
+        reading2_xruns,
         comparison,
     }
 }
@@ -351,6 +366,12 @@ struct TauOutcome {
     agreement_count: Option<u32>,
     reading1_s: Option<f64>,
     reading2_s: Option<f64>,
+    // #369: present whenever reading1_s/reading2_s are — i.e. whenever both
+    // lifecycles ran, regardless of what they measured. Presence tracks
+    // "both readings were taken", not "count is nonzero", so an old-daemon
+    // consumer's missing-field-vs-zero ambiguity never reaches a new one.
+    reading1_xruns: Option<u32>,
+    reading2_xruns: Option<u32>,
     delta_samples: Option<i64>,
     periods: Option<i64>,
     error: Option<String>,
@@ -365,6 +386,8 @@ impl TauOutcome {
             agreement_count: None,
             reading1_s: None,
             reading2_s: None,
+            reading1_xruns: None,
+            reading2_xruns: None,
             delta_samples: None,
             periods: None,
             error: None,
@@ -393,14 +416,44 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
             agreement_count: None,
             reading1_s: None,
             reading2_s: None,
+            reading1_xruns: None,
+            reading2_xruns: None,
             delta_samples: None,
             periods: None,
             error: Some(message),
+        },
+        // #369: a lifecycle that crossed an xrun is refused before its
+        // comparison is even consulted — a contaminated pair agreeing or
+        // disagreeing is equally uninformative, and this is the only way
+        // to close the corroboration hole a doubly-corrupted *agreeing*
+        // pair would otherwise leave open (the two-lifetime rule from #347
+        // only catches a disagreement).
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_xruns,
+            reading2_xruns,
+            ..
+        } if reading1_xruns > 0 || reading2_xruns > 0 => TauOutcome {
+            state: "refused_xrun",
+            conditions: Some(conditions),
+            tau_s: None,
+            agreement_count: None,
+            reading1_s: Some(reading1_s),
+            reading2_s: Some(reading2_s),
+            reading1_xruns: Some(reading1_xruns),
+            reading2_xruns: Some(reading2_xruns),
+            delta_samples: None,
+            periods: None,
+            error: None,
         },
         TauAttempt::Compared {
             conditions,
             reading1_s,
             reading2_s,
+            reading1_xruns,
+            reading2_xruns,
             comparison: TauComparison::Agree,
         } => TauOutcome {
             state: "measured",
@@ -411,6 +464,8 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
             agreement_count: Some(2),
             reading1_s: Some(reading1_s),
             reading2_s: Some(reading2_s),
+            reading1_xruns: Some(reading1_xruns),
+            reading2_xruns: Some(reading2_xruns),
             // ZMQ.md: `tau_delta_samples` is present only on disagree_* —
             // a healthy Agree run must not serialize the field at all
             // (QA #348 correctness 1).
@@ -422,6 +477,8 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
             conditions,
             reading1_s,
             reading2_s,
+            reading1_xruns,
+            reading2_xruns,
             comparison: TauComparison::Disagree(d),
         } => TauOutcome {
             state: if d.periods.is_some() {
@@ -434,6 +491,8 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
             agreement_count: None,
             reading1_s: Some(reading1_s),
             reading2_s: Some(reading2_s),
+            reading1_xruns: Some(reading1_xruns),
+            reading2_xruns: Some(reading2_xruns),
             delta_samples: Some(d.delta_samples),
             periods: d.periods,
             error: Some(d.message()),
@@ -690,6 +749,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         }
         if let Some(r2) = tau_outcome.reading2_s {
             cal_done_frame["tau_reading2_s"] = json!(r2);
+        }
+        if let Some(x1) = tau_outcome.reading1_xruns {
+            cal_done_frame["tau_reading1_xruns"] = json!(x1);
+        }
+        if let Some(x2) = tau_outcome.reading2_xruns {
+            cal_done_frame["tau_reading2_xruns"] = json!(x2);
         }
         if let Some(d) = tau_outcome.delta_samples {
             cal_done_frame["tau_delta_samples"] = json!(d);
@@ -1004,6 +1069,8 @@ mod tests {
                 conditions: dummy_conditions(),
                 reading1_s: 0.001,
                 reading2_s: 0.001,
+                reading1_xruns: 0,
+                reading2_xruns: 0,
                 comparison: TauComparison::Agree,
             }
         });
@@ -1025,6 +1092,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.000_667,
             reading2_s: 0.000_667,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison: TauComparison::Agree,
         });
         assert_eq!(outcome.state, "measured");
@@ -1037,6 +1106,10 @@ mod tests {
         // correctness 1).
         assert_eq!(outcome.delta_samples, None);
         assert_eq!(outcome.periods, None);
+        // #369: presence tracks "both readings were taken", so a clean run
+        // still carries concrete Some(0)s, not an absent field.
+        assert_eq!(outcome.reading1_xruns, Some(0));
+        assert_eq!(outcome.reading2_xruns, Some(0));
     }
 
     #[test]
@@ -1045,10 +1118,83 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.001_000_00,
             reading2_s: 0.001_000_02,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison: TauComparison::Agree,
         });
         let tau_s = outcome.tau_s.expect("measured");
         assert!((tau_s - 0.001_000_01).abs() < 1e-9);
+    }
+
+    /// #369 acceptance criterion: an xrun crossing either lifecycle refuses
+    /// the reading regardless of what the comparison would have said — this
+    /// pair would otherwise agree, which is exactly the doubly-corrupted
+    /// case the two-lifetime rule alone cannot catch.
+    #[test]
+    fn tau_result_xrun_on_one_reading_refuses_even_when_readings_agree() {
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 0,
+            reading2_xruns: 1,
+            comparison: TauComparison::Agree,
+        });
+        assert_eq!(outcome.state, "refused_xrun");
+        assert_eq!(outcome.tau_s, None);
+        assert_eq!(outcome.agreement_count, None);
+        assert_eq!(outcome.reading1_s, Some(0.000_667));
+        assert_eq!(outcome.reading2_s, Some(0.000_667));
+        assert_eq!(outcome.reading1_xruns, Some(0));
+        assert_eq!(outcome.reading2_xruns, Some(1));
+    }
+
+    /// Symmetric with the above: reading 1 dirty, reading 2 clean.
+    #[test]
+    fn tau_result_xrun_on_reading1_is_attributed_to_reading1() {
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 3,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+        });
+        assert_eq!(outcome.state, "refused_xrun");
+        assert_eq!(outcome.reading1_xruns, Some(3));
+        assert_eq!(outcome.reading2_xruns, Some(0));
+    }
+
+    /// Both lifecycles dirty — both counts carried, not summed into one.
+    #[test]
+    fn tau_result_xrun_on_both_readings_carries_both_counts() {
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 2,
+            reading2_xruns: 1,
+            comparison: TauComparison::Agree,
+        });
+        assert_eq!(outcome.state, "refused_xrun");
+        assert_eq!(outcome.reading1_xruns, Some(2));
+        assert_eq!(outcome.reading2_xruns, Some(1));
+    }
+
+    /// A disagreeing pair that is *also* dirty takes the xrun path, not the
+    /// disagreement path — dispatch order is xrun-first (architect note).
+    #[test]
+    fn tau_result_xrun_takes_priority_over_disagreement() {
+        let comparison = compare_tau_readings(0.0, 0.000_5, 48_000, Some(1024));
+        let outcome = tau_result(true, || TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.0,
+            reading2_s: 0.000_5,
+            reading1_xruns: 1,
+            reading2_xruns: 0,
+            comparison,
+        });
+        assert_eq!(outcome.state, "refused_xrun");
     }
 
     /// #347 acceptance criterion: "two synthetic readings one period_size
@@ -1063,6 +1209,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 4262.064 / 96_000.0,
             reading2_s: 5286.064 / 96_000.0,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison,
         });
         assert_eq!(outcome.state, "disagree_period_shift");
@@ -1084,6 +1232,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.0,
             reading2_s: 0.000_5,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison,
         });
         assert_eq!(outcome.state, "disagree_other");

@@ -1306,6 +1306,63 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
     // ZMQ.md: tau_delta_samples is present only on disagree_* — an Agree
     // outcome must not serialize a stray Some(0) (QA #348 correctness 1).
     assert!(done.get("tau_delta_samples").is_none(), "frame: {done}");
+    // #369 clean-path regression: a run with no xruns still carries the
+    // fields, present-as-zero rather than absent (per ZMQ.md's presence
+    // rule), and does not take the refused_xrun path.
+    assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(0), "frame: {done}");
+}
+
+/// #369: a lifecycle that crosses an xrun refuses the reading end-to-end,
+/// through the real `measure_tau_twice` → `tau_result` → `cal_done` path —
+/// not just the hand-constructed `TauAttempt::Compared` unit tests. Uses
+/// the fake backend's `AC_FAKE_XRUNS_OVERRIDE` hook (`audio/fake.rs`) to
+/// make reading 2's lifecycle report one xrun while reading 1 stays clean;
+/// both lifecycles' delays are left at the default so the two readings
+/// would otherwise agree — the exact doubly-corrupted-but-agreeing shape
+/// the xrun-first dispatch order exists to catch (a disagreement would
+/// have been refused anyway, and would not have exercised this).
+#[test]
+fn calibrate_reports_refused_xrun_end_to_end() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_XRUNS_OVERRIDE", "0,1")]);
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+
+    assert_eq!(done["tau_state"], json!("refused_xrun"), "frame: {done}");
+    assert_eq!(
+        done["tau_s"],
+        json!(null),
+        "a refused reading must not report a τ: {done}"
+    );
+    assert_eq!(done["tau_agreement_count"], json!(0), "frame: {done}");
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+    // Per-reading attribution, not summed — reading 1 stayed clean.
+    assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(1), "frame: {done}");
+
+    // Refused, not stored — no entry in tau_history at all.
+    let after = read_cal_entry(&cal_path);
+    assert!(
+        after.get("tau_history").is_none()
+            || after["tau_history"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+        "a refused-xrun reading must not append to tau_history: {after}"
+    );
 }
 
 /// QA #348 test-coverage gap: every other disagreement test drives

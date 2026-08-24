@@ -1484,13 +1484,15 @@ reading either.
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
   "tau_state":            "measured" | "not_measured_no_loopback" | "error"
-                           | "disagree_period_shift" | "disagree_other",
+                           | "disagree_period_shift" | "disagree_other" | "refused_xrun",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
   "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
-  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_*)
+  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
+  "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
+  "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
@@ -1534,6 +1536,7 @@ them before storing anything:
 | `error` | loopback was detected but a lifecycle's own measurement failed (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
@@ -1552,6 +1555,20 @@ period-shift jump is the diagnostic clue #347 itself was found from.
 `tau_delta_samples` and (on `disagree_period_shift`) `tau_periods` are
 the already-classified delta, so a client doesn't have to re-derive the
 rounding/period-multiple logic itself.
+
+`tau_reading1_xruns` / `tau_reading2_xruns` (#369) are the count of xruns
+`AudioEngine::xruns()` reported during that reading's own lifecycle —
+scoped to the `measure_tau` call specifically (sweep synthesis + the
+`play_and_capture` I/O + deconvolve), not the whole `start`..`stop` span.
+Present exactly when the matching `tau_reading{1,2}_s` is, always as a
+concrete integer including 0, on `measured` / `disagree_*` / `refused_xrun`
+alike — an old daemon has none of these fields, and a client must not read
+their absence on an old frame as "zero", only as "unknown". A nonzero
+value on either reading always yields `refused_xrun` regardless of what
+the two readings' comparison would otherwise have said (dispatch checks
+the xrun counts before consulting `compare_tau_readings`'s result), so
+`tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured` or
+one of the `disagree_*` states.
 
 ---
 

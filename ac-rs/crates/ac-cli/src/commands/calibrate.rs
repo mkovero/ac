@@ -255,6 +255,9 @@ fn print_tau_leg(data: &serde_json::Value) {
         "disagree_period_shift" | "disagree_other" => {
             print_tau_disagreement_leg(state, data, sample_rate);
         }
+        "refused_xrun" => {
+            print_tau_xrun_leg(data);
+        }
         // "not_measured_no_loopback" and anything unrecognised (older
         // daemon without this field): state the observation, not an
         // inferred cause — `is_loopback` is what the daemon saw, not a
@@ -297,6 +300,43 @@ fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate
             "          {r1_samples:.3} samples \u{2192} {r2_samples:.3} samples  \
              (\u{394} {delta} samples = {delta_ms:.4} ms at {sr} Hz)"
         );
+    }
+}
+
+/// Render the #369 `refused_xrun` τ state: an xrun crossed one or both
+/// lifecycles that measured this run's τ, so nothing was stored regardless
+/// of whether the two readings would otherwise have agreed (dispatch is
+/// xrun-first in the daemon). States which lifecycle and how many, never
+/// that τ itself is wrong — the instrument cannot know that, only that a
+/// dropout happened during the reading that was supposed to measure it.
+fn print_tau_xrun_leg(data: &serde_json::Value) {
+    let r1 = data
+        .get("tau_reading1_xruns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let r2 = data
+        .get("tau_reading2_xruns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let mut dirty = Vec::new();
+    if r1 > 0 {
+        dirty.push("reading 1");
+    }
+    if r2 > 0 {
+        dirty.push("reading 2");
+    }
+    let which = dirty.join(", ");
+    println!(
+        "  {:<8}not measured (xrun during {which} — not stored)",
+        "Delay:"
+    );
+
+    if r1 > 0 {
+        println!("  !! reading 1: {r1} xrun(s) during that lifecycle");
+    }
+    if r2 > 0 {
+        println!("  !! reading 2: {r2} xrun(s) during that lifecycle");
     }
 }
 
