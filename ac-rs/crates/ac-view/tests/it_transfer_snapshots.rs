@@ -27,12 +27,22 @@
 //!
 //! **Reference currency.** These references are only as current as the
 //! rig run that produced them — nothing re-checks them against `draw_view`
-//! automatically (#337). #391 removed the delay readout's ms → m
-//! conversion entirely (the calibration/warning rows #356 added on top of
-//! it went with it) — every reference in this directory needs
-//! regenerating on the real adapter (192.168.9.25) before this change
-//! merges; see `TESTING.md` → "A3 snapshot reference currency" for the
-//! checklist a `draw_view`/pane change must satisfy before merge.
+//! automatically (#337). Last regenerated 2026-08-24 on 192.168.9.25 (RTX
+//! 2070), `issue-391` at `92d3d42`, immediately followed by a plain
+//! (non-update) run in the same session per the acceptance check in #337
+//! — built on the dev VM (`cargo test --no-run`) and the resulting binary
+//! copied across, not built on the rig itself (its host has no headroom
+//! to spare for a build). `#391` removed
+//! the delay readout's ms → m conversion entirely (the calibration/warning
+//! rows #356 added on top of it went with it): `spectrum_ref_trace_off.png`
+//! / `spectrum_ref_trace_on.png` came out byte-identical (spectrum view,
+//! untouched by this change); the 5 transfer-view files
+//! (`transfer_armed_banner.png`, `transfer_driving_banner.png`,
+//! `transfer_ir_panel.png`, `transfer_live_masked_gap.png`,
+//! `transfer_stored_comparison_no_live.png`) all moved — the masked-gap
+//! reference shrank the most (2 calibration/warning rows gone). See
+//! `TESTING.md` → "A3 snapshot reference currency" for the checklist a
+//! `draw_view`/pane change must satisfy before merge.
 
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
