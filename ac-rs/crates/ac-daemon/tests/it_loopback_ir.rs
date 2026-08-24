@@ -88,11 +88,16 @@ const SELF_LOOP_LEVEL_DBFS: f64 = -6.0;
 /// being placed by `MAX_ROUND_TRIP_S`, and a peak pinned at that edge —
 /// exactly what a too-short window produces — passes the position check
 /// as if it were a plausible round trip. 2.0 s (the reference rig's own
-/// runbook duration, ARCHITECTURE.md's "Loopback IR runbook") puts the
-/// half-gap at ~120 ms, twice `MAX_ROUND_TRIP_S`, so the bound genuinely
-/// binds with headroom — checked at runtime by `round_trip_bound` below
-/// and pinned for the runnable sample rates by
-/// `default_duration_binds_max_round_trip_at_runnable_sample_rates`.
+/// runbook duration, ARCHITECTURE.md's "Loopback IR runbook") fixes this,
+/// but the two runnable sample rates hit different limits and so land at
+/// different margins: at 48 kHz the harmonic gap is still the smaller
+/// number (11536 samples), giving a half-window of ~120 ms — 2.00×
+/// `MAX_ROUND_TRIP_S`. At 96 kHz the gap alone would be 23072 samples,
+/// but `linear_ir_len` clamps to the fixed `window_len_requested` (16384)
+/// this test passes to `plot_ir`, giving a half-window of ~85 ms — 1.42×
+/// `MAX_ROUND_TRIP_S`, not 2×. Both bind (ratio > 1×), checked at runtime
+/// by `round_trip_bound` below and pinned for both runnable sample rates
+/// by `default_duration_binds_max_round_trip_at_runnable_sample_rates`.
 const DEFAULT_DURATION_S: f64 = 2.0;
 
 /// Maximum acceptable round-trip latency, in seconds. #277 measured
