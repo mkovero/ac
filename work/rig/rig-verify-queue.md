@@ -287,12 +287,14 @@ channel, which is #204.
 
   **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
   to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
-  survives in the form `rig-test-plan.md` already recommends:
-  `|Δt_onset − Δt_transfer_stream| ≤ 1.3 samples`, each estimator's own
-  increment between the two positions, compared in the time domain where tape
-  and `c` both drop out. Both estimators see the same physical move whatever
-  the tape says it was. That is the only valid form here, not merely a
-  stronger one.
+  survives in the form `rig-test-plan.md` already recommends: compare each
+  estimator's own increment between the two positions in the time domain,
+  where tape and `c` both drop out. Both estimators see the same physical
+  move whatever the tape says it was. That is the only valid form here, not
+  merely a stronger one. **The 1.3-sample bar itself was also a tape draw
+  converted to samples** and was re-derived 2026-08-24 (#375) to
+  `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, scored against the
+  candidate estimator's own measured repeatability — see `rig-test-plan.md`.
 
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
