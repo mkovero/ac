@@ -102,7 +102,7 @@ triage_evidence() {
 # drive() sets it when architect or ux has just changed the design under a diff
 # that may already carry an approval of the design it replaced.
 qa_loop() {
-  local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev
+  local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev pre post
   # Not every exit path sets STATE, and drive() re-enters this function after a
   # handback. A STATE left over from the previous entry would read as a second
   # handback and loop until the step limit — which looks like cycling labels
@@ -142,7 +142,27 @@ qa_loop() {
         echo "     retire the measurement; the label stays for you to clear."
       fi
       echo "  #$n PR #$pr: revising (round $qa_round)"
+      pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
+        || { echo "  #$n: cannot read the tip — not starting a revise"; return 1; }
       "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
+      post="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
+        || { echo "  #$n: cannot read the tip — check the PR by hand"; return 1; }
+
+      # A revise that pushed nothing is the developer saying the block is not
+      # code-fixable. Clearing needs-work here would be this script overruling
+      # that on the developer's behalf — and worse, the reviewed-SHA cache below
+      # would then see a tip qa has already reviewed with a comment on it and
+      # report "raised nothing", which is how a request-changes verdict turns
+      # into "yours to merge". Leave the label. Stop.
+      if [[ $pre == "$post" ]]; then
+        echo "  #$n PR #$pr: revise pushed nothing — tip is still $post"
+        echo "     needs-work stays. re-reviewing an identical tip cannot change"
+        echo "     the verdict, so the block is one only you can clear: a rig"
+        echo "     measurement, acceptance of an assumed criterion, a design call."
+        echo "     read the developer's PR comment for which."
+        STATE=needs-human; return 0
+      fi
+
       gh_retry gh pr edit "$pr" -R "$AC_REPO" \
         --remove-label needs-work --add-label in-review >/dev/null 2>&1 || true
       ls="$(pr_labels "$pr")"

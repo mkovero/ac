@@ -253,10 +253,24 @@ run() {
   mkdir -p "$CARGO_TARGET_DIR"
 
   local tag="${AC_TAG:-$$}" stamp status=0
+  mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
   stamp="$(date +%F)-$role-$tag"
+
+  # The tag is not unique. revise.sh uses pr-<n>-rev for EVERY round, so round
+  # two overwrote round one — transcript, distilled output, and the --resume id
+  # with it. Same for a re-run of implement.sh on one issue in a day. Suffix
+  # instead of clobbering: the run you want to read is usually the earlier one,
+  # and a tool that deletes the evidence of its own cost cannot be audited.
+  if [[ -e "$AC_LOG_DIR/$stamp.jsonl" || -e "$AC_SESSION_DIR/$stamp.md" ]]; then
+    local i=2
+    while [[ -e "$AC_LOG_DIR/$stamp-$i.jsonl" || -e "$AC_SESSION_DIR/$stamp-$i.md" ]]; do
+      (( ++i ))
+    done
+    stamp="$stamp-$i"
+  fi
+
   local raw="$AC_LOG_DIR/$stamp.jsonl"
   local out="$AC_SESSION_DIR/$stamp.md"
-  mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
 
   # Stream to the terminal, keep the raw transcript. Distillation happens after
   # the run, not inside the pipe — a process-substitution tee races the
