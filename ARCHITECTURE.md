@@ -402,12 +402,15 @@ cargo test -p ac-daemon --test it_loopback_ir -- --ignored
 The test pre-writes a config with `output_port = "ac-daemon:in"` and
 `input_port = "ac-daemon:out"`, so the daemon self-connects its own
 JACK output to its own input — no `jack_connect` and no system audio
-devices required. It then runs a 0.5 s exponential sweep, deconvolves,
+devices required. It then runs a 2.0 s exponential sweep, deconvolves,
 and asserts the recovered linear IR has a dominant peak at least 25 dB
 above the pre-impulse floor, at or after the gate centre and within a
 60 ms round-trip margin of it — both derived from measurement, not round
 numbers; see `it_loopback_ir.rs`'s `MAX_ROUND_TRIP_S`/`SNR_FLOOR_DB`
-comments and #341.
+comments and #341. The 2.0 s duration is itself load-bearing, not just a
+default value: shorter sweeps shrink the window the round-trip bound is
+measured against, and below ~1.0 s that window can no longer hold
+`MAX_ROUND_TRIP_S` at all (#361).
 
 **That default routes through no converter.** The self-loop stays inside
 the daemon's own JACK client, so it exercises the ring and the

@@ -48,6 +48,7 @@ use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ac_core::measurement::sweep::SweepParams;
 use serde_json::{json, Value};
 
 static PORT_CURSOR: AtomicU16 = AtomicU16::new(25_900);
@@ -79,7 +80,102 @@ const SELF_LOOP_LEVEL_DBFS: f64 = -6.0;
 /// `duration · ln 2 / ln(f2/f1)` seconds. So the window that has to contain
 /// the round trip grows with the sweep, and a chain whose latency exceeds
 /// half the gap puts its own peak outside the window it is measured in.
-const DEFAULT_DURATION_S: f64 = 0.5;
+///
+/// #361: at the old default (0.5 s), that half-gap is ~30 ms at 96 kHz —
+/// *less* than `MAX_ROUND_TRIP_S` (60 ms) below, and less than the
+/// reference rig's own measured 43.75 ms round trip (#277). `hi_bound`
+/// then saturates at the window's own last sample instead of genuinely
+/// being placed by `MAX_ROUND_TRIP_S`, and a peak pinned at that edge —
+/// exactly what a too-short window produces — passes the position check
+/// as if it were a plausible round trip. 2.0 s (the reference rig's own
+/// runbook duration, ARCHITECTURE.md's "Loopback IR runbook") puts the
+/// half-gap at ~120 ms, twice `MAX_ROUND_TRIP_S`, so the bound genuinely
+/// binds with headroom — checked at runtime by `round_trip_bound` below
+/// and pinned for the runnable sample rates by
+/// `default_duration_binds_max_round_trip_at_runnable_sample_rates`.
+const DEFAULT_DURATION_S: f64 = 2.0;
+
+/// Maximum acceptable round-trip latency, in seconds. #277 measured
+/// 43.75 ms on the reference rig (Babyface Pro leg, 96 kHz, 2.0 s sweep —
+/// ARCHITECTURE.md's "Loopback IR runbook"). This is that figure with
+/// ~37% headroom for rig-to-rig jitter, not a bound fitted to one run.
+/// If a chain ever needs more than this, the number moves and this
+/// comment's citation moves with it — it must never grow silently.
+const MAX_ROUND_TRIP_S: f64 = 0.060;
+
+/// Where the round-trip-latency bound sits inside a deconvolved IR window,
+/// once the window has been shown large enough to hold `MAX_ROUND_TRIP_S`
+/// at all.
+#[derive(Debug)]
+struct RoundTripBound {
+    lo_bound: usize,
+    hi_bound: usize,
+}
+
+impl RoundTripBound {
+    /// The IR peak is the deconvolution delta. `extract_irs` centres the
+    /// gate at the sweep endpoint, so the peak nominally sits at
+    /// `ir_len / 2` — but JACK adds at least one period of port-to-port
+    /// latency, and an external converter adds its own latency on top,
+    /// shifting the peak later. Latency only ever adds delay, so the peak
+    /// cannot legitimately land before centre; `lo_bound` gives a small
+    /// rounding tolerance rather than requiring the peak at-or-after
+    /// centre exactly.
+    fn contains(&self, peak_idx: usize) -> bool {
+        peak_idx > self.lo_bound && peak_idx < self.hi_bound
+    }
+}
+
+/// Derive the round-trip-latency bound for a window of `ir_len` samples at
+/// `sample_rate_hz`, admitting up to `max_round_trip_s` of round trip.
+///
+/// Refuses (rather than silently capping `hi_bound` at `ir_len - 1`) when
+/// the window is too short to express `max_round_trip_s` at all. That
+/// capping is exactly #361's defect: a window too short to hold the stated
+/// maximum round trip makes `hi_bound` saturate at the window's own last
+/// sample regardless of `max_round_trip_s`, so a peak pinned at the far
+/// edge — what a too-short window actually produces — passes the position
+/// check as a plausible-looking round trip instead of being refused.
+fn round_trip_bound(
+    ir_len: usize,
+    sample_rate_hz: f64,
+    max_round_trip_s: f64,
+) -> Result<RoundTripBound, String> {
+    let centre = ir_len / 2;
+    let low_margin_samples = ((0.001 * sample_rate_hz).round() as usize).max(1);
+    let hi_margin_samples = (max_round_trip_s * sample_rate_hz).round() as usize;
+    let lo_bound = centre.saturating_sub(low_margin_samples);
+    let hi_bound = centre + hi_margin_samples;
+    let saturated_at = ir_len.saturating_sub(1);
+    if hi_bound >= saturated_at {
+        return Err(format!(
+            "window too short to hold max_round_trip_s ({:.1} ms) at \
+             {sample_rate_hz} Hz: hi_bound (centre {centre} + margin \
+             {hi_margin_samples} = {hi_bound}) would saturate at ir_len - 1 \
+             ({saturated_at}) instead of genuinely binding, so a peak pinned \
+             at the window edge would pass the position check unrejected \
+             (ir_len={ir_len})",
+            max_round_trip_s * 1000.0,
+        ));
+    }
+    Ok(RoundTripBound { lo_bound, hi_bound })
+}
+
+/// The linear IR's gate length (`window_len_used[0]`) that `extract_irs`
+/// actually produces for a sweep with these parameters — order 1's gate
+/// clamped down to the sample distance to order 2 (`per_order_window_lens`,
+/// `sweep.rs:328`), the same computation the daemon runs, called here
+/// directly rather than re-derived by hand so the two can't drift apart.
+fn linear_ir_len(duration_s: f64, sample_rate_hz: f64, window_len_requested: usize) -> usize {
+    let p = SweepParams {
+        f1_hz: 50.0,
+        f2_hz: 16_000.0,
+        duration_s,
+        sample_rate: sample_rate_hz as u32,
+    };
+    let gap_samples = (p.harmonic_time_offset_s(2) * sample_rate_hz).round() as usize;
+    window_len_requested.min(gap_samples)
+}
 
 /// Where the sweep goes and where it comes back, and how hard it is driven.
 struct Routing {
@@ -346,11 +442,13 @@ fn loopback_ir_recovers_sharp_peak() {
     let d = Daemon::spawn_jack(&routing);
     let c = Client::new(&d);
 
-    // Short sweep so the test stays under ~1 s of audio time. `window_len`
-    // is sized to comfortably contain both the gate centre (placed by
-    // `extract_irs` at the sweep endpoint) and the JACK round-trip latency
-    // shift (one JACK period for a self-connected client) plus a wide
-    // pre-impulse stretch that's clear of the bandlimited-sinc skirts.
+    // Sweep long enough that the round-trip-latency bound below genuinely
+    // binds instead of saturating at the window's own edge (#361 —
+    // `DEFAULT_DURATION_S`'s doc comment). `window_len` is sized to
+    // comfortably contain both the gate centre (placed by `extract_irs`
+    // at the sweep endpoint) and the JACK round-trip latency shift (one
+    // JACK period for a self-connected client) plus a wide pre-impulse
+    // stretch that's clear of the bandlimited-sinc skirts.
     let ack = c.call(json!({
         "cmd":        "plot_ir",
         "f1_hz":      50.0,
@@ -458,45 +556,28 @@ fn loopback_ir_recovers_sharp_peak() {
         "all-zero IR — loopback never delivered audio over {chain}"
     );
 
-    // Maximum acceptable round-trip latency, in seconds. #277 measured
-    // 43.75 ms on the reference rig (Babyface Pro leg, 96 kHz, 2.0 s sweep —
-    // ARCHITECTURE.md's "Loopback IR runbook"). This is that figure with
-    // ~37% headroom for rig-to-rig jitter, not a bound fitted to one run.
-    // If a chain ever needs more than this, the number moves and this
-    // comment's citation moves with it — it must never grow silently.
-    const MAX_ROUND_TRIP_S: f64 = 0.060;
-
-    // The IR peak is the deconvolution delta. `extract_irs` centres the gate
-    // at the sweep endpoint, so the peak nominally sits at `centre` (=
-    // `ir.len() / 2`) — but JACK adds at least one period of port-to-port
-    // latency, and an external converter adds its own latency on top,
-    // shifting the peak later. Latency only ever adds delay, so the peak
-    // cannot legitimately land before `centre`; `lo_bound` gives a small
-    // rounding tolerance rather than requiring the peak at-or-after `centre`
-    // exactly. `hi_bound` admits up to `MAX_ROUND_TRIP_S` of round trip,
-    // capped at the window's own last sample — a window too short to
-    // express that margin is already bounded by its own length, not by
-    // this constant.
-    //
     // The window this bound divides is `ir.len()` — the gate length
     // `extract_irs` actually returned (checked equal to `window_len_used[0]`
     // above), not the `window_len` requested above. `per_order_window_lens`
     // clamps it to the gap between the linear IR and the order-2 IR
     // (`sweep.rs:318`, `:335`), which is `duration · ln 2 / ln(f2/f1)`
-    // seconds — 2884 samples at 48 kHz for the request above, not 16384.
-    // See #277/#341 for the measured consequence of dividing the wrong one.
+    // seconds. See #277/#341 for the measured consequence of dividing the
+    // wrong one, and #361 for what happens when that gap is too small to
+    // hold `MAX_ROUND_TRIP_S` at all: `round_trip_bound` refuses outright
+    // (panicking below) rather than silently capping `hi_bound` at the
+    // window's own last sample and admitting an edge-pinned peak.
     let sample_rate_hz = sample_rate_hz.unwrap_or_else(|| {
         panic!("sample_rate_hz absent from frame over {chain}; can't derive the round-trip bound")
     });
-    let low_margin_samples = ((0.001 * sample_rate_hz).round() as usize).max(1);
-    let hi_margin_samples = (MAX_ROUND_TRIP_S * sample_rate_hz).round() as usize;
-    let lo_bound = centre.saturating_sub(low_margin_samples);
-    let hi_bound = (centre + hi_margin_samples).min(ir.len().saturating_sub(1));
+    let bound = round_trip_bound(ir.len(), sample_rate_hz, MAX_ROUND_TRIP_S)
+        .unwrap_or_else(|e| panic!("{e} over {chain}"));
     assert!(
-        peak_idx > lo_bound && peak_idx < hi_bound,
-        "peak at index {peak_idx} outside expected range [{lo_bound}, {hi_bound}] \
+        bound.contains(peak_idx),
+        "peak at index {peak_idx} outside expected range [{}, {}] \
          (window_len={}, centre={centre}, max_round_trip={:.1} ms) over {chain}; \
          deconvolution may have failed",
+        bound.lo_bound,
+        bound.hi_bound,
         ir.len(),
         MAX_ROUND_TRIP_S * 1000.0,
     );
@@ -520,4 +601,93 @@ fn loopback_ir_recovers_sharp_peak() {
     // Drain the trailing report + done frames so Drop doesn't race on shutdown.
     let _ = c.recv_pub(2_000);
     let _ = c.recv_pub(2_000);
+}
+
+/// Plain unit tests over the round-trip-latency bound math, not `#[ignore]`d
+/// — no JACK server needed, so these run under plain `cargo test` and catch
+/// a regression to #361's failure mode without a rig.
+#[cfg(test)]
+mod round_trip_bound_tests {
+    use super::*;
+
+    /// #361's own reproduced failure: at the old default (0.5 s), the
+    /// window is too short to hold `MAX_ROUND_TRIP_S`, so `hi_bound` would
+    /// have saturated at `ir_len - 1` and silently accepted the edge-pinned
+    /// peak the rig actually reported (`peak_index 5709` of `ir_len 5768`,
+    /// 96 kHz — see the issue's rig record). The guard must refuse to
+    /// produce a bound at all — the pinned value must never come back as a
+    /// validated round trip.
+    #[test]
+    fn refuses_window_too_short_to_hold_max_round_trip() {
+        let ir_len = 5768;
+        let sample_rate_hz = 96_000.0;
+        let pinned_peak_idx = 5709; // #361's own reported, wrongly-accepted peak
+
+        let result = round_trip_bound(ir_len, sample_rate_hz, MAX_ROUND_TRIP_S);
+        assert!(
+            result.is_err(),
+            "a window too short to hold MAX_ROUND_TRIP_S must be refused, not \
+             silently produce a bound the edge-pinned peak {pinned_peak_idx} \
+             would pass"
+        );
+    }
+
+    /// With a window genuinely large enough to hold `MAX_ROUND_TRIP_S`, a
+    /// peak pinned at the window's far edge — the shape #277/#340/#361 all
+    /// measured — must still be refused by the position bound itself, not
+    /// accepted because the window happens to be long. Same shape as
+    /// `calibrate.rs`'s `check_peak_within_window_refuses_peak_pinned_at_edge`
+    /// (#340), one layer up.
+    #[test]
+    fn refuses_peak_pinned_at_far_edge_even_in_a_binding_window() {
+        let ir_len = 200_000; // generously larger than MAX_ROUND_TRIP_S needs
+        let sample_rate_hz = 96_000.0;
+        let bound = round_trip_bound(ir_len, sample_rate_hz, MAX_ROUND_TRIP_S)
+            .expect("this window is sized to hold MAX_ROUND_TRIP_S");
+        let pinned_peak_idx = ir_len - 1; // pinned at the far edge
+        let pinned_offset_samples = pinned_peak_idx as i64 - (ir_len / 2) as i64;
+
+        assert!(
+            !bound.contains(pinned_peak_idx),
+            "peak pinned at the window edge must be refused, not accepted as \
+             offset {pinned_offset_samples}"
+        );
+    }
+
+    /// The rig's own measured round trip (#277/#340: 43.75 ms, 4200 samples
+    /// at 96 kHz) must clear the position bound in a genuinely binding
+    /// window — not just a dead-centre synthetic peak.
+    #[test]
+    fn accepts_the_rigs_measured_round_trip() {
+        let ir_len = 200_000;
+        let sample_rate_hz = 96_000.0;
+        let bound = round_trip_bound(ir_len, sample_rate_hz, MAX_ROUND_TRIP_S)
+            .expect("this window is sized to hold MAX_ROUND_TRIP_S");
+        let centre = ir_len / 2;
+        let peak_idx = centre + 4200; // rig's measured round trip, 96 kHz (#277/#340)
+
+        assert!(
+            bound.contains(peak_idx),
+            "the rig's own measured round trip must be inside the accepted window"
+        );
+    }
+
+    /// `DEFAULT_DURATION_S` must genuinely bind `MAX_ROUND_TRIP_S` at the
+    /// sample rates this repo can actually exercise the loopback test at:
+    /// `jackd -d dummy` self-loop configs (48 kHz) and the rig's own
+    /// Babyface Pro leg (96 kHz — ARCHITECTURE.md's "Loopback IR runbook").
+    /// Regression guard for #361's acceptance criterion: `hi_bound` must
+    /// not saturate at any configuration that actually runs.
+    #[test]
+    fn default_duration_binds_max_round_trip_at_runnable_sample_rates() {
+        for sample_rate_hz in [48_000.0, 96_000.0] {
+            let ir_len = linear_ir_len(DEFAULT_DURATION_S, sample_rate_hz, 16_384);
+            let result = round_trip_bound(ir_len, sample_rate_hz, MAX_ROUND_TRIP_S);
+            assert!(
+                result.is_ok(),
+                "DEFAULT_DURATION_S ({DEFAULT_DURATION_S} s) does not bind \
+                 MAX_ROUND_TRIP_S at {sample_rate_hz} Hz (ir_len={ir_len}): {result:?}"
+            );
+        }
+    }
 }
