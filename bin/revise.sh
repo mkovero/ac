@@ -26,7 +26,13 @@ Read the agent:qa review comment on it and address every point raised. This is \
 a revision: the branch and the PR already exist — commit and push to this \
 branch, do not open a new PR and do not change labels. Reply to the review \
 points in a PR comment so the next QA pass can see what you did and why. Any \
-point you disagree with, say so there rather than silently leaving it." "$@"
+point you disagree with, say so there rather than silently leaving it.
+
+Before you start: check the linked issue for an architect or ux comment newer \
+than the commit this branch was built on. If there is one, the design changed \
+under you — that comment supersedes what you implemented against, and the QA \
+review you are answering may have been written against the old design. Read it \
+first and say in your PR comment which design you revised to." "$@"
 
 echo "worktree: $wt   branch: $branch" >&2
 echo "when pushed: gh_retry gh pr edit $n -R $AC_REPO --remove-label needs-work --add-label in-review" >&2

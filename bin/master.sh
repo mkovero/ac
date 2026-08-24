@@ -3,15 +3,25 @@
 #
 # Drives an issue through whatever its labels say it needs:
 #
+#   nothing routed it yet → triage
 #   needs-design → architect    needs-ux → ux
 #   ready-to-implement → developer → qa → (needs-work → developer → qa)...
 #
-# It does NOT merge, close, or resolve a disagreement. Those are your gates.
-# It stops on needs-discussion, on blocked, on qa approval, and when a role
-# leaves its own label in place.
+# qa or developer may decide the DESIGN is what is wrong, not the code, and put
+# needs-design or needs-ux back on the issue. That is not a failure state: this
+# picks it up, re-drives architect or ux, and returns to the PR with a forced
+# full re-review — the diff may already carry an approval of a design that no
+# longer stands.
 #
-#   AC_ROUNDS=3   max dev→qa cycles before handing back (default 3)
-#   AC_STEPS=8    max state transitions per issue, loop backstop (default 8)
+# It does NOT merge, close, or resolve a disagreement. Those are your gates.
+# It stops on needs-discussion, on needs-clarification, on blocked, on qa
+# approval, and when a role leaves its own label in place.
+#
+#   AC_ROUNDS=3          max dev→qa cycles before handing back (default 3)
+#   AC_STEPS=8           max state transitions per issue, loop backstop (default 8)
+#   AC_DESIGN_PASSES=2   max architect passes per issue per run (default 2)
+#   AC_UX_PASSES=2       max ux passes per issue per run (default 2)
+#   AC_NO_TRIAGE=1       never triage; an unrouted issue is nothing to do
 #
 # Verify label names first — a wrong one makes this do nothing while looking
 # like it worked:  gh label list -R mkovero/ac
@@ -21,6 +31,13 @@ BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
 STEPS="${AC_STEPS:-8}"
+DESIGN_PASSES="${AC_DESIGN_PASSES:-2}"
+UX_PASSES="${AC_UX_PASSES:-2}"
+
+# dev→qa rounds, counted per ISSUE rather than per qa_loop() call. A design
+# handback re-enters qa_loop, and a counter local to it would reset there —
+# turning ROUNDS from a bound into a suggestion.
+qa_round=0
 
 fg=""; ids=()
 for a in "$@"; do
@@ -57,17 +74,65 @@ stale_branch() {
 # does. Require positive evidence that QA spoke. qa_evidence() is in common.sh.
 qa_comments() { qa_evidence "$1"; }
 
+# Has anything routed this issue? Any one of these labels means triage,
+# architect, ux or you already decided where it goes. blocked, needs-discussion
+# and needs-clarification are not listed: drive() returns on them earlier, so
+# listing them here would be a branch nothing can reach.
+routed() {
+  local ls="$1" l
+  for l in ready-to-implement needs-design needs-ux epic; do
+    has "$l" "$ls" && return 0
+  done
+  return 1
+}
+
+# Positive evidence that triage spoke, same shape and same reason as
+# qa_evidence(): a run that crashed or hit its turn limit leaves an issue
+# looking exactly like one triage never touched, and an API failure must not
+# read as "no spec". Echoes a count or fails; never 0-on-error.
+triage_evidence() {
+  local c
+  c=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
+      --jq '[.comments[] | select(.body | test("agent: *triage"; "i"))] | length') || return 1
+  echo "${c:-0}"
+}
+
+# qa_loop <issue> <pr> [force]
+# force=full → ignore the reviewed-SHA cache and review the whole PR again.
+# drive() sets it when architect or ux has just changed the design under a diff
+# that may already carry an approval of the design it replaced.
 qa_loop() {
-  local n="$1" pr="$2" round=0 ls before after head mark ev
-  while (( round <= ROUNDS )); do
+  local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev
+  # Not every exit path sets STATE, and drive() re-enters this function after a
+  # handback. A STATE left over from the previous entry would read as a second
+  # handback and loop until the step limit — which looks like cycling labels
+  # and is not.
+  STATE=""
+  while (( qa_round <= ROUNDS )); do
     ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
+
+    # qa or developer can conclude that the design is wrong rather than the
+    # code, and send the issue back by re-applying needs-design or needs-ux.
+    # Read the ISSUE: those are issue labels (AGENTS.md label schema) and
+    # architect and ux act on the issue, not on the PR. Checked before the
+    # needs-work branch below, so a PR carrying both goes to the design
+    # question first instead of spending a revise round on the old one.
+    ils="$(labels "$n")" || { echo "  #$n: cannot read issue labels — stopping rather than guessing"; return 1; }
+    if has needs-design "$ils"; then
+      echo "  #$n PR #$pr: sent back to architect (needs-design on the issue)"
+      STATE=needs-design; return 0
+    fi
+    if has needs-ux "$ils"; then
+      echo "  #$n PR #$pr: sent back to ux (needs-ux on the issue)"
+      STATE=needs-ux; return 0
+    fi
 
     # Already labelled needs-work: the verdict is in, revise before reviewing
     # again. Reviewing first would re-review a tip qa has already judged.
     if has needs-work "$ls"; then
-      (( ++round ))
-      if (( round > ROUNDS )); then
+      (( ++qa_round ))
+      if (( qa_round > ROUNDS )); then
         echo "  #$n PR #$pr: still needs-work after $ROUNDS rounds — stopping"
         echo "     two agents failing to converge is signal. read the reviews."
         return 0
@@ -76,7 +141,7 @@ qa_loop() {
         echo "  #$n PR #$pr: carries requires-rig — revising the code does not"
         echo "     retire the measurement; the label stays for you to clear."
       fi
-      echo "  #$n PR #$pr: revising (round $round)"
+      echo "  #$n PR #$pr: revising (round $qa_round)"
       "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
       gh_retry gh pr edit "$pr" -R "$AC_REPO" \
         --remove-label needs-work --add-label in-review >/dev/null 2>&1 || true
@@ -87,8 +152,10 @@ qa_loop() {
     mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
 
     # Already reviewed at this exact tip and qa raised nothing: that is a pass.
+    # Unless force is set — then the tip is unchanged but the design under it
+    # is not, and the cached approval is an approval of a superseded spec.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
-    if [[ -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
+    if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
       if has requires-rig "$ls"; then
         echo "  #$n PR #$pr: qa reviewed $head — approved, but REQUIRES RIG"
         echo "     a measurement is outstanding. the label is human-clear only:"
@@ -100,9 +167,10 @@ qa_loop() {
       STATE=awaiting-merge; return 0
     fi
 
-    echo "  #$n PR #$pr: qa review"
+    echo "  #$n PR #$pr: qa review${force:+ (full — design changed since the last pass)}"
     before="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
-    "$BIN/review.sh" "$pr" $fg || { echo "  #$n: review failed"; return 1; }
+    "$BIN/review.sh" "$pr" ${force:+--full} $fg || { echo "  #$n: review failed"; return 1; }
+    force=""   # one forced pass; later rounds go back to reviewing the delta
     after="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — review may have succeeded, check the PR"; return 1; }
 
     if (( after <= before )); then
@@ -113,6 +181,20 @@ qa_loop() {
 
     ls="$(pr_labels "$pr")" || { echo "  #$n PR #$pr: cannot read labels — stopping rather than guessing"; return 1; }
     has needs-discussion "$ls" && { echo "  #$n PR #$pr: qa escalated — yours"; STATE=needs-human; return 0; }
+
+    # The review that just ran may itself be the handback. Catch it here rather
+    # than a lap later: the needs-work branch above would otherwise spend a
+    # revise round answering a review whose own verdict was "wrong design".
+    ils="$(labels "$n")" || { echo "  #$n: cannot read issue labels — stopping rather than guessing"; return 1; }
+    if has needs-design "$ils"; then
+      echo "  #$n PR #$pr: qa sent it back to architect (needs-design on the issue)"
+      STATE=needs-design; return 0
+    fi
+    if has needs-ux "$ils"; then
+      echo "  #$n PR #$pr: qa sent it back to ux (needs-ux on the issue)"
+      STATE=needs-ux; return 0
+    fi
+
     if ! has needs-work "$ls"; then
       if has requires-rig "$ls"; then
         echo "  #$n PR #$pr: approved, but REQUIRES RIG — measurement outstanding"
@@ -125,33 +207,80 @@ qa_loop() {
       return 0
     fi
   done
+
+  # Reachable only on re-entry after a handback, when the earlier passes
+  # already spent the budget. Silence here would read as a clean finish.
+  echo "  #$n PR #$pr: dev→qa rounds already spent ($ROUNDS) — stopping"
+  return 0
 }
 
 drive() {
-  local n="$1" step=0 ls pr
-  local ran_design=0 ran_ux=0
+  local n="$1" step=0 ls pr tc st force=""
+  local ran_design=0 ran_ux=0 ran_triage=0
+  local design_passes=0 ux_passes=0
+  qa_round=0
 
   while (( step < STEPS )); do
     (( ++step ))
     ls="$(labels "$n")" || { echo "  #$n: cannot read issue"; return 1; }
 
+    # A role that ran and left its OWN label is a spec gap, and retrying is how
+    # a loop turns one into an infinite one — the guards below stop on it. But
+    # a label that was cleared and later re-applied is a different fact: qa or
+    # developer sending the issue back, which is exactly what deserves another
+    # pass. Observing the label absent is what separates the two cases, so
+    # observe it every lap, before anything branches on it.
+    has needs-design "$ls" || ran_design=0
+    has needs-ux     "$ls" || ran_ux=0
+
     has blocked "$ls"          && { echo "  #$n: blocked — lift condition is in the comment that applied it"; STATE=blocked; return 0; }
     has needs-discussion "$ls" && { echo "  #$n: needs-discussion — yours to decide"; STATE=needs-human; return 0; }
+    has needs-clarification "$ls" && { echo "  #$n: needs-clarification — triage is waiting on the reporter"; STATE=needs-human; return 0; }
+    has epic "$ls"             && { echo "  #$n: epic — children drive separately"; STATE=epic; return 0; }
+
+    # Nothing has routed this issue and triage has never spoken on it. This is
+    # the case that used to fall out of the bottom as "nothing to do".
+    if ! routed "$ls"; then
+      tc="$(triage_evidence "$n")" || { echo "  #$n: cannot read issue comments — stopping rather than guessing"; return 1; }
+      if (( tc == 0 )); then
+        [[ -n ${AC_NO_TRIAGE:-} ]] && { echo "  #$n: unrouted, AC_NO_TRIAGE set — nothing to do"; return 0; }
+        (( ran_triage )) && { echo "  #$n: triage ran and applied no routing label — read its comment"; return 0; }
+        ran_triage=1; echo "  #$n: triage"
+        "$BIN/triage.sh" "$n" $fg || { echo "  #$n: triage failed"; return 1; }
+        continue
+      fi
+      # Spec comment but no routing label: triage stopped mid-way, or a label
+      # was removed by hand. Either way the next step is a decision, not a run.
+      echo "  #$n: triage spec present but no routing label — yours to set"
+      STATE=needs-human; return 0
+    fi
 
     # ux step 6 runs first: it clears needs-ux but defers ready-to-implement to
     # architect when both labels are set, so design must be the later gate.
     if has needs-ux "$ls"; then
-      (( ran_ux )) && { echo "  #$n: ux ran, needs-ux still set — read its comment"; return 0; }
-      ran_ux=1; echo "  #$n: ux"
+      if (( ran_ux )); then
+        echo "  #$n: ux ran, needs-ux still set — read its comment"; return 0
+      fi
+      if (( ux_passes >= UX_PASSES )); then
+        echo "  #$n: needs-ux applied $ux_passes times this run — stopping"
+        echo "     the issue is bouncing between ux and implementation. read the comments."
+        STATE=needs-human; return 0
+      fi
+      ran_ux=1; (( ++ux_passes )); echo "  #$n: ux (pass $ux_passes)"
       "$BIN/ux.sh" "$n" $fg || { echo "  #$n: ux failed"; return 1; }
       continue
     fi
 
-    # A role that ran and left its label is not a state to retry. Retrying is
-    # how a loop turns a spec gap into an infinite one.
     if has needs-design "$ls"; then
-      (( ran_design )) && { echo "  #$n: architect ran, needs-design still set — read its comment"; return 0; }
-      ran_design=1; echo "  #$n: architect"
+      if (( ran_design )); then
+        echo "  #$n: architect ran, needs-design still set — read its comment"; return 0
+      fi
+      if (( design_passes >= DESIGN_PASSES )); then
+        echo "  #$n: needs-design applied $design_passes times this run — stopping"
+        echo "     the issue is bouncing between design and implementation. read the comments."
+        STATE=needs-human; return 0
+      fi
+      ran_design=1; (( ++design_passes )); echo "  #$n: architect (pass $design_passes)"
       "$BIN/design.sh" "$n" $fg || { echo "  #$n: design failed"; return 1; }
       continue
     fi
@@ -159,7 +288,17 @@ drive() {
     pr="$(pr_for "$n")"
     if [[ -n $pr ]]; then
       echo "  #$n: PR #$pr"
-      qa_loop "$n" "$pr"; return
+      st=0; qa_loop "$n" "$pr" "$force" || st=$?
+      force=""
+      (( st == 0 )) || return "$st"
+      case "$STATE" in
+        needs-design|needs-ux)
+          # Round the loop: the label is on the issue, and the ux and design
+          # gates above route on it. Come back to this PR with a full pass —
+          # the tip may be unchanged, but what it is measured against is not.
+          force=full; continue ;;
+      esac
+      return 0
     fi
 
     if stale_branch "$n"; then
@@ -190,7 +329,12 @@ drive() {
     pr="$(pr_for "$n")"
     [[ -n $pr ]] || { echo "  #$n: no PR opened — check the session log"; return 1; }
     echo "  #$n: opened PR #$pr"
-    qa_loop "$n" "$pr"; return
+    st=0; qa_loop "$n" "$pr" || st=$?
+    (( st == 0 )) || return "$st"
+    case "$STATE" in
+      needs-design|needs-ux) force=full; continue ;;
+    esac
+    return 0
   done
 
   echo "  #$n: hit step limit ($STEPS) — labels are cycling, look at it"
@@ -287,6 +431,9 @@ for id in "${ids[@]}"; do
   else
     STATE=""
     drive "$id" || echo "  #$id: aborted"
+    # is_epic() ran before triage did. An issue triage has just broken into
+    # sub-issues is an epic now, and drive() returns STATE=epic saying so.
+    [[ $STATE == epic ]] && drive_epic "$id" || true
   fi
 done
 

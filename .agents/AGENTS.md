@@ -6,8 +6,9 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 
 | file | role | trigger |
 |---|---|---|
-| `.agents/triage.md` | PM — writes specs, routes issues | new issue opened |
+| `.agents/triage.md` | PM — writes specs, routes issues | new issue opened; or `master.sh` reach an issue carrying no routing label and no triage spec comment |
 | `.agents/architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
+| `.agents/ux.md` | output-surface design — what the operator sees, and in what units | issue labeled `needs-ux` |
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved` |
@@ -66,10 +67,16 @@ Example trigger: label applied → run triage or developer agent.
 new issue
   └─ triage
        ├─ needs-design → architect → ready-to-implement
+       ├─ needs-ux     → ux        → ready-to-implement
        └─ ready-to-implement → developer → PR → qa → codex-qa → human merge
 
 ambiguous issue
   └─ triage applies needs-clarification → wait for reporter
+
+design wrong rather than code
+  └─ qa or developer applies needs-design / needs-ux ON THE ISSUE
+       └─ architect or ux revises its decision → ready-to-implement
+            └─ back to the same PR, re-reviewed in full
 ```
 
 PRs touching stimulus/drive (`set_drive`, arm/fire state machine, keepalive):
@@ -98,10 +105,11 @@ Always human-only:
 | label | set by | meaning |
 |---|---|---|
 | `needs-clarification` | triage | waiting on reporter |
-| `needs-design` | triage | architect must review |
+| `needs-design` | triage, **qa or developer** | architect must review — see the handback section |
+| `needs-ux` | triage, architect, **qa or developer** | output surface must be specified before implementation — see the handback section |
 | `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |
-| `ready-to-implement` | triage or architect | developer can pick up |
+| `ready-to-implement` | triage, architect or ux | developer can pick up |
 | `in-review` | developer (via PR) | PR open |
 | `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed** |
 | `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed |
@@ -150,6 +158,35 @@ here.
 Only a fresh Claude QA pass restores `claude-approved`, so a Codex-failed PR
 cannot re-enter the Codex queue until Claude QA has re-reviewed it. The queue
 predicate is the interlock — there is no separate mechanism to keep in sync.
+
+### the design handback — `needs-design` / `needs-ux` re-applied downstream
+
+These two labels normally flow one way: triage route, architect or ux decide,
+implementation follow. They also flow backward. qa or developer may find that
+the implementation does exactly what the spec says and the spec is wrong, and
+put the label back on the issue (`qa.md` step 5, `developer.md` hard
+constraints). `master.sh` route on that and re-drive architect or ux.
+
+Three constraints make it a loop that terminates rather than one that spins:
+
+- **The label go on the ISSUE, not the PR.** Architect and ux act on issues,
+  and the design comment belong where the spec is. On a PR the label is read by
+  nothing and cleared by nobody. The PR keep `needs-work`.
+- **A role that ran and left its own label is a stall, not a handback.** The
+  two look identical in a label set. What separate them is that a handback's
+  label was *cleared* in between — so the clearing is the evidence, and
+  `master.sh` observe it rather than inferring intent. A stall stop for a human;
+  a handback get another pass.
+- **Passes are capped** (`AC_DESIGN_PASSES`, `AC_UX_PASSES`, default 2 each).
+  An issue bouncing between design and implementation is not converging, and
+  the third lap is not the one that fix it.
+
+One consequence worth stating, because it is the reason the handback exists at
+all rather than being folded into `needs-work`: **an approval attach to a tip,
+but it also attach to a spec.** A design handback can leave the tip unchanged
+while invalidating the review of it, so the PR is re-reviewed in full — the
+delta-review path in `review.sh` would find no new commits and report nothing
+wrong, which is true about the diff and false about the PR.
 
 ### `blocked` and `blocks-others` are opposite relations
 

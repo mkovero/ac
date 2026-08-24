@@ -178,7 +178,15 @@ arrangement worthless while looking like it worked.
 - No reformat or style cleanup outside scope. `cargo fmt --check` must pass, but run `cargo fmt` only on files you edited.
 - No TODO comments. Implement it or open follow-up issue.
 - No commented-out code.
-- Issue ambiguous at implementation time → comment on issue, stop. Do not guess and implement wrong thing.
+- Issue ambiguous at implementation time → comment on issue, stop. Do not guess
+  and implement wrong thing. **Say which role can settle it, with the label:**
+  a boundary, wire-schema or estimator question is `needs-design`; a question
+  about what the operator sees — a value's unit, reference, format, or whether a
+  state needs a surface at all — is `needs-ux`. Apply that label on the **issue**
+  and stop. Anything else, or a genuine human decision, is `needs-discussion`.
+  Stopping without a label is stopping with nothing to route on: the issue sit
+  at `ready-to-implement` looking dispatchable, and the next run pick it up and
+  hit the same ambiguity.
 - **Pushing to a PR branch that carries `claude-approved` → remove
   `claude-approved` in the same action.** Applies to every push in every mode:
   the issue flow, codex-finding mode, a one-line fixup, a `cargo fmt` reflow.

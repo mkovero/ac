@@ -195,6 +195,16 @@ place is not the way to signal this: the label say *ux has not looked yet*, and
 after you looked it false. State the ambiguity in your open questions section
 and hand it over with `needs-discussion`.
 
+Issue reach you a second time with an open PR against it, because qa or
+developer decided the output surface is what is wrong → same job, but the
+implementation now exist and you can see what it actually print. Use it: paste
+the real current output into your before/after, not a reconstruction of it.
+Edit your existing design comment rather than adding a second — one per issue
+still hold — and mark what changed, so the developer can tell which part of the
+old proposal no longer stand. `ready-to-implement` here mean *revise that PR*,
+not *start again*; where your change invalidate a field already implemented, say
+that it comes out. Do not touch `needs-work` on the PR — qa own that.
+
 Issue also carry `needs-design` and architect not yet commented → remove
 `needs-ux` only. Do not apply `ready-to-implement`; architect step 4 own that
 transition, and applying it early let implementation start before boundary

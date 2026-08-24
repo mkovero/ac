@@ -117,6 +117,28 @@ the architect.
   Apply it alongside `ready-to-implement`, not instead of: ux specify the
   surface, it does not re-open the boundary you settled.
 
+### 5. re-entry — `needs-design` arrived from qa or developer
+
+An issue can reach you a second time, with an open PR against it, because qa or
+developer concluded the design is what is wrong. Same job, three differences:
+
+- **Read the PR before deciding.** The implementation is evidence about your
+  earlier decision that did not exist when you made it — usually the cheapest
+  evidence available. What the developer had to do to make the boundary work is
+  the finding.
+- **Edit your existing design comment, do not add a second one.** One design
+  comment per issue still hold. Mark what changed and why, so the developer can
+  see which part of the old decision no longer stand: a comment that reads as a
+  fresh decision leave them diffing two designs to find out what to do.
+- **Say what the open PR has to become.** `ready-to-implement` on an issue with
+  an open PR means *revise that PR*, not *start again*. Where your decision
+  invalidates work already on the branch, name what comes out — otherwise the
+  revision layer the new design on top of the old one and both ship.
+
+Labels as in step 4: remove `needs-design`, apply `ready-to-implement` when the
+decision is complete, `needs-discussion` when it is genuinely yours to escalate.
+Do not touch `needs-work` on the PR — qa own that.
+
 ## hard constraints
 - No implementation code. Implementation notes = orientation, not code.
 - Do not merge. Merge to main is a human gate.
