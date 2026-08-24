@@ -1104,8 +1104,9 @@ counterpart to pair it with) and
 Annex A.4.5, the gating method itself).
 
 `interface_latency` is the τ (interface round-trip latency) resolved for
-this capture — the field that lets an arrival be converted to a distance.
-It is a tagged union on `state`:
+this capture — the field that lets an arrival be converted to a
+τ-corrected flight time (milliseconds; #391 removed the further ms → m
+conversion this used to also unlock). It is a tagged union on `state`:
 
 ```json
 // τ measured under exactly these conditions (device, backend, sample
@@ -1118,7 +1119,7 @@ It is a tagged union on `state`:
 { "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
 ```
 
-A reader must not derive a distance from the arrival when `state` is
+A reader must not subtract τ from the arrival when `state` is
 `unavailable`: the arrival still contains the uncorrected interface
 latency, which at 48 kHz is routinely tens of samples of phantom path.
 
@@ -1845,25 +1846,8 @@ every other observable looking correct.
   "weighting":    "A" | "C" | "Z",     // optional, default "Z". Case-insensitive.
                                         // Strict 3-way — "off" is rejected
                                         // (unlike `set_band_weighting`'s 4-way enum).
-  "integration":  "fast" | "slow",     // optional, default "fast". Case-insensitive.
+  "integration":  "fast" | "slow"      // optional, default "fast". Case-insensitive.
                                         // "leq" is not implemented in M0 — rejected.
-
-  // Distance calibration (#243) — selects a stored per-pair constant for
-  // the delay readout's ms → m conversion. Absent (the default): every
-  // pair's `distance_cal` on the wire is `null` for the whole session, and
-  // the delay readout stays ms-only — the safe default, since the daemon
-  // has no way to know the setup is still the one a stored constant was
-  // captured under. Present but unresolvable for ANY requested pair (no
-  // `distance_cal_history` entry with a matching `(ref_channel, setup_id)`)
-  // refuses the whole request synchronously — `{"ok": false, "error":
-  // "..."}` naming the pair and the delta to the nearest stored entry —
-  // rather than launching a session that silently never finds one.
-  "distance_setup_id": "<string>",     // optional, no default
-  // Session-scoped plausibility ceiling for the same readout, in metres
-  // (#243). Operator-supplied, not derived — no default, since the daemon
-  // has no ground truth for the room. Absent disables the plausibility
-  // check entirely rather than guessing a room size.
-  "distance_plausible_max_m": <float>  // optional, no default
 }
 ```
 
@@ -1931,57 +1915,6 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // a digital loopback legitimately reads
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
-
-  // Additive (#243) — the speed of sound the delay readout's ms → m
-  // conversion must use, in m/s. Derived daemon-side from the configured
-  // room temperature (`config.temperature_c`) as 331.3 + 0.606·T, once at
-  // session start: a room does not change temperature mid-session, so
-  // every frame in a session carries the same constant.
-  //
-  // Shipped already derived rather than as a temperature, so a consumer
-  // holds one number instead of two that have to agree. Absent on a daemon
-  // predating #243, and consumers must default it to 343.0 — the constant
-  // the readout used unconditionally before, so absence reproduces the old
-  // behaviour rather than inventing a new one.
-  //
-  // Note what this alone does NOT license — corrected by #243. Even under
-  // the supported wiring (README.md, "Reference wiring"), the locked delay
-  // is NOT equal to the acoustic arrival: rig measurement showed a residual
-  // that survives the wiring doctrine, dominated by loudspeaker and
-  // microphone geometry rather than interface latency. Converting the whole
-  // locked delay with this constant alone over-reads a taped distance by up
-  // to 40%. `distance_cal` below is the field that reports (and lets a
-  // consumer subtract) that residual; `speed_of_sound_m_s` on its own only
-  // fixes the temperature-dependent part of the conversion, not the offset.
-  "speed_of_sound_m_s": <float>,         // e.g. 345.8 at 24 °C
-
-  // Additive (#243) — this pair's stored distance-calibration constant, or
-  // `null` when the session named no `distance_setup_id` or none was found
-  // for this `(ref_channel, setup_id)`. Consumers must not compute a
-  // metres figure from `delay_ms` when this is `null` — see `distance_m`
-  // in `ac-scene`'s `transfer` module for the one subtraction site.
-  //
-  // The constant is NOT interface latency, and must not be described or
-  // stored as one: rig measurement decomposed it into converter-channel
-  // asymmetry and acoustic centre + capsule offset, the latter dominating.
-  // It changes when the loudspeaker or mic moves, not only when the
-  // interface does — which is exactly why it is keyed on an operator-named
-  // `setup_id`, exact-match only, rather than applied by channel pair alone.
-  "distance_cal": {
-    "constant_ms":         <float>,      // subtract from delay_ms before the
-                                          // speed-of-sound conversion
-    "setup_id":            "<string>",   // the acoustic setup this was
-                                          // captured under
-    "captured_at":         "<RFC3339>",
-    "captured_distance_m": <float> | null // informational: taped distance
-                                          // at capture time
-  } | null,
-
-  // Additive (#243) — session-scoped plausibility ceiling for the delay
-  // readout's metres figure, in metres, echoing the request's
-  // `distance_plausible_max_m`. `null` when the session named none — the
-  // plausibility check does not run rather than guessing a room size.
-  "distance_plausible_max_m": <float> | null,
 
   // Additive (#238) — how many delay estimates this pair has completed,
   // accepted or refused. 0 before the first attempt, and absent entirely on

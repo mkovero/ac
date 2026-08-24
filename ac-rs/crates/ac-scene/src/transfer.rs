@@ -54,29 +54,11 @@ use ac_core::visualize::smoothing::{smooth_db, smooth_unwrapped_phase_deg};
 use crate::fault::{Fault, FaultFrame, FaultInput, FaultState};
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{db_to_y, freq_to_x, phase_to_y};
-use crate::wire::{MtwStage, WireDistanceCal, WireFrame};
+use crate::wire::{MtwStage, WireFrame};
 
 /// Columns below this coherence are masked out of both panes (D5 —
 /// fixed threshold, no tuning UI).
 pub const COHERENCE_THRESHOLD: f64 = 0.5;
-
-/// Speed of sound for the delay readout's metres conversion when the frame
-/// carries none — 343 m/s, the conventional 20 °C figure.
-///
-/// D2 originally fixed this "exactly 343 m/s, not a temperature-dependent
-/// estimate". #243 reverses that half of the decision: the rooms this
-/// instrument measures in run 24–26 °C, where c ≈ 346 m/s, and over 1 m the
-/// disagreement is larger than one sample at 96 kHz — so the constant was
-/// wrong by more than the estimator could resolve, which is the bar for
-/// whether a physical constant may be baked in at all. The speed is now a
-/// parameter, derived daemon-side from a configured room temperature and
-/// carried on [`WireFrame::speed_of_sound_m_s`].
-///
-/// This value survives as the fallback for a frame that names no speed —
-/// an older daemon, or a room whose temperature nobody recorded — where it
-/// reproduces the previous behaviour exactly rather than inventing one.
-pub const SPEED_OF_SOUND_DEFAULT_M_S: f64 =
-    ac_core::shared::conversions::SPEED_OF_SOUND_DEFAULT_M_S;
 
 /// Meter floor: −60 dBFS maps to a zero-height bar (§6).
 pub const METER_FLOOR_DBFS: f64 = -60.0;
@@ -240,197 +222,19 @@ pub fn derotate_deg(phase_wire_deg: f64, freq_hz: f64, tau_derot_ms: f64) -> f64
     wrap_deg(phase_wire_deg + 360.0 * freq_hz * tau_derot_ms / 1000.0)
 }
 
-/// The distance a locked delay corresponds to, in metres.
-///
-/// `constant_ms`, when given, is subtracted from `delay_ms` before the
-/// conversion — the delay this pair's lock includes that never travelled
-/// through air (converter/DUT latency, loudspeaker DSP, mic geometry). It
-/// comes from a stored [`DistanceCalibration`] (#243); `None` performs the
-/// pre-#243 conversion of the whole delay, unchanged.
-///
-/// Under the supported wiring both legs traverse the same converter, so
-/// everything ahead of the converter's analogue output is common-mode and
-/// cancels in the correlation, and what survives is only what the acoustic
-/// branch genuinely adds — amplifier, speaker DSP, driver origin, air,
-/// microphone. Rig measurement (#243) showed that residual is *not*
-/// converter latency alone — it is dominated by loudspeaker and microphone
-/// geometry — so it is a property of the pair's acoustic setup, not of the
-/// interface, and is looked up accordingly. See `README.md`'s "Reference
-/// wiring" for the topology this depends on, and what the readout means
-/// without it.
-pub fn distance_m(delay_ms: f64, speed_of_sound_m_s: f64, constant_ms: Option<f64>) -> f64 {
-    (delay_ms - constant_ms.unwrap_or(0.0)) / 1000.0 * speed_of_sound_m_s
-}
-
-/// The pre-#243 "`{ms} ms`" / "`{ms} ms  ({m} m)`" readout, unconditioned on
-/// a stored [`DistanceCalibration`] — kept for the two IR-panel marker call
-/// sites (`ir.rs`, `sweep_ir.rs`) whose delay is not this issue's
-/// per-`(meas_channel, ref_channel)` constant: the live `visualize/ir`
-/// sidecar carries no distance-calibration wire field yet, and the
-/// sweep-gate panel's `ArrivalDistance::Known` case (#283) already applies
-/// its own, unrelated τ correction before this is called. [`format_delay_readout`]
-/// is for [`crate::transfer::TransferScene`] alone; this is everything else
-/// that prints a delay-as-distance string.
-// `!(delay_ms >= 0.0)` rather than `delay_ms < 0.0` is the NaN-aware guard —
-// see `format_delay_readout`'s own copy of this comment.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-pub fn format_delay_readout_plain(
-    delay_ms: f64,
-    delay_locked: Option<bool>,
-    speed_of_sound_m_s: f64,
-) -> String {
-    if delay_locked != Some(true) || !(delay_ms >= 0.0) {
-        return format!("{delay_ms:.2} ms");
-    }
-    let metres = distance_m(delay_ms, speed_of_sound_m_s, None);
-    format!("{delay_ms:.2} ms  ({metres:.2} m)")
-}
-
-/// A pair's stored distance-calibration constant (#243), adapted from
-/// [`crate::wire::WireDistanceCal`] for [`format_delay_readout`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct DistanceCalibration {
-    /// The flight-time offset to subtract from `delay_ms` before the ms → m
-    /// conversion, in milliseconds.
-    pub constant_ms: f64,
-    /// The acoustic setup this constant was captured under — shown so a
-    /// figure read later can be told from an uncalibrated one, and so a
-    /// patched-in channel wearing someone else's calibration is visible.
-    pub setup_id: String,
-    /// RFC3339 timestamp of the capture. Only the date portion (up to a
-    /// `T`, if present) is shown.
-    pub captured_at: String,
-}
-
-impl DistanceCalibration {
-    fn captured_date(&self) -> &str {
-        self.captured_at
-            .split('T')
-            .next()
-            .unwrap_or(&self.captured_at)
-    }
-
-    fn from_wire(w: &WireDistanceCal) -> DistanceCalibration {
-        DistanceCalibration {
-            constant_ms: w.constant_ms,
-            setup_id: w.setup_id.clone(),
-            captured_at: w.captured_at.clone(),
-        }
-    }
-}
-
-/// Everything [`format_delay_readout`] produces: the primary reading, and
-/// two receding-weight lines that say whether it can be trusted (#243).
+/// Everything [`format_delay_readout`] produces.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DelayReadout {
-    /// `"4.08 ms"`, or `"4.08 ms    0.999 m"` when a stored calibration
-    /// earns a metres figure.
+    /// `"4.08 ms"`.
     pub delay_readout: String,
-    /// `"cal 2026-08-18 · mic1 · pair meas0↔ref3"` when calibrated, or
-    /// `"not calibrated — pair meas0↔ref3"` when locked but not. `None`
-    /// when the pair is not locked — nothing here has an opinion on a
-    /// delay the estimator has not produced.
-    pub delay_calibration: Option<String>,
-    /// Set only when a calibrated reading exceeds `plausible_max_m`. Own
-    /// line, not appended to the value, and never colour-only: a warning
-    /// piped to a log or read on a colour-disabled terminal must still say
-    /// what it says.
-    pub delay_warning: Option<String>,
 }
 
-/// Builds [`DelayReadout`] — or milliseconds alone when the delay is not a
-/// measured lock (#243).
-///
-/// `speed_of_sound_m_s` comes from [`WireFrame::speed_of_sound_m_s`],
-/// falling back to [`SPEED_OF_SOUND_DEFAULT_M_S`]. `distance_cal` comes from
-/// a stored [`DistanceCalibration`] for this `(meas_channel, ref_channel)`
-/// pair, or `None` when the session named no `distance_setup_id` or none was
-/// found. `plausible_max_m` is an operator-supplied sanity ceiling (#243's
-/// plausibility check); `None` disables the check rather than guessing a
-/// room size.
-///
-/// # Why the lock gates the metres and not the milliseconds
-///
-/// `delay_locked` follows [`WireFrame::delay_locked`]'s three-way meaning,
-/// and only `Some(true)` earns metres. Before a lock the frame's `delay_ms`
-/// is `0.0` — a placeholder, not a measurement — and the readout used to
-/// paint `"0.00 ms  (0.00 m)"` from it: a distance claim about a room,
-/// stated in the unit an operator acts on, derived from a delay the
-/// estimator had not yet produced. That is on screen for the first seconds
-/// of every session and for the whole of a refusing one.
-///
-/// Milliseconds stay because they are the frame's own field reported back
-/// unchanged, and `0.00 ms` alongside a `NO LOCK` indicator reads as the
-/// placeholder it is. Metres go because the conversion is an inference about
-/// physical space, and an inference from a placeholder is worse than
-/// silence. An unlocked pair is already named by [`crate::fault`]'s
-/// `NO LOCK` / `LOST LOCK` states, so nothing new has to say why — and for
-/// the same reason, no calibration line is shown either: the pair's
-/// calibration status is moot until it has a delay to apply it to.
-///
-/// # Metres require a stored constant, not just a lock (#243)
-///
-/// A locked pair with no `distance_cal` gets milliseconds only, plus a
-/// `"not calibrated"` line naming the pair. Converting the whole locked
-/// delay — converter/DUT latency, loudspeaker DSP, air, mic, as if it were
-/// flight time alone — is the defect #243 was filed on: it read 1.40 m at a
-/// taped 1.000 m, 40% high. A missing calibration is not defaulted to zero
-/// offset; it suppresses the metres figure entirely.
-///
-/// # The non-negative guard is dormant, deliberately
-///
-/// A negative delay would mean the microphone heard the source before the
-/// reference did, which is the sign-reversed misroute. It cannot arrive from
-/// today's estimator: `estimate_delay` searches `zero_idx..` and selects
-/// `direct_idx ∈ zero_idx..=peak_idx`, so a lock is causal by construction
-/// and that misroute surfaces as a refusal (`NO LOCK`) instead. The guard is
-/// here so the conversion is total rather than because the branch is live —
-/// the same standing [`crate::fault::Fault::LostLock`] has until #226 — and
-/// it is written and tested now so that relaxing the causal rule does not
-/// also have to invent the display state for what it lets through.
-// `!(delay_ms >= 0.0)` rather than `delay_ms < 0.0` is the NaN-aware guard,
-// as in `ticks::freq_axis` and `band_labels`: a NaN delay must take the
-// no-metres branch too, and `<` would let it through into `format!`.
-#[allow(clippy::neg_cmp_op_on_partial_ord)]
-pub fn format_delay_readout(
-    delay_ms: f64,
-    delay_locked: Option<bool>,
-    speed_of_sound_m_s: f64,
-    meas_channel: i64,
-    ref_channel: i64,
-    distance_cal: Option<&DistanceCalibration>,
-    plausible_max_m: Option<f64>,
-) -> DelayReadout {
-    if delay_locked != Some(true) || !(delay_ms >= 0.0) {
-        return DelayReadout {
-            delay_readout: format!("{delay_ms:.2} ms"),
-            delay_calibration: None,
-            delay_warning: None,
-        };
-    }
-    let pair_tag = format!("pair meas{meas_channel}↔ref{ref_channel}");
-    match distance_cal {
-        None => DelayReadout {
-            delay_readout: format!("{delay_ms:.2} ms"),
-            delay_calibration: Some(format!("not calibrated — {pair_tag}")),
-            delay_warning: None,
-        },
-        Some(cal) => {
-            let metres = distance_m(delay_ms, speed_of_sound_m_s, Some(cal.constant_ms));
-            let delay_warning = plausible_max_m.filter(|&max| metres > max).map(|_| {
-                "readout exceeds plausible bound for this pair — check wiring or re-calibrate"
-                    .to_string()
-            });
-            DelayReadout {
-                delay_readout: format!("{delay_ms:.2} ms    {metres:.3} m"),
-                delay_calibration: Some(format!(
-                    "cal {} · {} · {pair_tag}",
-                    cal.captured_date(),
-                    cal.setup_id
-                )),
-                delay_warning,
-            }
-        }
+/// Builds [`DelayReadout`] — milliseconds only (#391 removed the ms → m
+/// conversion this used to also produce, and the calibration/plausibility
+/// lines that came with it).
+pub fn format_delay_readout(delay_ms: f64) -> DelayReadout {
+    DelayReadout {
+        delay_readout: format!("{delay_ms:.2} ms"),
     }
 }
 
@@ -618,20 +422,8 @@ pub struct TransferScene {
     /// Degrees gridlines for the phase pane — `{+180, +90, 0, −90}`, with
     /// no −180 line (matches the trace's `(−180, +180]` wrap boundary).
     pub phase_axis: crate::ticks::Axis,
-    /// `"2.50 ms"`, or `"2.50 ms    0.860 m"` when a stored calibration
-    /// earns a metres figure (#243).
+    /// `"2.50 ms"` — τ_sess, milliseconds only (#391).
     pub delay_readout: String,
-    /// `"cal 2026-08-18 · mic1 · pair meas0↔ref3"` or `"not calibrated —
-    /// pair meas0↔ref3"` — which stored constant (if any) the metres figure
-    /// came from, so a figure read a year later can be told from an
-    /// uncalibrated one (#243). `None` while unlocked; see
-    /// [`format_delay_readout`].
-    pub delay_calibration: Option<String>,
-    /// Set only when a calibrated metres figure exceeds the session's
-    /// plausibility ceiling (#243) — the case this issue was filed on: a
-    /// readout larger than the true distance, positive and locked, which no
-    /// other guard here catches.
-    pub delay_warning: Option<String>,
     /// `"smoothing 1/6 octave"`, or `None` when the trace is unaltered
     /// (#229).
     ///
@@ -673,26 +465,13 @@ pub struct TransferInput {
     /// τ_sess, this session's frozen estimate.
     pub delay_ms: f64,
     /// Whether [`Self::delay_ms`] is a measured lock, with
-    /// [`WireFrame::delay_locked`]'s three-way meaning. Only `Some(true)`
-    /// earns a metres figure in the delay readout — see
-    /// [`format_delay_readout`].
+    /// [`WireFrame::delay_locked`]'s three-way meaning. Consumed by
+    /// [`crate::fault`], not by the delay readout itself (#391).
     pub delay_locked: Option<bool>,
-    /// Speed of sound for that conversion, in m/s. `None` falls back to
-    /// [`SPEED_OF_SOUND_DEFAULT_M_S`].
-    pub speed_of_sound_m_s: Option<f64>,
-    /// This pair's channel numbers, named in the delay readout's
-    /// calibration/warning lines (#243) — distinct from
-    /// [`Self::channel_role`], which is a display label, not a wire
-    /// identity.
+    /// This pair's channel numbers — distinct from [`Self::channel_role`],
+    /// which is a display label, not a wire identity.
     pub meas_channel: i64,
     pub ref_channel: i64,
-    /// This pair's stored distance-calibration constant (#243), or `None`
-    /// when the session named no `distance_setup_id` or none was found —
-    /// either way the delay readout's metres figure is not shown.
-    pub distance_cal: Option<DistanceCalibration>,
-    /// Session-scoped plausibility ceiling for the delay readout's metres
-    /// figure, in metres (#243). `None` disables the plausibility check.
-    pub distance_plausible_max_m: Option<f64>,
     pub meas_peak_dbfs: Option<f64>,
     pub ref_peak_dbfs: Option<f64>,
     pub channel_role: String,
@@ -771,14 +550,8 @@ impl TransferInput {
             coherence,
             delay_ms: frame.delay_ms,
             delay_locked: frame.delay_locked,
-            speed_of_sound_m_s: frame.speed_of_sound_m_s,
             meas_channel: frame.meas_channel,
             ref_channel: frame.ref_channel,
-            distance_cal: frame
-                .distance_cal
-                .as_ref()
-                .map(DistanceCalibration::from_wire),
-            distance_plausible_max_m: frame.distance_plausible_max_m,
             meas_peak_dbfs: frame.meas_peak_dbfs,
             ref_peak_dbfs: frame.ref_peak_dbfs,
             channel_role: format!("meas_{}", frame.meas_channel),
@@ -811,29 +584,15 @@ impl TransferInput {
             // A `PairDerivation` records no lock verdict — `derive_pair`
             // takes a `delay_samples` it is handed and asks no questions, so
             // a snapshot of a session that never locked carries the same
-            // `0` as one that did. `None` is the honest value, and it reads
-            // through `format_delay_readout` as milliseconds without metres:
-            // an offline derivation states the delay it was built with and
-            // makes no claim about the room it came from.
+            // `0` as one that did. `None` is the honest value: an offline
+            // derivation states the delay it was built with and makes no
+            // claim about whether it was a measured lock.
             delay_locked: None,
-            // A snapshot carries no room temperature either — it predates
-            // the field or was captured elsewhere — so the readout falls
-            // back to the conventional speed. Moot while the metres are
-            // gated off above, and set explicitly so it stays correct if a
-            // future snapshot format does record a lock.
-            speed_of_sound_m_s: None,
             // `PairDerivation` carries no wire channel identity — a
             // `channel_role` label is all the caller has (see above). `-1`
-            // is never a real channel number, and is moot regardless: with
-            // `delay_locked: None` above, `format_delay_readout` never
-            // reaches the branch that names a channel.
+            // is never a real channel number.
             meas_channel: -1,
             ref_channel: -1,
-            // A snapshot carries no distance calibration either — same
-            // reasoning as `speed_of_sound_m_s` above, and moot for the
-            // same reason.
-            distance_cal: None,
-            distance_plausible_max_m: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: channel_role.to_string(),
@@ -974,17 +733,7 @@ impl TransferScene {
             (Vec::new(), Vec::new())
         };
 
-        let delay = format_delay_readout(
-            input.delay_ms,
-            input.delay_locked,
-            input
-                .speed_of_sound_m_s
-                .unwrap_or(SPEED_OF_SOUND_DEFAULT_M_S),
-            input.meas_channel,
-            input.ref_channel,
-            input.distance_cal.as_ref(),
-            input.distance_plausible_max_m,
-        );
+        let delay = format_delay_readout(input.delay_ms);
 
         TransferScene {
             magnitude: Trace {
@@ -999,8 +748,6 @@ impl TransferScene {
             mag_axis: crate::ticks::db_axis(db_min, db_max),
             phase_axis: crate::ticks::phase_axis(),
             delay_readout: delay.delay_readout,
-            delay_calibration: delay.delay_calibration,
-            delay_warning: delay.delay_warning,
             smoothing_readout: modes.smoothing.label(),
             // Derived from the ladder alone, never from the frame's columns:
             // the same session yields the same labels on every frame, so
@@ -1201,11 +948,8 @@ mod tests {
                 coherence: vec![coh; 3],
                 delay_ms: 0.0,
                 delay_locked: Some(true),
-                speed_of_sound_m_s: None,
                 meas_channel: 0,
                 ref_channel: 1,
-                distance_cal: None,
-                distance_plausible_max_m: None,
                 meas_peak_dbfs: Some(-20.0),
                 ref_peak_dbfs: Some(-20.0),
                 channel_role: "meas_0".to_string(),
@@ -1288,270 +1032,17 @@ mod tests {
 
     /// A stored constant with no plausibility ceiling, at the issue's own
     /// rig figures (`work/rig/rig-243-343-results.md`, 2026-08-18).
-    fn dummy_distance_cal() -> DistanceCalibration {
-        DistanceCalibration {
-            constant_ms: 1.0615,
-            setup_id: "mic1".to_string(),
-            captured_at: "2026-08-18T11:35:14Z".to_string(),
-        }
-    }
+    // ─── delay readout — ms only (#391) ─────────────────────────────────
 
     #[test]
-    fn a_locked_delay_with_no_stored_constant_states_ms_only_and_says_why() {
-        // #243's core defect: converting the whole locked delay — including
-        // the part that never travelled through air — used to read
-        // "(0.86 m)" here unconditionally. With no stored constant for this
-        // pair, metres are withheld entirely rather than computed from a
-        // zero offset, and the readout says why.
-        let got = format_delay_readout(
-            2.5,
-            Some(true),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-            0,
-            3,
-            None,
-            None,
-        );
-        assert_eq!(got.delay_readout, "2.50 ms");
-        assert_eq!(
-            got.delay_calibration.as_deref(),
-            Some("not calibrated — pair meas0↔ref3")
-        );
-        assert_eq!(got.delay_warning, None);
-    }
-
-    #[test]
-    fn a_calibrated_delay_subtracts_the_constant_before_the_speed_conversion() {
-        // The issue's own motivating figures: 4.08 ms locked, 1.0615 ms of
-        // it not flight time, converted at the 26 \u{b0}C the rig ran
-        // (347.056 m/s) — not the 1.40 m the uncorrected 343 m/s path
-        // produces.
-        let c = ac_core::shared::conversions::speed_of_sound_at(26.0);
-        let cal = dummy_distance_cal();
-        let got = format_delay_readout(4.08, Some(true), c, 0, 3, Some(&cal), None);
-        let want_metres = (4.08 - 1.0615) / 1000.0 * c;
-        assert_eq!(got.delay_readout, format!("4.08 ms    {want_metres:.3} m"));
-        // Materially smaller than the uncorrected reading this issue was
-        // filed on.
-        assert!(
-            want_metres < 1.2,
-            "got {want_metres} m, expected well under the uncorrected 1.40 m"
-        );
-        assert_eq!(
-            got.delay_calibration.as_deref(),
-            Some("cal 2026-08-18 · mic1 · pair meas0↔ref3")
-        );
-    }
-
-    #[test]
-    fn the_room_temperature_still_moves_the_metres_once_calibrated() {
-        // #243's second error, preserved alongside the first: with the
-        // constant held at zero (isolating the temperature effect), the
-        // same 4.08 ms lock reads 1.40 m at the hardcoded 343 and 1.41 m at
-        // the 24 \u{b0}C the rig room ran.
-        let zero_cal = DistanceCalibration {
-            constant_ms: 0.0,
-            ..dummy_distance_cal()
-        };
-        let warm = ac_core::shared::conversions::speed_of_sound_at(24.0);
-        assert_eq!(
-            format_delay_readout(
-                4.08,
-                Some(true),
-                SPEED_OF_SOUND_DEFAULT_M_S,
-                0,
-                3,
-                Some(&zero_cal),
-                None
-            )
-            .delay_readout,
-            "4.08 ms    1.399 m"
-        );
-        assert_eq!(
-            format_delay_readout(4.08, Some(true), warm, 0, 3, Some(&zero_cal), None).delay_readout,
-            "4.08 ms    1.411 m"
-        );
-    }
-
-    #[test]
-    fn metres_need_a_lock() {
-        // The reachable defect: before a lock the frame's delay_ms is 0.0, a
-        // placeholder, and the readout used to convert it into "(0.00 m)" —
-        // a claim about the room from a delay the estimator had not made.
-        // No calibration line either: the pair's calibration status is moot
-        // until it has a delay to apply it to.
-        let cal = dummy_distance_cal();
-        for unlocked in [None, Some(false)] {
-            let got = format_delay_readout(
-                0.0,
-                unlocked,
-                SPEED_OF_SOUND_DEFAULT_M_S,
-                0,
-                3,
-                Some(&cal),
-                None,
-            );
-            assert_eq!(
-                got.delay_readout, "0.00 ms",
-                "an unlocked pair must not state a distance"
-            );
-            assert_eq!(got.delay_calibration, None);
-        }
-        // Milliseconds are still the frame's own field, reported unchanged.
-        assert_eq!(
-            format_delay_readout(
-                4.08,
-                Some(false),
-                SPEED_OF_SOUND_DEFAULT_M_S,
-                0,
-                3,
-                Some(&cal),
-                None
-            )
-            .delay_readout,
-            "4.08 ms"
-        );
-    }
-
-    #[test]
-    fn a_negative_or_nan_delay_states_no_distance() {
-        // Dormant against today's causal-only estimator — see
-        // `format_delay_readout`'s doc — so this is what keeps the branch
-        // honest rather than a claim that it fires.
-        let cal = dummy_distance_cal();
-        assert_eq!(
-            format_delay_readout(
-                -0.5,
-                Some(true),
-                SPEED_OF_SOUND_DEFAULT_M_S,
-                0,
-                3,
-                Some(&cal),
-                None
-            )
-            .delay_readout,
-            "-0.50 ms"
-        );
-        assert_eq!(
-            format_delay_readout(
-                f64::NAN,
-                Some(true),
-                SPEED_OF_SOUND_DEFAULT_M_S,
-                0,
-                3,
-                Some(&cal),
-                None
-            )
-            .delay_readout,
-            "NaN ms"
-        );
-    }
-
-    #[test]
-    fn a_readout_over_the_plausible_ceiling_warns() {
-        // The case this issue was filed on: a readout larger than the true
-        // distance, positive and locked. A floor or negative-delay guard is
-        // the wrong sign for this — only an explicit ceiling catches it.
-        let zero_cal = DistanceCalibration {
-            constant_ms: 0.0,
-            ..dummy_distance_cal()
-        };
-        let got = format_delay_readout(
-            4.08,
-            Some(true),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-            0,
-            3,
-            Some(&zero_cal),
-            Some(1.2), // taped at 1.0 m; the 1.40 m reading is implausible
-        );
-        assert_eq!(got.delay_readout, "4.08 ms    1.399 m");
-        assert_eq!(
-            got.delay_warning.as_deref(),
-            Some("readout exceeds plausible bound for this pair — check wiring or re-calibrate")
-        );
-    }
-
-    #[test]
-    fn a_readout_inside_the_plausible_ceiling_is_silent() {
-        let cal = dummy_distance_cal();
-        let c = ac_core::shared::conversions::speed_of_sound_at(26.0);
-        let got = format_delay_readout(4.08, Some(true), c, 0, 3, Some(&cal), Some(1.5));
-        assert_eq!(got.delay_warning, None);
-    }
-
-    #[test]
-    fn no_plausible_ceiling_disables_the_check() {
-        // No default — an unset ceiling must not guess a room size, so a
-        // grossly implausible reading is silent rather than refused.
-        let zero_cal = DistanceCalibration {
-            constant_ms: 0.0,
-            ..dummy_distance_cal()
-        };
-        let got = format_delay_readout(
-            4.08,
-            Some(true),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-            0,
-            3,
-            Some(&zero_cal),
-            None,
-        );
-        assert_eq!(got.delay_warning, None);
-    }
-
-    #[test]
-    fn a_stored_constant_from_one_setup_does_not_silently_apply_to_another() {
-        // This is a display-layer check, not a lookup — `format_delay_readout`
-        // takes whatever `Option<&DistanceCalibration>` its caller resolved,
-        // and the daemon-side exact-match-or-refuse lookup
-        // (`Calibration::distance_cal_for`) is what keeps a mismatched
-        // `setup_id` from ever reaching here as `Some`. What this asserts is
-        // the half of that guarantee visible at this layer: the calibration
-        // line always names the setup it actually used, so a reader can
-        // catch a wrong one on sight rather than trusting it silently.
-        let cal_a = DistanceCalibration {
-            setup_id: "mic1".to_string(),
-            ..dummy_distance_cal()
-        };
-        let cal_b = DistanceCalibration {
-            setup_id: "mic2-moved".to_string(),
-            ..dummy_distance_cal()
-        };
-        let got_a = format_delay_readout(
-            4.08,
-            Some(true),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-            0,
-            3,
-            Some(&cal_a),
-            None,
-        );
-        let got_b = format_delay_readout(
-            4.08,
-            Some(true),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-            0,
-            3,
-            Some(&cal_b),
-            None,
-        );
-        assert_ne!(got_a.delay_calibration, got_b.delay_calibration);
-        assert!(got_a.delay_calibration.unwrap().contains("mic1"));
-        assert!(got_b.delay_calibration.unwrap().contains("mic2-moved"));
-    }
-
-    #[test]
-    fn the_fallback_speed_is_the_pre_243_constant() {
-        // Not `speed_of_sound_at(20.0)` (343.42): a frame that names no
-        // speed must reproduce the old behaviour exactly, not a nearby
-        // derived value.
-        assert!((SPEED_OF_SOUND_DEFAULT_M_S - 343.0).abs() < 1e-12);
-        assert!(
-            (SPEED_OF_SOUND_DEFAULT_M_S - ac_core::shared::conversions::speed_of_sound_at(20.0))
-                .abs()
-                > 0.4
-        );
+    fn delay_readout_is_ms_only_regardless_of_lock_state() {
+        // #391 removed the ms → m conversion entirely — the readout is
+        // just the frame's own `delay_ms`, unconditioned on lock, sign, or
+        // any stored calibration (there is none left to store).
+        assert_eq!(format_delay_readout(2.5).delay_readout, "2.50 ms");
+        assert_eq!(format_delay_readout(0.0).delay_readout, "0.00 ms");
+        assert_eq!(format_delay_readout(-0.5).delay_readout, "-0.50 ms");
+        assert_eq!(format_delay_readout(f64::NAN).delay_readout, "NaN ms");
     }
 
     #[test]
@@ -1617,11 +1108,8 @@ mod tests {
             coherence: vec![0.9; 3],
             delay_ms: 0.0,
             delay_locked: Some(true),
-            speed_of_sound_m_s: None,
             meas_channel: 0,
             ref_channel: 1,
-            distance_cal: None,
-            distance_plausible_max_m: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: "meas_0".to_string(),
@@ -1671,11 +1159,8 @@ mod tests {
             coherence: vec![0.9, 0.9, 0.9, 0.9],
             delay_ms: 0.0,
             delay_locked: Some(true),
-            speed_of_sound_m_s: None,
             meas_channel: 0,
             ref_channel: 1,
-            distance_cal: None,
-            distance_plausible_max_m: None,
             meas_peak_dbfs: None,
             ref_peak_dbfs: None,
             channel_role: "meas_0".to_string(),

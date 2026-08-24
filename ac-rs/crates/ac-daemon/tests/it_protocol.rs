@@ -2036,24 +2036,22 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
         (used_tau - stored_tau).abs() < 1e-12,
         "plot_ir used τ {used_tau}, calibrate stored {stored_tau}"
     );
-    // The provenance the printed distance names must be present, not just
-    // the number.
+    // The τ provenance must be archived, not just the number.
     assert!(latency["measured_at"].is_string(), "{latency}");
     assert_eq!(latency["method"], json!("farina_short_ess_v2"), "{latency}");
 
     // With a τ this close to the arrival (both are the same 32-sample
-    // fake loopback), the derived path length must land near zero — the
-    // fake backend has no acoustic path. A τ that failed to subtract
-    // would read ~0.23 m instead.
+    // fake loopback), the τ-corrected flight time must land near zero —
+    // the fake backend has no acoustic path. A τ that failed to subtract
+    // would read ~0.67 ms instead (32 samples at 48 kHz).
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
-    match report.ir_arrival_distance() {
-        ac_core::measurement::report::ArrivalDistance::Known { distance_m, .. } => assert!(
-            distance_m.abs() < 0.05,
-            "fake loopback has no acoustic path, got {distance_m} m"
-        ),
-        other => panic!("expected a known distance, got {other:?}"),
-    }
+    let stats = report.ir_stats().expect("ir_stats");
+    let flight_ms = (stats.arrival_s - used_tau) * 1000.0;
+    assert!(
+        flight_ms.abs() < 0.15,
+        "fake loopback has no acoustic path, got {flight_ms} ms"
+    );
 }
 
 #[test]
@@ -2986,246 +2984,6 @@ fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
     assert!(
         spl.is_finite() && (0.0..=200.0).contains(&spl),
         "spl={spl} outside a plausible dB SPL range"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// distance calibration (#243) — the per-pair constant the delay readout's
-// ms -> m conversion is gated on.
-// ---------------------------------------------------------------------------
-
-/// Seed `cal.json` with a `distance_cal_history` entry for `out0_in0`,
-/// `ref_channel: 1`, `setup_id: "mic1"` — same shape as
-/// `get_and_list_calibrations_carry_tau_history`'s seed, minimal fields only.
-fn seed_distance_cal(d: &Daemon) {
-    let cal_path = d.home.join(".config").join("ac").join("cal.json");
-    let seeded = json!({
-        "out0_in0": {
-            "output_channel":                   0,
-            "input_channel":                    0,
-            "ref_freq":                         1000.0,
-            "vrms_at_0dbfs_out":                null,
-            "vrms_at_0dbfs_in":                 null,
-            "ref_dbfs":                         -10.0,
-            "mic_sensitivity_dbfs_at_94db_spl": null,
-            "mic_response":                     null,
-            "tau_history":                      [],
-            "distance_cal_history": [
-                {
-                    "ref_channel":         1,
-                    "setup_id":            "mic1",
-                    "constant_ms":         1.0615,
-                    "captured_at":         "2026-08-18T11:35:14Z",
-                    "captured_distance_m": 1.0
-                }
-            ]
-        }
-    });
-    fs::write(&cal_path, serde_json::to_vec_pretty(&seeded).unwrap()).expect("seed cal.json");
-}
-
-#[test]
-fn transfer_stream_distance_cal_reaches_the_frame_when_the_setup_id_matches() {
-    let d = Daemon::spawn();
-    seed_distance_cal(&d);
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
-        "distance_setup_id": "mic1", "distance_plausible_max_m": 5.0,
-    }));
-    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
-
-    let mut frame: Option<Value> = None;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as i32;
-        match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
-                frame = Some(v);
-                break;
-            }
-            Some(_) => continue,
-            None => break,
-        }
-    }
-    let _ = c.call(json!({"cmd": "stop"}));
-    let frame = frame.expect("no transfer_stream frame within 10 s");
-
-    assert_eq!(
-        frame["distance_cal"]["constant_ms"],
-        json!(1.0615),
-        "{frame}"
-    );
-    assert_eq!(frame["distance_cal"]["setup_id"], json!("mic1"), "{frame}");
-    assert_eq!(
-        frame["distance_cal"]["captured_at"],
-        json!("2026-08-18T11:35:14Z"),
-        "{frame}"
-    );
-    assert_eq!(frame["distance_plausible_max_m"], json!(5.0), "{frame}");
-}
-
-#[test]
-fn transfer_stream_omits_distance_cal_when_no_setup_id_is_requested() {
-    // A stored constant existing on disk must not be applied silently —
-    // the session has to name the setup id it wants. This is the "pair
-    // with no stored constant" acceptance test from the session's point
-    // of view: no request, no lookup, `distance_cal: null` regardless of
-    // what cal.json holds.
-    let d = Daemon::spawn();
-    seed_distance_cal(&d);
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
-    }));
-    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
-
-    let mut frame: Option<Value> = None;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as i32;
-        match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
-                frame = Some(v);
-                break;
-            }
-            Some(_) => continue,
-            None => break,
-        }
-    }
-    let _ = c.call(json!({"cmd": "stop"}));
-    let frame = frame.expect("no transfer_stream frame within 10 s");
-
-    assert_eq!(frame["distance_cal"], Value::Null, "{frame}");
-    assert_eq!(frame["distance_plausible_max_m"], Value::Null, "{frame}");
-}
-
-#[test]
-fn transfer_stream_refuses_an_unresolvable_distance_setup_id() {
-    // A `distance_setup_id` that does not match what's stored — wrong id,
-    // or none stored at all — must refuse the whole request synchronously
-    // rather than launching a session that silently never finds one.
-    let d = Daemon::spawn();
-    seed_distance_cal(&d); // stores "mic1" only
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
-        "distance_setup_id": "mic2-moved",
-    }));
-    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
-    let err = r["error"].as_str().expect("error string");
-    assert!(
-        err.contains("mic2-moved"),
-        "must name the requested id: {err}"
-    );
-    assert!(
-        err.contains("mic1"),
-        "must name the stored id it differs from: {err}"
-    );
-}
-
-#[test]
-fn transfer_stream_refuses_a_distance_setup_id_with_no_history_at_all() {
-    let d = Daemon::spawn();
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
-        "distance_setup_id": "mic1",
-    }));
-    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
-    assert!(
-        r["error"].as_str().unwrap_or_default().contains("mic1"),
-        "must name the requested id: {r:?}"
-    );
-}
-
-/// #373 — a self-pair (`meas_channel == ref_channel`) has no acoustic path
-/// and therefore can never have a distance calibration to resolve. A
-/// `distance_setup_id` naming that pair alongside a resolvable acoustic
-/// pair must accept the session — the rig's standing shape,
-/// `pairs = [[0,1],[1,1]]`, is the acoustic pair from `seed_distance_cal`
-/// carried next to the self-pair control channel.
-#[test]
-fn transfer_stream_accepts_self_pair_alongside_resolvable_acoustic_pair() {
-    let d = Daemon::spawn();
-    seed_distance_cal(&d); // out0_in0, ref_channel 1, setup_id "mic1"
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "pairs": [[0, 1], [1, 1]],
-        "distance_setup_id": "mic1",
-    }));
-    assert_eq!(r["ok"], json!(true), "REP: {r:?}");
-
-    let mut acoustic_frame: Option<Value> = None;
-    let mut self_frame: Option<Value> = None;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && (acoustic_frame.is_none() || self_frame.is_none()) {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as i32;
-        match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
-                match (v["meas_channel"].as_u64(), v["ref_channel"].as_u64()) {
-                    (Some(0), Some(1)) => acoustic_frame = Some(v),
-                    (Some(1), Some(1)) => self_frame = Some(v),
-                    _ => {}
-                }
-            }
-            Some(_) => continue,
-            None => break,
-        }
-    }
-    let _ = c.call(json!({"cmd": "stop"}));
-    let acoustic_frame = acoustic_frame.expect("no meas0/ref1 frame within 10 s");
-    let self_frame = self_frame.expect("no meas1/ref1 self-pair frame within 10 s");
-
-    // Independent per pair, in the same session: the acoustic pair carries
-    // the resolved constant, the self-pair carries null — one pair's
-    // resolution never leaks into or is borrowed by the other.
-    assert_eq!(
-        acoustic_frame["distance_cal"]["constant_ms"],
-        json!(1.0615),
-        "{acoustic_frame}"
-    );
-    assert_eq!(
-        self_frame["distance_cal"],
-        Value::Null,
-        "self-pair must carry no invented, borrowed, or nearest-matched \
-         constant: {self_frame}"
-    );
-}
-
-/// #373 — the self-pair exemption must not weaken the existing refusal
-/// discipline: a non-self pair that cannot resolve the requested setup id
-/// still refuses the whole request synchronously, self-pair present or not.
-#[test]
-fn transfer_stream_still_refuses_unresolvable_acoustic_pair_with_self_pair_present() {
-    let d = Daemon::spawn();
-    seed_distance_cal(&d); // stores "mic1" for ref_channel 1 only
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "transfer_stream", "pairs": [[0, 1], [1, 1]],
-        "distance_setup_id": "mic2-moved",
-    }));
-    assert_eq!(r["ok"], json!(false), "REP: {r:?}");
-    let err = r["error"].as_str().expect("error string");
-    assert!(
-        err.contains("meas0/ref1"),
-        "must name the acoustic pair that failed, not the self-pair: {err}"
-    );
-    assert!(
-        err.contains("mic2-moved") && err.contains("mic1"),
-        "must name the requested and stored ids: {err}"
     );
 }
 

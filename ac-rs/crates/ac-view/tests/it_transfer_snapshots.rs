@@ -22,28 +22,18 @@
 //!
 //! The committed `tests/snapshots/*.png` are also the human-viewable
 //! evidence attached to the PR: live transfer (masked gap, meters, delay
-//! readout, and — since #356's QA follow-up on #243 — a calibrated
-//! `delay_calibration`/`delay_warning` pair), the ARMED and DRIVING
-//! banners, and the ref-trace toggle on versus off.
+//! readout), the ARMED and DRIVING banners, and the ref-trace toggle on
+//! versus off.
 //!
 //! **Reference currency.** These references are only as current as the
 //! rig run that produced them — nothing re-checks them against `draw_view`
-//! automatically (#337). Last regenerated 2026-08-20 on 192.168.9.25 (RTX
-//! 2070), `issue-243` at `e0e9341` (PR #356), immediately followed by a
-//! plain (non-update) run in the same session per the acceptance check in
-//! #337. Only `transfer_ir_panel.png` came out byte-identical to the
-//! pre-regeneration commit (its readout is replaced by the IR panel, so
-//! #243's wording change never reaches its pixels); the other 4 files in
-//! this directory moved — 3 of them (`transfer_armed_banner.png`,
-//! `transfer_driving_banner.png`, `transfer_stored_comparison_no_live.png`)
-//! only for #243's ms-only wording change (none of them set a
-//! `distance_cal`), and `transfer_live_masked_gap.png` for both that and
-//! the two new calibration/warning rows it now exercises on purpose (see
-//! that test's own comment). See `TESTING.md` → "A3 snapshot reference
-//! currency" for the checklist a `draw_view`/pane change must satisfy
-//! before merge.
+//! automatically (#337). #391 removed the delay readout's ms → m
+//! conversion entirely (the calibration/warning rows #356 added on top of
+//! it went with it) — every reference in this directory needs
+//! regenerating on the real adapter (192.168.9.25) before this change
+//! merges; see `TESTING.md` → "A3 snapshot reference currency" for the
+//! checklist a `draw_view`/pane change must satisfy before merge.
 
-use ac_scene::transfer::DistanceCalibration;
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
     Smoothing, Source, TransferInput, TransferScene,
@@ -61,17 +51,7 @@ const SIZE: egui::Vec2 = egui::vec2(960.0, 420.0);
 
 /// Transfer scene over 24 columns with a coherence gap at 8..14 and a
 /// sloped magnitude, so the gap and the pane shapes are both visible.
-///
-/// `distance_cal`/`distance_plausible_max_m` are threaded through so
-/// [`snapshot_transfer_live_masked_gap`] can exercise the calibrated
-/// readout (#243's `delay_calibration`/`delay_warning` rows) while the
-/// other fixtures below keep the plain uncalibrated case they already
-/// covered — passing `(None, None)` reproduces the pre-existing scene
-/// exactly.
-fn transfer_scene(
-    distance_cal: Option<DistanceCalibration>,
-    distance_plausible_max_m: Option<f64>,
-) -> TransferScene {
+fn transfer_scene() -> TransferScene {
     let n = 24;
     let freqs: Vec<f64> = (0..n).map(|i| 40.0 * 1.3f64.powi(i as i32)).collect();
     let magnitude_db: Vec<f64> = (0..n).map(|i| -6.0 + (i as f64 - 12.0) * 0.8).collect();
@@ -88,19 +68,13 @@ fn transfer_scene(
         phase_deg,
         coherence,
         delay_ms: 2.5,
-        // Locked, no frame-supplied speed. With no stored distance
-        // calibration (the default `(None, None)` callers below) — #243
-        // changed this reference image's own readout from
-        // "2.50 ms  (0.86 m)" to ms-only plus a "not calibrated" line,
-        // since a metres figure with no per-pair constant is exactly the
-        // defect #243 fixes. See this file's module doc: references need
-        // regenerating on the real adapter after this change.
+        // Locked. #391 removed the ms → m conversion entirely, so this
+        // reference image's readout is ms-only — "2.50 ms". See this
+        // file's module doc: references need regenerating on the real
+        // adapter after this change.
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         meas_channel: 0,
         ref_channel: 1,
-        distance_cal,
-        distance_plausible_max_m,
         meas_peak_dbfs: Some(-6.0),
         ref_peak_dbfs: Some(-14.0),
         channel_role: "meas_0".to_string(),
@@ -148,7 +122,6 @@ fn ir_scene() -> IrScene {
         t_origin_ms,
         delay_ms: 10.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         channel_role: "meas_0".to_string(),
         source: Source::Live,
         sr: 48_000,
@@ -194,22 +167,7 @@ fn transfer_state(target: StimState) -> TransferViewState {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_live_masked_gap() {
-    // Calibrated and past its plausible ceiling on purpose (#356 QA
-    // follow-up on #243): with `constant_ms: 1.0615` the 2.5 ms lock
-    // corrects to ~0.49 m, and `distance_plausible_max_m: Some(0.3)` puts
-    // that over the bound — so this is the one reference PNG in this file
-    // that paints both new rows (`delay_calibration`, `delay_warning`)
-    // rather than leaving them absent, which is the human-viewable pixel
-    // evidence that the two extra rows fit under the meters/masked-gap
-    // pane without intruding on the plotted magnitude trace.
-    let scene = transfer_scene(
-        Some(DistanceCalibration {
-            constant_ms: 1.0615,
-            setup_id: "mic1".to_string(),
-            captured_at: "2026-08-18T11:35:14Z".to_string(),
-        }),
-        Some(0.3),
-    );
+    let scene = transfer_scene();
     let view = ViewKind::Transfer(transfer_state(StimState::Idle));
     let mut h = Harness::builder()
         .with_size(SIZE)
@@ -223,7 +181,7 @@ fn snapshot_transfer_live_masked_gap() {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_armed_banner() {
-    let scene = transfer_scene(None, None);
+    let scene = transfer_scene();
     let view = ViewKind::Transfer(transfer_state(StimState::Armed));
     let mut h = Harness::builder()
         .with_size(SIZE)
@@ -237,7 +195,7 @@ fn snapshot_transfer_armed_banner() {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_driving_banner() {
-    let scene = transfer_scene(None, None);
+    let scene = transfer_scene();
     let view = ViewKind::Transfer(transfer_state(StimState::Driving));
     let mut h = Harness::builder()
         .with_size(SIZE)
@@ -251,7 +209,7 @@ fn snapshot_transfer_driving_banner() {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_ir_panel() {
-    let transfer = transfer_scene(None, None);
+    let transfer = transfer_scene();
     let ir = ir_scene();
     let mut state = transfer_state(StimState::Idle);
     state.toggle_ir_panel();
@@ -277,8 +235,8 @@ fn snapshot_transfer_ir_panel() {
 #[test]
 #[ignore = "real-adapter only (wgpu); run on 192.168.9.25 per A3 policy"]
 fn snapshot_transfer_stored_comparison_no_live() {
-    let run_a = transfer_scene(None, None);
-    let run_b = transfer_scene(None, None);
+    let run_a = transfer_scene();
+    let run_b = transfer_scene();
     let mut state = TransferViewState::new(-10.0, -20.0);
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);
