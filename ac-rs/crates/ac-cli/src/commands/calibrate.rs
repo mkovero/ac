@@ -214,6 +214,16 @@ fn print_cal_leg(label: &str, data: &serde_json::Value, vrms_key: &str, state_ke
 /// readings agreed, and the two new disagreement states show both raw
 /// readings so an operator can see the evidence, not just the conclusion.
 fn print_tau_leg(data: &serde_json::Value) {
+    for line in render_tau_leg(data) {
+        println!("{line}");
+    }
+}
+
+/// Pure line-rendering core of [`print_tau_leg`]. Returns each output line
+/// so the mapping from `cal_done` JSON to text is unit-testable — split out
+/// for the same reason [`render_tau_history_leg`] is: a `println!`-only
+/// function cannot be asserted against without capturing stdout (#388 QA).
+fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
     let state = data.get("tau_state").and_then(|v| v.as_str()).unwrap_or("");
     let sample_rate = data.get("tau_sample_rate").and_then(|v| v.as_u64());
     let period_size = data.get("tau_period_size").and_then(|v| v.as_u64());
@@ -234,13 +244,13 @@ fn print_tau_leg(data: &serde_json::Value) {
                 } else {
                     String::new()
                 };
-                println!(
+                vec![format!(
                     "  {:<8}{:.4} ms   (measured, {agree}{conditions})",
                     "Delay:",
                     tau_s * 1000.0
-                );
+                )]
             }
-            None => println!("  {:<8}not measured", "Delay:"),
+            None => vec![format!("  {:<8}not measured", "Delay:")],
         },
         "error" => {
             // A real measurement failure with a loopback present — state
@@ -250,22 +260,20 @@ fn print_tau_leg(data: &serde_json::Value) {
                 .get("tau_error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("measurement failed");
-            println!("  {:<8}not measured ({msg})", "Delay:");
+            vec![format!("  {:<8}not measured ({msg})", "Delay:")]
         }
         "disagree_period_shift" | "disagree_other" => {
-            print_tau_disagreement_leg(state, data, sample_rate);
+            render_tau_disagreement_leg(state, data, sample_rate)
         }
-        "refused_xrun" => {
-            print_tau_xrun_leg(data);
-        }
+        "refused_xrun" => render_tau_xrun_leg(data),
         // "not_measured_no_loopback" and anything unrecognised (older
         // daemon without this field): state the observation, not an
         // inferred cause — `is_loopback` is what the daemon saw, not a
         // claim about physical wiring the instrument cannot verify.
-        _ => println!(
+        _ => vec![format!(
             "  {:<8}not measured (loopback not detected this run)",
             "Delay:"
-        ),
+        )],
     }
 }
 
@@ -275,7 +283,11 @@ fn print_tau_leg(data: &serde_json::Value) {
 /// Both raw readings are shown, not a compressed delta — the fractional
 /// part staying identical across a period-shift jump is the exact
 /// diagnostic clue #347's rig data uses to prove the fault is software.
-fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate: Option<u64>) {
+fn render_tau_disagreement_leg(
+    state: &str,
+    data: &serde_json::Value,
+    sample_rate: Option<u64>,
+) -> Vec<String> {
     let reading1_s = data.get("tau_reading1_s").and_then(|v| v.as_f64());
     let reading2_s = data.get("tau_reading2_s").and_then(|v| v.as_f64());
     let delta_samples = data.get("tau_delta_samples").and_then(|v| v.as_i64());
@@ -288,7 +300,7 @@ fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate
     } else {
         "2 readings disagree, not a period multiple".to_string()
     };
-    println!("  {:<8}not measured ({headline})", "Delay:");
+    let mut lines = vec![format!("  {:<8}not measured ({headline})", "Delay:")];
 
     if let (Some(sr), Some(r1), Some(r2), Some(delta)) =
         (sample_rate, reading1_s, reading2_s, delta_samples)
@@ -296,11 +308,12 @@ fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate
         let r1_samples = r1 * sr as f64;
         let r2_samples = r2 * sr as f64;
         let delta_ms = delta as f64 / sr as f64 * 1000.0;
-        println!(
+        lines.push(format!(
             "          {r1_samples:.3} samples \u{2192} {r2_samples:.3} samples  \
              (\u{394} {delta} samples = {delta_ms:.4} ms at {sr} Hz)"
-        );
+        ));
     }
+    lines
 }
 
 /// Render the #369 `refused_xrun` τ state: an xrun crossed one or both
@@ -309,7 +322,7 @@ fn print_tau_disagreement_leg(state: &str, data: &serde_json::Value, sample_rate
 /// xrun-first in the daemon). States which lifecycle and how many, never
 /// that τ itself is wrong — the instrument cannot know that, only that a
 /// dropout happened during the reading that was supposed to measure it.
-fn print_tau_xrun_leg(data: &serde_json::Value) {
+fn render_tau_xrun_leg(data: &serde_json::Value) -> Vec<String> {
     let r1 = data
         .get("tau_reading1_xruns")
         .and_then(|v| v.as_u64())
@@ -327,17 +340,22 @@ fn print_tau_xrun_leg(data: &serde_json::Value) {
         dirty.push("reading 2");
     }
     let which = dirty.join(", ");
-    println!(
+    let mut lines = vec![format!(
         "  {:<8}not measured (xrun during {which} — not stored)",
         "Delay:"
-    );
+    )];
 
     if r1 > 0 {
-        println!("  !! reading 1: {r1} xrun(s) during that lifecycle");
+        lines.push(format!(
+            "  !! reading 1: {r1} xrun(s) during that lifecycle"
+        ));
     }
     if r2 > 0 {
-        println!("  !! reading 2: {r2} xrun(s) during that lifecycle");
+        lines.push(format!(
+            "  !! reading 2: {r2} xrun(s) during that lifecycle"
+        ));
     }
+    lines
 }
 
 pub fn run_show(client: &mut AcClient) {
@@ -856,6 +874,68 @@ mod tests {
             "got {:?}",
             lines[0]
         );
+    }
+
+    // ─── live cal_done τ leg rendering — issue #388 QA gap ──────────────
+
+    #[test]
+    fn render_tau_leg_measured_prints_no_xrun_text() {
+        // Clean-path regression the #369 spec's own last AC asks for: zero
+        // xruns on both lifecycles must not leak xrun-shaped text into the
+        // ordinary "measured" render, even though the fields are present.
+        let data = serde_json::json!({
+            "tau_state": "measured",
+            "tau_s": 0.001,
+            "tau_sample_rate": 48_000,
+            "tau_agreement_count": 2,
+            "tau_reading1_xruns": 0,
+            "tau_reading2_xruns": 0,
+        });
+        let lines = render_tau_leg(&data);
+        assert!(lines.iter().all(|l| !l.contains("xrun")), "got {lines:?}");
+    }
+
+    #[test]
+    fn render_tau_xrun_leg_names_only_the_dirty_reading() {
+        let data = serde_json::json!({
+            "tau_state": "refused_xrun",
+            "tau_reading1_xruns": 0,
+            "tau_reading2_xruns": 1,
+        });
+        let lines = render_tau_xrun_leg(&data);
+        assert_eq!(
+            lines,
+            vec![
+                "  Delay:  not measured (xrun during reading 2 — not stored)".to_string(),
+                "  !! reading 2: 1 xrun(s) during that lifecycle".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_tau_xrun_leg_both_dirty_lists_both_lines_not_summed() {
+        let data = serde_json::json!({
+            "tau_state": "refused_xrun",
+            "tau_reading1_xruns": 2,
+            "tau_reading2_xruns": 1,
+        });
+        let lines = render_tau_xrun_leg(&data);
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        assert!(lines[1].contains("reading 1: 2 xrun"));
+        assert!(lines[2].contains("reading 2: 1 xrun"));
+    }
+
+    #[test]
+    fn render_tau_leg_dispatches_refused_xrun_through_render_tau_leg() {
+        // render_tau_leg's own dispatch, not just render_tau_xrun_leg in
+        // isolation — catches a wrong match arm the unit test above can't.
+        let data = serde_json::json!({
+            "tau_state": "refused_xrun",
+            "tau_reading1_xruns": 1,
+            "tau_reading2_xruns": 0,
+        });
+        let lines = render_tau_leg(&data);
+        assert_eq!(lines, render_tau_xrun_leg(&data));
     }
 
     #[test]

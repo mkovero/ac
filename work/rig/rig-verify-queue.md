@@ -336,6 +336,35 @@ channel, which is #204.
   > the ground truth; look at it directly rather than trusting this
   > description.
 
+- **#369/PR #388 — is "any xrun during a τ lifecycle" the right dirty
+  threshold?** QA on PR #388 (2026-08-24) tagged this `assumed`: the code
+  refuses and refuses to store τ whenever `AudioEngine::xruns()` reads above
+  0 during either of `measure_tau_twice`'s two lifecycles, but nothing in the
+  PR, the issue, or a prior comment shows that a single xrun during the
+  0.35 s sweep-plus-tail actually perturbs the deconvolved peak enough to
+  matter, as against not perturbing it at all and the gate being needlessly
+  strict.
+
+  Measurement: on the rig (`192.168.9.25`, jackd `-p 64 -n 2` at 96 kHz — the
+  configuration #369 was filed against), capture a `calibrate` τ reading
+  where a real, timed xrun is induced during one lifecycle's `measure_tau`
+  window (briefly starve the audio thread), and compare the resulting raw τ
+  against a clean-lifecycle reading taken immediately before/after under the
+  same acoustic path.
+
+  > **Falsifying value, either direction closes it.** If the xrun-crossed
+  > reading's τ lands within the tolerance `compare_tau_readings` already
+  > treats as agreement, a single real xrun does not reliably perturb the
+  > peak enough to be caught by the two-lifetime rule on its own — the
+  > "any nonzero count is dirty" threshold is not over-conservative in the
+  > way that would make `calibrate` needlessly refuse good readings, which
+  > supports the current bound. If it diverges by a wide, consistent margin
+  > instead, that supports the bound from the other direction. Either result
+  > is informative; no run currently exists.
+
+  **Not fixable from code alone — this entry documents the gap, it does not
+  close it.** The QA finding stands until this measurement runs.
+
 ---
 
 ## Before anything: the rig's own defects
