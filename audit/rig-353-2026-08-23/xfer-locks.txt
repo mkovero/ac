@@ -1,0 +1,23 @@
+# transfer_stream per-pair locks, 2026-08-23, 192.168.9.25
+# Six independent sessions (each re-estimates the warmup lock, #226), all
+# frames with delay_locked == true. Unlocked warmup frames excluded and
+# counted separately.
+#
+# routing reported by the daemon on session start:
+#   meas_port system:capture_1 (mic)   ref_port system:capture_4 (loopback)
+#   out_port  system:playback_5        pink on [system:playback_2, system:playback_5]
+#   pairs [[0,3],[3,3]]
+#
+# session          pair(0,3)  pair(3,3)  locked/total (pair 0,3)
+xfer-1m            392        0          475/475
+xfer-1m-r2         392        0          375/375
+xfer-1m-r3         392        0          375/375
+xfer-3m-r1         942        0          376/376
+xfer-3m-r2         942        0          356/376   (20 warmup frames, delay_locked false, delay 0)
+xfer-3m-r3         942        0          376/376
+
+# increment: 942 - 392 = 550 samples exactly, zero spread across three
+# independent locks at each position.
+# pair (3,3) is capture_4 correlated against itself: zero flight by
+# construction, and it read exactly 0 in every frame of every session --
+# the standing proof that playback/capture buffering is common-mode.
