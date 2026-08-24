@@ -473,16 +473,15 @@ scatter was `sd 0` across `n=3` fresh locks at each taped position in the
 sample resolution at that repeat count, and negligible next to any candidate
 estimator's `se`.
 
-> **Record not in this repo, 2026-08-24 (QA on #375's PR).** `rig-2026-08-23-onset-353-results.md`
-> and its raw logs `audit/rig-353-2026-08-23/` are cited here and in #378, but
-> neither is committed to `main` or any branch of this repo (`git log --all`
-> for both paths returns nothing). The n=12/n=3 table below is reproduced
-> verbatim from #375's and #378's issue-body text, not read from a file this
-> page's reader can open. If the session record lives elsewhere (rig-machine
-> `audit/`, not yet copied in per the "spec docs arrive by copy" convention),
-> cite that location here; if it needs committing, commit it alongside a fix
-> to this flag. Until then this table is load-bearing on an uncommitted
-> record.
+> **Record committed, 2026-08-24 (this PR, in response to QA on #375's PR).**
+> `work/rig/rig-2026-08-23-onset-353-results.md` and its raw logs
+> `audit/rig-353-2026-08-23/` (`ir-1m.log`, `ir-3m.log`, `ladder-3m.log`,
+> `xfer-locks.txt`) were on disk from the 2026-08-23 session but had never
+> been committed — QA's `git log --all` correctly found nothing. Both are now
+> in this tree; the n=12/n=3 table below is read from the committed file, not
+> reproduced from issue-body prose. `xfer-locks.txt` shows the raw per-session
+> `transfer_stream` locks (392/942 samples, zero spread across 3 fresh locks
+> each) that the 550.00-sample increment above sums to.
 
 **This bar assumes `se(Δt_est)` is estimated from n=12 captures at each of the
 two taped positions**, per the 2026-08-23 session table (also quoted in #378):
