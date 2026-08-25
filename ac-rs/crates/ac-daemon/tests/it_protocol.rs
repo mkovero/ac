@@ -232,6 +232,106 @@ fn status_replies_ok() {
     assert_eq!(r["listen_mode"], json!("local"));
 }
 
+/// #385: `status` carries the identity fields a client needs to tell this
+/// daemon apart from one squatting the same hardcoded ports under a
+/// different `HOME`.
+#[test]
+fn status_reports_daemon_identity() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"status"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(
+        r["home"],
+        json!(d.home.display().to_string()),
+        "home must be the daemon's own $HOME: {r}"
+    );
+    assert_eq!(
+        r["pid"],
+        json!(d.child.id()),
+        "pid must be this daemon process's own pid: {r}"
+    );
+    assert_eq!(
+        r["spawn_mode"],
+        json!("manual"),
+        "Daemon::spawn never passes --auto-spawned: {r}"
+    );
+    let config_path = r["config_path"].as_str().expect("config_path string");
+    assert!(
+        config_path.ends_with("config.json"),
+        "config_path: {config_path}"
+    );
+    assert!(
+        config_path.starts_with(&d.home.display().to_string()),
+        "config_path should be under the daemon's HOME: {config_path}"
+    );
+    let started_at = r["started_at"].as_str().expect("started_at string");
+    assert!(
+        started_at.ends_with('Z'),
+        "started_at should be RFC3339 Zulu: {started_at}"
+    );
+}
+
+/// #385: `server_connections` carries the same identity fields as `status`.
+#[test]
+fn server_connections_reports_daemon_identity() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"server_connections"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["home"], json!(d.home.display().to_string()));
+    assert_eq!(r["pid"], json!(d.child.id()));
+    assert_eq!(r["spawn_mode"], json!("manual"));
+}
+
+/// #385: a second daemon that loses the bind race must report the
+/// incumbent's identity to stderr rather than fail silently or guess.
+#[test]
+fn second_daemon_on_taken_port_reports_incumbent_identity() {
+    let d = Daemon::spawn();
+
+    let home2 = alloc_home();
+    let stderr_path = home2.join("daemon2.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture");
+    let mut second = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+        .env("HOME", &home2)
+        .args([
+            "--fake-audio",
+            "--local",
+            "--ctrl-port",
+            &d.ctrl_port.to_string(),
+            "--data-port",
+            &d.data_port.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn second ac-daemon");
+
+    let status = second.wait().expect("wait for second daemon to exit");
+    assert!(
+        !status.success(),
+        "a daemon on an already-bound port must exit non-zero"
+    );
+
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        stderr.contains("existing listener"),
+        "expected the incumbent's identity in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&d.home.display().to_string()),
+        "expected the incumbent's home in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("manual"),
+        "expected the incumbent's spawn_mode (manual) in stderr, got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&home2);
+}
+
 #[test]
 fn unknown_command_rejected() {
     let d = Daemon::spawn();

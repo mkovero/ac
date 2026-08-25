@@ -52,13 +52,56 @@ fn daemon_mtime() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn ensure_server(client: &mut AcClient, host: &str) {
+/// Caller's own `$HOME`, with the same fallback `ac-daemon` uses for its
+/// identity field (#385) — degrade to `"."` rather than treat an unset
+/// `$HOME` as a mismatch against every daemon.
+fn my_home() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+}
+
+/// If `reply` (a `status`/`server_connections`-shaped ok reply) carries a
+/// `home` field that differs from the caller's own `$HOME`, format the
+/// mismatch warning (ux spec Frame 2). `None` when the reply carries no
+/// `home` at all (an older daemon, pre-#385 — nothing to compare) or when
+/// the two match.
+fn mismatch_warning(reply: &serde_json::Value, host: &str, ctrl_port: u16) -> Option<String> {
+    let daemon_home = reply.get("home").and_then(|v| v.as_str())?;
+    let this_home = my_home();
+    if daemon_home == this_home {
+        return None;
+    }
+    let pid = reply.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+    let spawn_label = match reply.get("spawn_mode").and_then(|v| v.as_str()) {
+        Some("auto") => "auto-spawned",
+        Some("manual") => "manual",
+        _ => "?",
+    };
+    let started_at = reply
+        .get("started_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    Some(format!(
+        "  warning: daemon at {host}:{ctrl_port} belongs to a different HOME\n    \
+         daemon:  {daemon_home}  (pid {pid}, {spawn_label} {started_at})\n    \
+         this ac: {this_home}"
+    ))
+}
+
+pub fn ensure_server(client: &mut AcClient, host: &str, ctrl_port: u16) {
     let is_local = matches!(host, "localhost" | "127.0.0.1" | "::1");
 
     let status = client.send_cmd(&serde_json::json!({"cmd": "status"}), Some(1500));
 
     if let Some(reply) = &status {
         if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            // Gate BOTH what follows: the silent-proceed fallthrough below,
+            // and the stale-`src_mtime` auto-`quit`+respawn branch inside
+            // the `is_local` arm — `quit` must never fire against a `home`
+            // that isn't the caller's own (#385).
+            if let Some(warning) = mismatch_warning(reply, host, ctrl_port) {
+                eprintln!("{warning}");
+                std::process::exit(1);
+            }
             if is_local {
                 let server_mtime = reply
                     .get("src_mtime")
@@ -98,7 +141,7 @@ fn spawn_daemon() {
     };
     eprintln!("  starting daemon: {}", bin.display());
     let mut cmd = Command::new(&bin);
-    cmd.arg("--local");
+    cmd.arg("--local").arg("--auto-spawned");
     // Carry the client's port override (see `main::port_override`) into
     // the daemon we start. Without this the override would move the
     // client and leave an auto-spawned daemon on 5556/5557, so the two

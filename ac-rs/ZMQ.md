@@ -486,9 +486,19 @@ Returns server health and current state.
   "running_cmd":    "<name>" | null,
   "src_mtime":      <float>,          // max mtime of server source files
   "listen_mode":    "local" | "public",
-  "server_enabled": <bool>
+  "server_enabled": <bool>,
+  "home":           "<path>",         // this process's $HOME ("." if unset) — #385
+  "config_path":    "<path>",         // config.json path in use
+  "pid":            <int>,
+  "started_at":     "<RFC3339>",      // UTC, second precision — process start
+  "spawn_mode":     "auto" | "manual" // "auto" = started via ac-cli's spawn_daemon()
 }
 ```
+
+`home`/`config_path`/`pid`/`started_at`/`spawn_mode` (#385) let a client tell
+this daemon apart from another one squatting the same hardcoded 5556/5557
+ports under a different `HOME` — e.g. a leftover auto-spawn from an isolated
+test/rig run. Additive fields; a client that doesn't read them is unaffected.
 
 ---
 
@@ -1779,7 +1789,12 @@ Returns current listen mode and connected client endpoints.
   "ctrl_endpoint": "tcp://127.0.0.1:5556",
   "data_endpoint": "tcp://127.0.0.1:5557",
   "clients":       ["<endpoint>", ...],
-  "workers":       ["<cmd-name>", ...]
+  "workers":       ["<cmd-name>", ...],
+  "home":          "<path>",          // same identity fields as `status` — #385
+  "config_path":   "<path>",
+  "pid":           <int>,
+  "started_at":    "<RFC3339>",
+  "spawn_mode":    "auto" | "manual"
 }
 ```
 
