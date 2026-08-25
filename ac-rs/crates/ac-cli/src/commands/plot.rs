@@ -1,4 +1,4 @@
-use super::{check_ack, get_cal, level_to_dbfs};
+use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp, print_level_clamp_range};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -49,6 +49,11 @@ pub fn run(
         cmd_json["bpo"] = serde_json::json!(b);
     }
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot");
+    let applied_db = ack
+        .get("level_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(level_db);
+    print_level_clamp(level_db, applied_db);
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -115,6 +120,15 @@ pub fn run_level(
         ),
         "plot_level",
     );
+    let start_applied = ack
+        .get("start_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(start_db);
+    let stop_applied = ack
+        .get("stop_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(stop_db);
+    print_level_clamp_range(start_db, stop_db, start_applied, stop_applied);
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -206,6 +220,11 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
+    let applied_db = ack
+        .get("level_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(level_db);
+    print_level_clamp(level_db, applied_db);
     if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
         println!("  Output: {p}");
     }
