@@ -178,6 +178,55 @@ pub fn level_to_dbfs(level: &LevelSpec, cal: Option<&serde_json::Value>) -> f64 
     }
 }
 
+/// #380: print the "level clamped to ceiling" line for a scalar level
+/// command (`plot`, `plot_ir`, `generate`, `generate_pink`,
+/// `sweep_frequency`, `calibrate`) once the applied value is read back from
+/// the sync ack (#360's server-side `drive_max_dbfs` clamp). No-op when
+/// `applied_dbfs == requested_dbfs`, so the unclamped path's output stays
+/// byte-for-byte identical to before #360 — the acceptance criterion this
+/// exists to satisfy, not an incidental property.
+pub fn print_level_clamp(requested_dbfs: f64, applied_dbfs: f64) {
+    if applied_dbfs != requested_dbfs {
+        println!(
+            "  level clamped to ceiling  {requested_dbfs:.1} dBFS \u{2192} {applied_dbfs:.1} dBFS  (drive_max_dbfs)"
+        );
+    }
+}
+
+/// Range form (`plot_level`, `sweep_level`): reports requested and applied
+/// bounds on their own lines, per #360's UX mockup, and calls out the
+/// degenerate case — the whole requested range sits above the ceiling and
+/// collapses to one flat level — rather than letting it print as an
+/// ordinary sweep (the exact case #360's UX comment designed the
+/// `(flat — ...)` annotation for).
+pub fn print_level_clamp_range(
+    requested_start: f64,
+    requested_stop: f64,
+    applied_start: f64,
+    applied_stop: f64,
+) {
+    if applied_start == requested_start && applied_stop == requested_stop {
+        return;
+    }
+    // Whichever bound actually moved is the ceiling — the clamp is
+    // `.min(ceiling)` per-bound, so an unmoved bound tells us nothing about
+    // it. When both moved they're equal, so either arm gives the same value.
+    let ceiling = if applied_start != requested_start {
+        applied_start
+    } else {
+        applied_stop
+    };
+    println!("  level clamped to ceiling  (drive_max_dbfs {ceiling:.1} dBFS)");
+    println!("  requested  {requested_start:.1} \u{2192} {requested_stop:.1} dBFS");
+    if applied_start == applied_stop {
+        println!(
+            "  applied    {applied_start:.1} dBFS  (flat \u{2014} entire requested range exceeds ceiling)"
+        );
+    } else {
+        println!("  applied    {applied_start:.1} \u{2192} {applied_stop:.1} dBFS");
+    }
+}
+
 pub fn get_cal(client: &mut AcClient) -> Option<serde_json::Value> {
     let reply = client.send_cmd(&serde_json::json!({"cmd": "get_calibration"}), None)?;
     if reply.get("found").and_then(|v| v.as_bool()) == Some(true) {
