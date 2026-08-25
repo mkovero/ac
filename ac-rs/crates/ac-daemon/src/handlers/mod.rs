@@ -839,9 +839,11 @@ mod resolve_output_by_channel_tests {
     /// exactly the defect (#358).
     #[test]
     fn explicit_channel_differing_from_default_ignores_default_sticky_port() {
-        let mut cfg = Config::default();
-        cfg.output_channel = 4;
-        cfg.output_port = Some("fake:playback_9".to_string());
+        let cfg = Config {
+            output_channel: 4,
+            output_port: Some("fake:playback_9".to_string()),
+            ..Default::default()
+        };
         let state = fake_state();
 
         let port = resolve_output_by_channel(&cfg, &state, 1)
@@ -859,9 +861,11 @@ mod resolve_output_by_channel_tests {
     /// channel than the configured default.
     #[test]
     fn explicit_channel_matching_default_still_uses_sticky_port() {
-        let mut cfg = Config::default();
-        cfg.output_channel = 1;
-        cfg.output_port = Some("fake:playback_9".to_string());
+        let cfg = Config {
+            output_channel: 1,
+            output_port: Some("fake:playback_9".to_string()),
+            ..Default::default()
+        };
         let state = fake_state();
 
         let port = resolve_output_by_channel(&cfg, &state, 1).expect("channel 1 configured");
