@@ -202,7 +202,18 @@ pub fn run(
         return Err(e).with_context(|| format!("bind CTRL tcp://{bind_host}:{ctrl_port}"));
     }
     if let Err(e) = data.bind(&format!("tcp://{bind_host}:{data_port}")) {
-        report_bind_conflict(ctrl_port);
+        // Not `report_bind_conflict(ctrl_port)`: CTRL already bound *in this
+        // process* two lines above, so probing `ctrl_port` here would reach
+        // our own not-yet-serving REP socket and time out — misreporting a
+        // self-probe timeout as "could not identify existing listener" when
+        // no incumbent was ever queried. DATA is a PUB socket with no
+        // `status` responder, so whoever holds `data_port` genuinely can't
+        // be identified this way; say why instead of sounding like a failed
+        // probe (#385 / PR #396 QA correctness #2).
+        eprintln!(
+            "ac-daemon: DATA port already in use — cannot identify the \
+             existing listener (PUB sockets don't answer status queries)"
+        );
         return Err(e).with_context(|| format!("bind DATA tcp://{bind_host}:{data_port}"));
     }
 
@@ -384,11 +395,17 @@ pub fn run(
     Ok(())
 }
 
-/// On a CTRL/DATA bind failure (port already in use), probe whatever is
-/// already listening on `ctrl_port` via a short-lived `status` request and
-/// print its identity to stderr before this process gives up — or admit we
-/// couldn't identify it, rather than guessing (#385). 500 ms timeout,
-/// matching `ac-cli/src/spawn.rs`'s `wait_for_server` per-attempt timeout.
+/// On a CTRL bind failure (port already in use), probe whatever is already
+/// listening on `ctrl_port` via a short-lived `status` request and print its
+/// identity to stderr before this process gives up — or admit we couldn't
+/// identify it, rather than guessing (#385). 500 ms timeout, matching
+/// `ac-cli/src/spawn.rs`'s `wait_for_server` per-attempt timeout.
+///
+/// Not called on a DATA-only bind failure: at that point CTRL has already
+/// bound successfully in this process, so probing `ctrl_port` would reach
+/// our own socket, not an incumbent's — see the DATA-bind-failure arm in
+/// `run()` for the honest message used there instead (#396 QA correctness
+/// #2).
 fn report_bind_conflict(ctrl_port: u16) {
     let cant_identify = || {
         eprintln!("ac-daemon: could not identify existing listener (no response to status query)");

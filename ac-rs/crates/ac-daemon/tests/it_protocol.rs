@@ -332,6 +332,59 @@ fn second_daemon_on_taken_port_reports_incumbent_identity() {
     let _ = fs::remove_dir_all(&home2);
 }
 
+/// #385 / PR #396 QA correctness #2: a DATA-port-only conflict (CTRL binds
+/// fine in this process, but the DATA port belongs to someone else) must
+/// not misreport itself as "could not identify existing listener" — that
+/// message is honest only when a probe was actually attempted and got no
+/// answer. Here no probe is attempted at all: CTRL already bound in *this*
+/// process, so a `ctrl_port` probe would reach our own not-yet-serving
+/// socket rather than the incumbent, and DATA is a PUB socket with no
+/// `status` responder to query in the first place. The message must say
+/// that, not sound like a failed probe.
+#[test]
+fn data_port_conflict_does_not_misreport_self_as_unidentified_incumbent() {
+    let d = Daemon::spawn();
+
+    let (free_ctrl, _unused_data) = alloc_ports();
+    let home2 = alloc_home();
+    let stderr_path = home2.join("daemon2.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture");
+    let mut second = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+        .env("HOME", &home2)
+        .args([
+            "--fake-audio",
+            "--local",
+            "--ctrl-port",
+            &free_ctrl.to_string(),
+            "--data-port",
+            &d.data_port.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn second ac-daemon");
+
+    let status = second.wait().expect("wait for second daemon to exit");
+    assert!(
+        !status.success(),
+        "a daemon on an already-bound DATA port must exit non-zero"
+    );
+
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        !stderr.contains("could not identify existing listener"),
+        "a DATA-only conflict never probes anyone, so it must not use the \
+         failed-probe wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("DATA port already in use"),
+        "expected an honest DATA-conflict message, got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&home2);
+}
+
 #[test]
 fn unknown_command_rejected() {
     let d = Daemon::spawn();

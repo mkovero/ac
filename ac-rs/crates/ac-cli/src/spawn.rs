@@ -94,15 +94,20 @@ pub fn ensure_server(client: &mut AcClient, host: &str, ctrl_port: u16) {
 
     if let Some(reply) = &status {
         if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-            // Gate BOTH what follows: the silent-proceed fallthrough below,
-            // and the stale-`src_mtime` auto-`quit`+respawn branch inside
-            // the `is_local` arm — `quit` must never fire against a `home`
-            // that isn't the caller's own (#385).
-            if let Some(warning) = mismatch_warning(reply, host, ctrl_port) {
-                eprintln!("{warning}");
-                std::process::exit(1);
-            }
             if is_local {
+                // Gate BOTH what follows in this arm: the silent-proceed
+                // fallthrough below, and the stale-`src_mtime` auto-`quit`
+                // +respawn branch — `quit` must never fire against a `home`
+                // that isn't the caller's own (#385). Scoped to `is_local`:
+                // a remote host (`ac server <ip>` / `cfg.server_host`) is
+                // *expected* to report a different `$HOME` — that's a
+                // different machine, not a squatting signal, and comparing
+                // it here regressed the shipped remote-daemon workflow
+                // (architect revision on #385, re-entry from PR #396 QA).
+                if let Some(warning) = mismatch_warning(reply, host, ctrl_port) {
+                    eprintln!("{warning}");
+                    std::process::exit(1);
+                }
                 let server_mtime = reply
                     .get("src_mtime")
                     .and_then(|v| v.as_f64())
