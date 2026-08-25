@@ -63,22 +63,19 @@ that trips over it.
 Read full triage spec comment + architect comment (if present).
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
-Locating code → repowise first: `get_context` on the files you expect to
-touch, then `get_risk` on that list to surface co-change partners you did not
-expect. Build the step-1 file list from the graph rather than from
-Grep-and-read exploration — that exploration is the expensive part of this
-step, and the graph already holds the answer.
+Locating code → `Glob` and `Grep` to find candidates, `Read` to confirm. Shell
+readers and searchers (`cat`, `grep`, `find`) denied by
+`.claude/settings.json`; do not work around them. Check the deny list rather
+than this sentence for the current set — it is the authority and it changes.
 
-`Glob`, `Grep` and `Read` remain the fallback, and remain what you use when
-repowise is unavailable or its index is behind HEAD. Shell readers and
-searchers (`cat`, `grep`, `find`) denied by `.claude/settings.json`; do not
-work around them. Check the deny list rather than this sentence for the
-current set — it is the authority and it changes.
+Start from the spec's own "files likely affected" line and the module map
+above, not from a whole-tree sweep. Where a change plausibly crosses a crate
+boundary — anything touching the daemon's published frame — `ac-rs/ZMQ.md`
+names the consumers, which is cheaper than discovering them by search.
 
-Both are locators. A repowise result puts a file on your list; it does not tell
-you what the file does. `get_risk` naming a co-change partner is a reason to
-open that file, and — like a `Grep` hit — not a licence to widen scope past
-what the spec justifies. See `AGENTS.md`'s repowise rule.
+A search hit is a locator. It puts a file on your list; it does not tell you
+what the file does, and it is not a licence to widen scope past what the spec
+justifies. See `AGENTS.md`'s verified-read rule.
 
 ### step 2 — branch
 ```bash
@@ -97,16 +94,17 @@ Broken or unclear thing outside issue scope:
 
 ### step 4 — verify
 ```bash
-repowise distill cargo test    # paste summary in PR body
-repowise distill cargo clippy -- -D warnings   # must be zero new warnings
-cargo fmt --check              # must pass
+cargo test --workspace 2>&1 | tail -20   # paste summary in PR body
+cargo clippy -- -D warnings 2>&1 | tail -20   # must be zero new warnings
+cargo fmt --check                        # must pass
 ```
 
-`repowise distill` preserves the exit code and puts errors first; omitted
-output is recoverable via `repowise expand <ref>` — never re-run the command to
-see it. Plain `cargo test 2>&1 | tail -20` remains correct if distill is
-unavailable. This is command output, not a file read, so nothing in
-`AGENTS.md`'s repowise rule applies to it.
+Pipe through `tail` rather than reading the whole output: a green run's body is
+noise, and a red one puts its failures at the end. Never re-run a command
+merely to see output you truncated — the failing test name is enough to re-run
+that one test. Any local wrapper that compacts command output is fine to use if
+you have one; this is command stdout, not a file read, so `AGENTS.md`'s
+verified-read rule does not apply to it.
 
 Check fails → fix before opening PR. No PRs with failing tests.
 

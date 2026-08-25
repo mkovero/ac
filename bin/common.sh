@@ -86,9 +86,14 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
 
-# Task = delegation tool. Without it a session cannot reach explorer and reads
-# every file itself, in its own context. Verify against a transcript after any
-# upgrade:  jq -r 'select(.type=="system") | .tools // empty | .[]' <raw>
+# Task = delegation tool. Whether a session can actually reach a subagent is
+# NOT settled by this list: `.claude/settings.json` denies `Task(Explore)` and
+# run() exports CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1, either of which is
+# enough to make it dead weight. Do not infer the answer from these three
+# settings — read it off a transcript, which is the only place it is observable:
+#   jq -r 'select(.type=="system") | .tools // empty | .[]' <raw>
+# If Task is absent there, drop it from these lists rather than leaving a tool
+# in an allowlist that nothing can call.
 TOOLS_WRITE="Read,Grep,Glob,Edit,Write,Bash,Task"
 TOOLS_READ="Read,Grep,Glob,Bash,Task"
 

@@ -12,8 +12,8 @@ an agent reviewing another agent's PR shares the same specs, the same failure
 modes and the same blind spots, so that review is not an independent check.
 You reduce that overlap — different model, different harness, and a reading
 order that keeps the first review out of your sight until your own findings
-are formed. You do not remove it: you read the same specs, and Claude QA and
-you query the same repowise index. Merge stays human.
+are formed. You do not remove it: you read the same specs, against the same
+tree. Merge stays human.
 
 The whole value is in the independence. A review that agrees with Claude QA
 because it read Claude QA first is worth nothing, and costs the same.
@@ -40,8 +40,8 @@ walks this list and holds nothing.
 ## read order — this order is the mechanism, not a preference
 
 1. Root `AGENTS.md` (symlinked to `.agents/AGENTS.md`) — label schema, human
-   gates, evidence discipline, the repowise rule. Read automatically; it is
-   shared context, not a QA document.
+   gates, evidence discipline, the verified-read rule. Read automatically; it
+   is shared context, not a QA document.
 2. This file.
 3. The issue the PR closes, and its triage spec comment — the acceptance
    criteria you are checking against.
@@ -201,23 +201,17 @@ You set and clear `codex-approved` and `needs-work`. Nothing else — never
 `in-review` + `needs-work` together is the expected shape of a Codex fail.
 Leave `in-review` alone; it is not yours.
 
-## repowise
+## shared sources
 
-Available, secondary, and bounded by `AGENTS.md`'s repowise rule: `get_symbol`
-at HEAD is a verified read, everything else is a locator.
+**The reason you exist is the reason to be careful here.** Anything Claude QA
+and you both consult — a shared index, a cached summary, a generated wiki — is
+correlated exactly where the second review is supposed to be independent. An
+error in it is an error for both of you, and it will read as agreement.
 
-**One extra restriction here, and it is the reason you exist.** Claude QA
-queries the same index. An error in it is an error for both of you, correlated
-exactly where the second review is supposed to be independent. Ground every
-finding in the diff and the tree. A finding whose evidence line names a
-repowise summary is not a finding.
-
-Until one review has been observed running against a checked-out PR branch in
-this worktree — the index is built on the main checkout, and neither
-`stale_warning` nor `get_symbol`'s bounds have been watched under that
-condition — treat **all** repowise output here as a locator, `get_symbol`
-included. Lift this paragraph once that run has happened and the behaviour is
-known.
+Ground every finding in the diff and the tree. A finding whose evidence line
+names a summary rather than a file you opened is not a finding. This applies to
+any such tool added later; the repo carried one until 2026-08 and this
+paragraph outlived it deliberately.
 
 ## sandbox and scratch space
 
@@ -251,8 +245,8 @@ it.
 - Never set or clear `claude-approved`. Only Claude QA restores it, and that is
   the interlock that stops a failed PR re-entering your queue unreviewed.
 - Never remove `requires-rig`. Human-only, after the measurement exists.
-- No citing a location you have not opened. A `Grep` hit or a repowise summary
-  is a candidate, not a verified read.
+- No citing a location you have not opened. A `Grep` hit, or any summary of the
+  tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.
 - Read the `<!-- agent: qa -->` comment only after your own findings are
   formed, and only for unaddressed open questions.

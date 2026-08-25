@@ -313,51 +313,37 @@ Corollaries:
   *corrected*, *added*, and *checked and unchanged* — this is the project's own
   harm-statistic discipline turned on the verification process itself.
 
-### repowise — a locator, with one exception
+### a summary is not a verified read
 
-This repo is indexed by repowise, and its tools are available to every role.
-They exist to cut the *exploration* cost — the candidate reads that find the
-right file — not to replace the read that a finding rests on.
+`qa.md` states this for search: a `Grep` hit is a candidate, not a verified
+read. The general form, because it outlives whichever tool prompted it:
 
-**The line:**
+**Anything that describes the tree without being the tree is a locator.** It
+says where to look. No finding, no acceptance criterion, no citation and no
+approval rests on one. The file it points at gets opened, or the claim does not
+get made. This covers search hits, index summaries, wiki prose, scores, a
+handoff document, another agent's comment, and this file's own module maps.
 
-- **`get_symbol` returns raw source bytes with exact line bounds. When
-  `_meta.indexed_commit` equals HEAD of the tree under review, a `get_symbol`
-  result counts as having opened that span** — it *is* the tree, arrived at
-  more cheaply than `Read` plus offset arithmetic. This is the exception, and
-  it is conditional on the commit matching.
-- **Everything else repowise returns is a locator.** `get_context`,
-  `get_answer`, `get_risk`, `get_change_risk`, `get_health`, `get_dead_code`,
-  `search_codebase`, `get_why`, and the wiki are summaries or scores. No
-  finding, no acceptance criterion, no citation and no approval rests on one.
-  The file it points at gets opened — by `Read`, or by `get_symbol` at HEAD —
-  or the claim does not get made.
-- **Index behind HEAD → the exception lapses.** Every result is approximate
-  and `get_symbol` loses verified-read status until the index is resynced
-  (`repowise update`). `indexed_commit` is what makes staleness observable
-  instead of silent, which makes checking it load-bearing rather than hygiene.
+Two consequences worth stating, because both were learned the expensive way:
 
-This is `qa.md`'s existing rule — "a `Grep` hit is a candidate, not a verified
-read" — restated for a tool that returns prose instead of line numbers, and it
-is the same rule for the same reason: a summary is an assertion about the tree
-by something that is not the tree.
+- **A savings mechanism may compress a locator; it may not compress evidence.**
+  Compacting the output of `cargo test` or `clippy` is free — a command's stdout
+  is not a file read. A mechanism that makes `Read` return a *summary* of a file
+  is not free, and is worse than useless when it arrives invisibly: summarized
+  content through the channel this rule designates as verified, with nothing in
+  the result saying so. Judge any future tool on that line.
+- **Shared sources correlate reviewers.** Claude QA and Codex QA read the same
+  specs; that is why merge stays human. Anything else they would both consult —
+  a shared index, a shared cache of summaries — widens the common mode in
+  exactly the place the second review exists to narrow it. Ground findings in
+  the tree and the diff.
 
-**A savings mechanism may compress a locator; it may not compress evidence.**
-repowise ships hooks that rewrite tool results in flight. `search_digest`
-compacts search output, and search results are already locators here, so it
-costs nothing this rule depends on. `read_skeleton` makes a `Read` return a
-skeleton instead of file bytes — summarized content arriving through the exact
-channel this section designates as verified, and arriving invisibly, since
-nothing in the result says it is a summary. It is therefore off, and any
-future hook is judged on the same line. `repowise distill`, which compacts the
-output of `cargo test` and `clippy`, is unaffected: a command's stdout is not
-a file read.
-
-**Common mode.** Claude QA and Codex QA query the same index. A wrong entry in
-it is wrong for both, which is exactly the correlation the second review
-exists to break. Ground findings in the tree and the diff, never in the shared
-index — this is why the exception above is narrow and conditional rather than
-a general "trust the index".
+Provenance: this repo was indexed by repowise for a period, and the rule above
+is what bounded it. The index was retired — its semantic half was running on a
+mock embedder, its wiki regenerated through a paid model on every commit, and
+no session was ever measured to have saved a read by it. The rule is kept
+because it was never really about that tool. Removed 2026-08; `bin/session.sh
+weight` is the measurement to repeat before adopting a replacement.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

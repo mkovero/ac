@@ -159,20 +159,16 @@ into this one.
 
 ### step 2 — review the diff
 
-Before opening files, run the two repowise calls that take the range you
-already have. Both are locators under `AGENTS.md`'s repowise rule — they say
-where to look, never what is true:
+Start from the changed-file list itself. Two questions it answers before any
+file opens, and both are cheap:
 
-- `get_risk(targets, changed_files=<the PR's files>)` — read its `directive`
-  first. `missing_cochanges` on a daemon-handler diff that does not touch
-  `ac-cli`/`ac-view` is the wire-schema check firing before any file opens.
-  `will_break`, `missing_tests` and `tests_to_run` are leads to verify.
-- `get_change_risk("<base>..<head>")` — scores the range rather than the paths.
-  Lead with `risk_percentile`.
+- **Does the diff touch `ac-daemon`'s published frame without touching
+  `ac-cli` and `ac-view`?** That is the wire-schema check firing off the file
+  list alone. `ac-rs/ZMQ.md` names the contract.
+- **Does it touch a crate whose consumers are not in the diff?** Same shape,
+  one level out.
 
-**A clean report licenses nothing.** The checklist below runs in full either
-way; these calls change the order you read in, not whether you read. A finding
-that cites either without an opened file is not a finding.
+Both are leads, not findings. The checklist below runs in full either way.
 
 Check:
 - **correctness** — implementation do what spec says?
@@ -180,11 +176,9 @@ Check:
 - **wire schema** — `ac-daemon`'s published frame changed → do `ac-cli` and `ac-view` match? (`ac-rs/ZMQ.md`)
 
 Cross-crate check (schema match, existing helper, pattern used elsewhere) →
-`get_context` on the symbol with `include=["callers"]`, then `get_symbol` on
-each hit. When `_meta.indexed_commit` equals the tip you are reviewing, that
-`get_symbol` result *is* the verified read and no `Read` is needed; when it
-does not, or when the tool is unavailable, fall back to `Grep` for the symbol
-then `Read` the hit. Shell readers and searchers denied by
+`Grep` for the symbol across the workspace, then `Read` each hit. The `Grep`
+tells you where; only the `Read` tells you what, and a citation to a line you
+did not open is not a citation. Shell readers and searchers denied by
 `.claude/settings.json`; do not work around them.
 - **error handling** — Results propagated, not silently unwrapped?
 - **test coverage** — new code paths exercised by tests?
@@ -230,10 +224,6 @@ Each new test:
 - Measurement functions: numeric assertions with tight tolerances?
   Example: `assert!((result.thd - 0.0023).abs() < 1e-4)` not just `assert!(result.thd > 0.0)`
 - CLI behavior: output strings or exit codes asserted?
-
-`get_health` untested-hotspot entries are a useful pointer to where a missing
-test would matter most — a locator for this step, not a finding in it. A file
-it flags still gets opened before the review says anything about its coverage.
 
 Tests missing or weak → write missing tests yourself, include in review comment as suggested additions.
 

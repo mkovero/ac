@@ -47,14 +47,6 @@ ac-daemon [--local] [--fake-audio] [--ctrl-port N] [--data-port N]
 | `cpal_backend.rs` | macOS/Windows fallback when no JACK. Disabled on Linux at runtime (`#[cfg(not(target_os = "linux"))]` in `make_engine`). |
 | `fake.rs` | `--fake-audio` flag; returns clean sine so `analyze()` gets plausible output. Also Linux fallback when JACK not running, so missing-JACK fails loud instead of silently grabbing ALSA. |
 
-## Server loop (`ac-daemon/src/server.rs`)
-
-Single-threaded ZMQ REP/PUB loop. Workers run in `std::thread::spawn`. Main loop drains `pub_tx` channel (worker → PUB socket), reaps finished workers via `JoinHandle::is_finished()` every 10 ms poll.
-
-## Handlers (`ac-daemon/src/handlers/`)
-
-One function per command. Each audio command (`generate`, `plot`, etc.) checks busy guard (`check_busy`), spawns `WorkerHandle`, inserts into shared `workers` map, returns CTRL reply immediately.
-
 ## Protocol reference
 
 See `ac-rs/ZMQ.md` — authoritative for both Python and Rust.
@@ -74,7 +66,6 @@ See `ac-rs/ZMQ.md` — authoritative for both Python and Rust.
 - JACK process callback not real-time safe today (Mutex + alloc every period). See issue #23 — fix in flight via `ringbuf` SPSC + atomic tone swap.
 - `xruns()` counter always 0 on JACK and CPAL (issue #24).
 - Capture rings grow unbounded on long output-only commands (issue #25).
-- ~~`handlers.rs` is 1931 LOC; slated for split (#29).~~ Done — now `handlers/`, one module per concern (`transfer`, `snapshot`, `calibrate`, `test_hw`, `test_dut`, `test_software`, `mic`, `admin`, `mod`).
 
 Full backlog: <https://github.com/mkovero/ac/issues?q=is%3Aopen+label%3Abacklog>.
 
