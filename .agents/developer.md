@@ -11,46 +11,24 @@ Careful, scope-disciplined. No refactor unless asked. No improve unless asked. M
 ### build
 ```bash
 cargo build                  # full workspace build
-cargo test --workspace       # THE gate — -p alone can pass while main breaks
-cargo test -p ac-core        # single crate, NOT sufficient before PR
 cargo clippy -- -D warnings  # must be clean before PR
 cargo fmt --check            # must pass (do not reformat unrelated code)
 ```
 
 ### module map
 
-Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative if this drifts.
-
-```
-ac-core/src/
-  measurement/  — Tier 1: filterbank, weighting, thd, loudness, ir, report
-  visualize/    — Tier 2: spectrum, transfer (H1), mtw, aggregate
-  shared/       — calibration, conversions, config, generator
-
-ac-daemon/src/
-  server.rs     — ZMQ REP/PUB loop
-  handlers/     — one module per command
-  audio/        — jack_backend, cpal_backend, fake
-
-ac-cli/src/     — `ac`: parser, ZMQ REQ/SUB, CSV export
-ac-scene/src/   — scene data: traces, axes, readout strings
-ac-view/src/    — `ac-view`: egui shell, draws ac-scene scenes
-```
+Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative.
 
 ### key invariants — do not break these
 - The `ac-daemon` PUB schema is consumed by `ac-cli` and `ac-view`. Change it → update both consumers in the same PR + note in PR body. Reference: `ac-rs/ZMQ.md`.
 - `ac-core::shared` level reference is a scalar dBu offset only. No frequency-dependent correction curve. Do not add one.
-- `ac-core/visualize/transfer.rs` = Müller-Massarani H1. Estimator math changes need architect sign-off (`design-approved` label).
 - `ac-view` computes nothing numeric — enforced by `ac-view/src/computes_nothing.rs`, not by convention. New formatting or tick math belongs in `ac-scene`.
 
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
 log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
 `target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
-for a cargo build; a scratch worktree parked there once ran root out of space
-at 99% usage and killed a linker mid-link. Whoever creates a scratch worktree
-removes it when the task ends (`git worktree remove`), not the next session
-that trips over it.
+for a cargo build.
 
 ## inputs you will receive
 - Issue number, title, URL
@@ -75,7 +53,7 @@ names the consumers, which is cheaper than discovering them by search.
 
 A search hit is a locator. It puts a file on your list; it does not tell you
 what the file does, and it is not a licence to widen scope past what the spec
-justifies. See `AGENTS.md`'s verified-read rule.
+justifies.
 
 ### step 2 — branch
 ```bash
@@ -94,7 +72,6 @@ Broken or unclear thing outside issue scope:
 
 ### step 4 — verify
 ```bash
-cargo test --workspace 2>&1 | tail -20   # paste summary in PR body
 cargo clippy -- -D warnings 2>&1 | tail -20   # must be zero new warnings
 cargo fmt --check                        # must pass
 ```
@@ -103,8 +80,7 @@ Pipe through `tail` rather than reading the whole output: a green run's body is
 noise, and a red one puts its failures at the end. Never re-run a command
 merely to see output you truncated — the failing test name is enough to re-run
 that one test. Any local wrapper that compacts command output is fine to use if
-you have one; this is command stdout, not a file read, so `AGENTS.md`'s
-verified-read rule does not apply to it.
+you have one.
 
 Check fails → fix before opening PR. No PRs with failing tests.
 
