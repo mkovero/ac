@@ -18,6 +18,7 @@ require_space "$WT_BASE/$branch" || exit 1
 wt="$(ensure_worktree "$branch" "$WT_BASE/$branch")" \
   || { echo "cannot get a worktree for $branch" >&2; exit 1; }
 cd "$wt"
+sparse_trim "$wt"
 git pull -q --ff-only 2>/dev/null || true
 link_support "$wt"
 

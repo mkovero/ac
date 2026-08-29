@@ -31,7 +31,7 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 AC_HOME="${AC_HOME:-$(dirname "$ROOT")/ac-wt}"
 WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
-AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
+AC_SESSION_DIR="${AC_SESSION_DIR:-$AC_HOME/session}"
 
 # One shared target dir, not one per branch. Per-branch was warm across runs on
 # the same issue, but cost several GB each and left orphans behind every merge.
@@ -84,7 +84,6 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 # Raw transcripts: large, noisy, never committed. The distilled final message
 # goes to AC_SESSION_DIR, which is in the repo.
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
-AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
 
 # Task = delegation tool. Whether a session can actually reach a subagent is
 # NOT settled by this list: `.claude/settings.json` denies `Task(Explore)` and
@@ -194,6 +193,17 @@ link_support() {
   return 0
 }
 
+# Heavy trees an implementation never needs. Cheaper and more reliable than a
+# Read deny rule: a file that is not on disk cannot be found by any tool.
+sparse_trim() {
+  local wt="$1"
+  [[ -n ${AC_NO_SPARSE:-} ]] && return 0
+  local -a pat
+  read -r -a pat <<< "${AC_SPARSE:-/* !/work/ !/audit/}"
+  git -C "$wt" sparse-checkout init --no-cone 2>/dev/null || return 0
+  git -C "$wt" sparse-checkout set "${pat[@]}"
+}
+
 # Count QA's output on a PR. It may land as an issue comment OR as a review
 # (gh pr review --comment creates the latter, and --json comments does not
 # return those). Count both, or a good review reads as silence.
@@ -208,6 +218,15 @@ qa_evidence() {
   echo $(( ${c:-0} + ${r:-0} ))
 }
 
+# The architect's file manifest for an issue: repo-relative paths, one per line.
+# Empty output means no manifest — the caller decides whether that is fatal.
+manifest_of() {
+  gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
+    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""' \
+  | sed -n '/^```files[[:space:]]*$/,/^```[[:space:]]*$/p' \
+  | sed '1d;$d; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+  | grep -v '^$' || true
+}
 # Extract the session's final message from a finished transcript.
 # Prefer the result event; fall back to the last assistant text block, because
 # not every version emits result into the stream — an interrupted run has none
@@ -239,6 +258,11 @@ run() {
       *)                  turns=80  ;;
     esac
   fi
+  case "$role" in
+    developer|qa) AC_MODEL=sonnet ;;
+    architect|ux) AC_MODEL=opus ;;
+    *)		  AC_MODEL=sonnet ;;
+  esac
   local fg="" tools="$TOOLS_WRITE" deny="$DENY_ASYNC" mode="acceptEdits" arg
   local -a extra=()
   for arg in "$@"; do
@@ -280,7 +304,7 @@ run() {
   # Stream to the terminal, keep the raw transcript. Distillation happens after
   # the run, not inside the pipe — a process-substitution tee races the
   # pipeline's exit and truncates exactly the long sessions worth reading.
-  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 \
+#  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 \
   claude -p --system-prompt-file "$(spec "$role")" "$prompt" \
     --model "${AC_MODEL:-sonnet}" \
     --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \

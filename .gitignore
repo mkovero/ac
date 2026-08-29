@@ -29,3 +29,4 @@ stddocs
 /.cargo/
 .claude/CLAUDE.md
 .mcp.json
+work/sessions/
