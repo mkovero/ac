@@ -205,27 +205,28 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // The gate re-centres the linear IR on the sweep endpoint, so the
     // fake backend's 32-sample loopback still shows up as the *peak's*
     // offset from centre — but `arrival` now comes from
-    // `estimate_onset`, which walks backward from the peak into its own
-    // bandlimited main-lobe skirt whenever that skirt clears the
-    // floor+margin threshold. No geometry is recorded for this run, so
-    // no causal bound applies and the onset can legitimately land before
-    // the peak. It can never land at or after the peak plus this
-    // fixture's window, and a regression that lost the delay entirely
-    // would read ~0.
+    // `estimate_onset`, which under #378 picks the change point in the
+    // IR's own variance over a window ending at the peak. No geometry is
+    // recorded for this run, so no causal bound applies and the pick can
+    // legitimately land before the peak — and on this fixture it lands
+    // well before it, inside the bandlimited deconvolution's pre-ring
+    // (a 200 Hz lower sweep limit puts the main lobe's leading skirt
+    // ~240 samples wide at 48 kHz). That is the case the causal bound
+    // exists to reject, and there is none here.
     let arrival = printed_arrival_samples(&stdout);
-    // Pinned exact, not just bounded (QA on #352): this fixture's IR shape
-    // is deterministic (fake backend, fixed 200hz/8000hz/1024win sweep),
-    // so `estimate_onset`'s answer for it is a known, computable value —
-    // pinning it the way the old test pinned the peak catches a
-    // regression in the estimator's exact behaviour, not only a sign or
-    // bound violation. Recompute if the fixture's stimulus parameters
-    // above ever change. Value moved 19 → 17 under #353 (option A′):
-    // this fixture's real pre-impulse region is not pure Gaussian noise
-    // (log-sweep deconvolution artefacts sit at negative time), so the
-    // median-based floor legitimately disagrees with the old RMS floor by
-    // a couple of samples even without gross contamination — expected per
-    // the architect's own review, not a regression.
-    const EXPECTED_ONSET_SAMPLES: i64 = 17;
+    // Pinned exact, not just bounded (QA on #352): this fixture's IR
+    // shape is deterministic (fake backend, fixed 200hz/8000hz/4096win
+    // sweep), so the estimator's answer for it is a known, computable
+    // value — pinning it catches a regression in the estimator's exact
+    // behaviour, not only a sign or bound violation. Recompute if the
+    // fixture's stimulus parameters above ever change. Value moved
+    // 19 → 17 under #353 (median floor) and 17 → -86 under #378: the
+    // level crossing stopped where the skirt fell below floor+12 dB,
+    // while the change-point pick keys on where the skirt's variance
+    // leaves the numerical floor, which on a 200 Hz-limited sweep is
+    // much earlier. Expected per the #378 design decision — the pick is
+    // deliberately not amplitude-referenced — not a regression.
+    const EXPECTED_ONSET_SAMPLES: i64 = -86;
     assert_eq!(
         arrival, EXPECTED_ONSET_SAMPLES,
         "printed arrival should be the fake backend's exact onset sample \
@@ -239,25 +240,25 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
-    // #346 AC4 (QA on #352): the onset rule must reach the terminal, and
-    // the peak line must be marked diagnostic now that it can legitimately
-    // disagree with arrival — a silent divergence between the two would
+    // #346 AC4 / #378: the onset rule must reach the terminal, and the
+    // peak line must carry the onset-to-peak distance now that the two
+    // can legitimately disagree — a silent divergence between them would
     // read as a bug in the tool rather than the fix working.
-    // #353 (UX revision 2): the onset rule now prints as two lines — the
-    // statistic/margin, then the causal-bound clause — since option A′
-    // switched the threshold to a median floor and the old single-line
-    // form ran past 80 columns at large sample indices.
     assert!(
-        stdout.contains("onset: median floor +12 dB, backward walk"),
+        stdout.contains("onset: AIC change-point pick, 10.0 ms window"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("no causal bound (geometry not known)"),
-        "printed summary missing the causal-bound clause (AC4):\n{stdout}"
+        stdout.contains("(search span, no geometry known)"),
+        "printed summary missing the window-start clause (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("(diagnostic \u{2014} not arrival)"),
-        "peak line must be marked diagnostic now arrival can diverge from it:\n{stdout}"
+        stdout.contains("diagnostic \u{2014} arrival is onset-derived, 118 samples earlier"),
+        "peak line must carry the onset-to-peak distance (#378):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("median floor"),
+        "the pre-#378 rule's text must not survive anywhere:\n{stdout}"
     );
     // #391: no distance figure prints at all — the ms → m conversion it
     // came from is gone, and milliseconds are what's asserted above.

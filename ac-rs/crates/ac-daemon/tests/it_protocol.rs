@@ -2199,18 +2199,22 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // would read ~0.67 ms instead (32 samples at 48 kHz).
     //
     // Stopgap tolerance (#346 → #351): `measure_tau` still locates τ via
-    // `argmax|h|`, while `ir_stats().arrival_s` is now onset-derived. The
-    // two captures' differing sweep bandwidth means their bandlimited-
-    // deconvolution skirts differ too, so they no longer cancel to the
-    // pre-#346 tightness. #351 tracks reconciling the two estimators.
+    // `argmax|h|`, while `ir_stats().arrival_s` is onset-derived. Under
+    // #378 the onset is an AIC change-point pick with no causal bound
+    // available on this fixture, so it lands where the bandlimited
+    // deconvolution's pre-ring leaves the numerical floor — 118 samples
+    // (2.458 ms at 48 kHz) before the peak for this 200 Hz–8 kHz sweep.
+    // The two estimators therefore no longer cancel. #351 tracks
+    // reconciling them.
     //
     // Pinned tight around this fixture's known, computable answer (QA on
     // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
     // exact value could hide unrelated regression) rather than left as an
     // open-ended bound — this fixture is deterministic (fake backend,
     // fixed 200 Hz–8 kHz / 1024-sample window), so its exact phantom
-    // flight time is a known quantity, not measurement noise.
-    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = 0.0;
+    // flight time is a known quantity, not measurement noise. Value moved
+    // -0.310 → -2.458 ms under #378 for the reason above.
+    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = -2.4583;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     let stats = report.ir_stats().expect("ir_stats");

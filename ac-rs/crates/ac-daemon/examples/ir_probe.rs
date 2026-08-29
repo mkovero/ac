@@ -226,12 +226,12 @@ fn main() {
     // `MeasurementReport::ir_stats` (`ac_core::measurement::sweep::
     // estimate_onset`) rather than a third independent backward-scan — no
     // known geometry here, so no causal bound is enforced.
-    println!("--- onset (#346) ---");
+    println!("--- onset (#346, #378) ---");
     let floor_rms = {
         let mean_sq = ir[..far_end].iter().map(|v| v * v).sum::<f64>() / far_end as f64;
         mean_sq.sqrt()
     };
-    let onset = estimate_onset(&ir, peak_idx, floor_rms, None);
+    let onset = estimate_onset(&ir, peak_idx, sr as u32, floor_rms, None);
     let o = onset.index as i64 - centre as i64;
     println!(
         "  onset:         index {}, offset {o:+} samples = {:+.4} ms  ({} before peak)",

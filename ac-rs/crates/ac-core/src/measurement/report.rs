@@ -685,22 +685,26 @@ impl MeasurementReport {
             f64::INFINITY
         };
 
-        // #353 (architect revision 2, option A′): `floor_rms` above has a
-        // breakdown point of zero — a single sample of the peak's own
-        // sustained energy bleeding into `pre_region` moves it, and by how
-        // much scales with that sample's amplitude, so nothing bounds how
-        // little contamination it takes to inflate `estimate_onset`'s
-        // threshold past the wavefront it must detect (#353, revision 1's
-        // rejected two-pass fix couldn't escape this because a search that
-        // detects nothing narrows nothing on its own output). `floor_rms`
-        // and `pre_impulse_snr_db` above stay exactly as they were — reused
-        // unchanged, not recomputed (#346 architect review) — so this adds
-        // a second, onset-only floor over the same `pre_region` instead:
-        // the median absolute sample value, scaled by the standard
-        // MAD-to-σ constant so it targets the same quantity `floor_rms`
-        // does on clean noise. A rank statistic has a 50% breakdown point
-        // — up to half of `pre_region` can be lobe by count and the median
-        // still reads the noise floor, not the lobe.
+        // #353 (option A′), retained under #378 with a narrower job.
+        // `floor_rms` above has a breakdown point of zero — a single
+        // sample of the peak's own sustained energy bleeding into
+        // `pre_region` moves it, and by how much scales with that
+        // sample's amplitude. So this computes a second, onset-only
+        // floor over the same `pre_region`: the median absolute sample
+        // value, scaled by the standard MAD-to-σ constant so it targets
+        // the same quantity `floor_rms` does on clean noise. A rank
+        // statistic has a 50% breakdown point — up to half of
+        // `pre_region` can be lobe by count and the median still reads
+        // the noise floor, not the lobe.
+        //
+        // #378 demoted it from `estimate_onset`'s threshold input to its
+        // validity gate: the picker takes no threshold at all, and this
+        // floor now decides only whether the search window holds
+        // anything above the floor, never where inside it the onset is.
+        // Its 50% breakdown point is what makes that gate trustworthy on
+        // a contaminated pre-impulse region. `floor_rms` and
+        // `pre_impulse_snr_db` above stay exactly as they were — reused
+        // unchanged, not recomputed (#346 architect review, #378 AC5).
         const MAD_TO_SIGMA: f64 = 0.6744897501960817; // Φ⁻¹(0.75), not tuned
         let onset_floor = if pre_region.is_empty() {
             0.0
@@ -738,6 +742,7 @@ impl MeasurementReport {
         let onset = crate::measurement::sweep::estimate_onset(
             linear_ir,
             peak_index,
+            *sample_rate_hz,
             onset_floor,
             min_admissible_index,
         );
@@ -1440,31 +1445,50 @@ mod tests {
 
     /// #346: when a report carries both a measured interface latency and
     /// a recorded `position.distance_m`, `ir_stats` must convert them
-    /// into a causal bound and enforce it — proven by picking a bound
-    /// that actively clamps the estimate away from what the unbounded
-    /// search alone would return.
+    /// into a causal bound and enforce it — proven with a capture whose
+    /// unbounded answer is non-causal, so the bound actively changes the
+    /// result rather than agreeing with it by coincidence.
+    ///
+    /// #378 changed how: the bound is the search window's lower limit,
+    /// so the non-causal candidate is outside the picker's reach rather
+    /// than being clamped after the fact. What is asserted is the same
+    /// requirement — a bounded capture never reads earlier than pure
+    /// flight time allows — expressed against a window instead of a
+    /// walk.
     #[test]
     fn ir_stats_wires_a_causal_bound_from_position_and_interface_latency() {
         let window_len = 1024;
         let sr = 48_000u32;
         let centre = window_len / 2;
-        let noise = 0.001;
         let peak_true = centre + 100;
-        let onset_true = peak_true - 20;
-        let mut ir = vec![noise; window_len];
-        for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
-            *v = 0.3;
+        let bound_index = peak_true - 12;
+        let wavefront = peak_true - 7; // inside the admissible window
+        let pre_ring = peak_true - 52; // below it — non-causal
+        let mut ir: Vec<f64> = (0..window_len)
+            .map(|i| {
+                let mut s = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                s ^= s >> 29;
+                ((s >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2e-4
+            })
+            .collect();
+        for (i, v) in ir.iter_mut().enumerate() {
+            if (pre_ring..wavefront).contains(&i) {
+                *v += 0.02 * ((i - pre_ring) as f64 * 0.7).sin();
+            } else if (wavefront..=peak_true).contains(&i) {
+                *v += 0.3 * (i - wavefront + 1) as f64 / 8.0;
+            }
         }
         ir[peak_true] = 1.0;
 
         let mut r = ir_report_with_custom_ir(ir, sr);
         let unbounded = r.ir_stats().unwrap();
-        assert_eq!(unbounded.onset_index, onset_true);
+        assert!(
+            unbounded.onset_index < bound_index,
+            "test setup: the unbounded pick must be non-causal, got {}",
+            unbounded.onset_index
+        );
+        assert!(unbounded.onset_rule.contains("no causal bound"));
 
-        // Pure-flight bound at `peak_true - 12` — inside the sustained
-        // onset run, so it actively clamps the estimate rather than
-        // agreeing with the unbounded answer by coincidence.
-        let bound_index = peak_true - 12;
         let bound_offset_samples = (bound_index - centre) as f64;
         let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
         r.position = Some(PositionSnapshot {
@@ -1475,9 +1499,16 @@ mod tests {
         r.interface_latency = Some(measured_tau(0.0));
 
         let bounded = r.ir_stats().unwrap();
-        assert_eq!(bounded.onset_index, bound_index);
+        assert!(
+            bounded.onset_index >= bound_index,
+            "causal bound must exclude the non-causal candidate, got {}",
+            bounded.onset_index
+        );
         assert_ne!(bounded.onset_index, unbounded.onset_index);
         assert!(bounded.onset_rule.contains("causal bound enforced"));
+        assert!(bounded
+            .onset_rule
+            .contains(&format!("window start at sample {bound_index}")));
     }
 
     /// #346 (QA on #352, correctness issue 2) / #353: `floor_rms`'s guard
@@ -1529,19 +1560,54 @@ mod tests {
         );
     }
 
-    /// #353 acceptance criterion 3: names the input that makes the check
-    /// go red for both the rejected (RMS) rule and the shipped (median,
-    /// option A′) rule, per the architect's revision-2 probe table
-    /// (2026-08-23) — bracketing the crossings, not locating them to the
-    /// sample, exactly as that comment states. All cases share
-    /// `window_len = 256`, `peak_true = 160`, `guard = 8` (so
-    /// `pre_end = 152`); `width` is `peak_true - onset_true`, i.e. how far
-    /// the sustained run reaches back from the peak.
+    /// The rule #378 rejects, computed inline so these tests measure it
+    /// rather than asserting "the new answer is closer to truth": a
+    /// threshold 12 dB above the supplied pre-impulse floor, walked
+    /// backward from the peak. Nothing in `ac-core` implements this any
+    /// more — it exists only here, as the comparison.
+    fn rejected_level_crossing_rule(ir: &[f64], peak_index: usize, floor: f64) -> usize {
+        let threshold = floor * 10f64.powf(12.0 / 20.0);
+        let mut onset = peak_index;
+        while onset > 0 && ir[onset - 1].abs() > threshold {
+            onset -= 1;
+        }
+        onset
+    }
+
+    /// #353's median floor, recomputed here over an arbitrary region so
+    /// the rejected rule can be driven by either floor.
+    fn median_abs_over_phi_inv(region: &[f64]) -> f64 {
+        if region.is_empty() {
+            return 0.0;
+        }
+        let mut abs_vals: Vec<f64> = region.iter().map(|v| v.abs()).collect();
+        abs_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = abs_vals.len();
+        let median = if n % 2 == 1 {
+            abs_vals[n / 2]
+        } else {
+            (abs_vals[n / 2 - 1] + abs_vals[n / 2]) / 2.0
+        };
+        median / 0.674_489_750_196_081_7
+    }
+
+    /// #353 acceptance criterion 3, carried into #378: names the input
+    /// that makes the *rejected* level-crossing rule go red under both
+    /// the RMS floor and the median floor (option A′), per the
+    /// architect's revision-2 probe table (2026-08-23) — bracketing the
+    /// crossings, not locating them to the sample, exactly as that
+    /// comment states. All cases share `window_len = 256`,
+    /// `peak_true = 160`, `guard = 8` (so `pre_end = 152`); `width` is
+    /// `peak_true - onset_true`, i.e. how far the sustained run reaches
+    /// back from the peak.
     ///
-    /// The "old" rule is computed inline against each input rather than
-    /// trusted from an earlier revision (`test-against-the-rejected-
-    /// implementation`), so this test proves *why* the fix is needed, not
-    /// only that `ir_stats` now returns a different number.
+    /// Both rejected rules are computed inline against each input rather
+    /// than trusted from an earlier revision (`test-against-the-rejected-
+    /// implementation`). #353's own evidence is kept intact — the RMS
+    /// floor breaks first, the median floor survives to its 50%
+    /// breakdown point — and #378's claim is added on top: the shipped
+    /// picker takes no threshold from either floor, so contamination
+    /// that moves both of them does not move its answer at all.
     #[test]
     fn ir_stats_onset_floor_breakdown_point_matches_the_measured_table() {
         let window_len = 256;
@@ -1550,16 +1616,16 @@ mod tests {
         let peak_true = 160;
         let guard = (window_len / 32).max(8); // 8
 
-        // (lobe width, old RMS floor reaches onset_true?, median floor
-        // (#353) reaches onset_true?)
+        // (lobe width, RMS-floor level rule reaches onset_true?,
+        //  median-floor level rule reaches onset_true?)
         let cases = [
-            (16, true, true),   // old: 5% contaminated, green
-            (18, false, true),  // old: 6.6% contaminated, red; new: green
-            (80, false, true),  // old: red; new: 47% contaminated, still green
-            (90, false, false), // new: 54% contaminated, past the 50% breakdown point — red
+            (16, true, true),   // RMS: 5% contaminated, green
+            (18, false, true),  // RMS: 6.6% contaminated, red; median: green
+            (80, false, true),  // RMS: red; median: 47% contaminated, green
+            (90, false, false), // median: 54% contaminated, past 50% — red
         ];
 
-        for (width, old_reaches_onset, new_reaches_onset) in cases {
+        for (width, rms_reaches_onset, median_reaches_onset) in cases {
             let onset_true = peak_true - width;
             let mut ir = vec![noise; window_len];
             for v in ir.iter_mut().take(peak_true + 1).skip(onset_true) {
@@ -1567,9 +1633,6 @@ mod tests {
             }
             ir[peak_true] = 1.0;
 
-            // The rejected implementation: the plain RMS floor over the
-            // same guard-only `pre_region`, exactly as `ir_stats` computed
-            // it before #353.
             let pre_end = peak_true.saturating_sub(guard);
             let pre_region = &ir[..pre_end];
             let rms_floor = {
@@ -1577,45 +1640,50 @@ mod tests {
                     pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
                 mean_sq.sqrt()
             };
-            let old = crate::measurement::sweep::estimate_onset(&ir, peak_true, rms_floor, None);
+            let median_floor = median_abs_over_phi_inv(pre_region);
+
             assert_eq!(
-                old.index == onset_true,
-                old_reaches_onset,
-                "width {width}: old (RMS) floor onset = {}, expected reaches_onset={old_reaches_onset}",
-                old.index
+                rejected_level_crossing_rule(&ir, peak_true, rms_floor) == onset_true,
+                rms_reaches_onset,
+                "width {width}: RMS-floor level rule onset = {}, expected \
+                 reaches_onset={rms_reaches_onset}",
+                rejected_level_crossing_rule(&ir, peak_true, rms_floor)
+            );
+            assert_eq!(
+                rejected_level_crossing_rule(&ir, peak_true, median_floor) == onset_true,
+                median_reaches_onset,
+                "width {width}: median-floor level rule onset = {}, expected \
+                 reaches_onset={median_reaches_onset}",
+                rejected_level_crossing_rule(&ir, peak_true, median_floor)
             );
 
             let r = ir_report_with_custom_ir(ir, sr);
             let stats = r.ir_stats().unwrap();
             assert_eq!(
-                stats.onset_index == onset_true,
-                new_reaches_onset,
-                "width {width}: ir_stats onset = {}, expected reaches_onset={new_reaches_onset}",
-                stats.onset_index
+                stats.onset_index, onset_true,
+                "width {width}: #378's picker takes no threshold from either \
+                 floor, so guard-band contamination that moves both rejected \
+                 rules must not move it"
             );
-            if !new_reaches_onset {
-                assert_eq!(
-                    stats.onset_index, peak_true,
-                    "documented breakdown (#353 architect review): beyond \
-                     the median floor's 50% breakdown point it degrades to \
-                     today's shipped answer (peak_index), never to an \
-                     earlier or non-causal one"
-                );
-            }
         }
     }
 
-    /// #353 acceptance criterion 5: the guard stays fixed and content-
-    /// independent (option A′ adds a distribution property, not a second
-    /// constant coupled to the first) — asserted here as an estimator-vs-
-    /// estimator agreement rather than a hidden tolerance between the two
-    /// floors, per the architect's own instruction ("do not convert that
-    /// into a dB tolerance on the two floors; that number has not been
-    /// measured and would ship as `assumed`"). On a clean pre-impulse
-    /// region (no contamination), the RMS floor and the median floor must
-    /// pick the *same* onset index — checked over many seeded noise
-    /// realisations so this is a statement, not a coincidence (architect's
-    /// own probe: 200 seeds, `{0: 200}`).
+    /// #353 acceptance criterion 5, carried into #378: the guard stays
+    /// fixed and content-independent (option A′ added a distribution
+    /// property, not a second constant coupled to the first) — asserted
+    /// as an estimator-vs-estimator agreement rather than a hidden
+    /// tolerance between the two floors, per the architect's own
+    /// instruction ("do not convert that into a dB tolerance on the two
+    /// floors; that number has not been measured and would ship as
+    /// `assumed`"). On a clean pre-impulse region the RMS floor and the
+    /// median floor must send the rejected level rule to the *same*
+    /// onset index — checked over many seeded noise realisations so this
+    /// is a statement, not a coincidence (architect's own probe: 200
+    /// seeds, `{0: 200}`).
+    ///
+    /// #378 adds the stronger claim on the same 200 captures: the
+    /// shipped picker's answer is identical whichever floor is handed to
+    /// it, because the floor is a validity gate now and not a threshold.
     #[test]
     fn ir_stats_onset_floor_agrees_with_rms_floor_on_clean_pre_impulse_noise() {
         use rand::rngs::StdRng;
@@ -1649,16 +1717,23 @@ mod tests {
                     pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
                 mean_sq.sqrt()
             };
-            let rms_onset =
-                crate::measurement::sweep::estimate_onset(&ir, peak_true, rms_floor, None);
-
-            let r = ir_report_with_custom_ir(ir, sr);
-            let stats = r.ir_stats().unwrap();
+            let median_floor = median_abs_over_phi_inv(pre_region);
 
             assert_eq!(
-                stats.onset_index, rms_onset.index,
+                rejected_level_crossing_rule(&ir, peak_true, rms_floor),
+                rejected_level_crossing_rule(&ir, peak_true, median_floor),
                 "seed {seed}: median floor (#353) must agree with the RMS \
                  floor on an uncontaminated pre-impulse region"
+            );
+
+            let picked_with_rms =
+                crate::measurement::sweep::estimate_onset(&ir, peak_true, sr, rms_floor, None);
+            let r = ir_report_with_custom_ir(ir, sr);
+            let stats = r.ir_stats().unwrap();
+            assert_eq!(
+                stats.onset_index, picked_with_rms.index,
+                "seed {seed}: #378's pick must not depend on which floor \
+                 reaches the validity gate"
             );
         }
     }
