@@ -1,4 +1,4 @@
-use super::{check_ack, level_to_dbfs};
+use super::{check_ack, level_to_dbfs, print_level_clamp};
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
 
@@ -39,6 +39,14 @@ pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
         ),
         "generate",
     );
+    let applied_dbfs = ack
+        .get("level_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(dbfs);
+    if applied_dbfs != dbfs {
+        println!();
+        print_level_clamp(dbfs, applied_dbfs);
+    }
     if let Some(ports) = ack.get("out_ports").and_then(|v| v.as_array()) {
         for p in ports {
             if let Some(s) = p.as_str() {
@@ -84,6 +92,14 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
         ),
         "generate_pink",
     );
+    let applied_dbfs = ack
+        .get("level_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(dbfs);
+    if applied_dbfs != dbfs {
+        println!();
+        print_level_clamp(dbfs, applied_dbfs);
+    }
     if let Some(ports) = ack.get("out_ports").and_then(|v| v.as_array()) {
         for p in ports {
             if let Some(s) = p.as_str() {

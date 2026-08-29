@@ -27,3 +27,5 @@ ac-rs/crates/ac-view/tests/snapshots/*.diff.png
 pytest-of-mui/
 stddocs
 /.cargo/
+.claude/CLAUDE.md
+.mcp.json

@@ -26,13 +26,14 @@ use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    busy_guard, resolve_input, resolve_output, send_pub, snapshot_from_cal, spawn_worker,
-    sweep_point_frame, Tier1Ctx,
+    apply_drive_ceiling, busy_guard, cfg_guard, resolve_input, resolve_output, send_pub,
+    snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
 };
 use crate::handlers::mic;
 
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
+    cfg_guard!(state);
     let start_hz = cmd.get("start_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let stop_hz = cmd
         .get("stop_hz")
@@ -46,6 +47,10 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: `plot` puts a stimulus on a physical output, so it is clamped
+    // to the session ceiling here — the same discipline `set_drive` has
+    // always had.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -281,11 +286,17 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "in_port": in_port_reply})
+    json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "in_port": in_port_reply,
+        "level_dbfs": level_dbfs,
+    })
 }
 
 pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_level");
+    cfg_guard!(state);
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
     let start_dbfs = cmd
         .get("start_dbfs")
@@ -295,6 +306,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let steps = cmd.get("steps").and_then(Value::as_u64).unwrap_or(26) as usize;
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
+    let ceiling = cfg.drive_max_dbfs;
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -306,6 +318,11 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let out_port_reply = out_port.clone();
     let in_port_reply = in_port.clone();
+    // Applied endpoints echoed on the sync reply — see `sweep_level`'s
+    // identical reasoning (#360): monotone under a `min` clamp, so this is
+    // exactly the range the sweep's levels actually cover.
+    let start_dbfs_applied = apply_drive_ceiling(ceiling, start_dbfs);
+    let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -319,6 +336,10 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
+        // Raw request shape — each computed level is clamped individually
+        // below (#360), not the endpoints here, so a range whose top end
+        // exceeds the ceiling flattens there rather than shifting the
+        // whole shape.
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
         let mut eng = make_engine(fake);
@@ -334,10 +355,14 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
 
         let mut n = 0usize;
         let mut xruns = 0u32;
-        for &level_dbfs in &levels {
+        for &level_req in &levels {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
+            // Applied value (#360) — the frame below carries this, not the
+            // raw request, so `drive_db` on the wire always matches what
+            // reached the engine.
+            let level_dbfs = apply_drive_ceiling(ceiling, level_req);
             let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
             eng.set_tone(freq_hz, amplitude);
             let _ = eng.capture_block(0.1);
@@ -400,7 +425,13 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_level".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "in_port": in_port_reply})
+    json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "in_port": in_port_reply,
+        "start_dbfs": start_dbfs_applied,
+        "stop_dbfs": stop_dbfs_applied,
+    })
 }
 
 /// Run the concatenated sweep capture through an IEC 61260-1 Class 1
@@ -551,7 +582,8 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// Renamed from `sweep_ir` by #282 (CLI moved to `ac plot ir`): the wire
 /// `cmd` now follows its new `plot` family, matching `plot`/`plot_level`.
 ///
-/// Generates an ESS at `level_dbfs`, plays it out via the audio engine,
+/// Generates an ESS at `level_dbfs` (clamped to `drive_max_dbfs`, #360),
+/// plays it out via the audio engine,
 /// synchronously captures `duration + tail_s` of the measurement input,
 /// deconvolves via the normalized inverse filter, gates the linear IR and
 /// the first few pre-impulse harmonic IRs, and emits them as a
@@ -565,6 +597,7 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// bails. See ARCHITECTURE.md.
 pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot_ir");
+    cfg_guard!(state);
     let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
@@ -587,6 +620,11 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or(4096) as usize;
 
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: `plot_ir` had no clamp at all — the module doc on
+    // `tests/it_loopback_ir.rs` documented this gap outright. Every other
+    // field derived from `level_dbfs` below (the report's `StimulusParams`,
+    // the actual played amplitude) now derives from the applied value.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -951,5 +989,5 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_ir".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply})
+    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs})
 }

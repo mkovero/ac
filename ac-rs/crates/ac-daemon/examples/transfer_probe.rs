@@ -265,7 +265,6 @@ fn main() {
                 "delay_ms":           v["delay_ms"],
                 "delay_locked":       v["delay_locked"],
                 "delay_attempts":     v["delay_attempts"],
-                "speed_of_sound_m_s": v["speed_of_sound_m_s"],
                 "meas_peak_dbfs":     v["meas_peak_dbfs"],
                 "ref_peak_dbfs":      v["ref_peak_dbfs"],
                 "delay_evidence":     v["delay_evidence"],

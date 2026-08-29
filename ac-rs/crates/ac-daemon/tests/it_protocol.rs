@@ -232,6 +232,159 @@ fn status_replies_ok() {
     assert_eq!(r["listen_mode"], json!("local"));
 }
 
+/// #385: `status` carries the identity fields a client needs to tell this
+/// daemon apart from one squatting the same hardcoded ports under a
+/// different `HOME`.
+#[test]
+fn status_reports_daemon_identity() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"status"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(
+        r["home"],
+        json!(d.home.display().to_string()),
+        "home must be the daemon's own $HOME: {r}"
+    );
+    assert_eq!(
+        r["pid"],
+        json!(d.child.id()),
+        "pid must be this daemon process's own pid: {r}"
+    );
+    assert_eq!(
+        r["spawn_mode"],
+        json!("manual"),
+        "Daemon::spawn never passes --auto-spawned: {r}"
+    );
+    let config_path = r["config_path"].as_str().expect("config_path string");
+    assert!(
+        config_path.ends_with("config.json"),
+        "config_path: {config_path}"
+    );
+    assert!(
+        config_path.starts_with(&d.home.display().to_string()),
+        "config_path should be under the daemon's HOME: {config_path}"
+    );
+    let started_at = r["started_at"].as_str().expect("started_at string");
+    assert!(
+        started_at.ends_with('Z'),
+        "started_at should be RFC3339 Zulu: {started_at}"
+    );
+}
+
+/// #385: `server_connections` carries the same identity fields as `status`.
+#[test]
+fn server_connections_reports_daemon_identity() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd":"server_connections"}));
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["home"], json!(d.home.display().to_string()));
+    assert_eq!(r["pid"], json!(d.child.id()));
+    assert_eq!(r["spawn_mode"], json!("manual"));
+}
+
+/// #385: a second daemon that loses the bind race must report the
+/// incumbent's identity to stderr rather than fail silently or guess.
+#[test]
+fn second_daemon_on_taken_port_reports_incumbent_identity() {
+    let d = Daemon::spawn();
+
+    let home2 = alloc_home();
+    let stderr_path = home2.join("daemon2.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture");
+    let mut second = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+        .env("HOME", &home2)
+        .args([
+            "--fake-audio",
+            "--local",
+            "--ctrl-port",
+            &d.ctrl_port.to_string(),
+            "--data-port",
+            &d.data_port.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn second ac-daemon");
+
+    let status = second.wait().expect("wait for second daemon to exit");
+    assert!(
+        !status.success(),
+        "a daemon on an already-bound port must exit non-zero"
+    );
+
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        stderr.contains("existing listener"),
+        "expected the incumbent's identity in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&d.home.display().to_string()),
+        "expected the incumbent's home in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("manual"),
+        "expected the incumbent's spawn_mode (manual) in stderr, got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&home2);
+}
+
+/// #385 / PR #396 QA correctness #2: a DATA-port-only conflict (CTRL binds
+/// fine in this process, but the DATA port belongs to someone else) must
+/// not misreport itself as "could not identify existing listener" — that
+/// message is honest only when a probe was actually attempted and got no
+/// answer. Here no probe is attempted at all: CTRL already bound in *this*
+/// process, so a `ctrl_port` probe would reach our own not-yet-serving
+/// socket rather than the incumbent, and DATA is a PUB socket with no
+/// `status` responder to query in the first place. The message must say
+/// that, not sound like a failed probe.
+#[test]
+fn data_port_conflict_does_not_misreport_self_as_unidentified_incumbent() {
+    let d = Daemon::spawn();
+
+    let (free_ctrl, _unused_data) = alloc_ports();
+    let home2 = alloc_home();
+    let stderr_path = home2.join("daemon2.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create stderr capture");
+    let mut second = Command::new(env!("CARGO_BIN_EXE_ac-daemon"))
+        .env("HOME", &home2)
+        .args([
+            "--fake-audio",
+            "--local",
+            "--ctrl-port",
+            &free_ctrl.to_string(),
+            "--data-port",
+            &d.data_port.to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn second ac-daemon");
+
+    let status = second.wait().expect("wait for second daemon to exit");
+    assert!(
+        !status.success(),
+        "a daemon on an already-bound DATA port must exit non-zero"
+    );
+
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    assert!(
+        !stderr.contains("could not identify existing listener"),
+        "a DATA-only conflict never probes anyone, so it must not use the \
+         failed-probe wording: {stderr}"
+    );
+    assert!(
+        stderr.contains("DATA port already in use"),
+        "expected an honest DATA-conflict message, got: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&home2);
+}
+
 #[test]
 fn unknown_command_rejected() {
     let d = Daemon::spawn();
@@ -1141,6 +1294,126 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
     assert!((stored_out - expected_out).abs() < 1e-6);
 }
 
+/// Drive a `calibrate` run to completion, skipping every voltage prompt
+/// (`vrms: null`), and return the `cal_done` payload. `cmd` supplies any
+/// extra fields (`output_channel` / `input_channel` / `ref_dbfs`) merged
+/// into the `calibrate` request.
+fn run_calibrate_skip_all(c: &Client, mut cmd: Value) -> Value {
+    cmd["cmd"] = json!("calibrate");
+    let r = c.call(cmd);
+    assert_eq!(r["ok"], json!(true), "calibrate ack: {r}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((topic, _)) if topic == "cal_prompt" => {
+                let _ = c.call(json!({"cmd":"cal_reply", "vrms": null}));
+            }
+            Some((topic, payload)) if topic == "cal_done" => return payload,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    panic!("calibrate run never reached cal_done");
+}
+
+/// #370, acceptance criterion 1: `cal_done` carries the resolved input/output
+/// port names actually used — server-side, not the client's copy of the
+/// request — so a scan across channels stops reading as a flat, plausible
+/// result when every run actually measured the same port.
+#[test]
+fn cal_done_reports_resolved_ports() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let done = run_calibrate_skip_all(&c, json!({"output_channel": 2, "input_channel": 3}));
+    assert_eq!(
+        done["output_port"],
+        json!("fake:playback_2"),
+        "cal_done: {done}"
+    );
+    assert_eq!(
+        done["input_port"],
+        json!("fake:capture_3"),
+        "cal_done: {done}"
+    );
+}
+
+/// #370, acceptance criterion 3 (the failing case named in the triage spec):
+/// a config.json edit made between two measurements against one long-lived
+/// daemon must reach the second one. Before the per-request reload in
+/// `dispatch()`, this is exactly the reporter's repro — an auto-spawned
+/// daemon outlives the `ac` command that spawned it, so a channel-scan
+/// script editing `input_channel` between runs silently re-measured the
+/// first channel every time.
+#[test]
+fn calibrate_picks_up_a_config_edit_made_between_two_runs() {
+    let d = Daemon::spawn_with_config(Some(json!({"input_channel": 1})));
+    let c = Client::new(&d);
+
+    let done1 = run_calibrate_skip_all(&c, json!({}));
+    assert_eq!(
+        done1["input_port"],
+        json!("fake:capture_1"),
+        "first run: {done1}"
+    );
+
+    // Same daemon process, no restart — just the config file changing
+    // underneath it, exactly as an operator's editor would.
+    let cfg_path = d.home.join(".config").join("ac").join("config.json");
+    fs::write(
+        &cfg_path,
+        serde_json::to_vec_pretty(&json!({"input_channel": 2})).unwrap(),
+    )
+    .expect("rewrite config.json");
+
+    let done2 = run_calibrate_skip_all(&c, json!({}));
+    assert_eq!(
+        done2["input_port"],
+        json!("fake:capture_2"),
+        "second run: {done2}"
+    );
+    assert_ne!(
+        done1["input_port"], done2["input_port"],
+        "config edit between runs must change the resolved input port"
+    );
+}
+
+/// #370, acceptance criterion 4: where the running daemon cannot serve the
+/// current on-disk config (unparseable JSON, e.g. a file caught mid-write),
+/// a routing command must say so and refuse rather than silently serving
+/// against the last-known-good in-memory config. Non-routing commands
+/// (`status`) stay reachable so the operator can tell what's wrong without
+/// a restart.
+#[test]
+fn routing_command_refuses_when_config_json_is_unparseable() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let cfg_path = d.home.join(".config").join("ac").join("config.json");
+    fs::write(&cfg_path, b"{ not json").expect("write malformed config.json");
+
+    let r = c.call(json!({"cmd": "calibrate"}));
+    assert_eq!(r["ok"], json!(false), "expected refusal: {r}");
+    let err = r["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("config.json"),
+        "error should name config.json: {r}"
+    );
+    // `{e:#}` (not `{e}`) on the reload's Err arm: the reply must carry the
+    // actual parse failure, not just the file path — that's what makes the
+    // refusal diagnosable rather than merely visible.
+    assert!(
+        err.contains("line") || err.contains("column") || err.to_lowercase().contains("expected"),
+        "error should name *why* config.json failed to parse, not just that it did: {r}"
+    );
+
+    let s = c.call(json!({"cmd": "status"}));
+    assert_eq!(s["ok"], json!(true), "status must still answer: {s}");
+}
+
 /// #281 QA correctness issue 1: `measure_tau`'s sweep→deconvolve→peak→seconds
 /// path had zero test coverage — the only τ tests (`calibration.rs`)
 /// construct `TauEntry`/`TauConditions` directly and never call
@@ -1630,6 +1903,234 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
+// ---------------------------------------------------------------------
+// Drive ceiling (#360) — plot_ir and calibrate previously emitted an
+// unclamped level; both are commands whose whole point is to put a
+// stimulus on a physical output, and `drive_max_dbfs` governed neither.
+// ---------------------------------------------------------------------
+
+/// `plot_ir` clamps its requested level to `drive_max_dbfs`.
+///
+/// The deconvolved IR itself cannot be used as the observable here: the
+/// handler deliberately re-scales the recovered impulse response by
+/// `1/amp` (`plot.rs`, "so the reported IR has unity peak for an identity
+/// loopback regardless of `level_dbfs`"), and the fake backend's
+/// `play_and_capture` is a noiseless echo of exactly what was played — so
+/// on this backend the published IR is invariant to level by construction,
+/// clamped or not, and asserting on it would prove nothing.
+///
+/// `report.stimulus.level_dbfs` is emitted from inside the worker, after
+/// the capture, from the same binding that scaled the actually-played
+/// sweep (`let amp = dbfs_to_amplitude(level_dbfs)`) — a different
+/// computation from the synchronous CTRL reply, so this does not just
+/// re-check the same echo twice under two names.
+#[test]
+fn plot_ir_clamps_level_to_drive_max_dbfs() {
+    const CEILING_DBFS: f64 = -35.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": 12.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["level_dbfs"],
+        json!(CEILING_DBFS),
+        "sync reply must echo the applied (clamped) level, not the request: {r}"
+    );
+
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let applied = v["report"]["stimulus"]["level_dbfs"]
+        .as_f64()
+        .expect("stimulus.level_dbfs");
+    assert!(
+        (applied - CEILING_DBFS).abs() < 1e-9,
+        "report recorded level {applied}, requested 12.0 dBFS against a {CEILING_DBFS} \
+         ceiling — plot_ir emitted the raw request instead of the clamped level"
+    );
+}
+
+/// `calibrate` clamps its `ref_dbfs` to `drive_max_dbfs`, and an omitted
+/// `ref_dbfs` defaults to the ceiling rather than a hardcoded -10.0.
+///
+/// `cal_prompt` step 2's `captured_dbfs` is a genuine round trip through
+/// the fake engine — `capture_rms` reads back whatever `eng.set_tone` was
+/// actually given, via the same capture path `analyze_mono` and `plot`
+/// use — not a re-statement of the request. A sine's RMS sits ~3.01 dB
+/// below its peak amplitude, so a tone actually played at the ceiling
+/// reads back at `ceiling - 3.01`, not at the ~-3.0 dBFS a full-scale,
+/// unclamped 0 dBFS request would produce — the two are far enough apart
+/// that a clamp that silently didn't apply cannot pass this by accident.
+#[test]
+fn calibrate_default_and_explicit_ref_dbfs_are_clamped_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -25.0;
+    const PEAK_TO_RMS_DB: f64 = 3.0103; // 20·log10(√2)
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    // No `ref_dbfs` at all: must default to the session ceiling, not the
+    // historical hardcoded -10.0 (#360 acceptance criterion 2).
+    let r = c.call(json!({"cmd": "calibrate", "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["ref_dbfs"],
+        json!(CEILING_DBFS),
+        "an omitted ref_dbfs must default to drive_max_dbfs: {r}"
+    );
+
+    let step1 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+
+    let step2 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
+    let expected = CEILING_DBFS - PEAK_TO_RMS_DB;
+    assert!(
+        (captured_dbfs - expected).abs() < 1.5,
+        "captured {captured_dbfs} dBFS does not match a tone actually played at the \
+         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — the default was not clamped \
+         before the tone was set"
+    );
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    let _ = c.wait_for_topic("cal_done", Duration::from_secs(5));
+
+    // Explicit request above the ceiling: also clamped, defense in depth.
+    let r = c.call(json!({
+        "cmd": "calibrate", "ref_dbfs": 0.0, "output_channel": 0, "input_channel": 0,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["ref_dbfs"],
+        json!(CEILING_DBFS),
+        "an explicit ref_dbfs above the ceiling must be clamped: {r}"
+    );
+    let step1 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 1 prompt");
+    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
+    let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    let step2 = c
+        .wait_for_topic("cal_prompt", Duration::from_secs(5))
+        .expect("step 2 prompt");
+    let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
+    assert!(
+        (captured_dbfs - expected).abs() < 1.5,
+        "captured {captured_dbfs} dBFS does not match a tone actually played at the \
+         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — an explicit request above \
+         the ceiling reached the engine unclamped"
+    );
+}
+
+/// The remaining #360 call sites (`generate`, `generate_pink`,
+/// `sweep_level`, `sweep_frequency`, `plot`, `plot_level`) all echo the
+/// applied level on their sync reply, same as `plot_ir`/`calibrate` above
+/// and `set_drive` before them. One clamp-above-ceiling check per command
+/// — the shared `apply_drive_ceiling` chokepoint itself is unit-tested in
+/// `handlers/mod.rs`, so this is coverage that each site actually calls it,
+/// not a re-test of the clamp arithmetic.
+#[test]
+fn generate_and_generate_pink_clamp_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "generate", "freq_hz": 1000.0, "level_dbfs": 6.0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+
+    let r = c.call(json!({"cmd": "generate_pink", "level_dbfs": 6.0}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.call(json!({"cmd": "stop"}));
+}
+
+#[test]
+fn sweep_level_clamps_each_ramp_point_and_echoes_the_applied_range() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+
+    // Entire requested range sits above the ceiling — the degenerate case
+    // where the ramp's applied shape collapses to a flat line at the
+    // ceiling (UX spec, issue #360).
+    let r = c.call(json!({
+        "cmd": "sweep_level", "freq_hz": 1000.0,
+        "start_dbfs": -10.0, "stop_dbfs": 6.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(CEILING_DBFS), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+
+    // Partial overlap: only the top end is clamped.
+    let r = c.call(json!({
+        "cmd": "sweep_level", "freq_hz": 1000.0,
+        "start_dbfs": -40.0, "stop_dbfs": -10.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(-40.0), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+#[test]
+fn sweep_frequency_clamps_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "sweep_frequency", "start_hz": 100.0, "stop_hz": 200.0,
+        "level_dbfs": 6.0, "duration": 0.2,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(5));
+}
+
+#[test]
+fn plot_clamps_level_to_the_ceiling() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "plot", "start_hz": 500.0, "stop_hz": 600.0,
+        "level_dbfs": 6.0, "ppd": 2, "duration": 0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+}
+
+#[test]
+fn plot_level_clamps_the_range_and_echoes_it_applied() {
+    const CEILING_DBFS: f64 = -20.0;
+    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd": "plot_level", "freq_hz": 1000.0,
+        "start_dbfs": -40.0, "stop_dbfs": -10.0, "steps": 3, "duration": 0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["start_dbfs"], json!(-40.0), "{r}");
+    assert_eq!(r["stop_dbfs"], json!(CEILING_DBFS), "{r}");
+    let _ = c.wait_for_topic("done", Duration::from_secs(10));
+}
+
 /// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
 /// the entry it must hit was written by `calibrate`. Nothing but a test
 /// couples those two condition tuples — they are built in different
@@ -1688,46 +2189,38 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
         (used_tau - stored_tau).abs() < 1e-12,
         "plot_ir used τ {used_tau}, calibrate stored {stored_tau}"
     );
-    // The provenance the printed distance names must be present, not just
-    // the number.
+    // The τ provenance must be archived, not just the number.
     assert!(latency["measured_at"].is_string(), "{latency}");
     assert_eq!(latency["method"], json!("farina_short_ess_v2"), "{latency}");
 
     // With a τ this close to the arrival (both are the same 32-sample
-    // fake loopback), the derived path length should land near zero — the
-    // fake backend has no acoustic path. A τ that failed to subtract
-    // would read ~0.23 m instead.
+    // fake loopback), the τ-corrected flight time must land near zero —
+    // the fake backend has no acoustic path. A τ that failed to subtract
+    // would read ~0.67 ms instead (32 samples at 48 kHz).
     //
     // Stopgap tolerance (#346 → #351): `measure_tau` still locates τ via
-    // `argmax|h|`, while `ir_arrival_distance()`'s arrival is now
-    // `estimate_onset`-derived. The two captures' differing sweep
-    // bandwidth means their bandlimited-deconvolution skirts differ too,
-    // so they no longer cancel to the pre-#346 tightness. #351 tracks
-    // reconciling the two estimators.
+    // `argmax|h|`, while `ir_stats().arrival_s` is now onset-derived. The
+    // two captures' differing sweep bandwidth means their bandlimited-
+    // deconvolution skirts differ too, so they no longer cancel to the
+    // pre-#346 tightness. #351 tracks reconciling the two estimators.
     //
     // Pinned tight around this fixture's known, computable answer (QA on
     // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
-    // exact value could hide up to 0.15 m of unrelated regression) rather
-    // than left as an open-ended bound — this fixture is deterministic
-    // (fake backend, fixed 200 Hz–8 kHz / 1024-sample window), so its
-    // exact phantom distance is a known quantity, not measurement noise.
-    // Value moved -0.0929 → -0.1072 under #353 (option A′): `ir_stats`'s
-    // onset threshold switched from an RMS to a median pre-impulse floor,
-    // which shifts `estimate_onset`'s answer by a couple of samples on
-    // this real (non-Gaussian) fixture even without gross contamination —
-    // expected per the architect's own review, not a regression.
-    const EXPECTED_PHANTOM_DISTANCE_M: f64 = -0.1072;
+    // exact value could hide unrelated regression) rather than left as an
+    // open-ended bound — this fixture is deterministic (fake backend,
+    // fixed 200 Hz–8 kHz / 1024-sample window), so its exact phantom
+    // flight time is a known quantity, not measurement noise.
+    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = 0.0;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
-    match report.ir_arrival_distance() {
-        ac_core::measurement::report::ArrivalDistance::Known { distance_m, .. } => assert!(
-            (distance_m - EXPECTED_PHANTOM_DISTANCE_M).abs() < 0.01,
-            "fake loopback has no acoustic path; expected the known #351 \
-             phantom distance ({EXPECTED_PHANTOM_DISTANCE_M} m ± 0.01), got \
-             {distance_m} m"
-        ),
-        other => panic!("expected a known distance, got {other:?}"),
-    }
+    let stats = report.ir_stats().expect("ir_stats");
+    let flight_ms = (stats.arrival_s - used_tau) * 1000.0;
+    assert!(
+        (flight_ms - EXPECTED_PHANTOM_FLIGHT_MS).abs() < 0.03,
+        "fake loopback has no acoustic path; expected the known #351 \
+         phantom flight time ({EXPECTED_PHANTOM_FLIGHT_MS} ms ± 0.03), got \
+         {flight_ms} ms"
+    );
 }
 
 #[test]

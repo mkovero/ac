@@ -4,48 +4,40 @@
 set -euo pipefail
 
 AC_REPO="${AC_REPO:-mkovero/ac}"
-ROOT="$(git rev-parse --show-toplevel)"
+# The MAIN checkout, resolved from anywhere — including from inside a linked
+# worktree. `--show-toplevel` returns the current worktree, so deriving paths
+# from it nests them one level deeper on every dispatch:
+#   ~/src/ac-wt/wt/ac-wt/wt/issue-340/...
+# `--git-common-dir` always points at the main repo's .git, so its parent is
+# the main checkout wherever this is sourced from.
+ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 
-# ONE root for everything this tooling generates. Previously worktrees lived in
-# ~/src/ac-wt, build artifacts in ~/.cache/ac-target and transcripts in
-# ~/.local/state/ac — three places to check for disk use and three to clean.
-#
-#   $AC_HOME/wt/<branch>       worktrees
-#   $AC_HOME/target/<branch>   build artifacts
-#   $AC_HOME/log/              raw session transcripts
+# Where the current command is actually running. Same as ROOT in the main
+# checkout; the worktree path when a script is invoked from inside one.
+HERE="$(git rev-parse --show-toplevel)"
+
+# Standards PDFs live outside the repo — licence-restricted, gitignored, so no
+# worktree checkout will contain them. Roles reach them by absolute path.
+export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
+
+# ONE root for everything this tooling generates, always beside the main
+# checkout:
+#   $AC_HOME/wt/<branch>   worktrees
+#   $AC_HOME/target        build artifacts, SHARED
+#   $AC_HOME/log           raw session transcripts
 #
 # Distilled session output stays in work/sessions/ inside the repo: that is the
 # return channel to the planning chat and belongs in git.
 AC_HOME="${AC_HOME:-$(dirname "$ROOT")/ac-wt}"
 WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
-# No github MCP server is connected — roles reach the tracker through `gh` in
-# Bash. Set AC_GH_TOOLS if you add one; the tool names come from `claude mcp list`.
-GH_TOOLS="${AC_GH_TOOLS:-}"
+AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
+AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
 
-# cargo test --workspace on five crates with egui exceeds the default Bash
-# timeout, and a session that hits it backgrounds the build instead — then ends
-# its turn with nothing to wait on, and the -p process exits taking the
-# background task with it. Give it room to run synchronously.
-export BASH_DEFAULT_TIMEOUT_MS="${AC_BASH_TIMEOUT_MS:-900000}"
-export BASH_MAX_TIMEOUT_MS="${AC_BASH_MAX_TIMEOUT_MS:-1800000}"
-
-# Compile parallelism. Leave headroom: a full-throttle build starves the box
-# this is running on, and on a host with cores reserved for RT audio it will
-# spill onto them unless -j is bounded or the process is pinned. Set
-# AC_CARGO_JOBS to the cores you are willing to give up, not to nproc.
-export CARGO_BUILD_JOBS="${AC_CARGO_JOBS:-$(( $(nproc) > 4 ? $(nproc) - 2 : 1 ))}"
-
-# Test parallelism is a separate knob from compile parallelism, and for
-# measurement code the right value is often lower: timing-sensitive tests that
-# share a machine get flakier, not faster. Unset by default — set it if the
-# suite turns out to contend.
-if [[ -n ${AC_TEST_THREADS:-} ]]; then export RUST_TEST_THREADS="$AC_TEST_THREADS"; fi
-
-# Per branch, not per worktree and not shared: one dir across worktrees means
-# lock contention and fingerprint churn; one per worktree means every dispatch
-# pays a cold build. Per branch is warm across runs on the same issue and
-# isolated between them.
-AC_TARGET_ROOT="${AC_TARGET_ROOT:-$AC_HOME/target}"
+# One shared target dir, not one per branch. Per-branch was warm across runs on
+# the same issue, but cost several GB each and left orphans behind every merge.
+# Cargo locks the dir, so genuinely parallel dispatch serialises at the build
+# step — which is the right trade when parallel runs are rare.
+AC_TARGET="${AC_TARGET:-$AC_HOME/target}"
 
 # gh through a retry. GitHub 5xx and rate-limit responses are transient and
 # common enough to break a long run; a real error (404, auth, bad argument) is
@@ -85,10 +77,6 @@ gh_up() {
   return 1
 }
 
-# One place that decides where a worktree's build artifacts go. Used by run(),
-# by the per-worktree cargo config, and by ac-gc.sh.
-target_dir_for() { printf '%s/%s\n' "$AC_TARGET_ROOT" "${1:-detached}"; }
-
 # Standards PDFs live outside the repo — licence-restricted, gitignored, so no
 # worktree checkout will contain them. Roles reach them by absolute path.
 export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
@@ -98,9 +86,14 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$ROOT/work/sessions}"
 
-# Task = delegation tool. Without it a session cannot reach explorer and reads
-# every file itself, in its own context. Verify against a transcript after any
-# upgrade:  jq -r 'select(.type=="system") | .tools // empty | .[]' <raw>
+# Task = delegation tool. Whether a session can actually reach a subagent is
+# NOT settled by this list: `.claude/settings.json` denies `Task(Explore)` and
+# run() exports CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1, either of which is
+# enough to make it dead weight. Do not infer the answer from these three
+# settings — read it off a transcript, which is the only place it is observable:
+#   jq -r 'select(.type=="system") | .tools // empty | .[]' <raw>
+# If Task is absent there, drop it from these lists rather than leaving a tool
+# in an allowlist that nothing can call.
 TOOLS_WRITE="Read,Grep,Glob,Edit,Write,Bash,Task"
 TOOLS_READ="Read,Grep,Glob,Bash,Task"
 
@@ -192,13 +185,11 @@ link_support() {
   # Needs `/.cargo/` in the repo .gitignore — root-anchored, so the tracked
   # ac-rs/.cargo is unaffected. Without that a developer session doing
   # `git add -A` will commit it.
-  local br cfg
-  br="$(git -C "$wt" branch --show-current 2>/dev/null)"
-  cfg="$wt/.cargo/config.toml"
-  if [[ -n $br && ! -e $cfg ]]; then
+  local cfg="$wt/.cargo/config.toml"
+  if [[ ! -e $cfg ]]; then
     mkdir -p "$wt/.cargo"
-    printf '# written by .agents/bin — not tracked, see /.gitignore\n[build]\ntarget-dir = "%s"\n' \
-      "$(target_dir_for "$br")" > "$cfg"
+    printf '# written by bin/common.sh — not tracked, see /.gitignore\n[build]\ntarget-dir = "%s"\n' \
+      "$AC_TARGET" > "$cfg"
   fi
   return 0
 }
@@ -263,17 +254,28 @@ run() {
     return
   fi
 
-  # Set here, not at source time: the caller has cd'd into its worktree by now.
-  local branch
-  branch="$(git branch --show-current 2>/dev/null || echo detached)"
-  export CARGO_TARGET_DIR="$(target_dir_for "$branch")"
+  export CARGO_TARGET_DIR="$AC_TARGET"
   mkdir -p "$CARGO_TARGET_DIR"
 
   local tag="${AC_TAG:-$$}" stamp status=0
+  mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
   stamp="$(date +%F)-$role-$tag"
+
+  # The tag is not unique. revise.sh uses pr-<n>-rev for EVERY round, so round
+  # two overwrote round one — transcript, distilled output, and the --resume id
+  # with it. Same for a re-run of implement.sh on one issue in a day. Suffix
+  # instead of clobbering: the run you want to read is usually the earlier one,
+  # and a tool that deletes the evidence of its own cost cannot be audited.
+  if [[ -e "$AC_LOG_DIR/$stamp.jsonl" || -e "$AC_SESSION_DIR/$stamp.md" ]]; then
+    local i=2
+    while [[ -e "$AC_LOG_DIR/$stamp-$i.jsonl" || -e "$AC_SESSION_DIR/$stamp-$i.md" ]]; do
+      (( ++i ))
+    done
+    stamp="$stamp-$i"
+  fi
+
   local raw="$AC_LOG_DIR/$stamp.jsonl"
   local out="$AC_SESSION_DIR/$stamp.md"
-  mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
 
   # Stream to the terminal, keep the raw transcript. Distillation happens after
   # the run, not inside the pipe — a process-substitution tee races the

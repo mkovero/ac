@@ -4,6 +4,7 @@
 //! `crossbeam_channel::Receiver`; the main loop drains it between REP rounds.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -27,6 +28,14 @@ const PUB_BACKLOG_WARN: usize = 1_000;
 #[derive(Clone)]
 pub struct ServerState {
     pub cfg: Arc<Mutex<ac_core::config::Config>>,
+    /// Set when the last per-request reload of `config.json` (#370, in
+    /// `dispatch()`) failed — bad JSON, or a file caught mid-write. `cfg`
+    /// above keeps the last-good value in this case; routing-affecting
+    /// handlers check this via `cfg_guard!` and refuse rather than serve
+    /// against config the daemon can no longer confirm is current.
+    /// Cleared on the next reload that succeeds — self-healing, no restart
+    /// needed once the file is fixed.
+    pub cfg_error: Arc<Mutex<Option<String>>>,
     pub workers: Arc<Mutex<HashMap<String, WorkerHandle>>>,
     /// Worker threads → main thread → PUB socket.
     pub pub_tx: Sender<Vec<u8>>,
@@ -34,6 +43,19 @@ pub struct ServerState {
     pub fake_audio: bool,
     /// Human-readable mode string for `status` / `server_connections` replies.
     pub listen_mode: Arc<Mutex<String>>,
+    /// Identity fields (#385) — captured once at startup, read-only after,
+    /// same lifetime as `src_mtime`. Let a client tell one running daemon
+    /// apart from another: an auto-spawned daemon left over from an
+    /// isolated test/rig `HOME` is otherwise indistinguishable from the
+    /// operator's own, on the same hardcoded 5556/5557 ports.
+    pub home: String,
+    pub config_path: PathBuf,
+    pub pid: u32,
+    /// RFC3339, UTC, second precision — when this process started.
+    pub started_at: String,
+    /// `"auto"` when started by `ac-cli`'s `spawn_daemon()` (the
+    /// `--auto-spawned` flag), `"manual"` for a hand-run `ac-daemon`.
+    pub spawn_mode: String,
     /// Signal the main loop to rebind: send the new bind host ("*" or "127.0.0.1").
     /// The rebind happens AFTER the current CTRL reply is sent (per ZMQ.md spec).
     pub rebind_tx: Sender<String>,
@@ -161,7 +183,13 @@ impl Default for MonitorParams {
     }
 }
 
-pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -> Result<()> {
+pub fn run(
+    ctrl_port: u16,
+    data_port: u16,
+    local_only: bool,
+    fake_audio: bool,
+    auto_spawned: bool,
+) -> Result<()> {
     let ctx = zmq::Context::new();
 
     let ctrl = ctx.socket(zmq::REP).context("CTRL socket")?;
@@ -169,10 +197,25 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     data.set_sndhwm(PUB_HWM).context("set PUB sndhwm")?;
 
     let mut bind_host = if local_only { "127.0.0.1" } else { "*" }.to_string();
-    ctrl.bind(&format!("tcp://{bind_host}:{ctrl_port}"))
-        .with_context(|| format!("bind CTRL tcp://{bind_host}:{ctrl_port}"))?;
-    data.bind(&format!("tcp://{bind_host}:{data_port}"))
-        .with_context(|| format!("bind DATA tcp://{bind_host}:{data_port}"))?;
+    if let Err(e) = ctrl.bind(&format!("tcp://{bind_host}:{ctrl_port}")) {
+        report_bind_conflict(ctrl_port);
+        return Err(e).with_context(|| format!("bind CTRL tcp://{bind_host}:{ctrl_port}"));
+    }
+    if let Err(e) = data.bind(&format!("tcp://{bind_host}:{data_port}")) {
+        // Not `report_bind_conflict(ctrl_port)`: CTRL already bound *in this
+        // process* two lines above, so probing `ctrl_port` here would reach
+        // our own not-yet-serving REP socket and time out — misreporting a
+        // self-probe timeout as "could not identify existing listener" when
+        // no incumbent was ever queried. DATA is a PUB socket with no
+        // `status` responder, so whoever holds `data_port` genuinely can't
+        // be identified this way; say why instead of sounding like a failed
+        // probe (#385 / PR #396 QA correctness #2).
+        eprintln!(
+            "ac-daemon: DATA port already in use — cannot identify the \
+             existing listener (PUB sockets don't answer status queries)"
+        );
+        return Err(e).with_context(|| format!("bind DATA tcp://{bind_host}:{data_port}"));
+    }
 
     eprintln!("ac-daemon: CTRL tcp://{bind_host}:{ctrl_port}  DATA tcp://{bind_host}:{data_port}");
 
@@ -182,13 +225,28 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     let cfg = ac_core::config::load(None).unwrap_or_default();
     let listen_mode = if local_only { "local" } else { "public" }.to_string();
 
+    // Identity (#385) — captured once, same lifetime as `src_mtime`.
+    // `$HOME` unset mirrors `ac_core::config::default_config_path`'s own
+    // fallback: degrade to "." rather than panicking or leaving it absent.
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let config_path = ac_core::config::default_config_path();
+    let pid = std::process::id();
+    let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let spawn_mode = if auto_spawned { "auto" } else { "manual" }.to_string();
+
     let state = ServerState {
         cfg: Arc::new(Mutex::new(cfg)),
+        cfg_error: Arc::new(Mutex::new(None)),
         workers: Arc::new(Mutex::new(HashMap::new())),
         pub_tx,
         src_mtime: crate::binary_mtime(),
         fake_audio,
         listen_mode: Arc::new(Mutex::new(listen_mode)),
+        home,
+        config_path,
+        pid,
+        started_at,
+        spawn_mode,
         rebind_tx,
         ctrl_port,
         data_port,
@@ -337,6 +395,57 @@ pub fn run(ctrl_port: u16, data_port: u16, local_only: bool, fake_audio: bool) -
     Ok(())
 }
 
+/// On a CTRL bind failure (port already in use), probe whatever is already
+/// listening on `ctrl_port` via a short-lived `status` request and print its
+/// identity to stderr before this process gives up — or admit we couldn't
+/// identify it, rather than guessing (#385). 500 ms timeout, matching
+/// `ac-cli/src/spawn.rs`'s `wait_for_server` per-attempt timeout.
+///
+/// Not called on a DATA-only bind failure: at that point CTRL has already
+/// bound successfully in this process, so probing `ctrl_port` would reach
+/// our own socket, not an incumbent's — see the DATA-bind-failure arm in
+/// `run()` for the honest message used there instead (#396 QA correctness
+/// #2).
+fn report_bind_conflict(ctrl_port: u16) {
+    let cant_identify = || {
+        eprintln!("ac-daemon: could not identify existing listener (no response to status query)");
+    };
+
+    let ctx = zmq::Context::new();
+    let sock = match ctx.socket(zmq::REQ) {
+        Ok(s) => s,
+        Err(_) => return cant_identify(),
+    };
+    sock.set_linger(0).ok();
+    sock.set_rcvtimeo(500).ok();
+    sock.set_sndtimeo(500).ok();
+    let addr = format!("tcp://127.0.0.1:{ctrl_port}");
+    if sock.connect(&addr).is_err() || sock.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
+        return cant_identify();
+    }
+    let Ok(bytes) = sock.recv_bytes(0) else {
+        return cant_identify();
+    };
+    let Ok(reply) = serde_json::from_slice::<Value>(&bytes) else {
+        return cant_identify();
+    };
+    if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+        return cant_identify();
+    }
+    let home = reply.get("home").and_then(Value::as_str).unwrap_or("?");
+    let pid = reply.get("pid").and_then(Value::as_u64).unwrap_or(0);
+    let spawn_label = match reply.get("spawn_mode").and_then(Value::as_str) {
+        Some("auto") => "auto-spawned",
+        Some("manual") => "manual",
+        _ => "?",
+    };
+    let started_at = reply
+        .get("started_at")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    eprintln!("ac-daemon: existing listener: home {home}, pid {pid}, {spawn_label} {started_at}");
+}
+
 fn apply_pending_rebind(
     rebind_rx: &Receiver<String>,
     ctrl: &zmq::Socket,
@@ -378,6 +487,29 @@ fn dispatch(
 ) -> Value {
     while let Ok(frame) = pub_rx.try_recv() {
         data_sock.send(frame, 0).ok();
+    }
+
+    // #370: reload config.json on every request, before it reaches a
+    // handler. An auto-spawned daemon outlives the `ac` invocation that
+    // spawned it, so without this a config edit made between two `ac`
+    // commands never reaches an already-running daemon — it keeps serving
+    // the config it started with, silently. Routing fields are already
+    // re-resolved per request via `resolve_input`/`resolve_output`, so
+    // reloading here completes that design rather than fighting it.
+    // Single-threaded REP loop: no race with a handler's `cfg.lock().clone()`.
+    match ac_core::config::load(None) {
+        Ok(cfg) => {
+            *state.cfg.lock().unwrap() = cfg;
+            *state.cfg_error.lock().unwrap() = None;
+        }
+        Err(e) => {
+            // Keep the last-good in-memory config; record the failure so
+            // routing-affecting handlers can refuse via `cfg_guard!`
+            // instead of silently serving against config.json's last-known
+            // state. `status`/`quit`/etc. are unaffected — the operator can
+            // still reach the daemon to find out what's wrong.
+            *state.cfg_error.lock().unwrap() = Some(format!("{e:#}"));
+        }
     }
 
     let cmd: Value = match serde_json::from_slice(raw) {

@@ -13,8 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, read_dmm_vrms, ref_output_migration_warning, resolve_output, resolve_ref_output,
-    send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, read_dmm_vrms, ref_output_migration_warning,
+    resolve_output, resolve_ref_output, send_pub, spawn_worker,
 };
 
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
@@ -197,6 +197,7 @@ fn flush_pair(
 
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
+    cfg_guard!(state);
 
     // `drive` controls whether the daemon plays pink noise on the output
     // while capturing. Default `false` — the UI wants a purely passive H1
@@ -313,6 +314,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: a second, independent unclamped path from the same field
+    // `set_drive` already clamps — this seeds `DriveState` directly when
+    // `drive: true`, and is never touched by `set_drive`'s own clamp
+    // unless the client calls it again later. Clamped here, before the
+    // `DriveState::new` construction below, so the stored state never
+    // holds an unclamped value regardless of whether `set_drive` is ever
+    // called in this session.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
     let capture_ports = super::cached_capture_ports(state);
 
     // Resolve each unique capture channel to a port name once. `unique_ports`
@@ -396,13 +405,6 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
     let mic_corr_enabled = state.mic_correction_enabled.clone();
-
-    // Speed of sound for the delay readout's ms → m conversion (#243),
-    // resolved from config here rather than per frame: the room's
-    // temperature does not change during a session, and reading it once
-    // means every frame in a session converts with the same constant.
-    let speed_of_sound_m_s =
-        ac_core::shared::conversions::speed_of_sound_from_config(cfg.temperature_c);
 
     let out_port_r = out_port.clone();
     let meas_port_r = unique_ports.first().cloned().unwrap_or_default();
@@ -1329,16 +1331,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             "delay_samples":   result.delay_samples,
                             "delay_ms":        result.delay_ms,
                             "delay_locked":    delay_opt.is_some(),
-                            // Derived once at worker start from the
-                            // configured room temperature (#243). Shipped
-                            // per frame rather than left to the view so the
-                            // display converts with the same constant a
-                            // report writer would, and so a captured frame
-                            // records what it was converted with.
-                            "speed_of_sound_m_s": speed_of_sound_m_s,
                             // Read by position rather than zipped into the
                             // chain above: it is a scalar the closure only
-                            // reads, and the zip is already seven deep.
+                            // reads, and the zip is already six deep.
                             "delay_attempts":  pair_delay_attempts.get(pos).copied().unwrap_or(0),
                             "delay_evidence":  prom_opt,
                             "meas_peak_dbfs":  meas_peak,

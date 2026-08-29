@@ -733,13 +733,14 @@ fn draw_transfer(
     }
 
     // Delay readout. With nothing loaded this is `scene.delay_readout`
-    // verbatim, unchanged from before this trace could collide with
-    // another. Once a stored run exists, the value switches to whichever
-    // trace is focused and gains an owner tag (acceptance criterion 5:
-    // no readout naming a single measurement may leave its owner
-    // ambiguous) — `delay (<owner>)` is this crate's own chrome text, not
-    // a reformatted measurement, so it does not cross the `computes_nothing`
-    // boundary; the number after it is still ac-scene's string, untouched.
+    // verbatim (ms only — #391 removed the metres conversion this used to
+    // also carry, and the calibration/warning rows that came with it).
+    // Once a stored run exists, the value switches to whichever trace is
+    // focused and gains an owner tag (acceptance criterion 5: no readout
+    // naming a single measurement may leave its owner ambiguous) —
+    // `delay (<owner>)` is this crate's own chrome text, not a reformatted
+    // measurement, so it does not cross the `computes_nothing` boundary;
+    // the number after it is still ac-scene's string, untouched.
     // `Focus::Live` with no live scene (nothing loaded yet either, or a
     // stored-only session that hasn't cycled focus) draws no readout at
     // all — there is no measurement to attribute.
@@ -990,7 +991,7 @@ pub fn draw_sweep_ir_panel(
             // replaces a good one"), plus the fault's own detail text —
             // names what to check, never a cause (`SweepIrFault::detail`'s
             // doc).
-            draw_ir_header(painter, rect, fault.header());
+            draw_ir_header(painter, rect, &fault.header());
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,

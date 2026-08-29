@@ -237,11 +237,140 @@ where the issue itself stands rather than trusting this line. **Ring mode is
 not the way to rehearse it**: `fake_ring` still points every ref ring at one
 channel, which is #204.
 
+- **#243's own acceptance criterion 7 — a corrected metres readout against a
+  taped move.** QA on PR #356 (2026-08-20) flagged this as unverified: nothing
+  in the tree runs the built `distance_cal` subtraction against a physical
+  distance change. Tape a **2.000 m** reference (a new position, distinct from
+  the existing 1.000 m calibration fixture and the #251/electrical-constant
+  captures above), name the capture's `distance_setup_id`, lock, and read
+  `format_delay_readout`'s metres figure back against the tape.
+
+  > **Pass: the corrected metres figure agrees with 2.000 m to within 5 mm.**
+  > Use the same reference leg and wiring the #243 block above already has in
+  > place — no new patching, just a second taped distance under the same
+  > `setup_id` discipline `distance_cal_for` enforces (a constant captured at
+  > 1.000 m must not be silently applied at 2.000 m; this run is what proves
+  > the corrected number, not just the refusal-on-mismatch path already
+  > covered by unit tests).
+
+  **Ran 2026-08-23 against PR #356 at `647d115`. Deviation 23 mm — a pass at
+  the only bar the ground truth supports, and 5 mm is not that bar.** Full
+  record in `work/rig/rig-243-criterion7-results.md`. Constant derived at a
+  taped 3.000 m, verified at a taped 1.000 m: readout 1.023 m.
+
+  > **The 5 mm bar is not scoreable by tape and should be restated at ~5 cm.**
+  > The mic is physically moved between positions and measured by hand.
+  > Operator, 2026-08-23: *"you can expect +-5cm accuracy at the best there.
+  > anything <1cm is pure luck and very very good guess. this is the fact
+  > until laser and temperature meter makes itself known someday (dont stay
+  > waiting)."*
+  >
+  > Tape placement therefore dominates every other term by 10×: **±50 mm**,
+  > against 3.6 mm of sample quantisation and 3.5 mm per °C. A 5 mm criterion
+  > cannot be certified against a ±50 mm ruler. The 4.7 mm precedent in
+  > `rig-243-343-results.md` is one lucky draw from that distribution, not a
+  > demonstrated capability — and 23 mm is indistinguishable from it.
+
+  **`rig-test-plan.md`'s AC7 bands need the tape term added.** Its
+  `≤1.5 mm / 1.5–8.5 mm / >8.5 mm` table prices temperature and treats the
+  tape as exact, making it finer than its own ground truth by more than 10×.
+  Same applies to any taped-distance criterion it scores.
+
+  **What the run did establish.** The measurements are clean: both positions
+  locked to a single sample value across every frame of two independent
+  sessions each (925 smp at 3.000 m, 378 smp at 1.000 m), and the zero-flight
+  control pair locked at exactly 0 samples throughout. Three implementation
+  gaps were filed — #371 (nothing in the tree creates a `DistanceCalEntry`),
+  #372 (the calibrated readout and its plausibility warning are unreachable
+  from any shipped UI), #373 (`distance_setup_id` refuses the whole session
+  over a self-pair). None depend on the tolerance.
+
+  **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
+  to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
+  survives in the form `rig-test-plan.md` already recommends: compare each
+  estimator's own increment between the two positions in the time domain,
+  where tape and `c` both drop out. Both estimators see the same physical
+  move whatever the tape says it was. That is the only valid form here, not
+  merely a stronger one. **The 1.3-sample bar itself was also a tape draw
+  converted to samples** and was re-derived 2026-08-24 (#375) to
+  `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, scored against the
+  candidate estimator's own measured repeatability — see `rig-test-plan.md`.
+
+- **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
+  one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
+  `e0e9341` (built with `RUSTFLAGS="-C target-cpu=native"`, no `mold` on
+  that box — see rig-build-rustflags note if repeating this):
+  `UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots --
+  --ignored --test-threads=1`, then a plain rerun, green. Box + date +
+  commit recorded in `it_transfer_snapshots.rs`'s module doc.
+
+  Correcting the prior entry's premise: **4 of the 5 references moved, not
+  1.** None of the five fixtures set `distance_cal` before this pass —
+  `transfer_armed_banner.png`, `transfer_driving_banner.png`, and
+  `transfer_stored_comparison_no_live.png` were already stale from #243's
+  ms-only wording change alone (confirmed empirically: `git diff --stat`
+  before vs. after regen). `transfer_ir_panel.png` is the only byte-stable
+  one, since its readout is replaced by the IR panel. Separately,
+  `snapshot_transfer_live_masked_gap`'s fixture was extended (this pass) to
+  actually set `distance_cal` + an exceeded `distance_plausible_max_m`, so
+  its reference now paints both new rows — closing the gap that no
+  existing fixture exercised them at all.
+
+  > **Finding, not yet resolved: the two new rows visibly collide with the
+  > pane's own content.** Cropped and inspected the regenerated
+  > `transfer_live_masked_gap.png` directly (960×420, top-left 400×150
+  > region). Row 2 (delay readout) sits on the 0 dB gridline; row 3
+  > (`delay_calibration`) has the live magnitude trace drawn across its
+  > baseline; row 4 (`delay_warning`) sits on the −20 dB gridline. All
+  > three rows are still legible — painted after the trace/grid so they're
+  > on top, not erased — but visually busy in a way rows 0–2 alone were
+  > not. This matches the *risk* QA #356 named (rows 3/4 use the same
+  > pane-top overlay origin as rows 0–2, extended twice as deep) and
+  > confirms it actually fires for a plausible mid-slope magnitude curve,
+  > not just as a theoretical edge case. Root cause is the overlay's
+  > shared-origin-with-the-plot convention (pre-existing since row 0),
+  > not a bug introduced fresh by #356's two-row addition — but two more
+  > rows measurably raises how often it's hit. Whether that's acceptable
+  > (legible-on-top is the existing house style) or needs a layout change
+  > (background chip, reserved margin, or clipping the trace under the
+  > text) is a display-truth design call, not a mechanical one — flagged
+  > for the architect/QA rather than guessed at here. Referenced PNG is
+  > the ground truth; look at it directly rather than trusting this
+  > description.
+
 ---
 
 ## Before anything: the rig's own defects
 
 Not caused by any branch. Each cost a session's time.
+
+0. **Do not build on 192.168.9.25.** It is the hypervisor host the development
+   VM runs on. Four `cargo build --release` runs there on 2026-08-22 caused the
+   host's OOM killer to take a running 24 GB guest; the audio stack survived by
+   luck. Build on the VM, copy binaries over, and take the sha256 **after** the
+   copy. Integration tests travel the same way (`cargo test --no-run` produces a
+   self-contained binary), so the rig needs no toolchain at all. Two build traps
+   found the same day: a *shared* `CARGO_TARGET_DIR` across worktrees goes
+   false-fresh (three of four refs reported `Finished in 0.3s` without
+   compiling, and one binary was copied out under four names with four identical
+   hashes), while *separate* target dirs make binaries differ by sha256 even
+   when the code is identical, because absolute paths are baked into panic
+   messages. Identical hashes across refs that should differ is the alarming
+   direction; differing hashes across refs that should match is benign.
+4. **`ac plot` with no arguments runs a measurement.** It is not a usage query:
+   it auto-spawns a daemon and sweeps 20 Hz–20 kHz out `cfg.output_channel` at
+   the CLI default of **−20 dBFS**, unclamped. `ac --help` is the only form that
+   prints usage without emitting. Read the parser source instead of probing the
+   CLI on a live rig. (`ac-daemon` likewise does not reject unknown flags —
+   `--help` starts a server.)
+5. **`ac calibrate`'s `output_channel` argument does not route** — #358. It
+   selects the storage key only; the tone goes to `cfg.output_channel`. Set the
+   channel in the config, or pass sticky `output_port`/`input_port` names. The
+   symptom is "loopback not detected this run" on a cable that is fine.
+6. **`/home/mui/rig2-home/.config/ac/cal.json` carries a mislabeled entry** as
+   of 2026-08-22: key `out1_in3` written while `playback_5` was driven (#358).
+   No `tau_history`, so nothing reads a wrong τ from it, but it claims a pair
+   that was never measured. Left in place — it is the operator's file.
 
 1. **`~/.config/ac/config.json` has `reference_channel: 2`**, which points at
    `capture_3` — digitally silent on this wiring. Anything run as the

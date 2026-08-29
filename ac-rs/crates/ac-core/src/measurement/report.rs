@@ -43,10 +43,37 @@ use serde::{Deserialize, Serialize};
 ///   length, since τ is a property of the *(device, backend, sample
 ///   rate, period size, port pair)* tuple and is not recoverable from
 ///   the report otherwise (#283, consuming #281). Reports written at
-///   v1-v4 decode unchanged: the field defaults to `None`, which
-///   `ir_arrival_distance` reports as unavailable rather than deriving
-///   a distance from an uncorrected arrival.
+///   v1-v4 decode unchanged: the field defaults to `None`, which readers
+///   treat as no τ-corrected flight time being derivable from the
+///   uncorrected arrival (#391 — the ms → m conversion this used to feed
+///   is gone; τ itself, and this field, are not).
 pub const SCHEMA_VERSION: u32 = 5;
+
+/// Minimum pre-impulse SNR, in dB, below which a deconvolution is
+/// reported as failed rather than as a result (#376). Below this floor
+/// the linear-IR peak is not reliably the system response — it can land
+/// wherever the pre-impulse noise floor happens to be largest, producing
+/// a plausible-looking arrival/distance from noise.
+///
+/// Value: 18.0 dB — the worst observed *bad* capture in the rig table in
+/// the #376 issue body (−42 dBFS drive, pre-impulse SNR up to 16.5 dB with
+/// a peak index far from the true arrival) plus a 1.5 dB margin. The raw
+/// log and results doc the issue body itself cites for that table
+/// (`audit/rig-353-2026-08-23/ladder-3m.log`,
+/// `work/rig/rig-2026-08-23-onset-353-results.md`) never landed in this
+/// repo — the table reproduced in the issue is the only source checked
+/// here; do not add a citation to either path without confirming the file
+/// exists first. The same table's worst observed *good* capture (−36 dBFS
+/// drive) reaches down to 14.5 dB, so
+/// no single threshold separates this dataset cleanly — 18.0 dB is set
+/// at or above the worst bad case rather than at the overlap's midpoint,
+/// so a false refusal (cheap: re-run) is preferred over a false accept
+/// (expensive: a silently wrong logged distance). This also means some
+/// borderline-good low-drive captures near the boundary will be
+/// refused — low drive is the operator-encouraged *safe* choice under
+/// the rig's emission consent rules, so that blind spot is real and
+/// documented here rather than picked by eye.
+pub const PRE_IMPULSE_SNR_MIN_DB: f64 = 18.0;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -738,6 +765,35 @@ impl MeasurementReport {
             }
         };
 
+        // `pre_impulse_snr_db` goes to +inf two different ways, and only
+        // one of them is a failure. A zero floor against a nonzero peak
+        // (`rms == 0.0`, `pre_region` nonempty) is the *best* possible
+        // capture — infinite SNR, not an unmeasurable one — and clears any
+        // finite threshold below, so it falls through to the ordinary
+        // threshold comparison rather than being special-cased out. What
+        // fails closed is the case with nothing to measure at all: an
+        // empty `pre_region` (the guard band consumed the whole pre-peak
+        // window) or a zero peak (nothing captured, so there is no signal
+        // to compare a floor against either) — absence of proof of a good
+        // floor is not the same as proof of one (#376).
+        let verdict = if peak_magnitude == 0.0 {
+            IrVerdict::Failed {
+                reason: "no signal captured (linear IR is all zero)".to_string(),
+            }
+        } else if pre_region.is_empty() {
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string(),
+            }
+        } else if pre_impulse_snr_db < PRE_IMPULSE_SNR_MIN_DB {
+            IrVerdict::Failed {
+                reason: "pre-impulse SNR below threshold".to_string(),
+            }
+        } else {
+            IrVerdict::Ok
+        };
+
         Some(IrStats {
             sample_rate_hz: *sample_rate_hz,
             window_len,
@@ -751,88 +807,9 @@ impl MeasurementReport {
             gate_window_s,
             gate_f_low_hz,
             gate_window_kind,
+            verdict,
         })
     }
-
-    /// Arrival converted to an acoustic path length, in metres, or the
-    /// reason it cannot be.
-    ///
-    /// The arrival [`IrStats::arrival_s`] reports is a *round-trip* figure:
-    /// it still contains the interface's own latency (τ). Subtracting a τ
-    /// measured under this run's exact conditions is the only thing that
-    /// turns it into a path length, so this returns
-    /// [`ArrivalDistance::Unavailable`] — never a number — when the report
-    /// carries no τ. Speed of sound comes from `position.temperature_c`
-    /// when the capture recorded one, else the 20 °C default (see
-    /// [`crate::shared::conversions::speed_of_sound_from_config`]).
-    pub fn ir_arrival_distance(&self) -> ArrivalDistance {
-        let Some(stats) = self.ir_stats() else {
-            return ArrivalDistance::Unavailable {
-                reason: "report carries no impulse-response payload".to_string(),
-            };
-        };
-        let tau = match &self.interface_latency {
-            Some(InterfaceLatency::Measured(m)) => m,
-            Some(InterfaceLatency::Unavailable { reason }) => {
-                return ArrivalDistance::Unavailable {
-                    reason: reason.clone(),
-                }
-            }
-            None => {
-                return ArrivalDistance::Unavailable {
-                    reason: "no interface latency (\u{3c4}) recorded with this measurement"
-                        .to_string(),
-                }
-            }
-        };
-        let c = crate::shared::conversions::speed_of_sound_from_config(
-            self.position.as_ref().and_then(|p| p.temperature_c),
-        );
-        ArrivalDistance::Known {
-            distance_m: (stats.arrival_s - tau.tau_s) * c,
-            speed_of_sound_m_s: c,
-            tau_s: tau.tau_s,
-            provenance: m_provenance(tau),
-        }
-    }
-}
-
-/// One-line provenance for a τ used in a distance derivation: when it was
-/// measured, by what method, and under which conditions. Named in full
-/// because a distance derived from someone else's τ is a different number
-/// — see [`crate::shared::calibration::TauConditions`].
-fn m_provenance(m: &MeasuredLatency) -> String {
-    format!(
-        "\u{3c4} = {:.4} ms, measured {} by {} on {} backend @ {} Hz, period {}, {} \u{2192} {}",
-        m.tau_s * 1000.0,
-        m.measured_at,
-        m.method,
-        m.backend,
-        m.sample_rate_hz,
-        m.period_size
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "n/a".to_string()),
-        m.output_port,
-        m.input_port,
-    )
-}
-
-/// Result of converting an IR arrival into an acoustic path length. A
-/// distance is either derived from a named τ or explicitly unavailable —
-/// there is deliberately no third case that returns an uncorrected
-/// arrival as if it were a distance (#283).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ArrivalDistance {
-    Known {
-        distance_m: f64,
-        speed_of_sound_m_s: f64,
-        tau_s: f64,
-        /// Human-readable τ provenance, for printing next to the number.
-        provenance: String,
-    },
-    Unavailable {
-        reason: String,
-    },
 }
 
 /// See [`MeasurementReport::ir_stats`].
@@ -883,6 +860,24 @@ pub struct IrStats {
     /// gate — an inference from `extract_irs`, flagged as such so a
     /// reader does not mistake it for a recorded value.
     pub gate_window_kind: String,
+    /// Whether this capture's peak is trustworthy enough to present as a
+    /// result, per [`PRE_IMPULSE_SNR_MIN_DB`] (#376). Computed once here
+    /// so `ac-cli`'s text read-out and `ac-scene`'s sweep-IR panel read
+    /// the same verdict rather than each re-deriving their own rule from
+    /// [`Self::pre_impulse_snr_db`].
+    pub verdict: IrVerdict,
+}
+
+/// Verdict on whether an [`IrStats`] peak is a trustworthy deconvolution
+/// result or noise-floor pickup masquerading as one (#376). `Failed`
+/// never carries a computed arrival, distance, or peak-as-result — only
+/// the reason, naming what to check without asserting a cause (drive
+/// level, mic gain, distance, room noise are all plausible; the
+/// instrument cannot tell which).
+#[derive(Debug, Clone, PartialEq)]
+pub enum IrVerdict {
+    Ok,
+    Failed { reason: String },
 }
 
 #[cfg(test)]
@@ -1278,6 +1273,85 @@ mod tests {
         assert_eq!(stats.gate_window_kind, "half-hann");
     }
 
+    // ─── `IrStats::verdict` (#376) ─────────────────────────────────────
+
+    #[test]
+    fn ir_stats_verdict_ok_when_snr_clears_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.1 floor -> 20*log10(10) = 20 dB, above the
+        // 18.0 dB threshold.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_snr_is_below_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.2 floor -> 20*log10(5) \u{2248} 14.0 dB,
+        // below the 18.0 dB threshold — the #376 failure shape: a plausible
+        // number, but a noise-floor-scale peak.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.2, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "pre-impulse SNR below threshold".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_ok_on_a_perfectly_clean_capture() {
+        // A zero floor against a nonzero peak is +inf SNR, but it is the
+        // *best* possible capture, not an unmeasurable one — the floor was
+        // measured, and it measured to exactly zero. This must not be
+        // confused with a genuine failure (#387 QA correctness #1).
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(stats.pre_impulse_snr_db.is_infinite());
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_nothing_was_captured() {
+        // Peak magnitude itself is zero -> the whole linear IR is zero,
+        // i.e. there is no signal to compare a floor against at all. This
+        // is the genuine "no measurable floor" failure, distinct from the
+        // clean-capture case above.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, window_len / 2, 0.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no signal captured (linear IR is all zero)".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_guard_band_consumes_the_whole_pre_region() {
+        // Peak sits inside the guard band from the start of the window, so
+        // `pre_region` is empty — there is no data at all to measure a
+        // floor from, regardless of what the peak itself looks like.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, 3, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string()
+            }
+        );
+    }
+
     #[test]
     fn ir_stats_none_for_non_impulse_response_report() {
         let r = sample_report(); // FrequencyResponse variant
@@ -1589,7 +1663,7 @@ mod tests {
         }
     }
 
-    // ─── `ir_arrival_distance` (#283) ─────────────────────────────────
+    // ─── interface latency (τ), archived alongside the arrival ─────────
 
     fn measured_tau(tau_s: f64) -> InterfaceLatency {
         InterfaceLatency::Measured(MeasuredLatency {
@@ -1602,96 +1676,6 @@ mod tests {
             output_port: "out1".into(),
             input_port: "in1".into(),
         })
-    }
-
-    /// The rig's own converter constant: arrival(d) = 1.1931 ms + d/c.
-    /// An arrival of τ + 1 m/c must come back as 1 m — the τ subtraction
-    /// is the whole content of the conversion.
-    #[test]
-    fn arrival_distance_subtracts_tau_before_converting() {
-        let tau_s = 0.0011931;
-        let sr = 48_000.0;
-        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
-        let want_m = 1.0;
-        // Round to whole samples, as a real peak index would be.
-        let delay = ((tau_s + want_m / c) * sr).round() as usize;
-        let window_len = 4_096;
-        let mut r = ir_report_with_peak(window_len, window_len / 2 + delay, 1.0, 0.0, 48_000);
-        r.position = Some(PositionSnapshot {
-            temperature_c: Some(20.0),
-            ..Default::default()
-        });
-        r.interface_latency = Some(measured_tau(tau_s));
-
-        let ArrivalDistance::Known {
-            distance_m,
-            provenance,
-            ..
-        } = r.ir_arrival_distance()
-        else {
-            panic!("distance should be known when tau is recorded");
-        };
-        // One sample at 48 kHz is ~7 mm of path; allow that quantisation.
-        assert!(
-            (distance_m - want_m).abs() < 0.01,
-            "distance_m = {distance_m}"
-        );
-        // The AC requires the provenance be *named*, not just applied.
-        assert!(provenance.contains("farina_short_ess"), "{provenance}");
-        assert!(provenance.contains("2026-08-15T00:00:00Z"), "{provenance}");
-        assert!(provenance.contains("fake"), "{provenance}");
-    }
-
-    /// The load-bearing refusal: no τ must never fall through to a
-    /// distance computed from the uncorrected arrival. At 48 kHz a
-    /// 1.1931 ms τ is 57 samples — roughly 0.41 m of phantom path — so a
-    /// fallthrough would be a plausible-looking wrong number, not an
-    /// obvious one.
-    #[test]
-    fn arrival_distance_unavailable_without_tau() {
-        let window_len = 4_096;
-        let r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
-        assert!(r.interface_latency.is_none());
-        match r.ir_arrival_distance() {
-            ArrivalDistance::Unavailable { reason } => {
-                assert!(reason.contains("\u{3c4}"), "reason must name τ: {reason}")
-            }
-            ArrivalDistance::Known { distance_m, .. } => {
-                panic!("derived {distance_m} m from an uncorrected arrival")
-            }
-        }
-    }
-
-    /// A recorded refusal carries its reason through to the reader
-    /// instead of being flattened into a generic "no τ".
-    #[test]
-    fn arrival_distance_propagates_a_recorded_refusal_reason() {
-        let window_len = 4_096;
-        let mut r = ir_report_with_peak(window_len, window_len / 2 + 57, 1.0, 0.0, 48_000);
-        r.interface_latency = Some(InterfaceLatency::Unavailable {
-            reason: "nearest stored entry differs in period_size (requested 512, stored 1024)"
-                .into(),
-        });
-        match r.ir_arrival_distance() {
-            ArrivalDistance::Unavailable { reason } => assert!(reason.contains("period_size")),
-            other => panic!("expected unavailable, got {other:?}"),
-        }
-    }
-
-    /// v1-v4 archives decode with `interface_latency` absent, and must
-    /// land on the refusal — not on a distance derived without a τ.
-    #[test]
-    fn legacy_report_without_interface_latency_decodes_and_refuses_distance() {
-        let r = ir_report_with_peak(4_096, 4_096 / 2 + 57, 1.0, 0.0, 48_000);
-        let mut v: serde_json::Value = serde_json::from_str(&r.to_json().unwrap()).unwrap();
-        v["schema_version"] = serde_json::json!(4);
-        assert!(v.get("interface_latency").is_none(), "None must not encode");
-        let back: MeasurementReport = serde_json::from_value(v).unwrap();
-        assert!(back.interface_latency.is_none());
-        assert!(matches!(
-            back.ir_arrival_distance(),
-            ArrivalDistance::Unavailable { .. }
-        ));
     }
 
     #[test]

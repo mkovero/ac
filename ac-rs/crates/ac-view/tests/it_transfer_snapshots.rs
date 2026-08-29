@@ -27,14 +27,22 @@
 //!
 //! **Reference currency.** These references are only as current as the
 //! rig run that produced them — nothing re-checks them against `draw_view`
-//! automatically (#337). Last regenerated 2026-08-18 on 192.168.9.25 (RTX
-//! 2070), `main` at `3c05c03`, immediately followed by a plain (non-update)
-//! run in the same session per the acceptance check in #337.
-//! `transfer_ir_panel.png` and `transfer_stored_comparison_no_live.png`
-//! came out byte-identical to the pre-regeneration commit, so only the
-//! other 5 files in this directory moved. See `TESTING.md` → "A3 snapshot
-//! reference currency" for the checklist a `draw_view`/pane change must
-//! satisfy before merge.
+//! automatically (#337). Last regenerated 2026-08-24 on 192.168.9.25 (RTX
+//! 2070), `issue-391` at `92d3d42`, immediately followed by a plain
+//! (non-update) run in the same session per the acceptance check in #337
+//! — built on the dev VM (`cargo test --no-run`) and the resulting binary
+//! copied across, not built on the rig itself (its host has no headroom
+//! to spare for a build). `#391` removed
+//! the delay readout's ms → m conversion entirely (the calibration/warning
+//! rows #356 added on top of it went with it): `spectrum_ref_trace_off.png`
+//! / `spectrum_ref_trace_on.png` came out byte-identical (spectrum view,
+//! untouched by this change); the 5 transfer-view files
+//! (`transfer_armed_banner.png`, `transfer_driving_banner.png`,
+//! `transfer_ir_panel.png`, `transfer_live_masked_gap.png`,
+//! `transfer_stored_comparison_no_live.png`) all moved — the masked-gap
+//! reference shrank the most (2 calibration/warning rows gone). See
+//! `TESTING.md` → "A3 snapshot reference currency" for the checklist a
+//! `draw_view`/pane change must satisfy before merge.
 
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
@@ -70,11 +78,13 @@ fn transfer_scene() -> TransferScene {
         phase_deg,
         coherence,
         delay_ms: 2.5,
-        // Locked with no frame-supplied speed, so the readout is the same
-        // "2.50 ms  (0.86 m)" these reference images were taken against —
-        // #243 changes what an *unlocked* pair renders, not this one.
+        // Locked. #391 removed the ms → m conversion entirely, so this
+        // reference image's readout is ms-only — "2.50 ms". See this
+        // file's module doc: references need regenerating on the real
+        // adapter after this change.
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
         meas_peak_dbfs: Some(-6.0),
         ref_peak_dbfs: Some(-14.0),
         channel_role: "meas_0".to_string(),
@@ -122,7 +132,6 @@ fn ir_scene() -> IrScene {
         t_origin_ms,
         delay_ms: 10.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         channel_role: "meas_0".to_string(),
         source: Source::Live,
         sr: 48_000,

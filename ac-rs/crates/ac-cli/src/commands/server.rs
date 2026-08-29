@@ -44,14 +44,31 @@ pub fn connections(client: &mut AcClient) {
         .unwrap_or("?");
 
     println!("\n  Server connections:");
-    println!("  Mode: {mode}");
-    println!("  CTRL: {ctrl_ep}");
-    println!("  DATA: {data_ep}");
+    println!("  Mode:     {mode}");
+    println!("  CTRL:     {ctrl_ep}");
+    println!("  DATA:     {data_ep}");
+
+    // Identity fields (#385) — additive on `server_connections`; absent on
+    // an older daemon, in which case skip the block rather than print "?".
+    if let Some(home) = ack.get("home").and_then(|v| v.as_str()) {
+        println!("  Home:     {home}");
+    }
+    if let Some(config_path) = ack.get("config_path").and_then(|v| v.as_str()) {
+        println!("  Config:   {config_path}");
+    }
+    if let Some(started_at) = ack.get("started_at").and_then(|v| v.as_str()) {
+        let spawn_label = match ack.get("spawn_mode").and_then(|v| v.as_str()) {
+            Some("auto") => "auto-spawned",
+            Some("manual") => "manual",
+            _ => "?",
+        };
+        println!("  Started:  {started_at}  ({spawn_label})");
+    }
 
     if let Some(workers) = ack.get("workers").and_then(|v| v.as_array()) {
         if !workers.is_empty() {
             println!(
-                "  Workers: {}",
+                "  Workers:  {}",
                 workers
                     .iter()
                     .filter_map(|w| w.as_str())

@@ -486,9 +486,19 @@ Returns server health and current state.
   "running_cmd":    "<name>" | null,
   "src_mtime":      <float>,          // max mtime of server source files
   "listen_mode":    "local" | "public",
-  "server_enabled": <bool>
+  "server_enabled": <bool>,
+  "home":           "<path>",         // this process's $HOME ("." if unset) — #385
+  "config_path":    "<path>",         // config.json path in use
+  "pid":            <int>,
+  "started_at":     "<RFC3339>",      // UTC, second precision — process start
+  "spawn_mode":     "auto" | "manual" // "auto" = started via ac-cli's spawn_daemon()
 }
 ```
+
+`home`/`config_path`/`pid`/`started_at`/`spawn_mode` (#385) let a client tell
+this daemon apart from another one squatting the same hardcoded 5556/5557
+ports under a different `HOME` — e.g. a leftover auto-spawn from an isolated
+test/rig run. Additive fields; a client that doesn't read them is unaffected.
 
 ---
 
@@ -932,10 +942,19 @@ its CLI parent noun moved.
 }
 ```
 
+`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
+ceiling (#360) — each point on the ramp individually, not just the
+endpoints, so a range whose top end exceeds the ceiling flattens there
+rather than running unclamped.
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>" }
+{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float> }
 ```
+
+`start_dbfs`/`stop_dbfs` in the reply are the *applied* endpoints — what
+was requested clamped to the ceiling — same convention as `set_drive`'s
+`level_dbfs` echo.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -967,10 +986,15 @@ is a deprecated alias). Wire `cmd` unchanged — same reasoning as
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>" }
+{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value after the clamp — same
+convention as `set_drive`.
 
 **DATA**
 ```json
@@ -1020,6 +1044,10 @@ only the default trait impl bails.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
+before #360 this was the one command besides `calibrate` that emitted
+whatever was asked for with nothing bounding it.
+
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
 orders must not overlap, so each order's gate is clamped down to the
 sample distance to its nearest neighbouring order; the linear IR, whose
@@ -1030,8 +1058,11 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>" }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied (clamped) level, and the report's
+`stimulus.level_dbfs` field (below) is the same applied value.
 
 **DATA**
 ```json
@@ -1083,8 +1114,9 @@ counterpart to pair it with) and
 Annex A.4.5, the gating method itself).
 
 `interface_latency` is the τ (interface round-trip latency) resolved for
-this capture — the field that lets an arrival be converted to a distance.
-It is a tagged union on `state`:
+this capture — the field that lets an arrival be converted to a
+τ-corrected flight time (milliseconds; #391 removed the further ms → m
+conversion this used to also unlock). It is a tagged union on `state`:
 
 ```json
 // τ measured under exactly these conditions (device, backend, sample
@@ -1097,7 +1129,7 @@ It is a tagged union on `state`:
 { "state": "unavailable", "reason": "no τ entry for these exact conditions; nearest stored entry (measured ...) differs in period_size (requested 512, stored 1024)" }
 ```
 
-A reader must not derive a distance from the arrival when `state` is
+A reader must not subtract τ from the arrival when `state` is
 `unavailable`: the arrival still contains the uncorrected interface
 latency, which at 48 kHz is routinely tens of samples of phantom path.
 
@@ -1125,10 +1157,16 @@ captures + analyses the loopback. Emits one `measurement/frequency_response/poin
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>" }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value; each
+`measurement/frequency_response/point` frame's `drive_db` (below) is the
+same applied value.
 
 **DATA** — one per frequency:
 ```json
@@ -1160,13 +1198,20 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
 }
 ```
 
+`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
+ceiling (#360), each computed step individually — a range whose top end
+exceeds the ceiling flattens there rather than running unclamped.
+
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>" }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float> }
 ```
 
+`start_dbfs`/`stop_dbfs` in the reply are the applied endpoints.
+
 **DATA** — one per level step (measurement/frequency_response/point frame, `"cmd": "plot_level"`,
-includes `"freq_hz"` and `"drive_db"` fields).
+includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
+post-clamp level for that step).
 
 **DATA** — terminal:
 ```json
@@ -1319,10 +1364,14 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...] }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1347,10 +1396,14 @@ Plays continuous pink noise until stopped.
 }
 ```
 
+`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...] }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
 ```
+
+`level_dbfs` in the reply is the applied value.
 
 **DATA** — terminal after `stop`:
 ```json
@@ -1369,16 +1422,23 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 ```json
 {
   "cmd":            "calibrate",
-  "ref_dbfs":       <float>,   // optional, default -10.0
+  "ref_dbfs":       <float>,   // optional, default: the session's drive_max_dbfs
   "output_channel": <int>,     // optional, defaults to config
   "input_channel":  <int>      // optional, defaults to config
 }
 ```
 
+`ref_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
+an omitted value now defaults to that same ceiling rather than a
+hardcoded -10.0, so it can never itself sit above the config it is
+supposed to respect.
+
 **Reply**
 ```json
-{ "ok": true }
+{ "ok": true, "ref_dbfs": <float> }
 ```
+
+`ref_dbfs` in the reply is the applied (clamped, or defaulted) value.
 
 **DATA — `cal_prompt`** (step 1: output voltage at the DAC, while a
 1 kHz tone is playing at `ref_dbfs`):
@@ -1445,9 +1505,19 @@ reading either.
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
-  "error":                "<message>"      // only present on partial failure (voltage-cal save)
+  "error":                "<message>",     // only present on partial failure (voltage-cal save)
+  "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
+  "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
 }
 ```
+
+`input_port` / `output_port` are what `resolve_input`/`resolve_output` actually
+resolved this run — the same values the tone was played on and the capture
+was taken from. A config edit between two `calibrate` runs against one
+long-lived (auto-spawned) daemon changes these on the very next run (#370);
+before this field existed the two runs were indistinguishable on the wire,
+which is how a channel scan against one daemon read ten identical results
+as the physical answer instead of the daemon never having reloaded.
 
 The `vrms_at_0dbfs_*` fields report what is **stored after this run**,
 not only what this run measured, and the `*_state` word says which:
@@ -1719,7 +1789,12 @@ Returns current listen mode and connected client endpoints.
   "ctrl_endpoint": "tcp://127.0.0.1:5556",
   "data_endpoint": "tcp://127.0.0.1:5557",
   "clients":       ["<endpoint>", ...],
-  "workers":       ["<cmd-name>", ...]
+  "workers":       ["<cmd-name>", ...],
+  "home":          "<path>",          // same identity fields as `status` — #385
+  "config_path":   "<path>",
+  "pid":           <int>,
+  "started_at":    "<RFC3339>",
+  "spawn_mode":    "auto" | "manual"
 }
 ```
 
@@ -1771,7 +1846,8 @@ every other observable looking correct.
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
   "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
                              //   silent until `set_drive`. Implied by drive=true.
-  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10
+  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10; clamped to
+                             //   drive_max_dbfs (#360) before it seeds the drive state
 
   // Either the multi-pair form …
   "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
@@ -1854,26 +1930,6 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // a digital loopback legitimately reads
                                           // 0.0 (#216), so this flag is the only
                                           // thing separating the two.
-
-  // Additive (#243) — the speed of sound the delay readout's ms → m
-  // conversion must use, in m/s. Derived daemon-side from the configured
-  // room temperature (`config.temperature_c`) as 331.3 + 0.606·T, once at
-  // session start: a room does not change temperature mid-session, so
-  // every frame in a session carries the same constant.
-  //
-  // Shipped already derived rather than as a temperature, so a consumer
-  // holds one number instead of two that have to agree. Absent on a daemon
-  // predating #243, and consumers must default it to 343.0 — the constant
-  // the readout used unconditionally before, so absence reproduces the old
-  // behaviour rather than inventing a new one.
-  //
-  // Note what this does NOT license. The metres figure only means anything
-  // when the reference leg leaves through the same converter as the
-  // stimulus and is looped back (README.md, "Reference wiring"): only then
-  // are transport and DAC latency common-mode, leaving the locked delay
-  // equal to the acoustic arrival. Under any other wiring the residual is a
-  // fixed offset the instrument cannot see, and no field here reports it.
-  "speed_of_sound_m_s": <float>,         // e.g. 345.8 at 24 °C
 
   // Additive (#238) — how many delay estimates this pair has completed,
   // accepted or refused. 0 before the first attempt, and absent entirely on
@@ -2498,6 +2554,36 @@ When the guard fires:
 // topic: error
 { "cmd": "<name>", "message": "<exception string>" }
 ```
+
+### Unparseable config.json (#370)
+```json
+{ "ok": false, "error": "config.json: <parse error>" }
+```
+`config.json` is reloaded from disk before every CTRL request (see
+"Config reload" below). If the reload fails — bad JSON, or a file caught
+mid-write — routing-affecting commands (anything that resolves a port from
+config: `calibrate`, `calibrate_spl`, `plot`, `plot_level`, `plot_ir`,
+`generate`, `generate_pink`, `sweep_level`, `sweep_frequency`,
+`monitor_spectrum`, `transfer_stream`, `test_hardware`, `test_dut`) refuse
+with this shape instead of silently serving the last-known-good in-memory
+config. Non-routing commands (`status`, `quit`, `devices`, …) are
+unaffected, so the daemon stays reachable to diagnose the broken file. The
+error clears itself on the next reload after the file is fixed — no
+restart needed.
+
+---
+
+## Config reload
+
+Before every CTRL request `dispatch()` re-reads `config.json` from disk and
+replaces the in-memory `Config` (`server.rs`). This closes the gap where an
+auto-spawned daemon outlives the `ac` command that spawned it: a config
+edit made between two `ac` invocations reaches the very next command
+against that daemon, not only a freshly-spawned process (#370). Routing
+fields (`*_channel`, `*_port`) are already re-resolved per request via
+`resolve_input`/`resolve_output`, so this completes that design rather than
+adding a competing cache. See "Unparseable config.json" above for the
+failure mode.
 
 ---
 

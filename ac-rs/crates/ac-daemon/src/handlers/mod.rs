@@ -96,6 +96,26 @@ macro_rules! busy_guard {
 pub(super) use busy_guard;
 
 // ---------------------------------------------------------------------------
+// Config-freshness guard (#370)
+// ---------------------------------------------------------------------------
+
+/// Refuse a routing-affecting command when the last per-request
+/// `config.json` reload (`dispatch()` in `server.rs`) failed. Modeled on
+/// `busy_guard!` — same shape (early-return `{"ok": false, ...}`), different
+/// condition. Only handlers that resolve ports from `cfg` (directly or via
+/// `resolve_input`/`resolve_output`/`resolve_channels`/`resolve_ref_*`) need
+/// this — a command that cannot name which port it used is worse than one
+/// that refuses outright.
+macro_rules! cfg_guard {
+    ($state:expr) => {
+        if let Some(msg) = $state.cfg_error.lock().unwrap().clone() {
+            return ::serde_json::json!({"ok": false, "error": format!("config.json: {msg}")});
+        }
+    };
+}
+pub(super) use cfg_guard;
+
+// ---------------------------------------------------------------------------
 // Worker spawn
 // ---------------------------------------------------------------------------
 
@@ -110,6 +130,27 @@ where
         stop_flag: stop,
         thread: Some(t),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Drive ceiling (#360)
+// ---------------------------------------------------------------------------
+
+/// Clamp a requested dBFS level to the session's `drive_max_dbfs` ceiling.
+///
+/// Mirrors `set_drive`'s inline clamp (`transfer.rs`, `level.min(ceiling)`):
+/// clamping is normal operation, not an error, so a stimulus command that
+/// fails instead of applying a safe level is a worse field failure than one
+/// that quietly applies the ceiling. Every command that turns a requested
+/// dBFS into an emitted amplitude runs its value through this single
+/// chokepoint immediately after parsing — before #360, `set_drive` was the
+/// only one that did, and `plot_ir`/`calibrate` emitted whatever was asked
+/// for with nothing bounding it (issue #360).
+///
+/// The return value is always the value to actually use — callers echo it
+/// back on the wire as the *applied* level, never the raw request.
+pub(super) fn apply_drive_ceiling(ceiling_dbfs: f64, requested_dbfs: f64) -> f64 {
+    requested_dbfs.min(ceiling_dbfs)
 }
 
 // ---------------------------------------------------------------------------
@@ -707,5 +748,127 @@ pub(super) fn median(vals: &[f64]) -> f64 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::apply_drive_ceiling;
+
+    #[test]
+    fn passes_through_below_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -25.0), -25.0);
+    }
+
+    #[test]
+    fn clamps_above_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -3.0), -10.0);
+    }
+
+    #[test]
+    fn passes_through_exactly_at_ceiling() {
+        assert_eq!(apply_drive_ceiling(-10.0, -10.0), -10.0);
+    }
+
+    #[test]
+    fn clamps_a_positive_request() {
+        assert_eq!(apply_drive_ceiling(-30.0, 6.0), -30.0);
+    }
+}
+
+/// #358: `calibrate` used to resolve its output port from `cfg` alone,
+/// ignoring an explicit `output_channel` override entirely — the override
+/// only ever reached the stored calibration's key. These tests exercise
+/// `resolve_output_by_channel`, the function the fix routes `calibrate`
+/// through, directly against the rig's repro shape: a sticky port
+/// configured for the *default* channel must not silently win over an
+/// explicit request for a *different* one.
+#[cfg(test)]
+mod resolve_output_by_channel_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Minimal `ServerState` for exercising port resolution against the
+    /// fake backend's synthetic port list, without a real ZMQ/JACK daemon.
+    fn fake_state() -> ServerState {
+        let (pub_tx, _pub_rx) = crossbeam_channel::unbounded();
+        let (rebind_tx, _rebind_rx) = crossbeam_channel::unbounded();
+        ServerState {
+            cfg: Arc::new(Mutex::new(Config::default())),
+            cfg_error: Arc::new(Mutex::new(None)),
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            pub_tx,
+            src_mtime: 0.0,
+            fake_audio: true,
+            listen_mode: Arc::new(Mutex::new("local".to_string())),
+            home: ".".to_string(),
+            config_path: std::path::PathBuf::from("."),
+            pid: 0,
+            started_at: String::new(),
+            spawn_mode: "manual".to_string(),
+            rebind_tx,
+            ctrl_port: 0,
+            data_port: 0,
+            dut_reply_tx: Arc::new(Mutex::new(None)),
+            cal_reply_tx: Arc::new(Mutex::new(None)),
+            snapshot_ring: Arc::new(Mutex::new(None)),
+            drive_state: Arc::new(Mutex::new(None)),
+            relock_state: Arc::new(Mutex::new(None)),
+            snapshot_spool: Arc::new(Mutex::new(HashMap::new())),
+            playback_ports_cache: Arc::new(Mutex::new(None)),
+            capture_ports_cache: Arc::new(Mutex::new(None)),
+            analysis_mode: Arc::new(Mutex::new("fft".to_string())),
+            cwt_sigma: Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_SIGMA)),
+            cwt_n_scales: Arc::new(Mutex::new(ac_core::visualize::cwt::DEFAULT_N_SCALES)),
+            ioct_bpo: Arc::new(Mutex::new(None)),
+            band_weighting: Arc::new(Mutex::new("off".to_string())),
+            time_integration_mode: Arc::new(Mutex::new("off".to_string())),
+            leq_reset_request: Arc::new(AtomicBool::new(false)),
+            loudness_reset_request: Arc::new(AtomicBool::new(false)),
+            mic_correction_enabled: Arc::new(AtomicBool::new(true)),
+            monitor_params: Arc::new(Mutex::new(crate::server::MonitorParams::default())),
+        }
+    }
+
+    /// The rig repro, condensed: `cfg.output_channel = 4` carries a sticky
+    /// port, but the caller explicitly asked for channel 1. The port opened
+    /// must be channel 1's, by index — not the sticky port that belongs to
+    /// the unrelated default channel. A test that only checked the stored
+    /// calibration key would pass against the pre-fix code, which is
+    /// exactly the defect (#358).
+    #[test]
+    fn explicit_channel_differing_from_default_ignores_default_sticky_port() {
+        let cfg = Config {
+            output_channel: 4,
+            output_port: Some("fake:playback_9".to_string()),
+            ..Default::default()
+        };
+        let state = fake_state();
+
+        let port = resolve_output_by_channel(&cfg, &state, 1)
+            .expect("channel 1 is in range for the fake backend's port list");
+        assert_eq!(
+            port, "fake:playback_1",
+            "an explicit channel override must resolve by its own index, not \
+             the sticky port configured for a different default channel"
+        );
+    }
+
+    /// Companion case: when the requested channel *is* the configured
+    /// default, the sticky port must still apply — the fix must not turn
+    /// every call into an index lookup, only ones naming a different
+    /// channel than the configured default.
+    #[test]
+    fn explicit_channel_matching_default_still_uses_sticky_port() {
+        let cfg = Config {
+            output_channel: 1,
+            output_port: Some("fake:playback_9".to_string()),
+            ..Default::default()
+        };
+        let state = fake_state();
+
+        let port = resolve_output_by_channel(&cfg, &state, 1).expect("channel 1 configured");
+        assert_eq!(port, "fake:playback_9");
     }
 }

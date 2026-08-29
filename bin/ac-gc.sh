@@ -68,21 +68,30 @@ done
 act "git worktree prune"
 
 echo
-echo "== target dirs under $AC_TARGET_ROOT"
-if [[ -d $AC_TARGET_ROOT ]]; then
-  for d in "$AC_TARGET_ROOT"/*/; do
-    [[ -d $d ]] || continue
-    b="$(basename "$d")"
-    if git show-ref -q "refs/heads/$b"; then
-      echo "  KEEP $(size "$d")  $b"
-    else
-      echo "  GONE $(size "$d")  $b (no such branch)"
-      act "rm -rf '$d'"
-    fi
-  done
+echo "== shared target dir"
+if [[ -d $AC_TARGET ]]; then
+  echo "  $(size "$AC_TARGET")  $AC_TARGET"
+  echo "  (shared by every worktree — 'cargo clean' it, do not delete per branch)"
 else
-  echo "  (none)"
+  echo "  (none yet)"
 fi
+
+echo
+echo "== leftover per-branch target dirs"
+# From the old layout, where each branch had its own. Removable once the branch
+# is gone; nothing references them now.
+found=0
+for d in "$AC_HOME"/target/*/; do
+  [[ -d $d ]] || continue
+  b="$(basename "$d")"
+  [[ $b == debug || $b == release || $b == tmp || $b == .rustc_info.json ]] && continue
+  if [[ -d "$d/debug" || -d "$d/tmp" ]]; then
+    found=1
+    echo "  GONE $(size "$d")  $b (old per-branch layout)"
+    act "rm -rf '$d'"
+  fi
+done
+(( found )) || echo "  (none)"
 
 echo
 echo "== stray target dirs"

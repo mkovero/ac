@@ -17,8 +17,8 @@ use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, capture_rms, read_dmm_vrms, resolve_input, resolve_output, rms_to_dbfs, send_pub,
-    spawn_worker, wait_cal_reply, CalReply,
+    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, read_dmm_vrms, resolve_input,
+    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, CalReply,
 };
 
 /// Apply one prompt's reply to one stored voltage field and report which
@@ -94,6 +94,100 @@ const TAU_MIN_HALF_WINDOW_S: f64 = 0.05;
 /// once measured against real noise floors.
 const TAU_EDGE_MARGIN_FRAC: f64 = 0.10;
 
+/// Rig-instrument overrides for the two τ window constants (#350).
+///
+/// Compiled in only under the `tau-window-override` feature, which is off
+/// by default, so a production daemon cannot be perturbed by its
+/// environment. The rig needs them because the only lever hardware has on
+/// edge proximity is τ itself, and τ moves in period-sized steps
+/// (44.5 %, 33.8 %, 12.5 %, then off the end of the window) — there is no
+/// way to sample between 0 % and the shipped 10 % margin that way. Moving
+/// the *window* while the round trip stays fixed samples it continuously,
+/// inside one JACK client lifetime, which also keeps #347's one-period
+/// jump out of the comparison.
+#[cfg(feature = "tau-window-override")]
+fn tau_env_f64(key: &str, default: f64) -> f64 {
+    let raw = match std::env::var(key) {
+        Ok(v) => v,
+        Err(_) => return default,
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(x) if x.is_finite() && x >= 0.0 => x,
+        _ => {
+            eprintln!(
+                "calibrate: {key}={raw:?} is not a finite non-negative number —                  ignoring it and using {default}"
+            );
+            default
+        }
+    }
+}
+
+#[cfg(feature = "tau-window-override")]
+fn tau_half_window_s() -> f64 {
+    tau_env_f64("AC_TAU_HALF_WINDOW_S", TAU_MIN_HALF_WINDOW_S)
+}
+
+#[cfg(not(feature = "tau-window-override"))]
+fn tau_half_window_s() -> f64 {
+    TAU_MIN_HALF_WINDOW_S
+}
+
+#[cfg(feature = "tau-window-override")]
+fn tau_edge_margin_frac() -> f64 {
+    tau_env_f64("AC_TAU_EDGE_MARGIN_FRAC", TAU_EDGE_MARGIN_FRAC)
+}
+
+#[cfg(not(feature = "tau-window-override"))]
+fn tau_edge_margin_frac() -> f64 {
+    TAU_EDGE_MARGIN_FRAC
+}
+
+/// Per-reading τ diagnostic (#350). `measure_tau` reports only the peak
+/// position, so nothing on this path has ever recorded the SNR the peak
+/// was located against — which is the quantity #350 exists to measure.
+/// `floor` is defined exactly as `it_loopback_ir` and `ir_probe` define
+/// it (max |x| over the leading eighth of the window) so the numbers
+/// compare directly against #277's record.
+#[cfg(feature = "tau-window-override")]
+fn tau_probe_log(
+    ir: &[f64],
+    peak_idx: usize,
+    peak_abs: f64,
+    window_len: usize,
+    half: usize,
+    sr: u32,
+) {
+    let far_end = (ir.len() / 8).max(1);
+    let floor = ir[..far_end]
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0_f64, f64::max);
+    let snr_db = 20.0 * (peak_abs / floor.max(1e-15)).log10();
+    let margin_frac = tau_edge_margin_frac();
+    let margin = (margin_frac * half as f64).round() as usize;
+    let dist_from_end = window_len.saturating_sub(1).saturating_sub(peak_idx);
+    let edge_frac = dist_from_end as f64 / half as f64;
+    let offset = peak_idx as i64 - half as i64;
+    eprintln!("--- tau probe (#350) ---");
+    eprintln!("sample_rate:   {sr} Hz");
+    eprintln!(
+        "half_window:   {half} samples = {:.4} ms",
+        half as f64 * 1000.0 / sr as f64
+    );
+    eprintln!("window_len:    {window_len} samples");
+    eprintln!("peak_index:    {peak_idx}");
+    eprintln!("peak_abs:      {peak_abs:.6e}");
+    eprintln!("floor_abs:     {floor:.6e}  (max |x| over leading {far_end} samples)");
+    eprintln!("snr_db:        {snr_db:.2}");
+    eprintln!("dist_from_end: {dist_from_end} samples");
+    eprintln!("edge_frac:     {edge_frac:.4}  (margin_frac {margin_frac} = {margin} samples)");
+    eprintln!(
+        "tau:           {offset:+} samples = {:+.4} ms",
+        offset as f64 * 1000.0 / sr as f64
+    );
+    eprintln!("------------------------");
+}
+
 /// Refuse a peak sitting within `margin_frac` of the half-window of
 /// either edge of a `window_len`-sample gate. Pulled out of `measure_tau`
 /// so the edge case can be driven directly in tests without an
@@ -138,17 +232,29 @@ fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
     let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
     let inv = inverse_sweep(&params)?;
     let full = deconvolve_full(&captured, &inv);
-    let half = (TAU_MIN_HALF_WINDOW_S * sr as f64).ceil() as usize;
+    let half_window_s = tau_half_window_s();
+    if 2.0 * half_window_s > TAU_TAIL_S {
+        anyhow::bail!(
+            "\u{3c4} half-window {half_window_s} s needs a {:.4} s gate but the capture tail is \
+             only {TAU_TAIL_S} s \u{2014} the window would run off the end of the capture",
+            2.0 * half_window_s
+        );
+    }
+    let half = (half_window_s * sr as f64).ceil() as usize;
     let window_len = 2 * half;
     let irs = extract_irs(&full, &params, 1, window_len)?;
-    let (peak_idx, _) = irs
+    let (peak_idx, peak_val) = irs
         .linear
         .iter()
         .enumerate()
         .map(|(i, v)| (i, *v))
         .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
         .ok_or_else(|| anyhow::anyhow!("empty IR from τ sweep"))?;
-    check_peak_within_window(peak_idx, window_len, TAU_EDGE_MARGIN_FRAC)?;
+    #[cfg(feature = "tau-window-override")]
+    tau_probe_log(&irs.linear, peak_idx, peak_val.abs(), window_len, half, sr);
+    #[cfg(not(feature = "tau-window-override"))]
+    let _ = peak_val;
+    check_peak_within_window(peak_idx, window_len, tau_edge_margin_frac())?;
     let offset_samples = peak_idx as i64 - half as i64;
     Ok(offset_samples as f64 / sr as f64)
 }
@@ -337,6 +443,7 @@ fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOut
 
 pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate");
+    cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let out_ch = cmd
         .get("output_channel")
@@ -346,11 +453,34 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         .get("input_channel")
         .and_then(Value::as_u64)
         .unwrap_or(cfg.input_channel as u64) as u32;
-    let ref_dbfs = cmd.get("ref_dbfs").and_then(Value::as_f64).unwrap_or(-10.0);
+    // #360: an omitted `ref_dbfs` becomes "whatever this session's ceiling
+    // is", not a second hardcoded number (-10.0) that has to be kept in
+    // sync with `drive_max_dbfs`'s own default by convention. An
+    // explicitly-passed value is then clamped the same way — defense in
+    // depth, and the single binding every downstream quantity (amp,
+    // ref_amp, out_scale, in_scale, cal.ref_dbfs) derives from, so the
+    // calibration stays internally consistent (measured-and-scaled-at-the-
+    // same-level).
+    let ref_dbfs = cmd
+        .get("ref_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(cfg.drive_max_dbfs);
+    let ref_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, ref_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
-    let out_port = match resolve_output(&cfg, state) {
+    // #358: `out_ch` above already keys the saved calibration entry — it
+    // must also decide which port the tone actually leaves on, or the key
+    // and the port can name different channels (rig repro: key `out1_in3`,
+    // tone on the sticky-resolved `cfg.output_channel` port, capture on a
+    // dead loopback return). `resolve_output_by_channel` is the same
+    // explicit-wins-over-sticky rule `generate`'s multi-channel form
+    // already uses (`resolve_channels` in `audio/generate.rs`): an
+    // explicit channel that differs from `cfg.output_channel` is resolved
+    // by index, bypassing `cfg.output_port`; a channel that matches falls
+    // through to `resolve_output`, so an unrelated sticky port is left
+    // alone when the caller didn't ask to override anything.
+    let out_port = match resolve_output_by_channel(&cfg, state, out_ch) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
@@ -545,6 +675,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             "tau_sample_rate":      tau_sample_rate,
             "tau_period_size":      tau_period_size,
             "tau_agreement_count":  tau_outcome.agreement_count.unwrap_or(0),
+            // #370: the port names actually resolved server-side for this
+            // run, not the client's copy of the request — the reporter's
+            // repro was ten identical readings because the ports actually
+            // in use never surfaced anywhere.
+            "input_port":           in_port,
+            "output_port":          out_port,
         });
         if let Some(ref e) = tau_outcome.error {
             cal_done_frame["tau_error"] = json!(e);
@@ -592,7 +728,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("calibrate".to_string(), worker);
     }
-    json!({"ok": true})
+    json!({"ok": true, "ref_dbfs": ref_dbfs})
 }
 
 pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {
@@ -736,6 +872,7 @@ pub fn set_mic_correction_enabled(state: &ServerState, cmd: &Value) -> Value {
 ///   4. emit `cal_done` with the captured dBFS, then `done` / `error`.
 pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "calibrate_spl");
+    cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let out_ch = cmd
         .get("output_channel")
@@ -1084,5 +1221,30 @@ mod tests {
             TAU_TAIL_S >= 2.0 * TAU_MIN_HALF_WINDOW_S,
             "tail no longer clears the half-window with the margin the doc comment assumed"
         );
+    }
+
+    /// The rig override parser (#350) accepts a plain number and refuses
+    /// anything else — a typo must not silently become a different window
+    /// than the one the run sheet says was used, which would make the
+    /// recorded edge fraction wrong rather than missing. Uses keys no
+    /// other test reads so the process-wide environment stays shared-safe.
+    #[cfg(feature = "tau-window-override")]
+    #[test]
+    fn tau_env_override_parses_or_falls_back_to_the_compiled_constant() {
+        assert_eq!(
+            tau_env_f64("AC_TAU_TEST_UNSET_KEY_350", 0.05),
+            0.05,
+            "an unset variable must leave the compiled-in constant in place"
+        );
+        std::env::set_var("AC_TAU_TEST_GOOD_KEY_350", " 0.04862 ");
+        assert_eq!(tau_env_f64("AC_TAU_TEST_GOOD_KEY_350", 0.05), 0.04862);
+        for bad in ["", "48.62ms", "-0.01", "nan", "inf"] {
+            std::env::set_var("AC_TAU_TEST_BAD_KEY_350", bad);
+            assert_eq!(
+                tau_env_f64("AC_TAU_TEST_BAD_KEY_350", 0.05),
+                0.05,
+                "{bad:?} is not a usable window and must fall back, not be coerced"
+            );
+        }
     }
 }

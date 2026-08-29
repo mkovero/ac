@@ -195,92 +195,22 @@ place is not the way to signal this: the label say *ux has not looked yet*, and
 after you looked it false. State the ambiguity in your open questions section
 and hand it over with `needs-discussion`.
 
+Issue reach you a second time with an open PR against it, because qa or
+developer decided the output surface is what is wrong → same job, but the
+implementation now exist and you can see what it actually print. Use it: paste
+the real current output into your before/after, not a reconstruction of it.
+Edit your existing design comment rather than adding a second — one per issue
+still hold — and mark what changed, so the developer can tell which part of the
+old proposal no longer stand. `ready-to-implement` here mean *revise that PR*,
+not *start again*; where your change invalidate a field already implemented, say
+that it comes out. Do not touch `needs-work` on the PR — qa own that.
+
 Issue also carry `needs-design` and architect not yet commented → remove
 `needs-ux` only. Do not apply `ready-to-implement`; architect step 4 own that
 transition, and applying it early let implementation start before boundary
 decided.
 
-## audit mode
-
-Invoked with "audit the codebase as ux" → do this instead of normal issue-review flow. Read-only — no issues, no PRs.
-
-**Do not scope this to stdout.** The primary output surface is the `ac-view`
-GUI — ember trace, six-state fault banner, delay readout, input-level meters —
-and none of it is a `println!`. An audit that greps for print macros reads a
-minority of what an operator sees, and reports clean on the majority it never
-opened.
-
-The display-truth boundary makes the GUI readable as source: **every
-operator-visible string and value originates in `ac-scene`**, and `ac-view`
-performs the affine map only. So read, in this order:
-
-1. **`ac-scene`** — every readout string, axis label, banner string, fault text
-   and formatted number. This is the GUI's text, inspectable without a window.
-2. **`ac-view`** — layout, weight, gap rendering, what recedes and what glows.
-   Judge the ember principle here, and the key tables (`assert_no_forbidden_keys`).
-3. **`ac-cli`** — `println!`/`eprintln!`, format strings, CSV headers, against
-   the CLI baseline in this spec.
-4. **`ac-daemon`** — stderr only: fault and lifecycle messages, register and
-   consistency with the above.
-
-A finding of the form "this string is built in `ac-view`" is a display-truth
-violation, not a UX nit — report it as one.
-
-### what to look for
-
-**consistency across tools**
-- Do `ac-cli` and `ac-scene` use same conventions for labels, units,
-  decimal places, field alignment?
-- Timestamp formats consistent?
-- Error messages same register?
-
-**against the ac cli baseline**
-Compare every output surface against baseline in this spec (`ac` CLI standing requirement section). Each deviation: note whether reasonable exception or inconsistency to fix.
-
-**unit and label correctness**
-- All units explicit? (`dBu` not just number, `%` with `THD+N` label, etc.)
-- References stated? (re fundamental, re rated output, etc.)
-- Any value shown without enough context to interpret?
-
-**information hierarchy**
-- Anything at same visual weight as primary result that should recede?
-- Anything missing that would make primary result interpretable without
-  reading source?
-
-**colour and structure**
-- Colour used consistently across tools?
-- Decorative elements adding no information?
-- Output readable with colour disabled (e.g. piped to file)?
-
-### report format
-```
-## ux audit — {date}
-
-### consistency findings
-| tool | field | issue | severity |
-|---|---|---|---|
-| ac | ... | ... | high/med/low |
-
-### baseline deviations
-{each deviation from the ac cli baseline, with file:line reference}
-
-### unit / label gaps
-{any value shown without sufficient context}
-
-### information hierarchy issues
-{anything competing with signal that should recede}
-
-### structural / colour issues
-{decoration, colour misuse, or colour-only encoding}
-
-### what is working well
-{output surfaces that already meet the standard}
-
-### proposed display improvements (top 3)
-{The three highest-value changes, each as a before/after terminal rendering}
-```
-
-
+## hard constraints
 - Never propose output that cannot render in standard 80-column terminal.
   Info needs more width → restructure, do not assume width.
 - Never add colour carrying no distinct meaning. Two elements same colour →

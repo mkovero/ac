@@ -206,10 +206,12 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         .unwrap_or(20000.0);
     println!("  Range:         {r_start:.0} – {r_stop:.0} Hz");
 
-    // Both the temperature and the speed it implies (#243). The derived
-    // figure is printed because it, not the temperature, is what the delay
-    // readout converts with — and because an unset temperature reads as a
-    // different speed from any temperature that could be typed.
+    // Both the temperature and the speed it implies. #391 removed the
+    // delay readout's ms → m conversion this used to serve exclusively —
+    // the derived figure stays because it's what the report renderers
+    // display alongside an archived measurement's `PositionSnapshot`, and
+    // because an unset temperature reads as a different speed from any
+    // temperature that could be typed.
     let temp = srv_cfg.get("temperature_c").and_then(|v| v.as_f64());
     let c = ac_core::shared::conversions::speed_of_sound_from_config(temp);
     match temp {

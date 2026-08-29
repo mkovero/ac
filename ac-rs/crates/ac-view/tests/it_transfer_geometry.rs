@@ -35,7 +35,8 @@ fn masked_scene() -> TransferScene {
         coherence,
         delay_ms: 0.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
         meas_peak_dbfs: None,
         ref_peak_dbfs: None,
         channel_role: "meas_0".to_string(),
@@ -152,7 +153,8 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         coherence: vec![0.9; N],
         delay_ms: 0.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -258,7 +260,8 @@ fn the_persistent_row_paints_its_instruction() {
             coherence: vec![0.9; N],
             delay_ms: 0.0,
             delay_locked: Some(true),
-            speed_of_sound_m_s: None,
+            meas_channel: 0,
+            ref_channel: 1,
             meas_peak_dbfs: Some(-30.0),
             ref_peak_dbfs: Some(-14.5),
             channel_role: "meas_0".to_string(),
@@ -425,12 +428,9 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         phase_deg: vec![0.0; N],
         coherence: vec![0.9; N],
         delay_ms,
-        // Locked, because the collision this fixture reproduces is between
-        // the band row and the readout at its *widest* — and the metres
-        // figure is what makes it wide. An unlocked fixture would silently
-        // narrow the string and the layout test would stop proving anything.
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
+        meas_channel: 0,
+        ref_channel: 1,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -520,19 +520,18 @@ fn band_labels_are_painted_verbatim_at_the_scenes_band_centres() {
     );
 }
 
-/// The collision this layout exists to remove, pinned at a delay that shows
-/// it.
+/// The collision this layout exists to remove.
 ///
 /// #224 originally painted the delay readout on the band-label row and
 /// checked the clearance with `delay_ms = 0.0`, where the gap is ~8 px and
 /// the arrangement looks fine. It is not: the readout's laid-out width is a
-/// function of the number's digits, and at three digits it runs under the
-/// deepest band label. 123.45 ms is 42 m of flight — an ordinary far-mic
-/// distance in a live room, and less than a misrouted loopback produces.
-///
-/// The x-overlap is asserted first, so this test cannot pass by accident on
-/// a build where the strings happen to be narrow: it proves the two would
-/// collide on one row, and then proves the rows are what keeps them apart.
+/// function of the number's digits, and at three digits it used to run
+/// under the deepest band label — before #391 removed the metres suffix
+/// that supplied most of that width. A bare `"123.45 ms"` no longer reaches
+/// far enough right to threaten the deepest band label at this pane width
+/// (checked empirically, not asserted here), so the row separation below
+/// is regression insurance against a future wide suffix, not a defence
+/// against a live collision today.
 #[test]
 fn the_delay_readout_never_shares_a_row_with_a_band_label() {
     for smoothing in [Smoothing::Off, Smoothing::Oct6] {
@@ -581,26 +580,4 @@ fn the_delay_readout_never_shares_a_row_with_a_band_label() {
             }
         }
     }
-
-    // The rejected layout, measured here rather than argued: on one shared
-    // row these two DO overlap horizontally at a 3-digit delay, so the row
-    // separation above is what is holding them apart, not luck with widths.
-    let scene = scene_with_bands(123.45, Smoothing::Off);
-    let painted = painted_text_rects(&scene);
-    let x_range = |want: &str| -> (f32, f32) {
-        let r = painted
-            .iter()
-            .find(|(text, _)| text == want)
-            .expect("painted")
-            .1;
-        (r.min.x, r.max.x)
-    };
-    let (delay_x0, delay_x1) = x_range(&scene.delay_readout);
-    let (band_x0, band_x1) = x_range(&scene.band_labels.last().expect("bands").text);
-    assert!(
-        delay_x1 > band_x0 && band_x1 > delay_x0,
-        "the fixture no longer reproduces the collision: delay spans \
-         {delay_x0}–{delay_x1} px, deepest band label {band_x0}–{band_x1} px — \
-         at these widths a shared row would pass and prove nothing"
-    );
 }

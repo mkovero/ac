@@ -579,6 +579,38 @@ fn legacy_launch_time_drive_is_not_killed_by_the_dead_man() {
     );
 }
 
+/// #360's second, independent unclamped path: `transfer_stream`'s own
+/// `level_dbfs` seed when launched with legacy `drive: true`. This never
+/// goes through `set_drive`'s clamp unless the client calls `set_drive`
+/// again later, so it needs its own above-ceiling assertion —
+/// `legacy_launch_time_drive_is_not_killed_by_the_dead_man` above requests
+/// exactly `CEILING_DBFS`, which cannot distinguish clamped from unclamped
+/// code.
+#[test]
+fn legacy_launch_time_drive_clamps_level_to_the_ceiling() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let requested = CEILING_DBFS + 6.0;
+    let r = c.call(json!({
+        "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
+        "weighting": "Z", "integration": "fast",
+        "drive": true, "level_dbfs": requested,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+
+    let f = c.frame_after(Duration::from_millis(900));
+    assert_eq!(drive_state(&f)["on"], json!(true));
+    let applied = drive_state(&f)["level_dbfs"]
+        .as_f64()
+        .expect("level_dbfs while launch-time driving");
+    assert!(
+        (applied - CEILING_DBFS).abs() < 1e-9,
+        "launch-time drive:true reached the engine at {applied} dBFS, requested \
+         {requested} against a {CEILING_DBFS} ceiling — transfer_stream's self-driving \
+         seed is unclamped"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Observed drive state on the wire (#228)
 //

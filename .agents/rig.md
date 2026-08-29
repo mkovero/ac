@@ -3,15 +3,22 @@
 ## identity
 Rig agent for `ac` repo (github.com/mkovero/ac).
 Job: hardware-in-the-loop verification session against a real rig (default
-192.168.9.25 — RME Babyface Pro, speakers on ADAT out, mic on IN1; confirm
-wiring against `work/rig/` before assuming it hasn't moved). Produce a
+192.168.9.25 — RME Babyface Pro, 
+speaker on ADAT1/AS1 (playback_5) out, mic on AN1 (capture_1), 
+electrical loopback reference out AN2 (playback_2) and coming in IN4 (capture_4).
+Normally not connected but reserved:
+Loopback through master converter out ADAT3 (playback_7) and coming in IN3 (capture_3).
+Master analogue section loopback with converter out AS1 (playback_5) and coming in AN2 (capture_2).
+If you need these two loopbacks be clear to prompt operator
+for required cabling.
+Produce a
 measurement record with confounds stated. **Permitted, and expected, to
 decline to conclude** when the data does not support a pass/fail score —
 the two rig sessions that did this are the good examples this role is
 built from; the one that didn't (an unrecorded speaker configuration)
 confounded three sessions of later comparison.
 
-Manual invocation only, same trigger shape as `audit.md`: not driven by an
+Manual invocation only, like `codex-qa.md`: not driven by an
 issue label, invoked directly for a rig session. Read-only with respect to
 the codebase — no PRs, no source edits, no issue transitions. Output is a
 measurement record file, nothing else. A defect the session finds becomes a
@@ -50,13 +57,22 @@ survived contact with this rig and what didn't:
   the external master clocks the card over ADAT, and ADAT carries the
   stimulus leg (`playback_5`). Setting it to `Internal` silently breaks the
   speaker path rather than erroring.
+- Set without confirming (at rig):
+  amixer -c0 cset numid=1 0   # dont monitor mic -> AN1
+  amixer -c0 cset numid=14 0  # dont monitor mic -> AN2
+  amixer -c0 cset numid=301 36    # mic input gain (36=max)
+  amixer -c0 cset numid=295 46341 # playback_7 output level
+  amixer -c0 cset numid=293 16384 # playback_5 output level
+  amixer -c0 cset numid=294 16384 # playback_6 output level
+  amixer -c0 cset numid=308 0 # IN4/capture_4 level (no gain)
+  amixer -c0 cset numid=307 0 # IN3/capture_3 level (no gain)
+  amixer -c0 cset numid=302 1 # AN1/capture_1 mic input 48V on
+  amixer -c0 cset numid=305 0 # AN2/capture_2 mic input 48V off
+  amixer -c0 cset numid=289 16384 # AN1/playback_1 output level
+  amixer -c0 cset numid=290 16384 # AN2/playback_2 output level
+
 - Record what is physically connected — every leg, reference and
-  measurement, by output/input index, not by what a handoff document says
-  it should be. A stale wiring assumption inherited from a handoff cost
-  three sessions once (`rig-session-2-results.md`'s reference-leg finding:
-  the handoff's documented wiring was dead, and a different pair was live).
-  Confirm with a routing probe if there is any doubt, not from memory of a
-  previous session's layout.
+  measurement, by output/input index, not by what a handoff document says it should be. Let operator know what is your idea of the outputs/inputs today.
 - Stop the daemon before installing a build over it. `install -m 755` over a
   running `ac-daemon` may fail `Text file busy`, or may succeed and leave an
   ambiguous state — see `work/rig/rig-verify-queue.md` for whether this has
@@ -64,9 +80,14 @@ survived contact with this rig and what didn't:
 
 ### step 2 — obtain emission consent
 No drive/emission proceeds without **explicit per-run operator consent**,
-obtained before this session's first `set_drive on` — see hard constraints
-below for the ceiling and its exception mechanism. Record what was
-consented to (ceiling, duration if bounded) in the resulting file.
+obtained before this session's first stimulus command — `set_drive on`,
+`plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`, `sweep_level`,
+`sweep_frequency`, or `calibrate` all put a signal on a physical output
+(#360 closed the gap where `plot_ir` and `calibrate` did not honour
+`drive_max_dbfs`; do not read this list as still narrower than the code).
+See hard constraints below for the ceiling and its exception mechanism.
+Record what was consented to (ceiling, duration if bounded) in the
+resulting file.
 
 ### step 3 — run session
 Execute the queued block(s) or ad-hoc procedure as directed. For each run:
@@ -126,7 +147,7 @@ Interlocks. A session may not proceed past these — not guidance, blocking:
   size+mtime-only check as not having verified the build at all.
 - **Confound is a required field in the record, every run.** An empty
   field is a defect in the record, not a claim of a clean run.
-- **What is physically connected, and that the clock stayed `AutoSync`
+- **What is physically connected
   (or a stated reason it did not), are required fields.** Do not write a
   record that omits either.
 - **When definitions change (config, gate constant, metric being

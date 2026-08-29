@@ -191,8 +191,14 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // Unit-suffixed positional form (see `parse/plot.rs`): f1, f2,
     // duration, level, n_harmonics, window_len, then tail as the second
     // `Time` token.
+    // `window_len` is 4096, not the smaller windows this fixture used
+    // before #376: a short gate window leaves too few pre-impulse
+    // samples for a clean floor estimate even on this noise-free fake
+    // loopback (measured ~17.5 dB with a 1024-sample window, under the
+    // 18.0 dB threshold #376 added) — 4096 samples clears it with
+    // margin (~27 dB) so this fixture still exercises the passing path.
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     // ── printed arrival is onset-derived, not peak-derived (#346) ─────
@@ -253,11 +259,11 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         stdout.contains("(diagnostic \u{2014} not arrival)"),
         "peak line must be marked diagnostic now arrival can diverge from it:\n{stdout}"
     );
-    // No τ is calibrated in this rig, so distance must be refused by
-    // name — never derived from the uncorrected arrival above.
+    // #391: no distance figure prints at all — the ms → m conversion it
+    // came from is gone, and milliseconds are what's asserted above.
     assert!(
-        stdout.contains("distance      unavailable"),
-        "distance must be stated unavailable without \u{3c4}:\n{stdout}"
+        !stdout.contains("distance "),
+        "distance must not print — the ms \u{2192} m conversion was removed:\n{stdout}"
     );
     // ISO 18233 §B.5: the reader must be told the tail is an artefact.
     assert!(
@@ -299,7 +305,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // The gate is recorded, not left for a reader to infer (#280).
     let gate = report.data[0].gate.as_ref().expect("gate recorded");
     assert_eq!(gate.window_kind, "rectangular");
-    assert!((gate.f_low_hz - 48_000.0 / 1024.0).abs() < 1e-6);
+    assert!((gate.f_low_hz - 48_000.0 / 4096.0).abs() < 1e-6);
 
     let csv = fs::read_to_string(&csvs[0]).expect("read report csv");
     assert!(
@@ -313,5 +319,62 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         !rendered.trim().is_empty(),
         "ac report produced nothing for {}",
         jsons[0].display()
+    );
+}
+
+/// #376: a capture whose pre-impulse SNR does not clear the threshold is
+/// reported as a failed deconvolution, not as a result with a number in
+/// it — a short (1024-sample) gate window leaves too few pre-impulse
+/// samples for a clean floor estimate even on this noise-free fake
+/// loopback (measured ~17.5 dB, under the 18.0 dB threshold), so it
+/// reliably exercises the failure path without hardware.
+#[test]
+fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
+    let rig = Rig::start();
+    let stdout = rig.run_ac(&[
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
+    ]);
+
+    assert!(
+        stdout.contains("DECONVOLUTION FAILED"),
+        "expected a failed-deconvolution banner:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("check: drive level, mic gain, distance, room noise"),
+        "banner must name what to check:\n{stdout}"
+    );
+    // The exact plausible-looking-wrong-number shape #376 exists to
+    // close: neither line may print on a failed verdict.
+    assert!(
+        !stdout.contains("arrival "),
+        "arrival must not print on a failed verdict:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("distance "),
+        "distance must not print on a failed verdict:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("diagnostic only"),
+        "the one remaining peak number must be labelled diagnostic:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("required \u{2265} 18.0 dB"),
+        "pre-imp SNR line must state the threshold it failed against:\n{stdout}"
+    );
+
+    let dir = rig.report_dir();
+    let jsons = files_with_extension(&dir, "json");
+    assert_eq!(jsons.len(), 1, "expected one report JSON, got {jsons:?}");
+    let json = fs::read_to_string(&jsons[0]).expect("read report json");
+    let report: ac_core::measurement::report::MeasurementReport =
+        serde_json::from_str(&json).expect("persisted report must decode");
+    let stats = report.ir_stats().expect("persisted IR payload");
+    assert!(
+        matches!(
+            stats.verdict,
+            ac_core::measurement::report::IrVerdict::Failed { .. }
+        ),
+        "persisted report's own ir_stats() must agree with the printed verdict: {:?}",
+        stats.verdict
     );
 }

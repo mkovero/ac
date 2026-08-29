@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 use crate::audio::make_engine;
 use crate::server::ServerState;
 
-use super::super::{busy_guard, resolve_output, resolve_output_by_channel, send_pub, spawn_worker};
+use super::super::{
+    apply_drive_ceiling, busy_guard, cfg_guard, resolve_output, resolve_output_by_channel,
+    send_pub, spawn_worker,
+};
 
 /// Resolve the `channels` field in a generate command into playback ports.
 /// Empty / missing → `[resolve_output(cfg)]` (the sticky default). Useful
@@ -47,12 +50,18 @@ fn resolve_channels(
 
 pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate");
+    cfg_guard!(state);
     let freq_hz = cmd.get("freq_hz").and_then(Value::as_f64).unwrap_or(1000.0);
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(-10.0);
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: `generate` puts a stimulus on a physical output, so the
+    // requested level is clamped to the session ceiling here, before it
+    // ever reaches the engine. The echoed reply below carries this applied
+    // value, not the raw request.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
@@ -88,16 +97,19 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports})
+    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs})
 }
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "generate_pink");
+    cfg_guard!(state);
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(-10.0);
     let cfg = state.cfg.lock().unwrap().clone();
+    // #360: same ceiling discipline as `generate` above.
+    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
@@ -133,5 +145,5 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports})
+    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs})
 }

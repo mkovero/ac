@@ -2,13 +2,11 @@
   "permissions": {
     "deny": [
       "Task(Explore)",
-      "Bash(sed:*)",
       "Bash(awk:*)",
       "Bash(less:*)",
       "Bash(more:*)",
       "Bash(nl:*)",
       "Bash(strings:*)",
-      "Bash(grep:*)",
       "Bash(rg:*)",
       "Bash(ag:*)",
       "Bash(ack:*)",
@@ -29,6 +27,8 @@
       "Bash(cargo:*)",
       "Bash(git:*)",
       "Bash(gh:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
       "Bash(python3:*)",
       "Bash(head:*)",
       "Bash(tail:*)",

@@ -87,7 +87,10 @@ pub fn fmt_vpp(vrms: f64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Speed of sound — the delay readout's ms → m conversion (#243)
+// Speed of sound — archival environment display (report renderers, `ac
+// setup`), not the delay readout: #391 removed the ms → m conversion this
+// machinery fed exclusively. Config.temperature_c documents its current
+// remaining consumers.
 // ---------------------------------------------------------------------------
 
 /// Speed of sound in dry air at 0 °C, in m/s — the intercept of
