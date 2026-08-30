@@ -120,7 +120,7 @@ ARMED and DRIVING banners = safety UI, not chrome. Review requirements:
   new CLI flag affecting display, or new TUI element
 - Existing output examples (paste of current terminal output where relevant)
 - Applicable standard from `stddocs/` if display involves standardised
-  measurement (consult QA agent's standard reference table)
+  measurement — `docs/architecture/standards.md` holds the document map
 
 ## what you must do
 

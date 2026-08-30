@@ -6,7 +6,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 
 | file | role | trigger |
 |---|---|---|
-| `.agents/triage.md` | PM — writes specs, routes issues | new issue opened |
+| `.agents/triage.md` | PM — writes specs, routes issues, owns the scope label | new issue opened; any issue it touches that has no scope label |
 | `.agents/architect.md` | design review — resolves module/interface questions | issue labeled `needs-design` |
 | `.agents/ux.md` | output-surface design — what the operator sees, and in what units | issue labeled `needs-ux` |
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
@@ -48,6 +48,7 @@ Always human-only:
 | `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
+| `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
 | `in-review` | developer (via PR) | PR open |
 | `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed** |
 | `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed |
