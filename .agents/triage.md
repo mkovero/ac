@@ -89,6 +89,35 @@ Then routing label:
 - Needs architect review → `needs-design`
 - Else → `ready-to-implement`
 
+Then exactly one scope label, on every issue — you are the only role that sees
+all of them, and QA's standards check keys off this:
+`tier-1`, `tier-2` (`ac-core/visualize/`), `scene`, `view`, or `scope-none`
+(build, docs, wire plumbing — nothing a standard governs).
+
+**`tier-1` means a standard in `docs/architecture/standards.md`'s document map
+governs whether the change is correct.** Usually that is `ac-core/measurement/`
+and the path is enough to decide. The path is the common case, not the
+definition, and the two come apart in one specific way: code outside
+`measurement/` that implements a rule a standard defines there. #351 is the
+worked example — the bug is in `ac-daemon`'s `measure_tau`, but the fix makes τ
+obey `measurement/sweep.rs::estimate_onset`, which carries the Farina /
+ISO 18233 Annex B citation. Labelling it by path alone switches off the check on
+exactly the clause under review. Ask what decides correctness, not what the
+diff touches.
+
+Unsure between `tier-1` and anything else → `tier-1`; the cost is a standards
+check nobody needed, not a missed one.
+
+**An issue with no scope label is yours to fix, whatever else you were doing.**
+The label was introduced after these issues were filed, so most of the backlog
+predates it; an issue can also lose one when a human edits labels by hand. So
+this is not a one-off migration with an end date — treat a missing scope label
+the same whether the issue was opened a minute ago or a month ago. Set it and
+say so in a one-line comment. QA reads a missing label as `tier-1` and checks
+anyway, so this never blocks: you are converting a correct-but-expensive
+default into a cheap one, and that is worth exactly one line of comment, not a
+re-triage of the issue's spec.
+
 Then, additively — issue change what a user see (stdout format, new display
 field, `ac-scene` readout, axis label, banner or fault text) → also apply
 `needs-ux`. This is the same condition as category `output-format`, but not
@@ -122,6 +151,7 @@ claim about how the code works.
 | `needs-design` | architect must review before implementation |
 | `needs-ux` | output surface change; ux must specify it before implementation |
 | `ready-to-implement` | spec complete, developer can pick up |
+| `tier-1` / `tier-2` / `scene` / `view` / `scope-none` | what the change touches; `tier-1` is what makes QA run the standards check |
 | `in-review` | PR open |
 | `blocked` | depends on something external |
 | `epic` | contains sub-issues |

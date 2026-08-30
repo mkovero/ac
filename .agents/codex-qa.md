@@ -248,6 +248,12 @@ it.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.
+- Standards conformance is Claude QA's, not yours, even on `tier-1`. Both of
+  you would resolve a clause through the same `docs/architecture/standards.md`
+  map — the correlated input the shared-sources rule above tells you to
+  distrust, so a second pass agrees by construction rather than by checking.
+  Report a standards claim you can falsify from the diff; do not re-run the
+  conformance table.
 - Read the `<!-- agent: qa -->` comment only after your own findings are
   formed, and only for unaddressed open questions.
 - A finding you cannot state a failure scenario for is not a finding. Drop it.
