@@ -261,11 +261,24 @@ run() {
       *)                  turns=80  ;;
     esac
   fi
-  case "$role" in
-    developer|qa) AC_MODEL=sonnet ;;
-    architect|ux) AC_MODEL=opus ;;
-    *)		  AC_MODEL=sonnet ;;
-  esac
+  # Opus for the roles whose output is a judgement nobody re-derives: a design
+  # decision, an output-surface decision, and a spec's acceptance criteria are
+  # all read as settled by every role downstream, so a weak one propagates
+  # instead of failing. Triage belongs here for a second reason — it also sets
+  # the scope label that decides whether qa runs the standards check at all.
+  # The rest produce something a later step re-checks: the developer's code
+  # meets the test suite, qa's findings meet the diff.
+  #
+  # An AC_MODEL from the environment wins. It used to be overwritten here
+  # unconditionally, so `AC_MODEL=opus bin/review.sh 384` silently ran sonnet
+  # and the `:-sonnet` fallback below was unreachable.
+  local model="${AC_MODEL:-}"
+  if [[ -z $model ]]; then
+    case "$role" in
+      architect|ux|triage) model=opus ;;
+      *)                   model=sonnet ;;
+    esac
+  fi
   local fg="" tools="$TOOLS_WRITE" deny="$DENY_ASYNC" mode="acceptEdits" arg
   local -a extra=()
   for arg in "$@"; do
@@ -277,7 +290,23 @@ run() {
   done
 
   if [[ -n $fg ]]; then
-    claude --system-prompt-file "$(spec "$role")" "${extra[@]}" "$prompt"
+    # Same options as the -p run below, minus only the three that are about
+    # being non-interactive: -p itself, the stream-json plumbing, and
+    # --max-turns (you are sitting there and can stop it).
+    #
+    # This used to pass the system prompt and nothing else, so --fg ran a
+    # different model with different tools under a different permission mode
+    # than the run it exists to reproduce. A debugging mode that does not
+    # reproduce the thing being debugged sends you after the wrong cause.
+    #
+    # --permission-mode still differs in effect, not in value: interactively
+    # it prompts where -p auto-approves, which is the point of --fg.
+    claude --system-prompt-file "$(spec "$role")" \
+      --model "$model" \
+      --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
+      ${deny:+--disallowedTools "$deny"} \
+      --permission-mode "$mode" \
+      "${extra[@]}" "$prompt"
     return
   fi
 
@@ -309,7 +338,7 @@ run() {
   # pipeline's exit and truncates exactly the long sessions worth reading.
 #  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 \
   claude -p --system-prompt-file "$(spec "$role")" "$prompt" \
-    --model "${AC_MODEL:-sonnet}" \
+    --model "$model" \
     --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
     ${deny:+--disallowedTools "$deny"} \
     --permission-mode "$mode" \
