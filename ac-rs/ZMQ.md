@@ -711,6 +711,25 @@ their own).
 
 ---
 
+### `reset_loudness`
+
+Zeros the per-channel BS.1770-5 loudness state (integrated LKFS, LRA,
+dBTP) on the next monitor tick. Momentary and short-term windows are not
+cleared by this — they re-prime from their next input on their own. Safe
+to call when no monitor is active: the flag is one-shot and held until a
+worker consumes it.
+
+**Request**
+```json
+{ "cmd": "reset_loudness" }
+```
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+---
 ### `stop`
 
 Stops one or all running workers. **Synchronous**: the reply is only sent
@@ -2506,6 +2525,250 @@ retention window, default 30 s) — never exposed in any CTRL reply.
 
 ---
 
+### `probe`
+
+Discovers routing: which playback ports carry an analog signal, and which
+capture ports are looped back to them. Spawns a worker and reports on
+DATA; the CTRL reply only confirms the launch.
+
+**The worker emits a 1 kHz tone at −10 dBFS**, on one playback port at a
+time, with every other output disconnected. Nothing else on the wire
+announces this, so a caller driving unattended hardware is responsible
+for the level at the far end.
+
+The output scan needs a DMM (`dmm_host` in config). Without one it is
+skipped entirely and **every** playback port is treated as analog for the
+loopback phase, which is a weaker claim than a measured one — the
+`output_skip` frame is the only signal that this happened.
+
+**Request**
+```json
+{ "cmd": "probe" }
+```
+
+No arguments.
+
+**Reply**
+```json
+{ "ok": true, "n_playback": <int>, "n_capture": <int> }
+```
+
+**DATA frames.** Every frame carries `"cmd": "probe"` and a `"phase"`:
+
+| `phase` | fields | when |
+|---|---|---|
+| `output_start` | `n_ports` | DMM configured; opens the output scan |
+| `output` | `channel`, `port`, `vrms`, `analog` | once per playback port |
+| `output_skip` | `message` | no `dmm_host`; replaces the two rows above |
+| `loopback_start` | `n_outputs`, `n_inputs` | opens the loopback scan |
+| `loopback` | `out_ch`, `out_port`, `in_ch`, `in_port`, `level_dbfs` | a pair that carried signal |
+
+`vrms` is `<float> | null` — null when the DMM read failed, which is not
+the same as a measured zero. `analog` is `vrms > 10 mVrms`.
+
+`loopback` is emitted **only** for a pair measuring above −30 dBFS, so a
+pair that never appears means no loopback was detected, not that a frame
+was dropped. `level_dbfs` is rounded to one decimal.
+
+**Terminal frame** (`done`):
+```json
+{ "cmd": "probe", "analog_channels": [<int>, ...] }
+```
+
+An `error` frame with `"message"` replaces the `done` when the backend
+does not support port routing, when there are no playback ports, or when
+the engine fails to start.
+
+---
+
+### `test_software`
+
+Pure-software self-test of the analysis and conversion path: no audio
+device, no worker, no DATA traffic. The reply is synchronous and carries
+the whole result, so this is the one self-test a client can run without
+subscribing to DATA.
+
+**Request**
+```json
+{ "cmd": "test_software" }
+```
+
+**Reply**
+```json
+{
+  "ok":       true,
+  "results":  [
+    { "name": "<string>", "pass": <bool>, "detail": "<string>" }
+  ],
+  "all_pass": <bool>
+}
+```
+
+`all_pass` is the AND over `results[].pass`. `ok` is `true` whenever the
+suite ran — **a failed check is `all_pass: false`, not `ok: false`.** A
+client that only reads `ok` will call a failing daemon healthy.
+
+`name` and `detail` are display strings; their wording is not part of the
+contract. `results` order is the order the checks ran.
+
+---
+
+### `test_hardware`
+
+Analog loopback self-tests of the interface itself: noise floor, level
+linearity, THD floor, frequency response, channel match, repeatability.
+With `dmm: true` and a `dmm_host` configured it also runs three
+DMM-corroborated tests (absolute level, level tracking, frequency
+response). Spawns a worker; results arrive on DATA.
+
+Requires a reference channel — with neither `reference_channel` nor
+`reference_port` set it refuses with
+`{"ok": false, "error": "reference channel not configured — ..."}`.
+
+**Request**
+```json
+{ "cmd": "test_hardware", "dmm": <bool> }
+```
+
+`dmm` is optional, default `false`. The DMM tests run only when it is
+`true` **and** `dmm_host` is configured; asking for them without a DMM
+configured is silently a no-op, visible only as `dmm_run: 0` in the
+terminal frame.
+
+**Reply**
+```json
+{
+  "ok":           true,
+  "out_port":     "<port>",
+  "ref_out_port": "<port>",
+  "in_port":      "<port>",
+  "ref_port":     "<port>",
+  "warnings":     ["<string>", ...]   // optional — see `warnings` above
+}
+```
+
+**DATA frames** — one `test_result` per check:
+```json
+{
+  "type":           "test_result",
+  "cmd":            "test_hardware",
+  "name":           "<string>",
+  "pass":           <bool>,
+  "detail":         "<string>",
+  "tolerance":      "<string>",
+  "mic_correction": "on" | "off" | "none",
+  "spl_offset_db":  <float> | null
+}
+```
+
+`mic_correction` and `spl_offset_db` use the same vocabulary as the
+monitor frames. The DMM-corroborated results carry `"dmm": true` and
+**omit** `mic_correction` and `spl_offset_db` — a parser that requires
+those two fields will fail on the DMM rows.
+
+**Terminal frame** (`done`):
+```json
+{
+  "cmd":        "test_hardware",
+  "tests_run":  <int>, "tests_pass": <int>,
+  "dmm_run":    <int>, "dmm_pass":   <int>,
+  "xruns":      <int>
+}
+```
+
+A `stop` cuts the suite between tests, so `tests_run` is the number that
+actually ran, not the size of the suite.
+
+---
+
+### `test_dut`
+
+Qualification suite for a device under test: noise floor, gain, THD vs
+level, frequency response, clipping point. With `compare: true` it runs
+the same five again with the DUT bypassed, so the client can report
+deltas. Spawns a worker; results arrive on DATA.
+
+Requires a reference channel, and refuses with the same error as
+`test_hardware` when none is configured.
+
+**Request**
+```json
+{ "cmd": "test_dut", "compare": <bool>, "level_dbfs": <float> }
+```
+
+`compare` optional, default `false`. `level_dbfs` optional, default
+`-20.0` — it sets the drive for the gain and frequency-response tests.
+
+**Reply** — same shape as `test_hardware`:
+```json
+{
+  "ok":           true,
+  "out_port":     "<port>",
+  "ref_out_port": "<port>",
+  "in_port":      "<port>",
+  "ref_port":     "<port>",
+  "warnings":     ["<string>", ...]   // optional
+}
+```
+
+**DATA frames** — `test_result`, as in `test_hardware` but with a `tag`:
+```json
+{
+  "type":           "test_result",
+  "cmd":            "test_dut",
+  "tag":            "dut" | "bypass",
+  "name":           "<string>",
+  "pass":           <bool>,
+  "detail":         "<string>",
+  "tolerance":      "<string>",
+  "mic_correction": "on" | "off" | "none",
+  "spl_offset_db":  <float> | null
+}
+```
+
+**Compare mode.** After the `dut` pass the worker publishes a prompt and
+waits for `dut_reply`:
+```json
+{ "type": "dut_compare_prompt", "cmd": "test_dut",
+  "message": "Bypass DUT and press Enter" }
+```
+
+The wait has a **300 s deadline, and expiry is not an error**: the bypass
+pass runs anyway, and its frames are tagged `"bypass"` whether or not the
+operator actually bypassed anything. Nothing on the wire distinguishes an
+answered prompt from a timed-out one, so **a `bypass` tag is not evidence
+that the DUT was bypassed** — a client that needs that distinction must
+track whether it sent `dut_reply` itself.
+
+**Terminal frame** (`done`):
+```json
+{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "xruns": <int> }
+```
+
+---
+
+### `dut_reply`
+
+Answers the `dut_compare_prompt` published by a `test_dut` running in
+compare mode. Like `set_drive` and `snapshot` it targets a live worker
+rather than spawning one, so it does not go through the busy guard.
+
+**Request**
+```json
+{ "cmd": "dut_reply" }
+```
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+The reply is **always** `{"ok": true}`, including when no `test_dut` is
+waiting for it. The send is best-effort into the waiting worker's
+channel; the reply says the command was accepted, never that a prompt was
+answered. A client cannot use it to discover whether a suite is running.
+
+---
 ## Busy guard
 
 Audio commands are classified into four concurrency groups:

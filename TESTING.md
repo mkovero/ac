@@ -193,8 +193,19 @@ command, its abbreviations, defaults and error cases.
 
 Unit tests in `audio::{jack_backend, cpal_backend, fake}`, `gpio`, and the
 `handlers/` modules. Integration binaries in `tests/`: `it_protocol`,
-`it_snapshot`, `it_set_drive`, `it_scene_fixture`, `it_cross_tier_parity`,
-and the `#[ignore]`'d `it_loopback_ir`.
+`it_snapshot`, `it_set_drive`, `it_relock`, `it_scene_fixture`,
+`it_cross_tier_parity`, `it_zmq_doc_parity`, and the `#[ignore]`'d
+`it_loopback_ir`.
+
+`it_zmq_doc_parity` is the only test here that can fail because a *document*
+is wrong. `ZMQ.md` is the sole statement of the wire contract — the daemon
+emits frames inline, `ac-scene` and `ac-cli` each parse them separately, and
+nothing ties the three together at compile time — so it can drift from the
+code silently, and has. The test compares the command roster in both
+directions against the dispatch `match` in `server.rs`, and compares the
+documented reply keys of the read-only commands against a live `--fake-audio`
+daemon. It does not check DATA payloads, field types or values: a green run
+means the roster and the read-only replies agree, not that the prose is true.
 
 #### ac-scene
 
