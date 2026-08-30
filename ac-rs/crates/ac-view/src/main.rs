@@ -57,19 +57,29 @@ fn main() -> eframe::Result<()> {
     });
     let meas_channel = meas_override.unwrap_or(cfg_meas);
 
-    let launch = if transfer {
-        connect_and_launch_transfer
+    // Spelled out rather than selected as a function pointer: the
+    // transfer entry needs the stimulus ceiling from the config already
+    // loaded above, and the spectrum entry — which has no stimulus —
+    // must not be handed one. The differing signatures are the point.
+    let launched = if transfer {
+        connect_and_launch_transfer(
+            endpoint,
+            meas_channel,
+            ref_channel,
+            WeightingCurve::Z,
+            "fast",
+            cfg.drive_max_dbfs,
+        )
     } else {
-        connect_and_launch
+        connect_and_launch(
+            endpoint,
+            meas_channel,
+            ref_channel,
+            WeightingCurve::Z,
+            "fast",
+        )
     };
-    let app = launch(
-        endpoint,
-        meas_channel,
-        ref_channel,
-        WeightingCurve::Z,
-        "fast",
-    )
-    .unwrap_or_else(|e| {
+    let app = launched.unwrap_or_else(|e| {
         eprintln!("ac-view: failed to connect/launch session: {e}");
         std::process::exit(1);
     });

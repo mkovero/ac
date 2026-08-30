@@ -241,7 +241,10 @@ fn ir_panel_header_and_arrival_match_ac_scene_for_the_same_sidecar_frame() {
     // --- Check 2: the real app, driven through a real eframe harness
     // with a real `H` keypress, reads back what it would paint ---
     let mut harness = Harness::new_eframe(move |_cc| {
-        connect_and_launch_transfer(endpoint, 0, 1, WeightingCurve::A, "fast")
+        // Explicit stimulus ceiling: this test drives no stimulus, but
+        // the value is now a parameter rather than a config re-read, so
+        // it must not depend on the developer's local config.
+        connect_and_launch_transfer(endpoint, 0, 1, WeightingCurve::A, "fast", -10.0)
             .expect("connect_and_launch_transfer")
     });
 
