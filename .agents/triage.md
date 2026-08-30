@@ -91,10 +91,22 @@ Then routing label:
 
 Then exactly one scope label, on every issue — you are the only role that sees
 all of them, and QA's standards check keys off this:
-`tier-1` (`ac-core/measurement/`), `tier-2` (`ac-core/visualize/`), `scene`,
-`view`, or `scope-none` (daemon, CLI, wire, build, docs — nothing a standard
-governs). Unsure between `tier-1` and anything else → `tier-1`; the cost is a
-standards check nobody needed, not a missed one.
+`tier-1`, `tier-2` (`ac-core/visualize/`), `scene`, `view`, or `scope-none`
+(build, docs, wire plumbing — nothing a standard governs).
+
+**`tier-1` means a standard in `docs/architecture/standards.md`'s document map
+governs whether the change is correct.** Usually that is `ac-core/measurement/`
+and the path is enough to decide. The path is the common case, not the
+definition, and the two come apart in one specific way: code outside
+`measurement/` that implements a rule a standard defines there. #351 is the
+worked example — the bug is in `ac-daemon`'s `measure_tau`, but the fix makes τ
+obey `measurement/sweep.rs::estimate_onset`, which carries the Farina /
+ISO 18233 Annex B citation. Labelling it by path alone switches off the check on
+exactly the clause under review. Ask what decides correctness, not what the
+diff touches.
+
+Unsure between `tier-1` and anything else → `tier-1`; the cost is a standards
+check nobody needed, not a missed one.
 
 **An issue with no scope label is yours to fix, whatever else you were doing.**
 The label was introduced after these issues were filed, so most of the backlog

@@ -48,7 +48,7 @@ Always human-only:
 | `needs-discussion` | architect | human input needed |
 | `design-approved` | architect | design decided, ready for dev |
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
-| `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects | what the change touches; exactly one. `tier-1` is what makes qa run the standards check — an unlabelled issue is a triage gap, and qa treats it as `tier-1` |
+| `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
 | `in-review` | developer (via PR) | PR open |
 | `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed** |
 | `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed |

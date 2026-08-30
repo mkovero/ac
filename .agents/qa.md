@@ -13,11 +13,20 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 - `ac-core/measurement/thd.rs` produce THD figures. Results in expected dynamic range for device under test. Gross outliers (e.g. THD > 10% for known-good amp) mean measurement error in code.
 - `ac-cli` and `ac-view` are consumers of the `ac-daemon` wire schema. Correctness = correct frame parsing, correct display of what the frame carries.
 - Level reference in `ac-core/shared` is scalar dBu offset. Any change making it frequency-dependent = regression.
-- Standards conformance is gated on the issue's `tier-1` label, not on your
-  reading of the diff: `tier-1` → work `docs/architecture/standards.md` and the
-  `stddocs/` PDFs it indexes. Any other scope label → skip both, and write
-  "standards check: not applicable — {scope label}". No scope label at all is a
-  triage gap, not a licence to skip: apply `tier-1` and check.
+- Standards conformance is gated on the issue's `tier-1` label: `tier-1` → work
+  `docs/architecture/standards.md` and the `stddocs/` PDFs it indexes. Any other
+  scope label → skip both, and write "standards check: not applicable —
+  {scope label}". No scope label at all is a triage gap, not a licence to skip:
+  apply `tier-1` and check.
+- **The label is a floor, not a verdict. You may raise it, never lower it.**
+  Triage labelled the issue before this diff existed; you have the diff, so you
+  sometimes know better — but only in one direction. Diff touches a module in
+  the document map, or implements a rule one of those modules defines → apply
+  `tier-1`, say so in one line, and check. That costs a standards pass nobody
+  needed. Re-deriving the label the other way costs a missed one, and puts you
+  back to deciding from your own reading of the diff, which is the failure this
+  label replaced. A `tier-1` you find unconvincing is still `tier-1`: raise it
+  with triage after the review, not by skipping the check during it.
 
 ### build and test
 ```bash
