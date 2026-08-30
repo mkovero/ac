@@ -475,15 +475,15 @@ impl MeasurementData {
         }
     }
 
-    fn write_csv(&self, s: &mut String) -> Result<()> {
+    fn write_csv(&self, s: &mut String) {
         match self {
             MeasurementData::FrequencyResponse { points } => {
-                writeln!(
+                let _ = writeln!(
                     s,
                     "freq_hz,fundamental_dbfs,thd_pct,thdn_pct,noise_floor_dbfs,linear_rms,clipping,ac_coupled"
-                )?;
+                );
                 for p in points {
-                    writeln!(
+                    let _ = writeln!(
                         s,
                         "{:.6},{:.6},{:.6},{:.6},{:.6},{:.9},{},{}",
                         p.freq_hz,
@@ -494,7 +494,7 @@ impl MeasurementData {
                         p.linear_rms,
                         p.clipping,
                         p.ac_coupled,
-                    )?;
+                    );
                 }
             }
             MeasurementData::SpectrumBands {
@@ -503,9 +503,9 @@ impl MeasurementData {
                 centres_hz,
                 levels_dbfs,
             } => {
-                writeln!(s, "centre_hz,level_dbfs,bpo,class")?;
+                let _ = writeln!(s, "centre_hz,level_dbfs,bpo,class");
                 for (c, l) in centres_hz.iter().zip(levels_dbfs.iter()) {
-                    writeln!(s, "{:.6},{:.6},{},{}", c, l, bpo, class)?;
+                    let _ = writeln!(s, "{:.6},{:.6},{},{}", c, l, bpo, class);
                 }
             }
             MeasurementData::ImpulseResponse {
@@ -514,14 +514,14 @@ impl MeasurementData {
                 harmonics,
                 ..
             } => {
-                writeln!(s, "sample_idx,time_s,order,amplitude")?;
+                let _ = writeln!(s, "sample_idx,time_s,order,amplitude");
                 let fs = *sample_rate_hz as f64;
                 for (i, v) in linear_ir.iter().enumerate() {
-                    writeln!(s, "{},{:.9},1,{:.9}", i, i as f64 / fs, v)?;
+                    let _ = writeln!(s, "{},{:.9},1,{:.9}", i, i as f64 / fs, v);
                 }
                 for h in harmonics {
                     for (i, v) in h.samples.iter().enumerate() {
-                        writeln!(s, "{},{:.9},{},{:.9}", i, i as f64 / fs, h.order, v)?;
+                        let _ = writeln!(s, "{},{:.9},{},{:.9}", i, i as f64 / fs, h.order, v);
                     }
                 }
             }
@@ -532,31 +532,30 @@ impl MeasurementData {
                 a_weighted_dbfs,
                 ccir_weighted_dbfs,
             } => {
-                writeln!(
+                let _ = writeln!(
                     s,
                     "sample_rate_hz,duration_s,unweighted_dbfs,a_weighted_dbfs,ccir_weighted_dbfs"
-                )?;
+                );
                 let ccir = ccir_weighted_dbfs
                     .map(|v| format!("{v:.6}"))
                     .unwrap_or_default();
-                writeln!(
+                let _ = writeln!(
                     s,
                     "{},{:.6},{:.6},{:.6},{}",
                     sample_rate_hz, duration_s, unweighted_dbfs, a_weighted_dbfs, ccir,
-                )?;
+                );
             }
             MeasurementData::GatedFrequencyResponse { points } => {
-                writeln!(s, "freq_hz,magnitude_db,phase_deg")?;
+                let _ = writeln!(s, "freq_hz,magnitude_db,phase_deg");
                 for p in points {
-                    writeln!(
+                    let _ = writeln!(
                         s,
                         "{:.6},{:.6},{:.4}",
                         p.freq_hz, p.magnitude_db, p.phase_deg
-                    )?;
+                    );
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -598,13 +597,17 @@ impl MeasurementReport {
     /// that wants a single clean table can `grep -v '^#'` or split on
     /// the blank line. The header and column set within a block depend
     /// on that payload's `MeasurementData` variant.
-    pub fn to_csv(&self) -> Result<String> {
+    ///
+    /// Infallible: formatting into a `String` cannot fail, so there is
+    /// no encode error for a caller to handle — matching
+    /// [`super::report_html::render_html`].
+    pub fn to_csv(&self) -> String {
         let mut s = String::new();
         for (i, payload) in self.data.iter().enumerate() {
             if i > 0 {
-                writeln!(s)?;
+                let _ = writeln!(s);
             }
-            match &payload.gate {
+            let _ = match &payload.gate {
                 Some(g) => writeln!(
                     s,
                     "# payload {}: {}  gate={:.1}ms+{:.1}ms {} f_low={:.1}Hz",
@@ -614,12 +617,12 @@ impl MeasurementReport {
                     g.gate_length_s * 1000.0,
                     g.window_kind,
                     g.f_low_hz,
-                )?,
-                None => writeln!(s, "# payload {}: {}", i + 1, payload.data.kind_label())?,
-            }
-            payload.data.write_csv(&mut s)?;
+                ),
+                None => writeln!(s, "# payload {}: {}", i + 1, payload.data.kind_label()),
+            };
+            payload.data.write_csv(&mut s);
         }
-        Ok(s)
+        s
     }
 
     pub fn write_to(&self, path: &Path) -> Result<()> {
@@ -913,8 +916,8 @@ mod tests {
     #[test]
     fn report_csv_is_stable() {
         let r = sample_report();
-        let a = r.to_csv().unwrap();
-        let b = r.to_csv().unwrap();
+        let a = r.to_csv();
+        let b = r.to_csv();
         assert_eq!(a, b);
         // Payload comment + header + 3 data lines.
         assert_eq!(a.lines().count(), 5);
@@ -1020,7 +1023,7 @@ mod tests {
     #[test]
     fn spectrum_bands_csv_shape() {
         let r = sample_spectrum_bands_report();
-        let csv = r.to_csv().unwrap();
+        let csv = r.to_csv();
         assert!(csv.starts_with("# payload 1: spectrum_bands"));
         assert!(csv.contains("centre_hz,level_dbfs,bpo,class"));
         assert_eq!(csv.lines().count(), 5);
@@ -1084,7 +1087,7 @@ mod tests {
     #[test]
     fn impulse_response_csv_shape() {
         let r = sample_impulse_response_report();
-        let csv = r.to_csv().unwrap();
+        let csv = r.to_csv();
         assert!(csv.starts_with("# payload 1: impulse_response"));
         assert!(csv.contains("sample_idx,time_s,order,amplitude"));
         // Payload comment + header + 5 linear rows + 5 harmonic rows.
@@ -1436,7 +1439,7 @@ mod tests {
     #[test]
     fn noise_result_csv_shape() {
         let r = sample_noise_report();
-        let csv = r.to_csv().unwrap();
+        let csv = r.to_csv();
         assert!(csv.starts_with("# payload 1: noise_result"));
         assert!(csv.contains("sample_rate_hz,duration_s,unweighted_dbfs,"));
         assert_eq!(csv.lines().count(), 3);
@@ -1674,7 +1677,7 @@ mod tests {
                 f_low_hz: 50.0,
             }),
         });
-        let csv = r.to_csv().unwrap();
+        let csv = r.to_csv();
         assert!(csv.contains("# payload 1: impulse_response"));
         assert!(csv.contains("# payload 2: spectrum_bands  gate=0.0ms+20.0ms hann f_low=50.0Hz"));
         assert!(csv.contains("sample_idx,time_s,order,amplitude"));
@@ -1776,7 +1779,7 @@ mod tests {
             standard: vec![],
             gate: None,
         }];
-        let csv = r.to_csv().unwrap();
+        let csv = r.to_csv();
         assert!(csv.starts_with("# payload 1: gated_frequency_response"));
         assert!(csv.contains("freq_hz,magnitude_db,phase_deg"));
         // Payload comment + header + 2 data lines.
