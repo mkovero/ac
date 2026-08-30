@@ -109,6 +109,21 @@ fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
     Some(20.0 * (peak as f64).log10())
 }
 
+/// Scale a linear amplitude spectrum by a channel's voltage
+/// calibration, if it has one. No-op for an uncalibrated channel.
+///
+/// A constant per-channel factor, so it commutes with column
+/// aggregation (`sqrt(Σ(c·x)²) = c·sqrt(Σx²)`) — which is what lets it
+/// be applied to the full-resolution spectrum before aggregation rather
+/// than to the aggregated columns after.
+fn apply_voltage_cal(amp: &mut [f64], cal: Option<&Calibration>) {
+    if let Some(scale) = cal.and_then(|c| c.vrms_at_0dbfs_in) {
+        for v in amp.iter_mut() {
+            *v *= scale;
+        }
+    }
+}
+
 pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
     let drive = {
         let slot = state.drive_state.lock().unwrap();
@@ -177,22 +192,127 @@ struct Lock {
     driving: bool,
 }
 
-/// Discard pair `i`'s held lock and its ladder, and clear its retry
-/// timer so the next tick attempts acquisition immediately rather than
-/// waiting out `RELOCK_RETRY`. Leaves `pair_delay_attempts` and
-/// `pair_prominence` untouched — the first must stay monotone (a reset
-/// would make a locked-then-refusing pair read as one never asked), and
-/// the second is last-attempt evidence that the next attempt overwrites
-/// on its own.
-fn flush_pair(
-    i: usize,
-    pair_delays: &mut [Option<Lock>],
-    next_delay_attempt: &mut [Option<std::time::Instant>],
-    mtw: &mut [Option<ac_core::visualize::mtw::MtwPair>],
-) {
-    pair_delays[i] = None;
-    next_delay_attempt[i] = None;
-    mtw[i] = None;
+/// Everything about one pair that is fixed for the session: the channels
+/// it names, where those channels sit in the capture buffers, and the
+/// calibration each leg carries. Built once at launch, read-only after.
+///
+/// This replaces a `Vec` per field indexed by pair. That shape cost a
+/// seven-deep `zip` at the per-pair fan-out — deep enough that
+/// `delay_attempts` was read by index rather than joining it — and made
+/// each vec an independent chance to index the wrong pair, with nothing
+/// in the types saying they had to agree.
+struct PairCtx {
+    /// Position in the launch `pairs` list. Frames publish in this order,
+    /// and it is the index into the per-tick ladder column vectors.
+    pos: usize,
+    meas_ch: u32,
+    ref_ch: u32,
+    /// Index of the measurement channel in the capture buffers / `rings`.
+    mi: usize,
+    /// Index of the reference channel in the capture buffers / `rings`.
+    ri: usize,
+    meas_cal: Option<Calibration>,
+    ref_cal: Option<Calibration>,
+    /// `meas_cal`'s mic-curve, lifted out because the mag/phase/re/im
+    /// correction path takes it alone and must stay untouched
+    /// (additive-only discipline). A ref-leg curve is refused at launch,
+    /// so there is deliberately no `ref_curve` twin.
+    meas_curve: Option<ac_core::shared::calibration::MicResponse>,
+}
+
+/// Everything about one pair that the worker loop maintains across ticks.
+///
+/// Plain data on purpose: the per-pair fan-out takes `&PairState`, so
+/// every field here has to be `Sync`. The ladder (`MtwPair`) is
+/// deliberately *not* a field — it owns an FFT planner, and it is
+/// consumed into `mtw_columns` before the fan-out rather than read
+/// inside it, so it stays a separate vec alongside.
+struct PairState {
+    /// Delay cache: ref↔meas propagation is constant during a streaming
+    /// session (fixed hardware path), so we estimate once per pair on
+    /// warmup and reuse the result. Skipping `estimate_delay` per tick
+    /// (a 262 k-point FFT+IFFT at 2.5 s ring / 48 kHz) cuts the hot-loop
+    /// work from ~17 ms → ~3 ms and takes the refresh rate from choppy
+    /// ~8.5 Hz to the capture-interval-limited rate.
+    ///
+    /// That rate is ~16.6 Hz, not the ~10 Hz an older note claimed: the
+    /// limit is `chunk_secs` (0.05 s) plus per-tick work, and
+    /// `chunk_secs` was 0.2 when the ~10 Hz figure was written. Measured
+    /// 2026-08-06 on `--fake-audio` at 48 kHz over 30 s, two pairs,
+    /// median inter-frame gap 60.3 ms; the rig sees 17.5–18 Hz at 96 kHz.
+    delay: Option<Lock>,
+    /// A pair whose delay estimate was *refused* (no prominent
+    /// correlation peak — #227) stays unlocked and is retried, because
+    /// the cause is usually transient from the software's point of view:
+    /// an unpatched reference leg or a muted source that the operator
+    /// then fixes. Retry is rate-limited because each attempt is the same
+    /// full-ring FFT+IFFT the cache above exists to avoid, and the inputs
+    /// it reads only turn over on the ring's own timescale.
+    next_attempt: Option<std::time::Instant>,
+    /// Peak-to-median prominence from the most recent attempt, locked or
+    /// refused. Published so a session that never locks still says how
+    /// far short it fell — the estimator's one empirical constant is set
+    /// from this distribution, and a bare "refused" would not measure it.
+    prominence: Option<Value>,
+    /// How many delay estimates this pair has completed, accepted or
+    /// refused. Published as `delay_attempts` (#238).
+    ///
+    /// This is the only thing on the wire that separates "warming up"
+    /// from "refusing": both publish `delay_locked: false`, and until an
+    /// attempt has run there is no statement to make about the pair at
+    /// all. The consumer that needs it is the fault indicator, which may
+    /// not paint `LOST LOCK` on a session that has simply not been asked
+    /// a question yet — see `ac-scene::fault`.
+    ///
+    /// A count, not a verdict. It says the estimator ran; it says nothing
+    /// about how close the result came, which is the estimator's own
+    /// business (`delay_evidence`, diagnostic-only).
+    ///
+    /// MONOTONE for the life of the session — never reset, including by
+    /// #226's re-locking. Resetting it would make a pair that locked and
+    /// then started refusing read as one that has not been asked yet, and
+    /// the fault indicator answers "nothing to report" to that.
+    attempts: u32,
+    /// Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
+    /// handoff: transfer-frame-v2 M0). `None` for a pair whose meas
+    /// channel has no SPL calibration layer; `spl` stays `null` for that
+    /// pair's whole session, matching `spl_offsets` in `monitor.rs`.
+    /// Session-static per D10, so decided once at construction rather
+    /// than re-checked per tick.
+    spl_integ: Option<ac_core::visualize::time_integration::EmaIntegrator>,
+    /// Timestamp of the last `spl` integration step, for its `dt`.
+    spl_last: Option<std::time::Instant>,
+}
+
+impl PairState {
+    fn new(spl_integ: Option<ac_core::visualize::time_integration::EmaIntegrator>) -> Self {
+        Self {
+            delay: None,
+            next_attempt: None,
+            prominence: None,
+            attempts: 0,
+            spl_integ,
+            spl_last: None,
+        }
+    }
+
+    /// Discard this pair's held lock and its `ladder`, and clear the
+    /// retry timer so the next tick attempts acquisition immediately
+    /// rather than waiting out `RELOCK_RETRY`. Leaves `attempts` and
+    /// `prominence` untouched — the first must stay monotone (a reset
+    /// would make a locked-then-refusing pair read as one never asked),
+    /// and the second is last-attempt evidence that the next attempt
+    /// overwrites on its own.
+    ///
+    /// Takes the ladder slot as an argument because `MtwPair` cannot live
+    /// in `PairState` (see the type's note), but a flush that dropped the
+    /// lock without the ladder would leave a ladder aligned to an offset
+    /// no longer held.
+    fn flush(&mut self, ladder: &mut Option<ac_core::visualize::mtw::MtwPair>) {
+        self.delay = None;
+        self.next_attempt = None;
+        *ladder = None;
+    }
 }
 
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
@@ -345,17 +465,6 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
-    // Per-pair buffer indices into the `Vec<Vec<f32>>` that `capture_multi`
-    // returns. Precomputed so the worker loop doesn't re-scan per iteration.
-    let pair_idx: Vec<(usize, usize)> = pairs
-        .iter()
-        .map(|&(m, r)| {
-            let mi = unique_chans.iter().position(|&c| c == m).unwrap();
-            let ri = unique_chans.iter().position(|&c| c == r).unwrap();
-            (mi, ri)
-        })
-        .collect();
-
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -379,26 +488,51 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         }
     }
 
+    let out_ch = cfg.output_channel;
+
+    // One calibration load per unique capture channel, and every
+    // per-pair view below is taken from it. `Calibration::load` re-reads
+    // and re-parses the whole calibration file on every call, and this
+    // handler used to ask the same question of the same file four times
+    // over — the ref-curve refusal, the meas mic-curve, the meas and ref
+    // full calibrations, and the snapshot ring's per-channel copy.
+    //
+    // Not only cheaper: it also makes those views consistent by
+    // construction. Separate loads read the file at separate instants,
+    // so a calibration rewritten mid-launch could give the refusal check
+    // a channel with no curve and the correction path one with a curve —
+    // the exact split this check exists to prevent.
+    let unique_cals: Vec<Option<Calibration>> = unique_chans
+        .iter()
+        .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
+        .collect();
+    // Every channel named in `pairs` is in `unique_chans` by
+    // construction, so this never misses: `None` means "no calibration
+    // stored for this channel", never "channel not found".
+    let cal_for = |ch: u32| -> Option<&Calibration> {
+        unique_chans
+            .iter()
+            .position(|&c| c == ch)
+            .and_then(|i| unique_cals[i].as_ref())
+    };
+
     // Calibration discipline (#101): a mic-curve on the **reference**
     // channel is a misconfiguration — H1 = Y/X is a ratio, applying a
     // mic correction to the reference leg cancels against the meas-leg
     // correction (or worse, biases it the wrong way when only one leg
     // has a curve). Refuse the request synchronously with a clear
     // message so the user knows to clear the curve or swap channels.
-    let out_ch = cfg.output_channel;
     for &(_, ref_ch) in &pairs {
-        if let Ok(Some(cal)) = Calibration::load(out_ch, ref_ch, None) {
-            if cal.mic_response.is_some() {
-                return json!({
-                    "ok": false,
-                    "error": format!(
-                        "transfer ref channel {ref_ch} has a mic-curve loaded — \
-                         transfer is a ratio, applying a curve to the reference leg \
-                         is wrong. Run `ac calibrate mic-curve clear input {ref_ch}` \
-                         or swap meas/ref."
-                    ),
-                });
-            }
+        if cal_for(ref_ch).is_some_and(|c| c.mic_response.is_some()) {
+            return json!({
+                "ok": false,
+                "error": format!(
+                    "transfer ref channel {ref_ch} has a mic-curve loaded — \
+                     transfer is a ratio, applying a curve to the reference leg \
+                     is wrong. Run `ac calibrate mic-curve clear input {ref_ch}` \
+                     or swap meas/ref."
+                ),
+            });
         }
     }
 
@@ -414,41 +548,36 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .unwrap_or_else(|| meas_port_r.clone());
     let pairs_r = pairs.clone();
 
-    // Per-pair measurement-channel mic-curves. Loaded once at worker
-    // start; ref-channel curves were already refused above.
-    let pair_meas_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> = pairs
+    // Session-static per-pair context: buffer indices (precomputed so the
+    // worker loop doesn't re-scan per tick) plus the full per-leg
+    // calibration that feeds `meas_spectrum`/`ref_spectrum`/`spl`/
+    // `cal_tags` (handoff: transfer-frame-v2 M0).
+    //
+    // `meas_curve` stays a field of its own rather than being read back
+    // out of `meas_cal` at each use: the mag/phase/re/im correction path
+    // takes the curve alone and is left untouched (additive-only
+    // discipline). Both come from the same `unique_cals` load, so they
+    // cannot disagree about a channel.
+    let pair_ctx: Vec<PairCtx> = pairs
         .iter()
-        .map(|&(meas, _)| {
-            Calibration::load(out_ch, meas, None)
-                .ok()
-                .flatten()
-                .and_then(|c| c.mic_response.clone())
+        .enumerate()
+        .map(|(pos, &(meas, r))| PairCtx {
+            pos,
+            meas_ch: meas,
+            ref_ch: r,
+            mi: unique_chans.iter().position(|&c| c == meas).unwrap(),
+            ri: unique_chans.iter().position(|&c| c == r).unwrap(),
+            meas_cal: cal_for(meas).cloned(),
+            ref_cal: cal_for(r).cloned(),
+            meas_curve: cal_for(meas).and_then(|c| c.mic_response.clone()),
         })
         .collect();
 
-    // Full per-pair calibration (voltage / SPL / mic-curve) for
-    // `meas_spectrum`/`ref_spectrum`/`spl`/`cal_tags` (handoff:
-    // transfer-frame-v2 M0). Kept side by side with `pair_meas_curves`
-    // above (mic_response only, feeds the existing mag/phase/re/im
-    // correction) rather than merged, so that path stays untouched
-    // (additive-only discipline).
-    let pair_meas_cals: Vec<Option<Calibration>> = pairs
-        .iter()
-        .map(|&(meas, _)| Calibration::load(out_ch, meas, None).ok().flatten())
-        .collect();
-    let pair_ref_cals: Vec<Option<Calibration>> = pairs
-        .iter()
-        .map(|&(_, r)| Calibration::load(out_ch, r, None).ok().flatten())
-        .collect();
-
-    // Snapshot ring (handoff: snapshot-backend M1). Per-unique-channel
-    // calibration (not per-pair — a channel used in >1 pair gets one
-    // entry here) for `.acsnap` provenance; the ring itself is built
-    // inside the worker once `sr` is known.
-    let unique_cals: Vec<Option<Calibration>> = unique_chans
-        .iter()
-        .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
-        .collect();
+    // Snapshot ring (handoff: snapshot-backend M1) takes the
+    // per-unique-channel calibration directly — not per-pair, so a
+    // channel used in >1 pair gets one entry — for `.acsnap`
+    // provenance; the ring itself is built inside the worker once `sr`
+    // is known.
     let snapshot_ring_slot = state.snapshot_ring.clone();
     let drive_state_slot = state.drive_state.clone();
     let relock_state_slot = state.relock_state.clone();
@@ -651,75 +780,29 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // through to the same meas-only clear `capture_block` did.
         let _ = eng.capture_multi(0.2);
 
-        // Delay cache: ref↔meas propagation is constant during a streaming
-        // session (fixed hardware path), so we estimate once per pair on
-        // warmup and reuse the result. Skipping `estimate_delay` per tick
-        // (a 262 k-point FFT+IFFT at 2.5 s ring / 48 kHz) cuts the hot-loop
-        // work from ~17 ms → ~3 ms and takes the refresh rate from choppy
-        // ~8.5 Hz to the capture-interval-limited rate.
-        //
-        // That rate is now ~16.6 Hz, not the ~10 Hz this comment used to
-        // claim: the limit is `chunk_secs` (0.05 s) plus per-tick work, and
-        // `chunk_secs` was 0.2 when the ~10 Hz figure was written. Measured
-        // 2026-08-06 on `--fake-audio` at 48 kHz over 30 s, two pairs, median
-        // inter-frame gap 60.3 ms; the rig sees 17.5–18 Hz at 96 kHz.
-        let mut pair_delays: Vec<Option<Lock>> = vec![None; pairs.len()];
-
-        // A pair whose delay estimate was *refused* (no prominent correlation
-        // peak — #227) stays unlocked and is retried, because the cause is
-        // usually transient from the software's point of view: an unpatched
-        // reference leg or a muted source that the operator then fixes. Retry
-        // is rate-limited because each attempt is the same full-ring
-        // FFT+IFFT the cache above exists to avoid, and the inputs it reads
-        // only turn over on the ring's own timescale.
+        // Retry interval for a refused delay estimate — see
+        // `PairState::next_attempt`.
         const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
-        let mut next_delay_attempt: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
 
-        // Peak-to-median prominence from the most recent attempt, locked or
-        // refused. Published so a session that never locks still says how far
-        // short it fell — the estimator's one empirical constant is set from
-        // this distribution, and a bare "refused" would not measure it.
-        let mut pair_prominence: Vec<Option<serde_json::Value>> = vec![None; pairs.len()];
-
-        // How many delay estimates this pair has completed, accepted or
-        // refused. Published as `delay_attempts` (#238).
-        //
-        // This is the only thing on the wire that separates "warming up" from
-        // "refusing": both publish `delay_locked: false`, and until an attempt
-        // has run there is no statement to make about the pair at all. The
-        // consumer that needs it is the fault indicator, which may not paint
-        // `LOST LOCK` on a session that has simply not been asked a question
-        // yet — see `ac-scene::fault`.
-        //
-        // A count, not a verdict. It says the estimator ran; it says nothing
-        // about how close the result came, which is the estimator's own
-        // business (`delay_evidence`, diagnostic-only).
-        //
-        // MONOTONE for the life of the session — never reset, including when
-        // #226 adds re-locking. Resetting it would make a pair that locked and
-        // then started refusing read as one that has not been asked yet, and
-        // the fault indicator answers "nothing to report" to that.
-        let mut pair_delay_attempts: Vec<u32> = vec![0; pairs.len()];
-
-        // Per-pair `spl` time-integration state (F/S EMA, n_bands=1 —
-        // handoff: transfer-frame-v2 M0). `None` for a pair whose meas
-        // channel has no SPL calibration layer; `spl` stays `null` for
-        // that pair's whole session, matching `spl_offsets` in
-        // `monitor.rs`. Session-static per D10, so built once here
-        // rather than re-checked per tick.
-        let mut spl_integrators: Vec<Option<ac_core::visualize::time_integration::EmaIntegrator>> =
-            pair_meas_cals
-                .iter()
-                .map(|c| {
-                    c.as_ref().and_then(Calibration::spl_offset_db).map(|_| {
-                        ac_core::visualize::time_integration::EmaIntegrator::new(
-                            integration_tau_s,
-                            1,
-                        )
-                    })
-                })
-                .collect();
-        let mut spl_last_ts: Vec<Option<std::time::Instant>> = vec![None; pairs.len()];
+        // Per-pair maintained state, one entry per `pair_ctx` entry and in
+        // the same order. The `spl` integrator is the only field decided at
+        // construction rather than by the loop (session-static per D10).
+        let mut pair_state: Vec<PairState> = pair_ctx
+            .iter()
+            .map(|c| {
+                PairState::new(
+                    c.meas_cal
+                        .as_ref()
+                        .and_then(Calibration::spl_offset_db)
+                        .map(|_| {
+                            ac_core::visualize::time_integration::EmaIntegrator::new(
+                                integration_tau_s,
+                                1,
+                            )
+                        }),
+                )
+            })
+            .collect();
 
         // Drain telemetry (#208 D1). Off unless `AC_DRAIN_TELEMETRY` is set:
         // this slice adds no behaviour, and a streaming session must log
@@ -851,8 +934,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             let relock_gen = relock_state.generation();
             if relock_gen != last_relock_gen {
                 last_relock_gen = relock_gen;
-                for i in 0..pairs.len() {
-                    flush_pair(i, &mut pair_delays, &mut next_delay_attempt, &mut mtw);
+                for (st, ladder) in pair_state.iter_mut().zip(mtw.iter_mut()) {
+                    st.flush(ladder);
                 }
             }
 
@@ -867,17 +950,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // acquisition is attempted this tick rather than up to
             // `RELOCK_RETRY` later.
             if drive_edge_on {
-                for i in 0..pairs.len() {
-                    match pair_delays[i] {
-                        Some(Lock { driving: false, .. }) => {
-                            flush_pair(i, &mut pair_delays, &mut next_delay_attempt, &mut mtw);
-                        }
+                for (st, ladder) in pair_state.iter_mut().zip(mtw.iter_mut()) {
+                    match st.delay {
+                        Some(Lock { driving: false, .. }) => st.flush(ladder),
                         Some(Lock { driving: true, .. }) => {
                             // Acquired while driving — the dead-man/resume
                             // thrash case. Survives untouched.
                         }
                         None => {
-                            next_delay_attempt[i] = None;
+                            st.next_attempt = None;
                         }
                     }
                 }
@@ -942,16 +1023,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
             // Estimate any missing per-pair delays once on first entry (after
             // the rings are full). Subsequent ticks reuse the cached value.
-            for i in 0..pairs.len() {
-                if pair_delays[i].is_some() {
+            for (ctx, st) in pair_ctx.iter().zip(pair_state.iter_mut()) {
+                if st.delay.is_some() {
                     continue;
                 }
                 let now = std::time::Instant::now();
-                if next_delay_attempt[i].is_some_and(|t| now < t) {
+                if st.next_attempt.is_some_and(|t| now < t) {
                     continue;
                 }
-                let (mi, ri) = pair_idx[i];
-                if let (Some(meas), Some(refb)) = (rings.get(mi), rings.get(ri)) {
+                if let (Some(meas), Some(refb)) = (rings.get(ctx.mi), rings.get(ctx.ri)) {
                     let est = ac_core::visualize::transfer::estimate_delay_detailed(
                         refb.as_slice(),
                         meas.as_slice(),
@@ -960,7 +1040,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     // `driving` is this tick's already-updated `engine_on`
                     // — the provenance a future drive edge (#226) reads to
                     // decide whether this lock is stale by construction.
-                    pair_delays[i] = est.lag.map(|samples| Lock {
+                    st.delay = est.lag.map(|samples| Lock {
                         samples,
                         driving: engine_on,
                     });
@@ -968,12 +1048,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     // the branch where an estimate actually ran on full rings,
                     // so the count means "the estimator has answered", not
                     // "the loop reached the retry site".
-                    pair_delay_attempts[i] = pair_delay_attempts[i].saturating_add(1);
+                    st.attempts = st.attempts.saturating_add(1);
                     // Full lock evidence, not just the ratio: the competing
                     // peaks are what make DIRECT_PEAK_FRACTION settleable
                     // offline, and they cannot be reconstructed from a
                     // finished session.
-                    pair_prominence[i] = Some(json!({
+                    st.prominence = Some(json!({
                         "prominence":   est.prominence,
                         "peak_lag":     est.peak_lag,
                         "peak_value":   est.peak_value,
@@ -993,24 +1073,26 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             .collect::<Vec<_>>(),
                     }));
                     if est.lag.is_none() {
-                        next_delay_attempt[i] = Some(now + RELOCK_RETRY);
+                        st.next_attempt = Some(now + RELOCK_RETRY);
                     }
                 }
             }
             // Keep the ring's copy in sync — cheap (small Vec), and
             // simpler than trying to push incrementally from inside the
             // loop above.
-            snapshot_ring.lock().unwrap().delay_samples =
-                pair_delays.iter().map(|l| l.map(|l| l.samples)).collect();
+            snapshot_ring.lock().unwrap().delay_samples = pair_state
+                .iter()
+                .map(|st| st.delay.map(|l| l.samples))
+                .collect();
 
             // Build each pair's ladder once its alignment offset is known —
             // the offset is applied at full rate, before decimation, so it has
             // to exist before the first sample enters.
-            for (i, slot) in mtw.iter_mut().enumerate() {
+            for (slot, st) in mtw.iter_mut().zip(pair_state.iter()) {
                 if slot.is_some() || mtw_failed {
                     continue;
                 }
-                let Some(delay) = pair_delays[i].map(|l| l.samples) else {
+                let Some(delay) = st.delay.map(|l| l.samples) else {
                     continue;
                 };
                 match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
@@ -1032,12 +1114,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // what makes this loop expensive.
             let mtw_columns: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = mtw
                 .iter_mut()
-                .enumerate()
-                .map(|(i, slot)| {
+                .zip(pair_ctx.iter())
+                .map(|(slot, ctx)| {
                     let p = slot.as_mut()?;
-                    let (mi, ri) = pair_idx[i];
-                    let meas = bufs.get(mi)?;
-                    let refb = bufs.get(ri)?;
+                    let meas = bufs.get(ctx.mi)?;
+                    let refb = bufs.get(ctx.ri)?;
                     p.push(meas, refb);
                     p.columns(spec_f_min, spec_f_max, mtw_ppo)
                 })
@@ -1063,17 +1144,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // computed from the same H₁ result). flat_map flattens to
             // one Vec<Value> per filter_map; overall Vec<Vec<Value>>
             // is then chained into the per-message send loop below.
-            let messages: Vec<(usize, Vec<Value>, Option<f64>)> = pairs
+            let messages: Vec<(usize, Vec<Value>, Option<f64>)> = pair_ctx
                 .par_iter()
-                .enumerate()
-                .zip(pair_idx.par_iter())
-                .zip(pair_delays.par_iter())
-                .zip(pair_prominence.par_iter())
-                .zip(pair_meas_curves.par_iter())
-                .zip(pair_meas_cals.par_iter())
-                .zip(pair_ref_cals.par_iter())
+                .zip(pair_state.par_iter())
                 .filter_map(
-                    |(((((((pos, &(meas_ch, ref_ch)), &(mi, ri)), &delay_opt), prom_opt), curve_opt), meas_cal_opt), ref_cal_opt)| {
+                    |(ctx, st)| {
+                        let &PairCtx { pos, meas_ch, ref_ch, mi, ri, .. } = ctx;
+                        let (curve_opt, meas_cal_opt, ref_cal_opt) =
+                            (&ctx.meas_curve, &ctx.meas_cal, &ctx.ref_cal);
+                        let delay_opt = st.delay;
                         let meas = rings.get(mi)?.as_slice();
                         let refb = rings.get(ri)?.as_slice();
                         // `-inf` (digital silence) travels as JSON null:
@@ -1151,8 +1230,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 for ((r, i), &f) in
                                     re.iter_mut().zip(im.iter_mut()).zip(freqs.iter())
                                 {
-                                    let corr_db = curve.correction_at(f as f32) as f64;
-                                    let scale = 10.0_f64.powf(-corr_db / 20.0);
+                                    let scale = mic::mic_curve_scale(curve, f);
                                     *r *= scale;
                                     *i *= scale;
                                 }
@@ -1176,8 +1254,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 for (amp, &f) in
                                     mc_meas_amp.iter_mut().zip(result.freqs.iter())
                                 {
-                                    let corr_db = curve.correction_at(f as f32) as f64;
-                                    *amp *= 10.0_f64.powf(-corr_db / 20.0);
+                                    *amp *= mic::mic_curve_scale(curve, f);
                                 }
                             }
                         }
@@ -1197,30 +1274,21 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                                 ) + offset
                             });
 
-                        // Voltage cal (D3): a constant per-channel scale
-                        // factor, so it commutes with column aggregation
-                        // (`sqrt(Σ(c·x)²) = c·sqrt(Σx²)`) — applied here,
-                        // post mic-curve, pre-aggregation.
+                        // Voltage cal (D3), applied here — post mic-curve,
+                        // pre-aggregation. Both legs go through the same
+                        // helper: the meas and ref spectra are divided
+                        // against each other downstream, so a scale applied
+                        // to one leg under rules that have drifted from the
+                        // other's is an error that cancels out of every
+                        // check but the answer.
                         let meas_amp_wire = {
                             let mut a = mc_meas_amp;
-                            if let Some(scale) =
-                                meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in)
-                            {
-                                for v in a.iter_mut() {
-                                    *v *= scale;
-                                }
-                            }
+                            apply_voltage_cal(&mut a, meas_cal_opt.as_ref());
                             a
                         };
                         let ref_amp_wire = {
                             let mut a = result.ref_amp.clone();
-                            if let Some(scale) =
-                                ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in)
-                            {
-                                for v in a.iter_mut() {
-                                    *v *= scale;
-                                }
-                            }
+                            apply_voltage_cal(&mut a, ref_cal_opt.as_ref());
                             a
                         };
                         let (meas_spectrum, spec_freqs) =
@@ -1334,8 +1402,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                             // Read by position rather than zipped into the
                             // chain above: it is a scalar the closure only
                             // reads, and the zip is already six deep.
-                            "delay_attempts":  pair_delay_attempts.get(pos).copied().unwrap_or(0),
-                            "delay_evidence":  prom_opt,
+                            "delay_attempts":  st.attempts,
+                            "delay_evidence":  st.prominence,
                             "meas_peak_dbfs":  meas_peak,
                             "ref_peak_dbfs":   ref_peak,
                             "ref_channel":     ref_ch,
@@ -1408,18 +1476,20 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 )
                 .collect();
             for (pos, mut batch, spl_raw) in messages {
-                // Sequential, indexed by original pair position — the
-                // EMA integrator holds mutable per-pair state that can't
-                // safely live inside the parallel closure above (#pos is
-                // preserved through `filter_map` via `enumerate()` at the
-                // top of the chain, not the post-filter Vec position).
-                if let (Some(raw), Some(integ)) = (spl_raw, spl_integrators[pos].as_mut()) {
+                // Sequential, indexed by `PairCtx::pos` — the EMA
+                // integrator is `&mut` per pair and cannot be advanced
+                // inside the parallel closure above. `pos` is the pair's
+                // position in the launch list, carried through
+                // `filter_map`, never the post-filter Vec position.
+                let st = &mut pair_state[pos];
+                if let (Some(raw), Some(integ)) = (spl_raw, st.spl_integ.as_mut()) {
                     let now = std::time::Instant::now();
-                    let dt = spl_last_ts[pos]
+                    let dt = st
+                        .spl_last
                         .map(|t| now.duration_since(t).as_secs_f64())
                         .unwrap_or(chunk_secs)
                         .max(1e-6);
-                    spl_last_ts[pos] = Some(now);
+                    st.spl_last = Some(now);
                     let integrated = integ.update(&[raw], dt)[0];
                     if let Some(first) = batch.first_mut() {
                         first["spl"] = json!(integrated);
