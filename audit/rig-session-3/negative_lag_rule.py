@@ -1,4 +1,4 @@
-"""Block 2 of `work/rig/rig-verify-queue.md`, scored offline — no rig time.
+"""Block 2 of `rig/rig-verify-queue.md`, scored offline — no rig time.
 
 The proposal under test came out of rig session 2 and has never been measured:
 `prominence` divides `peak_value` by a median taken over **all** lags, and on a

@@ -122,7 +122,7 @@ to overlap under-estimates delay sensitivity badly.
 
 ## 4. HF-first loss: residual delay, and how much is too much
 
-**Moved here from `work/handoff/handoff-lock-and-smoothing.md` decision 5**,
+**Moved here from `$AC_HOME/handoff/handoff-lock-and-smoothing.md` decision 5**,
 which now points at this section. It lives here because a handoff carries a
 delete condition and this material does not.
 

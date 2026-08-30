@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use super::{check_ack, get_cal, level_to_dbfs};
+use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp};
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
 
@@ -34,8 +34,13 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         cmd_json["input_channel"] = (*ch).into();
     }
 
-    check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate");
+    let ack = check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate");
+    let applied_dbfs = ack
+        .get("ref_dbfs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(ref_dbfs);
     println!("  Calibration started: 1 kHz  |  {ref_dbfs:.1} dBFS");
+    print_level_clamp(ref_dbfs, applied_dbfs);
     println!("  Press Ctrl+C or type q to cancel.\n");
 
     loop {

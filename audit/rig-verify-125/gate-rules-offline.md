@@ -28,7 +28,7 @@
 > to be made, and this is the only record of that ranking. What is superseded
 > is the closing section's call for a trip that has now happened.
 
-Desk work item 2 (`work/handoff/handover-desk-work.md`). Reproduce with
+Desk work item 2 (`$AC_HOME/handoff/handover-desk-work.md`). Reproduce with
 `python3 gate_rules.py` in this directory; `--csv` adds machine-readable rows.
 
 The captures themselves (`*-evidence.pkl.gz`, 2.1 MB, slimmed to

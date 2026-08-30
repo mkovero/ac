@@ -34,8 +34,8 @@ gh pr list --state open \
 `needs-work` means you failed it previously and Claude QA has since re-passed
 it; that is a PR to review again, not one to skip.
 
-There is no queue state anywhere but GitHub. `.agents/bin/codex-qa-run.sh`
-walks this list and holds nothing.
+There is no queue state anywhere but GitHub. `bin/codex-qa.sh` walks this list
+and holds nothing.
 
 ## read order — this order is the mechanism, not a preference
 
@@ -258,3 +258,8 @@ it.
 - Bug found outside the PR's scope → say so in the comment; a human opens the
   issue. You do not create issues.
 - One comment per review pass. A later push means a new pass, not an edit.
+- GitHub holds all workflow state. Your durable output is the PR itself —
+  labels, your comment, the existing discussion. Never write a result file, a
+  PASS/FAIL marker, or any other local record meant to outlive the invocation:
+  the runner does not read one, and a second reader would trust it over the
+  labels. Scratch files for ordinary tooling are fine; state is not.

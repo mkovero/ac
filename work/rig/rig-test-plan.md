@@ -406,6 +406,22 @@ independent check — the constant is derived from these same measurements.
 > scoreable.
 >
 > See `work/rig/rig-243-criterion7-results.md`.
+>
+> **Tagging, 2026-08-24 (#375 AC3).** Swept `work/rig/*.md` and open issues
+> for criteria stated in millimetres against a hand-measured distance. Two
+> found, both already named on this page:
+> - **#356 AC7 (#243), `≤1.5 mm` / `1.5–8.5 mm` / `>8.5 mm` bands below —
+>   tape-scored.** Compares a metres readout to the tape directly; `c` and the
+>   tape both enter. Reported bounded, not pass/fail, per the temperature
+>   band below (`decline to conclude` where the answer depends on an
+>   unmeasured °C). Ran 2026-08-23: 23 mm, a pass at the ±5 cm bar the tape
+>   actually supports (`rig-243-criterion7-results.md`) and a `decline` at the
+>   mm-banded table as written.
+> - **#346 AC5 — c-free.** The estimator-vs-estimator increment above; tape
+>   and `c` both cancel. Re-derived bar in the section below.
+>
+> No other mm-against-tape criterion found in `work/rig/` or in an open
+> issue.
 
 ### Temperature: no thermometer this session (2026-08-22)
 
@@ -422,19 +438,125 @@ splitting them is what makes the run scoreable:
 wording is "at least as well as `transfer_stream`'s 4.7 mm". `transfer_stream`
 and the onset estimator can both be run at the same two positions in the same
 session, and compared **against each other in the time domain**, where `c`
-cancels exactly and the tape does not enter at all. Convert the criterion once:
+cancels exactly and the tape does not enter at all.
 
-> 2.000 m at 347.06 m/s = 5.7627 ms = **553.2 samples** at 96 kHz.
-> 4.7 mm over 2.000 m = 0.235% = **1.30 samples**.
+> ~~2.000 m at 347.06 m/s = 5.7627 ms = 553.2 samples at 96 kHz.~~
+> ~~4.7 mm over 2.000 m = 0.235% = 1.30 samples.~~
 >
-> **Pass: |Δt_onset − Δt_transfer_stream| ≤ 1.3 samples**, where each Δt is that
-> estimator's own increment between the two taped positions.
+> ~~**Pass: |Δt_onset − Δt_transfer_stream| ≤ 1.3 samples**, where each Δt is~~
+> ~~that estimator's own increment between the two taped positions.~~
+>
+> **Superseded, 2026-08-24 (#375).** The derivation above is sound — an
+> estimator-vs-estimator increment is still the only c-free, tape-free form —
+> but the 1.30-sample figure was `transfer_stream` agreeing with the **tape**
+> to 4.7 mm in one session (`rig-243-343-results.md`, 2026-08-18), not a
+> demonstrated capability of either estimator. The tape is ±50 mm
+> (`work/rig/rig-243-criterion7-results.md`), so 4.7 mm is one lucky draw from
+> a distribution ±10× wider than itself; the same comparison returned 23 mm on
+> 2026-08-23. Converting a tape draw to samples moves the uncertainty out of
+> view without removing it — a multiple quoted against 1.3 samples inherits an
+> authority the draw never had. See issue #375.
 
-This is a stronger test than the tape comparison, not a weaker substitute for
-it: it removes the temperature uncertainty *and* the tape-placement
+**Re-derived bar.** State the disagreement in units of the candidate
+estimator's own measured repeatability instead of a tape figure, so the bar
+needs no `c`, no tape, and tightens on its own as the estimator improves:
+
+> **Pass: |Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)**, where `Δt_est` is
+> the candidate estimator's own increment between the two taped positions,
+> `se(Δt_est)` is the standard error of that increment estimated from repeated
+> captures at each position in the same session, and `Δt_transfer_stream` is
+> treated as the reference value.
+
+`transfer_stream` is the reference and not a second noisy term because its own
+scatter was `sd 0` across `n=3` fresh locks at each taped position in the
+2026-08-23 session (`rig-2026-08-23-onset-353-results.md`) — deterministic to
+sample resolution at that repeat count, and negligible next to any candidate
+estimator's `se`.
+
+> **Record committed, 2026-08-24 (this PR, in response to QA on #375's PR).**
+> `work/rig/rig-2026-08-23-onset-353-results.md` and its raw logs
+> `audit/rig-353-2026-08-23/` (`ir-1m.log`, `ir-3m.log`, `ladder-3m.log`,
+> `xfer-locks.txt`) were on disk from the 2026-08-23 session but had never
+> been committed — QA's `git log --all` correctly found nothing. Both are now
+> in this tree; the n=12/n=3 table below is read from the committed file, not
+> reproduced from issue-body prose. `xfer-locks.txt` shows the raw per-session
+> `transfer_stream` locks (392/942 samples, zero spread across 3 fresh locks
+> each) that the 550.00-sample increment above sums to.
+
+**This bar assumes `se(Δt_est)` is estimated from n=12 captures at each of the
+two taped positions**, per the 2026-08-23 session table (also quoted in #378):
+
+| estimator | increment, 1.000 m → 3.000 m | own se | repeats/position |
+|---|---|---|---|
+| `transfer_stream` | 550.00 smp | sd 0 | n=3 (fresh locks) |
+| IR peak | 557.42 smp | se 0.60 | n=12 |
+| onset (#352) | 575.67 smp | se 3.26 | n=12 |
+
+A scatter estimate from fewer repeats — n=3, say — is a weaker claim than one
+from n=12 and should not be plugged into this bar without restating the
+resulting `se` and flagging the smaller n. 3σ is used because it is the
+conventional threshold at which measurement noise stops being a plausible
+explanation for a disagreement (>99.7% under a normal approximation): a result
+inside it cannot be distinguished from agreement using only the estimator's
+own measured scatter, and one outside it is a finding independent of tape,
+temperature, or `c`.
+
+> **Multiplier accepted, 2026-08-25.** mkovero on #375: "Accept 3σ". The bar
+> is settled at `k = 3` and is no longer proposed. Accepted while the choice
+> was uncontested — the 2026-08-23 onset sits at 7.9σ, so every conventional
+> multiplier (2, 3, 5) returns the same verdict and `k` could not select an
+> outcome. After #378 moves the onset's increment and `se`, a result may land
+> near the boundary; `k` is fixed before that happens, which is the point of
+> settling it now. **Do not re-open `k` once a verification run's numbers are
+> known** — a multiplier chosen against a known result is not a bar.
+>
+> **Two riders remain open, and neither was part of that acceptance.** They
+> bound what the accepted bar does and does not claim; both need a decision
+> before the #378 verification run, and neither changes `k`:
+>
+> 1. **The normal approximation is stated, not exact.** `se` is estimated, not
+>    known: n=12 per position gives the increment ~22 df, so the sampling
+>    distribution is Student's t, not normal, and 3σ under t(22) is ~99.3%
+>    rather than 99.73%. `se` itself carries ~15% relative uncertainty at that
+>    df (`1/√(2·22)`), so the bar's own width moves run to run by about that
+>    much. Either score with a t-multiplier at the actual df, or keep 3σ under
+>    the normal approximation and hold n ≥ 12 per position as a condition of
+>    the bar rather than a nice-to-have. **Undecided.**
+> 2. **`k × se` rewards imprecision, and encodes no accuracy requirement.** A
+>    noisy estimator gets a wide bar and passes; a precise one gets a narrow
+>    bar and fails. On the 2026-08-23 table the identical rule gives the onset
+>    9.78 smp (35 mm at 3.6 mm/sample, 96 kHz) and the IR peak 1.80 smp
+>    (6.5 mm) — a 5.4× spread in physical tolerance from one rule. The bar
+>    therefore tests *consistency with the reference given the estimator's own
+>    noise*, not *accuracy to any stated figure*. If the tuning path needs a
+>    fixed physical tolerance, that is a second, independent criterion —
+>    `bar = min(3 × se, <tolerance>)` is the obvious form, but the tolerance
+>    must come from what the measurement is used for, not from this rig.
+>    **Undecided; not implied by accepting 3σ.**
+>
+> A third, smaller gap, recorded so it is not lost: **the reference's own
+> variance is assumed zero.** `transfer_stream`'s `sd 0` is from n=3 fresh
+> locks, which establishes the lock is reproducible, not that its variance
+> vanishes (the session record says so in its own confounds). Strictly the
+> comparison wants `se(diff) = √(se_est² + se_ref²)`; today `se_ref` is
+> dropped. At n=3 versus the onset's `se` of 3.26 this is almost certainly
+> negligible, which is why it is a note and not a rider — but it stops being
+> negligible if a future estimator's `se` approaches the reference's.
+
+Applying this bar to #346 AC5 and restating the verdict is AC4 of #375, and is
+deferred to #378: #378 is expected to move the onset's own increment and
+`se`, so scoring the current numbers against this bar now would score code
+about to change. The illustrative case is already on record — the same
+2026-08-23 onset numbers above disagree with `transfer_stream` by **25.67
+smp**, which is **7.9σ** on the onset's own `se` of 3.26 — but that is
+evidence for #378's problem statement, not this issue's verdict.
+
+This remains a stronger test than the tape comparison, not a weaker substitute
+for it: it removes the temperature uncertainty *and* the tape-placement
 uncertainty, and it measures the thing AC5 actually asks about — whether the
 new estimator inherits the accuracy of the one already validated against tape.
-Record the raw sample counts, not just the difference.
+Record the raw sample counts and each position's own scatter, not just the
+increment's difference.
 
 **#356 AC7 is not scoreable c-free, and must be reported bounded.** It compares
 a metres readout against the tape, so `c` is in the answer. With the assumed
@@ -491,12 +613,15 @@ is `capture_3`. Zero extra cost, same call, and it re-measures
 Move the mic once. Re-read the tape and the thermometer. Repeat B1 and B2 with
 both builds.
 
-> **B1 pass (#346 AC5):** the onset estimator's increment between the two taped
-> positions matches the taped 2.000 m **at least as well as `transfer_stream`'s
-> 4.7 mm**, which is the standard the issue sets. For scale: the IR *peak*
-> managed 4.5 samples (1.6 cm) on the increment while being 145–151 samples
-> wrong in the absolute — the increment is forgiving, which is exactly why it
-> is the criterion, and also why a failure here is unambiguous.
+> **B1 pass (#346 AC5):** ~~the onset estimator's increment between the two
+> taped positions matches the taped 2.000 m at least as well as
+> `transfer_stream`'s 4.7 mm~~ — superseded 2026-08-24 (#375), the 4.7 mm
+> figure was a single tape draw, not a demonstrated capability; see the
+> re-derived, tape-free bar above (`|Δt_est − Δt_transfer_stream| ≤ 3 ×
+> se(Δt_est)`). For scale: the IR *peak* managed 4.5 samples (1.6 cm) on the
+> increment while being 145–151 samples wrong in the absolute — the increment
+> is forgiving, which is exactly why it is the criterion, and also why a
+> failure here is unambiguous.
 >
 > **B1 falsifying outcome:** the increment is worse than 4.7 mm, or the
 > estimator returns the peak (145–151 samples late in the absolute at these

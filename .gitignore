@@ -29,6 +29,15 @@ stddocs
 /.cargo/
 .claude/CLAUDE.md
 .mcp.json
-/.repowise/
-# repowise API keys (local)
-.repowise/.env
+
+# Handoffs live in $AC_HOME/handoff (default ~/src/ac-wt/handoff), not in the
+# repo. Same reasoning as the session output that used to sit in work/sessions/:
+# they accumulated faster than anyone retired them — 20 of the 25 removed here
+# carried no expiry condition — and every one of them was a document a later
+# session could find and read. Out of tree, they cost nothing until fetched.
+work/handoff/
+
+# Root-level scratch output: plots and captures written by hand during a
+# session. Never evidence — the committed captures live under audit/.
+/*.png
+/*.csv

@@ -81,7 +81,7 @@ fn main() {
         }
     };
 
-    spawn::ensure_server(&mut client, host);
+    spawn::ensure_server(&mut client, host, ctrl_port);
 
     if matches!(parsed.cmd, CommandKind::Monitor { .. }) {
         drop(client);

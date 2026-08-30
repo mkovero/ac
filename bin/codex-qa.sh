@@ -116,7 +116,7 @@ for pr in "${prs[@]}"; do
     codex exec -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'sandbox_read_only.network_access=true' "
 You are the independent Codex QA worker for GitHub PR #$pr.
 
-Read .codex/qa-instructions.md before doing anything else.
+Read .agents/codex-qa.md before doing anything else.
 
 Also follow the repository's normal AGENTS.md instructions.
 

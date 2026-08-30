@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# common.sh — shared by the .agents/bin runners. Source, do not execute.
+# common.sh — shared by the bin/ runners. Source, do not execute.
 
 set -euo pipefail
 
@@ -25,9 +25,12 @@ export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 #   $AC_HOME/wt/<branch>   worktrees
 #   $AC_HOME/target        build artifacts, SHARED
 #   $AC_HOME/log           raw session transcripts
+#   $AC_HOME/session       distilled session output
 #
-# Distilled session output stays in work/sessions/ inside the repo: that is the
-# return channel to the planning chat and belongs in git.
+# Distilled session output lives outside the repo, alongside the logs it is
+# distilled from. It used to be written to work/sessions/ and committed; that
+# accumulated faster than anyone read it and cost context in every later
+# session, so it is now untracked and out of tree.
 AC_HOME="${AC_HOME:-$(dirname "$ROOT")/ac-wt}"
 WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
@@ -82,7 +85,7 @@ gh_up() {
 export AC_STDDOCS="${AC_STDDOCS:-$ROOT/stddocs}"
 
 # Raw transcripts: large, noisy, never committed. The distilled final message
-# goes to AC_SESSION_DIR, which is in the repo.
+# goes to AC_SESSION_DIR, which is also outside the repo.
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
 
 # Task = delegation tool. Whether a session can actually reach a subagent is
@@ -157,7 +160,7 @@ require_space() {
   [[ -z $avail ]] && return 0
   if (( avail < need )); then
     echo "refusing to start: ${avail}G free, need ${need}G." >&2
-    echo "  reclaim with: .agents/bin/ac-gc.sh" >&2
+    echo "  reclaim with: bin/ac-gc.sh" >&2
     echo "  or override:  AC_MIN_FREE_GB=5 ..." >&2
     return 1
   fi
@@ -242,7 +245,7 @@ distill() {
 # run <role> <prompt> [--fg] [--read] [extra claude args...]
 # --fg drops into interactive Claude Code: you see everything and can steer,
 # but the allowlist is not enforced — you are prompted instead, and nothing
-# is written to work/sessions.
+# is written to $AC_SESSION_DIR.
 run() {
   local role="$1" prompt="$2"; shift 2
 

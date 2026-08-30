@@ -1,0 +1,360 @@
+=== level=-30dbfs run 1 2026-08-23T05:18:16+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1433 samples  (+14.927 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0759 FS  (-22.39 dB re unity)  at sample 9711  (diagnostic — not arrival)
+  pre-imp SNR   20.5 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed 3.7 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-30dbfs run 2 2026-08-23T05:18:20+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1427 samples  (+14.865 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0814 FS  (-21.78 dB re unity)  at sample 9710  (diagnostic — not arrival)
+  pre-imp SNR   21.6 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 200 Hz band only decayed 10.0 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-30dbfs run 3 2026-08-23T05:18:23+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1419 samples  (+14.781 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0756 FS  (-22.43 dB re unity)  at sample 9704  (diagnostic — not arrival)
+  pre-imp SNR   26.3 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed 12.0 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-30dbfs run 4 2026-08-23T05:18:26+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1431 samples  (+14.906 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0818 FS  (-21.74 dB re unity)  at sample 9711  (diagnostic — not arrival)
+  pre-imp SNR   20.7 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed 6.8 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-30dbfs run 5 2026-08-23T05:18:30+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1429 samples  (+14.885 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0804 FS  (-21.89 dB re unity)  at sample 9711  (diagnostic — not arrival)
+  pre-imp SNR   21.9 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 63 Hz band only decayed 11.0 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-30dbfs run 6 2026-08-23T05:18:33+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -30.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1428 samples  (+14.875 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0714 FS  (-22.92 dB re unity)  at sample 9710  (diagnostic — not arrival)
+  pre-imp SNR   23.7 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -2.5 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 1 2026-08-23T05:18:36+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1439 samples  (+14.990 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0765 FS  (-22.33 dB re unity)  at sample 9710  (diagnostic — not arrival)
+  pre-imp SNR   17.8 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed -1.2 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 2 2026-08-23T05:18:40+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1452 samples  (+15.125 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0750 FS  (-22.49 dB re unity)  at sample 9712  (diagnostic — not arrival)
+  pre-imp SNR   15.8 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed -0.3 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 3 2026-08-23T05:18:43+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1452 samples  (+15.125 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0645 FS  (-23.80 dB re unity)  at sample 9704  (diagnostic — not arrival)
+  pre-imp SNR   15.9 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -7.4 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 4 2026-08-23T05:18:46+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1425 samples  (+14.844 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0816 FS  (-21.76 dB re unity)  at sample 9711  (diagnostic — not arrival)
+  pre-imp SNR   24.1 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -0.2 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 5 2026-08-23T05:18:50+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1461 samples  (+15.219 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0574 FS  (-24.82 dB re unity)  at sample 9704  (diagnostic — not arrival)
+  pre-imp SNR   14.5 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed 3.2 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-36dbfs run 6 2026-08-23T05:18:53+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -36.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1449 samples  (+15.094 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0630 FS  (-24.02 dB re unity)  at sample 9712  (diagnostic — not arrival)
+  pre-imp SNR   17.2 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 100 Hz band only decayed 1.3 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 1 2026-08-23T05:18:56+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1435 samples  (+14.948 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.1019 FS  (-19.84 dB re unity)  at sample 9701  (diagnostic — not arrival)
+  pre-imp SNR   16.5 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -13.3 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 2 2026-08-23T05:19:00+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +7714 samples  (+80.354 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0783 FS  (-22.12 dB re unity)  at sample 15906  (diagnostic — not arrival)
+  pre-imp SNR   9.7 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -8.7 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 3 2026-08-23T05:19:03+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +2335 samples  (+24.323 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0782 FS  (-22.13 dB re unity)  at sample 10527  (diagnostic — not arrival)
+  pre-imp SNR   11.4 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 158 Hz band only decayed -0.1 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 4 2026-08-23T05:19:06+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +4221 samples  (+43.969 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.1352 FS  (-17.38 dB re unity)  at sample 12413  (diagnostic — not arrival)
+  pre-imp SNR   8.3 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 158 Hz band only decayed -1.9 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 5 2026-08-23T05:19:10+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +1977 samples  (+20.594 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.1138 FS  (-18.88 dB re unity)  at sample 10511  (diagnostic — not arrival)
+  pre-imp SNR   15.2 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 10000 Hz band only decayed -1.2 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.
+=== level=-42dbfs run 6 2026-08-23T05:19:13+03:00 ===
+  No calibration found — levels in dBFS only.
+
+  IR: 50 → 16000 Hz  |  -42.0 dBFS  |  2.0s  |  5 harmonics, 16384-sample window, 0.80s tail
+  Output: system:playback_5
+  Running IR measurement...
+
+  harmonics     4 order(s) extracted
+  captured      2.80s  (2.00s sweep + 0.80s tail)
+  arrival       +4880 samples  (+50.833 ms re gate centre @ 96000 Hz)
+                onset: backward threshold from floor, no causal bound
+  distance      unavailable — no calibration stored for this channel pair — run `ac calibrate` with loopback patched to measure τ for device 0 / jack backend
+  peak          0.0877 FS  (-21.14 dB re unity)  at sample 13072  (diagnostic — not arrival)
+  pre-imp SNR   9.4 dB
+  gate          rectangular window, 16384 samples (170.67 ms) → f_low 5.9 Hz
+  note: report_dir not configured — result not persisted (see `ac setup`)
+
+  ISO 18233 §6.3.2 tail-decay check FAILED: 1/3-oct 12589 Hz band only decayed -2.8 dB over the captured tail (need ≥30 dB) — this capture may be unreliable for band-resolved work; re-run with a longer tail_s.
+  harmonic gate window clamped below the requested 16384 samples so adjacent orders do not overlap: order 2 → 13496 samples, order 3 → 9575 samples, order 4 → 7428 samples, order 5 → 7428 samples. Orders not listed used the requested length.
+  The decaying tail after the peak is a linear-deconvolution artefact (fft_linear_convolve), increasingly low-pass filtered toward its end — not the measured system's reverberant decay. See ISO 18233 §B.5.

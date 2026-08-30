@@ -32,6 +32,10 @@ fn main() {
 
     let fake_audio = args.iter().any(|a| a == "--fake-audio");
     let local_only = args.iter().any(|a| a == "--local");
+    // Internal flag — set by `ac-cli`'s `spawn_daemon()`, not documented as
+    // an operator-facing flag. A hand-run `ac-daemon` is "manual" by
+    // default (#385).
+    let auto_spawned = args.iter().any(|a| a == "--auto-spawned");
     let ctrl_port: u16 = args
         .windows(2)
         .find(|w| w[0] == "--ctrl-port")
@@ -51,7 +55,7 @@ fn main() {
         gpio::spawn(path, ctrl_port, data_port);
     }
 
-    if let Err(e) = run(ctrl_port, data_port, local_only, fake_audio) {
+    if let Err(e) = run(ctrl_port, data_port, local_only, fake_audio, auto_spawned) {
         eprintln!("ac-daemon error: {e:#}");
         std::process::exit(1);
     }

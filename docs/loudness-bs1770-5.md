@@ -155,7 +155,7 @@ state (that's per-channel, not per-measurement).
 UI: top-right status row under the fractional-octave overlay. Bound to
 `Shift+L` (reset) — confirm no collision in the input handler before
 wiring. (Historical note: this was the now-detached ac-ui's input
-handler — see `attic/ac-ui`.)
+handler.)
 
 ## Test vectors
 
