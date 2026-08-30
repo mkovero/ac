@@ -315,10 +315,42 @@ impl PairState {
     }
 }
 
-pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
-    busy_guard!(state, "transfer_stream");
-    cfg_guard!(state);
+/// Every `transfer_stream` launch parameter that comes from the request
+/// alone, validated.
+///
+/// Deliberately a pure function of `cmd`: it reads no `ServerState` and
+/// no config, so the whole of the request contract — defaults, ranges,
+/// and the three rejections — is decidable without a daemon, a socket, or
+/// an audio backend. That is why `level_dbfs` is left UNCLAMPED here; the
+/// ceiling is `cfg.drive_max_dbfs`, and folding it in would drag the
+/// config in and make the reachable-value tests need one.
+#[derive(Debug)]
+struct TransferParams {
+    drive: bool,
+    drivable: bool,
+    /// As requested. Still to be clamped to `cfg.drive_max_dbfs` by the
+    /// caller (#360) before it reaches `DriveState` or a loudspeaker.
+    level_dbfs: f64,
+    fake_correlated_pair: Option<(f64, usize)>,
+    fake_ring_process_secs: Option<f64>,
+    fake_ring_period: usize,
+    mtw_ppo: f64,
+    mtw_n_blocks: usize,
+    pairs: Vec<(u32, u32)>,
+    weighting: ac_core::visualize::weighting_curves::WeightingCurve,
+    /// Normalised (lower-cased) tag, echoed on every frame as
+    /// `spl_integration`.
+    integration_tag: String,
+    integration_tau_s: f64,
+}
 
+/// Parse and validate `transfer_stream`'s launch parameters. `Err` is a
+/// message suitable for `{"ok": false, "error": ...}`.
+///
+/// Out-of-range numeric knobs (`mtw_ppo`, `mtw_n_blocks`) fall back to
+/// their defaults rather than erroring — that is the pre-existing
+/// contract, preserved here, and `filter` is what implements it.
+fn parse_params(cmd: &Value) -> Result<TransferParams, String> {
     // `drive` controls whether the daemon plays pink noise on the output
     // while capturing. Default `false` — the UI wants a purely passive H1
     // estimate against whatever the user is already driving into the inputs.
@@ -342,7 +374,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // Fake-audio-only stimulus knob (handoff: parity-completion M1.5),
     // same pattern as `monitor_spectrum`'s `fake_tones`/`fake_noise_dbfs`
     // (`handlers/audio/monitor.rs`): read unconditionally here, applied
-    // only inside `if fake { ... }` below — real backends never see it.
+    // only inside `if fake { ... }` in the worker — real backends never
+    // see it.
     let fake_correlated_pair: Option<(f64, usize)> =
         cmd.get("fake_correlated_pair").and_then(|v| {
             let gain = v.get("gain").and_then(Value::as_f64)?;
@@ -356,8 +389,8 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // mode; absence leaves the on-demand generator in place, unchanged.
     //
     // `process_secs` defaults to the transfer worker's own measured per-tick
-    // compute (~5 ms with the delay cached — see the hot-loop note further
-    // down), so an unparameterised run models this worker rather than an
+    // compute (~5 ms with the delay cached — see the hot-loop note in the
+    // worker), so an unparameterised run models this worker rather than an
     // arbitrary gap.
     let fake_ring_process_secs: Option<f64> = cmd.get("fake_ring").map(|v| {
         v.get("process_secs")
@@ -401,10 +434,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         .map(|v| v as usize)
         .unwrap_or(ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS);
 
-    let pairs = match parse_transfer_pairs(cmd) {
-        Ok(p) => p,
-        Err(e) => return json!({"ok": false, "error": e}),
-    };
+    let pairs = parse_transfer_pairs(cmd)?;
 
     // Per-meas-channel SPL session params (D10 — static for the session,
     // set once here, not live-toggleable). `weighting`'s wire contract
@@ -412,14 +442,9 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     // "off" — so `WeightingCurve::from_tag`'s existing rejection of
     // anything else (including "off") is exactly the validation wanted.
     let weighting_tag = cmd.get("weighting").and_then(Value::as_str).unwrap_or("Z");
-    let weighting = match ac_core::visualize::weighting_curves::WeightingCurve::from_tag(
-        weighting_tag,
-    ) {
-        Some(w) => w,
-        None => {
-            return json!({"ok": false, "error": format!("weighting must be one of A, C, Z, got '{weighting_tag}'")})
-        }
-    };
+    let weighting =
+        ac_core::visualize::weighting_curves::WeightingCurve::from_tag(weighting_tag)
+            .ok_or_else(|| format!("weighting must be one of A, C, Z, got '{weighting_tag}'"))?;
     let integration_tag = cmd
         .get("integration")
         .and_then(Value::as_str)
@@ -429,8 +454,447 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         "fast" => ac_core::visualize::time_integration::TAU_FAST_S,
         "slow" => ac_core::visualize::time_integration::TAU_SLOW_S,
         _ => {
-            return json!({"ok": false, "error": format!("integration must be 'fast' or 'slow', got '{integration_tag}'")})
+            return Err(format!(
+                "integration must be 'fast' or 'slow', got '{integration_tag}'"
+            ))
         }
+    };
+
+    Ok(TransferParams {
+        drive,
+        drivable,
+        level_dbfs,
+        fake_correlated_pair,
+        fake_ring_process_secs,
+        fake_ring_period,
+        mtw_ppo,
+        mtw_n_blocks,
+        pairs,
+        weighting,
+        integration_tag,
+        integration_tau_s,
+    })
+}
+
+/// Frame inputs that are fixed for the worker's whole life.
+///
+/// Split from [`TickInputs`] on exactly that axis: anything here is
+/// derived from `sr` or from a launch parameter, so a test can build one
+/// and reuse it, and a reviewer can see at a glance that nothing in it
+/// can drift between ticks.
+struct FrameStatics {
+    sr: u32,
+    /// Fixed log-column grid for `meas_spectrum`/`ref_spectrum` (D18).
+    spec_f_min: f64,
+    spec_f_max: f64,
+    spec_n_columns: usize,
+    weighting: ac_core::visualize::weighting_curves::WeightingCurve,
+    integration_tag: String,
+    mtw_ppo: f64,
+    mtw_n_blocks: usize,
+    /// Ladder description, shipped whole with every frame so a consumer
+    /// can interpret a column's `stage` without knowing the layout rules,
+    /// and so a saved frame stays interpretable if those rules change.
+    mtw_stages: Value,
+}
+
+/// Frame inputs that change every capture tick.
+struct TickInputs<'a> {
+    /// Sliding H1 window per unique channel, indexed by `PairCtx::mi`/`ri`.
+    rings: &'a [Vec<f32>],
+    /// Raw pre-calibration peaks (§4.2) from THIS tick's blocks, same index.
+    tick_peaks_dbfs: &'a [Option<f64>],
+    /// Global mic-correction toggle, sampled once per tick so every pair in
+    /// a frame agrees about it.
+    mc_enabled: bool,
+    /// Observed drive state (#228), identical for every pair in the tick.
+    drive_msg: &'a Value,
+    /// Ladder columns and settled-rung flags, indexed by `PairCtx::pos`.
+    mtw_columns: &'a [Option<Vec<ac_core::visualize::mtw::splice::Column>>],
+    mtw_settled: &'a [Vec<bool>],
+}
+
+/// Build one pair's wire messages for this tick: the `transfer_stream`
+/// frame, plus a Phase 4b `visualize/ir` sidecar computed from the same
+/// H1 result. Returns the pair's launch position alongside them, and the
+/// **un-integrated** broadband SPL — integration holds `&mut` per-pair
+/// state and so happens on the worker thread, after the fan-out.
+///
+/// `None` when the pair's channels are not present in this tick's rings,
+/// which drops the pair from the frame rather than publishing a partial
+/// one.
+///
+/// Pure apart from its inputs, and that is the point of it being a
+/// function: the 300-odd lines here decide the entire published frame,
+/// and inside the closure they could only be exercised by standing up a
+/// daemon, a socket and an audio backend.
+fn build_pair_messages(
+    ctx: &PairCtx,
+    st: &PairState,
+    statics: &FrameStatics,
+    tick: &TickInputs<'_>,
+) -> Option<(usize, Vec<Value>, Option<f64>)> {
+    let &PairCtx {
+        pos,
+        meas_ch,
+        ref_ch,
+        mi,
+        ri,
+        ..
+    } = ctx;
+    let (curve_opt, meas_cal_opt, ref_cal_opt) = (&ctx.meas_curve, &ctx.meas_cal, &ctx.ref_cal);
+    let delay_opt = st.delay;
+    let &FrameStatics {
+        sr,
+        spec_f_min,
+        spec_f_max,
+        spec_n_columns,
+        weighting,
+        mtw_ppo,
+        mtw_n_blocks,
+        ..
+    } = statics;
+    let integration_tag = &statics.integration_tag;
+    let mtw_stages = &statics.mtw_stages;
+    let &TickInputs {
+        rings,
+        tick_peaks_dbfs,
+        mc_enabled,
+        drive_msg,
+        mtw_columns,
+        mtw_settled,
+    } = tick;
+    let meas = rings.get(mi)?.as_slice();
+    let refb = rings.get(ri)?.as_slice();
+    // `-inf` (digital silence) travels as JSON null:
+    // serde_json cannot serialise a non-finite float,
+    // so the conversion is explicit here rather than
+    // left to the `json!` site.
+    let meas_peak: Value = tick_peaks_dbfs
+        .get(mi)
+        .copied()
+        .flatten()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let ref_peak: Value = tick_peaks_dbfs
+        .get(ri)
+        .copied()
+        .flatten()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    // An unlocked pair (still warming up, or refused by the
+    // prominence gate — #227) is measured unaligned rather
+    // than aligned to a guess. `delay_locked` below is what
+    // keeps that distinguishable on the wire: a refused pair
+    // and a genuine 0-sample digital loopback both report
+    // `delay_ms` 0.0, and #216 established that the loopback
+    // case is legitimately 0.0, so the number alone cannot
+    // carry the difference.
+    let delay = delay_opt.map(|l| l.samples).unwrap_or(0);
+    let result = ac_core::visualize::transfer::h1_estimate_with_delay(refb, meas, sr, delay);
+
+    let n_pts = result.freqs.len();
+    let indices: Vec<usize> = if n_pts > 2000 {
+        let mut idx: Vec<usize> = (0..2000)
+            .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
+            .collect();
+        idx.dedup();
+        idx
+    } else {
+        (0..n_pts).collect()
+    };
+
+    let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
+    let mut mag = indices
+        .iter()
+        .map(|&i| result.magnitude_db[i])
+        .collect::<Vec<_>>();
+    let phase = indices
+        .iter()
+        .map(|&i| result.phase_deg[i])
+        .collect::<Vec<_>>();
+    let coh = indices
+        .iter()
+        .map(|&i| result.coherence[i])
+        .collect::<Vec<_>>();
+    // unified.md Phase 3: complex H downsampled in
+    // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
+    // group-delay-from-complex) get H(ω) directly
+    // without re-deriving from mag/phase. Same `indices`
+    // → guaranteed consistent with mag/phase/coherence.
+    let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
+    let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
+
+    // Mic-curve correction (#101) on the measurement leg
+    // only — the reference leg was guarded above. H1's
+    // dB magnitude has the mic over-read embedded; subtract
+    // the curve at each downsampled bin to recover truth.
+    // Same correction applied multiplicatively to (re, im)
+    // — the curve is magnitude-only (no phase change), so
+    // scaling both re and im by 10^(-curve_db/20)
+    // preserves arg(H) while shrinking |H| consistently.
+    if mc_enabled {
+        if let Some(curve) = curve_opt.as_ref() {
+            mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
+            for ((r, i), &f) in re.iter_mut().zip(im.iter_mut()).zip(freqs.iter()) {
+                let scale = mic::mic_curve_scale(curve, f);
+                *r *= scale;
+                *i *= scale;
+            }
+        }
+    }
+    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
+
+    // Calibrated per-channel spectra (D18, handoff:
+    // transfer-frame-v2 M0). Full-resolution
+    // `result.meas_amp`/`result.ref_amp` (NOT the
+    // 2000-pt indices above — same full-res-then-
+    // aggregate split the IR sidecar below already
+    // uses) so the mic-curve's per-freq correction is
+    // applied at native Welch-bin resolution, then
+    // `spectrum_to_columns_wire` band-power-aggregates
+    // to the fixed grid — same aggregator, same tests,
+    // the monitor `spectrum` frame already uses.
+    let mut mc_meas_amp = result.meas_amp.clone();
+    if mc_enabled {
+        if let Some(curve) = curve_opt.as_ref() {
+            for (amp, &f) in mc_meas_amp.iter_mut().zip(result.freqs.iter()) {
+                *amp *= mic::mic_curve_scale(curve, f);
+            }
+        }
+    }
+    // `spl` is computed from the mic-corrected (acoustic
+    // truth) spectrum, before voltage-cal scaling below
+    // — SPL derives from the dBFS + spl_offset_db model
+    // (Calibration::spl_offset_db), independent of the
+    // electrical Vrms voltage-cal layer.
+    let spl_raw: Option<f64> = meas_cal_opt
+        .as_ref()
+        .and_then(Calibration::spl_offset_db)
+        .map(|offset| {
+            ac_core::visualize::spl_level::weighted_broadband_dbfs(
+                &mc_meas_amp,
+                &result.freqs,
+                weighting,
+            ) + offset
+        });
+
+    // Voltage cal (D3), applied here — post mic-curve,
+    // pre-aggregation. Both legs go through the same
+    // helper: the meas and ref spectra are divided
+    // against each other downstream, so a scale applied
+    // to one leg under rules that have drifted from the
+    // other's is an error that cancels out of every
+    // check but the answer.
+    let meas_amp_wire = {
+        let mut a = mc_meas_amp;
+        apply_voltage_cal(&mut a, meas_cal_opt.as_ref());
+        a
+    };
+    let ref_amp_wire = {
+        let mut a = result.ref_amp.clone();
+        apply_voltage_cal(&mut a, ref_cal_opt.as_ref());
+        a
+    };
+    let (meas_spectrum, spec_freqs) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
+        &meas_amp_wire,
+        sr as f64,
+        spec_f_min,
+        spec_f_max,
+        spec_n_columns,
+    );
+    let (ref_spectrum, _) = ac_core::visualize::aggregate::spectrum_to_columns_wire(
+        &ref_amp_wire,
+        sr as f64,
+        spec_f_min,
+        spec_f_max,
+        spec_n_columns,
+    );
+
+    // Per-channel provenance tags (tier-framing
+    // labelled-tag rules, #97/#98 vocabulary):
+    // "on"/"none" for voltage and SPL (no daemon-side
+    // enable toggle for either, unlike mic-curve);
+    // "on"/"off"/"none" for mic_curve via the existing
+    // `mic_correction_tag`. Ref leg's mic_curve is
+    // structurally always "none" — a ref-channel mic
+    // curve is refused at request time, above.
+    let ref_curve_loaded = ref_cal_opt
+        .as_ref()
+        .is_some_and(|c| c.mic_response.is_some());
+    let cal_tags = json!({
+        "meas": {
+            "voltage": if meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+            "spl":     if meas_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+            "mic_curve": mc_tag,
+        },
+        "ref": {
+            "voltage": if ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+            "spl":     if ref_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+            "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
+        },
+    });
+
+    // Multi-time-window columns (additive; `null` until
+    // every rung holds a full N blocks — 2.56 s at the
+    // bottom, which is the design's stated settling time
+    // and matches what the full-rate estimator takes
+    // today. Gating on the full N is what makes the
+    // reported N unambiguous: every column is the mean of
+    // the same number of blocks).
+    //
+    // Every column ships the Δf, window and N that
+    // produced it. That is not decoration: neighbouring
+    // columns can come from windows 12x apart, and
+    // coherence from uncorrelated inputs floats near 1/N,
+    // so without those a screenshot of this display is not
+    // interpretable. `bins` is criterion 1 made
+    // observable — it is never zero.
+    //
+    // dB is applied here, daemon-side, per the display-
+    // truth rule: `ac-view` plots what it is given and
+    // does no `log10` of its own.
+    let mtw_msg = match mtw_columns.get(pos).and_then(|c| c.as_ref()) {
+        None => Value::Null,
+        Some(cols) => json!({
+            "freqs":        cols.iter().map(|c| c.freq).collect::<Vec<_>>(),
+            "f_lo":         cols.iter().map(|c| c.lo).collect::<Vec<_>>(),
+            "f_hi":         cols.iter().map(|c| c.hi).collect::<Vec<_>>(),
+            "magnitude_db": cols.iter()
+                .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
+                .collect::<Vec<_>>(),
+            "phase_deg":    cols.iter()
+                .map(|c| c.h1.arg().to_degrees())
+                .collect::<Vec<_>>(),
+            "coherence":    cols.iter().map(|c| c.coherence).collect::<Vec<_>>(),
+            "df":           cols.iter().map(|c| c.df).collect::<Vec<_>>(),
+            "window_s":     cols.iter().map(|c| c.window_s).collect::<Vec<_>>(),
+            "n":            cols.iter().map(|c| c.n).collect::<Vec<_>>(),
+            "stage":        cols.iter().map(|c| c.stage).collect::<Vec<_>>(),
+            "blend":        cols.iter().map(|c| c.blend).collect::<Vec<_>>(),
+            "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
+            "ppo":          mtw_ppo,
+            "n_blocks":     mtw_n_blocks,
+            // Which rungs have settled, shallowest first.
+            // Shipped so a consumer can distinguish "still
+            // warming, more band coming" from "this is all
+            // there is" — a short column list looks the
+            // same either way, and the difference decides
+            // whether a blank low end is a fault.
+            "settled_stages": mtw_settled
+                .get(pos)
+                .cloned()
+                .unwrap_or_default(),
+            "stages":       mtw_stages,
+        }),
+    };
+
+    let transfer_msg = json!({
+        "type":            "transfer_stream",
+        "cmd":             "transfer_stream",
+        "mtw":             mtw_msg,
+        "freqs":           freqs,
+        "magnitude_db":    mag,
+        "phase_deg":       phase,
+        "coherence":       coh,
+        "re":              re,
+        "im":              im,
+        "delay_samples":   result.delay_samples,
+        "delay_ms":        result.delay_ms,
+        "delay_locked":    delay_opt.is_some(),
+        // Read by position rather than zipped into the
+        // chain above: it is a scalar the closure only
+        // reads, and the zip is already six deep.
+        "delay_attempts":  st.attempts,
+        "delay_evidence":  st.prominence,
+        "meas_peak_dbfs":  meas_peak,
+        "ref_peak_dbfs":   ref_peak,
+        "ref_channel":     ref_ch,
+        "meas_channel":    meas_ch,
+        "sr":              sr,
+        "mic_correction":  mc_tag,
+        "spec_freqs":      spec_freqs,
+        "meas_spectrum":   meas_spectrum,
+        "ref_spectrum":    ref_spectrum,
+        "spl":             Value::Null,
+        "spl_weighting":   weighting.tag(),
+        "spl_integration": integration_tag.as_str(),
+        "cal_tags":        cal_tags,
+        "drive":           drive_msg.clone(),
+    });
+    // Phase 4b: IR sidecar from full-resolution
+    // complex H (NOT the downsampled re/im above —
+    // the IFFT needs the raw nperseg/2+1 bins to
+    // recover h(t) correctly). Time-domain output is
+    // 1 s long at sr (matches the 1 Hz Welch
+    // resolution); downsample to ≤2000 samples for
+    // wire economy by stride-picking. Mic-curve
+    // correction is intentionally NOT applied to the
+    // IR — the downsampled re/im version already
+    // would have it, but the full-resolution H here
+    // does not (mic-curve correction in the curve_opt
+    // branch above only touches the downsampled mag /
+    // re / im). For the visualization-only Tier 2 IR
+    // view this is acceptable; if a Tier-1 calibrated
+    // IR is wanted, that path goes through the sweep
+    // measurement, not transfer_stream.
+    let h_full_re = &result.re;
+    let h_full_im = &result.im;
+    let ir_full = ac_core::visualize::transfer::impulse_response_from_h(h_full_re, h_full_im);
+    let ir_msg = if ir_full.is_empty() {
+        None
+    } else {
+        const IR_MAX_SAMPLES: usize = 2000;
+        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
+        let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        // t_origin_ms = -mid_ms because
+        // impulse_response_from_h centres the IR
+        // peak at the middle of the array (t=0 in
+        // the user's mental model).
+        let dt_ms = 1000.0 / sr as f64 * stride as f64;
+        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
+        Some(json!({
+            "type":         "visualize/ir",
+            "cmd":          "transfer_stream",
+            "samples":      ir_ds,
+            "sr":           sr,
+            "stride":       stride,
+            "dt_ms":        dt_ms,
+            "t_origin_ms":  t_origin_ms,
+            "ref_channel":  ref_ch,
+            "meas_channel": meas_ch,
+            "delay_samples": result.delay_samples,
+            "delay_ms":     result.delay_ms,
+            "delay_locked": delay_opt.is_some(),
+        }))
+    };
+    let mut out = vec![transfer_msg];
+    if let Some(m) = ir_msg {
+        out.push(m);
+    }
+    Some((pos, out, spl_raw))
+}
+
+pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
+    busy_guard!(state, "transfer_stream");
+    cfg_guard!(state);
+
+    let TransferParams {
+        drive,
+        drivable,
+        level_dbfs,
+        fake_correlated_pair,
+        fake_ring_process_secs,
+        fake_ring_period,
+        mtw_ppo,
+        mtw_n_blocks,
+        pairs,
+        weighting,
+        integration_tag,
+        integration_tau_s,
+    } = match parse_params(cmd) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
     };
 
     let cfg = state.cfg.lock().unwrap().clone();
@@ -691,6 +1155,20 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                     .collect(),
             ),
             Err(_) => Value::Null,
+        };
+
+        // Every frame input that is fixed for this worker's life, gathered
+        // once. `mtw_stages` is moved in rather than cloned per frame.
+        let statics = FrameStatics {
+            sr,
+            spec_f_min,
+            spec_f_max,
+            spec_n_columns,
+            weighting,
+            integration_tag,
+            mtw_ppo,
+            mtw_n_blocks,
+            mtw_stages,
         };
 
         // Snapshot ring (handoff: snapshot-backend M1, deliverable 1):
@@ -1138,7 +1616,14 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // reference) scale linearly with core count. The rings are
             // read-only inside the per-pair closure; JSON is built on the
             // worker thread and published back in original pair order.
-            let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
+            let tick = TickInputs {
+                rings: &rings,
+                tick_peaks_dbfs: &tick_peaks_dbfs,
+                mc_enabled: mic_corr_enabled.load(Ordering::Relaxed),
+                drive_msg: &drive_msg,
+                mtw_columns: &mtw_columns,
+                mtw_settled: &mtw_settled,
+            };
             // Each pair can contribute multiple wire messages (the
             // transfer_stream frame + a Phase 4b visualize/ir sidecar
             // computed from the same H₁ result). flat_map flattens to
@@ -1147,333 +1632,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             let messages: Vec<(usize, Vec<Value>, Option<f64>)> = pair_ctx
                 .par_iter()
                 .zip(pair_state.par_iter())
-                .filter_map(
-                    |(ctx, st)| {
-                        let &PairCtx { pos, meas_ch, ref_ch, mi, ri, .. } = ctx;
-                        let (curve_opt, meas_cal_opt, ref_cal_opt) =
-                            (&ctx.meas_curve, &ctx.meas_cal, &ctx.ref_cal);
-                        let delay_opt = st.delay;
-                        let meas = rings.get(mi)?.as_slice();
-                        let refb = rings.get(ri)?.as_slice();
-                        // `-inf` (digital silence) travels as JSON null:
-                        // serde_json cannot serialise a non-finite float,
-                        // so the conversion is explicit here rather than
-                        // left to the `json!` site.
-                        let meas_peak: Value = tick_peaks_dbfs
-                            .get(mi)
-                            .copied()
-                            .flatten()
-                            .map(Value::from)
-                            .unwrap_or(Value::Null);
-                        let ref_peak: Value = tick_peaks_dbfs
-                            .get(ri)
-                            .copied()
-                            .flatten()
-                            .map(Value::from)
-                            .unwrap_or(Value::Null);
-                        // An unlocked pair (still warming up, or refused by the
-                        // prominence gate — #227) is measured unaligned rather
-                        // than aligned to a guess. `delay_locked` below is what
-                        // keeps that distinguishable on the wire: a refused pair
-                        // and a genuine 0-sample digital loopback both report
-                        // `delay_ms` 0.0, and #216 established that the loopback
-                        // case is legitimately 0.0, so the number alone cannot
-                        // carry the difference.
-                        let delay = delay_opt.map(|l| l.samples).unwrap_or(0);
-                        let result = ac_core::visualize::transfer::h1_estimate_with_delay(
-                            refb, meas, sr, delay,
-                        );
-
-                        let n_pts = result.freqs.len();
-                        let indices: Vec<usize> = if n_pts > 2000 {
-                            let mut idx: Vec<usize> = (0..2000)
-                                .map(|i| (i as f64 * (n_pts - 1) as f64 / 1999.0).round() as usize)
-                                .collect();
-                            idx.dedup();
-                            idx
-                        } else {
-                            (0..n_pts).collect()
-                        };
-
-                        let freqs = indices.iter().map(|&i| result.freqs[i]).collect::<Vec<_>>();
-                        let mut mag = indices
-                            .iter()
-                            .map(|&i| result.magnitude_db[i])
-                            .collect::<Vec<_>>();
-                        let phase = indices
-                            .iter()
-                            .map(|&i| result.phase_deg[i])
-                            .collect::<Vec<_>>();
-                        let coh = indices
-                            .iter()
-                            .map(|&i| result.coherence[i])
-                            .collect::<Vec<_>>();
-                        // unified.md Phase 3: complex H downsampled in
-                        // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
-                        // group-delay-from-complex) get H(ω) directly
-                        // without re-deriving from mag/phase. Same `indices`
-                        // → guaranteed consistent with mag/phase/coherence.
-                        let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
-                        let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
-
-                        // Mic-curve correction (#101) on the measurement leg
-                        // only — the reference leg was guarded above. H1's
-                        // dB magnitude has the mic over-read embedded; subtract
-                        // the curve at each downsampled bin to recover truth.
-                        // Same correction applied multiplicatively to (re, im)
-                        // — the curve is magnitude-only (no phase change), so
-                        // scaling both re and im by 10^(-curve_db/20)
-                        // preserves arg(H) while shrinking |H| consistently.
-                        if mc_enabled {
-                            if let Some(curve) = curve_opt.as_ref() {
-                                mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
-                                for ((r, i), &f) in
-                                    re.iter_mut().zip(im.iter_mut()).zip(freqs.iter())
-                                {
-                                    let scale = mic::mic_curve_scale(curve, f);
-                                    *r *= scale;
-                                    *i *= scale;
-                                }
-                            }
-                        }
-                        let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
-
-                        // Calibrated per-channel spectra (D18, handoff:
-                        // transfer-frame-v2 M0). Full-resolution
-                        // `result.meas_amp`/`result.ref_amp` (NOT the
-                        // 2000-pt indices above — same full-res-then-
-                        // aggregate split the IR sidecar below already
-                        // uses) so the mic-curve's per-freq correction is
-                        // applied at native Welch-bin resolution, then
-                        // `spectrum_to_columns_wire` band-power-aggregates
-                        // to the fixed grid — same aggregator, same tests,
-                        // the monitor `spectrum` frame already uses.
-                        let mut mc_meas_amp = result.meas_amp.clone();
-                        if mc_enabled {
-                            if let Some(curve) = curve_opt.as_ref() {
-                                for (amp, &f) in
-                                    mc_meas_amp.iter_mut().zip(result.freqs.iter())
-                                {
-                                    *amp *= mic::mic_curve_scale(curve, f);
-                                }
-                            }
-                        }
-                        // `spl` is computed from the mic-corrected (acoustic
-                        // truth) spectrum, before voltage-cal scaling below
-                        // — SPL derives from the dBFS + spl_offset_db model
-                        // (Calibration::spl_offset_db), independent of the
-                        // electrical Vrms voltage-cal layer.
-                        let spl_raw: Option<f64> = meas_cal_opt
-                            .as_ref()
-                            .and_then(Calibration::spl_offset_db)
-                            .map(|offset| {
-                                ac_core::visualize::spl_level::weighted_broadband_dbfs(
-                                    &mc_meas_amp,
-                                    &result.freqs,
-                                    weighting,
-                                ) + offset
-                            });
-
-                        // Voltage cal (D3), applied here — post mic-curve,
-                        // pre-aggregation. Both legs go through the same
-                        // helper: the meas and ref spectra are divided
-                        // against each other downstream, so a scale applied
-                        // to one leg under rules that have drifted from the
-                        // other's is an error that cancels out of every
-                        // check but the answer.
-                        let meas_amp_wire = {
-                            let mut a = mc_meas_amp;
-                            apply_voltage_cal(&mut a, meas_cal_opt.as_ref());
-                            a
-                        };
-                        let ref_amp_wire = {
-                            let mut a = result.ref_amp.clone();
-                            apply_voltage_cal(&mut a, ref_cal_opt.as_ref());
-                            a
-                        };
-                        let (meas_spectrum, spec_freqs) =
-                            ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                &meas_amp_wire,
-                                sr as f64,
-                                spec_f_min,
-                                spec_f_max,
-                                spec_n_columns,
-                            );
-                        let (ref_spectrum, _) =
-                            ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                &ref_amp_wire,
-                                sr as f64,
-                                spec_f_min,
-                                spec_f_max,
-                                spec_n_columns,
-                            );
-
-                        // Per-channel provenance tags (tier-framing
-                        // labelled-tag rules, #97/#98 vocabulary):
-                        // "on"/"none" for voltage and SPL (no daemon-side
-                        // enable toggle for either, unlike mic-curve);
-                        // "on"/"off"/"none" for mic_curve via the existing
-                        // `mic_correction_tag`. Ref leg's mic_curve is
-                        // structurally always "none" — a ref-channel mic
-                        // curve is refused at request time, above.
-                        let ref_curve_loaded = ref_cal_opt
-                            .as_ref()
-                            .is_some_and(|c| c.mic_response.is_some());
-                        let cal_tags = json!({
-                            "meas": {
-                                "voltage": if meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
-                                "spl":     if meas_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
-                                "mic_curve": mc_tag,
-                            },
-                            "ref": {
-                                "voltage": if ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
-                                "spl":     if ref_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
-                                "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
-                            },
-                        });
-
-                        // Multi-time-window columns (additive; `null` until
-                        // every rung holds a full N blocks — 2.56 s at the
-                        // bottom, which is the design's stated settling time
-                        // and matches what the full-rate estimator takes
-                        // today. Gating on the full N is what makes the
-                        // reported N unambiguous: every column is the mean of
-                        // the same number of blocks).
-                        //
-                        // Every column ships the Δf, window and N that
-                        // produced it. That is not decoration: neighbouring
-                        // columns can come from windows 12x apart, and
-                        // coherence from uncorrelated inputs floats near 1/N,
-                        // so without those a screenshot of this display is not
-                        // interpretable. `bins` is criterion 1 made
-                        // observable — it is never zero.
-                        //
-                        // dB is applied here, daemon-side, per the display-
-                        // truth rule: `ac-view` plots what it is given and
-                        // does no `log10` of its own.
-                        let mtw_msg = match mtw_columns.get(pos).and_then(|c| c.as_ref()) {
-                            None => Value::Null,
-                            Some(cols) => json!({
-                                "freqs":        cols.iter().map(|c| c.freq).collect::<Vec<_>>(),
-                                "f_lo":         cols.iter().map(|c| c.lo).collect::<Vec<_>>(),
-                                "f_hi":         cols.iter().map(|c| c.hi).collect::<Vec<_>>(),
-                                "magnitude_db": cols.iter()
-                                    .map(|c| 20.0 * c.h1.norm().max(1e-6).log10())
-                                    .collect::<Vec<_>>(),
-                                "phase_deg":    cols.iter()
-                                    .map(|c| c.h1.arg().to_degrees())
-                                    .collect::<Vec<_>>(),
-                                "coherence":    cols.iter().map(|c| c.coherence).collect::<Vec<_>>(),
-                                "df":           cols.iter().map(|c| c.df).collect::<Vec<_>>(),
-                                "window_s":     cols.iter().map(|c| c.window_s).collect::<Vec<_>>(),
-                                "n":            cols.iter().map(|c| c.n).collect::<Vec<_>>(),
-                                "stage":        cols.iter().map(|c| c.stage).collect::<Vec<_>>(),
-                                "blend":        cols.iter().map(|c| c.blend).collect::<Vec<_>>(),
-                                "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
-                                "ppo":          mtw_ppo,
-                                "n_blocks":     mtw_n_blocks,
-                                // Which rungs have settled, shallowest first.
-                                // Shipped so a consumer can distinguish "still
-                                // warming, more band coming" from "this is all
-                                // there is" — a short column list looks the
-                                // same either way, and the difference decides
-                                // whether a blank low end is a fault.
-                                "settled_stages": mtw_settled
-                                    .get(pos)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                "stages":       mtw_stages,
-                            }),
-                        };
-
-                        let transfer_msg = json!({
-                            "type":            "transfer_stream",
-                            "cmd":             "transfer_stream",
-                            "mtw":             mtw_msg,
-                            "freqs":           freqs,
-                            "magnitude_db":    mag,
-                            "phase_deg":       phase,
-                            "coherence":       coh,
-                            "re":              re,
-                            "im":              im,
-                            "delay_samples":   result.delay_samples,
-                            "delay_ms":        result.delay_ms,
-                            "delay_locked":    delay_opt.is_some(),
-                            // Read by position rather than zipped into the
-                            // chain above: it is a scalar the closure only
-                            // reads, and the zip is already six deep.
-                            "delay_attempts":  st.attempts,
-                            "delay_evidence":  st.prominence,
-                            "meas_peak_dbfs":  meas_peak,
-                            "ref_peak_dbfs":   ref_peak,
-                            "ref_channel":     ref_ch,
-                            "meas_channel":    meas_ch,
-                            "sr":              sr,
-                            "mic_correction":  mc_tag,
-                            "spec_freqs":      spec_freqs,
-                            "meas_spectrum":   meas_spectrum,
-                            "ref_spectrum":    ref_spectrum,
-                            "spl":             Value::Null,
-                            "spl_weighting":   weighting.tag(),
-                            "spl_integration": integration_tag.as_str(),
-                            "cal_tags":        cal_tags,
-                            "drive":           drive_msg.clone(),
-                        });
-                        // Phase 4b: IR sidecar from full-resolution
-                        // complex H (NOT the downsampled re/im above —
-                        // the IFFT needs the raw nperseg/2+1 bins to
-                        // recover h(t) correctly). Time-domain output is
-                        // 1 s long at sr (matches the 1 Hz Welch
-                        // resolution); downsample to ≤2000 samples for
-                        // wire economy by stride-picking. Mic-curve
-                        // correction is intentionally NOT applied to the
-                        // IR — the downsampled re/im version already
-                        // would have it, but the full-resolution H here
-                        // does not (mic-curve correction in the curve_opt
-                        // branch above only touches the downsampled mag /
-                        // re / im). For the visualization-only Tier 2 IR
-                        // view this is acceptable; if a Tier-1 calibrated
-                        // IR is wanted, that path goes through the sweep
-                        // measurement, not transfer_stream.
-                        let h_full_re = &result.re;
-                        let h_full_im = &result.im;
-                        let ir_full = ac_core::visualize::transfer::impulse_response_from_h(
-                            h_full_re, h_full_im,
-                        );
-                        let ir_msg = if ir_full.is_empty() {
-                            None
-                        } else {
-                            const IR_MAX_SAMPLES: usize = 2000;
-                            let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-                            let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
-                            // t_origin_ms = -mid_ms because
-                            // impulse_response_from_h centres the IR
-                            // peak at the middle of the array (t=0 in
-                            // the user's mental model).
-                            let dt_ms = 1000.0 / sr as f64 * stride as f64;
-                            let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
-                            Some(json!({
-                                "type":         "visualize/ir",
-                                "cmd":          "transfer_stream",
-                                "samples":      ir_ds,
-                                "sr":           sr,
-                                "stride":       stride,
-                                "dt_ms":        dt_ms,
-                                "t_origin_ms":  t_origin_ms,
-                                "ref_channel":  ref_ch,
-                                "meas_channel": meas_ch,
-                                "delay_samples": result.delay_samples,
-                                "delay_ms":     result.delay_ms,
-                                "delay_locked": delay_opt.is_some(),
-                            }))
-                        };
-                        let mut out = vec![transfer_msg];
-                        if let Some(m) = ir_msg {
-                            out.push(m);
-                        }
-                        Some((pos, out, spl_raw))
-                    },
-                )
+                .filter_map(|(ctx, st)| build_pair_messages(ctx, st, &statics, &tick))
                 .collect();
             for (pos, mut batch, spl_raw) in messages {
                 // Sequential, indexed by `PairCtx::pos` — the EMA
@@ -1810,5 +1969,358 @@ mod tests {
     #[test]
     fn passive_session_opens_no_output_ports() {
         assert!(drive_out_ports(false, "system:playback_1", "system:playback_2").is_empty());
+    }
+
+    // ---- parse_params -------------------------------------------------
+    //
+    // These exist because `parse_params` reads no `ServerState` and no
+    // config. Every one of them used to require a live daemon to reach.
+
+    fn params(v: Value) -> Result<TransferParams, String> {
+        parse_params(&v)
+    }
+
+    #[test]
+    fn params_defaults_are_passive_and_z_weighted() {
+        let p = params(json!({"pairs": [[0, 1]]})).unwrap();
+        assert!(!p.drive, "default session must not drive");
+        assert!(!p.drivable, "default session must open no output ports");
+        assert_eq!(p.level_dbfs, -10.0);
+        assert_eq!(p.weighting.tag(), "Z");
+        assert_eq!(p.integration_tag, "fast");
+        assert_eq!(
+            p.integration_tau_s,
+            ac_core::visualize::time_integration::TAU_FAST_S
+        );
+        assert!(p.fake_correlated_pair.is_none());
+        assert!(p.fake_ring_process_secs.is_none());
+    }
+
+    // Legacy `drive: true` must still imply drivable, or the generator
+    // plays onto a port that was never opened.
+    #[test]
+    fn params_drive_implies_drivable() {
+        let p = params(json!({"pairs": [[0, 1]], "drive": true})).unwrap();
+        assert!(p.drivable);
+    }
+
+    #[test]
+    fn params_drivable_alone_does_not_drive() {
+        let p = params(json!({"pairs": [[0, 1]], "drivable": true})).unwrap();
+        assert!(p.drivable);
+        assert!(!p.drive);
+    }
+
+    // #360: the ceiling is `cfg.drive_max_dbfs`, which this fn cannot see.
+    // It must therefore hand back exactly what was asked for — a clamp
+    // appearing here would be a second, config-blind ceiling.
+    #[test]
+    fn params_do_not_clamp_level() {
+        let p = params(json!({"pairs": [[0, 1]], "level_dbfs": 0.0})).unwrap();
+        assert_eq!(p.level_dbfs, 0.0);
+    }
+
+    // The wire contract is a strict 3-way A/C/Z. "off" is the specific
+    // value worth pinning: it is accepted by other weighting knobs in this
+    // daemon and must be refused here.
+    #[test]
+    fn params_reject_off_weighting() {
+        assert!(params(json!({"pairs": [[0, 1]], "weighting": "off"})).is_err());
+    }
+
+    #[test]
+    fn params_reject_unknown_weighting() {
+        let e = params(json!({"pairs": [[0, 1]], "weighting": "B"})).unwrap_err();
+        assert!(e.contains("A, C, Z"), "{e}");
+    }
+
+    #[test]
+    fn params_accept_lowercase_weighting() {
+        assert_eq!(
+            params(json!({"pairs": [[0, 1]], "weighting": "a"}))
+                .unwrap()
+                .weighting
+                .tag(),
+            "A"
+        );
+    }
+
+    #[test]
+    fn params_integration_slow_and_case_insensitive() {
+        let p = params(json!({"pairs": [[0, 1]], "integration": "SLOW"})).unwrap();
+        assert_eq!(p.integration_tag, "slow", "tag is normalised for the wire");
+        assert_eq!(
+            p.integration_tau_s,
+            ac_core::visualize::time_integration::TAU_SLOW_S
+        );
+    }
+
+    #[test]
+    fn params_reject_unknown_integration() {
+        assert!(params(json!({"pairs": [[0, 1]], "integration": "medium"})).is_err());
+    }
+
+    // Out-of-range ladder knobs fall back to the default rather than
+    // erroring. That is the pre-existing contract; this test is here so a
+    // future tightening to a rejection is a visible decision rather than a
+    // silent one.
+    #[test]
+    fn params_out_of_range_ladder_knobs_fall_back() {
+        let p = params(json!({
+            "pairs": [[0, 1]],
+            "mtw_ppo": 10_000.0,
+            "mtw_n_blocks": 0,
+        }))
+        .unwrap();
+        assert_eq!(p.mtw_ppo, ac_core::visualize::mtw::ladder::P_REF);
+        assert_eq!(
+            p.mtw_n_blocks,
+            ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS
+        );
+    }
+
+    #[test]
+    fn params_in_range_ladder_knobs_are_taken() {
+        let p = params(json!({"pairs": [[0, 1]], "mtw_ppo": 24.0, "mtw_n_blocks": 8})).unwrap();
+        assert_eq!(p.mtw_ppo, 24.0);
+        assert_eq!(p.mtw_n_blocks, 8);
+    }
+
+    // Presence of the key selects ring mode; its absence leaves the
+    // on-demand generator in place. An empty object is still presence.
+    #[test]
+    fn params_fake_ring_presence_selects_mode() {
+        let p = params(json!({"pairs": [[0, 1]], "fake_ring": {}})).unwrap();
+        assert_eq!(p.fake_ring_process_secs, Some(0.005));
+        assert_eq!(p.fake_ring_period, 1024);
+    }
+
+    #[test]
+    fn params_pair_error_propagates() {
+        assert!(params(json!({"pairs": []})).is_err());
+    }
+
+    // ---- build_pair_messages -----------------------------------------
+    //
+    // Same reason: the frame contract used to be reachable only through a
+    // daemon, a socket and an audio backend.
+
+    const TEST_SR: u32 = 8000;
+
+    fn test_statics() -> FrameStatics {
+        let spec_f_min = 20.0_f64;
+        let spec_f_max = TEST_SR as f64 / 2.0;
+        FrameStatics {
+            sr: TEST_SR,
+            spec_f_min,
+            spec_f_max,
+            spec_n_columns: ac_core::visualize::aggregate::transfer_spectrum_n_columns(
+                spec_f_min, spec_f_max,
+            ),
+            weighting: ac_core::visualize::weighting_curves::WeightingCurve::Z,
+            integration_tag: "fast".to_string(),
+            mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
+            mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
+            mtw_stages: Value::Null,
+        }
+    }
+
+    fn test_ctx() -> PairCtx {
+        PairCtx {
+            pos: 0,
+            meas_ch: 2,
+            ref_ch: 5,
+            mi: 0,
+            ri: 1,
+            meas_cal: None,
+            ref_cal: None,
+            meas_curve: None,
+        }
+    }
+
+    /// One Welch segment of a correlated pair: ref is a tone, meas is the
+    /// same tone at half amplitude. Enough for H1 to produce a frame.
+    fn test_rings() -> Vec<Vec<f32>> {
+        let n = TEST_SR as usize;
+        let refb: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 100.0 / TEST_SR as f32).sin())
+            .collect();
+        let meas: Vec<f32> = refb.iter().map(|s| s * 0.5).collect();
+        vec![meas, refb]
+    }
+
+    fn call(
+        ctx: &PairCtx,
+        st: &PairState,
+        statics: &FrameStatics,
+        rings: &[Vec<f32>],
+        peaks: &[Option<f64>],
+    ) -> Option<(usize, Vec<Value>, Option<f64>)> {
+        let drive_msg = json!({"on": false, "level_dbfs": Value::Null, "drivable": false});
+        let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
+        let settled: Vec<Vec<bool>> = vec![Vec::new()];
+        let tick = TickInputs {
+            rings,
+            tick_peaks_dbfs: peaks,
+            mc_enabled: false,
+            drive_msg: &drive_msg,
+            mtw_columns: &cols,
+            mtw_settled: &settled,
+        };
+        build_pair_messages(ctx, st, statics, &tick)
+    }
+
+    #[test]
+    fn frame_carries_channels_and_position() {
+        let rings = test_rings();
+        let (pos, batch, _) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[Some(-6.0), Some(-3.0)],
+        )
+        .expect("full rings must produce a frame");
+        assert_eq!(pos, 0);
+        let f = &batch[0];
+        assert_eq!(f["type"], "transfer_stream");
+        assert_eq!(f["meas_channel"], 2);
+        assert_eq!(f["ref_channel"], 5);
+        assert_eq!(f["sr"], TEST_SR);
+        assert_eq!(f["meas_peak_dbfs"], -6.0);
+        assert_eq!(f["ref_peak_dbfs"], -3.0);
+    }
+
+    // `delay_locked` is the field that keeps a refused pair distinguishable
+    // from a genuine 0-sample digital loopback (#216, #227) — both report
+    // `delay_ms` 0.0, so the number alone cannot carry the difference.
+    #[test]
+    fn unlocked_pair_reports_delay_locked_false() {
+        let rings = test_rings();
+        let (_, batch, _) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, None],
+        )
+        .unwrap();
+        assert_eq!(batch[0]["delay_locked"], false);
+    }
+
+    #[test]
+    fn locked_pair_reports_delay_locked_true() {
+        let rings = test_rings();
+        let mut st = PairState::new(None);
+        st.delay = Some(Lock {
+            samples: 0,
+            driving: true,
+        });
+        let (_, batch, _) = call(&test_ctx(), &st, &test_statics(), &rings, &[None, None]).unwrap();
+        assert_eq!(batch[0]["delay_locked"], true);
+    }
+
+    // The count that separates "warming up" from "refusing" for the fault
+    // indicator (#238). It is read straight off `PairState`, so a frame
+    // must echo whatever the estimator has recorded.
+    #[test]
+    fn frame_echoes_attempt_count() {
+        let rings = test_rings();
+        let mut st = PairState::new(None);
+        st.attempts = 7;
+        let (_, batch, _) = call(&test_ctx(), &st, &test_statics(), &rings, &[None, None]).unwrap();
+        assert_eq!(batch[0]["delay_attempts"], 7);
+    }
+
+    // Digital silence is `-inf` dBFS, which serde_json cannot serialise.
+    // It has to reach the wire as null, not as a substituted number.
+    #[test]
+    fn silent_channel_peak_is_null_not_a_number() {
+        let rings = test_rings();
+        let (_, batch, _) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, Some(-3.0)],
+        )
+        .unwrap();
+        assert!(batch[0]["meas_peak_dbfs"].is_null());
+    }
+
+    // An uncalibrated pair must say so on both legs, and publish no SPL —
+    // not a zero, which would read as a real 0 dB SPL measurement.
+    #[test]
+    fn uncalibrated_pair_tags_none_and_publishes_no_spl() {
+        let rings = test_rings();
+        let (_, batch, spl_raw) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, None],
+        )
+        .unwrap();
+        assert!(spl_raw.is_none());
+        assert!(batch[0]["spl"].is_null());
+        for leg in ["meas", "ref"] {
+            let t = &batch[0]["cal_tags"][leg];
+            assert_eq!(t["voltage"], "none", "{leg}");
+            assert_eq!(t["spl"], "none", "{leg}");
+            assert_eq!(t["mic_curve"], "none", "{leg}");
+        }
+    }
+
+    // The ladder is additive: a pair with no columns yet publishes a frame
+    // with `mtw` null, never a frame withheld or a partial ladder.
+    #[test]
+    fn absent_ladder_publishes_null_not_a_withheld_frame() {
+        let rings = test_rings();
+        let (_, batch, _) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, None],
+        )
+        .unwrap();
+        assert!(batch[0]["mtw"].is_null());
+    }
+
+    // Phase 4b sidecar rides along with the frame, from the same H1 result.
+    #[test]
+    fn ir_sidecar_accompanies_the_frame() {
+        let rings = test_rings();
+        let (_, batch, _) = call(
+            &test_ctx(),
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, None],
+        )
+        .unwrap();
+        assert_eq!(batch.len(), 2, "frame + IR sidecar");
+        assert_eq!(batch[1]["type"], "visualize/ir");
+        assert_eq!(batch[1]["meas_channel"], 2);
+        assert!(batch[1]["samples"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+    }
+
+    // A pair whose channels are not in this tick's rings is dropped, not
+    // published half-built.
+    #[test]
+    fn missing_channel_buffer_drops_the_pair() {
+        let rings = test_rings();
+        let mut ctx = test_ctx();
+        ctx.ri = 9;
+        assert!(call(
+            &ctx,
+            &PairState::new(None),
+            &test_statics(),
+            &rings,
+            &[None, None]
+        )
+        .is_none());
     }
 }
