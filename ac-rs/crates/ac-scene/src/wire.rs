@@ -1,6 +1,11 @@
 //! Deserialization types for the `transfer_stream` v2 DATA frame
-//! (`ZMQ.md` lines ~1572-1627) and its `visualize/ir` sidecar
-//! (`ZMQ.md` lines ~2094-2156). `serde` ignores JSON fields a struct
+//! (`ZMQ.md`, `### transfer_stream`) and its `visualize/ir` sidecar
+//! (`ZMQ.md`, `#### visualize/ir sidecar`). Cite those sections by name,
+//! never by line: the line numbers this comment used to carry drifted ~230
+//! lines out of date as the document grew above them, and pointed at a
+//! different command with nothing to signal it.
+//!
+//! `serde` ignores JSON fields a struct
 //! doesn't name, so a real wire frame deserializes fine even though
 //! each struct here is a subset of its schema.
 //!
@@ -259,7 +264,8 @@ impl MtwColumns {
     }
 }
 
-/// The `visualize/ir` sidecar DATA frame (`ZMQ.md:2094`) — daemon-side
+/// The `visualize/ir` sidecar DATA frame (`ZMQ.md`, `#### visualize/ir
+/// sidecar`) — daemon-side
 /// IFFT of the full-resolution H₁(ω) into a time-domain h(t), published
 /// alongside each `transfer_stream` frame for the same pair on the same
 /// tick. A separate top-level shape (`"type": "visualize/ir"`), not a

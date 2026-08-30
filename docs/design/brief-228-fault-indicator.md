@@ -80,7 +80,7 @@ Four facts not yet in those documents:
      coherence is a real condition. But it is a different message — "poor coherence",
      reverberation-limited — and must not be conflated with a lock fault.
 
-     Two constraints from ac-rs/ZMQ.md (transfer_stream frame, ~line 1603) that the
+     Two constraints from ac-rs/ZMQ.md (`### transfer_stream`) that the
      implementation has to respect:
 
        - `delay_locked: false` is also what a pair publishes *while warming up*, not
