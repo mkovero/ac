@@ -353,7 +353,7 @@ mod tests {
 
     /// `20*log10(v)` with the same floor as the wire's single genuine
     /// linear-to-dB conversion point (formerly `ac-ui/data/receiver.rs`,
-    /// pending re-home onto ac-cli's receive path — handoff.md A2) so
+    /// pending re-home onto ac-cli's receive path) so
     /// tests reason in the dBFS domain the field actually observes,
     /// without duplicating the display conversion's own correctness.
     fn to_dbfs(v: f32) -> f32 {

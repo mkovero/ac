@@ -33,7 +33,8 @@
       "Bash(mv:*)",
       "Read(./tests/fixtures/**)",
       "Read(./work/**)",
-      "Read(./audit/**)"
+      "Read(./audit/**)",
+      "Read(./docs/superseded/**)"
     ]
   }
 }

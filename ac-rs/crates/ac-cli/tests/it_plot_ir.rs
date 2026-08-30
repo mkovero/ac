@@ -220,11 +220,11 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
-    // No τ is calibrated in this rig, so distance must be refused by
-    // name — never derived from the uncorrected arrival above.
+    // #391: no distance figure prints at all — the ms → m conversion it
+    // came from is gone, and milliseconds are what's asserted above.
     assert!(
-        stdout.contains("distance      unavailable"),
-        "distance must be stated unavailable without \u{3c4}:\n{stdout}"
+        !stdout.contains("distance "),
+        "distance must not print — the ms \u{2192} m conversion was removed:\n{stdout}"
     );
     // ISO 18233 §B.5: the reader must be told the tail is an artefact.
     assert!(

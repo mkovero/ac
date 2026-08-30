@@ -291,7 +291,7 @@ pub struct FakeEngine {
     /// Per-channel-offset LCG state for `Stimulus::Noise`, keyed on the
     /// offset's bit pattern (one entry per distinct channel). Persisted
     /// across `capture_block`/`capture_stereo` calls so a soak driving the
-    /// I5 display-truth invariant (handoff.md) sees a genuine continuing
+    /// I5 display-truth invariant sees a genuine continuing
     /// pseudorandom stream rather than the same block on every tick — the
     /// LCG used to be re-seeded to the same fixed state on every single
     /// call (state was a local var in `make_samples_for`, `&self`), so a
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     /// Regression for the frozen/repeated-block bug the I5 soak invariant
-    /// exists to catch (`handoff.md`): before the fix, `Stimulus::Noise`
+    /// exists to catch: before the fix, `Stimulus::Noise`
     /// re-seeded its LCG to the same fixed state on every `capture_block`
     /// call, so a caller polling repeatedly (as `monitor_spectrum`'s LF
     /// ring does) saw the identical block over and over — a ring fed only
@@ -1138,7 +1138,7 @@ mod tests {
 
     /// Same starting state (fresh engine, same channel) must reproduce the
     /// same first block — the soak's "same seed -> same result" acceptance
-    /// criterion (handoff.md) depends on this, not just on the stream
+    /// criterion depends on this, not just on the stream
     /// advancing.
     #[test]
     fn noise_stream_is_deterministic_from_a_fresh_engine() {

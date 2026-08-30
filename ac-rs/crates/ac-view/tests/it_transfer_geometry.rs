@@ -5,7 +5,6 @@
 //! segment-split unit test: this proves the split survives to the
 //! painted polyline.
 
-use ac_scene::transfer::DistanceCalibration;
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
     TransferScene,
@@ -36,11 +35,8 @@ fn masked_scene() -> TransferScene {
         coherence,
         delay_ms: 0.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         meas_channel: 0,
         ref_channel: 1,
-        distance_cal: None,
-        distance_plausible_max_m: None,
         meas_peak_dbfs: None,
         ref_peak_dbfs: None,
         channel_role: "meas_0".to_string(),
@@ -157,11 +153,8 @@ fn scene_with(fault: Option<ac_scene::fault::FaultFrame>, now_s: f64) -> Transfe
         coherence: vec![0.9; N],
         delay_ms: 0.0,
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         meas_channel: 0,
         ref_channel: 1,
-        distance_cal: None,
-        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -267,11 +260,8 @@ fn the_persistent_row_paints_its_instruction() {
             coherence: vec![0.9; N],
             delay_ms: 0.0,
             delay_locked: Some(true),
-            speed_of_sound_m_s: None,
             meas_channel: 0,
             ref_channel: 1,
-            distance_cal: None,
-            distance_plausible_max_m: None,
             meas_peak_dbfs: Some(-30.0),
             ref_peak_dbfs: Some(-14.5),
             channel_role: "meas_0".to_string(),
@@ -438,22 +428,9 @@ fn scene_with_bands(delay_ms: f64, smoothing: Smoothing) -> TransferScene {
         phase_deg: vec![0.0; N],
         coherence: vec![0.9; N],
         delay_ms,
-        // Locked, because the collision this fixture reproduces is between
-        // the band row and the readout at its *widest* — and the metres
-        // figure is what makes it wide. An unlocked fixture would silently
-        // narrow the string and the layout test would stop proving anything.
-        // Likewise a stored distance calibration (#243) — without one the
-        // readout is ms-only regardless of lock, which is narrower still.
         delay_locked: Some(true),
-        speed_of_sound_m_s: None,
         meas_channel: 0,
         ref_channel: 1,
-        distance_cal: Some(DistanceCalibration {
-            constant_ms: 0.0,
-            setup_id: "fixture".to_string(),
-            captured_at: "2026-01-01T00:00:00Z".to_string(),
-        }),
-        distance_plausible_max_m: None,
         meas_peak_dbfs: Some(-30.0),
         ref_peak_dbfs: Some(-14.5),
         channel_role: "meas_0".to_string(),
@@ -543,108 +520,18 @@ fn band_labels_are_painted_verbatim_at_the_scenes_band_centres() {
     );
 }
 
-/// A scene with a stored distance calibration (#243), locked, so
-/// `delay_calibration` is `Some("cal ...")`; `distance_plausible_max_m`
-/// pinned at `0.0` so the corrected metres figure — necessarily positive —
-/// trips `delay_warning` regardless of the fixture's speed-of-sound default.
-fn scene_with_distance_cal(plausible_max_m: Option<f64>) -> TransferScene {
-    let inp = TransferInput {
-        freqs: freqs(),
-        magnitude_db: vec![0.0; N],
-        phase_deg: vec![0.0; N],
-        coherence: vec![0.9; N],
-        delay_ms: 4.08,
-        delay_locked: Some(true),
-        speed_of_sound_m_s: None,
-        meas_channel: 0,
-        ref_channel: 3,
-        distance_cal: Some(DistanceCalibration {
-            constant_ms: 1.0615,
-            setup_id: "mic1".to_string(),
-            captured_at: "2026-08-18T00:00:00Z".to_string(),
-        }),
-        distance_plausible_max_m: plausible_max_m,
-        meas_peak_dbfs: Some(-30.0),
-        ref_peak_dbfs: Some(-14.5),
-        channel_role: "meas_0".to_string(),
-        source: Source::Live,
-        sr: 48_000,
-        column_df: Vec::new(),
-        column_window_s: Vec::new(),
-        column_n: Vec::new(),
-        column_bins: Vec::new(),
-        stages: Vec::new(),
-        fault: None,
-    };
-    let mut meters = (MeterState::default(), MeterState::default());
-    TransferScene::from_input(
-        &inp,
-        DisplayModes::new(DerotMode::Session, Smoothing::Off),
-        FREQ_RANGE,
-        DB_RANGE,
-        &mut meters,
-        &mut FaultState::default(),
-        0.0,
-    )
-}
-
-/// QA #356 correctness issue 1: `TransferScene::delay_calibration` and
-/// `delay_warning` existed since #243 but nothing in this crate read them —
-/// a calibrated reading and an uncalibrated one painted identically, and
-/// the over-read warning never reached the screen. This proves both rows
-/// survive to the painted output, the same "scene field, then paint" split
-/// `a_fault_row_is_painted_verbatim_from_ac_scene` already uses for faults.
-#[test]
-fn the_calibration_and_warning_lines_reach_the_painted_output() {
-    let scene = scene_with_distance_cal(Some(0.0));
-    let calibration = scene
-        .delay_calibration
-        .as_deref()
-        .expect("locked + stored cal ⇒ Some");
-    let warning = scene
-        .delay_warning
-        .as_deref()
-        .expect("plausible_max_m: Some(0.0) ⇒ any positive metres reading trips it");
-
-    let texts = painted_texts(&scene);
-    assert!(
-        texts.iter().any(|t| t == calibration),
-        "calibration provenance line was not painted; texts on screen: {texts:?}"
-    );
-    assert!(
-        texts.iter().any(|t| t == warning),
-        "plausibility warning was not painted; texts on screen: {texts:?}"
-    );
-}
-
-/// The warning is absent under the plausible bound, and painting it is
-/// gated the same way — its line must not appear when `ac-scene` did not
-/// produce one.
-#[test]
-fn no_warning_line_is_painted_when_the_reading_is_plausible() {
-    let scene = scene_with_distance_cal(Some(1.5));
-    assert_eq!(scene.delay_warning, None, "fixture should not warn");
-
-    let texts = painted_texts(&scene);
-    assert!(
-        !texts.iter().any(|t| t.contains("exceeds plausible bound")),
-        "a warning line was painted despite no `delay_warning` on the scene: {texts:?}"
-    );
-}
-
-/// The collision this layout exists to remove, pinned at a delay that shows
-/// it.
+/// The collision this layout exists to remove.
 ///
 /// #224 originally painted the delay readout on the band-label row and
 /// checked the clearance with `delay_ms = 0.0`, where the gap is ~8 px and
 /// the arrangement looks fine. It is not: the readout's laid-out width is a
-/// function of the number's digits, and at three digits it runs under the
-/// deepest band label. 123.45 ms is 42 m of flight — an ordinary far-mic
-/// distance in a live room, and less than a misrouted loopback produces.
-///
-/// The x-overlap is asserted first, so this test cannot pass by accident on
-/// a build where the strings happen to be narrow: it proves the two would
-/// collide on one row, and then proves the rows are what keeps them apart.
+/// function of the number's digits, and at three digits it used to run
+/// under the deepest band label — before #391 removed the metres suffix
+/// that supplied most of that width. A bare `"123.45 ms"` no longer reaches
+/// far enough right to threaten the deepest band label at this pane width
+/// (checked empirically, not asserted here), so the row separation below
+/// is regression insurance against a future wide suffix, not a defence
+/// against a live collision today.
 #[test]
 fn the_delay_readout_never_shares_a_row_with_a_band_label() {
     for smoothing in [Smoothing::Off, Smoothing::Oct6] {
@@ -693,26 +580,4 @@ fn the_delay_readout_never_shares_a_row_with_a_band_label() {
             }
         }
     }
-
-    // The rejected layout, measured here rather than argued: on one shared
-    // row these two DO overlap horizontally at a 3-digit delay, so the row
-    // separation above is what is holding them apart, not luck with widths.
-    let scene = scene_with_bands(123.45, Smoothing::Off);
-    let painted = painted_text_rects(&scene);
-    let x_range = |want: &str| -> (f32, f32) {
-        let r = painted
-            .iter()
-            .find(|(text, _)| text == want)
-            .expect("painted")
-            .1;
-        (r.min.x, r.max.x)
-    };
-    let (delay_x0, delay_x1) = x_range(&scene.delay_readout);
-    let (band_x0, band_x1) = x_range(&scene.band_labels.last().expect("bands").text);
-    assert!(
-        delay_x1 > band_x0 && band_x1 > delay_x0,
-        "the fixture no longer reproduces the collision: delay spans \
-         {delay_x0}–{delay_x1} px, deepest band label {band_x0}–{band_x1} px — \
-         at these widths a shared row would pass and prove nothing"
-    );
 }

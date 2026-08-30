@@ -1,7 +1,7 @@
 # Rig verification queue — what still needs 192.168.9.25
 
 Written 2026-08-03 alongside branch `rig2-fixes-125` (findings 1, 2 and 5 of
-`work/handoff/handover.md`). **Updated 2026-08-06: session 3 ran on 2026-08-04 and executed
+`$AC_HOME/handoff/handover.md`). **Updated 2026-08-06: session 3 ran on 2026-08-04 and executed
 blocks 1, 2 and 3.** Their results are in `work/rig/rig-session-3-results.md`, which
 supersedes the expectations written here — where this file and that one
 disagree, the session is right. What survives is one block, promoted below.
@@ -122,7 +122,7 @@ Two things session 3 raised that no block here covers yet:
 
   **What the regeneration actually restores, which is a stronger argument than
   tidiness.** These five are the *only* coverage of whether a correctly
-  computed trace is actually visible — `work/qa/qa-ignore-audit-2026-08-10.md`
+  computed trace is actually visible — the 2026-08-10 QA ignore audit,
   finding 2. The headless suite covers the invariants: `it_banner_clearance`
   asserts nothing overlaps the banner, `it_trace_distinction` asserts meas and
   ref differ in colour and that snapshot traces paint dashed against live
@@ -489,7 +489,7 @@ cannot tell one passband from scattered accidents.
 
 ### What this branch does *not* fix — do not read these as regressions
 
-- **`LOST LOCK` / `NO LOCK` are still unreachable.** Finding 3 of `work/handoff/handover.md`
+- **`LOST LOCK` / `NO LOCK` are still unreachable.** Finding 3 of `$AC_HOME/handoff/handover.md`
   is untouched here. A session that refuses for 14 s still renders a blank
   window with no indicator. That is the known state, not a new one.
 - **The prominence gate still refuses valid measurements at 1 m.** Finding 4 is

@@ -19,7 +19,14 @@ pub fn status(state: &ServerState) -> Value {
         "running_cmd":   running,
         "src_mtime":     state.src_mtime,
         "listen_mode":   listen_mode,
-        "server_enabled": true
+        "server_enabled": true,
+        // Identity (#385) — lets a client tell this daemon apart from one
+        // spawned under a different HOME/config on the same hardcoded port.
+        "home":          state.home.clone(),
+        "config_path":   state.config_path.display().to_string(),
+        "pid":           state.pid,
+        "started_at":    state.started_at.clone(),
+        "spawn_mode":    state.spawn_mode.clone(),
     })
 }
 
@@ -458,5 +465,11 @@ pub fn server_connections(state: &ServerState) -> Value {
         "data_endpoint": data_ep,
         "clients":       [],
         "workers":       workers,
+        // Identity (#385) — same fields as `status`.
+        "home":          state.home.clone(),
+        "config_path":   state.config_path.display().to_string(),
+        "pid":           state.pid,
+        "started_at":    state.started_at.clone(),
+        "spawn_mode":    state.spawn_mode.clone(),
     })
 }

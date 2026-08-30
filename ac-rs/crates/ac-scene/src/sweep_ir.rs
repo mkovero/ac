@@ -24,14 +24,26 @@
 //! forward verbatim; this module is where they become plain data.
 
 use ac_core::measurement::report::{
-    ArrivalDistance, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
+    InterfaceLatency, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
 use crate::readout::format_sweep_ir_header;
 use crate::scene::{Provenance, Source, Trace};
 use crate::ticks::{time_axis, time_to_x, Axis};
-use crate::transfer::{format_delay_readout_plain, SPEED_OF_SOUND_DEFAULT_M_S};
+
+/// τ-corrected flight time for `report`'s IR arrival, in milliseconds — or
+/// `None` when no τ was measured under this run's exact conditions
+/// (`interface_latency` is `None` or `Unavailable`). No speed of sound, no
+/// metres, no provenance string: milliseconds are what the operator tunes
+/// against (#391 — this replaces `ir_arrival_distance`'s τ subtraction,
+/// without the ms → m conversion it used to also unlock).
+fn ir_flight_time_ms(report: &MeasurementReport, arrival_s: f64) -> Option<f64> {
+    match &report.interface_latency {
+        Some(InterfaceLatency::Measured(m)) => Some((arrival_s - m.tau_s) * 1000.0),
+        _ => None,
+    }
+}
 
 /// Mirrors [`crate::ir::IrScene`]'s own downsample target — display
 /// column density, not a shared constant. See that module's doc on its
@@ -257,43 +269,19 @@ impl SweepIrScene {
 
         let arrival_ms = stats.arrival_s * 1000.0;
         // `stats.arrival_s` is a round-trip figure and still contains any
-        // uncorrected interface latency (`IrStats::arrival_s`'s own doc);
-        // it must not be converted to a distance without a calibrated τ
-        // (#283, `ArrivalDistance`'s doc: "no third case that returns an
-        // uncorrected arrival as if it were a distance"). Route through
-        // `MeasurementReport::ir_arrival_distance()` — the one place that
-        // subtraction is allowed to happen — rather than hand-rolling the
-        // `delay_locked` argument: only a `Known` result (a measured τ on
-        // this report) both unlocks metres *and* supplies the
-        // τ-corrected delay to print them from; `Unavailable` (the common
-        // case — no τ measured with this run) prints ms only, same as the
-        // live panel's own `delay_locked: Some(false)` path.
-        let (readout_delay_ms, delay_locked, speed_of_sound_m_s) =
-            match report.ir_arrival_distance() {
-                ArrivalDistance::Known {
-                    tau_s,
-                    speed_of_sound_m_s,
-                    ..
-                } => (
-                    (stats.arrival_s - tau_s) * 1000.0,
-                    Some(true),
-                    speed_of_sound_m_s,
-                ),
-                ArrivalDistance::Unavailable { .. } => {
-                    (arrival_ms, Some(false), SPEED_OF_SOUND_DEFAULT_M_S)
-                }
-            };
+        // uncorrected interface latency (`IrStats::arrival_s`'s own doc).
+        // `ir_flight_time_ms` is the one place the τ subtraction happens;
+        // `Some` (a measured τ on this report) is the τ-corrected flight
+        // time, `None` (the common case — no τ measured with this run)
+        // prints the raw arrival re gate centre, unchanged.
+        let readout_delay_ms = ir_flight_time_ms(report, stats.arrival_s).unwrap_or(arrival_ms);
         let arrival = ArrivalMarker {
             position: if has_span {
                 time_to_x(arrival_ms, t_origin_ms, t_max_ms)
             } else {
                 0.5
             },
-            // `format_delay_readout_plain`'s own `delay_ms >= 0.0` guard
-            // means a peak that lands before the gate's zero-delay
-            // reference (or, in the `Known` branch, before τ) still prints
-            // ms-only rather than fabricating a negative distance.
-            text: format_delay_readout_plain(readout_delay_ms, delay_locked, speed_of_sound_m_s),
+            text: format!("{readout_delay_ms:.2} ms"),
         };
 
         // The recorded gate start, not `gate_window_s / 2`: the daemon's
@@ -522,34 +510,30 @@ mod tests {
     }
 
     #[test]
-    fn arrival_marker_reuses_format_delay_readout_verbatim() {
+    fn arrival_marker_prints_ms_only() {
         // `base_report()` sets `interface_latency: None`, so this is the
-        // no-τ path: `delay_locked` must gate off `Some(false)`, not the
-        // unconditional `Some(true)` this test previously pinned.
+        // no-τ path: the raw arrival re gate centre, ms only.
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        let want = format_delay_readout_plain(
-            stats.arrival_s * 1000.0,
-            Some(false),
-            SPEED_OF_SOUND_DEFAULT_M_S,
-        );
+        let want = format!("{:.2} ms", stats.arrival_s * 1000.0);
         assert_eq!(scene.arrival.text, want);
     }
 
     #[test]
     fn arrival_distance_is_not_shown_without_a_measured_interface_latency() {
         // Nonzero delay (see `gated_report_with_delayed_peak`'s doc) so a
-        // metres figure derived from the uncorrected round trip would be
-        // visibly nonzero too, not masked by a delay of exactly 0.
+        // τ-corrected figure derived from the uncorrected round trip would
+        // be visibly different too, not masked by a delay of exactly 0.
         let r = gated_report_with_delayed_peak(); // interface_latency: None
         let scene = SweepIrScene::from_report(&r).unwrap();
-        assert!(
-            !scene.arrival.text.contains('('),
-            "no measured \u{3c4} on this report — arrival text must not report metres: {}",
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            scene.arrival.text,
+            format!("{:.2} ms", stats.arrival_s * 1000.0),
+            "no measured \u{3c4} on this report — arrival text must be the raw arrival: {}",
             scene.arrival.text
         );
-        assert!(scene.arrival.text.ends_with("ms"));
     }
 
     #[test]
@@ -560,22 +544,14 @@ mod tests {
         // different, checkable sign/magnitude than the uncorrected one.
         r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
         let scene = SweepIrScene::from_report(&r).unwrap();
-        let ArrivalDistance::Known {
-            tau_s,
-            speed_of_sound_m_s,
-            ..
-        } = r.ir_arrival_distance()
-        else {
-            panic!("interface_latency is Measured, ir_arrival_distance() must be Known");
-        };
         let stats = r.ir_stats().unwrap();
-        let corrected_ms = (stats.arrival_s - tau_s) * 1000.0;
+        let corrected_ms = ir_flight_time_ms(&r, stats.arrival_s)
+            .expect("interface_latency is Measured, ir_flight_time_ms() must be Some");
         assert!(
             (corrected_ms - 0.15).abs() < 1e-9,
             "expected 0.25ms - 0.1ms = 0.15ms, got {corrected_ms}"
         );
-        let want = format_delay_readout_plain(corrected_ms, Some(true), speed_of_sound_m_s);
-        assert_eq!(scene.arrival.text, want);
+        assert_eq!(scene.arrival.text, format!("{corrected_ms:.2} ms"));
         // Not the uncorrected round-trip figure (#283's forbidden case).
         assert_ne!(
             scene.arrival.text,
