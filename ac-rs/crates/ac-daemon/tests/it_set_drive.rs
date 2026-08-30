@@ -14,171 +14,21 @@
 //! is why the assertions below are "returned to the idle level", not
 //! "went to −inf".
 
-use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
-// 28_800, not 28_400 — the latter collides with it_scene_fixture's base
-// under parallel `cargo test` (#195). Each ac-daemon test binary keeps a
-// distinct base rather than the ac-view PID-seed approach, since these
-// bases are inline per binary, not a shared module.
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(28_800);
-static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
+#[path = "common/mod.rs"]
+mod common;
+
+use common::{Client, Daemon};
 
 /// The default `drive_max_dbfs` ceiling (`ac_core::config`).
 const CEILING_DBFS: f64 = -10.0;
 /// Idle fake stimulus is a 0.1-amplitude tone ⇒ 20·log10(0.1) ≈ −20 dBFS.
 const IDLE_PEAK_DBFS: f64 = -20.0;
-
-fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
-}
-
-fn alloc_home() -> PathBuf {
-    let n = HOME_CURSOR.fetch_add(1, Ordering::Relaxed);
-    let mut p = env::temp_dir();
-    p.push(format!("ac-daemon-drive-it-{}-{n}", std::process::id()));
-    let _ = fs::create_dir_all(p.join(".config").join("ac"));
-    p
-}
-
-struct Daemon {
-    child: Child,
-    ctrl_port: u16,
-    data_port: u16,
-    home: PathBuf,
-}
-
-impl Daemon {
-    fn spawn() -> Self {
-        let home = alloc_home();
-        let (ctrl, data) = alloc_ports();
-        let bin = env!("CARGO_BIN_EXE_ac-daemon");
-        let child = Command::new(bin)
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .spawn()
-            .expect("spawn ac-daemon");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() <= deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-        Self {
-            child,
-            ctrl_port: ctrl,
-            data_port: data,
-            home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.home);
-    }
-}
-
-struct Client {
-    _ctx: zmq::Context,
-    req: zmq::Socket,
-    sub: zmq::Socket,
-}
-
-impl Client {
-    fn new(d: &Daemon) -> Self {
-        let ctx = zmq::Context::new();
-        let req = ctx.socket(zmq::REQ).unwrap();
-        req.set_linger(0).unwrap();
-        req.set_rcvtimeo(5_000).unwrap();
-        req.set_sndtimeo(5_000).unwrap();
-        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port))
-            .unwrap();
-
-        let sub = ctx.socket(zmq::SUB).unwrap();
-        sub.set_linger(0).unwrap();
-        sub.set_rcvtimeo(5_000).unwrap();
-        sub.set_subscribe(b"").unwrap();
-        sub.connect(&format!("tcp://127.0.0.1:{}", d.data_port))
-            .unwrap();
-
-        thread::sleep(Duration::from_millis(100));
-        Self {
-            _ctx: ctx,
-            req,
-            sub,
-        }
-    }
-
-    fn call(&self, cmd: Value) -> Value {
-        self.req.send(serde_json::to_vec(&cmd).unwrap(), 0).unwrap();
-        let bytes = self.req.recv_bytes(0).expect("CTRL recv");
-        serde_json::from_slice(&bytes).expect("CTRL decode")
-    }
-
-    /// Next `transfer_stream` DATA frame, or `None` on timeout.
-    fn next_frame(&self, timeout: Duration) -> Option<Value> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .max(1) as i32;
-            self.sub.set_rcvtimeo(remaining).ok();
-            let bytes = self.sub.recv_bytes(0).ok()?;
-            let split = bytes.iter().position(|&b| b == b' ')?;
-            let topic = String::from_utf8(bytes[..split].to_vec()).ok()?;
-            let payload: Value = serde_json::from_slice(&bytes[split + 1..]).ok()?;
-            if topic == "data" && payload["type"] == json!("transfer_stream") {
-                return Some(payload);
-            }
-        }
-        None
-    }
-
-    /// Drain frames for `settle`, then return the next one — so an
-    /// assertion sees the state after a drive change rather than a frame
-    /// computed from blocks captured before it.
-    fn frame_after(&self, settle: Duration) -> Value {
-        let until = Instant::now() + settle;
-        while Instant::now() < until {
-            let _ = self.next_frame(Duration::from_millis(300));
-        }
-        self.next_frame(Duration::from_secs(10))
-            .expect("no transfer_stream frame")
-    }
-}
 
 fn start_transfer(c: &Client) -> Value {
     c.call(json!({

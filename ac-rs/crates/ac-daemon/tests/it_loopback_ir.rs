@@ -44,28 +44,16 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use ac_core::measurement::sweep::SweepParams;
 use serde_json::{json, Value};
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(25_900);
-static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
+#[path = "common/mod.rs"]
+mod common;
 
-fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
-}
-
-fn alloc_home() -> PathBuf {
-    let n = HOME_CURSOR.fetch_add(1, Ordering::Relaxed);
-    let mut p = env::temp_dir();
-    p.push(format!("ac-daemon-loopback-{}-{n}", std::process::id()));
-    let _ = fs::create_dir_all(p.join(".config").join("ac"));
-    p
-}
+use common::{alloc_home, alloc_ports};
 
 /// The self-loop defaults: the daemon's own ports, under one JACK client.
 const SELF_LOOP_OUT: &str = "ac-daemon:in";
