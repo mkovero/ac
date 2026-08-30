@@ -1,6 +1,6 @@
 <!-- agent: architect -->
 
-# design decision — capture contiguity (work/handoff/handoff-capture-contiguity.md, D1/D2)
+# design decision — capture contiguity ($AC_HOME/handoff/handoff-capture-contiguity.md, D1/D2)
 
 > **Scope correction (2026-07-25, from the reporter).** The handoff's premise
 > is wrong. It reads the symptom as three copies **on the frequency axis** and

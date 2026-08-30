@@ -240,7 +240,7 @@ fn ac_proceeds_against_a_remote_host_with_a_different_home() {
     let caller_home = scratch_home("remote-caller");
     fs::write(
         caller_home.join(".config").join("ac").join("config.json"),
-        format!(r#"{{"server_host": "127.0.0.2"}}"#),
+        r#"{"server_host": "127.0.0.2"}"#,
     )
     .expect("seed caller config.json with server_host");
 

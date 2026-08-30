@@ -306,7 +306,7 @@ the `visualize/{spectrum,cwt,cqt,reassigned}` frame for the same tick
 no mic-curve, just the unmodified per-tick capture truncated to the
 newest 2048 samples. Intended for a client-side goniometer / trajectory
 view (`docs/superseded/unified.md` Phase 0b, resolves §9 OQ7); no current client
-subscribes to it since the ac-ui detach (see `attic/ac-ui`).
+subscribes to it since the ac-ui detach.
 
 ```json
 {

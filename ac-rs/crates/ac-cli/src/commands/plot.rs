@@ -463,7 +463,7 @@ fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::confi
 }
 
 /// What `launch_ui` should do post-command. The GPU viewer this used to
-/// spawn is gone (see `attic/ac-ui`); `Monitor` now always renders via the
+/// spawn is gone; `Monitor` now always renders via the
 /// terminal (`monitor_tui`), and the sweep variants just note that no
 /// visual plot is shown — the CSV/stdout output already carries the data.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

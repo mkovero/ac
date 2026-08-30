@@ -10,7 +10,7 @@ exponential one. Bottom stage is 4000 Hz, not 3000. If you find `τ = 1 s`,
 `α = 0.3401` or a 3000 Hz bottom stage below, that is a section I missed —
 stop and check against the handoff.
 
-Scope: the two items `work/handoff/handoff-mtw-live-spectrum.md` routes to architect —
+Scope: the two items `$AC_HOME/handoff/handoff-mtw-live-spectrum.md` routes to architect —
 **ladder crossover placement**, and **the decimator phase-lock mechanism
 (deliverable 1), "where the alignment guarantee is actually won or lost".**
 

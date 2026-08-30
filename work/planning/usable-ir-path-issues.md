@@ -182,7 +182,7 @@ has landed except two branches that are themselves waiting on the rig.
       threshold needs either a rig run (timed xrun vs clean lifecycle, same
       acoustic path, comparing raw τ) or explicit human acceptance on #369. The
       queue entry with the falsifying value in both directions is already
-      written (`work/rig/rig-verify-queue.md:339-366`) — but a queue entry is
+      written (`rig/rig-verify-queue.md:339-366`) — but a queue entry is
       not evidence. Latent at period 1024; period 64 makes it reachable, and two
       corrupted readings have no reason to disagree.
 
@@ -351,7 +351,7 @@ that can be recorded as a clamped run rather than a deviation.
    acoustic path, comparing raw τ. First because it is the cheapest thing here
    and it releases a finished, mergeable branch (PR #388); the falsifying value
    in both directions is already written down at
-   `work/rig/rig-verify-queue.md:339-366`. If the operator would rather accept
+   `rig/rig-verify-queue.md:339-366`. If the operator would rather accept
    the "any xrun > 0 is dirty" threshold explicitly on #369, this slot
    disappears and the PR merges today.
 2. **#378 verification** — both taped positions, ≥12 captures each, c-free

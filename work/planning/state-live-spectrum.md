@@ -40,7 +40,7 @@ something stops serving it, cut it.
   being live.
 - **#225–#230 filed** from the 2026-07-28 acoustic session. #225–#228 are the
   cluster standing between "works with workarounds" and "works"; see
-  `work/handoff/handoff-issue-strategy.md` for order.
+  `$AC_HOME/handoff/handoff-issue-strategy.md` for order.
 - **PR #233 — merged** (`a14ee4a`). #225, the reference output leg. Resolves it
   from its own playback index instead of `reference_channel`, an input index.
   Sessions no longer need hand-patching, and the launch reply carries a
@@ -178,7 +178,7 @@ Noticed during the acoustic session, unexplained, none blocking:
 
    Two things this turned up on the way:
 
-   - The `≈2.5 s` sentence **is** in `ac-rs/ZMQ.md` — `work/handoff/handoff-doc-maintenance.md`
+   - The `≈2.5 s` sentence **is** in `ac-rs/ZMQ.md` — `$AC_HOME/handoff/handoff-doc-maintenance.md`
      says it is not and calls the attribution here a doc error. That part of
      the handoff is itself wrong; the attribution was correct and the source
      was the thing at fault.

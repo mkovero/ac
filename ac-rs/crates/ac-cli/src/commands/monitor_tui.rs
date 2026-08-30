@@ -30,7 +30,7 @@ pub struct ChannelStats {
 /// `ac_core::visualize::spectrum::spectrum_only`, which normalizes to a
 /// linear magnitude and never takes a log. The linear→dB conversion used
 /// to happen in `ac-ui/src/data/receiver.rs` before that crate was
-/// detached (handoff.md A2); it hasn't been re-homed anywhere since, so
+/// detached; it hasn't been re-homed anywhere since, so
 /// every direct consumer of `spectrum` must do it locally. Clamped at
 /// 1e-12 so a silent/zero bin converts to a finite floor instead of
 /// `-inf`, matching the floor convention in

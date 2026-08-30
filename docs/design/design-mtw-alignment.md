@@ -2,7 +2,7 @@
 
 # design-mtw-alignment — reference alignment and retention for the MTW ladder
 
-Scope: deliverable 9 of `work/handoff/handoff-mtw-live-spectrum.md` — per-band reference
+Scope: deliverable 9 of `$AC_HOME/handoff/handoff-mtw-live-spectrum.md` — per-band reference
 alignment and reference-retention sizing. Routed to architect as "the decision
 that makes or breaks HF usability on a delayed DUT, settled before the ladder
 is fixed".
