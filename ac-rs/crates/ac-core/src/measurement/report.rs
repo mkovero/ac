@@ -461,6 +461,20 @@ impl MeasurementData {
         }
     }
 
+    /// Human-readable heading for the variant, used by the HTML and PDF
+    /// renderers. Lives here rather than in either renderer so the two
+    /// cannot drift apart in wording (they each carried a byte-identical
+    /// private copy).
+    pub fn display_title(&self) -> &'static str {
+        match self {
+            MeasurementData::FrequencyResponse { .. } => "Frequency Response",
+            MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
+            MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
+            MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
+            MeasurementData::GatedFrequencyResponse { .. } => "Frequency Response (gated)",
+        }
+    }
+
     fn write_csv(&self, s: &mut String) -> Result<()> {
         match self {
             MeasurementData::FrequencyResponse { points } => {
@@ -622,18 +636,15 @@ impl MeasurementReport {
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
     pub fn ir_stats(&self) -> Option<IrStats> {
-        let payload = self
-            .data
-            .iter()
-            .find(|p| matches!(p.data, MeasurementData::ImpulseResponse { .. }))?;
-        let MeasurementData::ImpulseResponse {
-            sample_rate_hz,
-            linear_ir,
-            ..
-        } = &payload.data
-        else {
-            return None;
-        };
+        let (payload, sample_rate_hz, linear_ir) =
+            self.data.iter().find_map(|p| match &p.data {
+                MeasurementData::ImpulseResponse {
+                    sample_rate_hz,
+                    linear_ir,
+                    ..
+                } => Some((p, sample_rate_hz, linear_ir)),
+                _ => None,
+            })?;
         if linear_ir.is_empty() || *sample_rate_hz == 0 {
             return None;
         }
@@ -1376,9 +1387,12 @@ mod tests {
     /// `StandardsCitation` — non-empty `standard` and `clause`. Serialising a
     /// report built from each `citation()` round-trips cleanly and survives
     /// at the current `SCHEMA_VERSION`. See #72 for the audit workflow.
-    #[test]
-    fn every_measurement_module_emits_populated_citation() {
-        let citations = [
+    /// Every citation this workspace emits, in one place. Both citation
+    /// guards below read this list: kept separate, a new measurement
+    /// module added to one and forgotten in the other leaves that guard
+    /// green while silently covering less.
+    fn every_citation() -> [StandardsCitation; 9] {
+        [
             crate::measurement::thd::citation(),
             crate::measurement::filterbank::Filterbank::citation(),
             crate::measurement::noise::citation(),
@@ -1388,7 +1402,12 @@ mod tests {
             crate::measurement::sweep::gated_response_citation(),
             crate::measurement::ccir468::citation(),
             crate::shared::reference_levels::citation(),
-        ];
+        ]
+    }
+
+    #[test]
+    fn every_measurement_module_emits_populated_citation() {
+        let citations = every_citation();
         for c in &citations {
             assert!(!c.standard.is_empty(), "empty standard in {c:?}");
             assert!(!c.clause.is_empty(), "empty clause in {c:?}");
@@ -1498,17 +1517,7 @@ mod tests {
         }
         let repo_root = stddocs_root.parent().expect("stddocs_root has a parent");
 
-        let citations = [
-            crate::measurement::thd::citation(),
-            crate::measurement::filterbank::Filterbank::citation(),
-            crate::measurement::noise::citation(),
-            crate::measurement::weighting::WeightingFilter::citation(),
-            crate::measurement::sweep::citation(),
-            crate::measurement::sweep::farina_citation(),
-            crate::measurement::sweep::gated_response_citation(),
-            crate::measurement::ccir468::citation(),
-            crate::shared::reference_levels::citation(),
-        ];
+        let citations = every_citation();
         for c in &citations {
             assert!(
                 citation_standard_resolves(&c.standard, stddocs_root),
