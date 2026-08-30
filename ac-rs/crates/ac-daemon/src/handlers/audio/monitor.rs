@@ -179,6 +179,277 @@ const LF_OVERLAP: f64 = 0.9;
 /// levels (EMA is power-domain, unbiased at steady state).
 const LF_AVG_TAU_S: f64 = 0.25;
 
+/// Wall-clock nanoseconds since the epoch, for a frame's `timestamp`.
+/// Returns 0 if the clock is before the epoch — a frame with a bogus
+/// timestamp still beats dropping the frame.
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Unwrap a capture result, publishing a `capture error on chN` frame and
+/// returning `None` when the engine failed.
+///
+/// A capture failure is terminal for the worker — there is no partial
+/// buffer to fall back on — so every caller must `return` on `None`. The
+/// `let ... else { return; }` is left at the call site rather than hidden
+/// in here, so the control flow stays visible where it happens.
+fn capture_or_report<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    pub_tx: &crossbeam_channel::Sender<Vec<u8>>,
+    channel: u32,
+) -> Option<T> {
+    match result {
+        Ok(v) => Some(v),
+        Err(e) => {
+            send_pub(
+                pub_tx,
+                "error",
+                &json!({
+                    "cmd":     "monitor_spectrum",
+                    "message": format!("capture error on ch{channel}: {e}"),
+                }),
+            );
+            None
+        }
+    }
+}
+
+/// Wire identity and per-tick values that every frame in one channel
+/// iteration shares. Bundled so the ring-path helpers below stay under a
+/// readable argument count.
+struct TickCtx<'a> {
+    pub_tx: &'a crossbeam_channel::Sender<Vec<u8>>,
+    n_channels: u32,
+    sr: u32,
+    /// Per-tick monotonic counter; identical for every channel of a tick
+    /// so the UI can pair L and R scope frames.
+    frame_idx: u64,
+    /// Tick-wide capture timestamp, for scope frames only.
+    tick_ts_ns: u64,
+    /// Snapshot of the global mic-correction toggle, read once per tick.
+    mic_corr_enabled: bool,
+    /// Capture-block duration for the ring-buffered modes, already
+    /// clamped to [16 ms, 100 ms].
+    tick_secs: f64,
+}
+
+/// Minimum CWT ring fill before a column is emitted. `morlet_cwt_into`
+/// asserts on fewer than 256 samples.
+const CWT_MIN_FILL: usize = 256;
+
+/// Which of a channel's rings a ring-buffered mode fills.
+#[derive(Clone, Copy)]
+enum RingKind {
+    Cwt,
+    Cqt,
+    Reassigned,
+}
+
+/// Outcome of one ring-buffered capture.
+enum RingTick {
+    /// The ring holds enough samples for a valid column. Carries the
+    /// engine's cumulative xrun count, read once here so the frames built
+    /// from this capture all quote the same number.
+    Ready { xruns: u32 },
+    /// Not enough samples yet — the caller should skip this channel.
+    NotReady,
+    /// Capture failed and has been reported; the caller must return.
+    Failed,
+}
+
+/// Capture one paced block for `ch`, push it through the loudness meter,
+/// emit its scope frame, and append it to the mode's ring, trimmed to
+/// `ring_cap` from the front.
+///
+/// This is the half of a CWT / CQT / reassigned tick that does not depend
+/// on which transform runs: the three modes differ only in which ring
+/// they fill, how full it must be, and what they then compute from it.
+fn capture_into_ring(
+    eng: &mut dyn crate::audio::AudioEngine,
+    ch: &mut ChannelState,
+    ctx: &TickCtx,
+    kind: RingKind,
+    ring_cap: usize,
+    min_fill: usize,
+) -> RingTick {
+    // Pace the capture tick to the UI's requested interval, clamped to
+    // [16 ms, 100 ms] by the caller. Pre-#109 this was hardcoded 20 ms
+    // regardless of `--max-fps`, so CWT emitted at 50 fps even when the
+    // UI was capped at 30 — wasted work on both sides.
+    let tick_secs = ctx.tick_secs;
+    let Some(samples) = capture_or_report(eng.capture_block(tick_secs), ctx.pub_tx, ch.channel)
+    else {
+        return RingTick::Failed;
+    };
+    // `eng.xruns()` is already a cumulative count for this engine session
+    // (see `jack_backend.rs`'s `SharedState::xruns`), so this assigns
+    // rather than accumulates — summing it across per-tick, per-channel
+    // reads would multiply a handful of real xruns into thousands over a
+    // long monitor session.
+    let xruns = eng.xruns();
+    // Feed the raw capture into the loudness meter before any downstream
+    // consumer touches it.
+    push_loudness_with_optional_fir(
+        &mut ch.loudness,
+        &mut ch.loudness_fir,
+        ctx.mic_corr_enabled,
+        &samples,
+    );
+    emit_scope_frame(
+        ctx.pub_tx,
+        ch.channel,
+        ctx.n_channels,
+        ctx.sr,
+        &samples,
+        ctx.frame_idx,
+        ctx.tick_ts_ns,
+        xruns,
+    );
+    let ring = ch.ring_mut(kind);
+    ring.extend(samples.iter());
+    while ring.len() > ring_cap {
+        ring.pop_front();
+    }
+    if ring.len() < min_fill {
+        return RingTick::NotReady;
+    }
+    RingTick::Ready { xruns }
+}
+
+/// Periodic timing line for a ring-buffered transform — one line every
+/// 50 ticks so a slow transform is visible without flooding the log.
+fn log_transform_time(
+    counter: &mut u32,
+    label: &str,
+    channel: u32,
+    t0: std::time::Instant,
+    ring_len: usize,
+    n_out: usize,
+) {
+    *counter += 1;
+    if *counter % 50 == 1 {
+        eprintln!(
+            "{label} ch{channel}: {:.1}ms, ring={ring_len}, out={n_out}",
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+/// Mic-correct `mags` in place, then emit the mode's `visualize/*` frame
+/// and the channel's `measurement/loudness` sidecar.
+///
+/// Returns the frame timestamp and mic-correction tag, which the CWT
+/// path reuses for its fractional-octave frames so every frame built from
+/// one column agrees.
+fn emit_ring_frames(
+    ch: &ChannelState,
+    ctx: &TickCtx,
+    frame_type: &str,
+    freqs: &[f32],
+    mags: &mut [f32],
+    extra: &[(&str, Value)],
+    xruns: u32,
+) -> (u64, &'static str) {
+    if ctx.mic_corr_enabled {
+        if let Some(curve) = &ch.mic_curve {
+            apply_mic_curve_inplace_f32(curve, freqs, mags);
+        }
+    }
+    let mc_tag = mic_correction_tag(ch.mic_curve.is_some(), ctx.mic_corr_enabled);
+    let ts_ns = now_ns();
+    let mags: &[f32] = mags;
+    let mut frame = json!({
+        "type":           frame_type,
+        "cmd":            "monitor_spectrum",
+        "channel":        ch.channel,
+        "n_channels":     ctx.n_channels,
+        "sr":             ctx.sr,
+        "magnitudes":     mags,
+        "frequencies":    freqs,
+        "spl_offset_db":  ch.spl_offset,
+        "mic_correction": mc_tag,
+        "timestamp":      ts_ns,
+        "xruns":          xruns,
+    });
+    if let Some(obj) = frame.as_object_mut() {
+        for (k, v) in extra {
+            obj.insert((*k).to_string(), v.clone());
+        }
+    }
+    send_pub(ctx.pub_tx, "data", &frame);
+    emit_loudness_frame(
+        ctx.pub_tx,
+        ch.channel,
+        ctx.n_channels,
+        ctx.sr,
+        &ch.loudness,
+        ch.spl_offset,
+        mc_tag,
+        ts_ns,
+        xruns,
+    );
+    (ts_ns, mc_tag)
+}
+
+/// Per-bin dBFS → dBu conversion offset:
+///   analog_vrms = sample_peak × cal_in / sqrt(2)   (sine assumption)
+///   dBu = dbfs_peak + 20·log10(cal_in / (sqrt(2)·dbu_ref))
+///
+/// The UI overlays this on hover readouts so any cursor position shows
+/// dBFS / dBu / dBV without a round-trip. `None` when the channel has no
+/// input voltage calibration.
+fn dbu_offset_db(cal: Option<&Calibration>) -> Option<f64> {
+    cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
+        20.0 * (v / (std::f64::consts::SQRT_2 * ac_core::shared::conversions::get_dbu_ref()))
+            .log10()
+    })
+}
+
+/// Aggregate a linear half-spectrum onto the wire's log-spaced columns,
+/// splicing the long-N LF spectrum in below `crossover_hz` when one is
+/// cached (#142), then apply the channel's mic curve.
+///
+/// Returns `(columns, column centre frequencies)`. Both the THD path and
+/// the fallback path below feed this; they differ only in where their
+/// input spectrum came from.
+fn spectrum_columns(
+    spec: &[f64],
+    lf: Option<&[f64]>,
+    sr: u32,
+    crossover_hz: f32,
+    ch: &ChannelState,
+    mic_corr_enabled: bool,
+) -> (Vec<f64>, Vec<f64>) {
+    let sr_f = sr as f64;
+    let (mut columns, freqs) = match lf {
+        Some(lf) => ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
+            lf,
+            spec,
+            sr_f,
+            crossover_hz as f64,
+            20.0,
+            (sr_f / 2.0).max(21.0),
+            ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+        ),
+        None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
+            spec,
+            sr_f,
+            20.0,
+            (sr_f / 2.0).max(21.0),
+            ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
+        ),
+    };
+    if mic_corr_enabled {
+        if let Some(curve) = &ch.mic_curve {
+            apply_mic_curve_inplace_f64(curve, &freqs, &mut columns);
+        }
+    }
+    (columns, freqs)
+}
+
 /// Convert a possibly-infinite `f64` to JSON — `null` when not finite,
 /// real number otherwise. Keeps the sidecar frame JSON-parseable; `-inf`
 /// would otherwise fail `serde_json`'s finite-value check.
@@ -324,6 +595,160 @@ fn dbfs_to_amplitude(dbfs: f64) -> f64 {
     10f64.powf(dbfs / 20.0)
 }
 
+/// Dual-resolution low-frequency FFT state for one channel (#142 / #173).
+///
+/// A second, longer ring feeds an `lf_fft_n`-point FFT used only below
+/// `crossover_hz`; the channel's short `fft_ring` keeps driving the high
+/// band at the live refresh rate. The LF spectrum is recomputed every
+/// `LF_OVERLAP`-hop (`(1 - LF_OVERLAP) * lf_fft_n / sr`, #173) rather
+/// than once per full block, and each new raw recompute is smoothed
+/// through a power-domain EMA (`ema`) before caching — see `LF_OVERLAP`
+/// / `LF_AVG_TAU_S` above.
+///
+/// The five members are only ever read and written together — the long
+/// ring, the smoothed spectrum it produces, the overlap-hop counter, and
+/// the EMA plus the timestamp its `dt` is measured from.
+struct LfState {
+    ring: std::collections::VecDeque<f32>,
+    /// Most recent smoothed LF linear half-spectrum; `None` until the
+    /// ring first fills.
+    spec_cache: Option<Vec<f64>>,
+    ticks_since_recompute: u32,
+    ema: Option<EmaIntegrator>,
+    ema_last_ts: Option<std::time::Instant>,
+}
+
+impl LfState {
+    fn new() -> Self {
+        Self {
+            ring: std::collections::VecDeque::with_capacity(131_072),
+            spec_cache: None,
+            ticks_since_recompute: u32::MAX,
+            ema: None,
+            ema_last_ts: None,
+        }
+    }
+
+    /// True when this channel still holds LF state that a disabled LF
+    /// band would leave stale.
+    fn is_stale(&self) -> bool {
+        !self.ring.is_empty() || self.spec_cache.is_some()
+    }
+
+    /// Drop everything so a later re-enable rebuilds from fresh capture.
+    fn clear(&mut self) {
+        self.ring.clear();
+        self.spec_cache = None;
+        self.ticks_since_recompute = u32::MAX;
+        self.ema = None;
+        self.ema_last_ts = None;
+    }
+}
+
+/// Everything the monitor worker tracks for one monitored channel.
+///
+/// This used to be eighteen `Vec`s walked by a shared `idx`. Holding one
+/// struct per channel means a channel cannot go half-initialised, a new
+/// piece of per-channel state cannot be added at one construction site
+/// and forgotten at another, and `idx` can no longer address two
+/// different channels within one tick.
+struct ChannelState {
+    channel: u32,
+    /// Resolved input port; used only by the multi-channel
+    /// `reconnect_input` path.
+    in_port: String,
+    cal: Option<Calibration>,
+    /// Per-channel SPL offset (= 94 - mic_sens_dbfs); `None` when the
+    /// channel hasn't been pistonphone-calibrated. Cached once at start
+    /// — re-running `calibrate_spl` requires a `monitor` restart, same
+    /// as voltage cal changes need today.
+    spl_offset: Option<f64>,
+    /// Mic frequency-response curve, cloned out of `cal` for cheap
+    /// per-tick lookup. Same staleness caveat as `spl_offset`.
+    mic_curve: Option<ac_core::shared::calibration::MicResponse>,
+    /// Mic-curve FIR for the loudness path (#104), built once at start
+    /// when the curve is loaded, bypassed when no curve or when the
+    /// global toggle is off. Runs *before* K-weighting / dBTP so LKFS
+    /// reflects the mic-corrected acoustic level.
+    loudness_fir: Option<MicCurveFir>,
+    current_freq: f64,
+    /// #93: reconnect-failure state for the multi-channel path.
+    /// Single-channel never touches `eng.reconnect_input()` and this
+    /// stays zeroed.
+    reconnect: ReconnectState,
+    cwt_ring: std::collections::VecDeque<f32>,
+    cqt_ring: std::collections::VecDeque<f32>,
+    reass_ring: std::collections::VecDeque<f32>,
+    /// Sliding ring for the FFT path so refresh cadence (`cur_interval`)
+    /// is decoupled from capture-window duration (`cur_fft_n / sr`).
+    fft_ring: std::collections::VecDeque<f32>,
+    lf: LfState,
+    /// Time-integration state for the `fractional_octave_leq` sidecar
+    /// frame. `None` until the first fractional_octave frame at the
+    /// current mode + band count arrives.
+    integrator: Option<Integrator>,
+    last_frac_ts: Option<std::time::Instant>,
+    /// BS.1770-5 / R128 mono-weighted loudness, emitted as a
+    /// `measurement/loudness` sidecar frame each tick.
+    loudness: LoudnessState,
+}
+
+/// Ring capacities for one channel. They come from the worker rather
+/// than being recomputed here because the same values also drive the
+/// per-tick trim conditions, and each is derived from the engine's `sr`,
+/// which is only known after `eng.start()`.
+struct RingCaps {
+    cwt: usize,
+    cqt: usize,
+    reass: usize,
+}
+
+impl ChannelState {
+    /// The ring a given ring-buffered mode fills.
+    fn ring_mut(&mut self, kind: RingKind) -> &mut std::collections::VecDeque<f32> {
+        match kind {
+            RingKind::Cwt => &mut self.cwt_ring,
+            RingKind::Cqt => &mut self.cqt_ring,
+            RingKind::Reassigned => &mut self.reass_ring,
+        }
+    }
+
+    fn new(
+        channel: u32,
+        in_port: String,
+        out_ch: u32,
+        sr: u32,
+        freq_hz: f64,
+        caps: &RingCaps,
+    ) -> Self {
+        let cal = Calibration::load(out_ch, channel, None).ok().flatten();
+        let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
+        let mic_curve = cal.as_ref().and_then(|c| c.mic_response.clone());
+        let loudness_fir = mic_curve
+            .as_ref()
+            .map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS));
+        Self {
+            channel,
+            in_port,
+            cal,
+            spl_offset,
+            mic_curve,
+            loudness_fir,
+            current_freq: freq_hz,
+            reconnect: ReconnectState::new(),
+            cwt_ring: std::collections::VecDeque::with_capacity(caps.cwt),
+            cqt_ring: std::collections::VecDeque::with_capacity(caps.cqt),
+            reass_ring: std::collections::VecDeque::with_capacity(caps.reass),
+            fft_ring: std::collections::VecDeque::with_capacity(131_072),
+            lf: LfState::new(),
+            integrator: None,
+            last_frac_ts: None,
+            loudness: LoudnessState::new_mono(sr)
+                .expect("sample_rate > 0 guaranteed by engine.sample_rate()"),
+        }
+    }
+}
+
 pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "monitor_spectrum");
     cfg_guard!(state);
@@ -427,24 +852,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let band_weighting_shared = state.band_weighting.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
-        let cals: Vec<Option<Calibration>> = channels_worker
-            .iter()
-            .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
-            .collect();
-        // Per-channel SPL offset (= 94 - mic_sens_dbfs); `None` when the
-        // channel hasn't been pistonphone-calibrated. Cached once at start
-        // — re-running `calibrate_spl` requires a `monitor` restart, same
-        // as voltage cal changes need today.
-        let spl_offsets: Vec<Option<f64>> = cals
-            .iter()
-            .map(|c| c.as_ref().and_then(Calibration::spl_offset_db))
-            .collect();
-        // Per-channel mic frequency-response curves (cloned out of `cals`
-        // for cheap per-tick lookup). Same staleness caveat as above.
-        let mic_curves: Vec<Option<ac_core::shared::calibration::MicResponse>> = cals
-            .iter()
-            .map(|c| c.as_ref().and_then(|c| c.mic_response.clone()))
-            .collect();
         let mut eng = make_engine(fake);
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
@@ -473,42 +880,12 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             }
         }
         let sr = eng.sample_rate();
-        // Per-channel mic-curve FIRs for the loudness path (#104). One
-        // FIR per channel, built once at start when the curve is loaded,
-        // bypassed when no curve or when the global toggle is off. The
-        // FIR runs *before* K-weighting / dBTP so LKFS reflects the
-        // mic-corrected acoustic level.
-        let mut loudness_firs: Vec<Option<MicCurveFir>> = mic_curves
-            .iter()
-            .map(|c| {
-                c.as_ref()
-                    .map(|curve| MicCurveFir::new(curve, sr, DEFAULT_N_TAPS))
-            })
-            .collect();
-        let mut current_freqs: Vec<f64> = vec![freq_hz; channels_worker.len()];
-        // `eng.xruns()` is already a cumulative count for this engine
-        // session (see `jack_backend.rs`'s `SharedState::xruns`), so every
-        // read below assigns rather than accumulates — summing it across
-        // per-tick, per-channel reads would multiply a handful of real
-        // xruns into thousands over a long monitor session. Always
-        // assigned before use (each analysis-mode branch below reads
-        // `eng.xruns()` before any frame referencing `xruns_total` is
-        // built), so no dead initial value is needed.
-        let mut xruns_total: u32;
         // Per-tick monotonic counter shared across all channels in the
         // tick. Phase 0b: the UI's Goniometer / PhaseScope3D pair L and
         // R scope frames by `frame_idx`, so it MUST increment exactly
         // once per tick — not once per (tick, channel). Wraps on u64
         // overflow (~600 years at 1 kHz tick rate; not a real concern).
         let mut frame_idx: u64 = 0;
-
-        // #93: per-channel reconnect-failure state for the multi-channel
-        // path. Single-channel never touches `eng.reconnect_input()` and
-        // these slots stay zeroed.
-        let mut reconnect_states: Vec<ReconnectState> = channels_worker
-            .iter()
-            .map(|_| ReconnectState::new())
-            .collect();
 
         // CWT state: recomputed when sigma/n_scales change.
         let mut cwt_sigma = *cwt_sigma_shared.lock().unwrap();
@@ -532,10 +909,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         // Floor at 16 ms (display refresh) and ceil at 100 ms so a wild
         // user override doesn't break the sliding-ring assumption.
         let ring_cap = (sr as f64 * 0.15).ceil() as usize; // 0.15 s — enough for 20 Hz
-        let mut cwt_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
-            .iter()
-            .map(|_| std::collections::VecDeque::with_capacity(ring_cap))
-            .collect();
         let mut cwt_log_counter = 0u32;
         // Reused across every CWT tick so morlet_cwt_into doesn't allocate
         // a fresh Vec each call (prev ~3.5% of CPU in madvise / allocator).
@@ -559,10 +932,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         );
         let cqt_kernels =
             ac_core::visualize::cqt::build_kernels(&cqt_freqs, sr, cqt_bpo, cqt_ring_cap);
-        let mut cqt_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
-            .iter()
-            .map(|_| std::collections::VecDeque::with_capacity(cqt_ring_cap))
-            .collect();
         let mut cqt_mags: Vec<f32> = Vec::with_capacity(cqt_freqs.len());
         let mut cqt_log_counter = 0u32;
 
@@ -583,62 +952,30 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             ac_core::visualize::reassigned::default_f_max(sr),
         );
         let reass_freqs_out: Vec<f32> = reass_kernels.freqs_out.clone();
-        let mut reass_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
-            .iter()
-            .map(|_| std::collections::VecDeque::with_capacity(reass_n))
-            .collect();
         let mut reass_mags: Vec<f32> = Vec::with_capacity(reass_n_out);
         let mut reass_log_counter = 0u32;
 
-        // Sliding ring buffer for single-channel FFT path so refresh cadence
-        // (`cur_interval`) can run faster than capture-window duration
-        // (`cur_fft_n / sr`). Each tick pulls just the new samples that
-        // arrived since the last tick, appends them, trims to the current
-        // FFT-N, and analyses the full ring.
-        let single_channel = channels_worker.len() == 1;
-        let mut fft_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
-            .iter()
-            .map(|_| std::collections::VecDeque::with_capacity(131_072))
-            .collect();
-
-        // Dual-resolution low-frequency path (#142). A second, longer ring
-        // feeds an `lf_fft_n`-point FFT used only below `crossover_hz`; the
-        // short `fft_rings` above keep driving the high band at the live
-        // refresh rate. The LF spectrum is recomputed every `LF_OVERLAP`-hop
-        // (`(1 - LF_OVERLAP) * lf_fft_n / sr`, #173) rather than once per
-        // full block, and each new raw recompute is smoothed through a
-        // power-domain EMA (`lf_ema`) before caching — see `LF_OVERLAP` /
-        // `LF_AVG_TAU_S` above. `lf_spec_cache` holds the most recent
-        // smoothed LF linear half-spectrum per channel (`None` until its
-        // ring first fills).
-        let mut lf_fft_rings: Vec<std::collections::VecDeque<f32>> = channels_worker
-            .iter()
-            .map(|_| std::collections::VecDeque::with_capacity(131_072))
-            .collect();
-        let mut lf_spec_cache: Vec<Option<Vec<f64>>> = vec![None; channels_worker.len()];
-        let mut lf_ticks_since_recompute: Vec<u32> = vec![u32::MAX; channels_worker.len()];
-        let mut lf_ema: Vec<Option<EmaIntegrator>> = vec![None; channels_worker.len()];
-        let mut lf_ema_last_ts: Vec<Option<std::time::Instant>> = vec![None; channels_worker.len()];
-
-        // Per-channel time-integration state for the `fractional_octave_leq`
-        // sidecar frame. `None` until the first fractional_octave frame at
-        // the current mode + band count arrives. Reset on mode/band-count
-        // change; Leq also reset on the `leq_reset_request` flag.
-        let mut integrators: Vec<Option<Integrator>> =
-            (0..channels_worker.len()).map(|_| None).collect();
-        let mut last_frac_ts: Vec<Option<std::time::Instant>> = vec![None; channels_worker.len()];
+        // Integrator state is reset on mode/band-count change; Leq also
+        // resets on the `leq_reset_request` flag, loudness on
+        // `loudness_reset_request`.
         let mut cur_ti_mode: String = time_integration_shared.lock().unwrap().clone();
 
-        // Per-channel BS.1770-5 / R128 loudness state — one mono-weighted
-        // LoudnessState per monitored channel. Emits a `measurement/loudness`
-        // sidecar frame each tick. Reset on `loudness_reset_request`.
-        let mut loudness: Vec<LoudnessState> = channels_worker
+        // One state record per monitored channel — every per-channel ring,
+        // calibration and integrator lives here. Built after `eng.start()`
+        // because each ring capacity is derived from the engine's `sr`.
+        let ring_caps = RingCaps {
+            cwt: ring_cap,
+            cqt: cqt_ring_cap,
+            reass: reass_n,
+        };
+        let mut channel_states: Vec<ChannelState> = channels_worker
             .iter()
-            .map(|_| {
-                LoudnessState::new_mono(sr)
-                    .expect("sample_rate > 0 guaranteed by engine.sample_rate()")
+            .zip(in_ports_worker.iter())
+            .map(|(&channel, in_port)| {
+                ChannelState::new(channel, in_port.clone(), out_ch, sr, freq_hz, &ring_caps)
             })
             .collect();
+        let single_channel = channel_states.len() == 1;
 
         while !stop.load(Ordering::Relaxed) {
             let tick_start = std::time::Instant::now();
@@ -649,10 +986,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             // the loudness/spectrum branches stay as-is; only scope
             // frames need tick-wide alignment.
             frame_idx = frame_idx.wrapping_add(1);
-            let tick_ts_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
+            let tick_ts_ns = now_ns();
             let (cur_interval, cur_fft_n, cur_lf_fft_n, cur_crossover_hz) = {
                 let mp = monitor_params_shared.lock().unwrap();
                 (mp.interval, mp.fft_n, mp.lf_fft_n, mp.crossover_hz)
@@ -675,25 +1009,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             // Time-integration bookkeeping — run once per tick.
             let new_ti_mode = time_integration_shared.lock().unwrap().clone();
             if new_ti_mode != cur_ti_mode {
-                for slot in integrators.iter_mut() {
-                    *slot = None;
-                }
-                for slot in last_frac_ts.iter_mut() {
-                    *slot = None;
+                for ch in channel_states.iter_mut() {
+                    ch.integrator = None;
+                    ch.last_frac_ts = None;
                 }
                 cur_ti_mode = new_ti_mode;
             }
             if leq_reset_shared.swap(false, Ordering::Relaxed) {
-                for i in integrators.iter_mut().flatten() {
-                    i.reset_if_leq();
-                }
-                for slot in last_frac_ts.iter_mut() {
-                    *slot = None;
+                for ch in channel_states.iter_mut() {
+                    if let Some(i) = ch.integrator.as_mut() {
+                        i.reset_if_leq();
+                    }
+                    ch.last_frac_ts = None;
                 }
             }
             if loudness_reset_shared.swap(false, Ordering::Relaxed) {
-                for l in loudness.iter_mut() {
-                    l.reset();
+                for ch in channel_states.iter_mut() {
+                    ch.loudness.reset();
                 }
             }
 
@@ -716,14 +1048,34 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 }
             }
 
-            for (idx, &channel) in channels_worker.iter().enumerate() {
+            // Wire identity + per-tick values every channel shares. The
+            // mic-correction toggle is sampled once per tick so all of a
+            // tick's frames agree on it; before, each branch re-read the
+            // atomic and one channel could disagree with the next.
+            let ctx = TickCtx {
+                pub_tx: &pub_tx,
+                n_channels,
+                sr,
+                frame_idx,
+                tick_ts_ns,
+                mic_corr_enabled: mic_corr_enabled.load(Ordering::Relaxed),
+                // Pace the ring-buffered modes to the UI's requested
+                // interval, clamped to [16 ms, 100 ms]. Pre-#109 this was
+                // hardcoded 20 ms regardless of `--max-fps`, so CWT
+                // emitted at 50 fps even when the UI was capped at 30 —
+                // wasted work on both sides.
+                tick_secs: cur_interval.clamp(0.016, 0.100),
+            };
+
+            for ch in channel_states.iter_mut() {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                if channels_worker.len() > 1 {
-                    if let Err(e) = eng.reconnect_input(&in_ports_worker[idx]) {
+                let channel = ch.channel;
+                if !single_channel {
+                    if let Err(e) = eng.reconnect_input(&ch.in_port) {
                         let now = std::time::Instant::now();
-                        let st = &mut reconnect_states[idx];
+                        let st = &mut ch.reconnect;
                         st.note_failure(now);
                         if st.should_give_up(now) {
                             let outage_s = st
@@ -761,59 +1113,24 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         }
                         continue;
                     }
-                    reconnect_states[idx].note_success();
+                    ch.reconnect.note_success();
                     eng.flush_capture();
                 }
                 if is_cwt {
-                    // Pace the capture tick to the UI's requested
-                    // interval, clamped to [16 ms, 100 ms]. Pre-#109 this
-                    // was hardcoded 20 ms regardless of `--max-fps`,
-                    // so CWT emitted at 50 fps even when the UI was
-                    // capped at 30 — wasted work on both sides.
-                    let cwt_tick = cur_interval.clamp(0.016, 0.100);
-                    let samples = match eng.capture_block(cwt_tick) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!("capture error on ch{channel}: {e}"),
-                                }),
-                            );
-                            return;
-                        }
+                    let xruns_total = match capture_into_ring(
+                        eng.as_mut(),
+                        ch,
+                        &ctx,
+                        RingKind::Cwt,
+                        ring_cap,
+                        CWT_MIN_FILL,
+                    ) {
+                        RingTick::Ready { xruns } => xruns,
+                        RingTick::NotReady => continue,
+                        RingTick::Failed => return,
                     };
-                    xruns_total = eng.xruns();
-                    // Feed the raw capture into the loudness meter before
-                    // any downstream consumers touch it.
-                    push_loudness_with_optional_fir(
-                        &mut loudness[idx],
-                        &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed),
-                        &samples,
-                    );
-                    emit_scope_frame(
-                        &pub_tx,
-                        channel,
-                        n_channels,
-                        sr,
-                        &samples,
-                        frame_idx,
-                        tick_ts_ns,
-                        xruns_total,
-                    );
-                    let ring = &mut cwt_rings[idx];
-                    ring.extend(samples.iter());
-                    while ring.len() > ring_cap {
-                        ring.pop_front();
-                    }
-                    if ring.len() < 256 {
-                        continue;
-                    }
                     let t0 = std::time::Instant::now();
-                    let buf = ring.make_contiguous();
+                    let buf = ch.cwt_ring.make_contiguous();
                     ac_core::visualize::cwt::morlet_cwt_into(
                         buf,
                         sr,
@@ -821,49 +1138,21 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                         cwt_sigma,
                         &mut cwt_mags,
                     );
-                    cwt_log_counter += 1;
-                    if cwt_log_counter % 50 == 1 {
-                        eprintln!(
-                            "cwt ch{channel}: {:.1}ms, ring={}, scales={}",
-                            t0.elapsed().as_secs_f64() * 1000.0,
-                            buf.len(),
-                            cwt_scales.len(),
-                        );
-                    }
-                    let ts_ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
-                    if mc_enabled {
-                        if let Some(curve) = &mic_curves[idx] {
-                            apply_mic_curve_inplace_f32(curve, &cwt_freqs, &mut cwt_mags);
-                        }
-                    }
-                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
-                    let frame = json!({
-                        "type":            "visualize/cwt",
-                        "cmd":             "monitor_spectrum",
-                        "channel":         channel,
-                        "n_channels":      n_channels,
-                        "sr":              sr,
-                        "magnitudes":      &cwt_mags,
-                        "frequencies":     cwt_freqs,
-                        "spl_offset_db":   spl_offsets[idx],
-                        "mic_correction":  mc_tag,
-                        "timestamp":       ts_ns,
-                        "xruns":           xruns_total,
-                    });
-                    send_pub(&pub_tx, "data", &frame);
-                    emit_loudness_frame(
-                        &pub_tx,
+                    log_transform_time(
+                        &mut cwt_log_counter,
+                        "cwt",
                         channel,
-                        n_channels,
-                        sr,
-                        &loudness[idx],
-                        spl_offsets[idx],
-                        mc_tag,
-                        ts_ns,
+                        t0,
+                        buf.len(),
+                        cwt_scales.len(),
+                    );
+                    let (ts_ns, mc_tag) = emit_ring_frames(
+                        ch,
+                        &ctx,
+                        "visualize/cwt",
+                        &cwt_freqs,
+                        &mut cwt_mags,
+                        &[],
                         xruns_total,
                     );
                     // Optional fractional-octave aggregation of the same
@@ -903,7 +1192,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             "weighting":      weighting_tag,
                             "freqs":          band_centres,
                             "spectrum":       band_levels.clone(),
-                            "spl_offset_db":  spl_offsets[idx],
+                            "spl_offset_db":  ch.spl_offset,
                             "mic_correction": mc_tag,
                             "timestamp":      ts_ns,
                             "xruns":          xruns_total,
@@ -912,7 +1201,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
                         if cur_ti_mode != "off" {
                             let n_bands = band_levels.len();
-                            let slot = &mut integrators[idx];
+                            let slot = &mut ch.integrator;
                             // Re-init if the band count changed (e.g. live
                             // ioct_bpo toggle) or if this channel hasn't
                             // been primed yet.
@@ -922,15 +1211,16 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .unwrap_or(true)
                             {
                                 *slot = Integrator::for_mode(&cur_ti_mode, n_bands);
-                                last_frac_ts[idx] = None;
+                                ch.last_frac_ts = None;
                             }
                             if let Some(integ) = slot.as_mut() {
                                 let now = std::time::Instant::now();
-                                let dt = last_frac_ts[idx]
+                                let dt = ch
+                                    .last_frac_ts
                                     .map(|t| now.duration_since(t).as_secs_f64())
                                     .unwrap_or(cur_interval)
                                     .max(1e-6);
-                                last_frac_ts[idx] = Some(now);
+                                ch.last_frac_ts = Some(now);
                                 let levels_f64: Vec<f64> =
                                     band_levels.iter().map(|&v| v as f64).collect();
                                 let integrated = integ.update(&levels_f64, dt);
@@ -953,7 +1243,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     "duration_s":     if dur_s.is_finite() { json!(dur_s) } else { Value::Null },
                                     "freqs":          band_centres,
                                     "spectrum":       integrated,
-                                    "spl_offset_db":  spl_offsets[idx],
+                                    "spl_offset_db":  ch.spl_offset,
                                     "mic_correction": mc_tag,
                                     "timestamp":      ts_ns,
                                     "xruns":          xruns_total,
@@ -965,193 +1255,79 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     continue;
                 }
                 if is_cqt {
-                    let cqt_tick = cur_interval.clamp(0.016, 0.100);
-                    let samples = match eng.capture_block(cqt_tick) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!("capture error on ch{channel}: {e}"),
-                                }),
-                            );
-                            return;
-                        }
+                    // The kernel for the lowest bin needs the full ring, so
+                    // ticks are skipped until it has filled that far; the
+                    // bins above it produce earlier, but a partial column
+                    // would confuse the waterfall.
+                    let xruns_total = match capture_into_ring(
+                        eng.as_mut(),
+                        ch,
+                        &ctx,
+                        RingKind::Cqt,
+                        cqt_ring_cap,
+                        cqt_kernels.max_kernel_len(),
+                    ) {
+                        RingTick::Ready { xruns } => xruns,
+                        RingTick::NotReady => continue,
+                        RingTick::Failed => return,
                     };
-                    xruns_total = eng.xruns();
-                    push_loudness_with_optional_fir(
-                        &mut loudness[idx],
-                        &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed),
-                        &samples,
-                    );
-                    emit_scope_frame(
-                        &pub_tx,
-                        channel,
-                        n_channels,
-                        sr,
-                        &samples,
-                        frame_idx,
-                        tick_ts_ns,
-                        xruns_total,
-                    );
-                    let ring = &mut cqt_rings[idx];
-                    ring.extend(samples.iter());
-                    while ring.len() > cqt_ring_cap {
-                        ring.pop_front();
-                    }
-                    // The kernel for the lowest bin needs the full ring.
-                    // Skip ticks until the ring has filled enough that the
-                    // lowest kernel produces a finite reading; the bins
-                    // above it produce earlier but a partial column would
-                    // confuse the waterfall.
-                    if ring.len() < cqt_kernels.max_kernel_len() {
-                        continue;
-                    }
                     let t0 = std::time::Instant::now();
-                    let buf = ring.make_contiguous();
+                    let buf = ch.cqt_ring.make_contiguous();
                     ac_core::visualize::cqt::cqt_into(buf, &cqt_kernels, &mut cqt_mags);
-                    cqt_log_counter += 1;
-                    if cqt_log_counter % 50 == 1 {
-                        eprintln!(
-                            "cqt ch{channel}: {:.1}ms, ring={}, bins={}",
-                            t0.elapsed().as_secs_f64() * 1000.0,
-                            buf.len(),
-                            cqt_freqs.len(),
-                        );
-                    }
-                    let ts_ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
-                    if mc_enabled {
-                        if let Some(curve) = &mic_curves[idx] {
-                            apply_mic_curve_inplace_f32(curve, &cqt_freqs, &mut cqt_mags);
-                        }
-                    }
-                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
-                    let frame = json!({
-                        "type":           "visualize/cqt",
-                        "cmd":            "monitor_spectrum",
-                        "channel":        channel,
-                        "n_channels":     n_channels,
-                        "sr":             sr,
-                        "bpo":            cqt_bpo,
-                        "magnitudes":     &cqt_mags,
-                        "frequencies":    cqt_freqs,
-                        "spl_offset_db":  spl_offsets[idx],
-                        "mic_correction": mc_tag,
-                        "timestamp":      ts_ns,
-                        "xruns":          xruns_total,
-                    });
-                    send_pub(&pub_tx, "data", &frame);
-                    emit_loudness_frame(
-                        &pub_tx,
+                    log_transform_time(
+                        &mut cqt_log_counter,
+                        "cqt",
                         channel,
-                        n_channels,
-                        sr,
-                        &loudness[idx],
-                        spl_offsets[idx],
-                        mc_tag,
-                        ts_ns,
+                        t0,
+                        buf.len(),
+                        cqt_freqs.len(),
+                    );
+                    emit_ring_frames(
+                        ch,
+                        &ctx,
+                        "visualize/cqt",
+                        &cqt_freqs,
+                        &mut cqt_mags,
+                        &[("bpo", json!(cqt_bpo))],
                         xruns_total,
                     );
                     continue;
                 }
                 if is_reassigned {
-                    let reass_tick = cur_interval.clamp(0.016, 0.100);
-                    let samples = match eng.capture_block(reass_tick) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!("capture error on ch{channel}: {e}"),
-                                }),
-                            );
-                            return;
-                        }
+                    let xruns_total = match capture_into_ring(
+                        eng.as_mut(),
+                        ch,
+                        &ctx,
+                        RingKind::Reassigned,
+                        reass_n,
+                        reass_n,
+                    ) {
+                        RingTick::Ready { xruns } => xruns,
+                        RingTick::NotReady => continue,
+                        RingTick::Failed => return,
                     };
-                    xruns_total = eng.xruns();
-                    push_loudness_with_optional_fir(
-                        &mut loudness[idx],
-                        &mut loudness_firs[idx],
-                        mic_corr_enabled.load(Ordering::Relaxed),
-                        &samples,
-                    );
-                    emit_scope_frame(
-                        &pub_tx,
-                        channel,
-                        n_channels,
-                        sr,
-                        &samples,
-                        frame_idx,
-                        tick_ts_ns,
-                        xruns_total,
-                    );
-                    let ring = &mut reass_rings[idx];
-                    ring.extend(samples.iter());
-                    while ring.len() > reass_n {
-                        ring.pop_front();
-                    }
-                    if ring.len() < reass_n {
-                        continue;
-                    }
                     let t0 = std::time::Instant::now();
-                    let buf = ring.make_contiguous();
+                    let buf = ch.reass_ring.make_contiguous();
                     ac_core::visualize::reassigned::reassigned_into(
                         buf,
                         &reass_kernels,
                         &mut reass_mags,
                     );
-                    reass_log_counter += 1;
-                    if reass_log_counter % 50 == 1 {
-                        eprintln!(
-                            "reassigned ch{channel}: {:.1}ms, n={}, bins={}",
-                            t0.elapsed().as_secs_f64() * 1000.0,
-                            buf.len(),
-                            reass_freqs_out.len(),
-                        );
-                    }
-                    let ts_ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
-                    if mc_enabled {
-                        if let Some(curve) = &mic_curves[idx] {
-                            apply_mic_curve_inplace_f32(curve, &reass_freqs_out, &mut reass_mags);
-                        }
-                    }
-                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
-                    let frame = json!({
-                        "type":           "visualize/reassigned",
-                        "cmd":            "monitor_spectrum",
-                        "channel":        channel,
-                        "n_channels":     n_channels,
-                        "sr":             sr,
-                        "magnitudes":     &reass_mags,
-                        "frequencies":    reass_freqs_out,
-                        "spl_offset_db":  spl_offsets[idx],
-                        "mic_correction": mc_tag,
-                        "timestamp":      ts_ns,
-                        "xruns":          xruns_total,
-                    });
-                    send_pub(&pub_tx, "data", &frame);
-                    emit_loudness_frame(
-                        &pub_tx,
+                    log_transform_time(
+                        &mut reass_log_counter,
+                        "reassigned",
                         channel,
-                        n_channels,
-                        sr,
-                        &loudness[idx],
-                        spl_offsets[idx],
-                        mc_tag,
-                        ts_ns,
+                        t0,
+                        buf.len(),
+                        reass_freqs_out.len(),
+                    );
+                    emit_ring_frames(
+                        ch,
+                        &ctx,
+                        "visualize/reassigned",
+                        &reass_freqs_out,
+                        &mut reass_mags,
+                        &[],
                         xruns_total,
                     );
                     continue;
@@ -1163,46 +1339,29 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // clearing drain on JACK, falls back to capture_block
                 // elsewhere); multi-channel must use block capture because
                 // `reconnect_input` clears the ring on every switch.
-                let per_ch_budget = (cur_interval / channels_worker.len() as f64).max(0.002);
+                let per_ch_budget = (cur_interval / n_channels as f64).max(0.002);
                 let budget_samples = capture_budget_samples(per_ch_budget, sr);
-                let new = if single_channel {
-                    match eng.capture_available(budget_samples) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!("capture error on ch{channel}: {e}"),
-                                }),
-                            );
-                            return;
-                        }
-                    }
+                let captured = if single_channel {
+                    eng.capture_available(budget_samples)
                 } else {
-                    match eng.capture_block(budget_samples as f64 / sr as f64) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            send_pub(
-                                &pub_tx,
-                                "error",
-                                &json!({
-                                    "cmd":     "monitor_spectrum",
-                                    "message": format!("capture error on ch{channel}: {e}"),
-                                }),
-                            );
-                            return;
-                        }
-                    }
+                    eng.capture_block(budget_samples as f64 / sr as f64)
                 };
-                xruns_total = eng.xruns();
+                let Some(new) = capture_or_report(captured, &pub_tx, channel) else {
+                    return;
+                };
+                // `eng.xruns()` is already a cumulative count for this
+                // engine session (see `jack_backend.rs`'s
+                // `SharedState::xruns`), so this assigns rather than
+                // accumulates — summing it across per-tick, per-channel
+                // reads would multiply a handful of real xruns into
+                // thousands over a long monitor session.
+                let xruns_total = eng.xruns();
                 // Loudness runs on the raw capture, independent of the
                 // FFT-N sliding ring.
                 push_loudness_with_optional_fir(
-                    &mut loudness[idx],
-                    &mut loudness_firs[idx],
-                    mic_corr_enabled.load(Ordering::Relaxed),
+                    &mut ch.loudness,
+                    &mut ch.loudness_fir,
+                    ctx.mic_corr_enabled,
                     &new,
                 );
                 emit_scope_frame(
@@ -1215,7 +1374,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                     tick_ts_ns,
                     xruns_total,
                 );
-                let ring = &mut fft_rings[idx];
+                let ring = &mut ch.fft_ring;
                 ring.extend(new.iter());
                 while ring.len() > cur_fft_n as usize {
                     ring.pop_front();
@@ -1230,13 +1389,13 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 // cadence. The cached LF half-spectrum is merged below the
                 // crossover; above it the live `r.spectrum` is untouched.
                 if lf_band_enabled {
-                    let lf_ring = &mut lf_fft_rings[idx];
+                    let lf_ring = &mut ch.lf.ring;
                     lf_ring.extend(new.iter());
                     while lf_ring.len() > cur_lf_fft_n as usize {
                         lf_ring.pop_front();
                     }
                     if lf_ring.len() >= cur_lf_fft_n as usize {
-                        let counter = &mut lf_ticks_since_recompute[idx];
+                        let counter = &mut ch.lf.ticks_since_recompute;
                         if *counter >= lf_recompute_every {
                             let lf_buf = lf_ring.make_contiguous();
                             let (lf_spec, _) =
@@ -1246,21 +1405,23 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             // change) so stale state never gets fed a
                             // mismatched vector length.
                             let n_bins = lf_spec.len();
-                            let ema_slot = &mut lf_ema[idx];
+                            let ema_slot = &mut ch.lf.ema;
                             if ema_slot
                                 .as_ref()
                                 .map(|e| e.state_len() != n_bins)
                                 .unwrap_or(true)
                             {
                                 *ema_slot = Some(EmaIntegrator::new(LF_AVG_TAU_S, n_bins));
-                                lf_ema_last_ts[idx] = None;
+                                ch.lf.ema_last_ts = None;
                             }
                             let now = std::time::Instant::now();
-                            let dt = lf_ema_last_ts[idx]
+                            let dt = ch
+                                .lf
+                                .ema_last_ts
                                 .map(|t| now.duration_since(t).as_secs_f64())
                                 .unwrap_or(cur_lf_fft_n as f64 * (1.0 - LF_OVERLAP) / sr as f64)
                                 .max(1e-6);
-                            lf_ema_last_ts[idx] = Some(now);
+                            ch.lf.ema_last_ts = Some(now);
                             let raw_db: Vec<f64> =
                                 lf_spec.iter().map(|&a| 20.0 * a.log10()).collect();
                             let smoothed_db = ema_slot.as_mut().unwrap().update(&raw_db, dt);
@@ -1268,50 +1429,36 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                 .iter()
                                 .map(|&db| 10f64.powf(db / 20.0))
                                 .collect();
-                            lf_spec_cache[idx] = Some(smoothed_amp);
+                            ch.lf.spec_cache = Some(smoothed_amp);
                             *counter = 0;
                         } else {
                             *counter = counter.saturating_add(1);
                         }
                     }
-                } else if !lf_fft_rings[idx].is_empty() || lf_spec_cache[idx].is_some() {
+                } else if ch.lf.is_stale() {
                     // LF band disabled (live N caught up to LF N) — drop stale
                     // state so a later re-enable rebuilds from fresh capture.
-                    lf_fft_rings[idx].clear();
-                    lf_spec_cache[idx] = None;
-                    lf_ticks_since_recompute[idx] = u32::MAX;
-                    lf_ema[idx] = None;
-                    lf_ema_last_ts[idx] = None;
+                    ch.lf.clear();
                 }
                 let lf_spec_for_merge: Option<&[f64]> = if lf_band_enabled {
-                    lf_spec_cache[idx].as_deref()
+                    ch.lf.spec_cache.as_deref()
                 } else {
                     None
                 };
 
                 {
                     let analyze_result =
-                        ac_core::measurement::thd::analyze(samples, sr, current_freqs[idx], 10);
-                    let mc_enabled = mic_corr_enabled.load(Ordering::Relaxed);
-                    let mc_tag = mic_correction_tag(mic_curves[idx].is_some(), mc_enabled);
-                    let frame = match analyze_result {
+                        ac_core::measurement::thd::analyze(samples, sr, ch.current_freq, 10);
+                    let mc_enabled = ctx.mic_corr_enabled;
+                    let mc_tag = mic_correction_tag(ch.mic_curve.is_some(), mc_enabled);
+                    let mut frame = match analyze_result {
                         Ok(r) => {
-                            current_freqs[idx] = r.fundamental_hz;
-                            let cal = cals[idx].as_ref();
-                            let in_dbu = cal
+                            ch.current_freq = r.fundamental_hz;
+                            let in_dbu = ch
+                                .cal
+                                .as_ref()
                                 .and_then(|c| c.in_vrms(r.linear_rms))
                                 .map(ac_core::shared::conversions::vrms_to_dbu);
-                            // Per-bin dBFS → dBu conversion offset:
-                            //   analog_vrms = sample_peak × cal_in / sqrt(2)   (sine assumption)
-                            //   dBu = dbfs_peak + 20·log10(cal_in / (sqrt(2)·dbu_ref))
-                            // UI overlays this on hover readouts so any cursor
-                            // position shows dBFS / dBu / dBV without a round-trip.
-                            let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
-                                20.0 * (v
-                                    / (std::f64::consts::SQRT_2
-                                        * ac_core::shared::conversions::get_dbu_ref()))
-                                .log10()
-                            });
                             // Parabolic-interpolated peaks on the linear FFT
                             // (before column aggregation), so the cursor can
                             // show scallop-corrected dBFS on hover. Threshold
@@ -1356,116 +1503,75 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             }
                             let peaks_json: Vec<serde_json::Value> =
                                 peaks.iter().map(|p| json!([p.freq_hz, p.dbfs])).collect();
-                            let sr_f = sr as f64;
-                            let (mut spec, freqs) = match lf_spec_for_merge {
-                                Some(lf) => {
-                                    ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
-                                        lf,
-                                        &r.spectrum,
-                                        sr_f,
-                                        cur_crossover_hz as f64,
-                                        20.0,
-                                        (sr_f / 2.0).max(21.0),
-                                        ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                    )
-                                }
-                                None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                    &r.spectrum,
-                                    sr_f,
-                                    20.0,
-                                    (sr_f / 2.0).max(21.0),
-                                    ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                ),
-                            };
-                            if mc_enabled {
-                                if let Some(curve) = &mic_curves[idx] {
-                                    apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
-                                }
-                            }
+                            let (spec, freqs) = spectrum_columns(
+                                &r.spectrum,
+                                lf_spec_for_merge,
+                                sr,
+                                cur_crossover_hz,
+                                ch,
+                                mc_enabled,
+                            );
+                            // THD analysis succeeded, so the frame carries
+                            // the tone readouts on top of the common
+                            // envelope built below.
                             json!({
-                                "type":             "visualize/spectrum",
-                                "cmd":              "monitor_spectrum",
-                                "channel":          channel,
-                                "n_channels":       n_channels,
-                                "freq_hz":          r.fundamental_hz,
-                                "sr":               sr,
                                 "freqs":            freqs,
                                 "spectrum":         spec,
+                                "freq_hz":          r.fundamental_hz,
                                 "peaks":            peaks_json,
                                 "fundamental_dbfs": r.fundamental_dbfs,
                                 "thd_pct":          r.thd_pct,
                                 "thdn_pct":         r.thdn_pct,
                                 "in_dbu":           in_dbu,
-                                "dbu_offset_db":    dbu_offset_db,
-                                "spl_offset_db":    spl_offsets[idx],
-                                "mic_correction":   mc_tag,
                                 "clipping":         r.clipping,
-                                "xruns":            xruns_total,
                             })
                         }
+                        // No resolvable fundamental — emit the plain
+                        // spectrum with none of the tone readouts.
                         Err(_) => {
-                            let cal = cals[idx].as_ref();
-                            let dbu_offset_db = cal.and_then(|c| c.vrms_at_0dbfs_in).map(|v| {
-                                20.0 * (v
-                                    / (std::f64::consts::SQRT_2
-                                        * ac_core::shared::conversions::get_dbu_ref()))
-                                .log10()
-                            });
-                            let (spec, _) =
-                                ac_core::visualize::spectrum::spectrum_only(samples, sr);
-                            let sr_f = sr as f64;
-                            let (mut spec, freqs) = match lf_spec_for_merge {
-                                Some(lf) => {
-                                    ac_core::visualize::aggregate::spectrum_to_columns_multiband_wire(
-                                        lf,
-                                        &spec,
-                                        sr_f,
-                                        cur_crossover_hz as f64,
-                                        20.0,
-                                        (sr_f / 2.0).max(21.0),
-                                        ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                    )
-                                }
-                                None => ac_core::visualize::aggregate::spectrum_to_columns_wire(
-                                    &spec,
-                                    sr_f,
-                                    20.0,
-                                    (sr_f / 2.0).max(21.0),
-                                    ac_core::visualize::aggregate::DEFAULT_WIRE_COLUMNS,
-                                ),
-                            };
-                            if mc_enabled {
-                                if let Some(curve) = &mic_curves[idx] {
-                                    apply_mic_curve_inplace_f64(curve, &freqs, &mut spec);
-                                }
-                            }
+                            let (raw, _) = ac_core::visualize::spectrum::spectrum_only(samples, sr);
+                            let (spec, freqs) = spectrum_columns(
+                                &raw,
+                                lf_spec_for_merge,
+                                sr,
+                                cur_crossover_hz,
+                                ch,
+                                mc_enabled,
+                            );
                             json!({
-                                "type":             "visualize/spectrum",
-                                "cmd":              "monitor_spectrum",
-                                "channel":          channel,
-                                "n_channels":       n_channels,
-                                "sr":               sr,
-                                "freqs":            freqs,
-                                "spectrum":         spec,
-                                "dbu_offset_db":    dbu_offset_db,
-                                "spl_offset_db":    spl_offsets[idx],
-                                "mic_correction":   mc_tag,
-                                "xruns":            xruns_total,
+                                "freqs":    freqs,
+                                "spectrum": spec,
                             })
                         }
                     };
+                    // Envelope common to both paths. `serde_json`'s Map is
+                    // a BTreeMap here (no `preserve_order` feature), so the
+                    // wire key order is sorted either way and merging the
+                    // two halves cannot reorder the frame.
+                    if let Some(obj) = frame.as_object_mut() {
+                        for (k, v) in [
+                            ("type", json!("visualize/spectrum")),
+                            ("cmd", json!("monitor_spectrum")),
+                            ("channel", json!(channel)),
+                            ("n_channels", json!(n_channels)),
+                            ("sr", json!(sr)),
+                            ("dbu_offset_db", json!(dbu_offset_db(ch.cal.as_ref()))),
+                            ("spl_offset_db", json!(ch.spl_offset)),
+                            ("mic_correction", json!(mc_tag)),
+                            ("xruns", json!(xruns_total)),
+                        ] {
+                            obj.insert(k.to_string(), v);
+                        }
+                    }
                     send_pub(&pub_tx, "data", &frame);
-                    let ts_ns = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
+                    let ts_ns = now_ns();
                     emit_loudness_frame(
                         &pub_tx,
                         channel,
                         n_channels,
                         sr,
-                        &loudness[idx],
-                        spl_offsets[idx],
+                        &ch.loudness,
+                        ch.spl_offset,
                         mc_tag,
                         ts_ns,
                         xruns_total,
