@@ -96,6 +96,16 @@ all of them, and QA's standards check keys off this:
 governs). Unsure between `tier-1` and anything else → `tier-1`; the cost is a
 standards check nobody needed, not a missed one.
 
+**An issue with no scope label is yours to fix, whatever else you were doing.**
+The label was introduced after these issues were filed, so most of the backlog
+predates it; an issue can also lose one when a human edits labels by hand. So
+this is not a one-off migration with an end date — treat a missing scope label
+the same whether the issue was opened a minute ago or a month ago. Set it and
+say so in a one-line comment. QA reads a missing label as `tier-1` and checks
+anyway, so this never blocks: you are converting a correct-but-expensive
+default into a cheap one, and that is worth exactly one line of comment, not a
+re-triage of the issue's spec.
+
 Then, additively — issue change what a user see (stdout format, new display
 field, `ac-scene` readout, axis label, banner or fault text) → also apply
 `needs-ux`. This is the same condition as category `output-format`, but not
