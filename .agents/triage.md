@@ -89,6 +89,13 @@ Then routing label:
 - Needs architect review → `needs-design`
 - Else → `ready-to-implement`
 
+Then exactly one scope label, on every issue — you are the only role that sees
+all of them, and QA's standards check keys off this:
+`tier-1` (`ac-core/measurement/`), `tier-2` (`ac-core/visualize/`), `scene`,
+`view`, or `scope-none` (daemon, CLI, wire, build, docs — nothing a standard
+governs). Unsure between `tier-1` and anything else → `tier-1`; the cost is a
+standards check nobody needed, not a missed one.
+
 Then, additively — issue change what a user see (stdout format, new display
 field, `ac-scene` readout, axis label, banner or fault text) → also apply
 `needs-ux`. This is the same condition as category `output-format`, but not
@@ -122,6 +129,7 @@ claim about how the code works.
 | `needs-design` | architect must review before implementation |
 | `needs-ux` | output surface change; ux must specify it before implementation |
 | `ready-to-implement` | spec complete, developer can pick up |
+| `tier-1` / `tier-2` / `scene` / `view` / `scope-none` | what the change touches; `tier-1` is what makes QA run the standards check |
 | `in-review` | PR open |
 | `blocked` | depends on something external |
 | `epic` | contains sub-issues |
