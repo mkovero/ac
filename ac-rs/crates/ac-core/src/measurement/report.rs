@@ -649,18 +649,7 @@ impl MeasurementReport {
             return None;
         }
         let window_len = linear_ir.len();
-        let (peak_index, peak_magnitude) =
-            linear_ir
-                .iter()
-                .enumerate()
-                .fold((0usize, 0.0_f64), |acc, (i, &v)| {
-                    let m = v.abs();
-                    if m > acc.1 {
-                        (i, m)
-                    } else {
-                        acc
-                    }
-                });
+        let (peak_index, peak_magnitude) = ir_peak(linear_ir);
 
         // `extract_irs` (`measurement::sweep`) centres the gate at the
         // sweep endpoint — the position an identity (zero-delay) system
@@ -670,66 +659,11 @@ impl MeasurementReport {
         let delay_samples = peak_index as i64 - centre as i64;
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
 
-        // Pre-impulse noise floor: everything strictly before the peak,
-        // minus a small guard band so the peak's own skirt doesn't bias
-        // the floor estimate upward.
-        let guard = (window_len / 32).max(8);
-        let pre_end = peak_index.saturating_sub(guard);
-        let pre_region = &linear_ir[..pre_end];
-        let pre_impulse_snr_db = if pre_region.is_empty() {
-            f64::INFINITY
-        } else {
-            let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
-            let rms = mean_sq.sqrt();
-            if rms > 0.0 {
-                20.0 * (peak_magnitude / rms).log10()
-            } else {
-                f64::INFINITY
-            }
-        };
-
-        // Prefer the gate the producer actually applied. #280 stores
-        // `f_low_hz` on the payload precisely so a reader does not
-        // recompute it; falling back to `window_len / sample_rate_hz`
-        // only covers legacy (v1-v3) reports, where no gate was recorded
-        // and the rectangular `extract_irs` window is the only gate that
-        // could have produced this payload.
-        let (gate_window_s, gate_f_low_hz, gate_window_kind) = match &payload.gate {
-            Some(g) => (g.gate_length_s, g.f_low_hz, g.window_kind.clone()),
-            None => {
-                let len_s = window_len as f64 / *sample_rate_hz as f64;
-                (len_s, 1.0 / len_s, "rectangular (not recorded)".to_string())
-            }
-        };
-
-        // `pre_impulse_snr_db` goes to +inf two different ways, and only
-        // one of them is a failure. A zero floor against a nonzero peak
-        // (`rms == 0.0`, `pre_region` nonempty) is the *best* possible
-        // capture — infinite SNR, not an unmeasurable one — and clears any
-        // finite threshold below, so it falls through to the ordinary
-        // threshold comparison rather than being special-cased out. What
-        // fails closed is the case with nothing to measure at all: an
-        // empty `pre_region` (the guard band consumed the whole pre-peak
-        // window) or a zero peak (nothing captured, so there is no signal
-        // to compare a floor against either) — absence of proof of a good
-        // floor is not the same as proof of one (#376).
-        let verdict = if peak_magnitude == 0.0 {
-            IrVerdict::Failed {
-                reason: "no signal captured (linear IR is all zero)".to_string(),
-            }
-        } else if pre_region.is_empty() {
-            IrVerdict::Failed {
-                reason: "no measurable pre-impulse floor (peak too close to \
-                         the start of the gated window)"
-                    .to_string(),
-            }
-        } else if pre_impulse_snr_db < PRE_IMPULSE_SNR_MIN_DB {
-            IrVerdict::Failed {
-                reason: "pre-impulse SNR below threshold".to_string(),
-            }
-        } else {
-            IrVerdict::Ok
-        };
+        let pre_region = pre_impulse_region(linear_ir, peak_index);
+        let pre_impulse_snr_db = pre_impulse_snr_db(pre_region, peak_magnitude);
+        let (gate_window_s, gate_f_low_hz, gate_window_kind) =
+            resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
+        let verdict = ir_verdict(peak_magnitude, pre_region, pre_impulse_snr_db);
 
         Some(IrStats {
             sample_rate_hz: *sample_rate_hz,
@@ -744,6 +678,105 @@ impl MeasurementReport {
             gate_window_kind,
             verdict,
         })
+    }
+}
+
+/// Index and magnitude of the largest-magnitude sample of a linear IR.
+/// Ties keep the earliest index.
+fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
+    linear_ir
+        .iter()
+        .enumerate()
+        .fold((0usize, 0.0_f64), |acc, (i, &v)| {
+            let m = v.abs();
+            if m > acc.1 {
+                (i, m)
+            } else {
+                acc
+            }
+        })
+}
+
+/// Pre-impulse noise floor region: everything strictly before the peak,
+/// minus a small guard band so the peak's own skirt doesn't bias the
+/// floor estimate upward. Empty when the guard band consumes the whole
+/// pre-peak window — which [`ir_verdict`] treats as a failure, not as a
+/// clean floor.
+fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64] {
+    let guard = (linear_ir.len() / 32).max(8);
+    &linear_ir[..peak_index.saturating_sub(guard)]
+}
+
+/// `20·log10(peak / rms(pre_region))`. `+inf` for an empty region (nothing
+/// to measure) and for a true-silent one (`rms == 0.0`); [`ir_verdict`] is
+/// what separates those two cases, since only the first is a failure.
+fn pre_impulse_snr_db(pre_region: &[f64], peak_magnitude: f64) -> f64 {
+    if pre_region.is_empty() {
+        return f64::INFINITY;
+    }
+    let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
+    let rms = mean_sq.sqrt();
+    if rms > 0.0 {
+        20.0 * (peak_magnitude / rms).log10()
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Gate duration, low-frequency limit and window shape for an IR payload.
+///
+/// Prefers the gate the producer actually applied. #280 stores `f_low_hz`
+/// on the payload precisely so a reader does not recompute it; falling
+/// back to `window_len / sample_rate_hz` only covers legacy (v1-v3)
+/// reports, where no gate was recorded and the rectangular `extract_irs`
+/// window is the only gate that could have produced this payload.
+fn resolve_gate(
+    gate: Option<&GateParams>,
+    window_len: usize,
+    sample_rate_hz: u32,
+) -> (f64, f64, String) {
+    match gate {
+        Some(g) => (g.gate_length_s, g.f_low_hz, g.window_kind.clone()),
+        None => {
+            let len_s = window_len as f64 / sample_rate_hz as f64;
+            (len_s, 1.0 / len_s, "rectangular (not recorded)".to_string())
+        }
+    }
+}
+
+/// Whether a capture's peak is trustworthy enough to present as a result
+/// (#376). Split out of [`MeasurementReport::ir_stats`] so this rule —
+/// the one `ac-cli` and `ac-scene` both read through
+/// [`IrStats::verdict`] — can be exercised directly, without assembling
+/// a whole report around it.
+///
+/// `snr_db` goes to +inf two different ways, and only one of them is a
+/// failure. A zero floor against a nonzero peak (`rms == 0.0`,
+/// `pre_region` nonempty) is the *best* possible capture — infinite SNR,
+/// not an unmeasurable one — and clears any finite threshold below, so it
+/// falls through to the ordinary threshold comparison rather than being
+/// special-cased out. What fails closed is the case with nothing to
+/// measure at all: an empty `pre_region` (the guard band consumed the
+/// whole pre-peak window) or a zero peak (nothing captured, so there is
+/// no signal to compare a floor against either) — absence of proof of a
+/// good floor is not the same as proof of one.
+fn ir_verdict(peak_magnitude: f64, pre_region: &[f64], snr_db: f64) -> IrVerdict {
+    if peak_magnitude == 0.0 {
+        IrVerdict::Failed {
+            reason: "no signal captured (linear IR is all zero)".to_string(),
+        }
+    } else if pre_region.is_empty() {
+        IrVerdict::Failed {
+            reason: "no measurable pre-impulse floor (peak too close to \
+                     the start of the gated window)"
+                .to_string(),
+        }
+    } else if snr_db < PRE_IMPULSE_SNR_MIN_DB {
+        IrVerdict::Failed {
+            reason: "pre-impulse SNR below threshold".to_string(),
+        }
+    } else {
+        IrVerdict::Ok
     }
 }
 
@@ -1174,6 +1207,43 @@ mod tests {
     }
 
     // ─── `IrStats::verdict` (#376) ─────────────────────────────────────
+    /// [`ir_verdict`] direct, without a report around it: the threshold is
+    /// a `<` on `PRE_IMPULSE_SNR_MIN_DB`, so a capture sitting exactly on
+    /// the floor passes and one a hair under it fails.
+    #[test]
+    fn ir_verdict_threshold_is_inclusive_at_the_floor() {
+        let floor = [0.0, 0.0, 0.0, 0.0];
+        assert_eq!(
+            ir_verdict(1.0, &floor, PRE_IMPULSE_SNR_MIN_DB),
+            IrVerdict::Ok
+        );
+        assert!(matches!(
+            ir_verdict(1.0, &floor, PRE_IMPULSE_SNR_MIN_DB - 0.001),
+            IrVerdict::Failed { .. }
+        ));
+    }
+
+    /// The two ways `snr_db` reaches `+inf` are not the same verdict: a
+    /// silent floor under a real peak is the best possible capture, while
+    /// an empty pre-impulse region means nothing was measured at all.
+    #[test]
+    fn ir_verdict_separates_a_silent_floor_from_an_unmeasured_one() {
+        assert_eq!(ir_verdict(1.0, &[0.0, 0.0], f64::INFINITY), IrVerdict::Ok);
+        assert!(matches!(
+            ir_verdict(1.0, &[], f64::INFINITY),
+            IrVerdict::Failed { .. }
+        ));
+    }
+
+    /// A zero peak fails ahead of every other branch — an all-zero IR has
+    /// no signal to compare a floor against, however clean the floor looks.
+    #[test]
+    fn ir_verdict_fails_a_zero_peak_before_reading_the_snr() {
+        assert!(matches!(
+            ir_verdict(0.0, &[0.0, 0.0], f64::INFINITY),
+            IrVerdict::Failed { .. }
+        ));
+    }
 
     #[test]
     fn ir_stats_verdict_ok_when_snr_clears_the_threshold() {
@@ -1382,162 +1452,19 @@ mod tests {
         assert_eq!(r, r2);
         let _ = std::fs::remove_file(&tmp);
     }
-
-    /// Every Tier 1 measurement module must emit a populated
-    /// `StandardsCitation` — non-empty `standard` and `clause`. Serialising a
-    /// report built from each `citation()` round-trips cleanly and survives
-    /// at the current `SCHEMA_VERSION`. See #72 for the audit workflow.
-    /// Every citation this workspace emits, in one place. Both citation
-    /// guards below read this list: kept separate, a new measurement
-    /// module added to one and forgotten in the other leaves that guard
-    /// green while silently covering less.
-    fn every_citation() -> [StandardsCitation; 9] {
-        [
-            crate::measurement::thd::citation(),
-            crate::measurement::filterbank::Filterbank::citation(),
-            crate::measurement::noise::citation(),
-            crate::measurement::weighting::WeightingFilter::citation(),
-            crate::measurement::sweep::citation(),
-            crate::measurement::sweep::farina_citation(),
-            crate::measurement::sweep::gated_response_citation(),
-            crate::measurement::ccir468::citation(),
-            crate::shared::reference_levels::citation(),
-        ]
-    }
-
+    /// A `StandardsCitation` from any Tier 1 measurement module survives a
+    /// full report round-trip at the current `SCHEMA_VERSION`. That the
+    /// citations are themselves populated and resolve to a held document is
+    /// `measurement::citation_audit`'s job, not this module's.
     #[test]
-    fn every_measurement_module_emits_populated_citation() {
-        let citations = every_citation();
-        for c in &citations {
-            assert!(!c.standard.is_empty(), "empty standard in {c:?}");
-            assert!(!c.clause.is_empty(), "empty clause in {c:?}");
-        }
-
-        // Round-trip each through a full MeasurementReport payload.
-        for c in citations {
+    fn citations_round_trip_through_a_report() {
+        for c in crate::measurement::citation_audit::every_citation() {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
             assert!(json.contains("\"schema_version\": 5"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
-        }
-    }
-
-    /// Maps one edition string (as it appears in a `citation().standard`
-    /// field, or one `; `-separated half of one) to the `stddocs/`-relative
-    /// path of the document it names. Single place this mapping lives —
-    /// see #313: it must not be re-derived per call site.
-    ///
-    /// Matches by prefix (not equality) because a `standard` field may
-    /// carry trailing qualifiers the citation owns (e.g. sweep.rs's
-    /// combined `citation()` appends "; ISO 18233:2006 Annex B
-    /// (normative)"). Returns `None` for any edition this map does not
-    /// recognise — that is the failure this guard exists to catch: a
-    /// citation naming an edition nobody holds.
-    fn standard_edition_to_stddocs_path(edition: &str) -> Option<&'static str> {
-        const KNOWN: &[(&str, &str)] = &[
-            ("IEC 61672-1:2013", "iec-full/IEC61672-1.pdf"),
-            ("IEC 60268-3:2018", "iec-full/IEC60268-3.pdf"),
-            ("IEC 61260-1:2014", "iec-full/IEC61260-1.pdf"),
-            ("ITU-R BS.468-4", "ITU-R BS.468-4.pdf"),
-            ("ITU-R BS.1770-5", "ITU-R BS.1770-5.pdf"),
-            ("AES17-2020", "iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf"),
-            (
-                "Farina, AES 108th Convention preprint #5093 (2000)",
-                "iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf",
-            ),
-            ("ISO 18233:2006", "iso-full/ISO18233.pdf"),
-            ("ISO 3382-1:2009", "iso-full/ISO3382-1.pdf"),
-            ("ISO 3382-2:2008", "iso-full/ISO3382-2.pdf"),
-        ];
-        KNOWN
-            .iter()
-            .find(|(key, _)| edition.starts_with(key))
-            .map(|(_, path)| *path)
-    }
-
-    /// A citation's `standard` field resolves only if every `; `-separated
-    /// half of it maps to a file that actually exists under `stddocs_root`.
-    fn citation_standard_resolves(standard: &str, stddocs_root: &Path) -> bool {
-        standard.split("; ").all(|edition| {
-            standard_edition_to_stddocs_path(edition)
-                .map(|rel| stddocs_root.join(rel).is_file())
-                .unwrap_or(false)
-        })
-    }
-
-    /// Pulls every backtick-delimited `stddocs/...pdf` path reference out
-    /// of a markdown document. Used to walk the normative-standards table
-    /// path columns in `.agents/qa.md` and `ARCHITECTURE.md`.
-    fn extract_stddocs_pdf_paths(markdown: &str) -> Vec<String> {
-        let mut paths = Vec::new();
-        let mut rest = markdown;
-        while let Some(start) = rest.find("stddocs/") {
-            let after = &rest[start..];
-            let Some(end) = after.find('`') else {
-                break;
-            };
-            let candidate = &after[..end];
-            // Skip bare directory references like `stddocs/` or
-            // `stddocs/iec-full/` — only file references matter here.
-            if candidate.ends_with(".pdf") {
-                paths.push(candidate.to_string());
-            }
-            rest = &after[end..];
-        }
-        paths
-    }
-
-    /// Regression guard for #313. `every_measurement_module_emits_populated_citation`
-    /// only checks that `standard`/`clause` are non-empty — a well-formed
-    /// lie passes it just as well as the truth. That is exactly what
-    /// shipped: `gated_response_citation()` cited `AES17-2015` while only
-    /// AES17-2020 was ever held in `stddocs/` (#312), and the existing
-    /// guard could not go red for it. This test additionally resolves each
-    /// citation's `standard` to a document actually present in `stddocs/`,
-    /// and separately walks the `.agents/qa.md` and `ARCHITECTURE.md`
-    /// standards tables for stale path references (#291's own acceptance
-    /// criterion: the table and the emitting fns must never disagree).
-    ///
-    /// `stddocs/` is gitignored — held PDFs are licensed and exist only in
-    /// the local main tree, not in worktrees (see repo `CLAUDE.md`). This
-    /// test skips, visibly, rather than failing when the directory is
-    /// absent, so the suite stays runnable where most agent work happens.
-    #[test]
-    fn every_citation_resolves_to_a_held_document() {
-        let stddocs_root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../stddocs"));
-        if !stddocs_root.is_dir() {
-            eprintln!(
-                "SKIP every_citation_resolves_to_a_held_document: {} not present \
-                 (stddocs/ is gitignored, main-tree only — see CLAUDE.md)",
-                stddocs_root.display()
-            );
-            return;
-        }
-        let repo_root = stddocs_root.parent().expect("stddocs_root has a parent");
-
-        let citations = every_citation();
-        for c in &citations {
-            assert!(
-                citation_standard_resolves(&c.standard, stddocs_root),
-                "citation names an edition nobody holds under stddocs/: {c:?}"
-            );
-        }
-
-        for (label, path) in [
-            (".agents/qa.md", repo_root.join(".agents/qa.md")),
-            ("ARCHITECTURE.md", repo_root.join("ARCHITECTURE.md")),
-        ] {
-            let doc = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-            for rel in extract_stddocs_pdf_paths(&doc) {
-                let full = repo_root.join(&rel);
-                assert!(
-                    full.is_file(),
-                    "{label} cites `{rel}` which does not exist on disk"
-                );
-            }
         }
     }
 
