@@ -235,3 +235,253 @@ pub enum IrVerdict {
     Ok,
     Failed { reason: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::*;
+    use super::super::*;
+    use super::*;
+
+    #[test]
+    fn ir_stats_reports_delay_samples_relative_to_gate_centre() {
+        // Peak 32 samples after the window centre — the fake backend's
+        // fixed loopback delay (see `ac-daemon/src/audio/fake.rs`).
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre + 32, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().expect("impulse response data present");
+        assert_eq!(stats.delay_samples, 32);
+        assert!((stats.arrival_s - 32.0 / 48_000.0).abs() < 1e-12);
+        assert_eq!(stats.peak_index, centre + 32);
+        assert_eq!(stats.peak_magnitude, 1.0);
+    }
+
+    #[test]
+    fn ir_stats_delay_is_negative_when_peak_precedes_centre() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre - 10, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.delay_samples, -10);
+        assert!(stats.arrival_s < 0.0);
+    }
+
+    #[test]
+    fn ir_stats_pre_impulse_snr_reflects_noise_floor() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak of 1.0 against a 0.01 floor -> 20*log10(100) = 40 dB.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.01, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(
+            (stats.pre_impulse_snr_db - 40.0).abs() < 0.5,
+            "pre_impulse_snr_db = {}",
+            stats.pre_impulse_snr_db
+        );
+    }
+
+    #[test]
+    fn ir_stats_snr_is_infinite_over_true_silence() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(stats.pre_impulse_snr_db.is_infinite());
+    }
+
+    #[test]
+    fn ir_stats_falls_back_to_window_duration_when_no_gate_recorded() {
+        let r = ir_report_with_peak(4_800, 2_400, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        // 4800 samples @ 48 kHz = 100 ms window -> f_low = 10 Hz.
+        assert!((stats.gate_window_s - 0.1).abs() < 1e-12);
+        assert!((stats.gate_f_low_hz - 10.0).abs() < 1e-9);
+        // A legacy report's gate is inferred, and must say so — a reader
+        // must not take "rectangular" here for a recorded fact.
+        assert!(
+            stats.gate_window_kind.contains("not recorded"),
+            "inferred gate must be flagged: {}",
+            stats.gate_window_kind
+        );
+    }
+
+    /// The recorded gate wins over the `window_len / sample_rate` guess.
+    /// This is the case that separates the two: a gate whose recorded
+    /// `f_low_hz` and length disagree with what the IR length implies
+    /// (a half-length gate on a zero-padded payload) — if `ir_stats`
+    /// recomputed instead of reading, it would report 10 Hz, not 20.
+    #[test]
+    fn ir_stats_prefers_the_recorded_gate_over_the_ir_length() {
+        let mut r = ir_report_with_peak(4_800, 2_400, 1.0, 0.0, 48_000);
+        r.data[0].gate = Some(GateParams {
+            gate_start_s: 0.0,
+            gate_length_s: 0.05,
+            window_kind: "half-hann".into(),
+            f_low_hz: 20.0,
+        });
+        let stats = r.ir_stats().unwrap();
+        assert!((stats.gate_window_s - 0.05).abs() < 1e-12);
+        assert!((stats.gate_f_low_hz - 20.0).abs() < 1e-9);
+        assert_eq!(stats.gate_window_kind, "half-hann");
+    }
+
+    /// [`ir_verdict`] direct, without a report around it: the threshold is
+    /// a `<` on `PRE_IMPULSE_SNR_MIN_DB`, so a capture sitting exactly on
+    /// the floor passes and one a hair under it fails.
+    #[test]
+    fn ir_verdict_threshold_is_inclusive_at_the_floor() {
+        let floor = [0.0, 0.0, 0.0, 0.0];
+        assert_eq!(
+            ir_verdict(1.0, &floor, PRE_IMPULSE_SNR_MIN_DB),
+            IrVerdict::Ok
+        );
+        assert!(matches!(
+            ir_verdict(1.0, &floor, PRE_IMPULSE_SNR_MIN_DB - 0.001),
+            IrVerdict::Failed { .. }
+        ));
+    }
+
+    /// The two ways `snr_db` reaches `+inf` are not the same verdict: a
+    /// silent floor under a real peak is the best possible capture, while
+    /// an empty pre-impulse region means nothing was measured at all.
+    #[test]
+    fn ir_verdict_separates_a_silent_floor_from_an_unmeasured_one() {
+        assert_eq!(ir_verdict(1.0, &[0.0, 0.0], f64::INFINITY), IrVerdict::Ok);
+        assert!(matches!(
+            ir_verdict(1.0, &[], f64::INFINITY),
+            IrVerdict::Failed { .. }
+        ));
+    }
+
+    /// A zero peak fails ahead of every other branch — an all-zero IR has
+    /// no signal to compare a floor against, however clean the floor looks.
+    #[test]
+    fn ir_verdict_fails_a_zero_peak_before_reading_the_snr() {
+        assert!(matches!(
+            ir_verdict(0.0, &[0.0, 0.0], f64::INFINITY),
+            IrVerdict::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn ir_stats_verdict_ok_when_snr_clears_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.1 floor -> 20*log10(10) = 20 dB, above the
+        // 18.0 dB threshold.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_snr_is_below_the_threshold() {
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // Peak 1.0 against a 0.2 floor -> 20*log10(5) \u{2248} 14.0 dB,
+        // below the 18.0 dB threshold — the #376 failure shape: a plausible
+        // number, but a noise-floor-scale peak.
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.2, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "pre-impulse SNR below threshold".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_ok_on_a_perfectly_clean_capture() {
+        // A zero floor against a nonzero peak is +inf SNR, but it is the
+        // *best* possible capture, not an unmeasurable one — the floor was
+        // measured, and it measured to exactly zero. This must not be
+        // confused with a genuine failure (#387 QA correctness #1).
+        let window_len = 1024;
+        let centre = window_len / 2;
+        let r = ir_report_with_peak(window_len, centre, 1.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert!(stats.pre_impulse_snr_db.is_infinite());
+        assert_eq!(stats.verdict, IrVerdict::Ok);
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_nothing_was_captured() {
+        // Peak magnitude itself is zero -> the whole linear IR is zero,
+        // i.e. there is no signal to compare a floor against at all. This
+        // is the genuine "no measurable floor" failure, distinct from the
+        // clean-capture case above.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, window_len / 2, 0.0, 0.0, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no signal captured (linear IR is all zero)".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_verdict_failed_when_guard_band_consumes_the_whole_pre_region() {
+        // Peak sits inside the guard band from the start of the window, so
+        // `pre_region` is empty — there is no data at all to measure a
+        // floor from, regardless of what the peak itself looks like.
+        let window_len = 1024;
+        let r = ir_report_with_peak(window_len, 3, 1.0, 0.1, 48_000);
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.verdict,
+            IrVerdict::Failed {
+                reason: "no measurable pre-impulse floor (peak too close to \
+                         the start of the gated window)"
+                    .to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ir_stats_none_for_non_impulse_response_report() {
+        let r = sample_report(); // FrequencyResponse variant
+        assert!(r.ir_stats().is_none());
+    }
+
+    /// A Farina capture emits several payloads; the impulse response is
+    /// not necessarily first. `ir_stats` must find it rather than read
+    /// `data[0]` and give up.
+    #[test]
+    fn ir_stats_finds_the_ir_payload_behind_another_payload() {
+        let mut r = ir_report_with_peak(1_024, 1_024 / 2 + 32, 1.0, 0.0, 48_000);
+        let ir_payload = r.data.remove(0);
+        r.data = vec![
+            MeasurementPayload {
+                data: MeasurementData::FrequencyResponse { points: vec![] },
+                standard: Vec::new(),
+                gate: None,
+            },
+            ir_payload,
+        ];
+        assert_eq!(r.ir_stats().unwrap().delay_samples, 32);
+    }
+
+    #[test]
+    fn ir_stats_none_for_empty_linear_ir() {
+        let mut r = sample_impulse_response_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::ImpulseResponse {
+                sample_rate_hz: 48_000,
+                f1_hz: 20.0,
+                f2_hz: 20_000.0,
+                duration_s: 1.0,
+                linear_ir: vec![],
+                noise_tail_start_s: None,
+                harmonics: vec![],
+            },
+            standard: Vec::new(),
+            gate: None,
+        }];
+        assert!(r.ir_stats().is_none());
+    }
+
+    // ─── interface latency (τ), archived alongside the arrival ─────────
+}

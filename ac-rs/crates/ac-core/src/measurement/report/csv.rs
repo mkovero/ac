@@ -127,3 +127,104 @@ impl MeasurementData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::*;
+    use super::super::*;
+
+    #[test]
+    fn report_csv_is_stable() {
+        let r = sample_report();
+        let a = r.to_csv();
+        let b = r.to_csv();
+        assert_eq!(a, b);
+        // Payload comment + header + 3 data lines.
+        assert_eq!(a.lines().count(), 5);
+        assert!(a.starts_with("# payload 1: frequency_response"));
+        assert!(a.contains("freq_hz,fundamental_dbfs,"));
+    }
+
+    #[test]
+    fn spectrum_bands_csv_shape() {
+        let r = sample_spectrum_bands_report();
+        let csv = r.to_csv();
+        assert!(csv.starts_with("# payload 1: spectrum_bands"));
+        assert!(csv.contains("centre_hz,level_dbfs,bpo,class"));
+        assert_eq!(csv.lines().count(), 5);
+    }
+
+    #[test]
+    fn impulse_response_csv_shape() {
+        let r = sample_impulse_response_report();
+        let csv = r.to_csv();
+        assert!(csv.starts_with("# payload 1: impulse_response"));
+        assert!(csv.contains("sample_idx,time_s,order,amplitude"));
+        // Payload comment + header + 5 linear rows + 5 harmonic rows.
+        assert_eq!(csv.lines().count(), 12);
+    }
+
+    // ─── `ir_stats` (#283) ────────────────────────────────────────────
+
+    #[test]
+    fn noise_result_csv_shape() {
+        let r = sample_noise_report();
+        let csv = r.to_csv();
+        assert!(csv.starts_with("# payload 1: noise_result"));
+        assert!(csv.contains("sample_rate_hz,duration_s,unweighted_dbfs,"));
+        assert_eq!(csv.lines().count(), 3);
+    }
+
+    #[test]
+    fn multi_payload_csv_does_not_collapse_into_one_table() {
+        let mut r = sample_impulse_response_report();
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::SpectrumBands {
+                bpo: 3,
+                class: "Class 1".into(),
+                centres_hz: vec![100.0],
+                levels_dbfs: vec![-30.0],
+            },
+            standard: vec![],
+            gate: Some(GateParams {
+                gate_start_s: 0.0,
+                gate_length_s: 0.02,
+                window_kind: "hann".into(),
+                f_low_hz: 50.0,
+            }),
+        });
+        let csv = r.to_csv();
+        assert!(csv.contains("# payload 1: impulse_response"));
+        assert!(csv.contains("# payload 2: spectrum_bands  gate=0.0ms+20.0ms hann f_low=50.0Hz"));
+        assert!(csv.contains("sample_idx,time_s,order,amplitude"));
+        assert!(csv.contains("centre_hz,level_dbfs,bpo,class"));
+    }
+
+    #[test]
+    fn gated_frequency_response_csv_shape() {
+        let mut r = sample_impulse_response_report();
+        r.data = vec![MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: vec![
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 100.0,
+                        magnitude_db: -0.5,
+                        phase_deg: 12.3,
+                    },
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 1_000.0,
+                        magnitude_db: -1.2,
+                        phase_deg: -145.0,
+                    },
+                ],
+            },
+            standard: vec![],
+            gate: None,
+        }];
+        let csv = r.to_csv();
+        assert!(csv.starts_with("# payload 1: gated_frequency_response"));
+        assert!(csv.contains("freq_hz,magnitude_db,phase_deg"));
+        // Payload comment + header + 2 data lines.
+        assert_eq!(csv.lines().count(), 4);
+    }
+}

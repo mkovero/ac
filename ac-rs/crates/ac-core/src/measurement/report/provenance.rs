@@ -214,3 +214,148 @@ impl Default for ProcessingChain {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::*;
+    use super::super::*;
+
+    #[test]
+    fn swept_sine_method_round_trip() {
+        let mut r = sample_report();
+        r.method = MeasurementMethod::SweptSine {
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 3.0,
+        };
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"kind\": \"swept_sine\""));
+        assert!(json.contains("\"f1_hz\": 20.0"));
+        assert!(json.contains("\"f2_hz\": 20000.0"));
+        assert!(json.contains("\"duration_s\": 3.0"));
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn method_json_no_longer_carries_standard() {
+        // The bug #280 exists to fix: a citation describing a payload
+        // must not be representable in the method slot at all.
+        let r = sample_report();
+        let json = r.to_json().unwrap();
+        let method_obj =
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["method"].clone();
+        assert!(method_obj.get("standard").is_none(), "{method_obj}");
+    }
+
+    #[test]
+    fn interface_latency_round_trips_through_json() {
+        let mut r = ir_report_with_peak(1_024, 512, 1.0, 0.0, 48_000);
+        r.interface_latency = Some(measured_tau(0.0011931));
+        let back: MeasurementReport = serde_json::from_str(&r.to_json().unwrap()).unwrap();
+        assert_eq!(back.interface_latency, r.interface_latency);
+    }
+
+    #[test]
+    fn cal_snapshot_round_trips_spl_and_mic_response() {
+        let snap = CalibrationSnapshot {
+            output_channel: 0,
+            input_channel: 1,
+            vrms_at_0dbfs_out: Some(1.234),
+            vrms_at_0dbfs_in: Some(0.567),
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: Some(-31.7),
+            mic_response: Some(MicResponseRef {
+                n_points: 157,
+                source_path: Some("/tmp/umik.frd".into()),
+                imported_at: "2026-04-15T12:00:00Z".into(),
+            }),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: CalibrationSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, back);
+    }
+
+    #[test]
+    fn cal_snapshot_omits_mic_fields_when_absent() {
+        // Voltage-only channel: the new fields must not appear in the
+        // serialised JSON so reports stay compact and old readers stay
+        // happy.
+        let snap = CalibrationSnapshot {
+            output_channel: 0,
+            input_channel: 0,
+            vrms_at_0dbfs_out: None,
+            vrms_at_0dbfs_in: Some(1.0),
+            ref_freq_hz: 1000.0,
+            ref_level_dbfs: -10.0,
+            mic_sensitivity_dbfs_at_94db_spl: None,
+            mic_response: None,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("mic_sensitivity_dbfs_at_94db_spl"), "{json}");
+        assert!(!json.contains("mic_response"), "{json}");
+    }
+
+    // ─── ProcessingChain (#105) ─────────────────────────────────────────
+
+    #[test]
+    fn processing_chain_default_is_all_off() {
+        let p = ProcessingChain::default();
+        assert_eq!(p.weighting, "off");
+        assert_eq!(p.smoothing_bpo, None);
+        assert_eq!(p.time_integration, "off");
+        assert!(!p.mic_correction_applied);
+    }
+
+    #[test]
+    fn processing_chain_round_trips() {
+        let p = ProcessingChain {
+            weighting: "a".into(),
+            smoothing_bpo: Some(6),
+            time_integration: "fast".into(),
+            mic_correction_applied: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ProcessingChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn n_averages_round_trips_and_omits_absent_field() {
+        let mut r = sample_report();
+        r.integration.n_averages = Some(8);
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"n_averages\": 8"), "{json}");
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+
+        // A report with no averages count omits the field entirely
+        // rather than serialising a misleading default.
+        let bare = sample_report();
+        let bare_json = bare.to_json().unwrap();
+        assert!(!bare_json.contains("n_averages"), "{bare_json}");
+    }
+
+    #[test]
+    fn position_snapshot_round_trips_and_omits_absent_fields() {
+        let mut r = sample_report();
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(21.3),
+            relative_humidity_pct: Some(45.0),
+            source_height_m: Some(1.2),
+            receiver_height_m: Some(1.1),
+            distance_m: Some(1.0),
+        });
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+
+        // A report with no position data omits the field entirely.
+        let bare = sample_report();
+        let bare_json = bare.to_json().unwrap();
+        assert!(!bare_json.contains("\"position\""), "{bare_json}");
+    }
+
+    // ─── GatedFrequencyResponse / noise_tail_start_s (#284) ──────────────
+}

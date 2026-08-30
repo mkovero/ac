@@ -158,3 +158,109 @@ pub struct FrequencyResponsePoint {
     #[serde(default)]
     pub ac_coupled: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::*;
+    use super::super::*;
+
+    #[test]
+    fn deserialize_rejects_wrong_discriminant() {
+        // A future reader must see `kind` so it can branch; a payload
+        // without `kind` should fail to decode.
+        let malformed = r#"{
+            "schema_version": 1,
+            "ac_version": "0.1.0",
+            "timestamp_utc": "2026-04-21T00:00:00Z",
+            "method": { "n_points": 1 },
+            "stimulus": {"sample_rate_hz":48000,"f_start_hz":100,"f_stop_hz":1000,"level_dbfs":-20,"n_points":1},
+            "integration": {"duration_s":1.0,"window":"hann"},
+            "data": {"points":[]}
+        }"#;
+        assert!(serde_json::from_str::<MeasurementReport>(malformed).is_err());
+    }
+
+    #[test]
+    fn spectrum_bands_round_trip() {
+        let r = sample_spectrum_bands_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn impulse_response_round_trip() {
+        let r = sample_impulse_response_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn noise_result_round_trip() {
+        let r = sample_noise_report();
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn gated_frequency_response_round_trips_and_labels_correctly() {
+        let mut r = sample_impulse_response_report();
+        r.data.push(MeasurementPayload {
+            data: MeasurementData::GatedFrequencyResponse {
+                points: vec![
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 100.0,
+                        magnitude_db: -0.5,
+                        phase_deg: 12.3,
+                    },
+                    GatedFrequencyResponsePoint {
+                        freq_hz: 1_000.0,
+                        magnitude_db: -1.2,
+                        phase_deg: -145.0,
+                    },
+                ],
+            },
+            standard: vec![
+                crate::measurement::sweep::citation(),
+                crate::measurement::sweep::gated_response_citation(),
+            ],
+            gate: Some(GateParams {
+                gate_start_s: 0.0,
+                gate_length_s: 0.020,
+                window_kind: "tukey0.25".into(),
+                f_low_hz: 50.0,
+            }),
+        });
+        assert_eq!(r.data[1].data.kind_label(), "gated_frequency_response");
+        let json = r.to_json().unwrap();
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+        assert_eq!(r2.data[1].standard.len(), 2);
+    }
+
+    #[test]
+    fn impulse_response_noise_tail_start_s_round_trips_and_is_optional() {
+        let mut r = sample_impulse_response_report();
+        let MeasurementData::ImpulseResponse {
+            noise_tail_start_s, ..
+        } = &mut r.data[0].data
+        else {
+            panic!("expected ImpulseResponse");
+        };
+        *noise_tail_start_s = Some(3.0);
+        let json = r.to_json().unwrap();
+        assert!(json.contains("\"noise_tail_start_s\": 3.0"), "{json}");
+        let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, r2);
+
+        // Absent field omits the key entirely (legacy reports decode
+        // with `None`, not a misleading `0.0`).
+        let bare = sample_impulse_response_report();
+        let bare_json = bare.to_json().unwrap();
+        assert!(!bare_json.contains("noise_tail_start_s"), "{bare_json}");
+        let bare2: MeasurementReport = serde_json::from_str(&bare_json).unwrap();
+        assert_eq!(bare2, bare);
+    }
+}
