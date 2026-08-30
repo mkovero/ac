@@ -599,6 +599,32 @@ impl RefusalRun {
     }
 }
 
+/// The two level rows, for a frame with at least one leg at the floor.
+///
+/// A quiet leg is only a fault when something should be reaching it. Not
+/// driving: idle and expected — and for a session that is not drivable at
+/// all, daemon silence says nothing about the inputs, so there is nothing to
+/// report either way.
+///
+/// **This is the only place the drive is read.** Drive state is not evidence
+/// about the lock: two legs both above the floor are carrying signal whoever
+/// put it there, so an external-DUT session still gets its lock rows.
+/// Arguably it needs them more than a driving one does, since the operator
+/// cannot resolve it by starting the stimulus.
+fn level_row(frame: FaultFrame, ref_dead: bool) -> Option<Fault> {
+    if !frame.drive.on {
+        return None;
+    }
+    // Both dead reports the reference. It is the daemon's own leg and its
+    // failure explains the other; naming the measurement leg first would
+    // send the operator to the mic for a patching fault.
+    Some(if ref_dead {
+        Fault::NoReference
+    } else {
+        Fault::NoSignal
+    })
+}
+
 /// The time-dependent part of the indicator, carried across frames the same
 /// way [`crate::transfer::MeterState`] carries the meter hold and clip latch.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -641,13 +667,29 @@ impl FaultState {
             return None;
         };
 
-        let ref_dead = at_floor(input.ref_peak_dbfs);
-        let meas_dead = at_floor(input.meas_peak_dbfs);
-
-        // Lock bookkeeping runs on every frame, whatever is reported. A
-        // refusal that spans a period of silence is still one unbroken
+        // Bookkeeping first and unconditionally, whatever ends up on screen.
+        // A refusal that spans a period of silence is still one unbroken
         // refusal, and the acquisition transient must not be missed because
         // a louder row was showing when it happened.
+        self.fold_lock(frame, now_s);
+
+        // The rows, in the order the causes chain in.
+        let ref_dead = at_floor(input.ref_peak_dbfs);
+        let meas_dead = at_floor(input.meas_peak_dbfs);
+        if ref_dead || meas_dead {
+            return level_row(frame, ref_dead);
+        }
+        // Both legs live from here.
+        self.lock_row(frame, now_s)
+            .or_else(|| coherence_dead(input.coherence).then_some(Fault::CheckRouting))
+    }
+
+    /// Carry the lock history forward one frame.
+    ///
+    /// Separate from the rows because it does not depend on them: it runs on
+    /// every frame the daemon reports its drive on, including the ones whose
+    /// indicator is a level row or nothing at all.
+    fn fold_lock(&mut self, frame: FaultFrame, now_s: f64) {
         // Either gate is enough, and each covers a case the other cannot:
         // `settled` is the only one a locked-then-lost pair can satisfy (the
         // ladder outlives the lock), and `estimator_attempted` is the only one
@@ -657,8 +699,7 @@ impl FaultState {
         // settled pair can lose its lock and report a refusal too — see
         // the module docs.
         let asked = frame.settled || frame.estimator_attempted();
-        let refusing = asked && frame.delay_locked == Some(false);
-        if refusing {
+        if asked && frame.delay_locked == Some(false) {
             self.refusing.get_or_insert(RefusalRun {
                 since_s: now_s,
                 since_attempts: frame.delay_attempts,
@@ -675,34 +716,15 @@ impl FaultState {
         if frame.delay_locked.is_some() {
             self.prev_locked = frame.delay_locked;
         }
+    }
 
-        if ref_dead || meas_dead {
-            // A quiet leg is only a fault when something should be reaching
-            // it. Not driving: idle and expected — and for a session that is
-            // not drivable at all, daemon silence says nothing about the
-            // inputs, so there is nothing to report either way.
-            //
-            // This gate covers the two level rows and **only** them. Drive
-            // state is not evidence about the lock: two legs both above the
-            // floor are carrying signal whoever put it there, so an
-            // external-DUT session below still gets its lock rows. Arguably
-            // it needs them more than a driving one does, since the operator
-            // cannot resolve it by starting the stimulus.
-            if !frame.drive.on {
-                return None;
-            }
-            // Both dead reports the reference. It is the daemon's own leg
-            // and its failure explains the other; naming the measurement leg
-            // first would send the operator to the mic for a patching fault.
-            return Some(if ref_dead {
-                Fault::NoReference
-            } else {
-                Fault::NoSignal
-            });
-        }
-
-        // Both legs live from here.
-
+    /// The refusal and acquisition rows, for a frame with both legs live.
+    ///
+    /// Reads only the history [`Self::fold_lock`] carried, never the current
+    /// frame's `delay_locked`: `LOST LOCK` versus `NO LOCK` is a claim about
+    /// what this pair has done, and the escalation to [`Fault::NoLock`] is a
+    /// claim about how long it has been doing it.
+    fn lock_row(&self, frame: FaultFrame, now_s: f64) -> Option<Fault> {
         if let Some(run) = self.refusing {
             // Escalation takes the *later* of the two thresholds (#247).
             // Seconds bound how long the operator stares at a transient row;
@@ -727,14 +749,11 @@ impl FaultState {
             });
         }
 
-        if let Some(at) = self.acquired_at_s {
-            if now_s - at < LOCK_ACQUIRED_HOLD_S {
-                return Some(Fault::LockAcquired);
-            }
-        }
-
-        if coherence_dead(input.coherence) {
-            return Some(Fault::CheckRouting);
+        if self
+            .acquired_at_s
+            .is_some_and(|at| now_s - at < LOCK_ACQUIRED_HOLD_S)
+        {
+            return Some(Fault::LockAcquired);
         }
 
         None
