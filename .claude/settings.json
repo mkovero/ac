@@ -1,28 +1,5 @@
 {
   "permissions": {
-    "deny": [
-      "Task(Explore)",
-      "Bash(awk:*)",
-      "Bash(less:*)",
-      "Bash(more:*)",
-      "Bash(nl:*)",
-      "Bash(strings:*)",
-      "Bash(rg:*)",
-      "Bash(ag:*)",
-      "Bash(ack:*)",
-      "Bash(find:*)",
-      "Bash(fd:*)",
-      "Bash(ls:*)",
-      "Bash(tree:*)",
-      "Bash(perl:*)",
-      "Bash(ruby:*)",
-      "Bash(node:*)",
-      "Bash(truncate:*)",
-      "Bash(dd:*)",
-      "Bash(cp:*)",
-      "Bash(mv:*)",
-      "Bash(rm:*)"
-    ],
     "allow": [
       "Bash(cargo:*)",
       "Bash(git:*)",
@@ -36,6 +13,27 @@
       "Bash(wc:*)",
       "Bash(sort:*)",
       "Bash(uniq:*)"
+    ],
+    "deny": [
+      "Bash(awk:*)",
+      "Bash(less:*)",
+      "Bash(more:*)",
+      "Bash(nl:*)",
+      "Bash(strings:*)",
+      "Bash(rg:*)",
+      "Bash(ag:*)",
+      "Bash(ack:*)",
+      "Bash(fd:*)",
+      "Bash(tree:*)",
+      "Bash(perl:*)",
+      "Bash(ruby:*)",
+      "Bash(node:*)",
+      "Bash(truncate:*)",
+      "Bash(dd:*)",
+      "Bash(mv:*)",
+      "Read(./tests/fixtures/**)",
+      "Read(./work/**)",
+      "Read(./audit/**)"
     ]
   }
 }

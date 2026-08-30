@@ -287,12 +287,21 @@ channel, which is #204.
 
   **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
   to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
-  survives in the form `rig-test-plan.md` already recommends:
-  `|Δt_onset − Δt_transfer_stream| ≤ 1.3 samples`, each estimator's own
-  increment between the two positions, compared in the time domain where tape
-  and `c` both drop out. Both estimators see the same physical move whatever
-  the tape says it was. That is the only valid form here, not merely a
-  stronger one.
+  survives in the form `rig-test-plan.md` already recommends: compare each
+  estimator's own increment between the two positions in the time domain,
+  where tape and `c` both drop out. Both estimators see the same physical
+  move whatever the tape says it was. That is the only valid form here, not
+  merely a stronger one. **The 1.3-sample bar itself was also a tape draw
+  converted to samples** and was re-derived 2026-08-24 (#375) to
+  `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, scored against the
+  candidate estimator's own measured repeatability — see `rig-test-plan.md`.
+  **The 3σ multiplier was accepted 2026-08-25** (mkovero on #375) and is fixed
+  before any verification run; do not re-open it once a run's numbers are
+  known. Two riders are still undecided and are recorded with the bar in
+  `rig-test-plan.md`: whether to score with a t-multiplier at the actual df or
+  hold n ≥ 12 per position under the normal approximation, and whether a fixed
+  physical tolerance is needed alongside `3 × se` — which on its own rewards a
+  noisy estimator with a wider bar.
 
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`
@@ -335,35 +344,6 @@ channel, which is #204.
   > for the architect/QA rather than guessed at here. Referenced PNG is
   > the ground truth; look at it directly rather than trusting this
   > description.
-
-- **#369/PR #388 — is "any xrun during a τ lifecycle" the right dirty
-  threshold?** QA on PR #388 (2026-08-24) tagged this `assumed`: the code
-  refuses and refuses to store τ whenever `AudioEngine::xruns()` reads above
-  0 during either of `measure_tau_twice`'s two lifecycles, but nothing in the
-  PR, the issue, or a prior comment shows that a single xrun during the
-  0.35 s sweep-plus-tail actually perturbs the deconvolved peak enough to
-  matter, as against not perturbing it at all and the gate being needlessly
-  strict.
-
-  Measurement: on the rig (`192.168.9.25`, jackd `-p 64 -n 2` at 96 kHz — the
-  configuration #369 was filed against), capture a `calibrate` τ reading
-  where a real, timed xrun is induced during one lifecycle's `measure_tau`
-  window (briefly starve the audio thread), and compare the resulting raw τ
-  against a clean-lifecycle reading taken immediately before/after under the
-  same acoustic path.
-
-  > **Falsifying value, either direction closes it.** If the xrun-crossed
-  > reading's τ lands within the tolerance `compare_tau_readings` already
-  > treats as agreement, a single real xrun does not reliably perturb the
-  > peak enough to be caught by the two-lifetime rule on its own — the
-  > "any nonzero count is dirty" threshold is not over-conservative in the
-  > way that would make `calibrate` needlessly refuse good readings, which
-  > supports the current bound. If it diverges by a wide, consistent margin
-  > instead, that supports the bound from the other direction. Either result
-  > is informative; no run currently exists.
-
-  **Not fixable from code alone — this entry documents the gap, it does not
-  close it.** The QA finding stands until this measurement runs.
 
 ---
 
