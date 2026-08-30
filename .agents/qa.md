@@ -13,8 +13,11 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 - `ac-core/measurement/thd.rs` produce THD figures. Results in expected dynamic range for device under test. Gross outliers (e.g. THD > 10% for known-good amp) mean measurement error in code.
 - `ac-cli` and `ac-view` are consumers of the `ac-daemon` wire schema. Correctness = correct frame parsing, correct display of what the frame carries.
 - Level reference in `ac-core/shared` is scalar dBu offset. Any change making it frequency-dependent = regression.
-- If PR defines scope to be Tier 1 see standards documentation in 
-  docs/architecture/standards.md
+- Standards conformance is gated on the issue's `tier-1` label, not on your
+  reading of the diff: `tier-1` → work `docs/architecture/standards.md` and the
+  `stddocs/` PDFs it indexes. Any other scope label → skip both, and write
+  "standards check: not applicable — {scope label}". No scope label at all is a
+  triage gap, not a licence to skip: apply `tier-1` and check.
 
 ### build and test
 ```bash
@@ -120,7 +123,7 @@ Each new test:
 - Measurement functions: numeric assertions with tight tolerances?
   Example: `assert!((result.thd - 0.0023).abs() < 1e-4)` not just `assert!(result.thd > 0.0)`
 - CLI behavior: output strings or exit codes asserted?
-- Do standards testing on Tier 1 scoped PRs (see docs/architecture/standards.md)
+- `tier-1` only: does a test assert the clause, or just the code's own output?
 
 Tests missing or weak → write missing tests yourself, include in review comment as suggested additions.
 
