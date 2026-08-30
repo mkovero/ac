@@ -445,9 +445,10 @@ impl FaultFrame {
                 drivable: drive.drivable,
             },
             delay_locked: frame.delay_locked,
-            // Same `lengths_agree` filter the display applies, so "settled"
-            // and "there are columns on screen" cannot disagree.
-            settled: frame.mtw.as_ref().filter(|m| m.lengths_agree()).is_some(),
+            // The display's own selection, so "settled" and "there are
+            // columns on screen" cannot disagree — see
+            // [`WireFrame::displayed_mtw`].
+            settled: frame.displayed_mtw().is_some(),
             delay_attempts: frame.delay_attempts,
         })
     }
@@ -484,9 +485,7 @@ impl<'a> FaultInput<'a> {
             meas_peak_dbfs: frame.meas_peak_dbfs,
             ref_peak_dbfs: frame.ref_peak_dbfs,
             coherence: frame
-                .mtw
-                .as_ref()
-                .filter(|m| m.lengths_agree())
+                .displayed_mtw()
                 .map(|m| m.coherence.as_slice())
                 .unwrap_or(&[]),
         }
@@ -561,21 +560,52 @@ fn coherence_dead(coherence: &[f64]) -> bool {
     (alive as f64) < COHERENCE_ALIVE_FRACTION * coherence.len() as f64
 }
 
-/// The time-dependent part of the indicator, carried across frames the same
-/// way [`crate::transfer::MeterState`] carries the meter hold and clip latch.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct FaultState {
-    /// When the current unbroken run of settled refusals began. Cleared by a
-    /// lock, and by falling back out of settled.
-    refusing_since_s: Option<f64>,
-    /// `delay_attempts` as it stood on the frame that began the current
-    /// refusal — the attempt that refused is itself counted, so the run has
-    /// made `delay_attempts - this + 1` attempts.
+/// The origin of one unbroken run of refusals, in both units escalation is
+/// measured in (#247).
+///
+/// One value rather than two parallel `Option`s. Both anchors are set by the
+/// same frame and cleared by the same lock, and there is no state in which one
+/// is meaningful without the other — a clock anchor without its attempt anchor
+/// would escalate on seconds alone, which is the coupling
+/// [`PERSISTENT_REFUSAL_ATTEMPTS`] exists to break. Making them one field
+/// means the skew cannot be written, rather than merely not being written
+/// today.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RefusalRun {
+    /// Scene time of the frame that began the run.
+    since_s: f64,
+    /// `delay_attempts` as it stood on that frame — the attempt that refused
+    /// is itself counted, so the run has made `delay_attempts - this + 1`
+    /// attempts.
     ///
     /// Zero means the producer does not report attempts (a daemon predating
     /// #238); see [`FaultState::update`] for why that falls back to the clock
     /// rather than never escalating.
-    refusing_since_attempts: Option<u32>,
+    since_attempts: u32,
+}
+
+impl RefusalRun {
+    /// Whether the estimator has had [`PERSISTENT_REFUSAL_ATTEMPTS`] chances
+    /// on this run.
+    ///
+    /// A producer reporting no attempts (pre-#238, anchor 0) leaves this
+    /// unobservable, and an unobservable condition must not be read as unmet:
+    /// that would make `NO LOCK` unreachable for exactly the daemons whose
+    /// refusals #238 was written to surface. Absent evidence defers to the
+    /// clock.
+    fn attempts_elapsed(&self, delay_attempts: u32) -> bool {
+        self.since_attempts == 0
+            || delay_attempts.saturating_sub(self.since_attempts) + 1 >= PERSISTENT_REFUSAL_ATTEMPTS
+    }
+}
+
+/// The time-dependent part of the indicator, carried across frames the same
+/// way [`crate::transfer::MeterState`] carries the meter hold and clip latch.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FaultState {
+    /// The current unbroken run of settled refusals. Cleared by a lock, and
+    /// by falling back out of settled.
+    refusing: Option<RefusalRun>,
     /// When the last false→true lock transition happened.
     acquired_at_s: Option<f64>,
     /// Last observed `delay_locked`, to detect that transition.
@@ -629,12 +659,12 @@ impl FaultState {
         let asked = frame.settled || frame.estimator_attempted();
         let refusing = asked && frame.delay_locked == Some(false);
         if refusing {
-            self.refusing_since_s.get_or_insert(now_s);
-            self.refusing_since_attempts
-                .get_or_insert(frame.delay_attempts);
+            self.refusing.get_or_insert(RefusalRun {
+                since_s: now_s,
+                since_attempts: frame.delay_attempts,
+            });
         } else {
-            self.refusing_since_s = None;
-            self.refusing_since_attempts = None;
+            self.refusing = None;
         }
         if frame.delay_locked == Some(true) {
             self.ever_locked = true;
@@ -673,26 +703,17 @@ impl FaultState {
 
         // Both legs live from here.
 
-        if let Some(since) = self.refusing_since_s {
+        if let Some(run) = self.refusing {
             // Escalation takes the *later* of the two thresholds (#247).
             // Seconds bound how long the operator stares at a transient row;
             // attempts bound how many chances the estimator has actually had,
             // which is what the advice claims to know. They coincide only
             // while `RELOCK_RETRY` is 1 s — a daemon constant this crate
             // cannot see, so it must not be the thing being relied on.
-            //
-            // A producer that reports no attempts (pre-#238, anchor 0) leaves
-            // the attempt count unobservable, and an unobservable condition
-            // must not be read as unmet: that would make `NO LOCK`
-            // unreachable for exactly the daemons whose refusals #238 was
-            // written to surface. Absent evidence falls back to the clock.
-            let attempts_elapsed = match self.refusing_since_attempts {
-                Some(0) | None => true,
-                Some(anchor) => {
-                    frame.delay_attempts.saturating_sub(anchor) + 1 >= PERSISTENT_REFUSAL_ATTEMPTS
-                }
-            };
-            if now_s - since >= PERSISTENT_REFUSAL_S && attempts_elapsed {
+            // See [`RefusalRun::attempts_elapsed`] for the pre-#238 producer.
+            if now_s - run.since_s >= PERSISTENT_REFUSAL_S
+                && run.attempts_elapsed(frame.delay_attempts)
+            {
                 return Some(Fault::NoLock);
             }
             // The transient row's words follow the history, not the clock.

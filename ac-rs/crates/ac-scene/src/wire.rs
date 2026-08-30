@@ -264,6 +264,22 @@ impl MtwColumns {
     }
 }
 
+impl WireFrame {
+    /// The ladder columns **as the display uses them**: present only when
+    /// [`MtwColumns::lengths_agree`], because a mismatched frame draws
+    /// nothing.
+    ///
+    /// One accessor rather than the same `filter` at each call site. The
+    /// selection is an invariant shared across modules, not a local
+    /// convenience: [`crate::fault::FaultFrame::settled`] means "there are
+    /// columns on screen", and it can only mean that while it and
+    /// [`crate::TransferInput::from_wire_frame`] make the identical choice.
+    /// Duplicating the filter let the two drift apart with nothing failing.
+    pub fn displayed_mtw(&self) -> Option<&MtwColumns> {
+        self.mtw.as_ref().filter(|m| m.lengths_agree())
+    }
+}
+
 /// The `visualize/ir` sidecar DATA frame (`ZMQ.md`, `#### visualize/ir
 /// sidecar`) — daemon-side
 /// IFFT of the full-resolution H₁(ω) into a time-domain h(t), published
