@@ -26,23 +26,6 @@ only planned run producing a legitimately gated ring, which is the case the
 dropped onset guard must not suppress, so it carries per-frame
 `median_value` / `negative_lag_median` as well. Full statement in block 4.
 
-- **#368's `TAU_SNR_THRESHOLD_DB` constant — QA on PR #384 (2026-08-23)
-  flagged it `derived`, not measured on the sweep configuration it gates.**
-  Its two anchors (33.8–83.5 dB electrical loopback, ~16 dB #376 acoustic
-  cliff) come from a different window-length rig session
-  (`rig-2026-08-22-tau-window-350-results.md`) and a different, longer-ESS
-  acoustic path — neither is `calibrate`'s own short-ESS electrical τ path.
-
-  Run `calibrate`'s actual τ path against the three cases the issue
-  measured: hot loopback (+3.01 dB), low-gain loopback (-4.19 dB), muted
-  route (-83.8 dBFS). Record `tau_pre_impulse_snr_db` for each.
-
-  > **Pass: both real loopbacks read at or above 24 dB, and the muted
-  > route reads below it.** Either real loopback's SNR coming back under
-  > 24 dB would wrongly refuse a working cable; the muted route's SNR
-  > coming back over 24 dB would wrongly accept noise as a peak. Both are
-  > falsifications of the current constant, not readouts to shrug past.
-
 Two things session 3 raised that no block here covers yet:
 
 - **The cable change, and the one measurement that verifies it — #243.** Move
@@ -304,12 +287,21 @@ channel, which is #204.
 
   **For #346/#352 — score it c-free, not against tape.** AC5's wording anchors
   to `transfer_stream`'s 4.7 mm, which the tape cannot support. Its intent
-  survives in the form `rig-test-plan.md` already recommends:
-  `|Δt_onset − Δt_transfer_stream| ≤ 1.3 samples`, each estimator's own
-  increment between the two positions, compared in the time domain where tape
-  and `c` both drop out. Both estimators see the same physical move whatever
-  the tape says it was. That is the only valid form here, not merely a
-  stronger one.
+  survives in the form `rig-test-plan.md` already recommends: compare each
+  estimator's own increment between the two positions in the time domain,
+  where tape and `c` both drop out. Both estimators see the same physical
+  move whatever the tape says it was. That is the only valid form here, not
+  merely a stronger one. **The 1.3-sample bar itself was also a tape draw
+  converted to samples** and was re-derived 2026-08-24 (#375) to
+  `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, scored against the
+  candidate estimator's own measured repeatability — see `rig-test-plan.md`.
+  **The 3σ multiplier was accepted 2026-08-25** (mkovero on #375) and is fixed
+  before any verification run; do not re-open it once a run's numbers are
+  known. Two riders are still undecided and are recorded with the bar in
+  `rig-test-plan.md`: whether to score with a t-multiplier at the actual df or
+  hold n ≥ 12 per position under the normal approximation, and whether a fixed
+  physical tolerance is needed alongside `3 × se` — which on its own rewards a
+  noisy estimator with a wider bar.
 
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`

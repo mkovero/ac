@@ -11,46 +11,24 @@ Careful, scope-disciplined. No refactor unless asked. No improve unless asked. M
 ### build
 ```bash
 cargo build                  # full workspace build
-cargo test --workspace       # THE gate — -p alone can pass while main breaks
-cargo test -p ac-core        # single crate, NOT sufficient before PR
 cargo clippy -- -D warnings  # must be clean before PR
 cargo fmt --check            # must pass (do not reformat unrelated code)
 ```
 
 ### module map
 
-Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative if this drifts.
-
-```
-ac-core/src/
-  measurement/  — Tier 1: filterbank, weighting, thd, loudness, ir, report
-  visualize/    — Tier 2: spectrum, transfer (H1), mtw, aggregate
-  shared/       — calibration, conversions, config, generator
-
-ac-daemon/src/
-  server.rs     — ZMQ REP/PUB loop
-  handlers/     — one module per command
-  audio/        — jack_backend, cpal_backend, fake
-
-ac-cli/src/     — `ac`: parser, ZMQ REQ/SUB, CSV export
-ac-scene/src/   — scene data: traces, axes, readout strings
-ac-view/src/    — `ac-view`: egui shell, draws ac-scene scenes
-```
+Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative.
 
 ### key invariants — do not break these
 - The `ac-daemon` PUB schema is consumed by `ac-cli` and `ac-view`. Change it → update both consumers in the same PR + note in PR body. Reference: `ac-rs/ZMQ.md`.
 - `ac-core::shared` level reference is a scalar dBu offset only. No frequency-dependent correction curve. Do not add one.
-- `ac-core/visualize/transfer.rs` = Müller-Massarani H1. Estimator math changes need architect sign-off (`design-approved` label).
 - `ac-view` computes nothing numeric — enforced by `ac-view/src/computes_nothing.rs`, not by convention. New formatting or tick math belongs in `ac-scene`.
 
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
 log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
 `target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
-for a cargo build; a scratch worktree parked there once ran root out of space
-at 99% usage and killed a linker mid-link. Whoever creates a scratch worktree
-removes it when the task ends (`git worktree remove`), not the next session
-that trips over it.
+for a cargo build.
 
 ## inputs you will receive
 - Issue number, title, URL
@@ -63,22 +41,9 @@ that trips over it.
 Read full triage spec comment + architect comment (if present).
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
-Locating code → repowise first: `get_context` on the files you expect to
-touch, then `get_risk` on that list to surface co-change partners you did not
-expect. Build the step-1 file list from the graph rather than from
-Grep-and-read exploration — that exploration is the expensive part of this
-step, and the graph already holds the answer.
+Your prompt contains a file manifest from the architect. It is the output of a search that has already happened. Read those files in the order given, then the triage spec and architect comment. Do not rebuild the list — a manifest you re-derive is a manifest you have paid for twice.
 
-`Glob`, `Grep` and `Read` remain the fallback, and remain what you use when
-repowise is unavailable or its index is behind HEAD. Shell readers and
-searchers (`cat`, `grep`, `find`) denied by `.claude/settings.json`; do not
-work around them. Check the deny list rather than this sentence for the
-current set — it is the authority and it changes.
-
-Both are locators. A repowise result puts a file on your list; it does not tell
-you what the file does. `get_risk` naming a co-change partner is a reason to
-open that file, and — like a `Grep` hit — not a licence to widen scope past
-what the spec justifies. See `AGENTS.md`'s repowise rule.
+A search hit inside a manifest file is a locator. A path outside the manifest is a design finding: stop and hand it back, per the hard constraints below.
 
 ### step 2 — branch
 ```bash
@@ -97,16 +62,15 @@ Broken or unclear thing outside issue scope:
 
 ### step 4 — verify
 ```bash
-repowise distill cargo test    # paste summary in PR body
-repowise distill cargo clippy -- -D warnings   # must be zero new warnings
-cargo fmt --check              # must pass
+cargo clippy -- -D warnings 2>&1 | tail -20   # must be zero new warnings
+cargo fmt --check                        # must pass
 ```
 
-`repowise distill` preserves the exit code and puts errors first; omitted
-output is recoverable via `repowise expand <ref>` — never re-run the command to
-see it. Plain `cargo test 2>&1 | tail -20` remains correct if distill is
-unavailable. This is command output, not a file read, so nothing in
-`AGENTS.md`'s repowise rule applies to it.
+Pipe through `tail` rather than reading the whole output: a green run's body is
+noise, and a red one puts its failures at the end. Never re-run a command
+merely to see output you truncated — the failing test name is enough to re-run
+that one test. Any local wrapper that compacts command output is fine to use if
+you have one.
 
 Check fails → fix before opening PR. No PRs with failing tests.
 

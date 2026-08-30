@@ -9,10 +9,12 @@
 #   delegate            explorer/subagent calls and their briefs
 #   final               last assistant message — the distilled output
 #   errors              failed tool results and rate limit events
+#   weight              context each tool put in front of the model, by result bytes
+#   cost                one TSV line: file, turns, usd, seconds
 #   types               event type histogram, for when a filter stops matching
 
 set -euo pipefail
-f="${1:?usage: session.sh <jsonl> [summary|tools|text|files|delegate|final|errors|types]}"
+f="${1:?usage: session.sh <jsonl> [summary|tools|text|files|delegate|final|errors|weight|cost|types]}"
 view="${2:-summary}"
 
 # Collapse newlines: a heredoc in a Bash command otherwise becomes several
@@ -55,12 +57,45 @@ errors() {
          | "RATE LIMIT " + (. | tostring | .[0:200])' "$f"
 }
 
+# How much context each tool actually put in front of the model, by result
+# size. Call counts are misleading on their own: one tool returning 40 kB of
+# prose costs more than twenty Greps returning line numbers. This is the view
+# that settles "is <tool> earning its place" — it is a measurement, not an
+# impression, and it is the only one that separates a locator from a payload.
+weight() {
+  jq -rs '
+    ( [ .[] | select(.type=="assistant") | .message.content[]?
+        | select(.type=="tool_use") | {key: .id, value: .name} ]
+      | from_entries ) as $name
+    | [ .[] | select(.type=="user") | .message.content[]?
+        | select(.type=="tool_result")
+        | {name: ($name[.tool_use_id] // "unknown"),
+           n:    (.content | tostring | length)} ]
+    | group_by(.name)
+    | map({name: .[0].name, calls: length, bytes: (map(.n) | add)})
+    | sort_by(-.bytes)
+    | (["BYTES","CALLS","TOOL"], (.[] | [.bytes, .calls, .name]))
+    | @tsv' "$f"
+}
+
+# One line per session, for aggregating across a whole log directory:
+#   for j in ~/src/ac-wt/log/*.jsonl; do bin/session.sh "$j" cost; done | sort -k3 -rn
+cost() {
+  jq -r --arg f "$(basename "$f")" '
+    select(.type=="result")
+    | [$f, (.num_turns // "?"), (.total_cost_usd // "?"),
+       ((.duration_ms // 0) / 1000 | floor)]
+    | @tsv' "$f"
+}
+
 case "$view" in
   tools)    tools ;;
   text)     text ;;
   files)    files ;;
   final)    final ;;
   errors)   errors ;;
+  weight)   weight ;;
+  cost)     cost ;;
   types)    jq -r '.type' "$f" | sort | uniq -c | sort -rn ;;
   delegate) jq -r 'select(.type=="assistant") | .message.content[]?
                    | select(.type=="tool_use" and (.name|test("Agent|Task";"i")))
