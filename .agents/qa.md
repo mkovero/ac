@@ -257,7 +257,7 @@ justification — do not downgrade to `request-changes` to express it, because
 that send the PR back to a developer who cannot take the measurement either.
 
 Where the measurement is one the rig role would take, say which block of
-`work/rig/rig-verify-queue.md` it belong to, or that it needs a new one. The
+`rig/rig-verify-queue.md` it belong to, or that it needs a new one. The
 rig role produce the measurement record; you do not run the session and you do
 not act on a result that does not exist yet.
 

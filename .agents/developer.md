@@ -41,19 +41,9 @@ for a cargo build.
 Read full triage spec comment + architect comment (if present).
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
-Locating code → `Glob` and `Grep` to find candidates, `Read` to confirm. Shell
-readers and searchers (`cat`, `grep`, `find`) denied by
-`.claude/settings.json`; do not work around them. Check the deny list rather
-than this sentence for the current set — it is the authority and it changes.
+Your prompt contains a file manifest from the architect. It is the output of a search that has already happened. Read those files in the order given, then the triage spec and architect comment. Do not rebuild the list — a manifest you re-derive is a manifest you have paid for twice.
 
-Start from the spec's own "files likely affected" line and the module map
-above, not from a whole-tree sweep. Where a change plausibly crosses a crate
-boundary — anything touching the daemon's published frame — `ac-rs/ZMQ.md`
-names the consumers, which is cheaper than discovering them by search.
-
-A search hit is a locator. It puts a file on your list; it does not tell you
-what the file does, and it is not a licence to widen scope past what the spec
-justifies.
+A search hit inside a manifest file is a locator. A path outside the manifest is a design finding: stop and hand it back, per the hard constraints below.
 
 ### step 2 — branch
 ```bash

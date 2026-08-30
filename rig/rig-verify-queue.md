@@ -295,6 +295,13 @@ channel, which is #204.
   converted to samples** and was re-derived 2026-08-24 (#375) to
   `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, scored against the
   candidate estimator's own measured repeatability — see `rig-test-plan.md`.
+  **The 3σ multiplier was accepted 2026-08-25** (mkovero on #375) and is fixed
+  before any verification run; do not re-open it once a run's numbers are
+  known. Two riders are still undecided and are recorded with the bar in
+  `rig-test-plan.md`: whether to score with a t-multiplier at the actual df or
+  hold n ≥ 12 per position under the normal approximation, and whether a fixed
+  physical tolerance is needed alongside `3 × se` — which on its own rewards a
+  noisy estimator with a wider bar.
 
 - **`ac-view` transfer snapshots regenerated for #356 — done 2026-08-20,
   one open finding.** Ran on 192.168.9.25 (RTX 2070) at `issue-243`

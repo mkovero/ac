@@ -62,6 +62,9 @@ Post comment in this exact structure:
 **affected modules**
 - {module} — {what changes}
 
+**file manifest**
+{Repo-relative paths from the repo root, one per line, no globs, no trailing comments. Include files that do not exist yet. This list is the developer's scope boundary, not a hint — a file you omit is a file they must stop and come back to you about. If you cannot name the files, the decision is not finished: that is needs-discussion, not an empty block.}
+
 **interface changes**
 {Describe any changes to: ZMQ session schema, CLI flags, public function signatures,
 Cargo feature flags. Write "none" if there are none.}
@@ -122,3 +125,4 @@ Do not touch `needs-work` on the PR — qa own that.
 - No contradicting triage spec acceptance criteria. Disagree with scope → note explicit, do not silently change.
 - No proposing wire schema changes without noting the impact on both consumers (`ac-cli`, `ac-view`).
 - One design comment per issue. Edit if revision needed.
+- the manifest is a boundary, and naming a file does not authorise changes the design decision doesn't justify.
