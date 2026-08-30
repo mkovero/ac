@@ -4,6 +4,8 @@
 //! returns a `results: [{name, pass, detail}]` array that the CLI's
 //! `run_software` renders one row per check.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use serde_json::{json, Value};
 
 use ac_core::measurement::thd;
@@ -199,11 +201,22 @@ fn check_mic_curve_log_linear_interp() -> Check {
     }
 }
 
+/// Distinguishes concurrent [`check_calibration_roundtrip`] scratch files.
+/// The pid alone is not enough: two `test_software` requests served at once —
+/// or, in this module's own tests, two `#[test]` fns both calling
+/// `run_all_checks` — share a pid, and each one deletes the file the other is
+/// mid-way through writing and reading back.
+static ROUNDTRIP_SEQ: AtomicU32 = AtomicU32::new(0);
+
 fn check_calibration_roundtrip() -> Check {
-    // Use the system temp dir + a per-pid filename. ac-core's test suite
-    // pulls in `tempfile`, but it's a dev-dep — at runtime we roll our own
-    // unique path so the daemon stays slim.
-    let path = std::env::temp_dir().join(format!("ac_self_test_{}_cal.json", std::process::id()));
+    // Use the system temp dir + a per-pid, per-call filename. ac-core's test
+    // suite pulls in `tempfile`, but it's a dev-dep — at runtime we roll our
+    // own unique path so the daemon stays slim.
+    let path = std::env::temp_dir().join(format!(
+        "ac_self_test_{}_{}_cal.json",
+        std::process::id(),
+        ROUNDTRIP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_file(&path);
 
     let n = 16usize;
