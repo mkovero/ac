@@ -501,11 +501,47 @@ inside it cannot be distinguished from agreement using only the estimator's
 own measured scatter, and one outside it is a finding independent of tape,
 temperature, or `c`.
 
-> **Multiplier not yet accepted, 2026-08-24.** 3σ is this derivation's own
-> proposed convention, not a value #375 or the architect's implementation note
-> hands down. It needs a human comment on #375 accepting 3σ specifically (or
-> naming a different multiplier) before this bar is treated as settled rather
-> than proposed.
+> **Multiplier accepted, 2026-08-25.** mkovero on #375: "Accept 3σ". The bar
+> is settled at `k = 3` and is no longer proposed. Accepted while the choice
+> was uncontested — the 2026-08-23 onset sits at 7.9σ, so every conventional
+> multiplier (2, 3, 5) returns the same verdict and `k` could not select an
+> outcome. After #378 moves the onset's increment and `se`, a result may land
+> near the boundary; `k` is fixed before that happens, which is the point of
+> settling it now. **Do not re-open `k` once a verification run's numbers are
+> known** — a multiplier chosen against a known result is not a bar.
+>
+> **Two riders remain open, and neither was part of that acceptance.** They
+> bound what the accepted bar does and does not claim; both need a decision
+> before the #378 verification run, and neither changes `k`:
+>
+> 1. **The normal approximation is stated, not exact.** `se` is estimated, not
+>    known: n=12 per position gives the increment ~22 df, so the sampling
+>    distribution is Student's t, not normal, and 3σ under t(22) is ~99.3%
+>    rather than 99.73%. `se` itself carries ~15% relative uncertainty at that
+>    df (`1/√(2·22)`), so the bar's own width moves run to run by about that
+>    much. Either score with a t-multiplier at the actual df, or keep 3σ under
+>    the normal approximation and hold n ≥ 12 per position as a condition of
+>    the bar rather than a nice-to-have. **Undecided.**
+> 2. **`k × se` rewards imprecision, and encodes no accuracy requirement.** A
+>    noisy estimator gets a wide bar and passes; a precise one gets a narrow
+>    bar and fails. On the 2026-08-23 table the identical rule gives the onset
+>    9.78 smp (35 mm at 3.6 mm/sample, 96 kHz) and the IR peak 1.80 smp
+>    (6.5 mm) — a 5.4× spread in physical tolerance from one rule. The bar
+>    therefore tests *consistency with the reference given the estimator's own
+>    noise*, not *accuracy to any stated figure*. If the tuning path needs a
+>    fixed physical tolerance, that is a second, independent criterion —
+>    `bar = min(3 × se, <tolerance>)` is the obvious form, but the tolerance
+>    must come from what the measurement is used for, not from this rig.
+>    **Undecided; not implied by accepting 3σ.**
+>
+> A third, smaller gap, recorded so it is not lost: **the reference's own
+> variance is assumed zero.** `transfer_stream`'s `sd 0` is from n=3 fresh
+> locks, which establishes the lock is reproducible, not that its variance
+> vanishes (the session record says so in its own confounds). Strictly the
+> comparison wants `se(diff) = √(se_est² + se_ref²)`; today `se_ref` is
+> dropped. At n=3 versus the onset's `se` of 3.26 this is almost certainly
+> negligible, which is why it is a note and not a rider — but it stops being
+> negligible if a future estimator's `se` approaches the reference's.
 
 Applying this bar to #346 AC5 and restating the verdict is AC4 of #375, and is
 deferred to #378: #378 is expected to move the onset's own increment and
