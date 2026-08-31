@@ -526,6 +526,12 @@ impl ChannelChain {
         self.samples_in_tile = 0;
     }
 
+    /// Samples the tile currently being filled still needs before it
+    /// closes. Always ≥ 1.
+    fn samples_to_tile_boundary(&self) -> usize {
+        self.tile_len - self.samples_in_tile
+    }
+
     /// Mean of the most recent `n` tiles, or `None` if fewer are available.
     fn tail_mean_ms(&self, n: usize) -> Option<f64> {
         if self.tile_ring.len() < n {
@@ -612,36 +618,63 @@ impl LoudnessState {
         // Feed the raw signal through the true-peak meter first — it
         // runs on unweighted audio per BS.1770-5 Annex 2.
         self.true_peak.push(channels)?;
-        // Push each channel in turn. Because they all see the same count
-        // of input samples, their tile emissions stay in lock-step.
-        let mut tiles_this_push: Option<usize> = None;
-        for (ch, chain) in channels.iter().zip(self.channels.iter_mut()) {
-            let n = chain.push(ch);
-            match tiles_this_push {
-                None => tiles_this_push = Some(n),
-                Some(prev) => debug_assert_eq!(prev, n, "channel tile counts diverged"),
+        // Walk the input one tile boundary at a time. Feeding the whole
+        // buffer to every channel and only then looping over the
+        // boundaries it crossed reads the *same*, final 400 ms / 3 s
+        // window once per boundary: a push spanning k boundaries would
+        // record k copies of the last window and lose the k-1 that
+        // actually closed inside it. Splitting on the boundary keeps
+        // every recorded window the one that closed there. The monitor
+        // pushes a whole tick at a time — two tile boundaries at the
+        // default 0.2 s interval — so this is the common path, not an
+        // edge case.
+        let len = channels.first().map_or(0, |c| c.len());
+        let mut off = 0;
+        let mut tiles = 0;
+        while off < len {
+            let need = self.samples_to_tile_boundary();
+            let take = need.min(len - off);
+            for (ch, chain) in channels.iter().zip(self.channels.iter_mut()) {
+                let emitted = chain.push(&ch[off..off + take]);
+                debug_assert_eq!(
+                    emitted,
+                    usize::from(take == need),
+                    "channel tile emission out of step"
+                );
             }
-        }
-        let tiles = tiles_this_push.unwrap_or(0);
-        for _ in 0..tiles {
-            self.tiles_emitted += 1;
-            // Every tile boundary once we have ≥ 4 tiles, a new 400 ms
-            // block completes. Compute its channel-weighted MS and record
-            // for the integrated-loudness gating.
-            if self.tiles_emitted as usize >= MOMENTARY_TILES {
-                if let Some(ms) = self.channel_weighted_ms(MOMENTARY_TILES) {
-                    self.block_ms.push(ms);
-                }
-            }
-            // Similarly, once we have ≥ 30 tiles, each boundary completes
-            // a new 3 s short-term window — record it for LRA.
-            if self.tiles_emitted as usize >= SHORT_TERM_TILES {
-                if let Some(ms) = self.channel_weighted_ms(SHORT_TERM_TILES) {
-                    self.short_term_ms.push(ms);
-                }
+            off += take;
+            if take == need {
+                self.record_tile_boundary();
+                tiles += 1;
             }
         }
         Ok(tiles)
+    }
+
+    /// Samples the next 100 ms tile still needs. Every channel is fed
+    /// the same slice lengths, so channel 0 speaks for the state.
+    fn samples_to_tile_boundary(&self) -> usize {
+        self.channels[0].samples_to_tile_boundary()
+    }
+
+    /// Record the windows that close at the tile boundary just crossed.
+    fn record_tile_boundary(&mut self) {
+        self.tiles_emitted += 1;
+        // Every tile boundary once we have ≥ 4 tiles, a new 400 ms
+        // block completes. Compute its channel-weighted MS and record
+        // for the integrated-loudness gating.
+        if self.tiles_emitted as usize >= MOMENTARY_TILES {
+            if let Some(ms) = self.channel_weighted_ms(MOMENTARY_TILES) {
+                self.block_ms.push(ms);
+            }
+        }
+        // Similarly, once we have ≥ 30 tiles, each boundary completes a
+        // new 3 s short-term window — record it for LRA.
+        if self.tiles_emitted as usize >= SHORT_TERM_TILES {
+            if let Some(ms) = self.channel_weighted_ms(SHORT_TERM_TILES) {
+                self.short_term_ms.push(ms);
+            }
+        }
     }
 
     /// Channel-weighted sum of mean-squares over the most recent `n`
@@ -1351,8 +1384,15 @@ mod tests {
     #[test]
     fn lra_relative_gate_drops_deep_silences() {
         // 20 s at -23 dBFS + 20 s at -60 dBFS. The quiet segment sits
-        // well below the -20 LU relative gate, so LRA should reflect
-        // only the loud segment (≈ 0).
+        // well below the -20 LU relative gate, so LRA must reflect the
+        // loud segment rather than the 37 LU drop between them.
+        //
+        // Not ≈ 0, though: the 3 s short-term window slides across the
+        // step for 3 s, and the first of those straddling windows are
+        // still within 20 LU of the ungated mean, so they survive the
+        // gate and set P10 a little under the steady loud level. A few
+        // LU of spread is the correct answer here; anything approaching
+        // the step height means the gate did not fire.
         let mut s = LoudnessState::new_mono(FS).unwrap();
         let loud = sine_samples((FS as usize) * 20, 1000.0, -23.0, FS);
         let deep_quiet = sine_samples((FS as usize) * 20, 1000.0, -60.0, FS);
@@ -1360,7 +1400,7 @@ mod tests {
         s.push(&[&deep_quiet]).unwrap();
         let lra = s.loudness_range();
         assert!(
-            lra < 1.5,
+            lra < 3.0,
             "relative gate failed to drop -60 dBFS segment: LRA = {lra:.3} LU"
         );
     }
@@ -1373,6 +1413,52 @@ mod tests {
         let _ = s.loudness_range();
         s.reset();
         assert_eq!(s.loudness_range(), 0.0);
+    }
+
+    #[test]
+    fn gated_stats_are_independent_of_push_chunking() {
+        // A push spanning several tile boundaries must record the window
+        // that closed at each one, not the last window repeated. Feeding
+        // identical audio as one call, as tile-aligned chunks, and as
+        // chunks that straddle boundaries crosses the same boundaries in
+        // all three cases, so every gated statistic must agree exactly.
+        let mut sig = Vec::new();
+        sig.extend(sine_samples((FS as usize) * 6, 1000.0, -30.0, FS));
+        sig.extend(sine_samples((FS as usize) * 6, 1000.0, -14.0, FS));
+        let tile = ((FS as f64) * BLOCK_STEP_S).round() as usize;
+
+        let mut one = LoudnessState::new_mono(FS).unwrap();
+        one.push(&[&sig]).unwrap();
+
+        for chunk in [tile, 1000, 4 * tile + 37] {
+            let mut split = LoudnessState::new_mono(FS).unwrap();
+            let mut tiles = 0;
+            for c in sig.chunks(chunk) {
+                tiles += split.push(&[c]).unwrap();
+            }
+            assert_eq!(
+                tiles,
+                sig.len() / tile,
+                "chunk {chunk}: wrong tile-boundary count"
+            );
+            assert!(
+                (one.integrated() - split.integrated()).abs() < 1e-9,
+                "chunk {chunk}: integrated {:.6} vs one-shot {:.6} LKFS",
+                split.integrated(),
+                one.integrated()
+            );
+            assert!(
+                (one.loudness_range() - split.loudness_range()).abs() < 1e-9,
+                "chunk {chunk}: LRA {:.6} vs one-shot {:.6} LU",
+                split.loudness_range(),
+                one.loudness_range()
+            );
+            assert_eq!(
+                one.gated_duration_s(),
+                split.gated_duration_s(),
+                "chunk {chunk}: gated duration differs"
+            );
+        }
     }
 
     #[test]
