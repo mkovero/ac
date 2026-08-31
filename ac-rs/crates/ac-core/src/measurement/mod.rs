@@ -2,6 +2,8 @@
 //! archivable. See `ARCHITECTURE.md`.
 
 pub mod ccir468;
+#[cfg(test)]
+mod citation_audit;
 pub mod filterbank;
 pub mod loudness;
 pub mod noise;

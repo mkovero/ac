@@ -81,7 +81,7 @@ fn write_payload(out: &mut String, payload: &MeasurementPayload) {
     let _ = writeln!(
         out,
         "<h2>{}</h2>",
-        html_escape(layout::payload_title(&payload.data))
+        html_escape(payload.data.display_title())
     );
     emit::write_rows(out, &layout::payload_meta_rows(payload));
     write_payload_body(out, &payload.data);

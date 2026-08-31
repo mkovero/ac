@@ -1,9 +1,10 @@
 //! Per-payload layout: title, citation/gate metadata, and the tabular
-//! or key-value body each [`MeasurementData`] variant carries.
+//! or key-value body each [`MeasurementData`](crate::measurement::report::MeasurementData)
+//! variant carries.
 
 use super::Row;
 use crate::measurement::report::{
-    FrequencyResponsePoint, GatedFrequencyResponsePoint, MeasurementData, MeasurementPayload,
+    FrequencyResponsePoint, GatedFrequencyResponsePoint, MeasurementPayload,
 };
 
 /// One table column, named for both backends and sized for the fixed-
@@ -37,16 +38,6 @@ pub fn fmt_f(v: f64, decimals: usize) -> String {
         return "\u{2013}".into();
     }
     format!("{v:.decimals$}")
-}
-
-pub fn payload_title(d: &MeasurementData) -> &'static str {
-    match d {
-        MeasurementData::FrequencyResponse { .. } => "Frequency Response",
-        MeasurementData::SpectrumBands { .. } => "Spectrum Bands",
-        MeasurementData::ImpulseResponse { .. } => "Impulse Response (Farina log sweep)",
-        MeasurementData::NoiseResult { .. } => "Idle-channel Noise (AES17)",
-        MeasurementData::GatedFrequencyResponse { .. } => "Frequency Response (gated)",
-    }
 }
 
 /// Citation(s) and gate for one payload. A payload with no citation
@@ -286,7 +277,7 @@ pub fn noise_result_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::measurement::report::{GateParams, StandardsCitation};
+    use crate::measurement::report::{GateParams, MeasurementData, StandardsCitation};
 
     fn point(freq_hz: f64, thd_pct: f64) -> FrequencyResponsePoint {
         FrequencyResponsePoint {
