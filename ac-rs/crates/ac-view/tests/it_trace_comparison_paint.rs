@@ -11,7 +11,7 @@ use ac_scene::{
     DerotMode, DisplayModes, FaultState, MeterState, Smoothing, Source, TransferInput,
     TransferScene,
 };
-use ac_view::view::{draw_view, Focus, TransferViewState, ViewKind};
+use ac_view::view::{draw_view, Focus, StoredTrace, TransferViewState, ViewKind};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -99,8 +99,12 @@ fn stored_runs_paint_without_a_live_scene() {
     // no live scene involved.
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);
-    let stored: Vec<(&str, &str, &TransferScene, bool)> =
-        vec![("fixture.acsnap", "2026-08-18T00:00:00Z", &fixture, true)];
+    let stored = vec![StoredTrace {
+        label: "fixture.acsnap",
+        captured_at_utc: "2026-08-18T00:00:00Z",
+        scene: &fixture,
+        focused: true,
+    }];
 
     let mut harness = Harness::new_ui(|ui| {
         ui.set_min_size(egui::vec2(400.0, 300.0));
@@ -137,9 +141,19 @@ fn legend_rows_distinguish_same_named_runs_by_timestamp() {
     let mut state = TransferViewState::new(-10.0, -30.0);
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);
-    let stored: Vec<(&str, &str, &TransferScene, bool)> = vec![
-        ("run.acsnap", "2026-08-01T00:00:00Z", &scene_a, true),
-        ("run.acsnap", "2026-08-02T00:00:00Z", &scene_b, false),
+    let stored = vec![
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-01T00:00:00Z",
+            scene: &scene_a,
+            focused: true,
+        },
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-02T00:00:00Z",
+            scene: &scene_b,
+            focused: false,
+        },
     ];
 
     let mut harness = Harness::new_ui(|ui| {

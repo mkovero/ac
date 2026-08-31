@@ -48,7 +48,9 @@ use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
     Smoothing, Source, TransferInput, TransferScene,
 };
-use ac_view::view::{draw_view, Focus, SpectrumViewState, StimState, TransferViewState, ViewKind};
+use ac_view::view::{
+    draw_view, Focus, SpectrumViewState, StimState, StoredTrace, TransferViewState, ViewKind,
+};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -250,9 +252,19 @@ fn snapshot_transfer_stored_comparison_no_live() {
     let mut state = TransferViewState::new(-10.0, -20.0);
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);
-    let stored: Vec<(&str, &str, &TransferScene, bool)> = vec![
-        ("run.acsnap", "2026-08-01T00:00:00Z", &run_a, true),
-        ("run.acsnap", "2026-08-02T00:00:00Z", &run_b, false),
+    let stored = vec![
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-01T00:00:00Z",
+            scene: &run_a,
+            focused: true,
+        },
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-02T00:00:00Z",
+            scene: &run_b,
+            focused: false,
+        },
     ];
     let mut h = Harness::builder()
         .with_size(SIZE)

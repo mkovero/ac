@@ -234,7 +234,7 @@ undetected because nobody was obliged to run the gate).
 `it_transfer_snapshots.rs`'s doc comment** (box, date, commit). Treat that
 line as the source of truth for staleness, not this file.
 
-**Checklist — any PR touching `ac-view/src/view.rs`'s `draw_view` or a
+**Checklist — any PR touching `ac-view/src/view/`'s `draw_view` or a
 pane module:**
 - [ ] Regenerate the 7 references on the rig (192.168.9.25) in that PR —
       `UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots
