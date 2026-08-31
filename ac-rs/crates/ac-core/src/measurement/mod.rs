@@ -7,6 +7,7 @@ pub mod loudness;
 pub mod noise;
 pub mod report;
 pub mod report_html;
+pub mod report_layout;
 pub mod report_pdf;
 pub mod sweep;
 pub mod thd;
