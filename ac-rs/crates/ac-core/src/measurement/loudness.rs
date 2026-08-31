@@ -229,6 +229,28 @@ pub fn ms_to_lkfs(ms: f64) -> f64 {
     }
 }
 
+/// Validate a planar push: `channels.len()` must equal `expected` and
+/// every slice must have the same length. Returns that common length
+/// (`0` when there are no channels).
+fn check_planar(channels: &[&[f32]], expected: usize) -> Result<usize> {
+    if channels.len() != expected {
+        bail!("expected {expected} channels, got {}", channels.len());
+    }
+    let Some(first) = channels.first() else {
+        return Ok(0);
+    };
+    let len = first.len();
+    for (i, ch) in channels.iter().enumerate().skip(1) {
+        if ch.len() != len {
+            bail!(
+                "channel {i} length {} mismatches channel 0 ({len})",
+                ch.len()
+            );
+        }
+    }
+    Ok(len)
+}
+
 pub fn citation() -> StandardsCitation {
     // Verified against the EBU Tech 3341 cases 1-4 and 9 and the
     // Tech 3342 constant-tone case via synthesised stimuli to ±0.1 LU
@@ -342,39 +364,16 @@ impl TruePeak {
     /// Feed planar audio. `channels.len()` must equal the configured
     /// channel count; every slice must have the same length.
     pub fn push(&mut self, channels: &[&[f32]]) -> Result<()> {
-        if channels.len() != self.rings.len() {
-            bail!(
-                "expected {} channels, got {}",
-                self.rings.len(),
-                channels.len()
-            );
-        }
-        if channels.is_empty() {
-            return Ok(());
-        }
-        let len = channels[0].len();
-        for (i, ch) in channels.iter().enumerate().skip(1) {
-            if ch.len() != len {
-                bail!(
-                    "channel {i} length {} mismatches channel 0 ({len})",
-                    ch.len()
-                );
-            }
-        }
+        check_planar(channels, self.rings.len())?;
         for (ch_idx, x_slice) in channels.iter().enumerate() {
             let ring = &mut self.rings[ch_idx];
             for &x in *x_slice {
                 // Shift the 12-sample ring: newest first.
-                for j in (1..TP_TAPS).rev() {
-                    ring[j] = ring[j - 1];
-                }
+                ring.copy_within(0..TP_TAPS - 1, 1);
                 ring[0] = x as f64;
                 // Compute 4 oversampled outputs and track absolute peak.
                 for phase in &TP_PHASE {
-                    let mut y = 0.0;
-                    for j in 0..TP_TAPS {
-                        y += phase[j] * ring[j];
-                    }
+                    let y: f64 = phase.iter().zip(ring.iter()).map(|(c, s)| c * s).sum();
                     let a = y.abs();
                     if a > self.max_abs {
                         self.max_abs = a;
@@ -431,6 +430,44 @@ const SHORT_TERM_TILES: usize = 30;
 /// level that corresponds to it.
 fn lkfs_to_ms(lkfs: f64) -> f64 {
     10.0_f64.powf((lkfs - LKFS_OFFSET_DB) / 10.0)
+}
+
+/// Mean-square ratio for a level shift of `lu` LU. The LKFS offset
+/// cancels, so `lkfs_to_ms(ms_to_lkfs(ms) + lu)` collapses to
+/// `ms * lu_ratio(lu)` — one multiply instead of a log10/powf round-trip,
+/// and no `ms <= 0` step through `-inf`.
+fn lu_ratio(lu: f64) -> f64 {
+    10.0_f64.powf(lu / 10.0)
+}
+
+/// BS.1770-5 §2.4 / EBU Tech 3342 §2.2 two-pass gate over a stream of
+/// channel-weighted mean-squares: keep everything at or above the
+/// absolute -70 LKFS gate, then keep everything at or above
+/// `rel_delta_lu` below the mean of those survivors. Returns `None` when
+/// either pass leaves nothing.
+fn two_pass_gate(values: &[f64], rel_delta_lu: f64) -> Option<Vec<f64>> {
+    let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+    let pass1: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|&ms| ms >= abs_gate_ms)
+        .collect();
+    if pass1.is_empty() {
+        return None;
+    }
+    let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
+    let rel_gate_ms = ungated_mean_ms * lu_ratio(rel_delta_lu);
+    let pass2: Vec<f64> = pass1.into_iter().filter(|&ms| ms >= rel_gate_ms).collect();
+    if pass2.is_empty() {
+        None
+    } else {
+        Some(pass2)
+    }
+}
+
+/// Arithmetic mean of a non-empty slice.
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
 }
 
 /// Per-channel filter + tile accumulator. One tile is a 100 ms
@@ -571,25 +608,7 @@ impl LoudnessState {
     /// of 100 ms tile boundaries crossed by this push (useful for driving
     /// a 10 Hz emit loop).
     pub fn push(&mut self, channels: &[&[f32]]) -> Result<usize> {
-        if channels.len() != self.channels.len() {
-            bail!(
-                "expected {} channels, got {}",
-                self.channels.len(),
-                channels.len()
-            );
-        }
-        if channels.is_empty() {
-            return Ok(0);
-        }
-        let len = channels[0].len();
-        for (i, ch) in channels.iter().enumerate().skip(1) {
-            if ch.len() != len {
-                bail!(
-                    "channel {i} length {} mismatches channel 0 ({len})",
-                    ch.len()
-                );
-            }
-        }
+        check_planar(channels, self.channels.len())?;
         // Feed the raw signal through the true-peak meter first — it
         // runs on unweighted audio per BS.1770-5 Annex 2.
         self.true_peak.push(channels)?;
@@ -662,27 +681,10 @@ impl LoudnessState {
     ///
     /// Returns `-∞` when fewer than one block survives the absolute gate.
     pub fn integrated(&self) -> f64 {
-        if self.block_ms.is_empty() {
-            return f64::NEG_INFINITY;
+        match two_pass_gate(&self.block_ms, RELATIVE_GATE_DELTA_LU) {
+            Some(survivors) => ms_to_lkfs(mean(&survivors)),
+            None => f64::NEG_INFINITY,
         }
-        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
-        let pass1: Vec<f64> = self
-            .block_ms
-            .iter()
-            .copied()
-            .filter(|&ms| ms >= abs_gate_ms)
-            .collect();
-        if pass1.is_empty() {
-            return f64::NEG_INFINITY;
-        }
-        let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
-        let rel_gate_ms = lkfs_to_ms(ms_to_lkfs(ungated_mean_ms) + RELATIVE_GATE_DELTA_LU);
-        let pass2: Vec<f64> = pass1.into_iter().filter(|&ms| ms >= rel_gate_ms).collect();
-        if pass2.is_empty() {
-            return f64::NEG_INFINITY;
-        }
-        let gated_mean_ms = pass2.iter().sum::<f64>() / pass2.len() as f64;
-        ms_to_lkfs(gated_mean_ms)
     }
 
     /// Seconds of audio that survived the absolute gate and contribute to
@@ -715,27 +717,11 @@ impl LoudnessState {
     /// at least 2 short-term values survive the gating so the stat is
     /// at least defined.
     pub fn loudness_range(&self) -> f64 {
-        if self.short_term_ms.is_empty() {
+        let Some(survivors) = two_pass_gate(&self.short_term_ms, LRA_RELATIVE_GATE_DELTA_LU) else {
             return 0.0;
-        }
-        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
-        let pass1: Vec<f64> = self
-            .short_term_ms
-            .iter()
-            .copied()
-            .filter(|&ms| ms >= abs_gate_ms)
-            .collect();
-        if pass1.is_empty() {
-            return 0.0;
-        }
-        let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
-        let rel_gate_ms = lkfs_to_ms(ms_to_lkfs(ungated_mean_ms) + LRA_RELATIVE_GATE_DELTA_LU);
+        };
         // Convert survivors to LKFS and sort so we can pull percentiles.
-        let mut lkfs: Vec<f64> = pass1
-            .into_iter()
-            .filter(|&ms| ms >= rel_gate_ms)
-            .map(ms_to_lkfs)
-            .collect();
+        let mut lkfs: Vec<f64> = survivors.into_iter().map(ms_to_lkfs).collect();
         if lkfs.len() < 2 {
             return 0.0;
         }
@@ -1387,6 +1373,67 @@ mod tests {
         let _ = s.loudness_range();
         s.reset();
         assert_eq!(s.loudness_range(), 0.0);
+    }
+
+    #[test]
+    fn true_peak_phase_table_is_symmetric() {
+        // Annex 2 Table 1's 48-tap prototype is linear-phase symmetric:
+        // phase 3 is phase 0 reversed, phase 2 is phase 1 reversed. The
+        // module doc asserts this in prose; assert it in code so a
+        // transcription slip in the literal table goes red.
+        for (a, b) in [(0usize, 3usize), (1, 2)] {
+            for j in 0..TP_TAPS {
+                let k = TP_TAPS - 1 - j;
+                assert_eq!(
+                    TP_PHASE[a][j], TP_PHASE[b][k],
+                    "phase {a} tap {j} != phase {b} tap {k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lu_ratio_matches_the_lkfs_round_trip_it_replaced() {
+        // `lu_ratio` replaced `lkfs_to_ms(ms_to_lkfs(ms) + lu)`. Compute
+        // that replaced expression here so any divergence goes red
+        // rather than silently shifting a gate threshold.
+        for &ms in &[1e-9_f64, 1e-4, 0.25, 0.5, 1.0, 3.7] {
+            for &lu in &[RELATIVE_GATE_DELTA_LU, LRA_RELATIVE_GATE_DELTA_LU, 0.0, 4.5] {
+                let replaced = lkfs_to_ms(ms_to_lkfs(ms) + lu);
+                let current = ms * lu_ratio(lu);
+                assert!(
+                    (replaced - current).abs() <= 1e-12 * replaced.max(current),
+                    "ms={ms:e} lu={lu}: round-trip {replaced:e} vs lu_ratio {current:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_pass_gate_drops_both_passes() {
+        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+        // Empty input, and input entirely below the absolute gate.
+        assert!(two_pass_gate(&[], RELATIVE_GATE_DELTA_LU).is_none());
+        assert!(two_pass_gate(&[abs_gate_ms * 0.5; 4], RELATIVE_GATE_DELTA_LU).is_none());
+        // One loud block plus blocks below the absolute gate: the quiet
+        // ones never reach pass 2, so the loud one stands alone.
+        let v = vec![1.0, abs_gate_ms * 0.1, abs_gate_ms * 0.1];
+        let survivors = two_pass_gate(&v, RELATIVE_GATE_DELTA_LU).expect("one survivor");
+        assert_eq!(survivors, vec![1.0]);
+        // A block 15 LU under the mean falls to the -10 LU relative gate.
+        let v = vec![1.0, 1.0, 1.0, lu_ratio(-15.0)];
+        let survivors = two_pass_gate(&v, RELATIVE_GATE_DELTA_LU).expect("three survivors");
+        assert_eq!(survivors.len(), 3);
+    }
+
+    #[test]
+    fn check_planar_reports_shape_errors() {
+        let a = vec![0.0_f32; 8];
+        let b = vec![0.0_f32; 7];
+        assert_eq!(check_planar(&[&a, &a], 2).unwrap(), 8);
+        assert_eq!(check_planar(&[], 0).unwrap(), 0);
+        assert!(check_planar(&[&a], 2).is_err());
+        assert!(check_planar(&[&a, &b], 2).is_err());
     }
 
     #[test]
