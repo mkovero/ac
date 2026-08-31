@@ -814,7 +814,7 @@ fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
     None
 }
 
-/// #261 — the third of the three call sites `shared/calibration.rs`'s layer
+/// #261 — the third of the three call sites `shared/calibration/`'s layer
 /// topology names, and the last one that held by human reading alone.
 ///
 /// `derive_pair` and the `transfer_stream` handler are covered by
@@ -963,6 +963,6 @@ fn parity_monitor_spl_is_independent_of_voltage_cal_scale() {
          `monitor.rs` is scaling `spectrum` by `vrms_at_0dbfs_in` — that is \
          20·log10(22.36), the stored full-scale constant, not 20·log10(5.0) of the DMM \
          reading. Voltage cal and SPL cal are parallel layers off raw digital amplitude, \
-         not composed (`shared/calibration.rs`, layer topology)."
+         not composed (`shared/calibration/`, layer topology)."
     );
 }
