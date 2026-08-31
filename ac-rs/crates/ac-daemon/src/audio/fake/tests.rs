@@ -1,13 +1,58 @@
 //! Unit tests for the fake backend.
 
+use super::stimulus::channel_index;
 use super::*;
+use std::f64::consts::PI;
+
+/// Goertzel magnitude at `freq`, normalised by length — enough to confirm
+/// energy landed where a tone was requested without pulling in a full FFT
+/// for a unit test. `freq` is snapped to the nearest bin, so a caller
+/// comparing two frequencies should pick ones that fall on bins at the
+/// length it captures.
+fn goertzel_mag(samples: &[f32], sr: f64, freq: f64) -> f64 {
+    let n = samples.len();
+    let k = (0.5 + (n as f64 * freq) / sr).floor();
+    let w = 2.0 * PI * k / n as f64;
+    let cw = w.cos();
+    let coeff = 2.0 * cw;
+    let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+    for &x in samples {
+        let s0 = x as f64 + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - s1 * s2 * coeff).sqrt() / n as f64
+}
+
+/// `meas[i]` must equal `gain * refch[i - delay]` for every `i` past the
+/// initial `delay` samples, which are silence — the `CorrelatedPair` ground
+/// truth, asserted against the captured arrays rather than a "they differ"
+/// proxy.
+fn assert_delayed_scaled(meas: &[f32], refch: &[f32], gain: f64, delay: usize, what: &str) {
+    for (i, &m) in meas.iter().enumerate().take(delay) {
+        assert_eq!(
+            m, 0.0,
+            "{what}: meas[{i}] should be silence before delay elapses"
+        );
+    }
+    for i in delay..meas.len() {
+        let expected = gain as f32 * refch[i - delay];
+        assert!(
+            (meas[i] - expected).abs() < 1e-6,
+            "{what}: meas[{i}]={} expected {expected} (= {gain} * ref[{}]={})",
+            meas[i],
+            i - delay,
+            refch[i - delay]
+        );
+    }
+}
 
 #[test]
 fn channel_index_parses_trailing_number() {
-    assert_eq!(FakeEngine::channel_index("fake:capture_0"), 0);
-    assert_eq!(FakeEngine::channel_index("fake:capture_7"), 7);
-    assert_eq!(FakeEngine::channel_index("fake:capture_19"), 19);
-    assert_eq!(FakeEngine::channel_index("garbage"), 0);
+    assert_eq!(channel_index("fake:capture_0"), 0);
+    assert_eq!(channel_index("fake:capture_7"), 7);
+    assert_eq!(channel_index("fake:capture_19"), 19);
+    assert_eq!(channel_index("garbage"), 0);
 }
 
 #[test]
@@ -15,9 +60,9 @@ fn reroute_shifts_effective_frequency() {
     let mut eng = FakeEngine::new();
     eng.set_tone(1_000.0, 0.5);
     eng.reconnect_input("fake:capture_0").unwrap();
-    assert!((eng.effective_freq(eng.input_port.as_deref()) - 1_000.0).abs() < 1e-9);
+    assert!((eng.gen.effective_freq(eng.input_port.as_deref()) - 1_000.0).abs() < 1e-9);
     eng.reconnect_input("fake:capture_3").unwrap();
-    assert!((eng.effective_freq(eng.input_port.as_deref()) - 1_300.0).abs() < 1e-9);
+    assert!((eng.gen.effective_freq(eng.input_port.as_deref()) - 1_300.0).abs() < 1e-9);
 }
 
 #[test]
@@ -81,17 +126,9 @@ fn capture_multi_returns_one_buffer_per_registered_port() {
     // the right *number* of buffers in the wrong order would put a
     // measurement channel's audio on a reference ring and still look
     // healthy from the frame count alone.
-    let n = bufs[0].len();
-    let energy_at = |buf: &[f32], freq: f64| -> f64 {
-        let sr = 48_000.0;
-        let (mut re, mut im) = (0.0, 0.0);
-        for (i, s) in buf.iter().enumerate() {
-            let t = 2.0 * PI * freq * (i as f64) / sr;
-            re += *s as f64 * t.cos();
-            im += *s as f64 * t.sin();
-        }
-        ((re * re + im * im) / (n * n) as f64).sqrt()
-    };
+    // 1 100 and 1 300 Hz both land exactly on a bin at this capture length
+    // (960 samples at 48 kHz, 50 Hz bins), so the bin snap costs nothing.
+    let energy_at = |buf: &[f32], freq: f64| goertzel_mag(buf, 48_000.0, freq);
     assert!(
         energy_at(&bufs[2], 1_100.0) > 10.0 * energy_at(&bufs[2], 1_300.0),
         "buffer 2 must be capture_1 (1 100 Hz), got 1 100 Hz {:.6} vs 1 300 Hz {:.6}",
@@ -124,21 +161,10 @@ fn correlated_pair_tracks_each_measurement_port_separately() {
         let bufs = eng.capture_multi(0.02).unwrap();
         assert_eq!(bufs.len(), 3);
         // delay 0 and gain 0.5: both measurement channels are the ref
-        // scaled, sample for sample, on every tick.
-        for (i, (m, r)) in bufs[0].iter().zip(&bufs[1]).enumerate() {
-            assert!(
-                (*m - 0.5 * *r).abs() < 1e-6,
-                "tick {tick} sample {i}: meas 0 {m} != 0.5 * ref {r}"
-            );
-        }
-        for (i, (m, r)) in bufs[2].iter().zip(&bufs[1]).enumerate() {
-            assert!(
-                (*m - 0.5 * *r).abs() < 1e-6,
-                "tick {tick} sample {i}: meas 1 {m} != 0.5 * ref {r} \
-                 — a shared meas cursor drifts the second channel by one \
-                 buffer per tick"
-            );
-        }
+        // scaled, sample for sample, on every tick. A shared meas cursor
+        // drifts the second channel by one buffer per tick.
+        assert_delayed_scaled(&bufs[0], &bufs[1], 0.5, 0, &format!("tick {tick} meas 0"));
+        assert_delayed_scaled(&bufs[2], &bufs[1], 0.5, 0, &format!("tick {tick} meas 1"));
     }
 }
 
@@ -154,23 +180,6 @@ fn stereo_channels_are_independent() {
     assert_eq!(meas.len(), refch.len());
     let diff: f32 = meas.iter().zip(&refch).map(|(a, b)| (a - b).abs()).sum();
     assert!(diff > 0.0, "meas and ref channels should differ");
-}
-
-/// Goertzel magnitude at `freq` — enough to confirm energy landed where
-/// a tone was requested without pulling in a full FFT for a unit test.
-fn goertzel_mag(samples: &[f32], sr: f64, freq: f64) -> f64 {
-    let n = samples.len();
-    let k = (0.5 + (n as f64 * freq) / sr).floor();
-    let w = 2.0 * PI * k / n as f64;
-    let cw = w.cos();
-    let coeff = 2.0 * cw;
-    let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
-    for &x in samples {
-        let s0 = x as f64 + coeff * s1 - s2;
-        s2 = s1;
-        s1 = s0;
-    }
-    (s1 * s1 + s2 * s2 - s1 * s2 * coeff).sqrt() / n as f64
 }
 
 #[test]
@@ -273,21 +282,7 @@ fn correlated_pair_meas_is_exact_delayed_scaled_copy_of_ref() {
         "test capture too short to exercise the delay"
     );
 
-    for i in delay..meas.len() {
-        let expected = gain as f32 * refch[i - delay];
-        assert!(
-            (meas[i] - expected).abs() < 1e-6,
-            "meas[{i}]={} expected {expected} (= {gain} * ref[{}]={})",
-            meas[i],
-            i - delay,
-            refch[i - delay]
-        );
-    }
-    // Before the delay has elapsed, meas is silence (no output before
-    // the DUT's input arrived).
-    for (i, &m) in meas.iter().enumerate().take(delay) {
-        assert_eq!(m, 0.0, "meas[{i}] should be silence before delay elapses");
-    }
+    assert_delayed_scaled(&meas, &refch, gain, delay, "single capture");
 }
 
 /// Same check across a call boundary (two consecutive `capture_stereo`
@@ -309,14 +304,7 @@ fn correlated_pair_delay_relationship_holds_across_call_boundary() {
         ref_all.extend(refch);
     }
     assert!(meas_all.len() > delay * 2);
-    for i in delay..meas_all.len() {
-        let expected = gain as f32 * ref_all[i - delay];
-        assert!(
-            (meas_all[i] - expected).abs() < 1e-6,
-            "meas_all[{i}]={} expected {expected}",
-            meas_all[i]
-        );
-    }
+    assert_delayed_scaled(&meas_all, &ref_all, gain, delay, "across five captures");
 }
 
 /// Broadband, not a hidden tone — the ground-truth H1/coherence test
