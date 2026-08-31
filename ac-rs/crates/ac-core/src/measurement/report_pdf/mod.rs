@@ -86,7 +86,7 @@ pub fn render_pdf(report: &MeasurementReport) -> Result<Vec<u8>> {
 /// One payload: heading, its citation(s) and gate block (when present),
 /// then the data-specific body.
 fn draw_payload(cur: &mut Cursor, payload: &MeasurementPayload) {
-    cur.heading(layout::payload_title(&payload.data));
+    cur.heading(payload.data.display_title());
     for row in layout::payload_meta_rows(payload) {
         cur.kv(row.label, &row.value);
     }

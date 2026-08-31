@@ -19,8 +19,8 @@ mod sections;
 pub use payload::{
     fmt_f, frequency_response_cells, frequency_response_columns, frequency_response_series,
     gated_cells, gated_columns, gated_magnitude_series, gated_phase_series, impulse_response_rows,
-    noise_result_rows, payload_meta_rows, payload_title, spectrum_bands_rows, spectrum_cells,
-    spectrum_columns, Column,
+    noise_result_rows, payload_meta_rows, spectrum_bands_rows, spectrum_cells, spectrum_columns,
+    Column,
 };
 pub use sections::{header_rows, sections};
 
