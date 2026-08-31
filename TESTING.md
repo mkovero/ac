@@ -177,7 +177,8 @@ the question directly.
 Unit tests sit in `#[cfg(test)]` modules beside the code:
 
 - `measurement/` — `thd`, `filterbank`, `weighting`, `ccir468`, `noise`,
-  `sweep`, `loudness`, `report`, `report_html`, `report_pdf`
+  `sweep`, `loudness`, `report`, `report_layout/`, `report_html/`,
+  `report_pdf/`
 - `visualize/` — `spectrum`, `cwt`, `cqt`, `reassigned`, `aggregate`,
   `fractional_octave`, `smoothing`, `spl_level`, `time_integration`,
   `transfer`, `pair_derivation`, `weighting_curves`, `mtw/`
