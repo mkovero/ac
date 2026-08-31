@@ -51,7 +51,12 @@ ac-core/src/
     weighting.rs           # A, C, Z weighting filters
     thd.rs                 # IEC 60268-3 THD / THD+N
     stepped_sine.rs        # ac plot primitives
-    sweep.rs               # Farina log-sweep IR deconvolution
+    sweep/                 # Farina log-sweep IR deconvolution
+      mod.rs               #   SweepParams, citations, re-exports
+      deconv.rs            #   sweep + inverse filter + FFT convolution
+      harmonics.rs         #   linear/harmonic IR gating
+      tail_decay.rs        #   ISO 18233 §6.3.2 capture-adequacy check
+      gated.rs             #   time-gated quasi-anechoic response
     noise.rs               # AES17 idle-channel noise measurement
     report.rs              # MeasurementReport type, serialization
     report_layout/         # what each section says — shared by both renderers

@@ -19,7 +19,7 @@ use crate::audio::AudioEngine;
 /// peak, not resolve harmonics or a decay tail, so `n_harmonics = 1` on
 /// the `extract_irs` call below. That matters for the window bound: with
 /// `n_harmonics == 1` there is no neighbouring order, so
-/// `per_order_window_lens`'s harmonic-gap clamp (`sweep.rs`) never runs —
+/// `per_order_window_lens`'s harmonic-gap clamp (`sweep/harmonics.rs`) never runs —
 /// it does not bind here, only on multi-harmonic callers like `plot_ir`.
 ///
 /// The bound that actually fires is the requested window itself, so it

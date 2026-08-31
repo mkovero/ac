@@ -1,7 +1,7 @@
 //! `plot` / `plot_level` — run a sweep, collect per-point analysis frames,
 //! and emit a `done` with the full dataset so the CLI can render a PNG.
 //! `plot_ir` — Farina log-sweep impulse-response capture (moved here from
-//! `sweep.rs` by #282: it captures and analyses, so it belongs with its
+//! `measurement/sweep` by #282: it captures and analyses, so it belongs with its
 //! `plot`/`plot_level` siblings rather than the pure generators).
 
 use std::sync::atomic::Ordering;

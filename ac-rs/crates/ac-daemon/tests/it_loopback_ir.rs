@@ -64,7 +64,7 @@ const SELF_LOOP_LEVEL_DBFS: f64 = -6.0;
 
 /// Sweep duration. Not a free parameter: the linear IR's window is clamped
 /// to the gap between the linear IR and the order-2 IR
-/// (`per_order_window_lens`, `sweep.rs:318`/`:335`), and that gap is
+/// (`per_order_window_lens`, `measurement/sweep/harmonics.rs`), and that gap is
 /// `duration · ln 2 / ln(f2/f1)` seconds. So the window that has to contain
 /// the round trip grows with the sweep, and a chain whose latency exceeds
 /// half the gap puts its own peak outside the window it is measured in.
@@ -157,7 +157,7 @@ fn round_trip_bound(
 /// The linear IR's gate length (`window_len_used[0]`) that `extract_irs`
 /// actually produces for a sweep with these parameters — order 1's gate
 /// clamped down to the sample distance to order 2 (`per_order_window_lens`,
-/// `sweep.rs:328`), the same computation the daemon runs, called here
+/// `measurement/sweep/harmonics.rs`), the same computation the daemon runs, called here
 /// directly rather than re-derived by hand so the two can't drift apart.
 fn linear_ir_len(duration_s: f64, sample_rate_hz: f64, window_len_requested: usize) -> usize {
     let p = SweepParams {
@@ -458,7 +458,7 @@ fn loopback_ir_recovers_sharp_peak() {
     let data = &frame["data"];
     let sample_rate_hz = data["sample_rate_hz"].as_f64();
     // `window_len_used` is an array, one entry per harmonic order (order 1
-    // first) — see ZMQ.md and `sweep.rs`'s `DeconvolvedIrs::window_len_used`.
+    // first) — see ZMQ.md and `sweep/harmonics.rs`'s `DeconvolvedIrs::window_len_used`.
     // Index [0] is the linear IR's actual gate length, which is what the
     // peak-position bound below is derived from.
     let window_len_used = frame["window_len_used"][0].as_u64();
@@ -553,7 +553,7 @@ fn loopback_ir_recovers_sharp_peak() {
     // `extract_irs` actually returned (checked equal to `window_len_used[0]`
     // above), not the `window_len` requested above. `per_order_window_lens`
     // clamps it to the gap between the linear IR and the order-2 IR
-    // (`sweep.rs:318`, `:335`), which is `duration · ln 2 / ln(f2/f1)`
+    // (`measurement/sweep/harmonics.rs`), which is `duration · ln 2 / ln(f2/f1)`
     // seconds. See #277/#341 for the measured consequence of dividing the
     // wrong one, and #361 for what happens when that gap is too small to
     // hold `MAX_ROUND_TRIP_S` at all: `round_trip_bound` refuses outright
