@@ -63,6 +63,7 @@ ac-core/src/
       emit.rs              #   <dl> and <table> emission, escaping
     report_pdf/            # pure-Rust printpdf renderer, paginated A4
       cursor.rs            #   page geometry, pt->mm, pagination
+      metrics.rs           #   core-font advance widths; wrap in the drawing face
       plot.rs              #   plot frame, grids, trace
 
   visualize/               # Tier 2

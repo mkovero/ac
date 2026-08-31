@@ -7,6 +7,7 @@
 use printpdf::{Mm, Point};
 
 use super::cursor::{Cursor, MARGIN_MM, PAGE_W_MM, SIZE_SMALL, SMALL_MM};
+use super::metrics::{text_mm, Face};
 use crate::measurement::report_layout::axis;
 
 /// Height of the plot box itself, excluding its frequency labels.
@@ -46,24 +47,25 @@ pub(super) fn draw(cur: &mut Cursor, series: &[(f64, f64)]) {
     for f in axis::freq_ticks(fmin, fmax) {
         let x = x_at(f);
         cur.vline(x, y0, y1, 0.15);
-        cur.layer().use_text(
-            axis::format_freq(f),
-            SIZE_SMALL,
-            Mm(x - 2.5),
-            Mm(y0 - SMALL_MM - 0.5),
-            &cur.fonts().mono,
-        );
+        // Centred on its tick, but never past a margin: the decade at
+        // the right edge of the box sits on x1, and a fixed nudge left
+        // put its label 2.6 mm into the margin — off-page for a wider
+        // one, and `printpdf` would not have said so.
+        let label = axis::format_freq(f);
+        let w = text_mm(&label, SIZE_SMALL, Face::Mono);
+        let x_label = (x - w / 2.0).clamp(MARGIN_MM, PAGE_W_MM - MARGIN_MM - w);
+        cur.text_at(&label, SIZE_SMALL, x_label, y0 - SMALL_MM - 0.5, Face::Mono);
     }
 
     for v in axis::db_gridlines(dmin, dmax) {
         let y = y_at(v);
         cur.hline(y, x0, x1, 0.15);
-        cur.layer().use_text(
-            format!("{v:.0}"),
+        cur.text_at(
+            &format!("{v:.0}"),
             SIZE_SMALL,
-            Mm(MARGIN_MM),
-            Mm(y - SMALL_MM * 0.35),
-            &cur.fonts().mono,
+            MARGIN_MM,
+            y - SMALL_MM * 0.35,
+            Face::Mono,
         );
     }
 

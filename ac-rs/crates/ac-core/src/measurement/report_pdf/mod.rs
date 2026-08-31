@@ -17,6 +17,7 @@
 //! numbers survive.
 
 mod cursor;
+mod metrics;
 mod plot;
 
 use anyhow::{Context, Result};
@@ -195,6 +196,8 @@ fn all_text(pdf: &[u8]) -> String {
 }
 #[cfg(test)]
 mod tests {
+    use super::cursor::winansi_char;
+    use super::metrics::{text_mm, Face};
     use super::*;
     use crate::measurement::report::{
         FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
@@ -431,6 +434,60 @@ mod tests {
         out
     }
 
+    /// Every text run in the document, as `(page, x_mm, width_mm, text)`.
+    ///
+    /// [`text_positions`] reads where a run *starts*. That cannot see a
+    /// line whose start is inside the margin and whose glyphs are not:
+    /// the width depends on the font the run was set in, so the font
+    /// has to be read out of the page resources and the run measured
+    /// against its own metrics.
+    fn text_runs(pdf: &[u8]) -> Vec<(u32, f32, f32, String)> {
+        use printpdf::lopdf::content::Content;
+        use printpdf::lopdf::{Document, Object};
+
+        const PT_PER_MM: f32 = 72.0 / 25.4;
+
+        fn num(o: &Object) -> f32 {
+            match o {
+                Object::Real(v) => *v,
+                Object::Integer(v) => *v as f32,
+                other => panic!("non-numeric operand: {other:?}"),
+            }
+        }
+
+        let doc = Document::load_mem(pdf).expect("parse pdf");
+        let mut out = Vec::new();
+        let mut pages: Vec<(u32, _)> = doc.get_pages().into_iter().collect();
+        pages.sort_by_key(|(n, _)| *n);
+        for (number, id) in pages {
+            let data = doc.get_page_content(id).expect("page content");
+            let (mut face, mut size, mut x) = (Face::Regular, 0.0f32, 0.0f32);
+            for op in Content::decode(&data).expect("decode content").operations {
+                match op.operator.as_str() {
+                    "Tf" => {
+                        // `printpdf` names a core font's resource after
+                        // the font itself, so the operand is the face.
+                        face = match op.operands[0].as_name().expect("font name") {
+                            b"Helvetica" => Face::Regular,
+                            b"Helvetica-Bold" => Face::Bold,
+                            b"Courier" => Face::Mono,
+                            other => panic!("unmetered font {}", String::from_utf8_lossy(other)),
+                        };
+                        size = num(&op.operands[1]);
+                    }
+                    "Td" => x = num(&op.operands[0]) / PT_PER_MM,
+                    "Tj" => {
+                        let bytes = op.operands[0].as_str().expect("string operand");
+                        let text: String = bytes.iter().map(|b| winansi_char(*b)).collect();
+                        out.push((number, x, text_mm(&text, size, face), text));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
     fn page_count(pdf: &[u8]) -> usize {
         printpdf::lopdf::Document::load_mem(pdf)
             .expect("parse pdf")
@@ -592,6 +649,38 @@ mod tests {
         let text = all_text(&pdf);
         assert!(text.contains("Calibration"), "{text}");
         assert!(text.contains("uncalibrated"), "{text}");
+    }
+
+    #[test]
+    fn no_text_run_is_drawn_past_the_right_margin() {
+        // `note` wrapped its lines to a Courier character budget and
+        // drew them in Helvetica, so a note of capitals or hex ran off
+        // the right edge — placed inside the margin, painted outside
+        // it, and silent either way. Measuring each run in the font it
+        // was actually set in is the only way to see that.
+        let mut wide = full_report(120);
+        wide.notes = Some(
+            "MEASUREMENT ABORTED: CHECK ROUTING, CLOCK AND GAIN BEFORE RETRYING THIS SWEEP\n\
+             WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM-WWW-MMM"
+                .into(),
+        );
+        for pdf in [
+            render_pdf(&sample_report()).expect("render"),
+            render_pdf(&wide).expect("render"),
+        ] {
+            let runs = text_runs(&pdf);
+            assert!(!runs.is_empty(), "no text placed at all");
+            for (page, x, width, text) in runs {
+                // A tick label clamped flush to the margin lands on it
+                // to within f32 rounding; a micrometre is not an
+                // overrun.
+                let end = x + width;
+                assert!(
+                    end <= 210.0 - 15.0 + 0.01,
+                    "page {page}: run ends at {end:.1} mm, past the 195 mm margin: {text:?}"
+                );
+            }
+        }
     }
 
     #[test]
