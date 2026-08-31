@@ -32,6 +32,20 @@ pub(crate) fn apply_mic_curve_inplace_f64(curve: &MicResponse, freqs: &[f64], ma
     }
 }
 
+/// Linear-amplitude counterpart of [`apply_mic_curve_inplace_f64`].
+///
+/// Same correction and same sign, different domain: subtracting
+/// `corr_db` from a dB magnitude and scaling a linear amplitude by
+/// `10^(-corr_db/20)` are one operation, and they have to stay one.
+/// `transfer_stream` corrects three views of a single measurement — the
+/// dB `magnitude_db`, the complex `re`/`im` pair, and the calibrated
+/// `meas_spectrum` — and a curve applied to one but not the others makes
+/// those views disagree with no symptom at the point of the mistake.
+/// Kept beside the dB form so the two are read and edited together.
+pub(crate) fn mic_curve_scale(curve: &MicResponse, f: f64) -> f64 {
+    10.0_f64.powf(-(curve.correction_at(f as f32) as f64) / 20.0)
+}
+
 /// Status flag stamped on every monitor / Tier-1 frame so the UI (and
 /// downstream wire subscribers) can tell whether the magnitudes are
 /// mic-corrected, have a curve loaded but the global toggle off, or
