@@ -284,6 +284,36 @@ struct PairState {
     spl_last: Option<std::time::Instant>,
 }
 
+/// Trim a capture ring to the analysis window, dropping **whole `step`
+/// units only** (#208).
+///
+/// The ring start then only ever sits on the stream's own `k·step`
+/// lattice, so the blocks `welch_all` cuts at ring offsets `0, step,
+/// 2·step, …` land on fixed absolute sample positions. Every event is
+/// analysed once, at one weight, for the life of the session.
+///
+/// Trimming to an exact `target_total` every tick instead — what this did
+/// before — advances the ring start by one capture chunk per tick and drags
+/// the whole block grid across the audio. A fixed event then drifts from the
+/// ring's edge, where only ONE block covers it, to the ring's middle, where
+/// TWO do, and back out. That is a ~6 dB swing in how much the event
+/// contributes, with the Hann shape on top of it. `n_averages = 1` hides the
+/// whole thing (one block, no grid, nothing to slide), which is why it
+/// presented as "averaging is broken".
+///
+/// Leaves up to `step - 1` samples of tail unconsumed. That is the point: a
+/// block is analysed when it is complete and not before. Length stays inside
+/// `[target_total, target_total + step)`, which fits exactly `n_averages`
+/// blocks at both ends of that range.
+///
+/// Falsified by `pinned_window_tests` below, which runs the discarded
+/// exact-trim drain side by side with this one on the same burst.
+fn drain_to_block_lattice(ring: &mut Vec<f32>, target_total: usize, step: usize) {
+    while ring.len() >= target_total + step {
+        ring.drain(..step);
+    }
+}
+
 impl PairState {
     fn new(spl_integ: Option<ac_core::visualize::time_integration::EmaIntegrator>) -> Self {
         Self {
@@ -512,6 +542,11 @@ struct TickInputs<'a> {
     /// Ladder columns and settled-rung flags, indexed by `PairCtx::pos`.
     mtw_columns: &'a [Option<Vec<ac_core::visualize::mtw::splice::Column>>],
     mtw_settled: &'a [Vec<bool>],
+    /// Welch blocks this tick's `rings` actually average over (#208).
+    /// Rises 1 → `n_averages` while the window fills, then is pinned
+    /// there by `drain_to_block_lattice`. Per-tick and not a
+    /// [`FrameStatics`] field for exactly that reason.
+    n_blocks: usize,
 }
 
 /// Build one pair's wire messages for this tick: the `transfer_stream`
@@ -563,6 +598,7 @@ fn build_pair_messages(
         drive_msg,
         mtw_columns,
         mtw_settled,
+        n_blocks,
     } = tick;
     let meas = rings.get(mi)?.as_slice();
     let refb = rings.get(ri)?.as_slice();
@@ -812,6 +848,12 @@ fn build_pair_messages(
         "ref_channel":     ref_ch,
         "meas_channel":    meas_ch,
         "sr":              sr,
+        // Welch blocks actually averaged into THIS frame (#208) — 1 while
+        // the window fills, then `n_averages` for the rest of the session.
+        // Shipped because coherence carries a `1/N` bias, so a coherence
+        // figure without N is not interpretable: a consumer that saw N move
+        // silently could not tell a settling display from a DUT that changed.
+        "n_averages":      n_blocks,
         "mic_correction":  mc_tag,
         "spec_freqs":      spec_freqs,
         "meas_spectrum":   meas_spectrum,
@@ -1191,12 +1233,12 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         ));
         *snapshot_ring_slot.lock().unwrap() = Some(snapshot_ring.clone());
 
-        // Sliding window: keep the last `target_total` samples per unique
-        // channel and recompute H1 every `chunk_secs`. nperseg/step mirror
-        // h1_estimate's internal Welch settings. chunk_secs matches the
-        // monitor tick default (50 ms → 20 Hz refresh) — now that per-tick
-        // compute is ~5 ms (delay cached), the loop is capture-bound, not
-        // compute-bound, and the view matches the FFT/CWT monitor cadence.
+        // Analysis window: the last `n_averages` Welch blocks, cut on the
+        // **stream's own** `k·step` lattice rather than from the head of a
+        // freely-sliding buffer (#208). nperseg/step mirror h1_estimate's
+        // internal Welch settings; `chunk_secs` is the capture tick, which
+        // is no longer the same thing as the analysis rate — see the drain
+        // below and `n_averages` on the wire.
         let nperseg = sr as usize; // 1 Hz bin width
         let step = nperseg / 2; // 50% overlap
         let n_averages = 4;
@@ -1487,17 +1529,41 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 }
                 let r = &mut rings[i];
                 r.extend_from_slice(buf);
-                if r.len() > target_total {
-                    let drop = r.len() - target_total;
-                    r.drain(..drop);
-                }
+                drain_to_block_lattice(r, target_total, step);
             }
 
-            // Warm-up: wait for the rings to fill to at least one Welch
-            // segment so the first H1 has meaningful coherence.
+            // Warm-up: one Welch segment, so the first H1 has meaningful
+            // coherence.
+            //
+            // Deliberately NOT the full `target_total`. Waiting for the whole
+            // 2.5 s window would make N constant from the first frame, which
+            // reads like the tidier contract, but it pushes time-to-first-
+            // frame from 1.0 s to 2.5 s — past the 1.5 s drive dead-man. A
+            // client that sets the drive and waits for a lock without sending
+            // keepalives then has the drive expire *before* the first delay
+            // attempt runs, so the lock is taken against silence, gets
+            // `driving: false` provenance, and is discarded on the next drive
+            // edge. `it_relock`'s two survives-a-resume tests are exactly that
+            // sequence and both go red on the longer gate.
+            //
+            // So the warmup stays at one segment and the frame carries the
+            // block count it was actually built from (below). The #208-adjacent
+            // defect here was never that N varies while the window fills — it
+            // is that N varied *silently*, leaving coherence's `1/N` bias
+            // uninterpretable. Reporting it fixes that without moving the gate.
             if rings.iter().any(|r| r.len() < nperseg) {
                 continue;
             }
+
+            // Blocks `welch_all` will actually average over this tick's rings —
+            // the same `while pos + nperseg <= len` walk it does, evaluated
+            // here so the frame can state it. Rises 1 → `n_averages` while the
+            // window fills, then is pinned there by `drain_to_block_lattice`.
+            let n_blocks = rings
+                .iter()
+                .map(|r| (r.len() - nperseg) / step + 1)
+                .min()
+                .unwrap_or(1);
 
             // Estimate any missing per-pair delays once on first entry (after
             // the rings are full). Subsequent ticks reuse the cached value.
@@ -1623,6 +1689,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 drive_msg: &drive_msg,
                 mtw_columns: &mtw_columns,
                 mtw_settled: &mtw_settled,
+                n_blocks,
             };
             // Each pair can contribute multiple wire messages (the
             // transfer_stream frame + a Phase 4b visualize/ir sidecar
@@ -2166,6 +2233,7 @@ mod tests {
             drive_msg: &drive_msg,
             mtw_columns: &cols,
             mtw_settled: &settled,
+            n_blocks: 4,
         };
         build_pair_messages(ctx, st, statics, &tick)
     }
@@ -2322,5 +2390,171 @@ mod tests {
             &[None, None]
         )
         .is_none());
+    }
+}
+
+/// The positive control #208 was closed without.
+///
+/// `work/planning/state-live-spectrum.md` records the gap in as many words:
+/// the A/B used a 6 s level step, which is longer than the analysis window,
+/// so its edge gives a monotone ramp on *both* builds and cannot excite the
+/// symptom. These tests use a burst **shorter than one Welch block** and
+/// score only the ticks where it sits entirely inside the analysis window —
+/// there the total energy is constant, so a sound estimator must report a
+/// flat line and every dB of spread is artifact.
+///
+/// Both drains run on the same stream in the same test, because "pinned, not
+/// sliding" is only a claim if the rejected implementation is measured next
+/// to it.
+#[cfg(test)]
+mod pinned_window_tests {
+    use super::drain_to_block_lattice;
+
+    const SR: u32 = 8_000;
+    const BURST_START_S: f64 = 1.0;
+    const BURST_LEN_S: f64 = 0.25; // shorter than the 1 s block — the whole point
+
+    fn params() -> (usize, usize, usize, usize) {
+        let nperseg = SR as usize;
+        let step = nperseg / 2;
+        let n_averages = 4;
+        (nperseg, step, n_averages, nperseg + step * (n_averages - 1))
+    }
+
+    /// Deterministic broadband burst in silence. No rng dependency: a
+    /// fixed-seed LCG keeps this test reproducible across toolchains.
+    fn burst_stream(total_s: f64) -> Vec<f32> {
+        let n = (total_s * SR as f64) as usize;
+        let mut x = vec![0.0f32; n];
+        let a = (BURST_START_S * SR as f64) as usize;
+        let b = ((BURST_START_S + BURST_LEN_S) * SR as f64) as usize;
+        let mut s: u32 = 0x1234_5678;
+        for v in x[a..b].iter_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *v = ((s >> 8) as f32 / 8_388_608.0 - 1.0) * 0.1;
+        }
+        x
+    }
+
+    /// The drain this replaced: trim to an exact length every tick, which
+    /// slides the block grid across the audio.
+    fn drain_exact(ring: &mut Vec<f32>, target_total: usize, _step: usize) {
+        if ring.len() > target_total {
+            let d = ring.len() - target_total;
+            ring.drain(..d);
+        }
+    }
+
+    /// Broadband level of one published frame, in dB. Uses the real
+    /// estimator, not a reimplementation of it.
+    fn level_db(ring: &[f32]) -> f64 {
+        let r = ac_core::visualize::transfer::h1_estimate_with_delay(ring, ring, SR, 0);
+        let p: f64 = r.meas_amp.iter().map(|a| a * a).sum();
+        10.0 * p.max(1e-30).log10()
+    }
+
+    /// Run the worker's ring loop with `drain`, returning `(t_s, level_db)`
+    /// for every tick that would have published a frame.
+    fn run(drain: fn(&mut Vec<f32>, usize, usize)) -> Vec<(f64, f64)> {
+        let (nperseg, step, n_averages, target_total) = params();
+        let chunk = (0.05 * SR as f64) as usize;
+        let x = burst_stream(6.0);
+        let mut ring: Vec<f32> = Vec::new();
+        let mut out = Vec::new();
+        let mut t = 0usize;
+        while t + chunk <= x.len() {
+            ring.extend_from_slice(&x[t..t + chunk]);
+            drain(&mut ring, target_total, step);
+            t += chunk;
+            // The production warmup gate, verbatim: one segment.
+            if ring.len() < nperseg {
+                continue;
+            }
+            // Score only frames at full N. The artifact under test is
+            // re-weighting at a *constant* block count; a frame from a
+            // still-filling window legitimately reports a different level, and
+            // mixing those in would let a real defect hide behind honest
+            // settling. Mirrors the frame's own `n_averages`.
+            if (ring.len() - nperseg) / step + 1 != n_averages {
+                continue;
+            }
+            out.push((t as f64 / SR as f64, level_db(&ring)));
+        }
+        out
+    }
+
+    /// dB spread over the ticks where the burst is wholly inside the window.
+    fn spread_while_fully_inside(series: &[(f64, f64)]) -> (f64, usize) {
+        let (_n, step, _a, target_total) = params();
+        let win_s = target_total as f64 / SR as f64;
+        // Window covers [t - win_s, t]; burst is inside once t has passed its
+        // end and until t - win_s passes its start. Trim a tick off each edge
+        // so quantisation of the chunk grid is not scored.
+        let lo = BURST_START_S + BURST_LEN_S + 0.05;
+        let hi = BURST_START_S + win_s - 0.05;
+        let v: Vec<f64> = series
+            .iter()
+            .filter(|(t, _)| *t >= lo && *t <= hi)
+            .map(|(_, d)| *d)
+            .collect();
+        let _ = step;
+        if v.len() < 3 {
+            return (f64::NAN, v.len());
+        }
+        let max = v.iter().cloned().fold(f64::MIN, f64::max);
+        let min = v.iter().cloned().fold(f64::MAX, f64::min);
+        (max - min, v.len())
+    }
+
+    /// The fix: a burst held entirely inside the window reports one level.
+    #[test]
+    fn pinned_grid_holds_a_stationary_burst_at_a_constant_level() {
+        let (spread, n) = spread_while_fully_inside(&run(drain_to_block_lattice));
+        assert!(
+            n >= 10,
+            "only {n} scored frames — the control is not running"
+        );
+        assert!(
+            spread < 0.05,
+            "pinned grid still moved a constant burst by {spread:.2} dB over {n} frames"
+        );
+    }
+
+    /// The control. If this ever stops failing, the burst has become
+    /// incapable of exciting the defect and the test above proves nothing.
+    #[test]
+    fn exact_trim_drain_reweights_the_same_burst() {
+        let (spread, n) = spread_while_fully_inside(&run(drain_exact));
+        assert!(
+            n >= 10,
+            "only {n} scored frames — the control is not running"
+        );
+        assert!(
+            spread > 3.0,
+            "the discarded exact-trim drain moved the burst by only {spread:.2} dB \
+             over {n} frames; this stimulus can no longer excite #208, so the \
+             pinned-grid test above is not evidence of anything"
+        );
+    }
+
+    /// The drain's own contract: length lands in `[target_total,
+    /// target_total + step)`, which is what fits exactly `n_averages` blocks.
+    #[test]
+    fn drain_keeps_the_ring_on_the_block_lattice() {
+        let (nperseg, step, n_avg, target_total) = params();
+        let mut ring: Vec<f32> = Vec::new();
+        for _ in 0..400 {
+            ring.extend(std::iter::repeat_n(0.0f32, 137)); // coprime with step
+            drain_to_block_lattice(&mut ring, target_total, step);
+            if ring.len() >= target_total {
+                assert!(
+                    ring.len() < target_total + step,
+                    "ring grew to {} beyond the window",
+                    ring.len()
+                );
+                let blocks = (ring.len() - nperseg) / step + 1;
+                assert_eq!(blocks, n_avg, "ring of {} fits {blocks} blocks", ring.len());
+            }
+        }
     }
 }
