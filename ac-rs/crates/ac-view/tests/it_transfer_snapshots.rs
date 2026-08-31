@@ -43,6 +43,28 @@
 //! reference shrank the most (2 calibration/warning rows gone). See
 //! `TESTING.md` → "A3 snapshot reference currency" for the checklist a
 //! `draw_view`/pane change must satisfy before merge.
+//!
+//! **Re-verified 2026-08-31** on the same box for the `view.rs` module
+//! split (PR #418), same build-on-the-dev-VM-and-copy method: all 7 pass
+//! against these references unchanged. Two facts worth recording from
+//! that run, because they are cheap to re-derive wrongly:
+//!
+//! * Regenerating produced byte-identical PNGs for the 5 transfer files
+//!   but a **±1 LSB** difference on ~400–750 scattered pixels in the two
+//!   spectrum files. It is not this crate's: a binary built from `main`
+//!   (`c2aa26fe`) regenerated *the same bytes* as the refactor binary for
+//!   all 7, and two runs of one binary are byte-identical, so the drift
+//!   is in the box's graphics stack since 2026-08-24 (its NVIDIA
+//!   userspace is now 610.57 against a 610.43 kernel module), not in any
+//!   `ac` commit. The references were therefore **not** regenerated —
+//!   they pass the gate, and replacing them would commit environment
+//!   drift as if it were a rendering change.
+//! * The gate is `threshold` 0.6 with `failed_pixel_count_threshold` 0
+//!   (egui_kittest defaults, no `kittest.toml` in this workspace): no
+//!   pixel may differ perceptibly, but a sub-threshold LSB shift passes.
+//!   A pass is therefore evidence of visual identity, not of byte
+//!   identity — regenerate into a scratch directory and hash if the
+//!   stronger claim is what a review needs.
 
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
