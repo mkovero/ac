@@ -54,8 +54,16 @@ ac-core/src/
     sweep.rs               # Farina log-sweep IR deconvolution
     noise.rs               # AES17 idle-channel noise measurement
     report.rs              # MeasurementReport type, serialization
-    report_html.rs         # self-contained HTML renderer (inline CSS + SVG)
-    report_pdf.rs          # pure-Rust printpdf renderer (single A4 page)
+    report_layout/         # what each section says — shared by both renderers
+      sections.rs          #   header, method, stimulus, calibration, environment
+      payload.rs           #   per-payload rows, table columns, plot series
+      axis.rs              #   log-f / dB domains, gridline steps, tick labels
+    report_html/           # self-contained HTML renderer (inline CSS + SVG)
+      plot.rs              #   one SVG plot: magnitude and phase
+      emit.rs              #   <dl> and <table> emission, escaping
+    report_pdf/            # pure-Rust printpdf renderer, paginated A4
+      cursor.rs            #   page geometry, pt->mm, pagination
+      plot.rs              #   plot frame, grids, trace
 
   visualize/               # Tier 2
     mod.rs
