@@ -10,7 +10,7 @@ use ac_scene::Scene;
 
 use crate::keys::{bindings_for, Action};
 use crate::session::{ConnectionState, PolledFrame, Session};
-use crate::view::{draw_view, SpectrumViewState, TransferViewState, ViewKind};
+use crate::view::{draw_view, SpectrumViewState, StoredTrace, TransferViewState, ViewKind};
 use crate::zmq_client::{Client, Endpoint};
 
 /// Grace window a run of `WireFrame`-parse failures must clear before the
@@ -809,20 +809,18 @@ impl AcViewApp {
     /// index-aligned with `loaded_scenes` and `TransferViewState::loaded`.
     /// Empty outside the transfer view or when nothing is loaded —
     /// `draw_view` renders the pre-#321 layout unchanged in that case.
-    fn stored_run_refs(&self) -> Vec<(&str, &str, &ac_scene::TransferScene, bool)> {
+    fn stored_run_refs(&self) -> Vec<StoredTrace<'_>> {
         match &self.view {
             ViewKind::Transfer(state) => state
                 .loaded
                 .iter()
                 .zip(self.loaded_scenes.iter())
                 .enumerate()
-                .map(|(i, (run, scene))| {
-                    (
-                        run.label.as_str(),
-                        run.captured_at_utc.as_str(),
-                        scene,
-                        matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
-                    )
+                .map(|(i, (run, scene))| StoredTrace {
+                    label: run.label.as_str(),
+                    captured_at_utc: run.captured_at_utc.as_str(),
+                    scene,
+                    focused: matches!(state.focus, crate::view::Focus::Stored(idx) if idx == i),
                 })
                 .collect(),
             ViewKind::Spectrum(_) => Vec::new(),
