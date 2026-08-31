@@ -275,7 +275,7 @@ fn calibrate_cancel_at_second_prompt_saves_nothing() {
 
 /// #295: symmetric with `calibrate_cancel_at_second_prompt_saves_nothing`,
 /// but the cancel lands at the *first* prompt instead — the path that
-/// worked all along, per the step-1 stop check at `handlers/calibrate.rs`
+/// worked all along, per the step-1 stop check at `handlers/calibrate/mod.rs`
 /// (checked immediately after `wait_cal_reply` for the output leg, before
 /// `cal.save()`). No test pinned it, so a future edit to that check could
 /// regress silently.

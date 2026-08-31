@@ -70,7 +70,11 @@ ac-core/src/
 
   shared/                  # Tier 0 — used by both tiers
     mod.rs
-    calibration.rs
+    calibration/           # one file per layer — they never compose
+      mod.rs               #   the entry + the voltage/SPL derivations
+      tau.rs               #   interface latency: conditions, history, #347
+      mic_response.rs      #   frequency-response curve
+      store.rs             #   cal.json read/modify/write
     conversions.rs
     constants.rs
     generator.rs
@@ -103,7 +107,7 @@ asserting the constant, because asserting the constant passes on any value.
 
 ## Calibration — three orthogonal layers
 
-Per-channel `CalibrationEntry` (in `shared/calibration.rs`, persisted to
+Per-channel `CalibrationEntry` (in `shared/calibration/`, persisted to
 `~/.config/ac/cal.json`) carries three independently-applicable
 corrections. They compose: a fully-cal'd channel reads an absolute
 SPL value with mic-curve compensation and the analog-domain Vrms /

@@ -6,7 +6,7 @@ use crate::common::{Client, Daemon};
 use serde_json::json;
 
 /// #281 QA correctness issue 1: `measure_tau`'s sweep→deconvolve→peak→seconds
-/// path had zero test coverage — the only τ tests (`calibration.rs`)
+/// path had zero test coverage — the only τ tests (`shared/calibration/tau.rs`)
 /// construct `TauEntry`/`TauConditions` directly and never call
 /// `measure_tau`. The fake backend's `play_and_capture` delays by a fixed
 /// `FAKE_LOOPBACK_DELAY_SAMPLES = 32` (see `audio/fake.rs`), the same
