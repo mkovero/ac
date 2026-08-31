@@ -18,6 +18,14 @@
 //! Each input sample produces 4 oversampled outputs; the maximum
 //! absolute value across the full stream is reported as dBTP.
 //!
+//! The gated statistics (integrated, LRA, gated duration) read their
+//! history from a fixed-width LKFS histogram rather than a growing list
+//! of values. They are queried once per monitor emit tick per channel,
+//! so a per-value history made them cost O(session length) on every
+//! tick; the histogram answers each in bounded time and bounded memory,
+//! at 0.1 LU resolution. The exact per-value computation survives as the
+//! reference the histogram is tested against.
+//!
 //! The K-weighting coefficients are re-derived at runtime from the two
 //! closed-form biquad designs BS.1770 uses — a custom Vh/Vb high-shelf
 //! for the pre-filter (not a plain RBJ cookbook shelf) and an
@@ -440,34 +448,156 @@ fn lu_ratio(lu: f64) -> f64 {
     10.0_f64.powf(lu / 10.0)
 }
 
-/// BS.1770-5 §2.4 / EBU Tech 3342 §2.2 two-pass gate over a stream of
-/// channel-weighted mean-squares: keep everything at or above the
-/// absolute -70 LKFS gate, then keep everything at or above
-/// `rel_delta_lu` below the mean of those survivors. Returns `None` when
-/// either pass leaves nothing.
-fn two_pass_gate(values: &[f64], rel_delta_lu: f64) -> Option<Vec<f64>> {
-    let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
-    let pass1: Vec<f64> = values
-        .iter()
-        .copied()
-        .filter(|&ms| ms >= abs_gate_ms)
-        .collect();
-    if pass1.is_empty() {
-        return None;
-    }
-    let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
-    let rel_gate_ms = ungated_mean_ms * lu_ratio(rel_delta_lu);
-    let pass2: Vec<f64> = pass1.into_iter().filter(|&ms| ms >= rel_gate_ms).collect();
-    if pass2.is_empty() {
-        None
-    } else {
-        Some(pass2)
-    }
+/// Loudness-histogram layout. Bin 0 opens exactly at the absolute gate,
+/// so a value the gate would discard never enters the histogram at all.
+/// 0.1 LU bins over a 100 LU span reach +30 LKFS, well past any level a
+/// converter can deliver, and match the bin width libebur128 uses for
+/// the same job -- an order of magnitude finer than the EBU Tech 3341 /
+/// 3342 compliance tolerances the gated statistics are judged against.
+const HIST_MIN_LKFS: f64 = ABSOLUTE_GATE_LKFS;
+const HIST_BIN_LU: f64 = 0.1;
+const HIST_BINS: usize = 1_000;
+
+#[derive(Clone, Copy, Default)]
+struct HistBin {
+    count: u64,
+    sum_ms: f64,
 }
 
-/// Arithmetic mean of a non-empty slice.
-fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
+/// Bounded history of channel-weighted mean-squares, bucketed by LKFS.
+///
+/// The gated statistics ask the history three questions: how many values
+/// cleared the absolute gate, what their mean is, and where the order
+/// statistics of the relative gate's survivors fall. None of those needs
+/// the individual values back. Keeping them in a `Vec` made
+/// `integrated`, `loudness_range` and `gated_duration_s` each cost O(n)
+/// against an `n` that grows ten entries per second for as long as the
+/// session runs, and the monitor pays that on every emit tick on every
+/// channel -- quadratic in session length. A fixed bin array answers all
+/// three in bounded time and bounded memory.
+///
+/// Each bin carries an exact `sum_ms` rather than a bin-centre stand-in,
+/// so a gated mean is exact but for the values sitting in the single bin
+/// the relative gate cuts through. Percentiles resolve to the bin width.
+struct LoudnessHistogram {
+    bins: Vec<HistBin>,
+    /// Values admitted (i.e. at or above the absolute gate).
+    count: u64,
+    /// Exact sum of the admitted values.
+    sum_ms: f64,
+}
+
+impl LoudnessHistogram {
+    fn new() -> Self {
+        Self {
+            bins: vec![HistBin::default(); HIST_BINS],
+            count: 0,
+            sum_ms: 0.0,
+        }
+    }
+
+    /// Bin for a mean-square, or `None` when it sits below the absolute
+    /// gate. The admission test is written in the mean-square domain
+    /// against the same `lkfs_to_ms(ABSOLUTE_GATE_LKFS)` the exact
+    /// two-pass gate uses, so a value landing exactly on the gate falls
+    /// the same way in both.
+    fn bin_index(ms: f64) -> Option<usize> {
+        if ms < lkfs_to_ms(ABSOLUTE_GATE_LKFS) {
+            return None;
+        }
+        Some(Self::bin_of_lkfs(ms_to_lkfs(ms)))
+    }
+
+    /// Bin containing `lkfs`, clamped to the array at both ends.
+    fn bin_of_lkfs(lkfs: f64) -> usize {
+        let offset = (lkfs - HIST_MIN_LKFS).max(0.0);
+        ((offset / HIST_BIN_LU) as usize).min(HIST_BINS - 1)
+    }
+
+    /// Centre level of bin `i`, used when reporting a percentile.
+    fn bin_centre_lkfs(i: usize) -> f64 {
+        HIST_MIN_LKFS + (i as f64 + 0.5) * HIST_BIN_LU
+    }
+
+    fn push(&mut self, ms: f64) {
+        let Some(i) = Self::bin_index(ms) else {
+            return;
+        };
+        self.bins[i].count += 1;
+        self.bins[i].sum_ms += ms;
+        self.count += 1;
+        self.sum_ms += ms;
+    }
+
+    /// Count of values that cleared the absolute gate.
+    fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// First bin at or above the relative gate, which sits
+    /// `rel_delta_lu` below the mean of everything admitted. `None` only
+    /// when nothing has been admitted.
+    fn relative_gate_bin(&self, rel_delta_lu: f64) -> Option<usize> {
+        if self.count == 0 {
+            return None;
+        }
+        let ungated_mean_ms = self.sum_ms / self.count as f64;
+        Some(Self::bin_of_lkfs(ms_to_lkfs(
+            ungated_mean_ms * lu_ratio(rel_delta_lu),
+        )))
+    }
+
+    /// Count and exact mean-square sum of the relative gate's survivors.
+    fn gated_totals(&self, rel_delta_lu: f64) -> Option<(u64, f64)> {
+        let start = self.relative_gate_bin(rel_delta_lu)?;
+        let mut n = 0u64;
+        let mut sum = 0.0;
+        for bin in &self.bins[start..] {
+            n += bin.count;
+            sum += bin.sum_ms;
+        }
+        if n == 0 {
+            None
+        } else {
+            Some((n, sum))
+        }
+    }
+
+    /// Number of values at or above the relative gate.
+    fn gated_count(&self, rel_delta_lu: f64) -> u64 {
+        self.gated_totals(rel_delta_lu).map_or(0, |(n, _)| n)
+    }
+
+    /// Mean mean-square of the relative gate's survivors -- the second
+    /// pass of BS.1770-5 §2.4.
+    fn gated_mean_ms(&self, rel_delta_lu: f64) -> Option<f64> {
+        self.gated_totals(rel_delta_lu)
+            .map(|(n, sum)| sum / n as f64)
+    }
+
+    /// Level at fractional rank `p` among the relative gate's survivors,
+    /// in LKFS. Rank convention follows [`percentile`]: position
+    /// `p * (n - 1)` in ascending order, here resolved to the containing
+    /// bin's centre rather than interpolated between neighbours.
+    fn gated_percentile_lkfs(&self, rel_delta_lu: f64, p: f64) -> Option<f64> {
+        let start = self.relative_gate_bin(rel_delta_lu)?;
+        let (n, _) = self.gated_totals(rel_delta_lu)?;
+        let rank = (p.clamp(0.0, 1.0) * (n - 1) as f64).floor() as u64;
+        let mut seen = 0u64;
+        for (i, bin) in self.bins.iter().enumerate().skip(start) {
+            seen += bin.count;
+            if seen > rank {
+                return Some(Self::bin_centre_lkfs(i));
+            }
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.bins.fill(HistBin::default());
+        self.count = 0;
+        self.sum_ms = 0.0;
+    }
 }
 
 /// Per-channel filter + tile accumulator. One tile is a 100 ms
@@ -554,14 +684,14 @@ pub struct LoudnessState {
     sample_rate: u32,
     channels: Vec<ChannelChain>,
     weights: Vec<f64>,
-    /// Running list of channel-weighted 400 ms block MS values, one per
-    /// tile boundary once the state has seen ≥ 4 tiles. Used for the
-    /// integrated-loudness two-pass gating.
-    block_ms: Vec<f64>,
-    /// Running list of channel-weighted 3 s short-term MS values, one
-    /// per tile boundary once the state has seen ≥ 30 tiles. Used for
-    /// the loudness-range gating and percentile stats.
-    short_term_ms: Vec<f64>,
+    /// Channel-weighted 400 ms block MS values, one per tile boundary
+    /// once the state has seen ≥ 4 tiles. Feeds the integrated-loudness
+    /// two-pass gating and the gated-duration readout.
+    blocks: LoudnessHistogram,
+    /// Channel-weighted 3 s short-term MS values, one per tile boundary
+    /// once the state has seen ≥ 30 tiles. Feeds the loudness-range
+    /// gating and percentiles.
+    short_terms: LoudnessHistogram,
     /// Count of tiles emitted per channel (all channels stay in lock-step
     /// because they're fed the same number of samples per `push`).
     tiles_emitted: u64,
@@ -594,8 +724,8 @@ impl LoudnessState {
             sample_rate,
             channels,
             weights: weights.to_vec(),
-            block_ms: Vec::new(),
-            short_term_ms: Vec::new(),
+            blocks: LoudnessHistogram::new(),
+            short_terms: LoudnessHistogram::new(),
             tiles_emitted: 0,
             true_peak: TruePeak::new(n),
         })
@@ -665,14 +795,14 @@ impl LoudnessState {
         // for the integrated-loudness gating.
         if self.tiles_emitted as usize >= MOMENTARY_TILES {
             if let Some(ms) = self.channel_weighted_ms(MOMENTARY_TILES) {
-                self.block_ms.push(ms);
+                self.blocks.push(ms);
             }
         }
         // Similarly, once we have ≥ 30 tiles, each boundary completes a
         // new 3 s short-term window — record it for LRA.
         if self.tiles_emitted as usize >= SHORT_TERM_TILES {
             if let Some(ms) = self.channel_weighted_ms(SHORT_TERM_TILES) {
-                self.short_term_ms.push(ms);
+                self.short_terms.push(ms);
             }
         }
     }
@@ -714,8 +844,8 @@ impl LoudnessState {
     ///
     /// Returns `-∞` when fewer than one block survives the absolute gate.
     pub fn integrated(&self) -> f64 {
-        match two_pass_gate(&self.block_ms, RELATIVE_GATE_DELTA_LU) {
-            Some(survivors) => ms_to_lkfs(mean(&survivors)),
+        match self.blocks.gated_mean_ms(RELATIVE_GATE_DELTA_LU) {
+            Some(ms) => ms_to_lkfs(ms),
             None => f64::NEG_INFINITY,
         }
     }
@@ -724,15 +854,7 @@ impl LoudnessState {
     /// the integrated loudness. Useful as a "gated duration" meter readout
     /// so users know how much of their session is actually counted.
     pub fn gated_duration_s(&self) -> f64 {
-        if self.block_ms.is_empty() {
-            return 0.0;
-        }
-        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
-        let n = self
-            .block_ms
-            .iter()
-            .filter(|&&ms| ms >= abs_gate_ms)
-            .count();
+        let n = self.blocks.count();
         // Each block is 400 ms but they overlap 75 % — the non-overlapping
         // contribution per block is 100 ms. Multiplied out, the gated
         // audio duration is n * 100 ms plus a 300 ms boundary correction
@@ -750,18 +872,19 @@ impl LoudnessState {
     /// at least 2 short-term values survive the gating so the stat is
     /// at least defined.
     pub fn loudness_range(&self) -> f64 {
-        let Some(survivors) = two_pass_gate(&self.short_term_ms, LRA_RELATIVE_GATE_DELTA_LU) else {
-            return 0.0;
-        };
-        // Convert survivors to LKFS and sort so we can pull percentiles.
-        let mut lkfs: Vec<f64> = survivors.into_iter().map(ms_to_lkfs).collect();
-        if lkfs.len() < 2 {
+        if self.short_terms.gated_count(LRA_RELATIVE_GATE_DELTA_LU) < 2 {
             return 0.0;
         }
-        lkfs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let lo = percentile(&lkfs, LRA_LOW_PERCENTILE);
-        let hi = percentile(&lkfs, LRA_HIGH_PERCENTILE);
-        (hi - lo).max(0.0)
+        let lo = self
+            .short_terms
+            .gated_percentile_lkfs(LRA_RELATIVE_GATE_DELTA_LU, LRA_LOW_PERCENTILE);
+        let hi = self
+            .short_terms
+            .gated_percentile_lkfs(LRA_RELATIVE_GATE_DELTA_LU, LRA_HIGH_PERCENTILE);
+        match (lo, hi) {
+            (Some(lo), Some(hi)) => (hi - lo).max(0.0),
+            _ => 0.0,
+        }
     }
 
     /// Peak level across every channel's oversampled signal, in dBTP.
@@ -774,8 +897,8 @@ impl LoudnessState {
         for c in self.channels.iter_mut() {
             c.reset();
         }
-        self.block_ms.clear();
-        self.short_term_ms.clear();
+        self.blocks.reset();
+        self.short_terms.reset();
         self.tiles_emitted = 0;
         self.true_peak.reset();
     }
@@ -784,6 +907,12 @@ impl LoudnessState {
 /// Linear-interpolated percentile of a pre-sorted ascending slice. `p` is
 /// in `[0, 1]`. Follows Tech 3342's "linear interpolation between adjacent
 /// samples" convention (R-7 / Excel PERCENTILE).
+///
+/// Only the tests reach this now: [`LoudnessHistogram`] answers the
+/// production percentile query from bin counts. It stays as half of the
+/// exact reference the histogram is checked against -- see
+/// `histogram_matches_the_exact_gate_it_replaced`.
+#[cfg(test)]
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -800,6 +929,37 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     } else {
         let frac = pos - lo as f64;
         sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    }
+}
+
+/// Exact BS.1770-5 §2.4 / EBU Tech 3342 §2.2 two-pass gate over a stream
+/// of channel-weighted mean-squares: keep everything at or above the
+/// absolute -70 LKFS gate, then keep everything at or above
+/// `rel_delta_lu` below the mean of those survivors. Returns `None` when
+/// either pass leaves nothing.
+///
+/// This is what [`LoudnessState`] ran before [`LoudnessHistogram`] took
+/// over, kept as the reference the histogram is measured against rather
+/// than deleted -- a bin-resolution approximation is only defensible for
+/// as long as something computes the unapproximated answer beside it.
+#[cfg(test)]
+fn two_pass_gate(values: &[f64], rel_delta_lu: f64) -> Option<Vec<f64>> {
+    let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+    let pass1: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|&ms| ms >= abs_gate_ms)
+        .collect();
+    if pass1.is_empty() {
+        return None;
+    }
+    let ungated_mean_ms = pass1.iter().sum::<f64>() / pass1.len() as f64;
+    let rel_gate_ms = ungated_mean_ms * lu_ratio(rel_delta_lu);
+    let pass2: Vec<f64> = pass1.into_iter().filter(|&ms| ms >= rel_gate_ms).collect();
+    if pass2.is_empty() {
+        None
+    } else {
+        Some(pass2)
     }
 }
 
@@ -1461,6 +1621,116 @@ mod tests {
         }
     }
 
+    /// Exact 400 ms block and 3 s short-term mean-square streams for one
+    /// mono channel, built the way `LoudnessState` builds them: 100 ms
+    /// tiles of K-weighted mean-square, then rolling means over 4 and 30
+    /// tiles. The rolling windows start where `LoudnessState` starts
+    /// recording (at the 4th and 30th tile), so the streams line up
+    /// entry for entry with what the histogram was fed.
+    fn reference_ms_streams(samples: &[f32], fs: u32) -> (Vec<f64>, Vec<f64>) {
+        let mut k = KWeighting::new(fs).unwrap();
+        let y = k.apply(samples);
+        let tile_len = ((fs as f64) * BLOCK_STEP_S).round() as usize;
+        let tiles: Vec<f64> = y
+            .chunks_exact(tile_len)
+            .map(|c| c.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / tile_len as f64)
+            .collect();
+        let roll = |n: usize| -> Vec<f64> {
+            tiles
+                .windows(n)
+                .map(|w| w.iter().sum::<f64>() / n as f64)
+                .collect()
+        };
+        (roll(MOMENTARY_TILES), roll(SHORT_TERM_TILES))
+    }
+
+    #[test]
+    fn histogram_matches_the_exact_gate_it_replaced() {
+        // `LoudnessState` used to keep every block / short-term value and
+        // run `two_pass_gate` over the lot. Run that exact computation
+        // here, against the same stimulus, and hold the histogram to it.
+        // A multi-level signal so both gates actually bite: two counted
+        // levels, one passage under the absolute gate, one loud tail
+        // that drags the relative gate up past the quieter material.
+        let mut sig = Vec::new();
+        sig.extend(sine_samples((FS as usize) * 12, 1000.0, -23.0, FS));
+        sig.extend(sine_samples((FS as usize) * 8, 1000.0, -31.0, FS));
+        sig.extend(sine_samples((FS as usize) * 6, 1000.0, -75.0, FS));
+        sig.extend(sine_samples((FS as usize) * 10, 1000.0, -18.0, FS));
+
+        let mut s = LoudnessState::new_mono(FS).unwrap();
+        s.push(&[&sig]).unwrap();
+        let (blocks, short_terms) = reference_ms_streams(&sig, FS);
+
+        // Integrated: bins misplace values only within the single bin the
+        // relative gate cuts through, so the gated mean lands inside a
+        // bin width of the exact answer.
+        let survivors = two_pass_gate(&blocks, RELATIVE_GATE_DELTA_LU).expect("gated blocks");
+        let exact = ms_to_lkfs(survivors.iter().sum::<f64>() / survivors.len() as f64);
+        let got = s.integrated();
+        assert!(
+            (got - exact).abs() < HIST_BIN_LU,
+            "integrated: histogram {got:.4} LKFS vs exact {exact:.4} LKFS"
+        );
+
+        // Gated duration: exact, because bin 0 opens on the absolute gate
+        // and nothing below it is ever admitted.
+        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+        let exact_n = blocks.iter().filter(|&&ms| ms >= abs_gate_ms).count();
+        assert_eq!(
+            s.gated_duration_s(),
+            exact_n as f64 * BLOCK_STEP_S,
+            "gated duration must stay exact"
+        );
+
+        // LRA: each percentile resolves to a bin centre instead of being
+        // interpolated between neighbours, so the difference of two of
+        // them can move by up to one bin width in either direction.
+        let survivors =
+            two_pass_gate(&short_terms, LRA_RELATIVE_GATE_DELTA_LU).expect("gated short-terms");
+        let mut lkfs: Vec<f64> = survivors.into_iter().map(ms_to_lkfs).collect();
+        lkfs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let exact_lra =
+            percentile(&lkfs, LRA_HIGH_PERCENTILE) - percentile(&lkfs, LRA_LOW_PERCENTILE);
+        let got_lra = s.loudness_range();
+        assert!(
+            (got_lra - exact_lra).abs() < 2.0 * HIST_BIN_LU,
+            "LRA: histogram {got_lra:.4} LU vs exact {exact_lra:.4} LU"
+        );
+    }
+
+    #[test]
+    fn histogram_drops_below_gate_and_clamps_above_range() {
+        let mut h = LoudnessHistogram::new();
+        let abs_gate_ms = lkfs_to_ms(ABSOLUTE_GATE_LKFS);
+        // Below the absolute gate: never admitted.
+        h.push(abs_gate_ms * 0.5);
+        h.push(0.0);
+        assert_eq!(h.count(), 0);
+        assert!(h.gated_mean_ms(RELATIVE_GATE_DELTA_LU).is_none());
+        // Exactly on the gate: admitted, and into bin 0.
+        h.push(abs_gate_ms);
+        assert_eq!(h.count(), 1);
+        assert_eq!(LoudnessHistogram::bin_index(abs_gate_ms), Some(0));
+        // Absurdly loud: clamped into the top bin rather than lost.
+        let huge = lkfs_to_ms(500.0);
+        assert_eq!(LoudnessHistogram::bin_index(huge), Some(HIST_BINS - 1));
+        h.push(huge);
+        assert_eq!(h.count(), 2);
+    }
+
+    #[test]
+    fn histogram_reset_clears_bins_not_just_totals() {
+        let mut h = LoudnessHistogram::new();
+        h.push(1.0);
+        h.reset();
+        assert_eq!(h.count(), 0);
+        assert!(h.gated_mean_ms(RELATIVE_GATE_DELTA_LU).is_none());
+        // A cleared total over uncleared bins would still report the old
+        // value here, because the relative gate would find the stale bin.
+        assert_eq!(h.gated_count(RELATIVE_GATE_DELTA_LU), 0);
+    }
+
     #[test]
     fn true_peak_phase_table_is_symmetric() {
         // Annex 2 Table 1's 48-tap prototype is linear-phase symmetric:
@@ -1468,12 +1738,10 @@ mod tests {
         // module doc asserts this in prose; assert it in code so a
         // transcription slip in the literal table goes red.
         for (a, b) in [(0usize, 3usize), (1, 2)] {
-            for j in 0..TP_TAPS {
+            let pairs = TP_PHASE[a].iter().zip(TP_PHASE[b].iter().rev());
+            for (j, (fwd, rev)) in pairs.enumerate() {
                 let k = TP_TAPS - 1 - j;
-                assert_eq!(
-                    TP_PHASE[a][j], TP_PHASE[b][k],
-                    "phase {a} tap {j} != phase {b} tap {k}"
-                );
+                assert_eq!(fwd, rev, "phase {a} tap {j} != phase {b} tap {k}");
             }
         }
     }

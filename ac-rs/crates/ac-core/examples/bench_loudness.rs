@@ -1,4 +1,4 @@
-use ac_core::measurement::loudness::{GatingBlock, KWeighting};
+use ac_core::measurement::loudness::{GatingBlock, KWeighting, LoudnessState};
 use std::time::Instant;
 
 fn main() {
@@ -46,5 +46,45 @@ fn main() {
             per_ms,
             (n as f64 / sr as f64) * 1000.0 / per_ms
         );
+    }
+
+    {
+        // The path the daemon actually runs: planar push into a
+        // multi-channel state, filter + tiling + true-peak in one call.
+        let mut st = LoudnessState::new_mono(sr).expect("state");
+        st.push(&[&samples]).expect("push");
+        st.reset();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            st.push(&[&samples]).expect("push");
+        }
+        let per_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+        println!(
+            "LoudnessState::push n={} avg={:.4} ms/call ({:.2}× realtime)",
+            n,
+            per_ms,
+            (n as f64 / sr as f64) * 1000.0 / per_ms
+        );
+    }
+
+    {
+        // Query cost against history depth. These are read once per emit
+        // tick per channel, so their cost must not track session length:
+        // the histogram makes them O(bins), and the numbers below should
+        // stay flat as the simulated session grows.
+        for minutes in [1u32, 10, 60] {
+            let mut st = LoudnessState::new_mono(sr).expect("state");
+            for _ in 0..(minutes * 60) {
+                st.push(&[&samples]).expect("push");
+            }
+            let reps = 2_000;
+            let t0 = Instant::now();
+            let mut sink = 0.0_f64;
+            for _ in 0..reps {
+                sink += st.integrated() + st.loudness_range() + st.gated_duration_s();
+            }
+            let per_us = t0.elapsed().as_secs_f64() * 1e6 / reps as f64;
+            println!("query @ {minutes:>2} min history  avg={per_us:.2} µs/emit (sink {sink:.3})");
+        }
     }
 }
