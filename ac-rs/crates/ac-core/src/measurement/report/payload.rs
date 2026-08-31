@@ -61,7 +61,7 @@ pub enum MeasurementData {
         levels_dbfs: Vec<f64>,
     },
     /// Farina exponential-sweep impulse response — output of
-    /// `measurement/sweep.rs`. The `linear_ir` is the deconvolved linear
+    /// `measurement/sweep`. The `linear_ir` is the deconvolved linear
     /// IR with the peak placed at `linear_ir.len() / 2`; each entry of
     /// `harmonics` is a pre-impulse-gated k-th-order harmonic IR.
     ImpulseResponse {

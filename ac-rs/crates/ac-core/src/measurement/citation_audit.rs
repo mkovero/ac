@@ -49,7 +49,7 @@ fn every_measurement_module_emits_populated_citation() {
 /// see #313: it must not be re-derived per call site.
 ///
 /// Matches by prefix (not equality) because a `standard` field may
-/// carry trailing qualifiers the citation owns (e.g. sweep.rs's
+/// carry trailing qualifiers the citation owns (e.g. `sweep/mod.rs`'s
 /// combined `citation()` appends "; ISO 18233:2006 Annex B
 /// (normative)"). Returns `None` for any edition this map does not
 /// recognise — that is the failure this guard exists to catch: a
