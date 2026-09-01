@@ -27,9 +27,87 @@ use crate::server::ServerState;
 
 use super::super::{
     apply_drive_ceiling, busy_guard, cfg_guard, resolve_input, resolve_output, send_pub,
-    snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
+    snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx, MAX_IR_HARMONICS,
+    MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
 };
 use crate::handlers::mic;
+
+fn request_error(cmd: &str, message: impl std::fmt::Display) -> Value {
+    json!({
+        "ok": false,
+        "error": format!("{cmd} not started — {message}\n         stimulus  silent"),
+    })
+}
+
+fn point_budget_error(cmd: &str, count: usize) -> Value {
+    json!({
+        "ok": false,
+        "error": format!(
+            "{cmd} not started — request expands to {count} points\n         maximum  {MAX_SWEEP_POINTS} points\n         stimulus  silent"
+        ),
+    })
+}
+
+fn bounded_duration(
+    request: &Value,
+    field: &str,
+    default: f64,
+    zero_allowed: bool,
+    cmd: &str,
+) -> Result<f64, Value> {
+    let Some(raw) = request.get(field) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_f64() else {
+        return Err(request_error(
+            cmd,
+            format!("{field} must be a finite number"),
+        ));
+    };
+    if !value.is_finite() || value < 0.0 || (!zero_allowed && value == 0.0) {
+        let lower = if zero_allowed {
+            "at least 0"
+        } else {
+            "greater than 0"
+        };
+        return Err(request_error(
+            cmd,
+            format!("{field} must be finite and {lower} seconds"),
+        ));
+    }
+    if value > MAX_STIMULUS_DURATION_S {
+        return Err(request_error(
+            cmd,
+            format!("{field} {value:.3} s exceeds {MAX_STIMULUS_DURATION_S:.3} s maximum"),
+        ));
+    }
+    Ok(value)
+}
+
+fn bounded_usize(
+    request: &Value,
+    field: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+    cmd: &str,
+) -> Result<usize, Value> {
+    let Some(raw) = request.get(field) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_u64() else {
+        return Err(request_error(cmd, format!("{field} must be an integer")));
+    };
+    let value = usize::try_from(value)
+        .map_err(|_| request_error(cmd, format!("{field} overflows usize")))?;
+    if !(min..=max).contains(&value) {
+        return Err(request_error(
+            cmd,
+            format!("{field} {value} is outside {min}–{max}"),
+        ));
+    }
+    Ok(value)
+}
 
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
@@ -43,8 +121,19 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(-10.0);
-    let ppd = cmd.get("ppd").and_then(Value::as_u64).unwrap_or(10) as usize;
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let ppd = match bounded_usize(cmd, "ppd", 10, 1, usize::MAX, "plot") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n_points = match super::super::checked_log_freq_point_count(start_hz, stop_hz, ppd) {
+        Ok(n) if n <= MAX_SWEEP_POINTS => n,
+        Ok(n) => return point_budget_error("plot", n),
+        Err(e) => return request_error("plot", e),
+    };
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
     // #360: `plot` puts a stimulus on a physical output, so it is clamped
@@ -85,6 +174,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
+        debug_assert!(freqs.len() <= n_points);
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
         let mut eng = make_engine(fake);
@@ -303,8 +393,14 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         .and_then(Value::as_f64)
         .unwrap_or(-40.0);
     let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
-    let steps = cmd.get("steps").and_then(Value::as_u64).unwrap_or(26) as usize;
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let steps = match bounded_usize(cmd, "steps", 26, 1, MAX_SWEEP_POINTS, "plot_level") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_level") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let cfg = state.cfg.lock().unwrap().clone();
     let ceiling = cfg.drive_max_dbfs;
 
@@ -600,13 +696,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     cfg_guard!(state);
     let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
         .unwrap_or(-6.0);
-    let tail_s = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
-    let n_harmonics = cmd.get("n_harmonics").and_then(Value::as_u64).unwrap_or(5) as usize;
+    let tail_s = match bounded_duration(cmd, "tail_s", 0.5, true, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n_harmonics = match bounded_usize(cmd, "n_harmonics", 5, 1, MAX_IR_HARMONICS, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     // 4096 is a request, not a promise: `extract_irs` clamps each order's
     // gate down to the spacing of its own nearest neighbour, so the linear
     // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
@@ -614,10 +719,11 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
     // the `measurement/impulse_response` envelope and, when any order was
     // shortened, in the report notes. See issue #278.
-    let window_len = cmd
-        .get("window_len")
-        .and_then(Value::as_u64)
-        .unwrap_or(4096) as usize;
+    let window_len =
+        match bounded_usize(cmd, "window_len", 4096, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
 
     let cfg = state.cfg.lock().unwrap().clone();
     // #360: `plot_ir` had no clamp at all — the module doc on
@@ -646,7 +752,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
 
-    let worker = spawn_worker(state, "plot_ir", move |_stop| {
+    let worker = spawn_worker(state, "plot_ir", move |stop| {
         // Calibration snapshot. The linear IR itself is never mic-curve
         // corrected — arrival estimation and gating (`extract_irs`,
         // `gated_frequency_response` below) run on the raw, uncorrected
@@ -707,8 +813,12 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs) as f32;
         let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
 
-        let captured = match eng.play_and_capture(&scaled, tail_s) {
+        let capture = eng.play_and_capture_cancellable(&scaled, tail_s, &stop);
+        eng.set_silence();
+        eng.stop();
+        let captured = match capture {
             Ok(c) => c,
+            Err(_) if stop.load(Ordering::Relaxed) => return,
             Err(e) => {
                 send_pub(
                     &pub_tx,
@@ -976,7 +1086,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             }
         }
 
-        eng.stop();
         send_pub(&pub_tx, "done", &json!({"cmd":"plot_ir"}));
     });
 
@@ -985,4 +1094,57 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("plot_ir".to_string(), worker);
     }
     json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs})
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+
+    #[test]
+    fn documented_duration_boundaries_are_accepted() {
+        assert_eq!(
+            bounded_duration(
+                &json!({"duration": MAX_STIMULUS_DURATION_S}),
+                "duration",
+                1.0,
+                false,
+                "plot_ir"
+            ),
+            Ok(MAX_STIMULUS_DURATION_S)
+        );
+        assert_eq!(
+            bounded_duration(&json!({"tail_s": 0.0}), "tail_s", 0.5, true, "plot_ir"),
+            Ok(0.0)
+        );
+    }
+
+    #[test]
+    fn documented_integer_boundaries_are_accepted() {
+        assert_eq!(
+            bounded_usize(
+                &json!({"n_harmonics": MAX_IR_HARMONICS}),
+                "n_harmonics",
+                5,
+                1,
+                MAX_IR_HARMONICS,
+                "plot_ir"
+            ),
+            Ok(MAX_IR_HARMONICS)
+        );
+        assert_eq!(
+            bounded_usize(
+                &json!({"window_len": MAX_IR_WINDOW_SAMPLES}),
+                "window_len",
+                4096,
+                1,
+                MAX_IR_WINDOW_SAMPLES,
+                "plot_ir"
+            ),
+            Ok(MAX_IR_WINDOW_SAMPLES)
+        );
+        assert_eq!(
+            super::super::super::checked_log_freq_point_count(100.0, 1000.0, 10_000),
+            Ok(MAX_SWEEP_POINTS)
+        );
+    }
 }

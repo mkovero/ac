@@ -69,7 +69,7 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
     }
     let stopped: Vec<String> = joined.iter().map(|(n, _)| n.clone()).collect();
     drop(joined); // runs Drop → joins the worker threads
-    json!({"ok": true, "stopped": stopped})
+    json!({"ok": true, "stopped": stopped, "stimulus": "silent"})
 }
 
 pub fn devices(state: &ServerState) -> Value {

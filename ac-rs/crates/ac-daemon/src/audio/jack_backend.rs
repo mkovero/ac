@@ -373,6 +373,15 @@ impl AudioEngine for JackEngine {
     }
 
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
+        self.play_and_capture_cancellable(samples, tail_s, &AtomicBool::new(false))
+    }
+
+    fn play_and_capture_cancellable(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        stop: &AtomicBool,
+    ) -> Result<Vec<f32>> {
         if samples.is_empty() {
             anyhow::bail!("play_and_capture: empty stimulus");
         }
@@ -393,8 +402,22 @@ impl AudioEngine for JackEngine {
         self.state.one_shot_active.store(true, Ordering::Release);
 
         let duration_s = n_total as f64 / sr;
-        let mut waiter = park_waiter(self.state.clone());
-        let wait = waiter(&self.rings, n_total, duration_s + 2.0);
+        let timeout = Instant::now() + Duration::from_secs_f64(duration_s + 2.0);
+        *self.state.waker.lock().unwrap() = Some(std::thread::current());
+        let wait = loop {
+            if stop.load(Ordering::Relaxed) {
+                self.state.silence.store(true, Ordering::Relaxed);
+                break Err(anyhow::anyhow!("play_and_capture cancelled"));
+            }
+            if self.rings.occupied() >= n_total {
+                break Ok(());
+            }
+            if Instant::now() > timeout {
+                break Err(anyhow::anyhow!("capture timeout after {duration_s:.1}s"));
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        };
+        *self.state.waker.lock().unwrap() = None;
 
         // Ensure RT stops consuming one-shot even if we bailed early.
         self.state.one_shot_active.store(false, Ordering::Release);

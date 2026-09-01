@@ -79,6 +79,44 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
+fn assert_plot_ir_stops_promptly(duration: f64, tail_s: f64, settle: Duration) {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let reply = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz":200.0,
+        "f2_hz":8000.0,
+        "duration":duration,
+        "tail_s":tail_s,
+        "window_len":1024,
+        "n_harmonics":3
+    }));
+    assert_eq!(reply["ok"], json!(true), "plot_ir rejected: {reply}");
+
+    std::thread::sleep(settle);
+    let started = Instant::now();
+    let stopped = c.call(json!({"cmd":"stop", "name":"plot_ir"}));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "stop blocked for {:?}: {stopped}",
+        started.elapsed()
+    );
+    assert_eq!(stopped["stopped"], json!(["plot_ir"]), "{stopped}");
+    assert_eq!(stopped["stimulus"], json!("silent"), "{stopped}");
+    let status = c.call(json!({"cmd":"status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
+}
+
+#[test]
+fn plot_ir_stop_cancels_during_stimulus() {
+    assert_plot_ir_stops_promptly(5.0, 0.1, Duration::from_millis(200));
+}
+
+#[test]
+fn plot_ir_stop_cancels_during_tail() {
+    assert_plot_ir_stops_promptly(0.1, 5.0, Duration::from_millis(300));
+}
+
 // ---------------------------------------------------------------------
 // Drive ceiling (#360) — plot_ir and calibrate previously emitted an
 // unclamped level; both are commands whose whole point is to put a
