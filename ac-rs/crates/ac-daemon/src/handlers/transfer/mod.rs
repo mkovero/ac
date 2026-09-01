@@ -7,6 +7,7 @@
 //! | module | holds | needs |
 //! |---|---|---|
 //! | [`request`] | the launch contract — pair parsing, [`request::TransferParams`] | a `Value` |
+//! | [`plan`] | launch resolution: ports, calibration, the reply | `ServerState` |
 //! | [`ctrl`] | `set_drive`, `relock` — CTRL commands that target a live worker | `ServerState` |
 //! | [`window`] | the analysis window's geometry and the block-lattice drain (#208) | a `Vec<f32>` |
 //! | [`pair`] | per-pair session constants and maintained state | — |
@@ -24,6 +25,7 @@ mod analysis;
 mod ctrl;
 mod frame;
 mod pair;
+mod plan;
 mod probe;
 mod request;
 mod session;
