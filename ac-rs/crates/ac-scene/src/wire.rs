@@ -330,8 +330,6 @@ mod tests {
             "magnitude_db": [0.0, 0.0],
             "phase_deg": [0.0, 0.0],
             "coherence": [1.0, 1.0],
-            "re": [1.0, 1.0],
-            "im": [0.0, 0.0],
             "delay_samples": 0,
             "delay_ms": 0.0,
             "meas_channel": 0,

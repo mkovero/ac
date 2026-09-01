@@ -139,7 +139,16 @@ fn capture_live_frame() -> Vec<u8> {
         match c.recv_pub_raw(remaining.max(1)) {
             Some((t, payload)) if t == "data" => {
                 let v: Value = serde_json::from_slice(&payload).unwrap_or(Value::Null);
-                if v["type"] == json!("transfer_stream") {
+                // `n_averages > 0` skips the settling frames a session
+                // publishes before its ring holds a Welch segment. They
+                // have the same key set — that is checked directly in the
+                // daemon's `session_tests` — but empty analysis arrays and
+                // a null `spl`, and this fixture's job is to put real
+                // numbers and the "on" cal-tag branches in front of
+                // `ac-scene`'s deserializer.
+                if v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0
+                {
                     raw_frame = Some(payload);
                     break;
                 }
