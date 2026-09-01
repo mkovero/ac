@@ -82,8 +82,8 @@ Route an unresolved gap by what can close it:
   quantities → `request-changes` and `needs-work`. Name the missing artifact or
   derivation. This is developer work.
 - Evidence only a physical rig can produce, while the implementation correctly
-  enforces the specified value → `approve` and `requires-rig`, as specified in
-  the dedicated section below. Do **not** apply `needs-work`: sending this to a
+  enforces the specified value → `rig-pending` and `requires-rig`, as specified
+  in the dedicated section below. Do **not** apply `needs-work`: sending this to a
   developer cannot produce the measurement and creates a dev→QA loop with no
   possible source change.
 - The implementation does not enforce the specified value correctly →
@@ -184,7 +184,7 @@ Post PR review in this structure:
 {Any files touched outside spec scope. If none: "none."}
 
 ### verdict
-{approve | request-changes | request-changes: design}
+{approve | rig-pending | request-changes | request-changes: design}
 {One sentence justification.}
 
 ### sent back to
@@ -199,12 +199,16 @@ would falsify the claim. See step 5.}
 
 ### step 5 — apply label
 - Approving → apply `claude-approved`, leave `in-review` in place
+- Rig pending → apply `requires-rig`, remove `claude-approved` and
+  `needs-work`, and leave `in-review` in place. The human clears
+  `requires-rig` after recording the measurement; the next full QA pass can
+  then approve at the same commit.
 - Requesting changes → apply `needs-work`, remove `in-review`. Do **not** apply
   `claude-approved`; the pairing of `claude-approved` with a request-changes
   verdict is what tells a reader the finding came from Codex, so never produce
   it here.
-- Correctness turn on a physical measurement you cannot make from the tree →
-  apply `requires-rig` **in addition to** whichever of the above applies
+- Correctness turns on a physical measurement you cannot make from the tree →
+  use the `rig-pending` verdict above, not an approval or request-changes
 - The defect is in the **design**, not the implementation → apply `needs-work`
   as above, and additionally apply `needs-design` **on the issue** (or
   `needs-ux` on the issue, where the thing that is wrong is what the operator
@@ -282,14 +286,18 @@ Apply it when the PR change or depend on:
 - timing that depend on real device or driver behaviour rather than the test
   clock
 
-Verdict and `requires-rig` are separate axes. A PR can be `approve` +
-`requires-rig`: the code is right as far as the tree can show, and one
-measurement remain before it should land. Say that plainly in the
-justification — do not downgrade to `request-changes` to express it, because
-that send the PR back to a developer who cannot take the measurement either.
+`requires-rig` is a pre-approval state. The code may be right as far as the
+tree can show, but QA has not established the acceptance criterion until the
+measurement exists. Use `rig-pending`; do not apply `claude-approved` and do
+not downgrade to `request-changes`, because that sends the PR back to a
+developer who cannot take the measurement either.
 This includes an unresolved `derived`/`assumed` acceptance criterion when the
 implementation correctly enforces the specified value and only physical rig
 evidence can validate that value. Step 1 routes that case here explicitly.
+
+After the measurement record exists and a human clears `requires-rig`, run a
+full QA pass even when the commit is unchanged. Verify the record closes the
+named falsification test before applying `claude-approved`.
 
 Where the measurement is one the rig role would take, say which block of
 `rig/rig-verify-queue.md` it belong to, or that it needs a new one. The

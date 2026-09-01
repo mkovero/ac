@@ -171,20 +171,26 @@ qa_loop() {
     head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
     mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
 
-    # Already reviewed at this exact tip and qa raised nothing: that is a pass.
+    # Already reviewed at this exact tip. requires-rig is a pre-approval stop;
+    # after a human clears it, absence of claude-approved forces a full same-tip
+    # QA pass so the measurement record becomes part of the approval evidence.
     # Unless force is set — then the tip is unchanged but the design under it
     # is not, and the cached approval is an approval of a superseded spec.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
       if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: qa reviewed $head — approved, but REQUIRES RIG"
+        echo "  #$n PR #$pr: tree QA complete — REQUIRES RIG before approval"
         echo "     a measurement is outstanding. the label is human-clear only:"
         echo "     read the review's 'rig verification required' field, run the"
         echo "     session, then: gh pr edit $pr -R $AC_REPO --remove-label requires-rig"
         STATE=needs-rig; return 0
       fi
-      echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
-      STATE=awaiting-merge; return 0
+      if has claude-approved "$ls"; then
+        echo "  #$n PR #$pr: qa approved $head — yours to merge"
+        STATE=awaiting-merge; return 0
+      fi
+      echo "  #$n PR #$pr: rig gate cleared — full QA must incorporate its evidence"
+      force=full
     fi
 
     echo "  #$n PR #$pr: qa review${force:+ (full — design changed since the last pass)}"
@@ -217,12 +223,15 @@ qa_loop() {
 
     if ! has needs-work "$ls"; then
       if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: approved, but REQUIRES RIG — measurement outstanding"
+        echo "  #$n PR #$pr: tree QA complete — REQUIRES RIG before approval"
         echo "     see the review's 'rig verification required' field."
         STATE=needs-rig
-      else
+      elif has claude-approved "$ls"; then
         echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"
         STATE=awaiting-merge
+      else
+        echo "  #$n PR #$pr: qa posted no approval or routed finding — stopping"
+        STATE=needs-human
       fi
       return 0
     fi

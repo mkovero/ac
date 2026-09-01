@@ -32,6 +32,8 @@ source "$(dirname "$0")/common.sh"
 
 readonly CLAUDE_LABEL="claude-approved"
 readonly CODEX_LABEL="codex-approved"
+readonly NEEDS_WORK_LABEL="needs-work"
+readonly REQUIRES_RIG_LABEL="requires-rig"
 
 # The active review worktree is removed on both success and failure. Refuse to
 # reuse an existing path: it may contain evidence or edits from an interrupted
@@ -65,7 +67,7 @@ if ! gh_retry gh auth status >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Checking for open PRs with '$CLAUDE_LABEL' and without '$CODEX_LABEL'..."
+echo "Checking for open PRs with '$CLAUDE_LABEL', without '$CODEX_LABEL', '$NEEDS_WORK_LABEL', or '$REQUIRES_RIG_LABEL'..."
 
 # IMPORTANT:
 # This is exactly:
@@ -73,8 +75,13 @@ echo "Checking for open PRs with '$CLAUDE_LABEL' and without '$CODEX_LABEL'..."
 #   open
 #   AND claude-approved
 #   AND NOT codex-approved
+#   AND NOT needs-work
+#   AND NOT requires-rig
 #
-# 'needs-work' intentionally does not participate in eligibility.
+# A Codex failure leaves claude-approved in place because that label belongs
+# to Claude QA. Excluding needs-work prevents the daemon from reviewing the
+# same rejected tip again on every poll. A revised tip re-enters only after
+# Claude QA has reviewed it and restored claude-approved.
 prs_output="$(
     gh_retry gh pr list \
         --state open \
@@ -87,6 +94,8 @@ prs_output="$(
                 all(
                     .labels[]?;
                     .name != "codex-approved"
+                    and .name != "needs-work"
+                    and .name != "requires-rig"
                 )
             )
             | .number
@@ -126,6 +135,8 @@ for pr in "${prs[@]}"; do
 
     has_claude_approved=false
     has_codex_approved=false
+    has_needs_work=false
+    has_requires_rig=false
 
     for label in "${labels[@]}"; do
         case "$label" in
@@ -134,6 +145,12 @@ for pr in "${prs[@]}"; do
                 ;;
             "$CODEX_LABEL")
                 has_codex_approved=true
+                ;;
+            "$NEEDS_WORK_LABEL")
+                has_needs_work=true
+                ;;
+            "$REQUIRES_RIG_LABEL")
+                has_requires_rig=true
                 ;;
         esac
     done
@@ -145,6 +162,16 @@ for pr in "${prs[@]}"; do
 
     if [[ "$has_codex_approved" == true ]]; then
         echo "Skipping PR #$pr: '$CODEX_LABEL' is already present."
+        continue
+    fi
+
+    if [[ "$has_needs_work" == true ]]; then
+        echo "Skipping PR #$pr: '$NEEDS_WORK_LABEL' is present."
+        continue
+    fi
+
+    if [[ "$has_requires_rig" == true ]]; then
+        echo "Skipping PR #$pr: '$REQUIRES_RIG_LABEL' is present."
         continue
     fi
 

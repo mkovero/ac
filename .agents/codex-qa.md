@@ -22,17 +22,20 @@ Review-only. No fixes, no test edits, no merges, no branch pushes.
 
 ## queue
 
-Open PRs with `claude-approved` and without `codex-approved`.
+Open PRs with `claude-approved`, without `codex-approved`, `needs-work`, or
+`requires-rig`.
 
 ```bash
 gh pr list --state open \
-  --search 'label:claude-approved -label:codex-approved' \
+  --search 'label:claude-approved -label:codex-approved -label:needs-work -label:requires-rig' \
   --json number --jq '.[].number'
 ```
 
-`needs-work` does **not** exclude a PR from the queue. `claude-approved` plus
-`needs-work` means you failed it previously and Claude QA has since re-passed
-it; that is a PR to review again, not one to skip.
+`claude-approved` plus `needs-work` is the state immediately after a Codex
+failure. Exclude it so an unattended runner does not review the same rejected
+tip on every poll. The developer removes both labels when picking up the
+finding. After the revision, Claude QA re-reviews the new tip and restores
+`claude-approved`; that puts the PR back in this queue.
 
 There is no queue state anywhere but GitHub. `bin/codex-qa.sh` walks this list
 and holds nothing.
@@ -94,6 +97,10 @@ criterion reads as `assumed`. For a `derived` or `assumed` criterion, name the
 measurement that would separate it from an equally plausible alternative — you
 inherit the assumption the same way the first reviewer did, and it is no more
 verified for having survived one review.
+
+`requires-rig` present, or the required measurement record absent, is not a
+pass. Do not apply `codex-approved`; the PR must return through full Claude QA
+after a human records the measurement and clears the rig gate.
 
 ### step 2 — the diff
 - **correctness** — does the implementation do what the spec says?
@@ -254,7 +261,9 @@ it.
 - Do not merge. Merge to main is a human gate, and both approvals plus a human
   reading the timestamps is what that gate means (`AGENTS.md`).
 - Never set or clear `claude-approved`. Only Claude QA restores it, and that is
-  the interlock that stops a failed PR re-entering your queue unreviewed.
+  how a revised PR re-enters your queue. `needs-work` is the interlock that
+  keeps the rejected tip out until the developer picks it up; the developer
+  removes `claude-approved` before changing that tip.
 - Never remove `requires-rig`. Human-only, after the measurement exists.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
