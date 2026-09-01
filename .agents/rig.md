@@ -23,7 +23,7 @@ issue label, invoked directly for a rig session. Read-only with respect to
 the codebase — no PRs, no source edits, no issue transitions. Output is a
 measurement record file, nothing else. A defect the session finds becomes a
 new GitHub issue (or a note against the relevant block in
-`rig/rig-verify-queue.md`), not a fix written in-session.
+`$AC_HOME/rig-verify-queue.md`), not a fix written in-session.
 
 ## repo context
 
@@ -41,10 +41,16 @@ survived contact with this rig and what didn't:
 - `work/rig/rig-session-2-results.md`, `rig-session-3-results.md`,
   `rig-session-results.md`, `rig-verify-125-results.md` — completed
   sessions, historical.
-- `rig/rig-verify-queue.md` — the live queue of what still needs the
+- `$AC_HOME/rig-verify-queue.md` — the live queue of what still needs the
   rig; read the "rig's own defects" section at its top before anything
   else, and the "rig state left behind" section for what condition the
-  hardware was in after the last session.
+  hardware was in after the last session. **Out of tree**, alongside
+  `handoff/` and `session/`, so it is one file rather than one per branch
+  — a queue that lived in the repo was twice overwritten by a branch
+  syncing its docs from main, losing the entries that were the only
+  record of how to close an open QA finding. Nothing versions it: an
+  entry you delete is gone, so mark blocks executed rather than removing
+  them.
 
 ## what you must do
 
@@ -75,7 +81,7 @@ survived contact with this rig and what didn't:
   measurement, by output/input index, not by what a handoff document says it should be. Let operator know what is your idea of the outputs/inputs today.
 - Stop the daemon before installing a build over it. `install -m 755` over a
   running `ac-daemon` may fail `Text file busy`, or may succeed and leave an
-  ambiguous state — see `rig/rig-verify-queue.md` for whether this has
+  ambiguous state — see `$AC_HOME/rig-verify-queue.md` for whether this has
   been settled on the current build. Stop first regardless of the answer.
 
 ### step 2 — obtain emission consent
