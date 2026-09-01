@@ -237,6 +237,62 @@ where the issue itself stands rather than trusting this line. **Ring mode is
 not the way to rehearse it**: `fake_ring` still points every ref ring at one
 channel, which is #204.
 
+- **#368's `TAU_SNR_THRESHOLD_DB` constant — QA on PR #384 (2026-08-23)
+  flagged it `derived`, not measured on the sweep configuration it gates.**
+  Its two anchors (33.8–83.5 dB electrical loopback, ~16 dB #376 acoustic
+  cliff) come from a different window-length rig session
+  (`rig-2026-08-22-tau-window-350-results.md`) and a different, longer-ESS
+  acoustic path — neither is `calibrate`'s own short-ESS electrical τ path.
+
+  Run `calibrate`'s actual τ path against the three cases the issue
+  measured: hot loopback (+3.01 dB), low-gain loopback (-4.19 dB), muted
+  route (-83.8 dBFS). Record `tau_pre_impulse_snr_db` for each.
+
+  > **Pass: both real loopbacks read at or above 24 dB, and the muted
+  > route reads below it.** Either real loopback's SNR coming back under
+  > 24 dB would wrongly refuse a working cable; the muted route's SNR
+  > coming back over 24 dB would wrongly accept noise as a peak. Both are
+  > falsifications of the current constant, not readouts to shrug past.
+
+  **Build `issue-368`, not `main`.** `tau_pre_impulse_snr_db` is the field PR
+  #384 adds; a daemon built from `main` does not emit it, and `calibrate`'s τ
+  leg there is still gated on the captured-level `is_loopback` proxy this run
+  exists to replace.
+
+- **#369/PR #388 — is "any xrun during a τ lifecycle" the right dirty
+  threshold?** QA on PR #388 (2026-08-24) tagged this `assumed`: the code
+  refuses and refuses to store τ whenever `AudioEngine::xruns()` reads above
+  0 during either of `measure_tau_twice`'s two lifecycles, but nothing in the
+  PR, the issue, or a prior comment shows that a single xrun during the
+  0.35 s sweep-plus-tail actually perturbs the deconvolved peak enough to
+  matter, as against not perturbing it at all and the gate being needlessly
+  strict.
+
+  Measurement: on the rig (`192.168.9.25`, jackd `-p 64 -n 2` at 96 kHz — the
+  configuration #369 was filed against), capture a `calibrate` τ reading
+  where a real, timed xrun is induced during one lifecycle's `measure_tau`
+  window (briefly starve the audio thread), and compare the resulting raw τ
+  against a clean-lifecycle reading taken immediately before/after under the
+  same acoustic path.
+
+  > **Falsifying value, either direction closes it.** If the xrun-crossed
+  > reading's τ lands within the tolerance `compare_tau_readings` already
+  > treats as agreement, a single real xrun does not reliably perturb the
+  > peak enough to be caught by the two-lifetime rule on its own — the
+  > "any nonzero count is dirty" threshold is not over-conservative in the
+  > way that would make `calibrate` needlessly refuse good readings, which
+  > supports the current bound. If it diverges by a wide, consistent margin
+  > instead, that supports the bound from the other direction. Either result
+  > is informative; no run currently exists.
+
+  **Not fixable from code alone — this entry documents the gap, it does not
+  close it.** The QA finding stands until this measurement runs.
+
+  **Build `issue-369`, not `main`.** The refusal and the per-reading
+  `tau_reading{1,2}_xruns` counts are what PR #388 adds; on `main` an
+  xrun-crossed lifecycle is reported as an ordinary reading, so there is
+  nothing to compare against.
+
 - **#243's own acceptance criterion 7 — a corrected metres readout against a
   taped move.** QA on PR #356 (2026-08-20) flagged this as unverified: nothing
   in the tree runs the built `distance_cal` subtraction against a physical
