@@ -418,10 +418,12 @@ fn parse_params(cmd: &Value) -> Result<TransferParams, String> {
     // observable consequence it has on JACK. Presence of the key selects the
     // mode; absence leaves the on-demand generator in place, unchanged.
     //
-    // `process_secs` defaults to the transfer worker's own measured per-tick
-    // compute (~5 ms with the delay cached — see the hot-loop note in the
-    // worker), so an unparameterised run models this worker rather than an
-    // arbitrary gap.
+    // `process_secs` defaults to the transfer worker's own measured compute
+    // on the tick that matters — the one where the ring crosses a block
+    // boundary and the analysis is recomputed: ~5 ms per pair in release,
+    // against ~1 ms on the nine ticks in ten that reuse the held estimate.
+    // Modelling the worst tick is the point: a splice is a function of the
+    // longest gap, not the average one.
     let fake_ring_process_secs: Option<f64> = cmd.get("fake_ring").map(|v| {
         v.get("process_secs")
             .and_then(Value::as_f64)
@@ -529,10 +531,13 @@ struct FrameStatics {
 }
 
 /// Frame inputs that change every capture tick.
+///
+/// The rings are deliberately absent: assembly reads the cached
+/// [`PairAnalysis`] instead, which is what lets a frame ship on every tick
+/// while the estimate behind it advances only when the ring does.
 struct TickInputs<'a> {
-    /// Sliding H1 window per unique channel, indexed by `PairCtx::mi`/`ri`.
-    rings: &'a [Vec<f32>],
-    /// Raw pre-calibration peaks (§4.2) from THIS tick's blocks, same index.
+    /// Raw pre-calibration peaks (§4.2) from THIS tick's blocks, indexed
+    /// by `PairCtx::mi`/`ri`.
     tick_peaks_dbfs: &'a [Option<f64>],
     /// Global mic-correction toggle, sampled once per tick so every pair in
     /// a frame agrees about it.
@@ -540,13 +545,17 @@ struct TickInputs<'a> {
     /// Observed drive state (#228), identical for every pair in the tick.
     drive_msg: &'a Value,
     /// Ladder columns and settled-rung flags, indexed by `PairCtx::pos`.
+    /// Recomputed every tick — the ladder is a push pipeline.
     mtw_columns: &'a [Option<Vec<ac_core::visualize::mtw::splice::Column>>],
     mtw_settled: &'a [Vec<bool>],
-    /// Welch blocks this tick's `rings` actually average over (#208).
-    /// Rises 1 → `n_averages` while the window fills, then is pinned
-    /// there by `drain_to_block_lattice`. Per-tick and not a
-    /// [`FrameStatics`] field for exactly that reason.
-    n_blocks: usize,
+    /// The held H1 estimate per pair, indexed by `PairCtx::pos`. `None`
+    /// means no segment yet, which publishes a settling frame.
+    analysis: &'a [Option<PairAnalysis>],
+    /// Capture channels the session has rings for. A pair naming a channel
+    /// outside that is dropped from the frame entirely rather than
+    /// publishing a partial one (#254) — which is a different thing from
+    /// having no estimate yet, and must not be reported as one.
+    n_channels: usize,
 }
 
 /// Per-channel provenance tags (tier-framing labelled-tag rules, #97/#98
@@ -632,6 +641,10 @@ fn settling_frame(
         // difference, and so does anyone deciding whether an empty
         // magnitude array is a fault or a start.
         "n_averages":      0,
+        // No estimate exists to number. `null` rather than 0, so the
+        // first real estimate's `0` cannot be mistaken for a repeat of
+        // something that was never sent.
+        "analysis_seq":    Value::Null,
         "mic_correction":  mc_tag,
         "spec_freqs":      Vec::<f64>::new(),
         "meas_spectrum":   Vec::<f64>::new(),
@@ -644,98 +657,113 @@ fn settling_frame(
     })
 }
 
-/// Build one pair's wire messages for this tick: the `transfer_stream`
-/// frame, plus a Phase 4b `visualize/ir` sidecar computed from the same
-/// H1 result. Returns the pair's launch position alongside them, and the
-/// **un-integrated** broadband SPL — integration holds `&mut` per-pair
-/// state and so happens on the worker thread, after the fan-out.
+/// What an H1 estimate is a function of.
 ///
-/// `None` when the pair's channels are not present in this tick's rings,
-/// which drops the pair from the frame rather than publishing a partial
-/// one.
+/// The Welch estimate reads whole segments from the ring's start, so it
+/// cannot change while the ring start and the segment count both hold —
+/// `drain_to_block_lattice` moves the start only in whole `step` units
+/// (#208), and the samples appended past the last complete segment are
+/// not read. Everything else the estimate depends on is here: the
+/// alignment offset it was computed at, and the mic-correction toggle
+/// that scales it.
 ///
-/// Pure apart from its inputs, and that is the point of it being a
-/// function: the 300-odd lines here decide the entire published frame,
-/// and inside the closure they could only be exercised by standing up a
-/// daemon, a socket and an audio backend.
-fn build_pair_messages(
+/// Equal keys therefore mean an identical result, which is what makes the
+/// cache a cache rather than a staleness policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalysisKey {
+    /// Samples drained from the ring since session start — the ring
+    /// start's absolute position in the stream, and so the absolute
+    /// position of every segment boundary.
+    dropped: usize,
+    /// Complete Welch segments in the ring.
+    n_blocks: usize,
+    /// The alignment offset this estimate was computed at. A pair that
+    /// locks mid-window must not keep publishing an unaligned estimate
+    /// until the next boundary.
+    delay: i64,
+    /// The global mic-correction toggle, which a client can flip between
+    /// ticks.
+    mc_enabled: bool,
+}
+
+/// One pair's H1 estimate and everything derived from it, held between
+/// block boundaries.
+///
+/// At 48 kHz the ring advances every 0.5 s while the loop ticks at 20 Hz,
+/// so without this the same estimate is recomputed about ten times — a
+/// 2.5 s Welch pass and a full-resolution IFFT per pair per tick, all of
+/// it producing bytes identical to the previous tick's. #419 named the
+/// waste and left it; this is the part of the loop that pays for it.
+///
+/// Arrays are stored already as `Value` because the only thing left to do
+/// with them is serialize them.
+struct PairAnalysis {
+    key: AnalysisKey,
+    /// Increments once per recomputation, published as `analysis_seq`.
+    /// A consumer comparing it across frames can tell an estimate that is
+    /// genuinely new from the same one shipped again, which is otherwise
+    /// invisible: the arrays are byte-identical either way.
+    seq: u64,
+    n_blocks: usize,
+    delay_samples: i64,
+    delay_ms: f64,
+    freqs: Value,
+    magnitude_db: Value,
+    phase_deg: Value,
+    coherence: Value,
+    spec_freqs: Value,
+    meas_spectrum: Value,
+    ref_spectrum: Value,
+    /// Broadband weighted level before time integration. The EMA that
+    /// consumes it still steps every tick with that tick's `dt`, so
+    /// holding the raw value here changes no `spl` number: it was
+    /// recomputed identically on every tick before.
+    spl_raw: Option<f64>,
+    /// Phase 4b sidecar payload, absent when the IFFT produced nothing.
+    ir: Option<IrPayload>,
+}
+
+/// The `visualize/ir` sidecar's per-analysis content. The channel and
+/// lock fields are added at assembly, from live state.
+struct IrPayload {
+    samples: Value,
+    stride: usize,
+    dt_ms: f64,
+    t_origin_ms: f64,
+}
+
+/// Compute one pair's H1 estimate and everything derived from it.
+///
+/// `None` when the pair's channels are not present in the rings, which
+/// drops the pair from the frame rather than publishing a partial one.
+fn analyse_pair(
     ctx: &PairCtx,
     st: &PairState,
     statics: &FrameStatics,
-    tick: &TickInputs<'_>,
-) -> Option<(usize, Vec<Value>, Option<f64>)> {
-    let &PairCtx {
-        pos,
-        meas_ch,
-        ref_ch,
-        mi,
-        ri,
-        ..
-    } = ctx;
-    let (curve_opt, meas_cal_opt, ref_cal_opt) = (&ctx.meas_curve, &ctx.meas_cal, &ctx.ref_cal);
-    let delay_opt = st.delay;
+    rings: &[Vec<f32>],
+    key: AnalysisKey,
+    seq: u64,
+) -> Option<PairAnalysis> {
     let &FrameStatics {
         sr,
         spec_f_min,
         spec_f_max,
         spec_n_columns,
         weighting,
-        mtw_ppo,
-        mtw_n_blocks,
         ..
     } = statics;
-    let integration_tag = &statics.integration_tag;
-    let mtw_stages = &statics.mtw_stages;
-    let &TickInputs {
-        rings,
-        tick_peaks_dbfs,
-        mc_enabled,
-        drive_msg,
-        mtw_columns,
-        mtw_settled,
-        n_blocks,
-    } = tick;
-    let meas = rings.get(mi)?.as_slice();
-    let refb = rings.get(ri)?.as_slice();
-    // `-inf` (digital silence) travels as JSON null:
-    // serde_json cannot serialise a non-finite float,
-    // so the conversion is explicit here rather than
-    // left to the `json!` site.
-    let meas_peak: Value = tick_peaks_dbfs
-        .get(mi)
-        .copied()
-        .flatten()
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    let ref_peak: Value = tick_peaks_dbfs
-        .get(ri)
-        .copied()
-        .flatten()
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
-    if n_blocks == 0 {
-        // The ring does not hold a whole Welch segment yet, so there is
-        // no H1 to report. Publish anyway — see `settling_frame`.
-        return Some((
-            pos,
-            vec![settling_frame(
-                ctx, st, statics, meas_peak, ref_peak, mc_tag, mc_enabled, drive_msg,
-            )],
-            None,
-        ));
-    }
+    let (curve_opt, meas_cal_opt, ref_cal_opt) = (&ctx.meas_curve, &ctx.meas_cal, &ctx.ref_cal);
+    let mc_enabled = key.mc_enabled;
+    let meas = rings.get(ctx.mi)?.as_slice();
+    let refb = rings.get(ctx.ri)?.as_slice();
 
-    // An unlocked pair (still warming up, or refused by the
-    // prominence gate — #227) is measured unaligned rather
-    // than aligned to a guess. `delay_locked` below is what
-    // keeps that distinguishable on the wire: a refused pair
-    // and a genuine 0-sample digital loopback both report
-    // `delay_ms` 0.0, and #216 established that the loopback
-    // case is legitimately 0.0, so the number alone cannot
-    // carry the difference.
-    let delay = delay_opt.map(|l| l.samples).unwrap_or(0);
-    let result = ac_core::visualize::transfer::h1_estimate_with_delay(refb, meas, sr, delay);
+    // An unlocked pair (still warming up, or refused by the prominence
+    // gate — #227) is measured unaligned rather than aligned to a guess.
+    // `delay_locked` on the frame is what keeps that distinguishable: a
+    // refused pair and a genuine 0-sample digital loopback both report
+    // `delay_ms` 0.0, and #216 established that the loopback case is
+    // legitimately 0.0, so the number alone cannot carry the difference.
+    let result = ac_core::visualize::transfer::h1_estimate_with_delay(refb, meas, sr, key.delay);
 
     let n_pts = result.freqs.len();
     let indices: Vec<usize> = if n_pts > 2000 {
@@ -761,26 +789,23 @@ fn build_pair_messages(
         .iter()
         .map(|&i| result.coherence[i])
         .collect::<Vec<_>>();
-    // Mic-curve correction (#101) on the measurement leg
-    // only — the reference leg was guarded above. H1's
-    // dB magnitude has the mic over-read embedded; subtract
-    // the curve at each downsampled bin to recover truth.
+    // Mic-curve correction (#101) on the measurement leg only — the
+    // reference leg was guarded at launch. H1's dB magnitude has the mic
+    // over-read embedded; subtract the curve at each downsampled bin to
+    // recover truth.
     if mc_enabled {
         if let Some(curve) = curve_opt.as_ref() {
             mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
         }
     }
 
-    // Calibrated per-channel spectra (D18, handoff:
-    // transfer-frame-v2 M0). Full-resolution
-    // `result.meas_amp`/`result.ref_amp` (NOT the
-    // 2000-pt indices above — same full-res-then-
-    // aggregate split the IR sidecar below already
-    // uses) so the mic-curve's per-freq correction is
-    // applied at native Welch-bin resolution, then
-    // `spectrum_to_columns_wire` band-power-aggregates
-    // to the fixed grid — same aggregator, same tests,
-    // the monitor `spectrum` frame already uses.
+    // Calibrated per-channel spectra (D18, handoff: transfer-frame-v2 M0).
+    // Full-resolution `result.meas_amp`/`result.ref_amp` — NOT the 2000-pt
+    // indices above, the same full-res-then-aggregate split the IR sidecar
+    // uses — so the mic-curve's per-freq correction is applied at native
+    // Welch-bin resolution, then `spectrum_to_columns_wire` band-power-
+    // aggregates to the fixed grid: same aggregator, same tests, as the
+    // monitor `spectrum` frame.
     let mut mc_meas_amp = result.meas_amp.clone();
     if mc_enabled {
         if let Some(curve) = curve_opt.as_ref() {
@@ -789,10 +814,9 @@ fn build_pair_messages(
             }
         }
     }
-    // `spl` is computed from the mic-corrected (acoustic
-    // truth) spectrum, before voltage-cal scaling below
-    // — SPL derives from the dBFS + spl_offset_db model
-    // (Calibration::spl_offset_db), independent of the
+    // `spl` is computed from the mic-corrected (acoustic truth) spectrum,
+    // before voltage-cal scaling below — SPL derives from the dBFS +
+    // spl_offset_db model (Calibration::spl_offset_db), independent of the
     // electrical Vrms voltage-cal layer.
     let spl_raw: Option<f64> = meas_cal_opt
         .as_ref()
@@ -805,13 +829,11 @@ fn build_pair_messages(
             ) + offset
         });
 
-    // Voltage cal (D3), applied here — post mic-curve,
-    // pre-aggregation. Both legs go through the same
-    // helper: the meas and ref spectra are divided
-    // against each other downstream, so a scale applied
-    // to one leg under rules that have drifted from the
-    // other's is an error that cancels out of every
-    // check but the answer.
+    // Voltage cal (D3), applied here — post mic-curve, pre-aggregation.
+    // Both legs go through the same helper: the meas and ref spectra are
+    // divided against each other downstream, so a scale applied to one leg
+    // under rules that have drifted from the other's is an error that
+    // cancels out of every check but the answer.
     let meas_amp_wire = {
         let mut a = mc_meas_amp;
         apply_voltage_cal(&mut a, meas_cal_opt.as_ref());
@@ -837,32 +859,151 @@ fn build_pair_messages(
         spec_n_columns,
     );
 
+    // Phase 4b: IR sidecar from the full-resolution complex H — the IFFT
+    // needs the raw nperseg/2+1 bins to recover h(t) correctly, so it
+    // reads `result.re`/`result.im` and not the 2000-point display arrays.
+    // Time-domain output is 1 s long at sr (matches the 1 Hz Welch
+    // resolution); downsampled to ≤2000 samples for wire economy by
+    // stride-picking. Mic-curve correction is intentionally NOT applied to
+    // the IR: the `curve_opt` branch above corrects only the downsampled
+    // `mag`, and the full-resolution H here is uncorrected. For the
+    // visualization-only Tier 2 IR view this is acceptable; a Tier-1
+    // calibrated IR goes through the sweep measurement, not
+    // `transfer_stream`.
+    let ir_full = ac_core::visualize::transfer::impulse_response_from_h(&result.re, &result.im);
+    let ir = if ir_full.is_empty() {
+        None
+    } else {
+        const IR_MAX_SAMPLES: usize = 2000;
+        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
+        let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
+        // t_origin_ms = -mid_ms because `impulse_response_from_h` centres
+        // the IR peak at the middle of the array (t=0 in the user's
+        // mental model).
+        let dt_ms = 1000.0 / sr as f64 * stride as f64;
+        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
+        Some(IrPayload {
+            samples: json!(ir_ds),
+            stride,
+            dt_ms,
+            t_origin_ms,
+        })
+    };
+
+    let _ = st;
+    Some(PairAnalysis {
+        key,
+        seq,
+        n_blocks: key.n_blocks,
+        delay_samples: result.delay_samples,
+        delay_ms: result.delay_ms,
+        freqs: json!(freqs),
+        magnitude_db: json!(mag),
+        phase_deg: json!(phase),
+        coherence: json!(coh),
+        spec_freqs: json!(spec_freqs),
+        meas_spectrum: json!(meas_spectrum),
+        ref_spectrum: json!(ref_spectrum),
+        spl_raw,
+        ir,
+    })
+}
+
+/// Build one pair's wire messages for this tick: the `transfer_stream`
+/// frame, plus a Phase 4b `visualize/ir` sidecar when there is an
+/// estimate to derive one from. Returns the pair's launch position
+/// alongside them, and the **un-integrated** broadband SPL — integration
+/// holds `&mut` per-pair state and so happens on the worker thread, after
+/// the fan-out.
+///
+/// Everything expensive already happened in [`analyse_pair`]; what is
+/// left is assembly from that plus this tick's live scalars, which is why
+/// a frame can ship every tick while the estimate behind it advances at
+/// the ring's own rate.
+fn build_pair_messages(
+    ctx: &PairCtx,
+    st: &PairState,
+    statics: &FrameStatics,
+    tick: &TickInputs<'_>,
+) -> Option<(usize, Vec<Value>, Option<f64>)> {
+    let &PairCtx {
+        pos,
+        meas_ch,
+        ref_ch,
+        mi,
+        ri,
+        ..
+    } = ctx;
+    let &TickInputs {
+        tick_peaks_dbfs,
+        mc_enabled,
+        drive_msg,
+        mtw_columns,
+        mtw_settled,
+        analysis,
+        n_channels,
+    } = tick;
+    if mi >= n_channels || ri >= n_channels {
+        return None;
+    }
+    let &FrameStatics {
+        sr,
+        mtw_ppo,
+        mtw_n_blocks,
+        ..
+    } = statics;
+    // `-inf` (digital silence) travels as JSON null: serde_json cannot
+    // serialise a non-finite float, so the conversion is explicit here
+    // rather than left to the `json!` site.
+    let meas_peak: Value = tick_peaks_dbfs
+        .get(mi)
+        .copied()
+        .flatten()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let ref_peak: Value = tick_peaks_dbfs
+        .get(ri)
+        .copied()
+        .flatten()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let mc_tag = mic::mic_correction_tag(ctx.meas_curve.is_some(), mc_enabled);
+
+    let Some(Some(a)) = analysis.get(pos) else {
+        // No estimate yet — the ring does not hold a whole Welch segment.
+        // Publish anyway; see `settling_frame`.
+        return Some((
+            pos,
+            vec![settling_frame(
+                ctx, st, statics, meas_peak, ref_peak, mc_tag, mc_enabled, drive_msg,
+            )],
+            None,
+        ));
+    };
+
     let cal_tags = cal_tags_value(
-        meas_cal_opt.as_ref(),
-        ref_cal_opt.as_ref(),
+        ctx.meas_cal.as_ref(),
+        ctx.ref_cal.as_ref(),
         mc_tag,
         mc_enabled,
     );
 
-    // Multi-time-window columns (additive; `null` until
-    // every rung holds a full N blocks — 2.56 s at the
-    // bottom, which is the design's stated settling time
-    // and matches what the full-rate estimator takes
-    // today. Gating on the full N is what makes the
-    // reported N unambiguous: every column is the mean of
-    // the same number of blocks).
+    // Multi-time-window columns (additive; `null` until every rung holds a
+    // full N blocks — 2.56 s at the bottom, the design's stated settling
+    // time. Gating on the full N is what makes the reported N
+    // unambiguous: every column is the mean of the same number of
+    // blocks). Unlike the Welch arrays above, these are recomputed every
+    // tick: the ladder is a push pipeline fed the fresh capture buffers,
+    // so its columns really do move at the frame rate.
     //
-    // Every column ships the Δf, window and N that
-    // produced it. That is not decoration: neighbouring
-    // columns can come from windows 12x apart, and
-    // coherence from uncorrelated inputs floats near 1/N,
-    // so without those a screenshot of this display is not
-    // interpretable. `bins` is criterion 1 made
-    // observable — it is never zero.
+    // Every column ships the Δf, window and N that produced it. That is
+    // not decoration: neighbouring columns can come from windows 12x
+    // apart, and coherence from uncorrelated inputs floats near 1/N, so
+    // without those a screenshot of this display is not interpretable.
+    // `bins` is criterion 1 made observable — it is never zero.
     //
-    // dB is applied here, daemon-side, per the display-
-    // truth rule: `ac-view` plots what it is given and
-    // does no `log10` of its own.
+    // dB is applied here, daemon-side, per the display-truth rule:
+    // `ac-view` plots what it is given and does no `log10` of its own.
     let mtw_msg = match mtw_columns.get(pos).and_then(|c| c.as_ref()) {
         None => Value::Null,
         Some(cols) => json!({
@@ -884,17 +1025,16 @@ fn build_pair_messages(
             "bins":         cols.iter().map(|c| c.bins).collect::<Vec<_>>(),
             "ppo":          mtw_ppo,
             "n_blocks":     mtw_n_blocks,
-            // Which rungs have settled, shallowest first.
-            // Shipped so a consumer can distinguish "still
-            // warming, more band coming" from "this is all
-            // there is" — a short column list looks the
-            // same either way, and the difference decides
-            // whether a blank low end is a fault.
+            // Which rungs have settled, shallowest first. Shipped so a
+            // consumer can distinguish "still warming, more band coming"
+            // from "this is all there is" — a short column list looks the
+            // same either way, and the difference decides whether a blank
+            // low end is a fault.
             "settled_stages": mtw_settled
                 .get(pos)
                 .cloned()
                 .unwrap_or_default(),
-            "stages":       mtw_stages,
+            "stages":       &statics.mtw_stages,
         }),
     };
 
@@ -902,16 +1042,13 @@ fn build_pair_messages(
         "type":            "transfer_stream",
         "cmd":             "transfer_stream",
         "mtw":             mtw_msg,
-        "freqs":           freqs,
-        "magnitude_db":    mag,
-        "phase_deg":       phase,
-        "coherence":       coh,
-        "delay_samples":   result.delay_samples,
-        "delay_ms":        result.delay_ms,
-        "delay_locked":    delay_opt.is_some(),
-        // Read by position rather than zipped into the
-        // chain above: it is a scalar the closure only
-        // reads, and the zip is already six deep.
+        "freqs":           a.freqs,
+        "magnitude_db":    a.magnitude_db,
+        "phase_deg":       a.phase_deg,
+        "coherence":       a.coherence,
+        "delay_samples":   a.delay_samples,
+        "delay_ms":        a.delay_ms,
+        "delay_locked":    st.delay.is_some(),
         "delay_attempts":  st.attempts,
         "delay_evidence":  st.prominence,
         "meas_peak_dbfs":  meas_peak,
@@ -920,71 +1057,48 @@ fn build_pair_messages(
         "meas_channel":    meas_ch,
         "sr":              sr,
         // Welch blocks actually averaged into THIS frame (#208) — 1 while
-        // the window fills, then `n_averages` for the rest of the session.
-        // Shipped because coherence carries a `1/N` bias, so a coherence
-        // figure without N is not interpretable: a consumer that saw N move
-        // silently could not tell a settling display from a DUT that changed.
-        "n_averages":      n_blocks,
+        // the window fills, then `n_averages` for the rest of the session,
+        // and 0 on a settling frame. Shipped because coherence carries a
+        // `1/N` bias, so a coherence figure without N is not
+        // interpretable: a consumer that saw N move silently could not
+        // tell a settling display from a DUT that changed.
+        "n_averages":      a.n_blocks,
+        // Which estimate these arrays are. Increments when the analysis is
+        // recomputed, which is once per Welch hop — slower than the frame
+        // rate, so consecutive frames repeat the same arrays by design.
+        // Without this the repetition is invisible and a stalled estimator
+        // looks exactly like a stationary DUT.
+        "analysis_seq":    a.seq,
         "mic_correction":  mc_tag,
-        "spec_freqs":      spec_freqs,
-        "meas_spectrum":   meas_spectrum,
-        "ref_spectrum":    ref_spectrum,
+        "spec_freqs":      a.spec_freqs,
+        "meas_spectrum":   a.meas_spectrum,
+        "ref_spectrum":    a.ref_spectrum,
         "spl":             Value::Null,
-        "spl_weighting":   weighting.tag(),
-        "spl_integration": integration_tag.as_str(),
+        "spl_weighting":   statics.weighting.tag(),
+        "spl_integration": statics.integration_tag.as_str(),
         "cal_tags":        cal_tags,
         "drive":           drive_msg.clone(),
     });
-    // Phase 4b: IR sidecar from the full-resolution
-    // complex H — the IFFT needs the raw nperseg/2+1
-    // bins to recover h(t) correctly, so it reads
-    // `result.re`/`result.im` and not the 2000-point
-    // display arrays. Time-domain output is 1 s long at
-    // sr (matches the 1 Hz Welch resolution);
-    // downsample to ≤2000 samples for wire economy by
-    // stride-picking. Mic-curve correction is
-    // intentionally NOT applied to the IR: the
-    // `curve_opt` branch above corrects only the
-    // downsampled `mag`, and the full-resolution H here
-    // is uncorrected. For the visualization-only Tier 2
-    // IR view this is acceptable; if a Tier-1 calibrated
-    // IR is wanted, that path goes through the sweep
-    // measurement, not transfer_stream.
-    let h_full_re = &result.re;
-    let h_full_im = &result.im;
-    let ir_full = ac_core::visualize::transfer::impulse_response_from_h(h_full_re, h_full_im);
-    let ir_msg = if ir_full.is_empty() {
-        None
-    } else {
-        const IR_MAX_SAMPLES: usize = 2000;
-        let stride = (ir_full.len() / IR_MAX_SAMPLES).max(1);
-        let ir_ds: Vec<f32> = ir_full.iter().step_by(stride).copied().collect();
-        // t_origin_ms = -mid_ms because
-        // impulse_response_from_h centres the IR
-        // peak at the middle of the array (t=0 in
-        // the user's mental model).
-        let dt_ms = 1000.0 / sr as f64 * stride as f64;
-        let t_origin_ms = -((ir_ds.len() / 2) as f64) * dt_ms;
-        Some(json!({
-            "type":         "visualize/ir",
-            "cmd":          "transfer_stream",
-            "samples":      ir_ds,
-            "sr":           sr,
-            "stride":       stride,
-            "dt_ms":        dt_ms,
-            "t_origin_ms":  t_origin_ms,
-            "ref_channel":  ref_ch,
-            "meas_channel": meas_ch,
-            "delay_samples": result.delay_samples,
-            "delay_ms":     result.delay_ms,
-            "delay_locked": delay_opt.is_some(),
-        }))
-    };
+
     let mut out = vec![transfer_msg];
-    if let Some(m) = ir_msg {
-        out.push(m);
+    if let Some(ir) = a.ir.as_ref() {
+        out.push(json!({
+            "type":          "visualize/ir",
+            "cmd":           "transfer_stream",
+            "samples":       ir.samples,
+            "sr":            sr,
+            "stride":        ir.stride,
+            "dt_ms":         ir.dt_ms,
+            "t_origin_ms":   ir.t_origin_ms,
+            "ref_channel":   ref_ch,
+            "meas_channel":  meas_ch,
+            "delay_samples": a.delay_samples,
+            "delay_ms":      a.delay_ms,
+            "delay_locked":  st.delay.is_some(),
+            "analysis_seq":  a.seq,
+        }));
     }
-    Some((pos, out, spl_raw))
+    Some((pos, out, a.spl_raw))
 }
 
 /// Retry interval for a refused delay estimate — see
@@ -1094,6 +1208,16 @@ struct SessionState {
     /// A layout the ladder cannot serve (an unsupported rate) degrades to
     /// "no ladder" rather than to a dead session, and is logged once.
     ladder_failed: bool,
+    /// The held H1 estimate per pair, same order as `ctx`. Recomputed
+    /// only when [`AnalysisKey`] changes — see [`PairAnalysis`].
+    analysis: Vec<Option<PairAnalysis>>,
+    /// Samples drained from the rings since session start. Half of the
+    /// analysis key: it is the ring start's absolute position in the
+    /// stream, so it changes exactly when the Welch segment boundaries do.
+    dropped: usize,
+    /// Next `analysis_seq`. Session-wide rather than per-pair so a
+    /// consumer watching two pairs sees one ordering.
+    next_seq: u64,
     /// Capture tick, used only as the `spl` integrator's `dt` on the
     /// first step, where there is no previous timestamp to subtract.
     chunk_secs: f64,
@@ -1128,7 +1252,8 @@ impl SessionState {
                 )
             })
             .collect();
-        let ladders = (0..ctx.len()).map(|_| None).collect();
+        let n_pairs = ctx.len();
+        let ladders = (0..n_pairs).map(|_| None).collect();
         let rings = (0..n_channels)
             .map(|_| Vec::with_capacity(window.target_total() + window.step))
             .collect();
@@ -1140,6 +1265,9 @@ impl SessionState {
             rings,
             ladders,
             ladder_failed: false,
+            analysis: (0..n_pairs).map(|_| None).collect(),
+            dropped: 0,
+            next_seq: 0,
             chunk_secs,
         }
     }
@@ -1191,12 +1319,23 @@ impl SessionState {
 
     /// Append this tick's capture to every ring and trim each back to the
     /// analysis window on the block lattice (#208).
+    /// Append this tick's capture to every ring, trim each back to the
+    /// analysis window on the block lattice (#208), and advance the
+    /// dropped-sample counter by what the trim removed.
+    ///
+    /// Every ring is popped to the same length by
+    /// `capture_multi_contiguous`, so one counter describes them all; the
+    /// first ring's drain is measured and the rest follow it.
     fn push_rings(&mut self, bufs: &[Vec<f32>]) {
         let (target_total, step) = (self.window.target_total(), self.window.step);
+        let before = self.rings.first().map(Vec::len).unwrap_or(0);
+        let appended = bufs.first().map(Vec::len).unwrap_or(0);
         for (r, buf) in self.rings.iter_mut().zip(bufs.iter()) {
             r.extend_from_slice(buf);
             drain_to_block_lattice(r, target_total, step);
         }
+        let after = self.rings.first().map(Vec::len).unwrap_or(0);
+        self.dropped += (before + appended).saturating_sub(after);
     }
 
     /// Welch segments `welch_all` will actually average over this tick's
@@ -1344,6 +1483,72 @@ impl SessionState {
         (columns, settled)
     }
 
+    /// Recompute the held H1 estimate for every pair whose
+    /// [`AnalysisKey`] has changed, and leave the rest alone.
+    ///
+    /// The key changes when the ring start moves (a whole `step`, so every
+    /// 0.5 s at 48 kHz), when the segment count changes (only while the
+    /// window fills), when a pair's lock changes, or when the
+    /// mic-correction toggle flips. Between those the estimate is
+    /// bit-identical to the one already held, which at a 20 Hz tick means
+    /// this used to run a 2.5 s Welch pass and a full-resolution IFFT per
+    /// pair about ten times per distinct answer. #419 named the waste and
+    /// left it.
+    ///
+    /// The pairs that do need recomputing are fanned out; a tick where
+    /// none do costs one key comparison per pair.
+    fn refresh_analysis(&mut self, n_blocks: usize, mc_enabled: bool) {
+        let statics = &self.statics;
+        let rings = &self.rings;
+        let dropped = self.dropped;
+        let stale: Vec<(usize, AnalysisKey)> = self
+            .ctx
+            .iter()
+            .zip(self.pairs.iter())
+            .zip(self.analysis.iter())
+            .filter_map(|((ctx, st), held)| {
+                let key = AnalysisKey {
+                    dropped,
+                    n_blocks,
+                    delay: st.delay.map(|l| l.samples).unwrap_or(0),
+                    mc_enabled,
+                };
+                match held {
+                    Some(a) if a.key == key => None,
+                    _ => Some((ctx.pos, key)),
+                }
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        // Sequence numbers are handed out before the fan-out so they do
+        // not depend on completion order.
+        let seq0 = self.next_seq;
+        self.next_seq += stale.len() as u64;
+        let ctx = &self.ctx;
+        let pairs = &self.pairs;
+        let fresh: Vec<(usize, Option<PairAnalysis>)> = stale
+            .par_iter()
+            .enumerate()
+            .map(|(i, &(pos, key))| {
+                (
+                    pos,
+                    analyse_pair(&ctx[pos], &pairs[pos], statics, rings, key, seq0 + i as u64),
+                )
+            })
+            .collect();
+        for (pos, a) in fresh {
+            // A pair whose channels are missing from the rings keeps
+            // whatever it held rather than gaining a half-built estimate;
+            // `build_pair_messages` publishes a settling frame for a pair
+            // that has never had one.
+            if a.is_some() {
+                self.analysis[pos] = a;
+            }
+        }
+    }
+
     /// One capture tick, from raw buffers to the messages to publish.
     ///
     /// `now` is a parameter rather than an `Instant::now()` call so the
@@ -1400,22 +1605,24 @@ impl SessionState {
         let n_blocks = self.n_blocks();
         if n_blocks > 0 {
             self.acquire_missing_locks(ev, now);
+            self.refresh_analysis(n_blocks, ev.mc_enabled);
         }
         let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
 
-        // Pairs are independent H1 estimates — fan out across the rayon
-        // pool so multi-pair sessions (e.g. 4 mic positions against one
-        // reference) scale linearly with core count. The rings are
-        // read-only inside the per-pair closure; JSON is built here and
-        // published back in original pair order.
+        // Assembly, not analysis: the expensive work happened above and
+        // only when the ring moved. What is left is building JSON from the
+        // held estimate plus this tick's live scalars, fanned out across
+        // the rayon pool so multi-pair sessions (e.g. 4 mic positions
+        // against one reference) scale with core count. Published back in
+        // original pair order.
         let tick = TickInputs {
-            rings: &self.rings,
             tick_peaks_dbfs: &tick_peaks_dbfs,
             mc_enabled: ev.mc_enabled,
             drive_msg,
             mtw_columns: &mtw_columns,
             mtw_settled: &mtw_settled,
-            n_blocks,
+            analysis: &self.analysis,
+            n_channels: self.rings.len(),
         };
         let statics = &self.statics;
         let built: Vec<(usize, Vec<Value>, Option<f64>)> = self
@@ -2512,14 +2719,24 @@ mod tests {
         let drive_msg = json!({"on": false, "level_dbfs": Value::Null, "drivable": false});
         let cols: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = vec![None];
         let settled: Vec<Vec<bool>> = vec![Vec::new()];
+        // Assembly reads a held estimate, so the estimate is computed
+        // here — the same call the session makes when a ring crosses a
+        // block boundary.
+        let key = AnalysisKey {
+            dropped: 0,
+            n_blocks: 4,
+            delay: st.delay.map(|l| l.samples).unwrap_or(0),
+            mc_enabled: false,
+        };
+        let analysis = vec![analyse_pair(ctx, st, statics, rings, key, 0)];
         let tick = TickInputs {
-            rings,
             tick_peaks_dbfs: peaks,
             mc_enabled: false,
             drive_msg: &drive_msg,
             mtw_columns: &cols,
             mtw_settled: &settled,
-            n_blocks: 4,
+            analysis: &analysis,
+            n_channels: rings.len(),
         };
         build_pair_messages(ctx, st, statics, &tick)
     }
@@ -3034,6 +3251,110 @@ mod session_tests {
             .expect("no frame on the tick that completed the segment");
         assert_eq!(f["n_averages"], json!(1));
         assert!(!f["freqs"].as_array().unwrap().is_empty());
+    }
+
+    /// The analysis advances on the ring, not on the loop.
+    ///
+    /// At 48 kHz the ring's start moves one `step` — 0.5 s — while the
+    /// loop ticks 20 times, so nine frames in ten repeat the previous
+    /// estimate exactly. That was true before this cache existed too; the
+    /// difference is that the repetition was produced by recomputing a
+    /// 2.5 s Welch pass and a full-resolution IFFT to arrive at the same
+    /// bytes, and that it was invisible on the wire.
+    #[test]
+    fn the_analysis_advances_once_per_welch_hop_not_once_per_tick() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        // Settle first: while the window fills, `n_blocks` changes and
+        // every tick legitimately re-analyses.
+        run_correlated(&mut s, 60, 480, events(false), t0);
+        let frames = run_correlated(&mut s, 60, 480, events(false), t0);
+
+        let seqs: Vec<u64> = frames
+            .iter()
+            .map(|f| f["analysis_seq"].as_u64().unwrap())
+            .collect();
+        assert!(
+            seqs.windows(2).all(|w| w[1] >= w[0]),
+            "analysis_seq went backwards: {seqs:?}"
+        );
+        let recomputes = seqs.windows(2).filter(|w| w[1] != w[0]).count();
+        // 60 ticks of 0.05 s = 3.0 s; the hop is 0.5 s.
+        assert_eq!(
+            recomputes, 6,
+            "expected one recomputation per 0.5 s hop over 3.0 s, got {recomputes}: {seqs:?}"
+        );
+
+        // And the repetition is real: same seq means the same numbers.
+        for w in frames.windows(2) {
+            let same_seq = w[0]["analysis_seq"] == w[1]["analysis_seq"];
+            let same_mag = w[0]["magnitude_db"] == w[1]["magnitude_db"];
+            assert_eq!(
+                same_seq, same_mag,
+                "analysis_seq and the arrays disagree about whether the estimate changed"
+            );
+        }
+    }
+
+    /// The cache must never be stale: what a frame carries has to equal
+    /// what analysing the ring right now would produce.
+    ///
+    /// Checked mid-hop, where a stale cache is possible at all — on a
+    /// boundary tick the two are trivially equal.
+    #[test]
+    fn a_held_estimate_equals_one_computed_from_the_ring_as_it_stands() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        run_correlated(&mut s, 60, 480, events(false), t0);
+        // Three more ticks: 0.15 s into a 0.5 s hop.
+        let frames = run_correlated(&mut s, 3, 480, events(false), t0);
+        let held = frames.last().unwrap();
+
+        let key = AnalysisKey {
+            dropped: s.dropped,
+            n_blocks: s.n_blocks(),
+            delay: s.pairs[0].delay.map(|l| l.samples).unwrap_or(0),
+            mc_enabled: false,
+        };
+        let fresh = analyse_pair(&s.ctx[0], &s.pairs[0], &s.statics, &s.rings, key, 0)
+            .expect("rings hold both channels");
+        assert_eq!(
+            held["magnitude_db"], fresh.magnitude_db,
+            "the frame's magnitude is not what the ring says now"
+        );
+        assert_eq!(held["coherence"], fresh.coherence);
+        assert_eq!(held["meas_spectrum"], fresh.meas_spectrum);
+    }
+
+    /// A lock arriving mid-hop must invalidate the estimate. The held one
+    /// was computed unaligned, and publishing it until the next boundary
+    /// would show an alignment the frame simultaneously claims to have.
+    #[test]
+    fn a_changed_lock_re_analyses_before_the_next_hop() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        run_correlated(&mut s, 60, 480, events(false), t0);
+        let before = run_correlated(&mut s, 1, 480, events(false), t0);
+        let before = before.last().unwrap().clone();
+
+        // Move the lock without moving the ring — the drive edge and
+        // `relock` both do this in the middle of a hop.
+        s.pairs[0].delay = Some(Lock {
+            samples: 1200,
+            driving: false,
+        });
+        let after = run_correlated(&mut s, 1, 480, events(false), t0);
+        let after = after.last().unwrap();
+
+        assert_ne!(
+            before["analysis_seq"], after["analysis_seq"],
+            "a changed lock did not re-analyse"
+        );
+        assert_eq!(after["delay_samples"], json!(1200));
+        assert_ne!(
+            before["magnitude_db"], after["magnitude_db"],
+            "re-analysis at a different alignment produced the same H1"
+        );
     }
 
     /// A settling frame and an analysis frame must be the same shape. They

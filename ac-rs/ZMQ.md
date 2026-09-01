@@ -2109,6 +2109,13 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
                                           // so a coherence figure without N is not
                                           // interpretable — a settling display and a
                                           // DUT that changed look alike without it.
+  "analysis_seq":    <int> | null,       // which H1 estimate these arrays are.
+                                          // Increments once per recomputation,
+                                          // which is once per Welch hop (0.5 s at
+                                          // 48 kHz) — slower than the ~20/s frame
+                                          // rate, so consecutive frames repeat the
+                                          // same arrays by design. `null` on a
+                                          // settling frame: no estimate to number.
   "mic_correction":  "on" | "off" | "none",
 
   // Additive (handoff: transfer-frame-v2 M0) — per-channel calibrated
@@ -2195,6 +2202,23 @@ could not distinguish a daemon that had not started from one whose drive
 had already dead-manned. The delay estimate keeps its own gate at one
 segment, because a cross-correlation needs one.
 
+**Frame rate is not analysis rate.** Frames ship every capture tick,
+about 20/s per pair. The Welch estimate behind `freqs`, `magnitude_db`,
+`phase_deg`, `coherence`, `spec_freqs`, `meas_spectrum`, `ref_spectrum`
+and `spl` advances once per Welch hop — 0.5 s at 48 kHz — because the
+analysis window is cut on the stream's own block lattice (#208) and does
+not move between hops. Roughly ten consecutive frames therefore carry
+**byte-identical** analysis arrays, and `analysis_seq` is how a consumer
+tells that apart from a stationary DUT.
+
+What does move every frame: `mtw` (the ladder is a push pipeline fed the
+fresh capture buffers), `meas_peak_dbfs` / `ref_peak_dbfs`, `drive`,
+`spl` (the F/S integrator steps every tick over the held broadband
+level), `delay_locked` and `delay_attempts`.
+
+The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
+it was derived from.
+
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB
 conversion happens in the receiver, nowhere else — the single such site
@@ -2258,6 +2282,8 @@ toggled on/off in the UI without re-issuing the transfer command.
   "stride":        <int>,            // downsample factor (ir_full / samples)
   "dt_ms":         <float>,          // ms per output sample (1000/sr * stride)
   "t_origin_ms":   <float>,          // negative — t=0 sits at samples.len()/2
+  "analysis_seq":  <int>,            // same value as the transfer_stream frame
+                                     // this was derived from
   "ref_channel":   <int>,
   "meas_channel":  <int>,
   "delay_samples": <int>,

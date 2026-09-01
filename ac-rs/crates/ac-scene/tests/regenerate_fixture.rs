@@ -229,6 +229,10 @@ fn build_wire_frame() -> serde_json::Value {
         "magnitude_db": d.h1.magnitude_db,
         "phase_deg": d.h1.phase_deg,
         "coherence": d.h1.coherence,
+        // Shape parity with the live frame. A snapshot-derived frame has
+        // no analysis sequence — it is one derivation of one capture, not
+        // a position in a stream — so the field is present and null.
+        "analysis_seq": serde_json::Value::Null,
         "delay_samples": d.h1.delay_samples,
         "delay_ms": d.h1.delay_ms,
         "meas_channel": meas_ch,
