@@ -68,8 +68,7 @@ memory, no redefinition here):
   `AGENTS.md` states for an agent asserting a mechanism, applied here to a
   reviewer inheriting one.
 
-A flagged `derived`/`assumed` criterion withholds `in-review` — apply
-`needs-work` — unless one of:
+A flagged `derived`/`assumed` criterion needs one of:
 - the gap is closed with evidence in the PR (a measurement, a rig run, a
   cited derivation the review comment can point to directly), or
 - a human has already posted an explicit comment on the issue accepting the
@@ -77,9 +76,23 @@ A flagged `derived`/`assumed` criterion withholds `in-review` — apply
   gates: merge is human-only because agent review is not independent, and
   neither is an agent's acceptance of another agent's assumption).
 
-This blocks only the flagged criterion. A `measured` criterion failing spec
-coverage is a correctness issue, reported in that section below, not folded
-into this one.
+Route an unresolved gap by what can close it:
+
+- Evidence the developer can add in the tree or derive from already-known
+  quantities → `request-changes` and `needs-work`. Name the missing artifact or
+  derivation. This is developer work.
+- Evidence only a physical rig can produce, while the implementation correctly
+  enforces the specified value → `approve` and `requires-rig`, as specified in
+  the dedicated section below. Do **not** apply `needs-work`: sending this to a
+  developer cannot produce the measurement and creates a dev→QA loop with no
+  possible source change.
+- The implementation does not enforce the specified value correctly →
+  `request-changes` and `needs-work`, independently of provenance. This is a
+  code defect, not an evidence gap.
+
+In every case, flag the unresolved criterion in the spec-coverage table. A
+`measured` criterion failing spec coverage is a correctness issue, reported in
+that section below, not folded into this one.
 
 ### step 2 — review the diff
 
@@ -267,6 +280,9 @@ Verdict and `requires-rig` are separate axes. A PR can be `approve` +
 measurement remain before it should land. Say that plainly in the
 justification — do not downgrade to `request-changes` to express it, because
 that send the PR back to a developer who cannot take the measurement either.
+This includes an unresolved `derived`/`assumed` acceptance criterion when the
+implementation correctly enforces the specified value and only physical rig
+evidence can validate that value. Step 1 routes that case here explicitly.
 
 Where the measurement is one the rig role would take, say which block of
 `rig/rig-verify-queue.md` it belong to, or that it needs a new one. The
