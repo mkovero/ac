@@ -48,9 +48,12 @@ survived contact with this rig and what didn't:
   `handoff/` and `session/`, so it is one file rather than one per branch
   — a queue that lived in the repo was twice overwritten by a branch
   syncing its docs from main, losing the entries that were the only
-  record of how to close an open QA finding. Nothing versions it: an
-  entry you delete is gone, so mark blocks executed rather than removing
-  them.
+  record of how to close an open QA finding. `$AC_HOME` is its own git
+  repo, so an overwrite is recoverable (`git -C "$AC_HOME" log -p --
+  rig-verify-queue.md`), but only up to the last commit there — commit at
+  the end of a session, not the start of the next one. Mark blocks
+  executed rather than deleting them regardless: the queue is the record
+  of what was asked, not just of what is left.
 
 ## what you must do
 
