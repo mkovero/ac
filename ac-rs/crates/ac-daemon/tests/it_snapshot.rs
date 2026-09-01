@@ -87,7 +87,17 @@ fn start_transfer_and_get_live_frame(c: &Client, min_ring_s: f64) -> Value {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => return v,
+            // `n_averages > 0` skips the settling frames a session
+            // publishes before its ring holds a Welch segment: they carry
+            // empty analysis arrays by design, and every comparison here
+            // is against a snapshot's reprocessed numbers.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
+                return v
+            }
             Some(_) => continue,
             None => break,
         }
@@ -551,7 +561,11 @@ fn full_ib_parity_under_correlated_stimulus() {
                 .saturating_duration_since(Instant::now())
                 .as_millis() as i32;
             match c.recv_pub(remaining.max(1)) {
-                Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+                Some((t, v))
+                    if t == "data"
+                        && v["type"] == json!("transfer_stream")
+                        && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+                {
                     found = Some(v);
                     break;
                 }

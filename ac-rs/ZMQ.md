@@ -2101,13 +2101,14 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "ref_channel":     <int>,
   "sr":              <int>,
   "n_averages":      <int>,              // Welch blocks actually averaged into this
-                                          // frame (#208). Rises 1 -> 4 over the first
-                                          // ~1.5 s while the analysis window fills,
-                                          // then stays 4 for the session. Coherence
-                                          // carries a `1/N` bias, so a coherence
-                                          // figure without N is not interpretable —
-                                          // a settling display and a DUT that changed
-                                          // look alike without it.
+                                          // frame (#208). 0 while the ring does not
+                                          // yet hold one whole segment — a SETTLING
+                                          // frame, see below — then rises 1 -> 4 over
+                                          // the first ~1.5 s and stays 4 for the
+                                          // session. Coherence carries a `1/N` bias,
+                                          // so a coherence figure without N is not
+                                          // interpretable — a settling display and a
+                                          // DUT that changed look alike without it.
   "mic_correction":  "on" | "off" | "none",
 
   // Additive (handoff: transfer-frame-v2 M0) — per-channel calibrated
@@ -2169,6 +2170,30 @@ to something inaudible is a real measurement with a bad SNR, which is neither
 output ports opened). `drivable: true, on: false` is a session that could
 drive and is not — the difference matters to a consumer deciding whether
 silence on the inputs is expected.
+
+**Settling frames.** A session publishes a frame every capture tick from
+the first one, roughly 20/s per pair. For about the first second — until
+a capture ring holds one whole Welch segment — there is no H₁ to report,
+and those frames say so: `n_averages` is **0** and `freqs`,
+`magnitude_db`, `phase_deg`, `coherence`, `spec_freqs`, `meas_spectrum`
+and `ref_spectrum` are all **empty arrays**, with `spl` and `mtw` `null`.
+Every other field is real: `drive`, `meas_peak_dbfs` / `ref_peak_dbfs`,
+`cal_tags`, `delay_attempts` (0 — the estimator has not been asked yet),
+`sr`, and the channel numbers. The key set is identical to an analysing
+frame's; only the contents differ.
+
+Read `n_averages > 0` to select frames that carry an estimate. Do not
+read an empty `magnitude_db` as a fault: it means "not yet", which is
+exactly the distinction `n_averages` exists to make. `delay_attempts: 0`
+alongside it means the estimator has not run, not that it refused —
+`delay_attempts >= 1` with `delay_locked: false` is a refusal (#227/#238).
+
+This is why publication no longer waits: the drive state, the capture
+peaks and the attempt count never depended on the analysis window, and
+withholding them meant that for the first second of a session a client
+could not distinguish a daemon that had not started from one whose drive
+had already dead-manned. The delay estimate keeps its own gate at one
+segment, because a cross-correlation needs one.
 
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB

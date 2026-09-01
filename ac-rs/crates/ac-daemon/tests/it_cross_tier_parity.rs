@@ -378,7 +378,15 @@ fn parity_transfer_meas_spectrum_matches_monitor_spectrum_level() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -506,7 +514,15 @@ fn parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -629,7 +645,15 @@ fn parity_transfer_spl_matches_monitor_derived_spl_on_first_frame() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -799,6 +823,9 @@ fn cal_tags_mic_curve_matches_monitor_mic_correction_tag() {
     );
 }
 
+/// The first frame carrying an actual H1 estimate. Settling frames
+/// (`n_averages == 0`, empty analysis arrays) are skipped: every caller
+/// here asserts on numbers those frames do not have.
 fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -806,7 +833,13 @@ fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => return Some(v),
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
+                return Some(v)
+            }
             Some(_) => continue,
             None => return None,
         }

@@ -92,12 +92,16 @@ fn live_frame_readout_matches_ac_scene_output_for_the_same_frame() {
         let mut found = None;
         while std::time::Instant::now() < deadline {
             // Skip the interleaved `visualize/ir` sidecar (#286) — this
-            // check wants a `transfer_stream` frame specifically.
+            // check wants a `transfer_stream` frame specifically — and the
+            // settling frames a session publishes before its ring holds a
+            // Welch segment, which carry no spectrum and so no `spl`.
             if let Some(PolledFrame::Transfer(f)) =
                 sniff_session.poll_frame(Duration::from_millis(200))
             {
-                found = Some(f);
-                break;
+                if f["n_averages"].as_u64().unwrap_or(0) > 0 {
+                    found = Some(f);
+                    break;
+                }
             }
         }
         found.expect("no transfer_stream frame within 10s")

@@ -549,6 +549,101 @@ struct TickInputs<'a> {
     n_blocks: usize,
 }
 
+/// Per-channel provenance tags (tier-framing labelled-tag rules, #97/#98
+/// vocabulary): `"on"`/`"none"` for voltage and SPL — neither has a
+/// daemon-side enable toggle, unlike mic-curve — and `"on"`/`"off"`/
+/// `"none"` for `mic_curve` via `mic_correction_tag`.
+///
+/// The reference leg's `mic_curve` is structurally almost always
+/// `"none"`: a ref-channel mic curve is refused at request time.
+///
+/// Shared by the settling frame and the analysis frame so the two cannot
+/// disagree about a session constant.
+fn cal_tags_value(
+    meas_cal: Option<&Calibration>,
+    ref_cal: Option<&Calibration>,
+    meas_mic_tag: &str,
+    mc_enabled: bool,
+) -> Value {
+    let ref_curve_loaded = ref_cal.is_some_and(|c| c.mic_response.is_some());
+    json!({
+        "meas": {
+            "voltage": if meas_cal.and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+            "spl":     if meas_cal.and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+            "mic_curve": meas_mic_tag,
+        },
+        "ref": {
+            "voltage": if ref_cal.and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
+            "spl":     if ref_cal.and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
+            "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
+        },
+    })
+}
+
+/// The frame a pair publishes before its ring holds a whole Welch segment.
+///
+/// Same key set as the analysis frame, with every H1-derived field empty
+/// or null and `n_averages: 0` saying so. What it does carry is everything
+/// that never depended on the analysis window: the observed drive state,
+/// the raw capture peaks, the attempt count, and the calibration tags.
+///
+/// The alternative — the loop `continue`ing until the window fills —
+/// suppressed those too, so for the first second of a session a client
+/// could not tell a daemon that had not started from one whose drive had
+/// already dead-manned, and `ac-scene::fault` had no frame to read. The
+/// analysis window and time-to-first-frame are different quantities and
+/// this is what stops one setting the other.
+///
+/// `spec_freqs` is empty here rather than carrying the session's fixed
+/// grid, so the three spectrum arrays agree in length on this frame as
+/// they do on every other.
+#[allow(clippy::too_many_arguments)]
+fn settling_frame(
+    ctx: &PairCtx,
+    st: &PairState,
+    statics: &FrameStatics,
+    meas_peak: Value,
+    ref_peak: Value,
+    mc_tag: &str,
+    mc_enabled: bool,
+    drive_msg: &Value,
+) -> Value {
+    json!({
+        "type":            "transfer_stream",
+        "cmd":             "transfer_stream",
+        "mtw":             Value::Null,
+        "freqs":           Vec::<f64>::new(),
+        "magnitude_db":    Vec::<f64>::new(),
+        "phase_deg":       Vec::<f64>::new(),
+        "coherence":       Vec::<f64>::new(),
+        "delay_samples":   0,
+        "delay_ms":        0.0,
+        "delay_locked":    false,
+        "delay_attempts":  st.attempts,
+        "delay_evidence":  st.prominence,
+        "meas_peak_dbfs":  meas_peak,
+        "ref_peak_dbfs":   ref_peak,
+        "ref_channel":     ctx.ref_ch,
+        "meas_channel":    ctx.meas_ch,
+        "sr":              statics.sr,
+        // Zero blocks: this frame carries no Welch estimate at all, which
+        // is a different statement from the `1` a first-segment frame
+        // makes. A consumer reading coherence's `1/N` bias needs the
+        // difference, and so does anyone deciding whether an empty
+        // magnitude array is a fault or a start.
+        "n_averages":      0,
+        "mic_correction":  mc_tag,
+        "spec_freqs":      Vec::<f64>::new(),
+        "meas_spectrum":   Vec::<f64>::new(),
+        "ref_spectrum":    Vec::<f64>::new(),
+        "spl":             Value::Null,
+        "spl_weighting":   statics.weighting.tag(),
+        "spl_integration": statics.integration_tag.as_str(),
+        "cal_tags":        cal_tags_value(ctx.meas_cal.as_ref(), ctx.ref_cal.as_ref(), mc_tag, mc_enabled),
+        "drive":           drive_msg.clone(),
+    })
+}
+
 /// Build one pair's wire messages for this tick: the `transfer_stream`
 /// frame, plus a Phase 4b `visualize/ir` sidecar computed from the same
 /// H1 result. Returns the pair's launch position alongside them, and the
@@ -618,6 +713,19 @@ fn build_pair_messages(
         .flatten()
         .map(Value::from)
         .unwrap_or(Value::Null);
+    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
+    if n_blocks == 0 {
+        // The ring does not hold a whole Welch segment yet, so there is
+        // no H1 to report. Publish anyway — see `settling_frame`.
+        return Some((
+            pos,
+            vec![settling_frame(
+                ctx, st, statics, meas_peak, ref_peak, mc_tag, mc_enabled, drive_msg,
+            )],
+            None,
+        ));
+    }
+
     // An unlocked pair (still warming up, or refused by the
     // prominence gate — #227) is measured unaligned rather
     // than aligned to a guess. `delay_locked` below is what
@@ -662,7 +770,6 @@ fn build_pair_messages(
             mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
         }
     }
-    let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
 
     // Calibrated per-channel spectra (D18, handoff:
     // transfer-frame-v2 M0). Full-resolution
@@ -730,29 +837,12 @@ fn build_pair_messages(
         spec_n_columns,
     );
 
-    // Per-channel provenance tags (tier-framing
-    // labelled-tag rules, #97/#98 vocabulary):
-    // "on"/"none" for voltage and SPL (no daemon-side
-    // enable toggle for either, unlike mic-curve);
-    // "on"/"off"/"none" for mic_curve via the existing
-    // `mic_correction_tag`. Ref leg's mic_curve is
-    // structurally always "none" — a ref-channel mic
-    // curve is refused at request time, above.
-    let ref_curve_loaded = ref_cal_opt
-        .as_ref()
-        .is_some_and(|c| c.mic_response.is_some());
-    let cal_tags = json!({
-        "meas": {
-            "voltage": if meas_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
-            "spl":     if meas_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
-            "mic_curve": mc_tag,
-        },
-        "ref": {
-            "voltage": if ref_cal_opt.as_ref().and_then(|c| c.vrms_at_0dbfs_in).is_some() { "on" } else { "none" },
-            "spl":     if ref_cal_opt.as_ref().and_then(Calibration::spl_offset_db).is_some() { "on" } else { "none" },
-            "mic_curve": mic::mic_correction_tag(ref_curve_loaded, mc_enabled),
-        },
-    });
+    let cal_tags = cal_tags_value(
+        meas_cal_opt.as_ref(),
+        ref_cal_opt.as_ref(),
+        mc_tag,
+        mc_enabled,
+    );
 
     // Multi-time-window columns (additive; `null` until
     // every rung holds a full N blocks — 2.56 s at the
@@ -1113,13 +1203,21 @@ impl SessionState {
     /// rings — the same `while pos + nperseg <= len` walk it does,
     /// evaluated here so the frame can state it. Rises 1 → `n_averages`
     /// while the window fills, then is pinned there by the drain.
+    /// Zero means no ring holds a whole segment yet, which is a state the
+    /// frame reports rather than a state that suppresses it — see
+    /// [`settling_frame`]. Saturating rather than wrapping: this is the
+    /// arithmetic that used to underflow the instant anything ran before
+    /// the warmup gate.
     fn n_blocks(&self) -> usize {
         let Window { nperseg, step, .. } = self.window;
         self.rings
             .iter()
-            .map(|r| (r.len() - nperseg) / step + 1)
+            .map(|r| match r.len().checked_sub(nperseg) {
+                Some(extra) => extra / step + 1,
+                None => 0,
+            })
             .min()
-            .unwrap_or(1)
+            .unwrap_or(0)
     }
 
     /// Estimate any pair's missing delay, rate-limited. Runs at most once
@@ -1279,31 +1377,30 @@ impl SessionState {
 
         self.push_rings(bufs);
 
-        // Warm-up: one Welch segment, so the first H1 has meaningful
-        // coherence.
+        // Analysis readiness, which is NOT the same question as whether to
+        // publish. `n_blocks == 0` means no ring holds a whole Welch
+        // segment, so there is no H1 and no delay estimate to be had; the
+        // frame says so and ships regardless.
         //
-        // Deliberately NOT the full `target_total`. Waiting for the whole
-        // 2.5 s window would make N constant from the first frame, which
-        // reads like the tidier contract, but it pushes time-to-first-
-        // frame from 1.0 s to 2.5 s — past the 1.5 s drive dead-man. A
-        // client that sets the drive and waits for a lock without sending
-        // keepalives then has the drive expire *before* the first delay
-        // attempt runs, so the lock is taken against silence, gets
-        // `driving: false` provenance, and is discarded on the next drive
-        // edge. `it_relock`'s two survives-a-resume tests are exactly that
-        // sequence and both go red on the longer gate.
+        // The two gates were one `continue` until now, and that made the
+        // analysis window set time-to-first-frame. It is why the window
+        // cannot simply be widened: waiting for the full `target_total`
+        // pushes the first frame from 1.0 s to 2.5 s, past the 1.5 s drive
+        // dead-man, so a client that sets the drive and waits for a lock
+        // without sending keepalives has the drive expire *before* the
+        // first delay attempt, takes its lock against silence, and loses
+        // it on the next drive edge. `it_relock`'s two survives-a-resume
+        // tests are that sequence.
         //
-        // So the warmup stays at one segment and the frame carries the
-        // block count it was actually built from. The #208-adjacent defect
-        // here was never that N varies while the window fills — it is that
-        // N varied *silently*, leaving coherence's `1/N` bias
-        // uninterpretable. Reporting it fixes that without moving the gate.
-        if self.rings.iter().any(|r| r.len() < self.window.nperseg) {
-            return Vec::new();
-        }
-
+        // Separating them does not by itself widen anything — `n_averages`
+        // still rises 1 → 4 and the frame still states it (#419) — but the
+        // dead-man now bounds only the delay estimate's own gate, which is
+        // one segment because a cross-correlation needs one, not because
+        // the Welch average does.
         let n_blocks = self.n_blocks();
-        self.acquire_missing_locks(ev, now);
+        if n_blocks > 0 {
+            self.acquire_missing_locks(ev, now);
+        }
         let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
 
         // Pairs are independent H1 estimates — fan out across the rayon
@@ -2878,36 +2975,93 @@ mod session_tests {
         out
     }
 
-    /// The warmup gate, stated as behaviour rather than as an expression:
-    /// nothing is published until a ring holds one whole Welch segment.
+    /// Publication does not wait on the analysis window. Every tick from
+    /// the first produces a frame; the ones before a ring holds a whole
+    /// Welch segment say `n_averages: 0` and carry empty analysis arrays,
+    /// and everything that never depended on the window — the observed
+    /// drive state, the capture peaks — is there from the start.
     ///
-    /// This is the gate that also suppresses the drive state and the
-    /// capture peaks, neither of which depends on the analysis window —
-    /// which is why it is worth having a test that says where the line
-    /// currently sits.
+    /// Before this split the loop `continue`d, so for the first second a
+    /// client could not tell a daemon that had not started from one whose
+    /// drive had already dead-manned.
     #[test]
-    fn nothing_is_published_until_the_ring_holds_one_welch_segment() {
+    fn a_frame_ships_from_the_first_tick_and_states_that_it_carries_no_analysis() {
         let mut s = session();
         let t0 = std::time::Instant::now();
         // One segment is `sr` samples = 20 ticks. The 20th completes it.
-        let before = run_correlated(&mut s, 19, 480, events(false), t0);
-        assert!(
-            before.is_empty(),
-            "published {} frame(s) before one segment was in the ring",
-            before.len()
-        );
-        let after = run_correlated(&mut s, 1, 480, events(false), t0);
+        let settling = run_correlated(&mut s, 19, 480, events(true), t0);
         assert_eq!(
-            after.len(),
-            1,
-            "no frame on the tick that completed the segment"
+            settling.len(),
+            19,
+            "a tick before the segment published nothing"
+        );
+        for f in &settling {
+            assert_eq!(
+                f["n_averages"],
+                json!(0),
+                "settling frame claimed a Welch block"
+            );
+            for key in [
+                "freqs",
+                "magnitude_db",
+                "phase_deg",
+                "coherence",
+                "meas_spectrum",
+            ] {
+                assert_eq!(
+                    f[key].as_array().map(Vec::len),
+                    Some(0),
+                    "{key} was not empty on a settling frame"
+                );
+            }
+            assert_eq!(f["delay_locked"], json!(false));
+            assert_eq!(
+                f["drive"]["on"],
+                json!(true),
+                "drive state withheld while settling"
+            );
+        }
+        // Peaks are measured from the tick's own blocks, so they are real
+        // numbers on the very first frame — the thing the old gate hid.
+        assert!(
+            settling[0]["meas_peak_dbfs"].as_f64().is_some(),
+            "capture peaks withheld while settling"
+        );
+
+        let analysing = run_correlated(&mut s, 1, 480, events(true), t0);
+        let f = analysing
+            .last()
+            .expect("no frame on the tick that completed the segment");
+        assert_eq!(f["n_averages"], json!(1));
+        assert!(!f["freqs"].as_array().unwrap().is_empty());
+    }
+
+    /// A settling frame and an analysis frame must be the same shape. They
+    /// are built by two different functions, so nothing but this stops one
+    /// gaining a field the other lacks — and a consumer meeting the
+    /// difference reads it as a daemon that dropped a field mid-session.
+    #[test]
+    fn the_settling_frame_has_the_same_keys_as_an_analysis_frame() {
+        fn keys(v: &Value) -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        }
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        let settling = run_correlated(&mut s, 1, 480, events(false), t0);
+        let analysing = run_correlated(&mut s, 20, 480, events(false), t0);
+        assert_eq!(
+            keys(&settling[0]),
+            keys(analysing.last().unwrap()),
+            "settling and analysis frames disagree about the frame's shape"
         );
     }
 
     /// `n_averages` is the frame's statement about its own coherence bias.
-    /// It must rise while the window fills and then stop, because
-    /// `drain_to_block_lattice` pins the ring inside one `step` of the
-    /// target (#208).
+    /// It rises from 0 (no segment yet) through the window filling and then
+    /// stops, because `drain_to_block_lattice` pins the ring inside one
+    /// `step` of the target (#208).
     #[test]
     fn n_averages_climbs_to_the_window_depth_and_then_holds() {
         let mut s = session();
@@ -2917,10 +3071,11 @@ mod session_tests {
             .iter()
             .map(|f| f["n_averages"].as_u64().unwrap())
             .collect();
+        assert_eq!(seen.first(), Some(&0), "first frame claimed a Welch block");
         assert_eq!(
-            seen.first(),
+            seen.iter().find(|&&n| n > 0),
             Some(&1),
-            "first frame did not report one block"
+            "the first analysis frame did not report exactly one block"
         );
         assert_eq!(
             seen.last(),

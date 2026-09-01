@@ -5,6 +5,18 @@ use std::time::Instant;
 
 use crate::common::{Client, Daemon};
 
+/// True for a frame that carries an actual H1 estimate.
+///
+/// A session publishes from its first tick, before its ring holds a whole
+/// Welch segment. Those settling frames report `n_averages: 0` and carry
+/// empty analysis arrays by design, so a test asserting anything about the
+/// numbers in a frame has to say which frames it means. Frame *shape* is
+/// identical either way and is checked in the daemon's own
+/// `session_tests`.
+fn has_analysis(v: &Value) -> bool {
+    v["type"].as_str() == Some("transfer_stream") && v["n_averages"].as_u64().unwrap_or(0) > 0
+}
+
 #[test]
 fn transfer_stream_missing_reference_errors() {
     // Neither `ref_channel` nor a `pairs` array — the handler's pair
@@ -47,7 +59,7 @@ fn transfer_stream_emits_data_and_done() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+            Some((t, v)) if t == "data" && has_analysis(&v) => {
                 for key in [
                     "freqs",
                     "magnitude_db",
@@ -212,7 +224,7 @@ fn transfer_stream_frame_v2_fields_present_and_spec_freqs_stable() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+            Some((t, v)) if t == "data" && has_analysis(&v) => {
                 frames.push(v);
             }
             Some(_) => continue,
@@ -305,9 +317,11 @@ fn transfer_stream_reports_delay_attempts_from_the_first_frame() {
     }));
     assert_eq!(r["ok"], json!(true), "REP: {r:?}");
 
+    // Every frame, settling and analysing alike — the point is that the
+    // two report different counts and that neither fabricates one.
     let mut frames: Vec<Value> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while frames.len() < 2 && Instant::now() < deadline {
+    while frames.iter().filter(|f| has_analysis(f)).count() < 2 && Instant::now() < deadline {
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
@@ -321,8 +335,9 @@ fn transfer_stream_reports_delay_attempts_from_the_first_frame() {
     }
     let _ = c.call(json!({"cmd": "stop"}));
     assert!(
-        frames.len() >= 2,
-        "need >=2 transfer_stream frames, got {}",
+        frames.iter().filter(|f| has_analysis(f)).count() >= 2,
+        "need >=2 analysing transfer_stream frames, got {} of {} total",
+        frames.iter().filter(|f| has_analysis(f)).count(),
         frames.len()
     );
 
@@ -330,10 +345,22 @@ fn transfer_stream_reports_delay_attempts_from_the_first_frame() {
         let attempts = f["delay_attempts"]
             .as_u64()
             .unwrap_or_else(|| panic!("delay_attempts missing or not an integer: {f}"));
-        assert!(
-            attempts >= 1,
-            "a frame was published before the estimator answered: {f}"
-        );
+        if has_analysis(f) {
+            assert!(
+                attempts >= 1,
+                "a frame carrying an H1 estimate was published before the \
+                 estimator answered: {f}"
+            );
+        } else {
+            // The counter's whole point (#238): it counts from the first
+            // moment a lock was possible, not from session start. A
+            // settling frame has not had an attempt and must say 0 rather
+            // than round up to the answer the next frame will give.
+            assert_eq!(
+                attempts, 0,
+                "a settling frame claimed an attempt the estimator had not made: {f}"
+            );
+        }
         // The count says the estimator ran; `delay_locked` says what it
         // decided. Neither is inferred from the other.
         assert!(
@@ -376,7 +403,7 @@ fn transfer_stream_meas_spectrum_amplitude_truth() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+            Some((t, v)) if t == "data" && has_analysis(&v) => {
                 frame = Some(v);
                 break;
             }
@@ -572,7 +599,7 @@ fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"].as_str() == Some("transfer_stream") => {
+            Some((t, v)) if t == "data" && has_analysis(&v) => {
                 frame = Some(v);
                 break;
             }
