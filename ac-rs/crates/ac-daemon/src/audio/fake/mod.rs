@@ -38,7 +38,10 @@ mod stimulus;
 use anyhow::Result;
 use std::time::Duration;
 
-use self::hooks::{next_loopback_delay_samples, period_size_override};
+use self::hooks::{
+    next_loopback_delay_samples, period_size_override, tau_gain_override,
+    tau_noise_amplitude_override,
+};
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
 use super::AudioEngine;
@@ -247,13 +250,28 @@ impl AudioEngine for FakeEngine {
     /// peaks at the expected offset.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         let delay_samples = next_loopback_delay_samples();
+        let gain = tau_gain_override();
+        let noise_amp = tau_noise_amplitude_override();
         let tail = (tail_s * self.sample_rate as f64).round() as usize;
         let total = samples.len() + tail;
         let mut out = vec![0.0f32; total];
+        if noise_amp > 0.0 {
+            // Deterministic LCG (same constants as `Stimulus::Noise`),
+            // seeded from the delay so distinct fake sessions get distinct
+            // dither rather than sharing one repeated sequence.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (delay_samples as u64);
+            for v in out.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                *v = (noise_amp as f64 * u) as f32;
+            }
+        }
         for (i, &s) in samples.iter().enumerate() {
             let j = i + delay_samples;
             if j < total {
-                out[j] = s;
+                out[j] += s * gain;
             }
         }
         Ok(out)

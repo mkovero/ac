@@ -57,3 +57,39 @@ pub(super) fn period_size_override() -> Option<u32> {
             .and_then(|s| s.parse().ok())
     })
 }
+
+/// Opt-in, fake-only test hooks (#368): let an external integration test
+/// simulate a low/no-SNR capture — the muted-route rig case #368's AC3
+/// needs reachable under `--fake-audio`, which by default always returns a
+/// clean, noiseless delayed copy of the played signal (the loopback shape
+/// every other τ test relies on).
+///
+/// `AC_FAKE_TAU_GAIN_OVERRIDE`: scales the played-signal copy that would
+/// otherwise land unattenuated at `delay_samples`. `1.0` (unset) keeps the
+/// existing unity loopback; `0.0` simulates a fully muted route.
+/// `AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE`: peak amplitude of broadband
+/// dither added to every sample of `play_and_capture`'s output. `0.0`
+/// (unset) is byte-identical to pre-#368 behaviour — with the gain also at
+/// its default, `out[j] = 0.0 + s * 1.0 == s`. Combined with a `0.0` gain,
+/// the deconvolved IR then contains only the dither at every position, so
+/// the peak the daemon finds is indistinguishable from its own noise
+/// floor, matching a real muted route's low pre-impulse SNR.
+pub(super) fn tau_gain_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_GAIN_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0)
+    })
+}
+
+pub(super) fn tau_noise_amplitude_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0)
+    })
+}

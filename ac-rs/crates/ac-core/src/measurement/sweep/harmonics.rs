@@ -211,6 +211,44 @@ pub fn extract_irs(
     })
 }
 
+/// Number of samples [`pre_impulse_snr_db`] measures its noise floor over:
+/// everything strictly before `peak_index`, minus the guard band. Zero when
+/// the guard band consumes the whole pre-peak window, which is the case
+/// `pre_impulse_snr_db` answers with `f64::INFINITY` — a caller that must
+/// distinguish "infinite because the floor is silent" from "infinite
+/// because there was no floor to measure" (`report::ir_stats`, #376)
+/// checks this rather than keeping its own copy of the guard arithmetic.
+pub fn pre_impulse_region_len(ir_len: usize, peak_index: usize) -> usize {
+    let guard = (ir_len / 32).max(8);
+    peak_index.saturating_sub(guard).min(ir_len)
+}
+
+/// Pre-impulse SNR of a linear impulse response, in dB: the located peak's
+/// magnitude over the RMS of everything strictly before it, minus a small
+/// guard band (`(ir.len() / 32).max(8)` samples) so the peak's own skirt
+/// doesn't bias the floor estimate upward. `f64::INFINITY` when the
+/// pre-peak region is empty or measures true silence (zero RMS).
+///
+/// Lifted out of `report::ir_stats` (#368) so `ac-daemon`'s τ gate can call
+/// the same formula on the same quantity — "does the deconvolution find a
+/// peak with adequate SNR" — rather than keeping two copies of one
+/// calculation that could drift apart. `peak_index` is the caller's own
+/// argmax over `ir`; this does not recompute it.
+pub fn pre_impulse_snr_db(ir: &[f64], peak_index: usize) -> f64 {
+    let pre_region = &ir[..pre_impulse_region_len(ir.len(), peak_index)];
+    if pre_region.is_empty() {
+        return f64::INFINITY;
+    }
+    let peak_magnitude = ir.get(peak_index).map(|v| v.abs()).unwrap_or(0.0);
+    let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
+    let rms = mean_sq.sqrt();
+    if rms > 0.0 {
+        20.0 * (peak_magnitude / rms).log10()
+    } else {
+        f64::INFINITY
+    }
+}
+
 /// Copy `len` samples of `buf` starting at signed index `start`, padding
 /// with zeros wherever the request falls outside the buffer, and scale
 /// sample `i` by `weight(i)`.

@@ -279,7 +279,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         }
 
         // Fallback conditions for the `cal_done` wire frame when τ isn't
-        // measured this run (no-loopback, or a lifecycle error before any
+        // measured this run (low SNR, or a lifecycle error before any
         // conditions were captured) — ZMQ.md requires `tau_sample_rate` /
         // `tau_period_size` present regardless of `tau_state`.
         let fallback_sample_rate = eng.sample_rate();
@@ -288,20 +288,21 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         eng.set_silence();
         eng.stop();
 
-        // τ (interface latency, #281/#347) — not prompt-driven, so it
-        // piggybacks on the loopback state established above rather than
-        // adding a third interactive step. Measured whenever a loopback was
-        // detected this run, regardless of whether either voltage prompt
-        // was answered or skipped — the cheap-refresh path (#279: both
-        // prompts skipped) still refreshes τ. #347: a single reading is not
+        // τ (interface latency, #281/#347) — not prompt-driven, so it does
+        // not add a third interactive step. Always attempted regardless of
+        // the loopback state step 2 established (#368: τ used to be gated
+        // on that captured-level proxy; it is now gated on its own
+        // deconvolved peak's SNR instead, inside `measure_tau` itself) and
+        // regardless of whether either voltage prompt was answered or
+        // skipped — the cheap-refresh path (#279: both prompts skipped)
+        // still refreshes τ. #347: a single reading is not
         // a measurement of τ on this stack, so this now runs two
         // independent client lifecycles (`measure_tau_twice`), decoupled
         // from the voltage-cal `eng` above (already stopped) — see that
         // function's doc for why the lifecycle boundary matters.
         let ref_amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
-        let tau_outcome = tau_result(is_loopback, || {
-            measure_tau_twice(fake, cfg.device, &out_port, &in_port, ref_amp)
-        });
+        let tau_outcome =
+            tau_result(|| measure_tau_twice(fake, cfg.device, &out_port, &in_port, ref_amp));
 
         // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
         let out_scale = 1.0 / ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);

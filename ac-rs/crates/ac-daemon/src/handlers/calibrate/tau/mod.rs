@@ -15,7 +15,7 @@ use ac_core::shared::calibration::{compare_tau_readings, TauComparison, TauCondi
 
 use crate::audio::make_engine;
 
-use measure::measure_tau;
+use measure::{measure_tau, tau_snr_threshold_db, LowSnrRefusal};
 
 /// Method tag stored on every [`TauEntry`] this handler produces. Bumped
 /// to `_v2` by #340: the window-sizing change below means a τ captured
@@ -26,15 +26,31 @@ use measure::measure_tau;
 /// method tag is the only thing that can invalidate it.
 pub(super) const TAU_METHOD: &str = "farina_short_ess_v2";
 
-/// Outcome of one independent τ lifecycle attempt (#347): either both
-/// readings were taken and compared, or a lifecycle itself failed (engine
-/// start / measurement error) before a comparison was possible.
+/// Outcome of one independent τ lifecycle attempt (#347): both readings
+/// were taken and compared, one lifecycle's peak was below the SNR
+/// threshold (#368), or a lifecycle itself failed (engine start /
+/// measurement error) before either could happen.
 pub(super) enum TauAttempt {
     Compared {
         conditions: TauConditions,
         reading1_s: f64,
         reading2_s: f64,
         comparison: TauComparison,
+        /// The worse (lower) of the two lifecycles' pre-impulse SNR. Both
+        /// necessarily cleared the τ SNR threshold — a lifecycle that
+        /// didn't would have produced [`TauAttempt::LowSnr`] instead — so
+        /// this is a diagnostic figure alongside the comparison, not a
+        /// second gate.
+        pre_impulse_snr_db: f64,
+    },
+    /// A lifecycle's peak sits below the SNR threshold (#368). Short-
+    /// circuits the same way [`TauAttempt::Error`] does: the second
+    /// lifecycle does not run once the first has already refused, and
+    /// `conditions` is `Some` only when the refusal happened on the second
+    /// lifecycle (mirroring `Error`'s own short-circuit shape below).
+    LowSnr {
+        conditions: Option<TauConditions>,
+        pre_impulse_snr_db: f64,
     },
     Error {
         conditions: Option<TauConditions>,
@@ -57,7 +73,7 @@ pub(super) fn measure_tau_twice(
     in_port: &str,
     amp: f64,
 ) -> TauAttempt {
-    let run_once = || -> anyhow::Result<(f64, TauConditions)> {
+    let run_once = || -> anyhow::Result<((f64, f64), TauConditions)> {
         let mut eng = make_engine(fake);
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
@@ -71,24 +87,39 @@ pub(super) fn measure_tau_twice(
         let reading = measure_tau(&mut *eng, amp);
         eng.set_silence();
         eng.stop();
-        reading.map(|t| (t, conditions))
+        reading.map(|r| (r, conditions))
     };
 
-    let (reading1_s, conditions) = match run_once() {
+    // #368: a low-SNR refusal is recovered from the error by type, not by
+    // matching the message — it is a distinct `tau_state`, and a reworded
+    // message must not silently collapse it back into `error`.
+    let ((reading1_s, snr1_db), conditions) = match run_once() {
         Ok(r) => r,
         Err(e) => {
-            return TauAttempt::Error {
-                conditions: None,
-                message: format!("\u{3c4} measurement failed (reading 1 of 2): {e}"),
+            return match e.downcast_ref::<LowSnrRefusal>() {
+                Some(refusal) => TauAttempt::LowSnr {
+                    conditions: None,
+                    pre_impulse_snr_db: refusal.snr_db,
+                },
+                None => TauAttempt::Error {
+                    conditions: None,
+                    message: format!("\u{3c4} measurement failed (reading 1 of 2): {e}"),
+                },
             }
         }
     };
-    let (reading2_s, conditions2) = match run_once() {
+    let ((reading2_s, snr2_db), conditions2) = match run_once() {
         Ok(r) => r,
         Err(e) => {
-            return TauAttempt::Error {
-                conditions: Some(conditions),
-                message: format!("\u{3c4} measurement failed (reading 2 of 2): {e}"),
+            return match e.downcast_ref::<LowSnrRefusal>() {
+                Some(refusal) => TauAttempt::LowSnr {
+                    conditions: Some(conditions),
+                    pre_impulse_snr_db: refusal.snr_db,
+                },
+                None => TauAttempt::Error {
+                    conditions: Some(conditions),
+                    message: format!("\u{3c4} measurement failed (reading 2 of 2): {e}"),
+                },
             }
         }
     };
@@ -103,6 +134,7 @@ pub(super) fn measure_tau_twice(
         reading1_s,
         reading2_s,
         comparison,
+        pre_impulse_snr_db: snr1_db.min(snr2_db),
     }
 }
 
@@ -119,8 +151,17 @@ pub(super) fn measure_tau_twice(
 /// `Option` fields and three `.expect("… when tau_state is measured")`
 /// at the one call site that stored an entry.
 pub(super) enum TauOutcome {
-    /// No loopback detected this run, so no sweep was played at all.
-    NotMeasuredNoLoopback,
+    /// #368: a lifecycle's deconvolved peak sat below the τ SNR threshold,
+    /// so the sweep ran but found nothing distinguishable from noise. This
+    /// replaces the old `NotMeasuredNoLoopback`, which reported on a
+    /// *captured level* measured before the sweep — see [`tau_result`].
+    /// `conditions` is `None` when the refusal came from the first
+    /// lifecycle, which short-circuits before any were captured.
+    NotMeasuredLowSnr {
+        conditions: Option<TauConditions>,
+        pre_impulse_snr_db: f64,
+        snr_threshold_db: f64,
+    },
     /// Two independent lifecycles agreed to the whole sample.
     Measured {
         conditions: TauConditions,
@@ -130,6 +171,12 @@ pub(super) enum TauOutcome {
         agreement_count: u32,
         reading1_s: f64,
         reading2_s: f64,
+        /// #368: the worse of the two lifecycles' pre-impulse SNR, and the
+        /// threshold it cleared. Reported on every state that reached a
+        /// deconvolution, not only on the refusal, so an operator can see
+        /// how much margin a *passing* run actually had.
+        pre_impulse_snr_db: f64,
+        snr_threshold_db: f64,
     },
     /// Both lifecycles ran and their readings disagreed. Nothing is
     /// stored; `periods` separates #347's own root cause (a
@@ -138,6 +185,10 @@ pub(super) enum TauOutcome {
         conditions: TauConditions,
         reading1_s: f64,
         reading2_s: f64,
+        /// #368: as on [`TauOutcome::Measured`] — both lifecycles cleared
+        /// the threshold, they just did not agree with each other.
+        pre_impulse_snr_db: f64,
+        snr_threshold_db: f64,
         delta_samples: i64,
         periods: Option<i64>,
         message: String,
@@ -155,7 +206,7 @@ impl TauOutcome {
     /// The `tau_state` wire value. See ZMQ.md's `cal_done` table.
     pub(super) fn state(&self) -> &'static str {
         match self {
-            Self::NotMeasuredNoLoopback => "not_measured_no_loopback",
+            Self::NotMeasuredLowSnr { .. } => "not_measured_low_snr",
             Self::Measured { .. } => "measured",
             Self::Disagree { periods, .. } => {
                 if periods.is_some() {
@@ -174,11 +225,12 @@ impl TauOutcome {
     /// `tau_sample_rate` / `tau_period_size` on every `cal_done`.
     pub(super) fn conditions(&self) -> Option<&TauConditions> {
         match self {
-            Self::NotMeasuredNoLoopback => None,
             Self::Measured { conditions, .. } | Self::Disagree { conditions, .. } => {
                 Some(conditions)
             }
-            Self::Error { conditions, .. } => conditions.as_ref(),
+            Self::NotMeasuredLowSnr { conditions, .. } | Self::Error { conditions, .. } => {
+                conditions.as_ref()
+            }
         }
     }
 
@@ -221,8 +273,31 @@ impl TauOutcome {
             } => json!(agreement_count),
             _ => json!(0),
         };
+        // #368: present on every state that reached a deconvolution at
+        // least once — `measured`, `not_measured_low_snr`, `disagree_*` —
+        // and absent on `error`, which can fail before a peak was ever
+        // located.
+        if let Self::Measured {
+            pre_impulse_snr_db,
+            snr_threshold_db,
+            ..
+        }
+        | Self::NotMeasuredLowSnr {
+            pre_impulse_snr_db,
+            snr_threshold_db,
+            ..
+        }
+        | Self::Disagree {
+            pre_impulse_snr_db,
+            snr_threshold_db,
+            ..
+        } = self
+        {
+            frame["tau_pre_impulse_snr_db"] = json!(pre_impulse_snr_db);
+            frame["tau_snr_threshold_db"] = json!(snr_threshold_db);
+        }
         match self {
-            Self::NotMeasuredNoLoopback => {}
+            Self::NotMeasuredLowSnr { .. } => {}
             Self::Measured {
                 reading1_s,
                 reading2_s,
@@ -254,16 +329,18 @@ impl TauOutcome {
     }
 }
 
-/// Turn the loopback flag established at step 2 into the [`TauOutcome`]
-/// `calibrate` reports — the exact decision #281 QA flagged as untestable
-/// because it was inlined in the worker closure, reachable only through a
-/// full daemon spawn. `attempt` is only called when `is_loopback`, matching
-/// the worker's original behaviour of never running the τ sweep on a run
-/// with no loopback detected.
-pub(super) fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
-    if !is_loopback {
-        return TauOutcome::NotMeasuredNoLoopback;
-    }
+/// Turn a τ attempt into the [`TauOutcome`] `calibrate` reports — the exact
+/// decision #281 QA flagged as untestable because it was inlined in the
+/// worker closure, reachable only through a full daemon spawn.
+///
+/// `attempt` always runs (#368). τ used to be gated on the `is_loopback`
+/// flag established at step 2 — a captured-level proxy that a hot (+3.01 dB)
+/// or low-gain (−4.19 dB) but genuinely patched loopback both fail, and
+/// that a loud uncorrelated interferer could pass. The gate now lives
+/// inside `measure_tau` itself, on the deconvolved peak's own pre-impulse
+/// SNR, so it applies regardless of what step 2 observed and answers the
+/// question that actually matters: did this sweep find a real arrival.
+pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
     match attempt() {
         TauAttempt::Error {
             conditions,
@@ -272,27 +349,41 @@ pub(super) fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt
             conditions,
             message,
         },
+        TauAttempt::LowSnr {
+            conditions,
+            pre_impulse_snr_db,
+        } => TauOutcome::NotMeasuredLowSnr {
+            conditions,
+            pre_impulse_snr_db,
+            snr_threshold_db: tau_snr_threshold_db(),
+        },
         TauAttempt::Compared {
             conditions,
             reading1_s,
             reading2_s,
             comparison: TauComparison::Agree,
+            pre_impulse_snr_db,
         } => TauOutcome::Measured {
             conditions,
             tau_s: (reading1_s + reading2_s) / 2.0,
             agreement_count: 2,
             reading1_s,
             reading2_s,
+            pre_impulse_snr_db,
+            snr_threshold_db: tau_snr_threshold_db(),
         },
         TauAttempt::Compared {
             conditions,
             reading1_s,
             reading2_s,
             comparison: TauComparison::Disagree(d),
+            pre_impulse_snr_db,
         } => TauOutcome::Disagree {
             conditions,
             reading1_s,
             reading2_s,
+            pre_impulse_snr_db,
+            snr_threshold_db: tau_snr_threshold_db(),
             delta_samples: d.delta_samples,
             periods: d.periods,
             message: d.message(),
@@ -301,6 +392,7 @@ pub(super) fn tau_result(is_loopback: bool, attempt: impl FnOnce() -> TauAttempt
 }
 #[cfg(test)]
 mod tests {
+    use super::measure::TAU_SNR_THRESHOLD_DB;
     use super::*;
 
     fn dummy_conditions() -> TauConditions {
@@ -324,33 +416,37 @@ mod tests {
         frame
     }
 
-    /// #281 QA correctness issue 3: the no-loopback path is hard to drive
-    /// end-to-end under `--fake-audio` (the fake backend's step-2 capture
-    /// always reads as loopback-shaped), so pin the decision down directly
-    /// instead. `attempt` must not run at all when there's no loopback.
+    /// #368: replaces `tau_result_no_loopback_short_circuits_without_
+    /// measuring` — the pre-attempt `is_loopback` gate that test pinned
+    /// down is gone, `attempt` now always runs, and a low-SNR peak is
+    /// refused *inside* the attempt instead. This is the "measured because
+    /// the gate was deleted" guard AC8 of #368 asks for at the
+    /// `tau_result` level: even though `attempt` ran and returned a real
+    /// conditions/SNR pair, a `LowSnr` outcome must still surface as
+    /// `not_measured_low_snr` rather than being folded into `measured` or
+    /// into the generic `error` state.
     #[test]
-    fn tau_result_no_loopback_short_circuits_without_measuring() {
-        let mut called = false;
-        let outcome = tau_result(false, || {
-            called = true;
-            TauAttempt::Compared {
-                conditions: dummy_conditions(),
-                reading1_s: 0.001,
-                reading2_s: 0.001,
-                comparison: TauComparison::Agree,
-            }
+    fn tau_result_low_snr_reports_new_state_and_fields() {
+        let outcome = tau_result(|| TauAttempt::LowSnr {
+            conditions: Some(dummy_conditions()),
+            pre_impulse_snr_db: -3.45,
         });
-        assert_eq!(outcome.state(), "not_measured_no_loopback");
+        assert_eq!(outcome.state(), "not_measured_low_snr");
+        assert!(outcome.conditions().is_some());
+        // Refused, so nothing reaches `tau_history`.
         assert!(outcome.stored_entry("m").is_none());
         let f = frame_for(&outcome);
         assert_eq!(f["tau_s"], Value::Null);
         assert_eq!(f["tau_agreement_count"], json!(0));
+        assert_eq!(f["tau_pre_impulse_snr_db"].as_f64(), Some(-3.45));
+        assert_eq!(
+            f["tau_snr_threshold_db"].as_f64(),
+            Some(TAU_SNR_THRESHOLD_DB)
+        );
+        // A refusal is not an error, and carries no readings — neither
+        // lifecycle produced one.
         assert!(f.get("tau_error").is_none(), "{f}");
         assert!(f.get("tau_reading1_s").is_none(), "{f}");
-        assert!(
-            !called,
-            "attempt must not run when no loopback was detected"
-        );
     }
 
     /// #347: two independent readings agreeing is what "measured" means
@@ -358,11 +454,12 @@ mod tests {
     /// `tau_agreement_count` must always be 2 alongside it.
     #[test]
     fn tau_result_agreeing_readings_reports_measured_with_agreement_count() {
-        let outcome = tau_result(true, || TauAttempt::Compared {
+        let outcome = tau_result(|| TauAttempt::Compared {
             conditions: dummy_conditions(),
             reading1_s: 0.000_667,
             reading2_s: 0.000_667,
             comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
         });
         assert_eq!(outcome.state(), "measured");
         assert!(outcome.conditions().is_some());
@@ -383,15 +480,23 @@ mod tests {
         // #348 correctness 1).
         assert!(f.get("tau_delta_samples").is_none(), "{f}");
         assert!(f.get("tau_periods").is_none(), "{f}");
+        // #368: present on every state that reached deconvolution, so a
+        // passing run shows how much margin it actually had.
+        assert_eq!(f["tau_pre_impulse_snr_db"].as_f64(), Some(40.0));
+        assert_eq!(
+            f["tau_snr_threshold_db"].as_f64(),
+            Some(TAU_SNR_THRESHOLD_DB)
+        );
     }
 
     #[test]
     fn tau_result_averages_two_agreeing_readings() {
-        let outcome = tau_result(true, || TauAttempt::Compared {
+        let outcome = tau_result(|| TauAttempt::Compared {
             conditions: dummy_conditions(),
             reading1_s: 0.001_000_00,
             reading2_s: 0.001_000_02,
             comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
         });
         let tau_s = outcome.stored_entry("m").expect("measured").tau_s;
         assert!((tau_s - 0.001_000_01).abs() < 1e-9);
@@ -405,11 +510,12 @@ mod tests {
     fn tau_result_period_shift_disagreement_refuses_and_names_the_period() {
         let comparison =
             compare_tau_readings(4262.064 / 96_000.0, 5286.064 / 96_000.0, 96_000, Some(1024));
-        let outcome = tau_result(true, || TauAttempt::Compared {
+        let outcome = tau_result(|| TauAttempt::Compared {
             conditions: dummy_conditions(),
             reading1_s: 4262.064 / 96_000.0,
             reading2_s: 5286.064 / 96_000.0,
             comparison,
+            pre_impulse_snr_db: 40.0,
         });
         assert_eq!(outcome.state(), "disagree_period_shift");
         assert!(
@@ -433,11 +539,12 @@ mod tests {
     #[test]
     fn tau_result_non_period_disagreement_is_a_different_state() {
         let comparison = compare_tau_readings(0.0, 0.000_5, 48_000, Some(1024));
-        let outcome = tau_result(true, || TauAttempt::Compared {
+        let outcome = tau_result(|| TauAttempt::Compared {
             conditions: dummy_conditions(),
             reading1_s: 0.0,
             reading2_s: 0.000_5,
             comparison,
+            pre_impulse_snr_db: 40.0,
         });
         assert_eq!(outcome.state(), "disagree_other");
         assert!(outcome.stored_entry("m").is_none());
@@ -455,7 +562,7 @@ mod tests {
 
     #[test]
     fn tau_result_loopback_err_reports_error_state_and_message() {
-        let outcome = tau_result(true, || TauAttempt::Error {
+        let outcome = tau_result(|| TauAttempt::Error {
             conditions: None,
             message: "\u{3c4} measurement failed (reading 1 of 2): timeout".to_string(),
         });
@@ -474,5 +581,9 @@ mod tests {
             msg.contains("timeout"),
             "error message should name the failure: {msg}"
         );
+        // #368: absent on error — a lifecycle can fail before a peak was
+        // ever located, so there is no SNR to report.
+        assert!(f.get("tau_pre_impulse_snr_db").is_none(), "{f}");
+        assert!(f.get("tau_snr_threshold_db").is_none(), "{f}");
     }
 }

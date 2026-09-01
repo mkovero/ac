@@ -9,7 +9,7 @@
 //! the parent module.
 
 use ac_core::measurement::sweep::{
-    deconvolve_full, extract_irs, inverse_sweep, log_sweep, SweepParams,
+    deconvolve_full, extract_irs, inverse_sweep, log_sweep, pre_impulse_snr_db, SweepParams,
 };
 
 use crate::audio::AudioEngine;
@@ -46,6 +46,39 @@ const TAU_MIN_HALF_WINDOW_S: f64 = 0.05;
 /// data — a threshold newly introduced by this change; may need revisiting
 /// once measured against real noise floors.
 const TAU_EDGE_MARGIN_FRAC: f64 = 0.10;
+
+/// Minimum pre-impulse SNR (dB) a τ lifecycle's deconvolved peak must clear
+/// before the reading is trusted at all (#368). This replaces the old
+/// pre-attempt `is_loopback` gate, which keyed on a *captured level*
+/// against a unity-gain expectation — a proxy that a hot cable (3.01 dB
+/// over unity) or a low-gain cable (4.19 dB under) both fail even though
+/// both carry a perfectly real, measurable arrival, and that a loud but
+/// uncorrelated interferer could still pass. This checks the quantity that
+/// actually distinguishes "patched" from "not patched": whether the
+/// deconvolution the τ sweep produced finds a peak that stands clear of its
+/// own pre-impulse noise floor, measured under the exact drive and gain
+/// conditions τ was measured under.
+///
+/// Provenance: derived, not measured on this exact sweep. Two rig sessions
+/// anchor it from different contexts —
+/// `work/rig/rig-2026-08-22-tau-window-350-results.md` measured real
+/// electrical-loopback τ SNR at 33.8–83.5 dB (the low end a JACK-startup-
+/// transient artefact on the first reading after engine start, not a true
+/// floor); #376's rig session measured a deconvolution noise cliff at
+/// ~16 dB pre-impulse SNR on an unrelated (long-ESS, acoustic) path. 24 dB
+/// splits that gap, rounded toward the reject side rather than the
+/// midpoint — a false accept (a spurious peak silently stored in
+/// `tau_history`) is more expensive than a false refuse (operator sees
+/// "not measured" and re-runs). Wired through the same `tau-window-
+/// override` env-override mechanism as `TAU_EDGE_MARGIN_FRAC` so a rig
+/// session can correct it without a rebuild.
+///
+/// Not to be confused with `report::ir_stats`'s `PRE_IMPULSE_SNR_MIN_DB`
+/// (18.0 dB, #376): that one gates a long-ESS *acoustic* capture's IR
+/// read-out, this one gates a short-ESS *electrical* τ lifecycle. Same
+/// quantity (`sweep::pre_impulse_snr_db`), different path, different
+/// evidence — which is why they are two constants and not one.
+pub(super) const TAU_SNR_THRESHOLD_DB: f64 = 24.0;
 
 /// Rig-instrument overrides for the two τ window constants (#350).
 ///
@@ -95,12 +128,25 @@ fn tau_edge_margin_frac() -> f64 {
     TAU_EDGE_MARGIN_FRAC
 }
 
-/// Per-reading τ diagnostic (#350). `measure_tau` reports only the peak
-/// position, so nothing on this path has ever recorded the SNR the peak
-/// was located against — which is the quantity #350 exists to measure.
-/// `floor` is defined exactly as `it_loopback_ir` and `ir_probe` define
-/// it (max |x| over the leading eighth of the window) so the numbers
-/// compare directly against #277's record.
+#[cfg(feature = "tau-window-override")]
+pub(super) fn tau_snr_threshold_db() -> f64 {
+    tau_env_f64("AC_TAU_SNR_THRESHOLD_DB", TAU_SNR_THRESHOLD_DB)
+}
+
+#[cfg(not(feature = "tau-window-override"))]
+pub(super) fn tau_snr_threshold_db() -> f64 {
+    TAU_SNR_THRESHOLD_DB
+}
+
+/// Per-reading τ diagnostic (#350). `snr_db` is the real gate value —
+/// `sweep::pre_impulse_snr_db` on this same peak, computed once by the
+/// caller and passed in rather than recomputed here (#368: this used to
+/// carry its own separate, leading-eighth-window SNR calculation, which
+/// became a second implementation of "is this peak real" once the actual
+/// gate needed the same number). `floor`/`far_end` below are a distinct,
+/// unrelated diagnostic — max |x| over the leading eighth of the window,
+/// defined exactly as `it_loopback_ir` and `ir_probe` define it, so those
+/// numbers still compare directly against #277's record.
 #[cfg(feature = "tau-window-override")]
 fn tau_probe_log(
     ir: &[f64],
@@ -109,13 +155,13 @@ fn tau_probe_log(
     window_len: usize,
     half: usize,
     sr: u32,
+    snr_db: f64,
 ) {
     let far_end = (ir.len() / 8).max(1);
     let floor = ir[..far_end]
         .iter()
         .map(|v| v.abs())
         .fold(0.0_f64, f64::max);
-    let snr_db = 20.0 * (peak_abs / floor.max(1e-15)).log10();
     let margin_frac = tau_edge_margin_frac();
     let margin = (margin_frac * half as f64).round() as usize;
     let dist_from_end = window_len.saturating_sub(1).saturating_sub(peak_idx);
@@ -139,6 +185,52 @@ fn tau_probe_log(
         offset as f64 * 1000.0 / sr as f64
     );
     eprintln!("------------------------");
+}
+
+/// Distinguishes a τ lifecycle's low-SNR refusal ([`check_peak_snr`]) from
+/// a genuine measurement failure (#368), so `measure_tau_twice` can report
+/// a distinct `cal_done.tau_state` (`"not_measured_low_snr"`) instead of
+/// folding it into the generic `"error"` state a real engine/deconvolution
+/// failure produces. Carried as a typed `anyhow::Error` payload,
+/// downcast-recovered by `measure_tau_twice`, rather than a string match on
+/// the message — a message wording change must not silently break the
+/// state split.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LowSnrRefusal {
+    pub(super) snr_db: f64,
+    pub(super) threshold_db: f64,
+}
+
+impl std::fmt::Display for LowSnrRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\u{3c4} peak pre-impulse SNR {:.2} dB is below the {:.2} dB threshold \u{2014} the \
+             deconvolution did not find a peak distinguishable from noise, so no value is \
+             reported",
+            self.snr_db, self.threshold_db
+        )
+    }
+}
+
+impl std::error::Error for LowSnrRefusal {}
+
+/// Refuse a τ lifecycle whose deconvolved peak sits below `threshold_db`
+/// pre-impulse SNR — the peak cannot be trusted as a real arrival rather
+/// than noise (#368, replacing the old pre-attempt `is_loopback` level
+/// gate). Modeled on [`check_peak_within_window`]'s shape — a small pure
+/// function over already-computed values, unit-testable without an
+/// `AudioEngine` — and called before it in `measure_tau`, since a peak that
+/// isn't real shouldn't be judged against the edge margin at all.
+fn check_peak_snr(snr_db: f64, threshold_db: f64) -> anyhow::Result<()> {
+    if snr_db < threshold_db {
+        return Err(LowSnrRefusal {
+            snr_db,
+            threshold_db,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Refuse a peak sitting within `margin_frac` of the half-window of
@@ -165,12 +257,15 @@ fn check_peak_within_window(
 }
 
 /// Play a short ESS, deconvolve it, and return the interface round-trip
-/// delay in seconds (peak of the linear IR, converted from samples).
+/// delay in seconds (peak of the linear IR, converted from samples)
+/// alongside that peak's pre-impulse SNR in dB (#368) — the caller needs
+/// the SNR value even on success, since `cal_done` reports it on every
+/// state that reached deconvolution, not only on a refusal.
 ///
 /// Reuses the Farina machinery from `ac_core::measurement::sweep` exactly
 /// as `plot_ir` does — see `handlers/audio/plot.rs` for the longer-form
 /// version of the same technique.
-pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<f64> {
+pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<(f64, f64)> {
     let sr = eng.sample_rate();
     let f2_hz = (sr as f64 * 0.45).min(20_000.0);
     let params = SweepParams {
@@ -203,13 +298,26 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
         .map(|(i, v)| (i, *v))
         .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
         .ok_or_else(|| anyhow::anyhow!("empty IR from τ sweep"))?;
+    let snr_db = pre_impulse_snr_db(&irs.linear, peak_idx);
     #[cfg(feature = "tau-window-override")]
-    tau_probe_log(&irs.linear, peak_idx, peak_val.abs(), window_len, half, sr);
+    tau_probe_log(
+        &irs.linear,
+        peak_idx,
+        peak_val.abs(),
+        window_len,
+        half,
+        sr,
+        snr_db,
+    );
     #[cfg(not(feature = "tau-window-override"))]
     let _ = peak_val;
+    // #368: the SNR gate runs before the edge-margin check — a peak that
+    // isn't distinguishable from noise shouldn't be judged against the
+    // window edge at all.
+    check_peak_snr(snr_db, tau_snr_threshold_db())?;
     check_peak_within_window(peak_idx, window_len, tau_edge_margin_frac())?;
     let offset_samples = peak_idx as i64 - half as i64;
-    Ok(offset_samples as f64 / sr as f64)
+    Ok((offset_samples as f64 / sr as f64, snr_db))
 }
 
 #[cfg(test)]
@@ -354,5 +462,41 @@ mod tests {
                 "{bad:?} is not a usable window and must fall back, not be coerced"
             );
         }
+    }
+
+    /// #368: `check_peak_snr` mirrors `check_peak_within_window`'s shape —
+    /// pin its boundary the same way (refuses strictly below, accepts at
+    /// and above).
+    #[test]
+    fn check_peak_snr_refuses_below_threshold() {
+        assert!(check_peak_snr(23.99, 24.0).is_err());
+    }
+
+    #[test]
+    fn check_peak_snr_accepts_at_and_above_threshold() {
+        assert!(check_peak_snr(24.0, 24.0).is_ok());
+        assert!(check_peak_snr(83.5, 24.0).is_ok());
+    }
+
+    /// The rig's own measured muted-route reading (#368 triage: drive
+    /// -30 dBFS, captured -83.8 dBFS) — a concrete refusal, not just a
+    /// boundary probe.
+    #[test]
+    fn check_peak_snr_refuses_the_rigs_measured_muted_route() {
+        assert!(check_peak_snr(-3.45, TAU_SNR_THRESHOLD_DB).is_err());
+    }
+
+    /// The refusal must stay recoverable *by type* — `measure_tau_twice`
+    /// downcasts to split `not_measured_low_snr` from the generic `error`
+    /// state, so an `anyhow!`-flavoured rewording of the message here must
+    /// not quietly collapse the two.
+    #[test]
+    fn check_peak_snr_refusal_is_downcastable_to_its_own_type() {
+        let err = check_peak_snr(-3.45, TAU_SNR_THRESHOLD_DB).expect_err("refused");
+        let refusal = err
+            .downcast_ref::<LowSnrRefusal>()
+            .expect("refusal carries its typed payload, not just a message");
+        assert_eq!(refusal.snr_db, -3.45);
+        assert_eq!(refusal.threshold_db, TAU_SNR_THRESHOLD_DB);
     }
 }
