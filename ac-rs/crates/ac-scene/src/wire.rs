@@ -1,6 +1,11 @@
 //! Deserialization types for the `transfer_stream` v2 DATA frame
-//! (`ZMQ.md` lines ~1572-1627) and its `visualize/ir` sidecar
-//! (`ZMQ.md` lines ~2094-2156). `serde` ignores JSON fields a struct
+//! (`ZMQ.md`, `### transfer_stream`) and its `visualize/ir` sidecar
+//! (`ZMQ.md`, `#### visualize/ir sidecar`). Cite those sections by name,
+//! never by line: the line numbers this comment used to carry drifted ~230
+//! lines out of date as the document grew above them, and pointed at a
+//! different command with nothing to signal it.
+//!
+//! `serde` ignores JSON fields a struct
 //! doesn't name, so a real wire frame deserializes fine even though
 //! each struct here is a subset of its schema.
 //!
@@ -259,7 +264,24 @@ impl MtwColumns {
     }
 }
 
-/// The `visualize/ir` sidecar DATA frame (`ZMQ.md:2094`) — daemon-side
+impl WireFrame {
+    /// The ladder columns **as the display uses them**: present only when
+    /// [`MtwColumns::lengths_agree`], because a mismatched frame draws
+    /// nothing.
+    ///
+    /// One accessor rather than the same `filter` at each call site. The
+    /// selection is an invariant shared across modules, not a local
+    /// convenience: [`crate::fault::FaultFrame::settled`] means "there are
+    /// columns on screen", and it can only mean that while it and
+    /// [`crate::TransferInput::from_wire_frame`] make the identical choice.
+    /// Duplicating the filter let the two drift apart with nothing failing.
+    pub fn displayed_mtw(&self) -> Option<&MtwColumns> {
+        self.mtw.as_ref().filter(|m| m.lengths_agree())
+    }
+}
+
+/// The `visualize/ir` sidecar DATA frame (`ZMQ.md`, `#### visualize/ir
+/// sidecar`) — daemon-side
 /// IFFT of the full-resolution H₁(ω) into a time-domain h(t), published
 /// alongside each `transfer_stream` frame for the same pair on the same
 /// tick. A separate top-level shape (`"type": "visualize/ir"`), not a
@@ -308,8 +330,6 @@ mod tests {
             "magnitude_db": [0.0, 0.0],
             "phase_deg": [0.0, 0.0],
             "coherence": [1.0, 1.0],
-            "re": [1.0, 1.0],
-            "im": [0.0, 0.0],
             "delay_samples": 0,
             "delay_ms": 0.0,
             "meas_channel": 0,

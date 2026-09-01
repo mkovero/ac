@@ -16,6 +16,26 @@ pub struct Viewport {
     pub height: f32,
 }
 
+/// The one place an `egui::Rect` becomes a [`Viewport`]. Every pane used
+/// to spell this conversion out field by field; centralising it here
+/// keeps the "which toolkit rectangle convention is this" question in the
+/// same file as the y-flip that depends on the answer.
+///
+/// A pane that occupies a *band* of a rect rather than all of it builds
+/// on this with struct-update syntax — e.g.
+/// `Viewport { y, height, ..Viewport::from(rect) }` — so the x/width half
+/// of the conversion still has exactly one definition.
+impl From<egui::Rect> for Viewport {
+    fn from(rect: egui::Rect) -> Self {
+        Viewport {
+            x: rect.min.x,
+            y: rect.min.y,
+            width: rect.width(),
+            height: rect.height(),
+        }
+    }
+}
+
 /// Map a scene-space point (`x=0` left/low-freq, `y=0` bottom/low-level,
 /// per `ac-scene`'s orientation contract) to a screen-space point
 /// within `viewport`. The only place `1.0 - y` (the sign flip) may

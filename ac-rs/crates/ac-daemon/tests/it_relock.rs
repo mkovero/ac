@@ -14,21 +14,15 @@
 //! only `engine_on`/the drive-edge trigger, never the thing being locked
 //! onto.
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
-// 29_200 — distinct from every other `ac-daemon` IT file's base
-// (25_600 / 25_900 / 26_400 / 27_000 / 28_400 / 28_800), so parallel
-// `cargo test` never collides (#195).
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(29_200);
-static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
+#[path = "common/mod.rs"]
+mod common;
+
+use common::{Client, Daemon};
 
 const CEILING_DBFS: f64 = -10.0;
 /// The configured `fake_correlated_pair` delay most tests lock onto.
@@ -37,174 +31,6 @@ const LOCK_DELAY_SAMPLES: i64 = 400;
 /// behind realtime under load; these tests care about correctness of the
 /// transition, not its latency.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
-
-fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
-}
-
-fn alloc_home() -> PathBuf {
-    let n = HOME_CURSOR.fetch_add(1, Ordering::Relaxed);
-    let mut p = env::temp_dir();
-    p.push(format!("ac-daemon-relock-it-{}-{n}", std::process::id()));
-    let _ = fs::create_dir_all(p.join(".config").join("ac"));
-    p
-}
-
-struct Daemon {
-    child: Child,
-    ctrl_port: u16,
-    data_port: u16,
-    home: PathBuf,
-    log_path: PathBuf,
-}
-
-impl Daemon {
-    fn spawn() -> Self {
-        let home = alloc_home();
-        let (ctrl, data) = alloc_ports();
-        let bin = env!("CARGO_BIN_EXE_ac-daemon");
-        let log_path = home.join("daemon.log");
-        let log_file = fs::File::create(&log_path).expect("create daemon log");
-        let log_file2 = log_file.try_clone().expect("clone daemon log handle");
-        let child = Command::new(bin)
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .stdout(log_file)
-            .stderr(log_file2)
-            .spawn()
-            .expect("spawn ac-daemon");
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() <= deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-        Self {
-            child,
-            ctrl_port: ctrl,
-            data_port: data,
-            home,
-            log_path,
-        }
-    }
-
-    fn log_tail(&self) -> String {
-        fs::read_to_string(&self.log_path).unwrap_or_else(|e| format!("<no log: {e}>"))
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.home);
-    }
-}
-
-struct Client<'a> {
-    _ctx: zmq::Context,
-    req: zmq::Socket,
-    sub: zmq::Socket,
-    daemon: &'a Daemon,
-}
-
-impl<'a> Client<'a> {
-    fn new(d: &'a Daemon) -> Self {
-        let ctx = zmq::Context::new();
-        let req = ctx.socket(zmq::REQ).unwrap();
-        req.set_linger(0).unwrap();
-        req.set_rcvtimeo(5_000).unwrap();
-        req.set_sndtimeo(5_000).unwrap();
-        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port))
-            .unwrap();
-
-        let sub = ctx.socket(zmq::SUB).unwrap();
-        sub.set_linger(0).unwrap();
-        sub.set_rcvtimeo(5_000).unwrap();
-        sub.set_subscribe(b"").unwrap();
-        sub.connect(&format!("tcp://127.0.0.1:{}", d.data_port))
-            .unwrap();
-
-        thread::sleep(Duration::from_millis(100));
-        Self {
-            _ctx: ctx,
-            req,
-            sub,
-            daemon: d,
-        }
-    }
-
-    fn call(&self, cmd: Value) -> Value {
-        self.req.send(serde_json::to_vec(&cmd).unwrap(), 0).unwrap();
-        let bytes = self.req.recv_bytes(0).expect("CTRL recv");
-        serde_json::from_slice(&bytes).expect("CTRL decode")
-    }
-
-    /// Next `transfer_stream` DATA frame, or `None` on timeout.
-    fn next_frame(&self, timeout: Duration) -> Option<Value> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .max(1) as i32;
-            self.sub.set_rcvtimeo(remaining).ok();
-            let bytes = self.sub.recv_bytes(0).ok()?;
-            let split = bytes.iter().position(|&b| b == b' ')?;
-            let topic = String::from_utf8(bytes[..split].to_vec()).ok()?;
-            let payload: Value = serde_json::from_slice(&bytes[split + 1..]).ok()?;
-            if topic == "data" && payload["type"] == json!("transfer_stream") {
-                return Some(payload);
-            }
-        }
-        None
-    }
-
-    /// The next frame matching `pred`, within `timeout` — polls one frame
-    /// at a time rather than a fixed settle window, since these tests care
-    /// about a transition (locked → unlocked → locked) that a fixed-delay
-    /// snapshot could straddle or miss entirely.
-    fn frame_matching(&self, timeout: Duration, pred: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "no matching frame within timeout. daemon log:\n{}",
-                self.daemon.log_tail()
-            );
-            let step = remaining.min(Duration::from_millis(300));
-            let Some(f) = self.next_frame(step) else {
-                continue;
-            };
-            if pred(&f) {
-                return f;
-            }
-        }
-    }
-}
 
 fn start_correlated(c: &Client, drivable: bool, delay_samples: i64, gain: f64) -> Value {
     c.call(json!({
