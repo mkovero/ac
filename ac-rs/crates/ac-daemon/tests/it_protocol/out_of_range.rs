@@ -144,6 +144,81 @@ fn in_range_channels_are_unaffected() {
     c.call(json!({"cmd":"stop"}));
 }
 
+#[test]
+fn named_stop_does_not_claim_silence_while_output_remains() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let generate = c.call(json!({
+        "cmd": "generate",
+        "freq_hz": 1000.0,
+        "level_dbfs": -40.0,
+    }));
+    assert_eq!(generate["ok"], json!(true), "generate rejected: {generate}");
+    let monitor = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "interval": 0.2,
+        "fft_n": 8192,
+    }));
+    assert_eq!(monitor["ok"], json!(true), "monitor rejected: {monitor}");
+
+    let stopped_monitor = c.call(json!({"cmd": "stop", "name": "monitor_spectrum"}));
+    assert_eq!(
+        stopped_monitor["stopped"],
+        json!(["monitor_spectrum"]),
+        "{stopped_monitor}"
+    );
+    assert!(
+        stopped_monitor.get("stimulus").is_none(),
+        "generate still drives output, so silence must not be attested: {stopped_monitor}"
+    );
+
+    let stopped_generate = c.call(json!({"cmd": "stop", "name": "generate"}));
+    assert_eq!(stopped_generate["stopped"], json!(["generate"]));
+    assert_eq!(stopped_generate["stimulus"], json!("silent"));
+}
+
+fn assert_budget_rejection(c: &Client<'_>, request: Value, field: &str) {
+    let reply = c.call(request);
+    assert_eq!(reply["ok"], json!(false), "request must fail: {reply}");
+    let error = reply["error"].as_str().unwrap_or_default();
+    assert!(error.contains(field), "error must name {field}: {error:?}");
+    assert!(
+        error.contains("not started") && error.contains("stimulus  silent"),
+        "rejection must confirm no audio was emitted: {error:?}"
+    );
+    let status = c.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "worker spawned: {status}");
+}
+
+#[test]
+fn plot_family_rejects_resource_budgets_before_spawn() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":100.0, "stop_hz":1000.0, "ppd":10001}),
+        "point",
+    );
+    assert_budget_rejection(&c, json!({"cmd":"plot", "duration":60.001}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot_level", "steps":10001}), "steps");
+    assert_budget_rejection(&c, json!({"cmd":"plot_level", "duration":0.0}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot_ir", "tail_s":60.001}), "tail_s");
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot_ir", "n_harmonics":33}),
+        "n_harmonics",
+    );
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot_ir", "window_len":1048577}),
+        "window_len",
+    );
+    assert_budget_rejection(&c, json!({"cmd":"plot_ir", "duration":"NaN"}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot", "ppd":u64::MAX}), "point");
+}
+
 // ---------------------------------------------------------------------------
 // Multi-time-window ladder (handoff-mtw-live-spectrum)
 // ---------------------------------------------------------------------------

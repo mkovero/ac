@@ -16,6 +16,8 @@ pub mod jack_backend;
 #[cfg(feature = "cpal-audio")]
 pub mod cpal_backend;
 
+use std::sync::atomic::AtomicBool;
+
 use anyhow::Result;
 
 /// Minimal trait for audio playback + capture, matching Python's JackEngine duck-type contract.
@@ -54,6 +56,20 @@ pub trait AudioEngine: Send + 'static {
             "play_and_capture is not implemented for the {} backend",
             self.backend_name()
         )
+    }
+
+    /// Cancellable one-shot playback/capture for stimulus commands whose
+    /// worker can be stopped over CTRL. Implementations must silence output
+    /// before returning a cancellation error. The default preserves source
+    /// compatibility for non-hardware test engines; every shipped backend
+    /// overrides it.
+    fn play_and_capture_cancellable(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        _stop: &AtomicBool,
+    ) -> Result<Vec<f32>> {
+        self.play_and_capture(samples, tail_s)
     }
 
     /// Non-blocking drain of up to `max_samples` from the capture ring,

@@ -49,7 +49,7 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
     // receive on the REP socket is guaranteed to see an empty workers map
     // and can start an `Exclusive`-group worker like `transfer_stream`.
     let mut joined: Vec<(String, crate::workers::WorkerHandle)> = Vec::new();
-    {
+    let no_workers_remain = {
         let mut workers = state.workers.lock().unwrap();
         if let Some(name) = target {
             if let Some(w) = workers.get(name) {
@@ -66,10 +66,15 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
                 joined.push((name, handle));
             }
         }
-    }
+        workers.is_empty()
+    };
     let stopped: Vec<String> = joined.iter().map(|(n, _)| n.clone()).collect();
     drop(joined); // runs Drop → joins the worker threads
-    json!({"ok": true, "stopped": stopped})
+    let mut reply = json!({"ok": true, "stopped": stopped});
+    if no_workers_remain {
+        reply["stimulus"] = json!("silent");
+    }
+    reply
 }
 
 pub fn devices(state: &ServerState) -> Value {

@@ -748,11 +748,15 @@ a clean slate (e.g. issuing `transfer_stream` immediately after
 
 **Reply**
 ```json
-{ "ok": true, "stopped": ["<worker-name>", ...] }
+{ "ok": true, "stopped": ["<worker-name>", ...], "stimulus": "silent" }
 ```
 
 `stopped` lists the workers that were actually joined during this call —
-empty if no matching worker was running.
+empty if no matching worker was running. `stimulus: "silent"` is present only
+when no workers remain after the selected handles have joined; cancellable
+stimulus workers have silenced their backend before the reply is constructed.
+It is omitted from a named-stop reply when another worker remains because that
+worker may still be driving output.
 
 **DATA** — after stop, the worker emits a terminal frame:
 ```json
@@ -1063,6 +1067,17 @@ only the default trait impl bails.
 }
 ```
 
+Request budgets are enforced before port resolution or worker spawn:
+
+- `duration`: greater than 0 and at most 60 seconds
+- `tail_s`: from 0 through 60 seconds
+- `n_harmonics`: from 1 through 32
+- `window_len`: from 1 through 1048576 samples
+
+An out-of-budget request returns `ok: false`, confirms that the stimulus is
+silent, and emits no audio. `stop` cancels both the sweep and tail portions of
+an accepted `plot_ir` request.
+
 `level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
 before #360 this was the one command besides `calibrate` that emitted
 whatever was asked for with nothing bounding it.
@@ -1176,6 +1191,10 @@ captures + analyses the loopback. Emits one `measurement/frequency_response/poin
 }
 ```
 
+`duration` must be greater than 0 and at most 60 seconds. The derived sweep
+grid may contain at most 10000 points; the daemon validates the checked point
+count before allocating it or spawning a worker.
+
 `level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
 
 **Reply**
@@ -1216,6 +1235,9 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
   "duration":   <float>   // capture duration per point (seconds), default 1.0
 }
 ```
+
+`duration` must be greater than 0 and at most 60 seconds. `steps` must be from
+1 through 10000. Both are validated before worker spawn.
 
 `start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
 ceiling (#360), each computed step individually — a range whose top end

@@ -408,6 +408,29 @@ pub(super) fn send_pub(tx: &crossbeam_channel::Sender<Vec<u8>>, topic: &str, fra
 // Sweep math helpers
 // ---------------------------------------------------------------------------
 
+pub(super) const MAX_STIMULUS_DURATION_S: f64 = 60.0;
+pub(super) const MAX_SWEEP_POINTS: usize = 10_000;
+pub(super) const MAX_IR_HARMONICS: usize = 32;
+pub(super) const MAX_IR_WINDOW_SAMPLES: usize = 1_048_576;
+
+pub(super) fn checked_log_freq_point_count(
+    start: f64,
+    stop: f64,
+    ppd: usize,
+) -> Result<usize, String> {
+    if !start.is_finite() || !stop.is_finite() || start <= 0.0 || stop < start {
+        return Err("frequency range must be finite, positive, and non-decreasing".into());
+    }
+    if ppd == 0 {
+        return Err("ppd must be at least 1".into());
+    }
+    let raw = ((stop / start).log10() * ppd as f64).round();
+    if !raw.is_finite() || raw > usize::MAX as f64 {
+        return Err("derived sweep point count overflows usize".into());
+    }
+    Ok((raw as usize).max(2))
+}
+
 pub(super) fn log_freq_points(start: f64, stop: f64, ppd: usize) -> Vec<f64> {
     let n_decades = (stop / start).log10();
     let n_points = (n_decades * ppd as f64).round() as usize;
