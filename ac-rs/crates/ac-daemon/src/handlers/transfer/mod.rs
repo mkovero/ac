@@ -20,6 +20,11 @@
 //! Only [`worker`] and [`probe`] need an audio backend and a socket. That is
 //! the line the split is drawn on: everything above them is reachable from a
 //! unit test, and most of it did not used to be.
+//!
+//! Where a module's tests are more than a handful they live in a file of
+//! their own beside it — `session/session_tests.rs`, `frame/tests.rs`,
+//! `request/tests.rs`, `window/pinned_window_tests.rs` — so the file you
+//! open to read an implementation is not four fifths test fixtures.
 
 mod analysis;
 mod ctrl;
