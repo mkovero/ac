@@ -897,6 +897,463 @@ fn build_pair_messages(
     Some((pos, out, spl_raw))
 }
 
+/// Retry interval for a refused delay estimate — see
+/// [`PairState::next_attempt`].
+const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The analysis window's geometry, all of it derived from the sample rate.
+///
+/// `nperseg`/`step` mirror `h1_estimate`'s internal Welch settings; a
+/// mismatch here would make `n_averages` on the wire a claim about a
+/// segmentation the estimator does not perform.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    /// Welch segment length. `sr` — 1 Hz bin width.
+    nperseg: usize,
+    /// Segment hop, `nperseg / 2` for 50% overlap. Also the quantum the
+    /// ring is drained in (#208), which is what pins the block grid to
+    /// the stream.
+    step: usize,
+    /// Segments averaged once the window is full — the steady-state
+    /// `n_averages` the frame reports.
+    n_averages: usize,
+}
+
+impl Window {
+    fn new(sr: u32, n_averages: usize) -> Self {
+        let nperseg = sr as usize;
+        Self {
+            nperseg,
+            step: nperseg / 2,
+            n_averages,
+        }
+    }
+
+    /// Ring length holding exactly `n_averages` complete segments.
+    /// Derived rather than stored so the three numbers cannot disagree.
+    fn target_total(&self) -> usize {
+        self.nperseg + self.step * (self.n_averages - 1)
+    }
+}
+
+/// What this tick observed outside the analysis: the drive state the
+/// worker actually applied to its engine, the two events that invalidate
+/// a lock, and the global mic-correction toggle.
+///
+/// Sampled once per tick by the worker and handed in whole, so every pair
+/// in a frame agrees about all four. The drive poll itself stays in the
+/// worker because applying it needs the engine; what reaches the analysis
+/// is the observation, never the command (#228).
+#[derive(Debug, Clone, Copy)]
+struct TickEvents {
+    /// Drive state as applied to the engine on this tick, after the
+    /// dead-man and after `set_drive`'s clamp. Recorded as a new lock's
+    /// `driving` provenance.
+    engine_on: bool,
+    /// False→true transition of `engine_on` since the previous tick
+    /// (#226): the signal a lock was taken against just changed.
+    drive_edge_on: bool,
+    /// A `relock` request arrived since the previous tick (#226).
+    relock_requested: bool,
+    /// `mic_correction_enabled`, sampled once so a frame cannot be built
+    /// half-corrected.
+    mc_enabled: bool,
+}
+
+/// Everything the streaming session maintains across ticks — and nothing
+/// else. No engine, no socket, no `Instant::now()`, no stop flag.
+///
+/// That exclusion is the point. Before this type the whole per-tick
+/// decision set — the warmup gate, the delay retry timer, the two lock
+/// flushes, the ladder's construction and the `spl` integrator's `dt` —
+/// lived in a 400-line closure body reachable only by standing up a
+/// daemon, a ZMQ socket and an audio backend. A defect in any of it could
+/// be demonstrated only through a live integration test, which is why the
+/// #208 drain had to be re-implemented inside its own test module to be
+/// scored at all.
+///
+/// [`SessionState::tick`] takes this tick's capture buffers, what the
+/// worker observed, and the current time, and returns the messages to
+/// publish. Everything it decides is therefore decidable from a `Vec` of
+/// samples.
+struct SessionState {
+    statics: FrameStatics,
+    window: Window,
+    /// Per-pair session constants, in launch order.
+    ctx: Vec<PairCtx>,
+    /// Per-pair maintained state, same order and length as `ctx`.
+    pairs: Vec<PairState>,
+    /// Sliding H1 window per unique capture channel, indexed by
+    /// `PairCtx::mi`/`ri`.
+    rings: Vec<Vec<f32>>,
+    /// Multi-time-window ladder per pair, same order as `ctx`. Not a
+    /// `PairState` field — see that type's note.
+    ///
+    /// Purely **additive**: it runs alongside the full-rate Welch
+    /// estimator and replaces nothing. That is not caution, it is
+    /// required — `spl` derives from the same `gyy` the Welch path
+    /// produces and has to stay bit-identical, and `meas_spectrum` /
+    /// `ref_spectrum` are calibrated absolute levels, which `Gxy/Gxx`'s
+    /// cancellation of `|Hdec|²` does not cover (see `visualize::mtw`'s
+    /// fence).
+    ///
+    /// Fed the fresh per-tick `bufs`, never the `rings` sliding window:
+    /// the ladder is a push pipeline, and pushing a re-segmented sliding
+    /// buffer into it would reproduce #208's re-analysis one level down.
+    ladders: Vec<Option<ac_core::visualize::mtw::MtwPair>>,
+    /// A layout the ladder cannot serve (an unsupported rate) degrades to
+    /// "no ladder" rather than to a dead session, and is logged once.
+    ladder_failed: bool,
+    /// Capture tick, used only as the `spl` integrator's `dt` on the
+    /// first step, where there is no previous timestamp to subtract.
+    chunk_secs: f64,
+}
+
+impl SessionState {
+    fn new(
+        statics: FrameStatics,
+        window: Window,
+        ctx: Vec<PairCtx>,
+        n_channels: usize,
+        chunk_secs: f64,
+        integration_tau_s: f64,
+    ) -> Self {
+        // The `spl` integrator is the only per-pair field decided at
+        // construction rather than by the loop: a meas channel with no SPL
+        // calibration layer publishes `spl: null` for the whole session
+        // (session-static per D10, matching `spl_offsets` in `monitor.rs`).
+        let pairs: Vec<PairState> = ctx
+            .iter()
+            .map(|c| {
+                PairState::new(
+                    c.meas_cal
+                        .as_ref()
+                        .and_then(Calibration::spl_offset_db)
+                        .map(|_| {
+                            ac_core::visualize::time_integration::EmaIntegrator::new(
+                                integration_tau_s,
+                                1,
+                            )
+                        }),
+                )
+            })
+            .collect();
+        let ladders = (0..ctx.len()).map(|_| None).collect();
+        let rings = (0..n_channels)
+            .map(|_| Vec::with_capacity(window.target_total() + window.step))
+            .collect();
+        Self {
+            statics,
+            window,
+            ctx,
+            pairs,
+            rings,
+            ladders,
+            ladder_failed: false,
+            chunk_secs,
+        }
+    }
+
+    /// How many capture channels this session assembled rings for. The
+    /// worker compares it against what capture actually returned (#254).
+    fn n_channels(&self) -> usize {
+        self.rings.len()
+    }
+
+    /// Each pair's held lock, in launch order, for the snapshot ring's
+    /// provenance copy.
+    fn delay_samples(&self) -> Vec<Option<i64>> {
+        self.pairs
+            .iter()
+            .map(|st| st.delay.map(|l| l.samples))
+            .collect()
+    }
+
+    /// Discard every pair's lock and ladder — a `relock` request (#226).
+    fn flush_all(&mut self) {
+        for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
+            st.flush(ladder);
+        }
+    }
+
+    /// The drive off→on edge (#226). A lock is stale by construction —
+    /// not by drift, not by a threshold — the instant a drive that was off
+    /// starts driving, because the signal producing it just changed.
+    ///
+    /// The qualifier: only a lock acquired *while the drive was off* is
+    /// discarded, so a dead-man drop and resume of a lock taken while
+    /// driving survives untouched — nothing about that lock's premise
+    /// changed. A pair that is currently unlocked gets its retry timer
+    /// cleared instead, so acquisition is attempted this tick rather than
+    /// up to `RELOCK_RETRY` later.
+    fn flush_locks_taken_against_silence(&mut self) {
+        for (st, ladder) in self.pairs.iter_mut().zip(self.ladders.iter_mut()) {
+            match st.delay {
+                Some(Lock { driving: false, .. }) => st.flush(ladder),
+                Some(Lock { driving: true, .. }) => {
+                    // Acquired while driving — the dead-man/resume thrash
+                    // case. Survives untouched.
+                }
+                None => st.next_attempt = None,
+            }
+        }
+    }
+
+    /// Append this tick's capture to every ring and trim each back to the
+    /// analysis window on the block lattice (#208).
+    fn push_rings(&mut self, bufs: &[Vec<f32>]) {
+        let (target_total, step) = (self.window.target_total(), self.window.step);
+        for (r, buf) in self.rings.iter_mut().zip(bufs.iter()) {
+            r.extend_from_slice(buf);
+            drain_to_block_lattice(r, target_total, step);
+        }
+    }
+
+    /// Welch segments `welch_all` will actually average over this tick's
+    /// rings — the same `while pos + nperseg <= len` walk it does,
+    /// evaluated here so the frame can state it. Rises 1 → `n_averages`
+    /// while the window fills, then is pinned there by the drain.
+    fn n_blocks(&self) -> usize {
+        let Window { nperseg, step, .. } = self.window;
+        self.rings
+            .iter()
+            .map(|r| (r.len() - nperseg) / step + 1)
+            .min()
+            .unwrap_or(1)
+    }
+
+    /// Estimate any pair's missing delay, rate-limited. Runs at most once
+    /// per pair per `RELOCK_RETRY` while unlocked, and not at all once
+    /// locked: ref↔meas propagation is constant during a session (fixed
+    /// hardware path), and each attempt is a full-ring FFT+IFFT.
+    fn acquire_missing_locks(&mut self, ev: TickEvents, now: std::time::Instant) {
+        let sr = self.statics.sr;
+        for (ctx, st) in self.ctx.iter().zip(self.pairs.iter_mut()) {
+            if st.delay.is_some() {
+                continue;
+            }
+            if st.next_attempt.is_some_and(|t| now < t) {
+                continue;
+            }
+            let (Some(meas), Some(refb)) = (self.rings.get(ctx.mi), self.rings.get(ctx.ri)) else {
+                continue;
+            };
+            let est = ac_core::visualize::transfer::estimate_delay_detailed(
+                refb.as_slice(),
+                meas.as_slice(),
+                sr,
+            );
+            // `driving` is this tick's observed engine state — the
+            // provenance a future drive edge (#226) reads to decide
+            // whether this lock is stale by construction.
+            st.delay = est.lag.map(|samples| Lock {
+                samples,
+                driving: ev.engine_on,
+            });
+            // Counted here rather than at the top of the loop: this is the
+            // branch where an estimate actually ran, so the count means
+            // "the estimator has answered", not "the loop reached the
+            // retry site".
+            st.attempts = st.attempts.saturating_add(1);
+            // Full lock evidence, not just the ratio: the competing peaks
+            // are what make DIRECT_PEAK_FRACTION settleable offline, and
+            // they cannot be reconstructed from a finished session.
+            st.prominence = Some(json!({
+                "prominence":   est.prominence,
+                "peak_lag":     est.peak_lag,
+                "peak_value":   est.peak_value,
+                // The strongest peak the estimator is not allowed to
+                // select. Published so ring skew (#216) and stimulus-onset
+                // ripples stay diagnosable from a capture rather than
+                // needing another rig session.
+                "noncausal_peak_lag":   est.noncausal_peak_lag,
+                "noncausal_peak_value": est.noncausal_peak_value,
+                "median_value": est.median_value,
+                // Uncontaminated noise floor for the offline
+                // re-thresholding experiment; see
+                // DelayEstimate::negative_lag_median.
+                "negative_lag_median": est.negative_lag_median,
+                "candidates":   est.candidates.iter()
+                    .map(|c| json!({"lag": c.lag, "value": c.value}))
+                    .collect::<Vec<_>>(),
+            }));
+            if est.lag.is_none() {
+                st.next_attempt = Some(now + RELOCK_RETRY);
+            }
+        }
+    }
+
+    /// Build each pair's ladder once its alignment offset is known — the
+    /// offset is applied at full rate, before decimation, so it has to
+    /// exist before the first sample enters — then push this tick's fresh
+    /// buffers through and read the columns back.
+    fn advance_ladders(
+        &mut self,
+        bufs: &[Vec<f32>],
+    ) -> (
+        Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>>,
+        Vec<Vec<bool>>,
+    ) {
+        let FrameStatics {
+            sr,
+            spec_f_min,
+            spec_f_max,
+            mtw_ppo,
+            mtw_n_blocks,
+            ..
+        } = self.statics;
+        for (slot, st) in self.ladders.iter_mut().zip(self.pairs.iter()) {
+            if slot.is_some() || self.ladder_failed {
+                continue;
+            }
+            let Some(delay) = st.delay.map(|l| l.samples) else {
+                continue;
+            };
+            match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
+                Ok(p) => *slot = Some(p),
+                Err(e) => {
+                    eprintln!("transfer_stream: MTW ladder unavailable at {sr} Hz: {e}");
+                    self.ladder_failed = true;
+                }
+            }
+        }
+        // Sequential rather than folded into the per-pair rayon fan-out:
+        // the ladders are `&mut` and the fan-out borrows `rings`
+        // immutably, and one 4096-point FFT pair per stage per tick is not
+        // what makes this loop expensive.
+        let columns = self
+            .ladders
+            .iter_mut()
+            .zip(self.ctx.iter())
+            .map(|(slot, ctx)| {
+                let p = slot.as_mut()?;
+                let meas = bufs.get(ctx.mi)?;
+                let refb = bufs.get(ctx.ri)?;
+                p.push(meas, refb);
+                p.columns(spec_f_min, spec_f_max, mtw_ppo)
+            })
+            .collect();
+        // Sampled after the push, so it describes the frame being built.
+        let settled = self
+            .ladders
+            .iter()
+            .map(|slot| {
+                slot.as_ref()
+                    .map(|p| p.settled_stages())
+                    .unwrap_or_default()
+            })
+            .collect();
+        (columns, settled)
+    }
+
+    /// One capture tick, from raw buffers to the messages to publish.
+    ///
+    /// `now` is a parameter rather than an `Instant::now()` call so the
+    /// delay retry timer and the `spl` integrator's `dt` are both driven
+    /// by the caller's clock.
+    fn tick(
+        &mut self,
+        bufs: &[Vec<f32>],
+        ev: TickEvents,
+        drive_msg: &Value,
+        now: std::time::Instant,
+    ) -> Vec<Value> {
+        // Consumed before this tick's own estimate, so a re-lock request
+        // and the tick's delay attempt never interleave.
+        if ev.relock_requested {
+            self.flush_all();
+        }
+        if ev.drive_edge_on {
+            self.flush_locks_taken_against_silence();
+        }
+
+        // Raw capture peaks (§4.2), per unique-port index, from THIS
+        // tick's blocks — before any calibration, weighting, or
+        // aggregation. Deliberately not derived from `rings` (a
+        // multi-segment window, not the frame's blocks) and not from
+        // `TransferResult`'s `meas_amp`/`ref_amp` (window-normalised and
+        // calibration-adjacent). The meters exist to judge gain staging,
+        // and a calibrated or band-aggregated value hides clipping — which
+        // is the one thing they must never do.
+        let tick_peaks_dbfs: Vec<Option<f64>> = bufs.iter().map(|b| raw_peak_dbfs(b)).collect();
+
+        self.push_rings(bufs);
+
+        // Warm-up: one Welch segment, so the first H1 has meaningful
+        // coherence.
+        //
+        // Deliberately NOT the full `target_total`. Waiting for the whole
+        // 2.5 s window would make N constant from the first frame, which
+        // reads like the tidier contract, but it pushes time-to-first-
+        // frame from 1.0 s to 2.5 s — past the 1.5 s drive dead-man. A
+        // client that sets the drive and waits for a lock without sending
+        // keepalives then has the drive expire *before* the first delay
+        // attempt runs, so the lock is taken against silence, gets
+        // `driving: false` provenance, and is discarded on the next drive
+        // edge. `it_relock`'s two survives-a-resume tests are exactly that
+        // sequence and both go red on the longer gate.
+        //
+        // So the warmup stays at one segment and the frame carries the
+        // block count it was actually built from. The #208-adjacent defect
+        // here was never that N varies while the window fills — it is that
+        // N varied *silently*, leaving coherence's `1/N` bias
+        // uninterpretable. Reporting it fixes that without moving the gate.
+        if self.rings.iter().any(|r| r.len() < self.window.nperseg) {
+            return Vec::new();
+        }
+
+        let n_blocks = self.n_blocks();
+        self.acquire_missing_locks(ev, now);
+        let (mtw_columns, mtw_settled) = self.advance_ladders(bufs);
+
+        // Pairs are independent H1 estimates — fan out across the rayon
+        // pool so multi-pair sessions (e.g. 4 mic positions against one
+        // reference) scale linearly with core count. The rings are
+        // read-only inside the per-pair closure; JSON is built here and
+        // published back in original pair order.
+        let tick = TickInputs {
+            rings: &self.rings,
+            tick_peaks_dbfs: &tick_peaks_dbfs,
+            mc_enabled: ev.mc_enabled,
+            drive_msg,
+            mtw_columns: &mtw_columns,
+            mtw_settled: &mtw_settled,
+            n_blocks,
+        };
+        let statics = &self.statics;
+        let built: Vec<(usize, Vec<Value>, Option<f64>)> = self
+            .ctx
+            .par_iter()
+            .zip(self.pairs.par_iter())
+            .filter_map(|(ctx, st)| build_pair_messages(ctx, st, statics, &tick))
+            .collect();
+
+        let mut out = Vec::with_capacity(built.len() * 2);
+        for (pos, mut batch, spl_raw) in built {
+            // Sequential, indexed by `PairCtx::pos` — the EMA integrator
+            // is `&mut` per pair and cannot be advanced inside the
+            // parallel closure above. `pos` is the pair's position in the
+            // launch list, carried through `filter_map`, never the
+            // post-filter Vec position.
+            let st = &mut self.pairs[pos];
+            if let (Some(raw), Some(integ)) = (spl_raw, st.spl_integ.as_mut()) {
+                let dt = st
+                    .spl_last
+                    .map(|t| now.duration_since(t).as_secs_f64())
+                    .unwrap_or(self.chunk_secs)
+                    .max(1e-6);
+                st.spl_last = Some(now);
+                let integrated = integ.update(&[raw], dt)[0];
+                if let Some(first) = batch.first_mut() {
+                    first["spl"] = json!(integrated);
+                }
+            }
+            out.extend(batch);
+        }
+        out
+    }
+}
+
 pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "transfer_stream");
     cfg_guard!(state);
@@ -1215,18 +1672,11 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
 
         // Analysis window: the last `n_averages` Welch blocks, cut on the
         // **stream's own** `k·step` lattice rather than from the head of a
-        // freely-sliding buffer (#208). nperseg/step mirror h1_estimate's
-        // internal Welch settings; `chunk_secs` is the capture tick, which
-        // is no longer the same thing as the analysis rate — see the drain
-        // below and `n_averages` on the wire.
-        let nperseg = sr as usize; // 1 Hz bin width
-        let step = nperseg / 2; // 50% overlap
-        let n_averages = 4;
-        let target_total = nperseg + step * (n_averages - 1);
+        // freely-sliding buffer (#208). `chunk_secs` is the capture tick,
+        // which is no longer the same thing as the analysis rate — see
+        // `drain_to_block_lattice` and `n_averages` on the wire.
+        let window = Window::new(sr, 4);
         let chunk_secs = 0.05;
-        let mut rings: Vec<Vec<f32>> = (0..unique_ports.len())
-            .map(|_| Vec::with_capacity(target_total + step))
-            .collect();
 
         // `drive_state` was constructed and published by the handler
         // before this worker was spawned (see the note there) — the
@@ -1280,50 +1730,23 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
         // through to the same meas-only clear `capture_block` did.
         let _ = eng.capture_multi(0.2);
 
-        // Retry interval for a refused delay estimate — see
-        // `PairState::next_attempt`.
-        const RELOCK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
-
-        // Per-pair maintained state, one entry per `pair_ctx` entry and in
-        // the same order. The `spl` integrator is the only field decided at
-        // construction rather than by the loop (session-static per D10).
-        let mut pair_state: Vec<PairState> = pair_ctx
-            .iter()
-            .map(|c| {
-                PairState::new(
-                    c.meas_cal
-                        .as_ref()
-                        .and_then(Calibration::spl_offset_db)
-                        .map(|_| {
-                            ac_core::visualize::time_integration::EmaIntegrator::new(
-                                integration_tau_s,
-                                1,
-                            )
-                        }),
-                )
-            })
-            .collect();
+        // Everything the loop below maintains across ticks. The engine,
+        // the socket, the stop flag and the clock stay out here; what goes
+        // in is decidable from a `Vec` of samples, which is what makes the
+        // per-tick decisions testable without a daemon.
+        let mut session = SessionState::new(
+            statics,
+            window,
+            pair_ctx,
+            unique_ports.len(),
+            chunk_secs,
+            integration_tau_s,
+        );
 
         // Drain telemetry (#208 D1). Off unless `AC_DRAIN_TELEMETRY` is set:
         // this slice adds no behaviour, and a streaming session must log
         // nothing new by default.
         let mut drain_telemetry = crate::audio::drain_telemetry::DrainTelemetry::from_env(sr);
-
-        // Multi-time-window ladder, one per pair.
-        //
-        // Purely **additive**: it runs alongside the full-rate Welch estimator
-        // above and replaces nothing. That is not caution, it is required —
-        // `spl` is derived from the same `gyy` the Welch path produces and has
-        // to stay bit-identical, and `meas_spectrum` / `ref_spectrum` are
-        // calibrated absolute levels, which `Gxy/Gxx`'s cancellation of
-        // `|Hdec|²` does not cover (see `visualize::mtw`'s fence).
-        //
-        // Fed the fresh per-tick `bufs`, never the `rings` sliding window: the
-        // ladder is a push pipeline, and pushing a re-segmented sliding buffer
-        // into it would reproduce #208's re-analysis one level down.
-        let mut mtw: Vec<Option<ac_core::visualize::mtw::MtwPair>> =
-            (0..pairs.len()).map(|_| None).collect();
-        let mut mtw_failed = false;
 
         // Last `relock` generation consumed (#226). Seeded from the
         // request state's own start value rather than 0 so a generation
@@ -1365,7 +1788,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // including ones not written yet, and covers a backend that
             // changes its mind mid-session — the count is only knowable from
             // what capture actually returned.
-            if bufs.len() < rings.len() {
+            if bufs.len() < session.n_channels() {
                 send_pub(
                     &pub_tx,
                     "error",
@@ -1377,7 +1800,7 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                              backend's multi-channel capture support, the `pairs` list, and \
                              the port names each channel resolved to: {:?}",
                             bufs.len(),
-                            rings.len(),
+                            session.n_channels(),
                             unique_chans,
                             unique_ports,
                         ),
@@ -1428,41 +1851,15 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
             // pair rather than compared against commanded state.
             let drive_edge_on = !prev_engine_on && engine_on;
 
-            // Manual re-lock (#226), consumed right after the drive poll
-            // and before this tick's own estimate, so a re-lock request
-            // and the tick's delay attempt never interleave.
+            // Manual re-lock (#226), read right after the drive poll so a
+            // re-lock request and the tick's delay attempt never
+            // interleave — `SessionState::tick` consumes it before
+            // acquisition. The flush it triggers, and the drive-edge flush
+            // beside it, both live in the session because both are
+            // decisions about held locks and neither needs the engine.
             let relock_gen = relock_state.generation();
-            if relock_gen != last_relock_gen {
-                last_relock_gen = relock_gen;
-                for (st, ladder) in pair_state.iter_mut().zip(mtw.iter_mut()) {
-                    st.flush(ladder);
-                }
-            }
-
-            // Drive off→on edge (#226). A lock is stale by construction —
-            // not by drift, not by a threshold — the instant the drive
-            // that was off starts driving, because the signal producing
-            // it just changed. The qualifier: only a lock acquired *while
-            // the drive was off* is discarded, so a dead-man drop and
-            // resume of a lock taken while driving survives untouched —
-            // nothing about that lock's premise changed. A pair that is
-            // currently unlocked gets its retry timer cleared instead, so
-            // acquisition is attempted this tick rather than up to
-            // `RELOCK_RETRY` later.
-            if drive_edge_on {
-                for (st, ladder) in pair_state.iter_mut().zip(mtw.iter_mut()) {
-                    match st.delay {
-                        Some(Lock { driving: false, .. }) => st.flush(ladder),
-                        Some(Lock { driving: true, .. }) => {
-                            // Acquired while driving — the dead-man/resume
-                            // thrash case. Survives untouched.
-                        }
-                        None => {
-                            st.next_attempt = None;
-                        }
-                    }
-                }
-            }
+            let relock_requested = relock_gen != last_relock_gen;
+            last_relock_gen = relock_gen;
 
             // Observed drive state (#228). Built from `engine_on`/`engine_level`
             // — what was actually applied to the engine on this tick, after the
@@ -1488,222 +1885,34 @@ pub fn transfer_stream(state: &ServerState, cmd: &Value) -> Value {
                 "drivable":   drivable,
             });
 
-            // Raw capture peaks (§4.2), per unique-port index, from
-            // THIS tick's blocks — before any calibration, weighting, or
-            // aggregation. Deliberately not derived from `rings` (a
-            // multi-segment window, not the frame's blocks) and not from
-            // `TransferResult`'s `meas_amp`/`ref_amp` (window-normalised
-            // and calibration-adjacent). The meters exist to judge gain
-            // staging, and a calibrated or band-aggregated value hides
-            // clipping — which is the one thing they must never do.
-            let tick_peaks_dbfs: Vec<Option<f64>> = bufs.iter().map(|b| raw_peak_dbfs(b)).collect();
-
             // Feed the snapshot ring the same raw, pre-processing `bufs`
-            // the H1 sliding window below derives from — same capture,
-            // second (larger, longer-retention) consumer.
+            // the H1 sliding window derives from — same capture, second
+            // (larger, longer-retention) consumer.
             snapshot_ring.lock().unwrap().push_tick(&bufs);
 
-            for (i, buf) in bufs.iter().enumerate() {
-                if i >= rings.len() {
-                    break;
-                }
-                let r = &mut rings[i];
-                r.extend_from_slice(buf);
-                drain_to_block_lattice(r, target_total, step);
-            }
+            let messages = session.tick(
+                &bufs,
+                TickEvents {
+                    engine_on,
+                    drive_edge_on,
+                    relock_requested,
+                    mc_enabled: mic_corr_enabled.load(Ordering::Relaxed),
+                },
+                &drive_msg,
+                std::time::Instant::now(),
+            );
 
-            // Warm-up: one Welch segment, so the first H1 has meaningful
-            // coherence.
-            //
-            // Deliberately NOT the full `target_total`. Waiting for the whole
-            // 2.5 s window would make N constant from the first frame, which
-            // reads like the tidier contract, but it pushes time-to-first-
-            // frame from 1.0 s to 2.5 s — past the 1.5 s drive dead-man. A
-            // client that sets the drive and waits for a lock without sending
-            // keepalives then has the drive expire *before* the first delay
-            // attempt runs, so the lock is taken against silence, gets
-            // `driving: false` provenance, and is discarded on the next drive
-            // edge. `it_relock`'s two survives-a-resume tests are exactly that
-            // sequence and both go red on the longer gate.
-            //
-            // So the warmup stays at one segment and the frame carries the
-            // block count it was actually built from (below). The #208-adjacent
-            // defect here was never that N varies while the window fills — it
-            // is that N varied *silently*, leaving coherence's `1/N` bias
-            // uninterpretable. Reporting it fixes that without moving the gate.
-            if rings.iter().any(|r| r.len() < nperseg) {
-                continue;
-            }
+            // Keep the snapshot ring's copy of the locks in sync — cheap
+            // (small Vec), and simpler than pushing incrementally from
+            // inside the acquisition loop. Written after the tick rather
+            // than between acquisition and the fan-out, so a `snapshot`
+            // arriving during a fan-out reads the previous tick's locks.
+            // A lock only changes at acquisition, so the difference is
+            // confined to the one tick a pair first locks on.
+            snapshot_ring.lock().unwrap().delay_samples = session.delay_samples();
 
-            // Blocks `welch_all` will actually average over this tick's rings —
-            // the same `while pos + nperseg <= len` walk it does, evaluated
-            // here so the frame can state it. Rises 1 → `n_averages` while the
-            // window fills, then is pinned there by `drain_to_block_lattice`.
-            let n_blocks = rings
-                .iter()
-                .map(|r| (r.len() - nperseg) / step + 1)
-                .min()
-                .unwrap_or(1);
-
-            // Estimate any missing per-pair delays once on first entry (after
-            // the rings are full). Subsequent ticks reuse the cached value.
-            for (ctx, st) in pair_ctx.iter().zip(pair_state.iter_mut()) {
-                if st.delay.is_some() {
-                    continue;
-                }
-                let now = std::time::Instant::now();
-                if st.next_attempt.is_some_and(|t| now < t) {
-                    continue;
-                }
-                if let (Some(meas), Some(refb)) = (rings.get(ctx.mi), rings.get(ctx.ri)) {
-                    let est = ac_core::visualize::transfer::estimate_delay_detailed(
-                        refb.as_slice(),
-                        meas.as_slice(),
-                        sr,
-                    );
-                    // `driving` is this tick's already-updated `engine_on`
-                    // — the provenance a future drive edge (#226) reads to
-                    // decide whether this lock is stale by construction.
-                    st.delay = est.lag.map(|samples| Lock {
-                        samples,
-                        driving: engine_on,
-                    });
-                    // Counted here rather than at the top of the loop: this is
-                    // the branch where an estimate actually ran on full rings,
-                    // so the count means "the estimator has answered", not
-                    // "the loop reached the retry site".
-                    st.attempts = st.attempts.saturating_add(1);
-                    // Full lock evidence, not just the ratio: the competing
-                    // peaks are what make DIRECT_PEAK_FRACTION settleable
-                    // offline, and they cannot be reconstructed from a
-                    // finished session.
-                    st.prominence = Some(json!({
-                        "prominence":   est.prominence,
-                        "peak_lag":     est.peak_lag,
-                        "peak_value":   est.peak_value,
-                        // The strongest peak the estimator is not allowed to
-                        // select. Published so ring skew (#216) and
-                        // stimulus-onset ripples stay diagnosable from a
-                        // capture rather than needing another rig session.
-                        "noncausal_peak_lag":   est.noncausal_peak_lag,
-                        "noncausal_peak_value": est.noncausal_peak_value,
-                        "median_value": est.median_value,
-                        // Uncontaminated noise floor for the offline
-                        // re-thresholding experiment; see
-                        // DelayEstimate::negative_lag_median.
-                        "negative_lag_median": est.negative_lag_median,
-                        "candidates":   est.candidates.iter()
-                            .map(|c| json!({"lag": c.lag, "value": c.value}))
-                            .collect::<Vec<_>>(),
-                    }));
-                    if est.lag.is_none() {
-                        st.next_attempt = Some(now + RELOCK_RETRY);
-                    }
-                }
-            }
-            // Keep the ring's copy in sync — cheap (small Vec), and
-            // simpler than trying to push incrementally from inside the
-            // loop above.
-            snapshot_ring.lock().unwrap().delay_samples = pair_state
-                .iter()
-                .map(|st| st.delay.map(|l| l.samples))
-                .collect();
-
-            // Build each pair's ladder once its alignment offset is known —
-            // the offset is applied at full rate, before decimation, so it has
-            // to exist before the first sample enters.
-            for (slot, st) in mtw.iter_mut().zip(pair_state.iter()) {
-                if slot.is_some() || mtw_failed {
-                    continue;
-                }
-                let Some(delay) = st.delay.map(|l| l.samples) else {
-                    continue;
-                };
-                match ac_core::visualize::mtw::MtwPair::new(sr, delay, mtw_n_blocks) {
-                    Ok(p) => *slot = Some(p),
-                    Err(e) => {
-                        // The ladder is additive, so a layout it cannot serve
-                        // (an unsupported rate) must degrade to "no ladder",
-                        // not to a dead session. Logged once.
-                        eprintln!("transfer_stream: MTW ladder unavailable at {sr} Hz: {e}");
-                        mtw_failed = true;
-                    }
-                }
-            }
-
-            // Push this tick into every ladder and assemble its columns.
-            // Sequential rather than folded into the per-pair rayon fan-out
-            // below: the ladders are `&mut` and the fan-out borrows `rings`
-            // immutably, and one 4096-point FFT pair per stage per tick is not
-            // what makes this loop expensive.
-            let mtw_columns: Vec<Option<Vec<ac_core::visualize::mtw::splice::Column>>> = mtw
-                .iter_mut()
-                .zip(pair_ctx.iter())
-                .map(|(slot, ctx)| {
-                    let p = slot.as_mut()?;
-                    let meas = bufs.get(ctx.mi)?;
-                    let refb = bufs.get(ctx.ri)?;
-                    p.push(meas, refb);
-                    p.columns(spec_f_min, spec_f_max, mtw_ppo)
-                })
-                .collect();
-            // Sampled after the push, so it describes the frame being built.
-            let mtw_settled: Vec<Vec<bool>> = mtw
-                .iter()
-                .map(|slot| {
-                    slot.as_ref()
-                        .map(|p| p.settled_stages())
-                        .unwrap_or_default()
-                })
-                .collect();
-
-            // Pairs are independent H1 estimates — fan out across the rayon
-            // pool so multi-pair sessions (e.g. 4 mic positions against one
-            // reference) scale linearly with core count. The rings are
-            // read-only inside the per-pair closure; JSON is built on the
-            // worker thread and published back in original pair order.
-            let tick = TickInputs {
-                rings: &rings,
-                tick_peaks_dbfs: &tick_peaks_dbfs,
-                mc_enabled: mic_corr_enabled.load(Ordering::Relaxed),
-                drive_msg: &drive_msg,
-                mtw_columns: &mtw_columns,
-                mtw_settled: &mtw_settled,
-                n_blocks,
-            };
-            // Each pair can contribute multiple wire messages (the
-            // transfer_stream frame + a Phase 4b visualize/ir sidecar
-            // computed from the same H₁ result). flat_map flattens to
-            // one Vec<Value> per filter_map; overall Vec<Vec<Value>>
-            // is then chained into the per-message send loop below.
-            let messages: Vec<(usize, Vec<Value>, Option<f64>)> = pair_ctx
-                .par_iter()
-                .zip(pair_state.par_iter())
-                .filter_map(|(ctx, st)| build_pair_messages(ctx, st, &statics, &tick))
-                .collect();
-            for (pos, mut batch, spl_raw) in messages {
-                // Sequential, indexed by `PairCtx::pos` — the EMA
-                // integrator is `&mut` per pair and cannot be advanced
-                // inside the parallel closure above. `pos` is the pair's
-                // position in the launch list, carried through
-                // `filter_map`, never the post-filter Vec position.
-                let st = &mut pair_state[pos];
-                if let (Some(raw), Some(integ)) = (spl_raw, st.spl_integ.as_mut()) {
-                    let now = std::time::Instant::now();
-                    let dt = st
-                        .spl_last
-                        .map(|t| now.duration_since(t).as_secs_f64())
-                        .unwrap_or(chunk_secs)
-                        .max(1e-6);
-                    st.spl_last = Some(now);
-                    let integrated = integ.update(&[raw], dt)[0];
-                    if let Some(first) = batch.first_mut() {
-                        first["spl"] = json!(integrated);
-                    }
-                }
-                for msg in batch {
-                    send_pub(&pub_tx, "data", &msg);
-                }
+            for msg in messages {
+                send_pub(&pub_tx, "data", &msg);
             }
         }
 
@@ -2388,17 +2597,17 @@ mod tests {
 /// to it.
 #[cfg(test)]
 mod pinned_window_tests {
-    use super::drain_to_block_lattice;
+    use super::{drain_to_block_lattice, Window};
 
     const SR: u32 = 8_000;
     const BURST_START_S: f64 = 1.0;
     const BURST_LEN_S: f64 = 0.25; // shorter than the 1 s block — the whole point
 
-    fn params() -> (usize, usize, usize, usize) {
-        let nperseg = SR as usize;
-        let step = nperseg / 2;
-        let n_averages = 4;
-        (nperseg, step, n_averages, nperseg + step * (n_averages - 1))
+    /// The production geometry, from the production type — not a second
+    /// copy of the arithmetic. A window this test derived for itself could
+    /// stay green while the session's own moved out from under it.
+    fn params() -> Window {
+        Window::new(SR, 4)
     }
 
     /// Deterministic broadband burst in silence. No rng dependency: a
@@ -2436,7 +2645,9 @@ mod pinned_window_tests {
     /// Run the worker's ring loop with `drain`, returning `(t_s, level_db)`
     /// for every tick that would have published a frame.
     fn run(drain: fn(&mut Vec<f32>, usize, usize)) -> Vec<(f64, f64)> {
-        let (nperseg, step, n_averages, target_total) = params();
+        let w = params();
+        let (nperseg, step, n_averages, target_total) =
+            (w.nperseg, w.step, w.n_averages, w.target_total());
         let chunk = (0.05 * SR as f64) as usize;
         let x = burst_stream(6.0);
         let mut ring: Vec<f32> = Vec::new();
@@ -2465,8 +2676,7 @@ mod pinned_window_tests {
 
     /// dB spread over the ticks where the burst is wholly inside the window.
     fn spread_while_fully_inside(series: &[(f64, f64)]) -> (f64, usize) {
-        let (_n, step, _a, target_total) = params();
-        let win_s = target_total as f64 / SR as f64;
+        let win_s = params().target_total() as f64 / SR as f64;
         // Window covers [t - win_s, t]; burst is inside once t has passed its
         // end and until t - win_s passes its start. Trim a tick off each edge
         // so quantisation of the chunk grid is not scored.
@@ -2477,7 +2687,6 @@ mod pinned_window_tests {
             .filter(|(t, _)| *t >= lo && *t <= hi)
             .map(|(_, d)| *d)
             .collect();
-        let _ = step;
         if v.len() < 3 {
             return (f64::NAN, v.len());
         }
@@ -2521,7 +2730,9 @@ mod pinned_window_tests {
     /// target_total + step)`, which is what fits exactly `n_averages` blocks.
     #[test]
     fn drain_keeps_the_ring_on_the_block_lattice() {
-        let (nperseg, step, n_avg, target_total) = params();
+        let w = params();
+        let (nperseg, step, n_avg, target_total) =
+            (w.nperseg, w.step, w.n_averages, w.target_total());
         let mut ring: Vec<f32> = Vec::new();
         for _ in 0..400 {
             ring.extend(std::iter::repeat_n(0.0f32, 137)); // coprime with step
@@ -2536,5 +2747,312 @@ mod pinned_window_tests {
                 assert_eq!(blocks, n_avg, "ring of {} fits {blocks} blocks", ring.len());
             }
         }
+    }
+}
+
+/// Per-tick session behaviour, driven directly rather than through a
+/// daemon.
+///
+/// Everything here was previously reachable only from a live ZMQ session:
+/// the warmup gate, the block count the frame reports, the two lock
+/// flushes and the refusal retry timer all lived inside the worker
+/// closure. `it_relock` covers three of them end to end and is the right
+/// test for the protocol, but it cannot advance the clock, so the retry
+/// interval below had no test at all — a `RELOCK_RETRY` of zero, or of an
+/// hour, would both have stayed green.
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+    const CHUNK: usize = (SR as usize) / 20; // 0.05 s, the capture tick
+
+    /// Deterministic broadband noise. Fixed-seed LCG rather than an rng
+    /// dependency, so a failure reproduces across toolchains.
+    fn noise(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (s >> 8) as f32 / (1 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
+    fn statics() -> FrameStatics {
+        FrameStatics {
+            sr: SR,
+            spec_f_min: 20.0,
+            spec_f_max: SR as f64 / 2.0,
+            spec_n_columns: ac_core::visualize::aggregate::transfer_spectrum_n_columns(
+                20.0,
+                SR as f64 / 2.0,
+            ),
+            weighting: ac_core::visualize::weighting_curves::WeightingCurve::from_tag("Z").unwrap(),
+            integration_tag: "fast".to_string(),
+            mtw_ppo: ac_core::visualize::mtw::ladder::P_REF,
+            mtw_n_blocks: ac_core::visualize::mtw::average::DEFAULT_N_BLOCKS,
+            mtw_stages: Value::Null,
+        }
+    }
+
+    /// One pair, channel 0 measurement against channel 1 reference, no
+    /// calibration of any kind — `spl` and the cal tags are not what these
+    /// tests are about.
+    fn session() -> SessionState {
+        SessionState::new(
+            statics(),
+            Window::new(SR, 4),
+            vec![PairCtx {
+                pos: 0,
+                meas_ch: 0,
+                ref_ch: 1,
+                mi: 0,
+                ri: 1,
+                meas_cal: None,
+                ref_cal: None,
+                meas_curve: None,
+            }],
+            2,
+            0.05,
+            ac_core::visualize::time_integration::TAU_FAST_S,
+        )
+    }
+
+    fn events(engine_on: bool) -> TickEvents {
+        TickEvents {
+            engine_on,
+            drive_edge_on: false,
+            relock_requested: false,
+            mc_enabled: false,
+        }
+    }
+
+    fn drive_msg(on: bool) -> Value {
+        json!({"on": on, "level_dbfs": if on { json!(-20.0) } else { Value::Null }, "drivable": true})
+    }
+
+    /// Feed `n` ticks of a correlated pair — measurement is the reference
+    /// delayed by `delay` samples, which is what the estimator is meant to
+    /// find — and return every frame published.
+    fn run_correlated(
+        s: &mut SessionState,
+        n: usize,
+        delay: usize,
+        ev: TickEvents,
+        t0: std::time::Instant,
+    ) -> Vec<Value> {
+        let x = noise(CHUNK * (n + 2) + delay, 0x5eed);
+        let mut out = Vec::new();
+        for k in 0..n {
+            let r0 = delay + k * CHUNK;
+            let refb = x[r0..r0 + CHUNK].to_vec();
+            let meas = x[r0 - delay..r0 - delay + CHUNK].to_vec();
+            let now = t0 + std::time::Duration::from_millis(50 * k as u64);
+            out.extend(
+                s.tick(&[meas, refb], ev, &drive_msg(ev.engine_on), now)
+                    .into_iter()
+                    .filter(|m| m["type"] == json!("transfer_stream")),
+            );
+        }
+        out
+    }
+
+    /// Uncorrelated legs: the estimator has nothing to lock to and must
+    /// refuse rather than pick the tallest noise peak (#227).
+    fn run_uncorrelated(
+        s: &mut SessionState,
+        ticks: &[std::time::Instant],
+        ev: TickEvents,
+    ) -> Vec<Value> {
+        let mut out = Vec::new();
+        for (k, &now) in ticks.iter().enumerate() {
+            let meas = noise(CHUNK, 0x1000 + k as u32);
+            let refb = noise(CHUNK, 0x9000 + k as u32);
+            out.extend(
+                s.tick(&[meas, refb], ev, &drive_msg(ev.engine_on), now)
+                    .into_iter()
+                    .filter(|m| m["type"] == json!("transfer_stream")),
+            );
+        }
+        out
+    }
+
+    /// The warmup gate, stated as behaviour rather than as an expression:
+    /// nothing is published until a ring holds one whole Welch segment.
+    ///
+    /// This is the gate that also suppresses the drive state and the
+    /// capture peaks, neither of which depends on the analysis window —
+    /// which is why it is worth having a test that says where the line
+    /// currently sits.
+    #[test]
+    fn nothing_is_published_until_the_ring_holds_one_welch_segment() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        // One segment is `sr` samples = 20 ticks. The 20th completes it.
+        let before = run_correlated(&mut s, 19, 480, events(false), t0);
+        assert!(
+            before.is_empty(),
+            "published {} frame(s) before one segment was in the ring",
+            before.len()
+        );
+        let after = run_correlated(&mut s, 1, 480, events(false), t0);
+        assert_eq!(
+            after.len(),
+            1,
+            "no frame on the tick that completed the segment"
+        );
+    }
+
+    /// `n_averages` is the frame's statement about its own coherence bias.
+    /// It must rise while the window fills and then stop, because
+    /// `drain_to_block_lattice` pins the ring inside one `step` of the
+    /// target (#208).
+    #[test]
+    fn n_averages_climbs_to_the_window_depth_and_then_holds() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        let frames = run_correlated(&mut s, 140, 480, events(false), t0);
+        let seen: Vec<u64> = frames
+            .iter()
+            .map(|f| f["n_averages"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            seen.first(),
+            Some(&1),
+            "first frame did not report one block"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&4),
+            "settled frames do not report the window depth"
+        );
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "n_averages went backwards: {seen:?}"
+        );
+        assert!(
+            seen.iter().all(|&n| n <= 4),
+            "n_averages exceeded the window depth: {seen:?}"
+        );
+    }
+
+    /// A refused estimate must not be retried on the very next tick: each
+    /// attempt is the same full-ring FFT+IFFT the delay cache exists to
+    /// avoid, and its inputs only turn over on the ring's own timescale.
+    ///
+    /// The clock is a parameter, so this asserts the interval itself. A
+    /// live session could only assert it by sleeping, which is why
+    /// `RELOCK_RETRY` had no test before: any value at all was green.
+    #[test]
+    fn a_refused_delay_waits_out_the_retry_interval_before_trying_again() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        // Fill the ring, then hold the clock still: every tick after the
+        // first attempt is inside the retry window.
+        let warm: Vec<std::time::Instant> = (0..20)
+            .map(|k| t0 + std::time::Duration::from_millis(50 * k))
+            .collect();
+        let frames = run_uncorrelated(&mut s, &warm, events(true));
+        let first = frames.last().expect("a frame once the segment is in");
+        assert_eq!(
+            first["delay_locked"],
+            json!(false),
+            "uncorrelated legs must not lock"
+        );
+        assert_eq!(
+            first["delay_attempts"],
+            json!(1),
+            "expected exactly one attempt"
+        );
+
+        // Well inside RELOCK_RETRY: no second attempt.
+        let held: Vec<std::time::Instant> = (0..5)
+            .map(|k| t0 + std::time::Duration::from_millis(1000 + 50 * k))
+            .collect();
+        let frames = run_uncorrelated(&mut s, &held, events(true));
+        assert_eq!(
+            frames.last().unwrap()["delay_attempts"],
+            json!(1),
+            "retried before the interval elapsed"
+        );
+
+        // Past it: exactly one more.
+        let after = vec![t0 + RELOCK_RETRY + std::time::Duration::from_millis(1500)];
+        let frames = run_uncorrelated(&mut s, &after, events(true));
+        assert_eq!(
+            frames.last().unwrap()["delay_attempts"],
+            json!(2),
+            "did not retry after the interval elapsed"
+        );
+    }
+
+    /// `relock` (#226) discards the held lock, and the attempt counter
+    /// stays monotone across it — a pair that locked and then started
+    /// refusing must not read as one never asked (`ac-scene::fault`).
+    #[test]
+    fn a_relock_request_drops_the_lock_and_leaves_the_attempt_count_monotone() {
+        let mut s = session();
+        let t0 = std::time::Instant::now();
+        let frames = run_correlated(&mut s, 25, 480, events(true), t0);
+        let locked = frames.last().unwrap();
+        assert_eq!(
+            locked["delay_locked"],
+            json!(true),
+            "correlated pair failed to lock"
+        );
+        assert_eq!(locked["delay_samples"], json!(480));
+        let attempts_before = locked["delay_attempts"].as_u64().unwrap();
+
+        let ev = TickEvents {
+            relock_requested: true,
+            ..events(true)
+        };
+        // The flush lands before this tick's own acquisition, so the pair
+        // re-locks within the same tick — what changes is the attempt
+        // count, which must have gone up rather than reset.
+        let after = run_correlated(&mut s, 1, 480, ev, t0 + std::time::Duration::from_secs(5));
+        let f = after.last().unwrap();
+        assert!(
+            f["delay_attempts"].as_u64().unwrap() > attempts_before,
+            "relock did not cause a new attempt"
+        );
+    }
+
+    /// The drive off→on edge discards a lock taken against silence and
+    /// keeps one taken while driving (#226). `it_relock` covers both over
+    /// ZMQ; here they are two assertions on the same held state.
+    #[test]
+    fn the_drive_edge_discards_a_lock_taken_against_silence_and_keeps_one_taken_driving() {
+        let t0 = std::time::Instant::now();
+
+        let mut silent = session();
+        let frames = run_correlated(&mut silent, 25, 480, events(false), t0);
+        assert_eq!(frames.last().unwrap()["delay_locked"], json!(true));
+        assert!(matches!(
+            silent.pairs[0].delay,
+            Some(Lock { driving: false, .. })
+        ));
+        silent.flush_locks_taken_against_silence();
+        assert!(
+            silent.pairs[0].delay.is_none(),
+            "a lock taken against silence survived the drive edge"
+        );
+        assert!(
+            silent.ladders[0].is_none(),
+            "the ladder outlived the lock it was aligned to"
+        );
+
+        let mut driving = session();
+        let frames = run_correlated(&mut driving, 25, 480, events(true), t0);
+        assert_eq!(frames.last().unwrap()["delay_locked"], json!(true));
+        let held = driving.pairs[0].delay;
+        assert!(matches!(held, Some(Lock { driving: true, .. })));
+        driving.flush_locks_taken_against_silence();
+        assert_eq!(
+            driving.pairs[0].delay.map(|l| l.samples),
+            held.map(|l| l.samples),
+            "a lock taken while driving was discarded by a later drive edge"
+        );
     }
 }
