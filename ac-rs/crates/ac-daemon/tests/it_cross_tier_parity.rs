@@ -23,156 +23,14 @@
 //! design. Verifying technique-internal calibration plumbing is what
 //! makes the cross-tier promise real.
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(26_400);
-static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
+#[path = "common/mod.rs"]
+mod common;
 
-fn alloc_ports() -> (u16, u16) {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    (base, base + 1)
-}
-
-fn alloc_home() -> PathBuf {
-    let n = HOME_CURSOR.fetch_add(1, Ordering::Relaxed);
-    let mut p = env::temp_dir();
-    p.push(format!("ac-daemon-parity-{}-{n}", std::process::id()));
-    let _ = fs::create_dir_all(p.join(".config").join("ac"));
-    p
-}
-
-struct Daemon {
-    child: Child,
-    ctrl_port: u16,
-    data_port: u16,
-    home: PathBuf,
-}
-
-impl Daemon {
-    fn spawn() -> Self {
-        let (ctrl, data) = alloc_ports();
-        let home = alloc_home();
-        let bin = env!("CARGO_BIN_EXE_ac-daemon");
-        let child = Command::new(bin)
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .spawn()
-            .expect("spawn ac-daemon");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let ctx = zmq::Context::new();
-        loop {
-            if Instant::now() > deadline {
-                panic!("daemon never came up");
-            }
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-        Self {
-            child,
-            ctrl_port: ctrl,
-            data_port: data,
-            home,
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.home);
-    }
-}
-
-struct Client {
-    _ctx: zmq::Context,
-    req: zmq::Socket,
-    sub: zmq::Socket,
-}
-
-impl Client {
-    fn new(d: &Daemon) -> Self {
-        let ctx = zmq::Context::new();
-        let req = ctx.socket(zmq::REQ).unwrap();
-        req.set_linger(0).unwrap();
-        req.set_rcvtimeo(5_000).unwrap();
-        req.set_sndtimeo(5_000).unwrap();
-        req.connect(&format!("tcp://127.0.0.1:{}", d.ctrl_port))
-            .unwrap();
-        let sub = ctx.socket(zmq::SUB).unwrap();
-        sub.set_linger(0).unwrap();
-        sub.set_rcvtimeo(8_000).unwrap();
-        sub.set_subscribe(b"").unwrap();
-        sub.connect(&format!("tcp://127.0.0.1:{}", d.data_port))
-            .unwrap();
-        thread::sleep(Duration::from_millis(100));
-        Self {
-            _ctx: ctx,
-            req,
-            sub,
-        }
-    }
-
-    fn call(&self, cmd: Value) -> Value {
-        self.req.send(serde_json::to_vec(&cmd).unwrap(), 0).unwrap();
-        let bytes = self.req.recv_bytes(0).expect("CTRL recv");
-        serde_json::from_slice(&bytes).expect("CTRL decode")
-    }
-
-    fn recv_pub(&self, timeout_ms: i32) -> Option<(String, Value)> {
-        self.sub.set_rcvtimeo(timeout_ms).ok();
-        let bytes = self.sub.recv_bytes(0).ok()?;
-        let split = bytes.iter().position(|&b| b == b' ')?;
-        let topic = String::from_utf8(bytes[..split].to_vec()).ok()?;
-        let payload = &bytes[split + 1..];
-        Some((
-            topic,
-            serde_json::from_slice(payload).unwrap_or(Value::Null),
-        ))
-    }
-
-    fn wait_for_topic(&self, want: &str, timeout: Duration) -> Option<Value> {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            let remaining = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis() as i32;
-            match self.recv_pub(remaining.max(1)) {
-                Some((t, v)) if t == want => return Some(v),
-                Some(_) => continue,
-                None => return None,
-            }
-        }
-        None
-    }
-}
+use common::{Client, Daemon};
 
 /// Build a synthetic mic-curve with a constant `peak_db` gain across
 /// 24 log-spaced points from 100 Hz to 10 kHz. Constant gain (rather
@@ -520,7 +378,15 @@ fn parity_transfer_meas_spectrum_matches_monitor_spectrum_level() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -648,7 +514,15 @@ fn parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -771,7 +645,15 @@ fn parity_transfer_spl_matches_monitor_derived_spl_on_first_frame() {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => {
+            // `n_averages > 0` skips the settling frames a session now
+            // publishes before its ring holds a Welch segment: those carry
+            // empty analysis arrays by design, and every parity assertion
+            // below is about the numbers in them.
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
                 tframe = Some(v);
                 break;
             }
@@ -941,6 +823,9 @@ fn cal_tags_mic_curve_matches_monitor_mic_correction_tag() {
     );
 }
 
+/// The first frame carrying an actual H1 estimate. Settling frames
+/// (`n_averages == 0`, empty analysis arrays) are skipped: every caller
+/// here asserts on numbers those frames do not have.
 fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -948,7 +833,13 @@ fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
             .saturating_duration_since(Instant::now())
             .as_millis() as i32;
         match c.recv_pub(remaining.max(1)) {
-            Some((t, v)) if t == "data" && v["type"] == json!("transfer_stream") => return Some(v),
+            Some((t, v))
+                if t == "data"
+                    && v["type"] == json!("transfer_stream")
+                    && v["n_averages"].as_u64().unwrap_or(0) > 0 =>
+            {
+                return Some(v)
+            }
             Some(_) => continue,
             None => return None,
         }
@@ -956,7 +847,7 @@ fn wait_for_transfer_frame(c: &Client) -> Option<Value> {
     None
 }
 
-/// #261 — the third of the three call sites `shared/calibration.rs`'s layer
+/// #261 — the third of the three call sites `shared/calibration/`'s layer
 /// topology names, and the last one that held by human reading alone.
 ///
 /// `derive_pair` and the `transfer_stream` handler are covered by
@@ -1105,6 +996,6 @@ fn parity_monitor_spl_is_independent_of_voltage_cal_scale() {
          `monitor.rs` is scaling `spectrum` by `vrms_at_0dbfs_in` — that is \
          20·log10(22.36), the stored full-scale constant, not 20·log10(5.0) of the DMM \
          reading. Voltage cal and SPL cal are parallel layers off raw digital amplitude, \
-         not composed (`shared/calibration.rs`, layer topology)."
+         not composed (`shared/calibration/`, layer topology)."
     );
 }

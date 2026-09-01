@@ -515,7 +515,7 @@ impl TransferInput {
         // saying so. No trace is the honest state for the ~2.56 s the bottom
         // rung takes to settle; the meters and delay readout stay live
         // throughout, which is what gain staging needs.
-        let mtw = frame.mtw.as_ref().filter(|m| m.lengths_agree());
+        let mtw = frame.displayed_mtw();
         let (
             freqs,
             magnitude_db,

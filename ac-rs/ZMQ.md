@@ -711,6 +711,25 @@ their own).
 
 ---
 
+### `reset_loudness`
+
+Zeros the per-channel BS.1770-5 loudness state (integrated LKFS, LRA,
+dBTP) on the next monitor tick. Momentary and short-term windows are not
+cleared by this — they re-prime from their next input on their own. Safe
+to call when no monitor is active: the flag is one-shot and held until a
+worker consumes it.
+
+**Request**
+```json
+{ "cmd": "reset_loudness" }
+```
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+---
 ### `stop`
 
 Stops one or all running workers. **Synchronous**: the reply is only sent
@@ -1577,7 +1596,7 @@ lifecycles' — both necessarily cleared the threshold, since a lifecycle
 that didn't would have produced `not_measured_low_snr` instead, so this is
 a diagnostic figure alongside the result rather than a second gate.
 `tau_snr_threshold_db` is a derived constant (see
-`ac-daemon/src/handlers/calibrate.rs`'s `TAU_SNR_THRESHOLD_DB` doc
+`ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
 comment for its provenance), not measured on this exact sweep.
 
 On either disagreement state, `tau_reading1_s` / `tau_reading2_s` are the
@@ -1924,8 +1943,6 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "magnitude_db":    [<float>, ...],
   "phase_deg":       [<float>, ...],
   "coherence":       [<float>, ...],
-  "re":              [<float>, ...],     // docs/superseded/unified.md Phase 3: complex H, real part
-  "im":              [<float>, ...],     // complex H, imaginary part
   "delay_samples":   <int>,
   "delay_ms":        <float>,
 
@@ -2107,6 +2124,22 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "meas_channel":    <int>,
   "ref_channel":     <int>,
   "sr":              <int>,
+  "n_averages":      <int>,              // Welch blocks actually averaged into this
+                                          // frame (#208). 0 while the ring does not
+                                          // yet hold one whole segment — a SETTLING
+                                          // frame, see below — then rises 1 -> 4 over
+                                          // the first ~1.5 s and stays 4 for the
+                                          // session. Coherence carries a `1/N` bias,
+                                          // so a coherence figure without N is not
+                                          // interpretable — a settling display and a
+                                          // DUT that changed look alike without it.
+  "analysis_seq":    <int> | null,       // which H1 estimate these arrays are.
+                                          // Increments once per recomputation,
+                                          // which is once per Welch hop (0.5 s at
+                                          // 48 kHz) — slower than the ~20/s frame
+                                          // rate, so consecutive frames repeat the
+                                          // same arrays by design. `null` on a
+                                          // settling frame: no estimate to number.
   "mic_correction":  "on" | "off" | "none",
 
   // Additive (handoff: transfer-frame-v2 M0) — per-channel calibrated
@@ -2169,6 +2202,47 @@ output ports opened). `drivable: true, on: false` is a session that could
 drive and is not — the difference matters to a consumer deciding whether
 silence on the inputs is expected.
 
+**Settling frames.** A session publishes a frame every capture tick from
+the first one, roughly 20/s per pair. For about the first second — until
+a capture ring holds one whole Welch segment — there is no H₁ to report,
+and those frames say so: `n_averages` is **0** and `freqs`,
+`magnitude_db`, `phase_deg`, `coherence`, `spec_freqs`, `meas_spectrum`
+and `ref_spectrum` are all **empty arrays**, with `spl` and `mtw` `null`.
+Every other field is real: `drive`, `meas_peak_dbfs` / `ref_peak_dbfs`,
+`cal_tags`, `delay_attempts` (0 — the estimator has not been asked yet),
+`sr`, and the channel numbers. The key set is identical to an analysing
+frame's; only the contents differ.
+
+Read `n_averages > 0` to select frames that carry an estimate. Do not
+read an empty `magnitude_db` as a fault: it means "not yet", which is
+exactly the distinction `n_averages` exists to make. `delay_attempts: 0`
+alongside it means the estimator has not run, not that it refused —
+`delay_attempts >= 1` with `delay_locked: false` is a refusal (#227/#238).
+
+This is why publication no longer waits: the drive state, the capture
+peaks and the attempt count never depended on the analysis window, and
+withholding them meant that for the first second of a session a client
+could not distinguish a daemon that had not started from one whose drive
+had already dead-manned. The delay estimate keeps its own gate at one
+segment, because a cross-correlation needs one.
+
+**Frame rate is not analysis rate.** Frames ship every capture tick,
+about 20/s per pair. The Welch estimate behind `freqs`, `magnitude_db`,
+`phase_deg`, `coherence`, `spec_freqs`, `meas_spectrum`, `ref_spectrum`
+and `spl` advances once per Welch hop — 0.5 s at 48 kHz — because the
+analysis window is cut on the stream's own block lattice (#208) and does
+not move between hops. Roughly ten consecutive frames therefore carry
+**byte-identical** analysis arrays, and `analysis_seq` is how a consumer
+tells that apart from a stationary DUT.
+
+What does move every frame: `mtw` (the ladder is a push pipeline fed the
+fresh capture buffers), `meas_peak_dbfs` / `ref_peak_dbfs`, `drive`,
+`spl` (the F/S integrator steps every tick over the held broadband
+level), `delay_locked` and `delay_attempts`.
+
+The `visualize/ir` sidecar carries the same `analysis_seq` as the frame
+it was derived from.
+
 **Linear-amplitude contract.** `meas_spectrum` / `ref_spectrum` carry
 **linear amplitude only** — the daemon never converts them to dB. dB
 conversion happens in the receiver, nowhere else — the single such site
@@ -2198,17 +2272,21 @@ continuously-integrated pressure-squared signal) is not. Same caveat
 as the existing `fractional_octave_leq` frame — display-only, must not
 be quoted as a certified SPL reading.
 
-**Complex H consistency.** `re` and `im` carry H₁(ω) directly so Tier 2
-views can render Nyquist locus, IFFT-based impulse response, and
-group-delay-from-complex without re-deriving from `magnitude_db` /
-`phase_deg`. All four representations (`mag`, `phase`, `re`, `im`) are
-computed from the same `H₁ = G_xy_comp / G_xx` complex value and are
-guaranteed mutually consistent: `magnitude_db = 20·log10(√(re² + im²))`
-and `phase_deg = atan2(im, re)·180/π`. Mic-curve correction (when
-enabled on the meas channel) is applied to all four — magnitude has
-the dB correction subtracted; (re, im) are scaled by `10^(−curve_db/20)`
-so `arg(H)` is unchanged. Older subscribers that ignore `re` / `im`
-keep working — the fields are pure additions.
+**Complex H is not on this frame.** `re` and `im` — H₁(ω) as real and
+imaginary arrays, downsampled in lockstep with `magnitude_db` — were
+carried here for Tier 2 views (Nyquist locus, IFFT-based impulse
+response, group-delay-from-complex) that were never built. They were
+**removed**: nothing in this repo read them, they were 86 KB of a
+222 KB frame, and each of the three uses they were added for is either
+absent or served better elsewhere. `magnitude_db` and `phase_deg` carry
+the same H₁ = `G_xy_comp / G_xx`, so a consumer that wants complex H
+reconstructs it as `10^(magnitude_db/20) · e^(j·phase_deg·π/180)`; the
+impulse response ships as the `visualize/ir` sidecar below, computed
+from the full-resolution H rather than these 2000 points, which could
+not have reconstructed h(t) correctly in any case. Mic-curve correction
+(when enabled on the meas channel) is applied to `magnitude_db` and not
+to `phase_deg` — the curve is magnitude-only, so `arg(H)` is unchanged
+either way.
 
 #### `visualize/ir` sidecar (Phase 4b)
 
@@ -2228,6 +2306,8 @@ toggled on/off in the UI without re-issuing the transfer command.
   "stride":        <int>,            // downsample factor (ir_full / samples)
   "dt_ms":         <float>,          // ms per output sample (1000/sr * stride)
   "t_origin_ms":   <float>,          // negative — t=0 sits at samples.len()/2
+  "analysis_seq":  <int>,            // same value as the transfer_stream frame
+                                     // this was derived from
   "ref_channel":   <int>,
   "meas_channel":  <int>,
   "delay_samples": <int>,
@@ -2530,6 +2610,250 @@ retention window, default 30 s) — never exposed in any CTRL reply.
 
 ---
 
+### `probe`
+
+Discovers routing: which playback ports carry an analog signal, and which
+capture ports are looped back to them. Spawns a worker and reports on
+DATA; the CTRL reply only confirms the launch.
+
+**The worker emits a 1 kHz tone at −10 dBFS**, on one playback port at a
+time, with every other output disconnected. Nothing else on the wire
+announces this, so a caller driving unattended hardware is responsible
+for the level at the far end.
+
+The output scan needs a DMM (`dmm_host` in config). Without one it is
+skipped entirely and **every** playback port is treated as analog for the
+loopback phase, which is a weaker claim than a measured one — the
+`output_skip` frame is the only signal that this happened.
+
+**Request**
+```json
+{ "cmd": "probe" }
+```
+
+No arguments.
+
+**Reply**
+```json
+{ "ok": true, "n_playback": <int>, "n_capture": <int> }
+```
+
+**DATA frames.** Every frame carries `"cmd": "probe"` and a `"phase"`:
+
+| `phase` | fields | when |
+|---|---|---|
+| `output_start` | `n_ports` | DMM configured; opens the output scan |
+| `output` | `channel`, `port`, `vrms`, `analog` | once per playback port |
+| `output_skip` | `message` | no `dmm_host`; replaces the two rows above |
+| `loopback_start` | `n_outputs`, `n_inputs` | opens the loopback scan |
+| `loopback` | `out_ch`, `out_port`, `in_ch`, `in_port`, `level_dbfs` | a pair that carried signal |
+
+`vrms` is `<float> | null` — null when the DMM read failed, which is not
+the same as a measured zero. `analog` is `vrms > 10 mVrms`.
+
+`loopback` is emitted **only** for a pair measuring above −30 dBFS, so a
+pair that never appears means no loopback was detected, not that a frame
+was dropped. `level_dbfs` is rounded to one decimal.
+
+**Terminal frame** (`done`):
+```json
+{ "cmd": "probe", "analog_channels": [<int>, ...] }
+```
+
+An `error` frame with `"message"` replaces the `done` when the backend
+does not support port routing, when there are no playback ports, or when
+the engine fails to start.
+
+---
+
+### `test_software`
+
+Pure-software self-test of the analysis and conversion path: no audio
+device, no worker, no DATA traffic. The reply is synchronous and carries
+the whole result, so this is the one self-test a client can run without
+subscribing to DATA.
+
+**Request**
+```json
+{ "cmd": "test_software" }
+```
+
+**Reply**
+```json
+{
+  "ok":       true,
+  "results":  [
+    { "name": "<string>", "pass": <bool>, "detail": "<string>" }
+  ],
+  "all_pass": <bool>
+}
+```
+
+`all_pass` is the AND over `results[].pass`. `ok` is `true` whenever the
+suite ran — **a failed check is `all_pass: false`, not `ok: false`.** A
+client that only reads `ok` will call a failing daemon healthy.
+
+`name` and `detail` are display strings; their wording is not part of the
+contract. `results` order is the order the checks ran.
+
+---
+
+### `test_hardware`
+
+Analog loopback self-tests of the interface itself: noise floor, level
+linearity, THD floor, frequency response, channel match, repeatability.
+With `dmm: true` and a `dmm_host` configured it also runs three
+DMM-corroborated tests (absolute level, level tracking, frequency
+response). Spawns a worker; results arrive on DATA.
+
+Requires a reference channel — with neither `reference_channel` nor
+`reference_port` set it refuses with
+`{"ok": false, "error": "reference channel not configured — ..."}`.
+
+**Request**
+```json
+{ "cmd": "test_hardware", "dmm": <bool> }
+```
+
+`dmm` is optional, default `false`. The DMM tests run only when it is
+`true` **and** `dmm_host` is configured; asking for them without a DMM
+configured is silently a no-op, visible only as `dmm_run: 0` in the
+terminal frame.
+
+**Reply**
+```json
+{
+  "ok":           true,
+  "out_port":     "<port>",
+  "ref_out_port": "<port>",
+  "in_port":      "<port>",
+  "ref_port":     "<port>",
+  "warnings":     ["<string>", ...]   // optional — see `warnings` above
+}
+```
+
+**DATA frames** — one `test_result` per check:
+```json
+{
+  "type":           "test_result",
+  "cmd":            "test_hardware",
+  "name":           "<string>",
+  "pass":           <bool>,
+  "detail":         "<string>",
+  "tolerance":      "<string>",
+  "mic_correction": "on" | "off" | "none",
+  "spl_offset_db":  <float> | null
+}
+```
+
+`mic_correction` and `spl_offset_db` use the same vocabulary as the
+monitor frames. The DMM-corroborated results carry `"dmm": true` and
+**omit** `mic_correction` and `spl_offset_db` — a parser that requires
+those two fields will fail on the DMM rows.
+
+**Terminal frame** (`done`):
+```json
+{
+  "cmd":        "test_hardware",
+  "tests_run":  <int>, "tests_pass": <int>,
+  "dmm_run":    <int>, "dmm_pass":   <int>,
+  "xruns":      <int>
+}
+```
+
+A `stop` cuts the suite between tests, so `tests_run` is the number that
+actually ran, not the size of the suite.
+
+---
+
+### `test_dut`
+
+Qualification suite for a device under test: noise floor, gain, THD vs
+level, frequency response, clipping point. With `compare: true` it runs
+the same five again with the DUT bypassed, so the client can report
+deltas. Spawns a worker; results arrive on DATA.
+
+Requires a reference channel, and refuses with the same error as
+`test_hardware` when none is configured.
+
+**Request**
+```json
+{ "cmd": "test_dut", "compare": <bool>, "level_dbfs": <float> }
+```
+
+`compare` optional, default `false`. `level_dbfs` optional, default
+`-20.0` — it sets the drive for the gain and frequency-response tests.
+
+**Reply** — same shape as `test_hardware`:
+```json
+{
+  "ok":           true,
+  "out_port":     "<port>",
+  "ref_out_port": "<port>",
+  "in_port":      "<port>",
+  "ref_port":     "<port>",
+  "warnings":     ["<string>", ...]   // optional
+}
+```
+
+**DATA frames** — `test_result`, as in `test_hardware` but with a `tag`:
+```json
+{
+  "type":           "test_result",
+  "cmd":            "test_dut",
+  "tag":            "dut" | "bypass",
+  "name":           "<string>",
+  "pass":           <bool>,
+  "detail":         "<string>",
+  "tolerance":      "<string>",
+  "mic_correction": "on" | "off" | "none",
+  "spl_offset_db":  <float> | null
+}
+```
+
+**Compare mode.** After the `dut` pass the worker publishes a prompt and
+waits for `dut_reply`:
+```json
+{ "type": "dut_compare_prompt", "cmd": "test_dut",
+  "message": "Bypass DUT and press Enter" }
+```
+
+The wait has a **300 s deadline, and expiry is not an error**: the bypass
+pass runs anyway, and its frames are tagged `"bypass"` whether or not the
+operator actually bypassed anything. Nothing on the wire distinguishes an
+answered prompt from a timed-out one, so **a `bypass` tag is not evidence
+that the DUT was bypassed** — a client that needs that distinction must
+track whether it sent `dut_reply` itself.
+
+**Terminal frame** (`done`):
+```json
+{ "cmd": "test_dut", "tests_run": <int>, "compare": <bool>, "xruns": <int> }
+```
+
+---
+
+### `dut_reply`
+
+Answers the `dut_compare_prompt` published by a `test_dut` running in
+compare mode. Like `set_drive` and `snapshot` it targets a live worker
+rather than spawning one, so it does not go through the busy guard.
+
+**Request**
+```json
+{ "cmd": "dut_reply" }
+```
+
+**Reply**
+```json
+{ "ok": true }
+```
+
+The reply is **always** `{"ok": true}`, including when no `test_dut` is
+waiting for it. The send is best-effort into the waiting worker's
+channel; the reply says the command was accepted, never that a prompt was
+answered. A client cannot use it to discover whether a suite is running.
+
+---
 ## Busy guard
 
 Audio commands are classified into four concurrency groups:
