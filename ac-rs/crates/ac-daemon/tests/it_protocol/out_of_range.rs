@@ -144,6 +144,40 @@ fn in_range_channels_are_unaffected() {
     c.call(json!({"cmd":"stop"}));
 }
 
+#[test]
+fn named_stop_does_not_claim_silence_while_output_remains() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let generate = c.call(json!({
+        "cmd": "generate",
+        "freq_hz": 1000.0,
+        "level_dbfs": -40.0,
+    }));
+    assert_eq!(generate["ok"], json!(true), "generate rejected: {generate}");
+    let monitor = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "interval": 0.2,
+        "fft_n": 8192,
+    }));
+    assert_eq!(monitor["ok"], json!(true), "monitor rejected: {monitor}");
+
+    let stopped_monitor = c.call(json!({"cmd": "stop", "name": "monitor_spectrum"}));
+    assert_eq!(
+        stopped_monitor["stopped"],
+        json!(["monitor_spectrum"]),
+        "{stopped_monitor}"
+    );
+    assert!(
+        stopped_monitor.get("stimulus").is_none(),
+        "generate still drives output, so silence must not be attested: {stopped_monitor}"
+    );
+
+    let stopped_generate = c.call(json!({"cmd": "stop", "name": "generate"}));
+    assert_eq!(stopped_generate["stopped"], json!(["generate"]));
+    assert_eq!(stopped_generate["stimulus"], json!("silent"));
+}
+
 fn assert_budget_rejection(c: &Client<'_>, request: Value, field: &str) {
     let reply = c.call(request);
     assert_eq!(reply["ok"], json!(false), "request must fail: {reply}");

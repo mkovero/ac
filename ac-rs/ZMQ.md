@@ -752,9 +752,11 @@ a clean slate (e.g. issuing `transfer_stream` immediately after
 ```
 
 `stopped` lists the workers that were actually joined during this call —
-empty if no matching worker was running. `stimulus: "silent"` is emitted only
-after those joins complete; cancellable stimulus workers have silenced their
-backend before the reply is constructed.
+empty if no matching worker was running. `stimulus: "silent"` is present only
+when no workers remain after the selected handles have joined; cancellable
+stimulus workers have silenced their backend before the reply is constructed.
+It is omitted from a named-stop reply when another worker remains because that
+worker may still be driving output.
 
 **DATA** — after stop, the worker emits a terminal frame:
 ```json
