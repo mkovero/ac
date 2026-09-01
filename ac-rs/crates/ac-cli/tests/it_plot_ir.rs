@@ -201,16 +201,36 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
     ]);
 
-    // ── printed arrival matches the fake backend's known delay ────────
-    // The gate re-centres the linear IR on the sweep endpoint, so a
-    // 32-sample loopback shows up as a +32-sample offset from centre.
-    // Tolerance is for finite-window deconvolution, not for the constant:
-    // a regression that lost the delay entirely would read 0.
+    // ── printed arrival is onset-derived, not peak-derived (#346) ─────
+    // The gate re-centres the linear IR on the sweep endpoint, so the
+    // fake backend's 32-sample loopback still shows up as the *peak's*
+    // offset from centre — but `arrival` now comes from
+    // `estimate_onset`, which under #378 picks the change point in the
+    // IR's own variance over a window ending at the peak. No geometry is
+    // recorded for this run, so no causal bound applies and the pick can
+    // legitimately land before the peak — and on this fixture it lands
+    // well before it, inside the bandlimited deconvolution's pre-ring
+    // (a 200 Hz lower sweep limit puts the main lobe's leading skirt
+    // ~240 samples wide at 48 kHz). That is the case the causal bound
+    // exists to reject, and there is none here.
     let arrival = printed_arrival_samples(&stdout);
-    assert!(
-        (arrival - FAKE_LOOPBACK_DELAY_SAMPLES).abs() <= 8,
-        "printed arrival {arrival} samples, expected ~{FAKE_LOOPBACK_DELAY_SAMPLES} \
-         (fake loopback delay):\n{stdout}"
+    // Pinned exact, not just bounded (QA on #352): this fixture's IR
+    // shape is deterministic (fake backend, fixed 200hz/8000hz/4096win
+    // sweep), so the estimator's answer for it is a known, computable
+    // value — pinning it catches a regression in the estimator's exact
+    // behaviour, not only a sign or bound violation. Recompute if the
+    // fixture's stimulus parameters above ever change. Value moved
+    // 19 → 17 under #353 (median floor) and 17 → -86 under #378: the
+    // level crossing stopped where the skirt fell below floor+12 dB,
+    // while the change-point pick keys on where the skirt's variance
+    // leaves the numerical floor, which on a 200 Hz-limited sweep is
+    // much earlier. Expected per the #378 design decision — the pick is
+    // deliberately not amplitude-referenced — not a regression.
+    const EXPECTED_ONSET_SAMPLES: i64 = -86;
+    assert_eq!(
+        arrival, EXPECTED_ONSET_SAMPLES,
+        "printed arrival should be the fake backend's exact onset sample \
+         for this fixture, not just somewhere in (0, {FAKE_LOOPBACK_DELAY_SAMPLES}]:\n{stdout}"
     );
 
     // ── the rest of the printed summary ───────────────────────────────
@@ -220,6 +240,26 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
+    // #346 AC4 / #378: the onset rule must reach the terminal, and the
+    // peak line must carry the onset-to-peak distance now that the two
+    // can legitimately disagree — a silent divergence between them would
+    // read as a bug in the tool rather than the fix working.
+    assert!(
+        stdout.contains("onset: AIC change-point pick, 10.0 ms window"),
+        "printed summary missing the onset rule line (AC4):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(search span, no geometry known)"),
+        "printed summary missing the window-start clause (AC4):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("diagnostic \u{2014} arrival is onset-derived, 118 samples earlier"),
+        "peak line must carry the onset-to-peak distance (#378):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("median floor"),
+        "the pre-#378 rule's text must not survive anywhere:\n{stdout}"
+    );
     // #391: no distance figure prints at all — the ms → m conversion it
     // came from is gone, and milliseconds are what's asserted above.
     assert!(

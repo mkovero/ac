@@ -183,6 +183,30 @@ pub(super) fn ir_report_with_peak(
     r
 }
 
+/// Companion to [`ir_report_with_peak`] for tests (#346) that need a
+/// hand-built `linear_ir` shape rather than a single spike over flat
+/// noise — e.g. sustained onset energy distinct from the peak.
+pub(super) fn ir_report_with_custom_ir(
+    linear_ir: Vec<f64>,
+    sample_rate_hz: u32,
+) -> MeasurementReport {
+    let mut r = sample_impulse_response_report();
+    r.data = vec![MeasurementPayload {
+        data: MeasurementData::ImpulseResponse {
+            sample_rate_hz,
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 1.0,
+            linear_ir,
+            noise_tail_start_s: None,
+            harmonics: vec![],
+        },
+        standard: Vec::new(),
+        gate: None,
+    }];
+    r
+}
+
 pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
     InterfaceLatency::Measured(MeasuredLatency {
         tau_s,
