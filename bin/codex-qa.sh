@@ -1,11 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "--daemon" ]]; then
+    if (($# != 1)); then
+        echo "Usage: $0 [--daemon]" >&2
+        exit 2
+    fi
+
+    readonly POLL_SECONDS="${CODEX_QA_POLL_SECONDS:-300}"
+    if [[ ! "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: CODEX_QA_POLL_SECONDS must be a positive integer." >&2
+        exit 2
+    fi
+
+    SCRIPT_PATH="$(realpath "$0")"
+    readonly SCRIPT_PATH
+    echo "Codex QA daemon started; polling every ${POLL_SECONDS}s."
+
+    while true; do
+        if ! "$SCRIPT_PATH"; then
+            echo "Codex QA pass failed; retrying in ${POLL_SECONDS}s." >&2
+        fi
+        sleep "$POLL_SECONDS"
+    done
+elif (($# != 0)); then
+    echo "Usage: $0 [--daemon]" >&2
+    exit 2
+fi
+
+source "$(dirname "$0")/common.sh"
+
 readonly CLAUDE_LABEL="claude-approved"
 readonly CODEX_LABEL="codex-approved"
 
+# The active review worktree is removed on both success and failure. Refuse to
+# reuse an existing path: it may contain evidence or edits from an interrupted
+# run, and silently replacing those would be destructive.
+active_worktree=""
+cleanup_worktree() {
+    if [[ -n "$active_worktree" ]]; then
+        git -C "$ROOT" worktree remove --force "$active_worktree" || {
+            echo "WARNING: could not remove review worktree: $active_worktree" >&2
+            return 1
+        }
+        active_worktree=""
+    fi
+}
+trap cleanup_worktree EXIT
+
 # Run from the repository containing this script.
-cd "$(git rev-parse --show-toplevel)"
+cd "$HERE"
 
 # Verify required commands before doing anything.
 for command in gh codex git jq; do
@@ -16,7 +60,7 @@ for command in gh codex git jq; do
 done
 
 # Verify GitHub authentication up front.
-if ! gh auth status >/dev/null 2>&1; then
+if ! gh_retry gh auth status >/dev/null 2>&1; then
     echo "ERROR: gh is not authenticated." >&2
     exit 1
 fi
@@ -31,8 +75,8 @@ echo "Checking for open PRs with '$CLAUDE_LABEL' and without '$CODEX_LABEL'..."
 #   AND NOT codex-approved
 #
 # 'needs-work' intentionally does not participate in eligibility.
-mapfile -t prs < <(
-    gh pr list \
+prs_output="$(
+    gh_retry gh pr list \
         --state open \
         --label "$CLAUDE_LABEL" \
         --limit 100 \
@@ -47,7 +91,12 @@ mapfile -t prs < <(
             )
             | .number
         '
-)
+)"
+
+prs=()
+if [[ -n "$prs_output" ]]; then
+    mapfile -t prs <<<"$prs_output"
+fi
 
 if ((${#prs[@]} == 0)); then
     echo "No PRs require Codex QA."
@@ -64,11 +113,16 @@ for pr in "${prs[@]}"; do
 
     # Re-check state immediately before handing the PR to Codex.
     # Another process may have changed labels since gh pr list ran.
-    mapfile -t labels < <(
-        gh pr view "$pr" \
+    labels_output="$(
+        gh_retry gh pr view "$pr" \
             --json labels \
             --jq '.labels[].name'
-    )
+    )"
+
+    labels=()
+    if [[ -n "$labels_output" ]]; then
+        mapfile -t labels <<<"$labels_output"
+    fi
 
     has_claude_approved=false
     has_codex_approved=false
@@ -95,32 +149,72 @@ for pr in "${prs[@]}"; do
     fi
 
     pr_url="$(
-        gh pr view "$pr" \
+        gh_retry gh pr view "$pr" \
             --json url \
             --jq '.url'
     )"
 
     pr_title="$(
-        gh pr view "$pr" \
+        gh_retry gh pr view "$pr" \
             --json title \
             --jq '.title'
     )"
 
     echo "Title: $pr_title"
     echo "URL:   $pr_url"
+
+    # Review the exact GitHub tip in an isolated, disposable worktree. Using
+    # refs/pull/N/head also works when the PR branch originates from a fork.
+    pr_head="$(
+        gh_retry gh pr view "$pr" \
+            --json headRefOid \
+            --jq '.headRefOid'
+    )"
+    [[ -n "$pr_head" ]] || {
+        echo "ERROR: PR #$pr has no head commit." >&2
+        exit 1
+    }
+
+    review_worktree="$WT_BASE/codex-pr-$pr"
+    if [[ -e "$review_worktree" ]]; then
+        echo "ERROR: review worktree path already exists: $review_worktree" >&2
+        echo "Inspect it, then remove it with: git worktree remove '$review_worktree'" >&2
+        exit 1
+    fi
+
+    require_space "$review_worktree"
+    mkdir -p "$WT_BASE" "$AC_TARGET"
+    git fetch -q origin "pull/$pr/head"
+    fetched_head="$(git rev-parse FETCH_HEAD)"
+    if [[ "$fetched_head" != "$pr_head" ]]; then
+        echo "ERROR: PR #$pr moved while preparing the review." >&2
+        echo "Expected $pr_head, fetched $fetched_head; retry the run." >&2
+        exit 1
+    fi
+    git worktree add --detach "$review_worktree" "$pr_head" >/dev/null
+    active_worktree="$review_worktree"
+    link_support "$active_worktree"
+
+    echo "Review worktree: $active_worktree [$pr_head]"
     echo "Starting Codex..."
 
     # Codex owns the actual review and GitHub state transition.
     # The wrapper intentionally does not parse a PASS/FAIL file and does
     # not maintain local workflow state.
-    codex exec -c 'approval_policy="never"' -c 'sandbox_mode="read-only"' -c 'sandbox_read_only.network_access=true' "
+    CARGO_TARGET_DIR="$AC_TARGET" codex exec \
+        -c 'approval_policy="never"' \
+        -s workspace-write \
+        -c 'sandbox_workspace_write.network_access=true' \
+        -C "$active_worktree" \
+        --add-dir "$AC_TARGET" "
 You are the independent Codex QA worker for GitHub PR #$pr.
 
-Read .codex/qa-instructions.md before doing anything else.
+Read .agents/codex-qa.md before doing anything else.
 
 Also follow the repository's normal AGENTS.md instructions.
 
-Use GitHub CLI freely. Inspect the PR, linked issue, PR discussion,
+Source bin/common.sh and run every GitHub CLI operation through gh_retry.
+Inspect the PR, linked issue, PR discussion,
 commits, complete diff, checks, relevant source, tests, configuration,
 documentation, and git history as needed.
 
@@ -151,6 +245,7 @@ The GitHub PR is the persistent record of your review.
 "
 
     echo "Codex finished PR #$pr."
+    cleanup_worktree
 done
 
 echo

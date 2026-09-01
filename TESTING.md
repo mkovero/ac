@@ -41,7 +41,7 @@ answered.
 
 It is also the expensive direction. A false green hides a defect; a false red
 sends someone hunting a regression that does not exist — the same shape as the
-stale `ac-view` snapshots in `work/rig/rig-verify-queue.md`, where the first
+stale `ac-view` snapshots in `rig/rig-verify-queue.md`, where the first
 pixel-diff failure is a real defect the tests could not see and reads as one
 they introduced.
 
@@ -177,7 +177,8 @@ the question directly.
 Unit tests sit in `#[cfg(test)]` modules beside the code:
 
 - `measurement/` — `thd`, `filterbank`, `weighting`, `ccir468`, `noise`,
-  `sweep`, `loudness`, `report`, `report_html`, `report_pdf`
+  `sweep`, `loudness`, `report`, `report_layout/`, `report_html/`,
+  `report_pdf/`
 - `visualize/` — `spectrum`, `cwt`, `cqt`, `reassigned`, `aggregate`,
   `fractional_octave`, `smoothing`, `spl_level`, `time_integration`,
   `transfer`, `pair_derivation`, `weighting_curves`, `mtw/`
@@ -193,8 +194,19 @@ command, its abbreviations, defaults and error cases.
 
 Unit tests in `audio::{jack_backend, cpal_backend, fake}`, `gpio`, and the
 `handlers/` modules. Integration binaries in `tests/`: `it_protocol`,
-`it_snapshot`, `it_set_drive`, `it_scene_fixture`, `it_cross_tier_parity`,
-and the `#[ignore]`'d `it_loopback_ir`.
+`it_snapshot`, `it_set_drive`, `it_relock`, `it_scene_fixture`,
+`it_cross_tier_parity`, `it_zmq_doc_parity`, and the `#[ignore]`'d
+`it_loopback_ir`.
+
+`it_zmq_doc_parity` is the only test here that can fail because a *document*
+is wrong. `ZMQ.md` is the sole statement of the wire contract — the daemon
+emits frames inline, `ac-scene` and `ac-cli` each parse them separately, and
+nothing ties the three together at compile time — so it can drift from the
+code silently, and has. The test compares the command roster in both
+directions against the dispatch `match` in `server.rs`, and compares the
+documented reply keys of the read-only commands against a live `--fake-audio`
+daemon. It does not check DATA payloads, field types or values: a green run
+means the roster and the read-only replies agree, not that the prose is true.
 
 #### ac-scene
 
@@ -223,7 +235,7 @@ undetected because nobody was obliged to run the gate).
 `it_transfer_snapshots.rs`'s doc comment** (box, date, commit). Treat that
 line as the source of truth for staleness, not this file.
 
-**Checklist — any PR touching `ac-view/src/view.rs`'s `draw_view` or a
+**Checklist — any PR touching `ac-view/src/view/`'s `draw_view` or a
 pane module:**
 - [ ] Regenerate the 7 references on the rig (192.168.9.25) in that PR —
       `UPDATE_SNAPSHOTS=1 cargo test -p ac-view --test it_transfer_snapshots

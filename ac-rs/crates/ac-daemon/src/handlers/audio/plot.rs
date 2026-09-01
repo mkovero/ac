@@ -1,7 +1,7 @@
 //! `plot` / `plot_level` — run a sweep, collect per-point analysis frames,
 //! and emit a `done` with the full dataset so the CLI can render a PNG.
 //! `plot_ir` — Farina log-sweep impulse-response capture (moved here from
-//! `sweep.rs` by #282: it captures and analyses, so it belongs with its
+//! `measurement/sweep` by #282: it captures and analyses, so it belongs with its
 //! `plot`/`plot_level` siblings rather than the pure generators).
 
 use std::sync::atomic::Ordering;
@@ -971,13 +971,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             // spreadsheet reader never has to go through `ac report`
             // (#283).
             let csv_path = dir.join(format!("{stem}.csv"));
-            match report.to_csv() {
-                Ok(csv) => {
-                    if let Err(e) = std::fs::write(&csv_path, csv) {
-                        eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
-                    }
-                }
-                Err(e) => eprintln!("plot_ir: CSV encode error: {e}"),
+            if let Err(e) = std::fs::write(&csv_path, report.to_csv()) {
+                eprintln!("plot_ir: CSV write error ({}): {e}", csv_path.display());
             }
         }
 

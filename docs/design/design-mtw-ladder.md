@@ -10,7 +10,7 @@ exponential one. Bottom stage is 4000 Hz, not 3000. If you find `τ = 1 s`,
 `α = 0.3401` or a 3000 Hz bottom stage below, that is a section I missed —
 stop and check against the handoff.
 
-Scope: the two items `work/handoff/handoff-mtw-live-spectrum.md` routes to architect —
+Scope: the two items `$AC_HOME/handoff/handoff-mtw-live-spectrum.md` routes to architect —
 **ladder crossover placement**, and **the decimator phase-lock mechanism
 (deliverable 1), "where the alignment guarantee is actually won or lost".**
 
@@ -544,7 +544,7 @@ not transfer frames.
   it.
 - Model the `sr`-derived layout test on criterion 2's four rates from the
   start. 44.1 kHz is the one that finds tree-shaped assumptions.
-- `measurement/loudness.rs:247` has the BS.1770 4-phase 48-tap polyphase
+- `measurement/loudness/truepeak.rs` has the BS.1770 4-phase 48-tap polyphase
   interpolator — a structural model for the polyphase indexing, not something
   to reuse (it interpolates, and its coefficients are normative).
 - Deliverable 7: `κ` is built from `2^(1/96)`, the MTW convention. It must not

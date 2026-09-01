@@ -1,6 +1,6 @@
 # The negative-lag floor does not separate. Block 2, answered offline.
 
-`work/rig/rig-verify-queue.md` block 2 asked one question of session 3's
+`rig/rig-verify-queue.md` block 2 asked one question of session 3's
 captures, and said a capture set that answers "no" is as valuable as one that
 answers "yes":
 

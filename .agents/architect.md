@@ -76,8 +76,10 @@ Cargo feature flags. Write "none" if there are none.}
 {Concrete pointers: which function to extend, which struct to modify, which test
 to look at as a model. Not pseudocode — just orientation.}
 
-**for reviewer**
-{is this tier1 or 2? should implement standards citations in review?}
+**scope**
+{tier-1 | tier-2 | scene | view | scope-none}
+{Only if this differs from the label triage set: say so, and move the label.
+Triage labels every issue; you see the ones where the answer was hard.}
 
 **risks**
 - {Risk}: {mitigation}

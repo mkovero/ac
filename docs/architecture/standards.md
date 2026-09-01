@@ -3,22 +3,23 @@
 Tier 1 modules cite the edition each implementation has been verified
 against:
 
-Paths to the held documents are not restated here — `.agents/qa.md`'s
-normative standards table is the single source of truth for where each
-standard's PDF lives. Look the standard up there by name.
+Paths to the held documents are in the **document map** at the end of this
+file. That map used to live in `.agents/qa.md`; it was removed there on
+2026-08-29 while these pointers to it survived, so for two days every row
+below pointed at nothing. Keep the map and the rows in one file.
 
 | Module | Standard | Clause | Verified against |
 |--------|----------|--------|------------------|
-| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | see `.agents/qa.md` |
-| `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | see `.agents/qa.md` |
-| `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | see `.agents/qa.md` |
-| `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | see `.agents/qa.md` |
-| `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | see `.agents/qa.md` |
-| `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | see `.agents/qa.md` |
-| `loudness.rs` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | see `.agents/qa.md`; EBU Tech 3341/3342 conformance cases (not a `stddocs/` file) |
-| `sweep.rs::citation()` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see `.agents/qa.md` (Annex B pending human cross-check, `verified: false`) |
-| `sweep.rs::farina_citation()` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis (log sweep, inverse filter, harmonic offsets) | see `.agents/qa.md`; `verified: false` |
-| `sweep.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) quasi-anechoic frequency response via time-gated impulse response | see `.agents/qa.md`; pending human cross-check, `verified: false` |
+| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | see document map |
+| `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | see document map |
+| `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | see document map |
+| `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | see document map |
+| `reference_levels.rs` | AES17-2020 | §3.12.1 Full-scale level; §3.12.3 Decibels full scale | see document map |
+| `ccir468.rs` | ITU-R BS.468-4 | §1 Weighting network; §2 Measuring-device characteristics | see document map |
+| `loudness/` | ITU-R BS.1770-5 / EBU Tech 3342 | BS.1770 Annex 1 + Annex 2; Tech 3342 §2.2 LRA | see document map; EBU Tech 3341/3342 conformance cases (not a `stddocs/` file) |
+| `sweep/mod.rs::citation()` | Farina, AES 108th Conv. preprint #5093 (2000); ISO 18233:2006 Annex B (normative) | §2 Theoretical basis; Annex B (normative) Swept-sine method | see document map (Annex B pending human cross-check, `verified: false`) |
+| `sweep/mod.rs::farina_citation()` | Farina, AES 108th Conv. preprint #5093 (2000) | §2 Theoretical basis (log sweep, inverse filter, harmonic offsets) | see document map; `verified: false` |
+| `sweep/mod.rs::gated_response_citation()` | AES17-2020 | Annex A.4.5 (informative) quasi-anechoic frequency response via time-gated impulse response | see document map; pending human cross-check, `verified: false` |
 
 When a standard is revised and the revision changes a computation, the
 old computation stays available behind a version flag so historical
@@ -158,4 +159,33 @@ Corollary for citations: **cite a section by name, not by line number.** A
   the source document. When reporting what a verification pass found, separate
   *corrected*, *added*, and *checked and unchanged* — this is the project's own
   harm-statistic discipline turned on the verification process itself.
-  
+
+## document map
+
+Source docs in `stddocs/` at repo root. Read relevant standard before reviewing any PR touching measurement values, output formatting, or display units. No memory — consult document.
+
+**Take the path from the `file` column, never from the standard's issuing body.** The three subdirectories are historical, not semantic: `iec-full/` holds AES17-2020 and one paper alongside the IEC documents, `iso-full/` holds the ISO ones, and several documents sit at `stddocs/` root. `stddocs/Fundamentals_of_modern_audio_measurement.pdf` (root) is the Cabot paper. A file of the same name previously sat at `stddocs/iec-full/` too, but it was a mislabelled copy of IEC 60268-3 — not an edition or variant of the Cabot paper — and has been deleted. If a same-named file ever reappears under `iec-full/`, treat it as suspect and verify against its first page before citing it; don't assume it's the fuller copy. Copy the cell.
+
+### normative standards
+
+| standard | file | applies to |
+|---|---|---|
+| AES-17-2020 | `stddocs/iec-full/aes17_2020_aes_standard_method_for_digital_audio_engineering_measurement.pdf` | THD+N methodology, notch filter specs, measurement conditions, result expression — digital audio |
+| IEC 60268-3:2018 | `stddocs/iec-full/IEC60268-3.pdf` | Sound system equipment — amplifiers: frequency response, S/N, dynamic range |
+| IEC 61260-1:2014 | `stddocs/iec-full/IEC61260-1.pdf` | Octave and fractional-octave band filters: bandwidth, ripple, attenuation |
+| IEC 61672-1:2013 | `stddocs/iec-full/IEC61672-1.pdf` | Sound level meters: frequency weighting, time weighting, level linearity |
+| ITU-R BS.468-4 | `stddocs/ITU-R BS.468-4.pdf` | Noise measurement: quasi-peak detector, 468 weighting curve |
+| ITU-R BS.1770-5 | `stddocs/ITU-R BS.1770-5.pdf` | Loudness measurement: K-weighting, integrated loudness (LUFS), true-peak |
+| ISO 18233:2006 | `stddocs/iso-full/ISO18233.pdf` | Deterministic-signal (swept-sine) substitution for classical room and building acoustics methods; IR acquisition, SNR, time-invariance, test report |
+| ISO 3382-1:2009 | `stddocs/iso-full/ISO3382-1.pdf` | Room acoustic parameters, performance spaces — reverberation time, early/late measures, source/receiver positions, test report |
+| ISO 3382-2:2008 | `stddocs/iso-full/ISO3382-2.pdf` | Reverberation time in ordinary rooms — survey / engineering / precision grades, decay evaluation, uncertainty |
+
+### reference reading (non-normative)
+
+Not standards, but hold authoritative derivations + worked examples. Consult when standard text ambiguous or when checking numerical results.
+
+| document | file | useful for |
+|---|---|---|
+| Metzler — Audio Measurement Handbook 2nd ed. | `stddocs/pdfcoffee.com_audio-measurement-handbook-2nd-ed-2005-bob-metzler-pdf-free.pdf` | Practical measurement procedures, expected value ranges, instrument behaviour |
+| Fundamentals of Modern Audio Measurement | `stddocs/Fundamentals_of_modern_audio_measurement.pdf` | Estimator theory, windowing, FFT measurement fundamentals |
+| Müller & Massarani 2001 | `stddocs/iec-full/Simultaneous_Measurement_of_Impulse_Response_and_D.pdf` | H1 estimator derivation — primary reference for `ac-core/visualize/transfer.rs` |

@@ -34,8 +34,8 @@ gh pr list --state open \
 `needs-work` means you failed it previously and Claude QA has since re-passed
 it; that is a PR to review again, not one to skip.
 
-There is no queue state anywhere but GitHub. `.agents/bin/codex-qa-run.sh`
-walks this list and holds nothing.
+There is no queue state anywhere but GitHub. `bin/codex-qa.sh` walks this list
+and holds nothing.
 
 ## read order — this order is the mechanism, not a preference
 
@@ -115,7 +115,8 @@ would it fail if that defect were present? A strong assertion on an
 unreachable path reports coverage it does not have. A test resting on a fake:
 name the field the assertion checks and confirm the fake models it.
 
-**Run the suite.** You have a writable worktree and a build directory:
+**Do not routinely rerun the full workspace gate.** A fresh
+`claude-approved` label attests that Claude QA ran:
 
 ```bash
 cargo test --workspace
@@ -123,9 +124,18 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-Do not take the PR body's pasted test output as evidence. Whether the tests
-pass on this tip is checkable in seconds, and the pasted block is exactly the
-thing a stale approval leaves behind.
+The stale-approval pre-check above must first establish that the approval
+covers the current tip. Once it does, inherit that gate result instead of
+repeating the same commands against the same commit.
+
+This reuses only execution evidence, not Claude QA's reasoning. Independently
+inspect every new or changed test and form findings before reading the Claude
+QA comment, as required by the read-order rule.
+
+Run a targeted test only when it would resolve a concrete uncertainty or
+attempt to disprove one of your findings. Do not run the full workspace gate
+merely to reproduce the fresh Claude QA result. Never use test output from the
+PR body or developer comment as substitute evidence.
 
 ### step 4 — disprove your own findings
 
@@ -167,9 +177,8 @@ clean pass rather than writing "none"}
 - **recommendation:** {smallest change that fixes it}
 
 ### gate
-cargo test: {pass/fail, counts}
-cargo clippy: {clean / N warnings}
-cargo fmt --check: {pass/fail}
+Claude QA workspace gate: inherited at current tip `<sha>`
+Codex targeted tests: {commands and results, or "not needed"}
 
 ### unaddressed open questions
 {questions raised in the qa or ux comment that nobody answered — the only
@@ -229,9 +238,11 @@ rather than by an exclusion rule that could drift. Network is open in
 `workspace-write`, so `gh` works; `--add-dir` adds further writable roots if
 the build needs them.
 
-Read-only sandbox is the wrong mode here: it blocks `cargo test`, and the
-fallback — trusting the PR body's pasted output — is the exact false
-confidence step 3 exists to catch.
+The worktree remains writable so Codex can run a targeted test when needed.
+Do not treat writable access as a requirement to repeat Claude QA's full
+workspace gate. The only reusable gate evidence is a fresh
+`claude-approved` label covering the current tip; PR-body and developer
+output remain insufficient.
 
 Remove the worktree when the review ends (`git worktree remove`). Whoever
 creates a scratch worktree removes it, not the next session that trips over
@@ -248,6 +259,12 @@ it.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.
+- Standards conformance is Claude QA's, not yours, even on `tier-1`. Both of
+  you would resolve a clause through the same `docs/architecture/standards.md`
+  map — the correlated input the shared-sources rule above tells you to
+  distrust, so a second pass agrees by construction rather than by checking.
+  Report a standards claim you can falsify from the diff; do not re-run the
+  conformance table.
 - Read the `<!-- agent: qa -->` comment only after your own findings are
   formed, and only for unaddressed open questions.
 - A finding you cannot state a failure scenario for is not a finding. Drop it.
@@ -258,3 +275,8 @@ it.
 - Bug found outside the PR's scope → say so in the comment; a human opens the
   issue. You do not create issues.
 - One comment per review pass. A later push means a new pass, not an edit.
+- GitHub holds all workflow state. Your durable output is the PR itself —
+  labels, your comment, the existing discussion. Never write a result file, a
+  PASS/FAIL marker, or any other local record meant to outlive the invocation:
+  the runner does not read one, and a second reader would trust it over the
+  labels. Scratch files for ordinary tooling are fine; state is not.

@@ -51,11 +51,25 @@ ac-core/src/
     weighting.rs           # A, C, Z weighting filters
     thd.rs                 # IEC 60268-3 THD / THD+N
     stepped_sine.rs        # ac plot primitives
-    sweep.rs               # Farina log-sweep IR deconvolution
+    sweep/                 # Farina log-sweep IR deconvolution
+      mod.rs               #   SweepParams, citations, re-exports
+      deconv.rs            #   sweep + inverse filter + FFT convolution
+      harmonics.rs         #   linear/harmonic IR gating
+      tail_decay.rs        #   ISO 18233 §6.3.2 capture-adequacy check
+      gated.rs             #   time-gated quasi-anechoic response
     noise.rs               # AES17 idle-channel noise measurement
     report.rs              # MeasurementReport type, serialization
-    report_html.rs         # self-contained HTML renderer (inline CSS + SVG)
-    report_pdf.rs          # pure-Rust printpdf renderer (single A4 page)
+    report_layout/         # what each section says — shared by both renderers
+      sections.rs          #   header, method, stimulus, calibration, environment
+      payload.rs           #   per-payload rows, table columns, plot series
+      axis.rs              #   log-f / dB domains, gridline steps, tick labels
+    report_html/           # self-contained HTML renderer (inline CSS + SVG)
+      plot.rs              #   one SVG plot: magnitude and phase
+      emit.rs              #   <dl> and <table> emission, escaping
+    report_pdf/            # pure-Rust printpdf renderer, paginated A4
+      cursor.rs            #   page geometry, pt->mm, pagination
+      metrics.rs           #   core-font advance widths; wrap in the drawing face
+      plot.rs              #   plot frame, grids, trace
 
   visualize/               # Tier 2
     mod.rs
@@ -70,7 +84,11 @@ ac-core/src/
 
   shared/                  # Tier 0 — used by both tiers
     mod.rs
-    calibration.rs
+    calibration/           # one file per layer — they never compose
+      mod.rs               #   the entry + the voltage/SPL derivations
+      tau.rs               #   interface latency: conditions, history, #347
+      mic_response.rs      #   frequency-response curve
+      store.rs             #   cal.json read/modify/write
     conversions.rs
     constants.rs
     generator.rs
@@ -103,7 +121,7 @@ asserting the constant, because asserting the constant passes on any value.
 
 ## Calibration — three orthogonal layers
 
-Per-channel `CalibrationEntry` (in `shared/calibration.rs`, persisted to
+Per-channel `CalibrationEntry` (in `shared/calibration/`, persisted to
 `~/.config/ac/cal.json`) carries three independently-applicable
 corrections. They compose: a fully-cal'd channel reads an absolute
 SPL value with mic-curve compensation and the analog-domain Vrms /

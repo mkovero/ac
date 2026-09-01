@@ -7,9 +7,9 @@ use crate::parse::CommandKind;
 
 /// `ac test software` — the daemon-side numeric self-test. Used to also
 /// run the ac-ui-hosted display-truth harness (#170) in the same table;
-/// that harness was removed along with the ac-ui crate (see
-/// `attic/ac-ui`) and is pending re-home onto an ac-cli/daemon-side truth
-/// harness (handoff.md workstream A3) — not reimplemented here.
+/// that harness was removed along with the ac-ui crate and is pending
+/// re-home onto an ac-cli/daemon-side truth harness — not reimplemented
+/// here.
 pub fn run_software(client: &mut AcClient) {
     let ack = check_ack(
         client.send_cmd(&serde_json::json!({"cmd": "test_software"}), None),
@@ -29,9 +29,7 @@ pub fn run_software(client: &mut AcClient) {
 
     println!("  Display-truth harness (T2/T3, #170)");
     println!("  {}", "\u{2500}".repeat(40));
-    println!(
-        "  [SKIP]  pending re-home onto ac-cli truth harness (see handoff.md A3, attic/ac-ui)"
-    );
+    println!("  [SKIP]  pending re-home onto ac-cli truth harness");
     println!();
 
     if !all_pass {

@@ -1,6 +1,6 @@
 # ac-rs — Rust audio measurement system
 
-Full Rust `ac` stack: measurement library, ZMQ daemon, CLI client, native egui view over pure scene layer. (Old GPU UI `ac-ui` deprecated + detached — see `attic/ac-ui`. `ac-view` is replacement, different crate.)
+Full Rust `ac` stack: measurement library, ZMQ daemon, CLI client, native egui view over pure scene layer. (Old GPU UI `ac-ui` deprecated + detached. `ac-view` is replacement, different crate.)
 
 ## Build
 

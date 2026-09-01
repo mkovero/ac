@@ -11,7 +11,7 @@ falls back to unaligned zero, which collapses HF exactly like a bad lock did. So
 refusing session presents as a blank top end — arguably worse for an operator than the
 confident wrong answer it replaced. #228 is what makes #227's improvement legible.
 
-This overrides work/handoff/handoff-issue-strategy.md, which you are about to read: that document
+This overrides $AC_HOME/handoff/handoff-issue-strategy.md, which you are about to read: that document
 says #227 is "Independent of #226 and #228 — different crate, different code — so it
 can run in parallel with them" (line 76), and sequences #228 as item 2 and #227 as
 item 3. That line is superseded. Everything else in the document still stands.
@@ -31,9 +31,9 @@ Read, in this order, from the main tip (git fetch origin first — these documen
 still being added to):
 
   1. work/planning/state-live-spectrum.md          — current state of the live spectrum path
-  2. work/handoff/handoff-issue-strategy.md       — how the issues relate and what order they land in,
+  2. $AC_HOME/handoff/handoff-issue-strategy.md       — how the issues relate and what order they land in,
                                        subject to the gate above
-  3. work/handoff/handoff-lock-and-smoothing.md, the "#228 — becomes load-bearing, and gains the
+  3. $AC_HOME/handoff/handoff-lock-and-smoothing.md, the "#228 — becomes load-bearing, and gains the
      full state set" section only (currently lines 164-203). The rest of that file is
      ratified decisions for #226/#227; read them only if #228 turns out to depend on one.
 
@@ -80,7 +80,7 @@ Four facts not yet in those documents:
      coherence is a real condition. But it is a different message — "poor coherence",
      reverberation-limited — and must not be conflated with a lock fault.
 
-     Two constraints from ac-rs/ZMQ.md (transfer_stream frame, ~line 1603) that the
+     Two constraints from ac-rs/ZMQ.md (`### transfer_stream`) that the
      implementation has to respect:
 
        - `delay_locked: false` is also what a pair publishes *while warming up*, not

@@ -25,7 +25,7 @@ that technique.
 Properties:
 - Numeric rigor matches Tier 1: f64 internally, dBFS calibrated, peak
   amplitude correctly recovered for an aligned cosine. The voltage /
-  SPL / mic-curve calibration layers (`shared/calibration.rs`) apply
+  SPL / mic-curve calibration layers (`shared/calibration/`) apply
   identically to Tier 1 and Tier 2 reads — a level shown on a CWT
   waterfall reflects the same physical quantity as the same level
   read off `ac plot`.

@@ -3,15 +3,18 @@
 Running plan for the issues filed **after** epic
 [#276](https://github.com/mkovero/ac/issues/276) ("make the non-live IR path a
 usable, reportable measurement"). The epic's own sub-issues (#277–#287) are
-done or in flight; this is the second wave — 27 issues now, almost all
-discovered by rig sessions once the path could actually be run on hardware.
+done or in flight; this is the second wave — 27 issues, almost all discovered
+by rig sessions once the path could actually be run on hardware.
 
 **Expires** when #276's definition-of-done is met and every issue listed below
 is closed. Delete it then; do not let it become a second epic body. The tracker
 owns open/closed — this file owns *order and reasoning only*, and any status
 column in it is a snapshot, not authority.
 
-**Snapshot taken 2026-08-24**, against `main` at `fd444c5` (PR #392 merged).
+**Snapshot taken 2026-08-25**, against `main` at `3469bcf` (PR #397 merged).
+**16 of 27 closed. 11 open, and all desk work on them is done** — what remains
+is one design (#378), one rebase (#352), two merges awaiting rig evidence
+(#368, #369), and a queue of measurements that need an operator on site.
 
 ## What changed since the epic was written
 
@@ -31,22 +34,23 @@ and unreachable. Three shapes recur:
 3. **Correct code with no operator surface** — #243's capture half (#371), its
    readout (#372), the control pair it refuses to carry (#373).
 
-## What changed since this plan was written (2026-08-23 → 2026-08-24)
+## What changed since this plan was written
 
-Two things re-priced whole phases. Both are recorded here because the phase
-text below now reads as history without them.
+Three things re-priced whole phases. Recorded here because the phase text below
+reads as history without them.
 
-- **The metre is deprecated (#391, merged as PR #392).** Shape 3 above was
-  resolved by deletion, not by building the surface. #371's premise did not
-  survive tracing: `constant_ms` only ever fed the cosmetic `(X m)` suffix and
-  never touched `delay_ms`, samples or phase, and the residual it was meant to
-  correct is speaker-model-specific geometry that cannot be derived from a
-  known reference delay. So #371, #372, #367 and #357 all closed *not-planned*,
-  #390 decided **remove**, and #391 took out `ir_arrival_distance`,
-  `distance_cal`, `distance_plausible_max_m`, `format_delay_readout`'s metres
-  branch and the whole `speed_of_sound_*` derivation pipeline in one wire
-  break. `ir_flight_time_ms()` (`ac-scene/src/sweep_ir.rs:41`) is what replaced
-  it. **Phase 3 is gone; Phase 4's DoD line has to be restated.**
+- **The metre is deprecated** (#391, merged as PR #392, 2026-08-24). Shape 3
+  above was resolved by deletion, not by building the surface. #371's premise
+  did not survive tracing: `constant_ms` only ever fed the cosmetic `(X m)`
+  suffix and never touched `delay_ms`, samples or phase, and the residual it
+  was meant to correct is speaker-model-specific geometry that cannot be
+  derived from a known reference delay. So #371, #372, #367 and #357 all closed
+  *not-planned*, #390 decided **remove**, and #391 took out
+  `ir_arrival_distance`, `distance_cal`, `distance_plausible_max_m`,
+  `format_delay_readout`'s metres branch and the whole `speed_of_sound_*`
+  derivation pipeline in one wire break. `ir_flight_time_ms()`
+  (`ac-scene/src/sweep_ir.rs:41`) is what replaced it. **Phase 3 is gone;
+  Phase 4's DoD line has to be restated.**
 - **The one-period jump did not reproduce on the new audio stack.** 24 captures
   at one fixed position, peak ranges 4 and 7 samples, no cluster structure;
   2026-08-22 saw it in 10 of 24 at period 1024, so 0 in 24 has p ≈ 4×10⁻⁶
@@ -56,133 +60,131 @@ text below now reads as history without them.
   latency jumps are to be expected off this rig ("power management to shitty
   drivers/hw"), so the detection has to be **global**, not sized to hardware
   that happens not to jump. See Phase 1.
-
-Nine of the original 22 issues are closed. Three new ones arrived that belong
-in this plan's ordering (#380, #385, #389) plus the two that carried the metre
-decision (#390, #391, both closed).
+- **Phase 0 cleared to two items** (2026-08-24 → 2026-08-25). #361 (PR #393),
+  #375 (PR #394), #380 (PR #395), #385 (PR #396) and #389 (PR #397) all merged
+  in a day. What that leaves is the shape worth noticing: **every remaining
+  open issue is blocked on either a design call or hardware, not on
+  implementation.** #368 and #369 both have clean, QA-passed, mergeable
+  branches held only by evidence that needs the rig.
 
 ---
 
 ## Inventory
 
-Open unless marked. Status column is a snapshot; the tracker is authority.
+Open unless struck through. Status column is a snapshot; the tracker is
+authority.
 
 | issue | title (short) | routing | rig? |
 |---|---|---|---|
 | [#340](https://github.com/mkovero/ac/issues/340) | τ window ceiling | code half merged (#349); open for AC3/AC4 only → #350 | yes |
-| [#346](https://github.com/mkovero/ac/issues/346) | onset estimator, not `argmax` | **PR #352 open, `blocked`, 6 conflicts vs `main`** | yes (AC5) |
+| [#346](https://github.com/mkovero/ac/issues/346) | onset estimator, not `argmax` | **PR #352 `blocked`, still 6 conflicts vs `main`** | yes (AC5) |
 | [#347](https://github.com/mkovero/ac/issues/347) | τ measured more than once | code merged (#348); open on the zero-sample tolerance | yes |
 | [#350](https://github.com/mkovero/ac/issues/350) | derive τ window constants | measured 2026-08-22; `EDGE_MARGIN_FRAC` still not derived | yes |
 | [#351](https://github.com/mkovero/ac/issues/351) | `measure_tau` still `argmax` | needs-design, blocked on #346 | yes |
-| [#353](https://github.com/mkovero/ac/issues/353) | onset floor / guard coupling | fixed by #377 on `issue-346`; `in-review`, closes when #352 merges | no |
-| [#359](https://github.com/mkovero/ac/issues/359) | `plot_ir` inherits the period jump | **re-scoped** — jump absent here, guard still required | yes |
-| [#361](https://github.com/mkovero/ac/issues/361) | `it_loopback_ir` admits a pinned peak | ready-to-implement, untouched | no |
-| [#363](https://github.com/mkovero/ac/issues/363) | τ one period short, "2 readings agree" | **re-scoped** — agreement rule cannot fail | yes |
-| [#368](https://github.com/mkovero/ac/issues/368) | ±2 dB unity gate refuses good loopbacks | **PR #384 open, `claude-approved`, CONFLICTING** | no |
-| [#369](https://github.com/mkovero/ac/issues/369) | xrun counter ignored by τ | **PR #388 open, `in-review`** | no |
-| [#375](https://github.com/mkovero/ac/issues/375) | AC5's bar came from a lucky tape draw | needs-design; AC1–AC3 are desk work, unstarted | no |
+| [#353](https://github.com/mkovero/ac/issues/353) | onset floor / guard coupling | fixed by #377 on `issue-346`; closes when #352 merges | no |
+| [#359](https://github.com/mkovero/ac/issues/359) | `plot_ir` inherits the period jump | re-scoped — jump absent here, guard still required | yes |
+| [#363](https://github.com/mkovero/ac/issues/363) | τ one period short, "2 readings agree" | re-scoped — agreement rule cannot fail | yes |
+| [#368](https://github.com/mkovero/ac/issues/368) | ±2 dB unity gate refuses good loopbacks | **PR #384 MERGEABLE, QA re-review passed** | yes (to merge) |
+| [#369](https://github.com/mkovero/ac/issues/369) | xrun counter ignored by τ | **PR #388 MERGEABLE, one `assumed` threshold left** | yes (to merge) |
 | [#378](https://github.com/mkovero/ac/issues/378) | onset threshold vs the DRR term | needs-design, no comments yet — **the blocker** | yes |
-| [#380](https://github.com/mkovero/ac/issues/380) | surface the clamp warning on 8 commands | untriaged; #360's follow-on | no |
-| [#385](https://github.com/mkovero/ac/issues/385) | spawned daemon squats 5556/5557 | untriaged; costs rig time | no |
-| [#389](https://github.com/mkovero/ac/issues/389) | `clippy --all-targets` fails | untriaged; the build gate is red | no |
-| ~~#357~~ | ac-view readout rows collide | **closed** not-planned — rows cannot fire (#391) | — |
-| ~~#358~~ | `calibrate` ignores `output_channel` | **closed** — PR #383 | — |
-| ~~#360~~ | `drive_max_dbfs` governs one command | **closed** — PR #381; surfacing is #380 | — |
-| ~~#367~~ | no distance on any acoustic path | **closed** not-planned — superseded by #391 | — |
-| ~~#370~~ | spawned daemon caches config | **closed** — PR #386, per-request re-read + port echo | — |
-| ~~#371~~ | no capture path for a distance cal | **closed** not-planned — premise did not hold | — |
-| ~~#372~~ | distance readout unreachable | **closed** not-planned — no writer, none coming | — |
-| ~~#373~~ | self-pair refuses the whole session | **closed** — PR #382 | — |
-| ~~#376~~ | failed deconvolution reported as a result | **closed** — PR #387 | — |
-| ~~#390~~ | deprecate or keep the distance layer dormant | **closed** — decided *remove* | — |
-| ~~#391~~ | deprecate the metre | **closed** — PR #392 on `main` | — |
+| ~~#357~~ | ac-view readout rows collide | closed not-planned — rows cannot fire (#391) | — |
+| ~~#358~~ | `calibrate` ignores `output_channel` | closed — PR #383 | — |
+| ~~#360~~ | `drive_max_dbfs` governs one command | closed — PR #381; surfacing was #380 | — |
+| ~~#361~~ | `it_loopback_ir` admits a pinned peak | closed — PR #393, refuses an edge-pinned peak | — |
+| ~~#367~~ | no distance on any acoustic path | closed not-planned — superseded by #391 | — |
+| ~~#370~~ | spawned daemon caches config | closed — PR #386, per-request re-read + port echo | — |
+| ~~#371~~ | no capture path for a distance cal | closed not-planned — premise did not hold | — |
+| ~~#372~~ | distance readout unreachable | closed not-planned — no writer, none coming | — |
+| ~~#373~~ | self-pair refuses the whole session | closed — PR #382 | — |
+| ~~#375~~ | AC5's bar came from a lucky tape draw | closed — PR #394, bar re-derived as 3 × se | — |
+| ~~#376~~ | failed deconvolution reported as a result | closed — PR #387 | — |
+| ~~#380~~ | clamp warning invisible on 8 commands | closed — PR #395, CLI reads the applied level back | — |
+| ~~#385~~ | spawned daemon squats 5556/5557 | closed — PR #396, daemon identity | — |
+| ~~#389~~ | `clippy --all-targets` fails | closed — PR #397, build gate green again | — |
+| ~~#390~~ | deprecate or keep the distance layer dormant | closed — decided *remove* | — |
+| ~~#391~~ | deprecate the metre | closed — PR #392 on `main` | — |
 
 ## Dependencies
 
 ```
-  RUN THE RIG AT ALL  (cheap, unblocks operator time)
-  #385 ────→ a squatting daemon is discoverable        ← new
-  #380 ────→ the clamp that #360 added is visible      ← new
-  #389 ────→ the build gate goes green again           ← new
-
   TRUST THE CAPTURE  (must precede any accuracy measurement)
   #363 ─┐
   #359 ─┴─→ period-jump detection, for hardware that is not this rig
-  #369 ────→ label a capture taken across a dropout    (PR #388)
-  #368 ────→ a working loopback is not refused         (PR #384)
+  #369 ────→ label a capture taken across a dropout   (PR #388, needs evidence)
+  #368 ────→ a working loopback is not refused        (PR #384, ready)
 
   ACCURACY
   #378 ─→ (rig re-measure) ─→ #346 AC5 verdict ─→ PR #352 merges ─→ #353 closes
-  #375 ─→ the bar that verdict is scored against   (AC1–3 desk, AC4 after #378)
-  #351 ─→ reconcile τ's rule with the arrival's    (after #346 lands)
-  #350 ─→ τ window constants                       (measured; margin undecided)
-  #347 ─→ the zero-sample agreement tolerance      (folds into #363)
+          └─ scored against #375's re-derived 3 × se bar (landed)
+  #351 ─→ reconcile τ's rule with the arrival's       (after #346 lands)
+  #350 ─→ τ window constants                          (measured; margin undecided)
+  #347 ─→ the zero-sample agreement tolerance         (folds into #363)
+  #340 ─→ nothing of its own left once #350 closes
 
-  TEST HYGIENE
-  #361 ────────────────────  independent of everything
-
-  OPERATOR SURFACE — dissolved by #391, kept here so the absence is legible
-  #371 ─→ #372 ─→ #357      all closed not-planned
-  #367 ─────────────────    closed, superseded
+  DONE — kept so the absence is legible
+  #360 → #380     clamp made real, then made visible
+  #385, #389      site-time and build-gate costs, both paid
+  #361            test hygiene, independent of everything
+  #371 → #372 → #357, #367     dissolved by #391 (Phase 3)
 ```
 
 ---
 
-## Phase 0 — before the next site visit — **mostly landed**
+## Phase 0 — before the next site visit — **cleared to two merges**
 
 Rig time is the scarce resource and it needs an operator physically present.
-Everything here is desk work that either makes the visit *legal*, makes it
-*cheaper*, or stops it producing numbers that have to be thrown away.
+Everything here was desk work that either makes the visit *legal*, makes it
+*cheaper*, or stops it producing numbers that have to be thrown away. All of it
+has landed except two branches that are themselves waiting on the rig.
 
 - [x] **#360 — `drive_max_dbfs` on every emitting command** (PR #381). The
       interlock `.agents/rig.md` requires is now satisfiable: `plot_ir` and
       `calibrate` clamp server-side, and `calibrate`'s silent `-10 dBFS`
       default no longer sits 30 dB above the standing cap. Every session before
       this one was recorded as a request-side-only deviation.
+- [x] **#380 — the clamp is visible** (PR #395). `ac-cli` reads the applied
+      level back from the clamp-echoing responses, so a clamped run and an
+      unclamped run no longer print the same thing.
 - [x] **#373 — stop refusing a session over the self-pair** (PR #382).
       `[[0,2],[2,2]]` runs in one session again.
 - [x] **#358 — route on the requested `output_channel`** (PR #383).
-- [x] **#370 — echo the resolved ports** (PR #386) — and the larger half
-      landed too: config is re-read per request, so a spawned daemon no longer
+- [x] **#370 — echo the resolved ports** (PR #386) — and the larger half landed
+      too: config is re-read per request, so a spawned daemon no longer
       re-measures the first channel for a whole scan.
 - [x] **#376 — refuse a deconvolution that is noise** (PR #387). Reported as an
       `IrVerdict` with its reason carried through `SweepIrFault`, not as a
-      result. This is the one that mattered most for a drive sweep: low drive
-      is the *safe* choice under the consent rules, so the protocol pushes the
-      operator toward exactly the conditions that produced it.
-- [ ] **#368 — replace the ±2 dB unity gate.** PR #384 is open and
-      `claude-approved`, operator picked option **B** on 2026-08-23, and the
-      branch is **CONFLICTING against `main`** — #391 moved code under it.
-      Rebase, re-run, merge. τ is a timing measurement and the gate is on gain;
-      the message must also report the captured level and the window it missed,
-      not "loopback not detected", which asserts a cause the instrument cannot
-      know.
-- [ ] **#369 — carry the xrun delta into `TauOutcome`.** PR #388 open,
-      architect design posted 2026-08-24, `in-review`. Latent at period 1024;
-      period 64 makes it reachable, and two corrupted readings have no reason
-      to disagree. Merge before the next session, not after.
-- [ ] **#361 — `it_loopback_ir`'s pinned-peak bound.** Untouched, still
-      `ready-to-implement`, no design call needed. Same defect class as #340 one
+      result. The one that mattered most for a drive sweep: low drive is the
+      *safe* choice under the consent rules, so the protocol pushes the operator
+      toward exactly the conditions that produced it.
+- [x] **#361 — `it_loopback_ir`'s pinned-peak bound** (PR #393). Refuses an
+      edge-pinned peak instead of admitting it — same defect class as #340, one
       layer down.
-- [ ] **#375 AC1–AC3 — re-derive AC5's bar** from measured estimator
-      repeatability, state the n it assumes, and mark every rig criterion as
-      tape-scored or c-free. Desk work against data already recorded — the
-      n = 12-per-position scatter is in
-      `work/rig/rig-2026-08-23-onset-353-results.md`. AC4 waits (Phase 2).
-- [ ] **#389 — the clippy gate is red.** `cargo clippy --workspace
-      --all-targets -- -D warnings` fails on `field_reassign_with_default` in
-      `handlers/mod.rs` tests. `ac-rs/CLAUDE.md` treats that as a build-breaking
-      state, so every "green" claimed since is qualified. Cheapest item here.
-- [ ] **#385 — a squatting daemon must be identifiable.** 5556/5557 are
-      hardcoded with no way to see whose daemon owns them; the 2026-08-23
-      session worked around it by hand with `AC_CTRL_PORT`/`AC_DATA_PORT` and a
-      note not to touch the `bin-350` daemon. That workaround is a site-time
-      cost and a mis-measurement risk (wrong daemon answers, right-looking
-      numbers).
-- [ ] **#380 — surface the clamp warning on the 8 stimulus commands.** #360
-      made the clamp real; this makes it visible. Without it a clamped run and
-      an unclamped run print the same thing, which is the silent-config defect
-      class.
+- [x] **#385 — a squatting daemon is identifiable** (PR #396). The 2026-08-23
+      session had to work around 5556/5557 by hand with
+      `AC_CTRL_PORT`/`AC_DATA_PORT` and a note not to touch the `bin-350`
+      daemon; that workaround was site time and a mis-measurement risk (wrong
+      daemon answers, right-looking numbers).
+- [x] **#389 — the clippy gate is green again** (PR #397). Every "green" claimed
+      between the break and this fix was qualified.
+- [x] **#375 AC1–AC3 — AC5's bar re-derived** (PR #394). See Phase 2 for the
+      number and what it does to the standing verdict.
+- [ ] **#368 — replace the ±2 dB unity gate.** PR #384 is **MERGEABLE and
+      CLEAN** (the #391 conflict is gone), `claude-approved`, QA re-review
+      passed with the hot-off-unity case pinned
+      (`calibrate_measures_tau_on_hot_off_unity_fake_loopback`, +3.01 dB via
+      `AC_FAKE_TAU_GAIN_OVERRIDE`), and the operator picked option **B** on
+      2026-08-23. τ is a timing measurement and the gate was on gain. Held only
+      by its `requires-rig` label — decide whether that evidence is a merge gate
+      or a follow-up, because the branch itself is finished.
+- [ ] **#369 — carry the xrun delta into `TauOutcome`.** PR #388 is
+      **MERGEABLE and CLEAN**, both QA passes addressed. One thing blocks it and
+      it is **not code-fixable**: the `assumed` "any xrun > 0 is dirty"
+      threshold needs either a rig run (timed xrun vs clean lifecycle, same
+      acoustic path, comparing raw τ) or explicit human acceptance on #369. The
+      queue entry with the falsifying value in both directions is already
+      written (`rig/rig-verify-queue.md:339-366`) — but a queue entry is
+      not evidence. Latent at period 1024; period 64 makes it reachable, and two
+      corrupted readings have no reason to disagree.
 
 ## Phase 1 — the period jump: answered, then re-scoped
 
@@ -202,7 +204,8 @@ branch this plan originally wrote:
 > setup similar than I have here […] several factors that can cause funky
 > latency spikes from power management to shitty drivers/hw.
 
-So both issues stay, with their justification changed:
+So both issues stay, with their justification changed. Neither has moved since;
+both are still `needs-design`-shaped work nobody has started.
 
 - [ ] **#363 — the agreement rule is structurally unable to fail.**
       `agreement_count: 2` means "the state persisted for one second", not "two
@@ -215,11 +218,12 @@ So both issues stay, with their justification changed:
       composes an absolute arrival, so `calibrate` and `plot_ir` inherit one
       guard rather than two (#359's own last AC — the third consumer,
       `ir_arrival_distance()`, was deleted by #391).
-- [ ] **Verification cannot be by reproduction on this rig.** Nothing here
-      jumps any more, so the guard has to be exercised by injection — the fake
-      backend already has `AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE` from #348, which
-      is the shape to extend. State plainly in both issues that a green run on
-      192.168.9.25 is *not* evidence the guard works.
+- [ ] **Verification cannot be by reproduction on this rig.** Nothing here jumps
+      any more, so the guard has to be exercised by injection — the fake backend
+      already has `AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE` from #348, which is the
+      shape to extend, and #384/#388 both use the same override pattern for
+      their own untriggerable cases. State plainly in both issues that a green
+      run on 192.168.9.25 is *not* evidence the guard works.
 - [ ] **#347's open half folds in here.** The exact-zero tolerance
       (`delta_samples == 0`) is still architect-tagged `assumed`; whatever #363
       concludes about independent windows should set it. The measurement #347
@@ -228,40 +232,59 @@ So both issues stay, with their justification changed:
 
 ## Phase 2 — the arrival's accuracy
 
-Unchanged in substance and now the critical path: with Phase 3 dissolved and
-Phase 0 nearly clear, #378 is the only thing standing between the tree and
-#276's definition-of-done.
+Now the critical path, and the only phase with unstarted design work: with
+Phase 3 dissolved and Phase 0 cleared, **#378 is the single item between the
+tree and #276's definition-of-done.** It has no comments on it yet.
 
 - [ ] **#378 — design.** What the onset threshold is taken *relative to*. The
       pre-impulse statistic cannot see the DRR drop that supplies 15.4 of the
       18.2-sample between-position shift; #353's median floor (merged as #377)
-      covers the other 2.8. Requires the architect, on the Tier 1 path. No
-      comments on the issue yet — this is the item to dispatch first.
+      covers the other 2.8. Requires the architect, on the Tier 1 path. **This
+      is the item to dispatch first — everything below waits on it.**
 - [ ] **#378 — implement**, with the test-against-the-rejected-rule form and a
-      pinned, stated breakdown direction (#353's fix degrades to exactly
-      today's answer, never earlier or non-causal — hold the replacement to
-      the same bar).
+      pinned, stated breakdown direction (#353's fix degrades to exactly today's
+      answer, never earlier or non-causal — hold the replacement to the same
+      bar).
 - [ ] **#378 — rig re-measurement**, both taped positions, c-free increment
       against `transfer_stream`, n stated per position. **Requires site
       access.** This is the measurement that also settles #346 AC5.
-- [ ] **#375 AC4 — restate the AC5 verdict** against the re-derived bar and the
-      new number. AC5 as executed on 2026-08-23 read **25.67 samples (92.8 mm)**
-      against a registered bar of 1.3 samples — outside the bar, outside the
-      5 cm physical floor, and outside the onset's own 3.26-sample standard
-      error. Whether the bar or the estimator moves is the operator's and
-      architect's call, and it is not answerable until the two items above land.
+- [ ] **#375 AC4 — restate the AC5 verdict.** The bar itself has landed (PR
+      #394): `|Δt_est − Δt_transfer_stream| ≤ 3 × se(Δt_est)`, in units of the
+      candidate estimator's own measured standard error rather than a tape
+      draw converted to samples. The old 1.3-sample / 4.7 mm derivation is kept
+      struck-through with the reason it was wrong, not deleted. Against the
+      2026-08-23 n = 12-per-position table (`transfer_stream` 550.00 smp, sd 0
+      at n = 3 fresh locks; IR peak 557.42 smp, se 0.60; onset 575.67 smp, se
+      3.26) the onset's bar is **3 × 3.26 = 9.78 samples**, and the measured
+      increment difference was **25.67 samples** — so AC5 still fails, by ~2.6×
+      its own bar rather than ~20× a borrowed one. AC4 was deferred into #378
+      when #375 closed, because #378 is expected to move the onset's numbers;
+      restating it before then scores code about to change.
+      **The 3σ multiplier is settled**: accepted by mkovero on #375,
+      2026-08-25, and recorded at `work/rig/rig-test-plan.md`. Fixed before any
+      verification run and not to be re-opened once a run's numbers are known.
+      **Two riders remain undecided** and were not part of that acceptance —
+      both belong to #378's verification, not to `k`: (a) `se` is estimated, so
+      the increment's distribution is t at ~22 df, not normal — score with a
+      t-multiplier or hold n ≥ 12 per position as a condition of the bar;
+      (b) `3 × se` encodes no accuracy requirement and rewards imprecision — it
+      gives the onset 9.78 smp (35 mm) and the IR peak 1.80 smp (6.5 mm) from
+      one rule. If the tuning path needs a fixed physical tolerance, that is a
+      second criterion and its value comes from the use, not from this rig.
 - [ ] **PR #352 merges or does not**, on that verdict. Its AC1–AC4 have never
-      been in question. Two things to do before it can merge at all, neither of
-      them about accuracy:
-      - **rebase onto `main`** — the branch is behind and a test-merge produces
-        **6 conflicts across 5 files** (`ac-cli/src/commands/plot.rs`,
-        `ac-cli/tests/it_plot_ir.rs`, `ac-core/src/measurement/report.rs`,
-        `ac-core/src/measurement/sweep.rs`, `ac-daemon/tests/it_protocol.rs`),
-        mostly where #391 removed the distance readout under it;
-      - **restate any distance-facing output in ms.** `ir_arrival_distance()`
-        is gone; the arrival's companion number is `ir_flight_time_ms()`.
-- [ ] **#353 closes with #352.** It is only open because #377's base was
-      `issue-346` rather than `main`. Nothing to do on it.
+      been in question. Two things to do before it can merge at all, neither
+      about accuracy:
+      - **rebase onto `main`** — still `CONFLICTING`/`DIRTY`, unchanged since
+        2026-08-23, and a test-merge still produces **6 conflicts across 5
+        files** (`ac-cli/src/commands/plot.rs`, `ac-cli/tests/it_plot_ir.rs`,
+        `ac-core/src/measurement/report.rs`, `ac-core/src/measurement/sweep.rs`,
+        `ac-daemon/tests/it_protocol.rs`), mostly where #391 removed the
+        distance readout under it. The longer this sits, the more of `main` it
+        has to absorb.
+      - **restate any distance-facing output in ms.** `ir_arrival_distance()` is
+        gone; the arrival's companion number is `ir_flight_time_ms()`.
+- [ ] **#353 closes with #352.** Open only because #377's base was `issue-346`
+      rather than `main`. Nothing to do on it.
 - [ ] **#351 — reconcile `measure_tau`'s rule with the arrival's.** Only after
       #346 lands, because what τ must match is whatever #378 leaves behind.
       Note the trap named in the issue: switching `measure_tau` to
@@ -310,7 +333,7 @@ If a metre is ever wanted again, it starts from #391's commit message and the
       that agree with the tape measure". #391 removed the distance, and a taped
       distance is ±5 cm, which cannot score any of the quantities above. Restate
       it in flight-time terms — `ir_flight_time_ms()` against a c-free
-      estimator-vs-estimator increment, per the form #375 lands.
+      estimator-vs-estimator increment, in the 3 × se form #375 landed.
 - [ ] Confirm no `StandardsCitation` moved to `verified: true` without a
       document in `stddocs/`. IEC 60268-21 is still the one missing document,
       and only the loudspeaker/PA case needs it.
@@ -320,30 +343,37 @@ If a metre is ever wanted again, it starts from #391's commit message and the
 ## What one site visit should cover
 
 Ordered so an early result can re-prioritise the rest of the same session.
-Assumes Phase 0 has landed; every run at the authorised drive level with the
-clamp now actually enforced in the daemon (#360 merged — the first session
-that can be recorded as a clamped run rather than a deviation).
+Every run at the authorised drive level with the clamp now actually enforced in
+the daemon (#360) **and visible in the CLI output** (#380) — the first session
+that can be recorded as a clamped run rather than a deviation.
 
-1. **#378 verification** — both taped positions, ≥12 captures each, c-free
-   increment vs `transfer_stream`, standard error per position recorded. Now
-   the first item, since the period-jump confirmation it used to follow is
-   done. Only if #378's fix has landed; otherwise this slot is a
-   characterisation run, not a verdict.
-2. **#347 / #363 τ repeatability** — ≥10 `calibrate` runs within one client
+1. **#369's xrun threshold** — timed xrun vs clean lifecycle on the same
+   acoustic path, comparing raw τ. First because it is the cheapest thing here
+   and it releases a finished, mergeable branch (PR #388); the falsifying value
+   in both directions is already written down at
+   `rig/rig-verify-queue.md:339-366`. If the operator would rather accept
+   the "any xrun > 0 is dirty" threshold explicitly on #369, this slot
+   disappears and the PR merges today.
+2. **#378 verification** — both taped positions, ≥12 captures each, c-free
+   increment vs `transfer_stream`, standard error per position recorded, scored
+   against `3 × se` (multiplier accepted 2026-08-25, fixed). Only if #378's fix
+   has landed; otherwise this slot is a characterisation run, not a verdict.
+   Settle the bar's **two open riders** — t-multiplier vs n ≥ 12, and whether a
+   fixed physical tolerance sits alongside `3 × se` — before the run, not after.
+3. **#347 / #363 τ repeatability** — ≥10 `calibrate` runs within one client
    lifetime and across daemon restarts, at 48 and 96 kHz, `delta_samples`
    recorded per run. Settles the exact-zero tolerance, and is the only way to
    see whether the agreement rule can distinguish anything on a stack that does
    not jump.
-3. **#350 confirmation** — τ near the window edge, folded in while the loopback
+4. **#350 confirmation** — τ near the window edge, folded in while the loopback
    is patched; decides whether `TAU_EDGE_MARGIN_FRAC` stays at its conservative
    0.10.
-4. **A clamped-run record** — one emitting command per path with
-   `drive_max_dbfs` doing the clamping, to close out the interlock deviation
-   that every prior session had to declare.
+5. **#368's rig evidence**, if its `requires-rig` label is treated as a merge
+   gate rather than a follow-up — the branch is otherwise finished.
 
-Dropped from this list since the last revision: the period-jump confirmation
-(done, negative), #371's capture verification and #357's pixel check (both
-closed with #391).
+Dropped since earlier revisions: the period-jump confirmation (done, negative);
+#371's capture verification and #357's pixel check (both closed with #391); the
+clamped-run record (now a property of every run, not a separate item).
 
 Standing constraints, not restated per item: −40 dBFS ceiling with explicit
 per-run consent; pairs `[[0,2],[2,2]]` so the self-pair witnesses common-mode

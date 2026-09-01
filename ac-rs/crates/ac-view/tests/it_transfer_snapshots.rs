@@ -43,12 +43,36 @@
 //! reference shrank the most (2 calibration/warning rows gone). See
 //! `TESTING.md` → "A3 snapshot reference currency" for the checklist a
 //! `draw_view`/pane change must satisfy before merge.
+//!
+//! **Re-verified 2026-08-31** on the same box for the `view.rs` module
+//! split (PR #418), same build-on-the-dev-VM-and-copy method: all 7 pass
+//! against these references unchanged. Two facts worth recording from
+//! that run, because they are cheap to re-derive wrongly:
+//!
+//! * Regenerating produced byte-identical PNGs for the 5 transfer files
+//!   but a **±1 LSB** difference on ~400–750 scattered pixels in the two
+//!   spectrum files. It is not this crate's: a binary built from `main`
+//!   (`c2aa26fe`) regenerated *the same bytes* as the refactor binary for
+//!   all 7, and two runs of one binary are byte-identical, so the drift
+//!   is in the box's graphics stack since 2026-08-24 (its NVIDIA
+//!   userspace is now 610.57 against a 610.43 kernel module), not in any
+//!   `ac` commit. The references were therefore **not** regenerated —
+//!   they pass the gate, and replacing them would commit environment
+//!   drift as if it were a rendering change.
+//! * The gate is `threshold` 0.6 with `failed_pixel_count_threshold` 0
+//!   (egui_kittest defaults, no `kittest.toml` in this workspace): no
+//!   pixel may differ perceptibly, but a sub-threshold LSB shift passes.
+//!   A pass is therefore evidence of visual identity, not of byte
+//!   identity — regenerate into a scratch directory and hash if the
+//!   stronger claim is what a review needs.
 
 use ac_scene::{
     DerotMode, DisplayModes, FaultState, IrInput, IrScene, MeterState, Scene, SceneInput,
     Smoothing, Source, TransferInput, TransferScene,
 };
-use ac_view::view::{draw_view, Focus, SpectrumViewState, StimState, TransferViewState, ViewKind};
+use ac_view::view::{
+    draw_view, Focus, SpectrumViewState, StimState, StoredTrace, TransferViewState, ViewKind,
+};
 use egui_kittest::Harness;
 
 const FREQ_RANGE: (f64, f64) = (20.0, 20_000.0);
@@ -250,9 +274,19 @@ fn snapshot_transfer_stored_comparison_no_live() {
     let mut state = TransferViewState::new(-10.0, -20.0);
     state.focus = Focus::Stored(0);
     let view = ViewKind::Transfer(state);
-    let stored: Vec<(&str, &str, &TransferScene, bool)> = vec![
-        ("run.acsnap", "2026-08-01T00:00:00Z", &run_a, true),
-        ("run.acsnap", "2026-08-02T00:00:00Z", &run_b, false),
+    let stored = vec![
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-01T00:00:00Z",
+            scene: &run_a,
+            focused: true,
+        },
+        StoredTrace {
+            label: "run.acsnap",
+            captured_at_utc: "2026-08-02T00:00:00Z",
+            scene: &run_b,
+            focused: false,
+        },
     ];
     let mut h = Harness::builder()
         .with_size(SIZE)

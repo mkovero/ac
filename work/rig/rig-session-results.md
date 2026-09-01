@@ -1,6 +1,6 @@
 # rig-session-results — 2026-07-28, 192.168.9.25
 
-Executes `work/handoff/handoff-rig-session.md`. Rig: RME Babyface Pro, 96 kHz native both
+Executes `$AC_HOME/handoff/handoff-rig-session.md`. Rig: RME Babyface Pro, 96 kHz native both
 directions (`hw_params` rate 96000, period 1024, buffer 4096 — **no
 resampling anywhere in the path**), PipeWire graph `clock.rate 96000`,
 `clock.quantum 1024`. Build under test: `main` @ `bd40ed4` (#218 + #222),

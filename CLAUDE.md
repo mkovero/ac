@@ -4,7 +4,7 @@ Agent specs in `.agents/`. Read spec for your role before anything. Active role 
 
 Repo: ac-rs/ (cargo workspace, five crates) — stddocs/ docs/ tests/
 
-Documents: root holds entry points only (this file, README, ARCHITECTURE, HARDWARE, TESTING). `docs/` = durable reference — `docs/design/` design notes + briefs, `docs/superseded/` dead-but-kept plans. `work/` = in-flight, expiring — `work/handoff/`, `work/rig/`, `work/qa/`, `work/planning/`. Executed handoff goes under `work/` with expiry condition written in, not root — root reads as current.
+Documents: root holds entry points only (this file, README, ARCHITECTURE, TESTING). `docs/` = durable reference — `docs/design/` design notes + briefs, `docs/superseded/` dead-but-kept plans. `work/` = in-flight, expiring — `work/rig/`, `work/planning/`. Handoffs are out of tree in `$AC_HOME/handoff`; read one only when a task names it.
 
 | crate | binary | role |
 |-------|--------|------|
