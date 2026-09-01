@@ -77,6 +77,12 @@ Standards PDFs are NOT in this checkout — they are licence-restricted and giti
 else
   prompt="Review PR #$n in $AC_REPO.
 
+This is an explicit full review. Even if this commit already has an earlier QA
+comment, this invocation is a new review pass: governing specs, issue decisions,
+or human evidence may have changed without a code push. Apply the current QA
+spec, post a new superseding QA comment, and update labels to its verdict. Do
+not decline to post merely because the PR tip is unchanged.
+
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi
 

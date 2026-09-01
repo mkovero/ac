@@ -214,6 +214,13 @@ would falsify the claim. See step 5.}
 `claude-approved` is not a merge signal. It puts the PR in the Codex queue merge needs a human. You never set or clear `codex-approved` — if you disagree with a Codex
 finding, say so in your review comment and leave the label alone.
 
+An explicit full re-review at the same commit is a new review pass when the
+governing agent spec, issue decision, or human evidence changed after the old
+verdict. Re-evaluate under the current inputs, post a superseding review
+comment, and update labels to the new verdict. "No new commit" is not a reason
+to preserve a verdict whose governing rule changed; the commit is the subject
+of review, not the only review input.
+
 ### sending it back to architect or ux — the design is wrong, not the code
 
 Most findings are "the implementation does not do what the spec says". Some are
