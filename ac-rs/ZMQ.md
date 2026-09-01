@@ -1919,8 +1919,6 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "magnitude_db":    [<float>, ...],
   "phase_deg":       [<float>, ...],
   "coherence":       [<float>, ...],
-  "re":              [<float>, ...],     // docs/superseded/unified.md Phase 3: complex H, real part
-  "im":              [<float>, ...],     // complex H, imaginary part
   "delay_samples":   <int>,
   "delay_ms":        <float>,
 
@@ -2201,17 +2199,21 @@ continuously-integrated pressure-squared signal) is not. Same caveat
 as the existing `fractional_octave_leq` frame — display-only, must not
 be quoted as a certified SPL reading.
 
-**Complex H consistency.** `re` and `im` carry H₁(ω) directly so Tier 2
-views can render Nyquist locus, IFFT-based impulse response, and
-group-delay-from-complex without re-deriving from `magnitude_db` /
-`phase_deg`. All four representations (`mag`, `phase`, `re`, `im`) are
-computed from the same `H₁ = G_xy_comp / G_xx` complex value and are
-guaranteed mutually consistent: `magnitude_db = 20·log10(√(re² + im²))`
-and `phase_deg = atan2(im, re)·180/π`. Mic-curve correction (when
-enabled on the meas channel) is applied to all four — magnitude has
-the dB correction subtracted; (re, im) are scaled by `10^(−curve_db/20)`
-so `arg(H)` is unchanged. Older subscribers that ignore `re` / `im`
-keep working — the fields are pure additions.
+**Complex H is not on this frame.** `re` and `im` — H₁(ω) as real and
+imaginary arrays, downsampled in lockstep with `magnitude_db` — were
+carried here for Tier 2 views (Nyquist locus, IFFT-based impulse
+response, group-delay-from-complex) that were never built. They were
+**removed**: nothing in this repo read them, they were 86 KB of a
+222 KB frame, and each of the three uses they were added for is either
+absent or served better elsewhere. `magnitude_db` and `phase_deg` carry
+the same H₁ = `G_xy_comp / G_xx`, so a consumer that wants complex H
+reconstructs it as `10^(magnitude_db/20) · e^(j·phase_deg·π/180)`; the
+impulse response ships as the `visualize/ir` sidecar below, computed
+from the full-resolution H rather than these 2000 points, which could
+not have reconstructed h(t) correctly in any case. Mic-curve correction
+(when enabled on the meas channel) is applied to `magnitude_db` and not
+to `phase_deg` — the curve is magnitude-only, so `arg(H)` is unchanged
+either way.
 
 #### `visualize/ir` sidecar (Phase 4b)
 

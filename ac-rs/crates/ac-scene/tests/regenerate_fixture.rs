@@ -229,8 +229,6 @@ fn build_wire_frame() -> serde_json::Value {
         "magnitude_db": d.h1.magnitude_db,
         "phase_deg": d.h1.phase_deg,
         "coherence": d.h1.coherence,
-        "re": d.h1.re,
-        "im": d.h1.im,
         "delay_samples": d.h1.delay_samples,
         "delay_ms": d.h1.delay_ms,
         "meas_channel": meas_ch,

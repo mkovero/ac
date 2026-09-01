@@ -203,8 +203,6 @@ fn mtw_does_not_disturb_the_existing_frame() {
         "magnitude_db",
         "phase_deg",
         "coherence",
-        "re",
-        "im",
         "spec_freqs",
         "meas_spectrum",
         "ref_spectrum",

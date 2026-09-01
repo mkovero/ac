@@ -653,30 +653,13 @@ fn build_pair_messages(
         .iter()
         .map(|&i| result.coherence[i])
         .collect::<Vec<_>>();
-    // unified.md Phase 3: complex H downsampled in
-    // lockstep so Tier 2 views (Nyquist, IR-via-IFFT,
-    // group-delay-from-complex) get H(ω) directly
-    // without re-deriving from mag/phase. Same `indices`
-    // → guaranteed consistent with mag/phase/coherence.
-    let mut re = indices.iter().map(|&i| result.re[i]).collect::<Vec<_>>();
-    let mut im = indices.iter().map(|&i| result.im[i]).collect::<Vec<_>>();
-
     // Mic-curve correction (#101) on the measurement leg
     // only — the reference leg was guarded above. H1's
     // dB magnitude has the mic over-read embedded; subtract
     // the curve at each downsampled bin to recover truth.
-    // Same correction applied multiplicatively to (re, im)
-    // — the curve is magnitude-only (no phase change), so
-    // scaling both re and im by 10^(-curve_db/20)
-    // preserves arg(H) while shrinking |H| consistently.
     if mc_enabled {
         if let Some(curve) = curve_opt.as_ref() {
             mic::apply_mic_curve_inplace_f64(curve, &freqs, &mut mag);
-            for ((r, i), &f) in re.iter_mut().zip(im.iter_mut()).zip(freqs.iter()) {
-                let scale = mic::mic_curve_scale(curve, f);
-                *r *= scale;
-                *i *= scale;
-            }
         }
     }
     let mc_tag = mic::mic_correction_tag(curve_opt.is_some(), mc_enabled);
@@ -833,8 +816,6 @@ fn build_pair_messages(
         "magnitude_db":    mag,
         "phase_deg":       phase,
         "coherence":       coh,
-        "re":              re,
-        "im":              im,
         "delay_samples":   result.delay_samples,
         "delay_ms":        result.delay_ms,
         "delay_locked":    delay_opt.is_some(),
@@ -864,20 +845,19 @@ fn build_pair_messages(
         "cal_tags":        cal_tags,
         "drive":           drive_msg.clone(),
     });
-    // Phase 4b: IR sidecar from full-resolution
-    // complex H (NOT the downsampled re/im above —
-    // the IFFT needs the raw nperseg/2+1 bins to
-    // recover h(t) correctly). Time-domain output is
-    // 1 s long at sr (matches the 1 Hz Welch
-    // resolution); downsample to ≤2000 samples for
-    // wire economy by stride-picking. Mic-curve
-    // correction is intentionally NOT applied to the
-    // IR — the downsampled re/im version already
-    // would have it, but the full-resolution H here
-    // does not (mic-curve correction in the curve_opt
-    // branch above only touches the downsampled mag /
-    // re / im). For the visualization-only Tier 2 IR
-    // view this is acceptable; if a Tier-1 calibrated
+    // Phase 4b: IR sidecar from the full-resolution
+    // complex H — the IFFT needs the raw nperseg/2+1
+    // bins to recover h(t) correctly, so it reads
+    // `result.re`/`result.im` and not the 2000-point
+    // display arrays. Time-domain output is 1 s long at
+    // sr (matches the 1 Hz Welch resolution);
+    // downsample to ≤2000 samples for wire economy by
+    // stride-picking. Mic-curve correction is
+    // intentionally NOT applied to the IR: the
+    // `curve_opt` branch above corrects only the
+    // downsampled `mag`, and the full-resolution H here
+    // is uncorrected. For the visualization-only Tier 2
+    // IR view this is acceptable; if a Tier-1 calibrated
     // IR is wanted, that path goes through the sweep
     // measurement, not transfer_stream.
     let h_full_re = &result.re;

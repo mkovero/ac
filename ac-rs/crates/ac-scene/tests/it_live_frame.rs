@@ -61,8 +61,6 @@ fn wire_frame_deserializes_a_real_daemon_emitted_frame() {
         "magnitude_db",
         "phase_deg",
         "coherence",
-        "re",
-        "im",
         "delay_samples",
         "delay_ms",
         "meas_channel",

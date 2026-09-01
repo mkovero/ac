@@ -53,53 +53,50 @@ fn transfer_stream_emits_data_and_done() {
                     "magnitude_db",
                     "phase_deg",
                     "coherence",
-                    "re",
-                    "im",
                     "delay_samples",
                     "delay_ms",
                 ] {
                     assert!(v.get(key).is_some(), "frame missing {key}: {v}");
                 }
-                // unified.md Phase 3: re/im consistency — every bin
-                // must satisfy |H| ≈ √(re² + im²) and arg(H) ≈
-                // atan2(im, re), since all four are derived from the
-                // same H₁ complex value.
-                let mag_db = v["magnitude_db"].as_array().unwrap();
-                let phase_deg = v["phase_deg"].as_array().unwrap();
-                let re = v["re"].as_array().unwrap();
-                let im = v["im"].as_array().unwrap();
-                assert_eq!(mag_db.len(), re.len(), "re must match mag length");
-                assert_eq!(mag_db.len(), im.len(), "im must match mag length");
-                for i in 0..mag_db.len() {
-                    let m_db = mag_db[i].as_f64().unwrap();
-                    let p_deg = phase_deg[i].as_f64().unwrap();
-                    let r = re[i].as_f64().unwrap();
-                    let im_v = im[i].as_f64().unwrap();
-                    let mag_lin_from_re_im = (r * r + im_v * im_v).sqrt();
-                    let mag_lin_from_db = 10.0_f64.powf(m_db / 20.0);
-                    // 0.01 relative tolerance: handles f32 → f64
-                    // round-trips through serde_json + the
-                    // h1.norm().max(1e-6) floor at very small |H|.
-                    let denom = mag_lin_from_db.max(1e-6);
-                    let rel_err = (mag_lin_from_re_im - mag_lin_from_db).abs() / denom;
+                // `re` / `im` were removed from this frame: they carried
+                // H₁(ω) for Tier 2 views that were never built, nothing
+                // in the tree read them, and they were 86 KB of a 222 KB
+                // frame. Asserted absent rather than merely dropped from
+                // the list above, so re-adding them has to be a decision
+                // someone makes here and not a paste that goes unnoticed.
+                // `ZMQ.md`'s "Complex H is not on this frame" paragraph
+                // is the contract this guards.
+                for key in ["re", "im"] {
                     assert!(
-                        rel_err < 0.01,
-                        "bin {i}: |H| from re/im = {mag_lin_from_re_im} vs from dB = {mag_lin_from_db}",
+                        v.get(key).is_none(),
+                        "{key} is back on the transfer_stream frame: {v}"
                     );
-                    // Phase: skip when |H| is at the floor (atan2 of
-                    // tiny re/im is meaningless / numerical noise).
-                    if mag_lin_from_db > 1e-4 {
-                        let p_from_re_im = im_v.atan2(r).to_degrees();
-                        let mut diff = (p_from_re_im - p_deg).abs();
-                        if diff > 180.0 {
-                            diff = 360.0 - diff;
-                        }
-                        assert!(
-                            diff < 1.0,
-                            "bin {i}: phase from re/im = {p_from_re_im}° vs frame = {p_deg}°",
-                        );
-                    }
                 }
+                // What the re/im consistency check used to cover, in the
+                // terms that survive: the display arrays are one
+                // downsampling of one H₁, so they are the same length,
+                // and every element is a number a plotter can use. A
+                // frame whose arrays disagree in length is the failure
+                // `ac-scene`'s `lengths_agree` filter silently swallows.
+                let freqs = v["freqs"].as_array().unwrap();
+                for key in ["magnitude_db", "phase_deg", "coherence"] {
+                    let a = v[key].as_array().unwrap();
+                    assert_eq!(a.len(), freqs.len(), "{key} must match freqs length");
+                    assert!(
+                        a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                        "{key} carries a non-finite or non-numeric element"
+                    );
+                }
+                // Coherence is a magnitude-squared coherence: outside
+                // [0, 1] it is not one, whatever else is true.
+                assert!(
+                    v["coherence"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|c| (0.0..=1.0).contains(&c.as_f64().unwrap())),
+                    "coherence outside [0, 1]"
+                );
                 got_frame = true;
                 break;
             }
