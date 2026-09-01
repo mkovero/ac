@@ -2102,6 +2102,14 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "meas_channel":    <int>,
   "ref_channel":     <int>,
   "sr":              <int>,
+  "n_averages":      <int>,              // Welch blocks actually averaged into this
+                                          // frame (#208). Rises 1 -> 4 over the first
+                                          // ~1.5 s while the analysis window fills,
+                                          // then stays 4 for the session. Coherence
+                                          // carries a `1/N` bias, so a coherence
+                                          // figure without N is not interpretable —
+                                          // a settling display and a DUT that changed
+                                          // look alike without it.
   "mic_correction":  "on" | "off" | "none",
 
   // Additive (handoff: transfer-frame-v2 M0) — per-channel calibrated
