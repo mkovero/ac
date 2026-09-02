@@ -26,10 +26,11 @@ use serde_json::{json, Value};
 use ac_core::visualize::time_integration::{TAU_FAST_S, TAU_SLOW_S};
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
-use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
-use super::super::{busy_guard, cfg_guard, resolve_input, send_pub, spawn_worker};
+use super::super::{
+    busy_guard, cfg_guard, make_engine_for_state, resolve_input, send_pub, spawn_worker,
+};
 
 use self::capture::{
     capture_budget_samples, capture_into_ring, capture_or_report, log_transform_time,
@@ -146,6 +147,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let out_ch = cfg.output_channel;
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
@@ -161,7 +167,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let band_weighting_shared = state.band_weighting.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
-        let mut eng = make_engine(fake);
         let start_port = in_ports_worker.first().map(String::as_str);
         if let Err(e) = eng.start(&[], start_port) {
             send_pub(
@@ -354,6 +359,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                 pub_tx: &pub_tx,
                 n_channels,
                 sr,
+                backend,
                 frame_idx,
                 tick_ts_ns,
                 mic_corr_enabled: mic_corr_enabled.load(Ordering::Relaxed),
@@ -494,6 +500,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             "mic_correction": mc_tag,
                             "timestamp":      ts_ns,
                             "xruns":          xruns_total,
+                            "backend":        backend,
                         });
                         send_pub(&pub_tx, "data", &frac_frame);
 
@@ -545,6 +552,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                                     "mic_correction": mc_tag,
                                     "timestamp":      ts_ns,
                                     "xruns":          xruns_total,
+                                    "backend":        backend,
                                 });
                                 send_pub(&pub_tx, "data", &leq_frame);
                             }
@@ -812,6 +820,7 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
                             ("spl_offset_db", json!(spl_offset)),
                             ("mic_correction", json!(mc_tag)),
                             ("xruns", json!(xruns_total)),
+                            ("backend", json!(backend)),
                         ] {
                             obj.insert(k.to_string(), v);
                         }
@@ -834,7 +843,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
             let mut mp = monitor_params_shared.lock().unwrap();
             mp.active = false;
         }
-        send_pub(&pub_tx, "done", &json!({"cmd":"monitor_spectrum"}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"monitor_spectrum","backend":backend}),
+        );
     });
 
     {
@@ -850,5 +863,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         "crossover_hz":    crossover_hz,
         "lf_avg_tau_ms":   LF_AVG_TAU_S * 1000.0,
         "lf_overlap_pct":  LF_OVERLAP * 100.0,
+        "backend":         backend,
     })
 }

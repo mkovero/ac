@@ -127,7 +127,17 @@ fn open_engine(plan: &SessionPlan, io: &SessionIo) -> Option<Box<dyn AudioEngine
     // this the generator plays onto an unconnected port.
     let out_ports: Vec<String> = drive_out_ports(plan.drivable, &plan.out_port, &plan.ref_out_port);
 
-    let mut eng = make_engine(plan.fake);
+    let mut eng = match make_engine(plan.fake, plan.backend_required.as_deref()) {
+        Ok(eng) => eng,
+        Err(e) => {
+            send_pub(
+                &io.pub_tx,
+                "error",
+                &json!({"cmd":"transfer_stream","message":e.to_string()}),
+            );
+            return None;
+        }
+    };
     let main_port = plan.unique_ports[0].clone();
     if let Err(e) = eng.start(&out_ports, Some(&main_port)) {
         send_pub(
@@ -176,7 +186,7 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
         return;
     };
     let sr = eng.sample_rate();
-    let statics = plan.frame_statics(sr);
+    let statics = plan.frame_statics(sr, eng.backend_name());
 
     // Snapshot ring (handoff: snapshot-backend M1, deliverable 1):
     // raw pre-processing samples for every unique session channel,

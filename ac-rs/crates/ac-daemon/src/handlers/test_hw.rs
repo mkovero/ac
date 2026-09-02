@@ -8,14 +8,14 @@ use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
 
-use crate::audio::{make_engine, AudioEngine};
+use crate::audio::AudioEngine;
 use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, capture_rms, cfg_guard, read_dmm_vrms, ref_output_migration_warning,
-    resolve_input, resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub,
-    spawn_worker, std_dev, TestResult,
+    analyze_mono, busy_guard, capture_rms, cfg_guard, make_engine_for_state, read_dmm_vrms,
+    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
+    resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, std_dev, TestResult,
 };
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
@@ -51,7 +51,11 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let dmm_host = cfg.dmm_host.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
@@ -69,7 +73,6 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
             vec![out_port.clone()]
         };
 
-        let mut eng = make_engine(fake);
         if !eng.supports_routing() {
             send_pub(
                 &pub_tx,
@@ -119,6 +122,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
                     "detail": $r.detail, "tolerance": $r.tolerance,
                     "mic_correction":   mc_tag,
                     "spl_offset_db":    spl_offset_db,
+                    "backend":          backend,
                 }));
             }};
         }
@@ -157,6 +161,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
                             "type": "test_result", "cmd": "test_hardware", "dmm": true,
                             "name": $r.name, "pass": $r.pass,
                             "detail": $r.detail, "tolerance": $r.tolerance,
+                            "backend": backend,
                         }));
                     }};
                 }
@@ -183,6 +188,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
                 "tests_run": tests_run, "tests_pass": tests_pass,
                 "dmm_run": dmm_run, "dmm_pass": dmm_pass,
                 "xruns": eng.xruns(),
+                "backend": backend,
             }),
         );
     });
@@ -197,6 +203,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
+        "backend":      backend,
     });
     // #225 migration notice — present on every reply, not just the first, so a
     // client that connects later still sees it. Omitted entirely when it does

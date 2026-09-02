@@ -76,6 +76,11 @@ stop consuming frames when it receives either of these:
 
 Every frame carries a tier-prefixed `"type"`:
 
+Every measurement DATA frame also carries `"backend": "jack" | "cpal" |
+"fake"`, taken from the live engine that produced it. This is provenance,
+not a copy of config; an unmet real-backend requirement produces no
+measurement frame.
+
 | Tier  | `type`                                      |
 |-------|---------------------------------------------|
 | 1     | `measurement/frequency_response/point`      |
@@ -491,7 +496,10 @@ Returns server health and current state.
   "config_path":    "<path>",         // config.json path in use
   "pid":            <int>,
   "started_at":     "<RFC3339>",      // UTC, second precision — process start
-  "spawn_mode":     "auto" | "manual" // "auto" = started via ac-cli's spawn_daemon()
+  "spawn_mode":     "auto" | "manual", // "auto" = started via ac-cli's spawn_daemon()
+  "backend_required": "jack" | "cpal" | "fake",
+  "backend_available": <bool>,
+  "backend":         "jack" | "cpal" | "fake" | null
 }
 ```
 
@@ -499,6 +507,12 @@ Returns server health and current state.
 this daemon apart from another one squatting the same hardcoded 5556/5557
 ports under a different `HOME` — e.g. a leftover auto-spawn from an isolated
 test/rig run. Additive fields; a client that doesn't read them is unaffected.
+
+`backend_required` is the canonical configured requirement (or the platform's
+real default; `--fake-audio` reports `fake`). `backend_available` reports
+whether that requirement can be met without opening or starting an engine.
+`backend` is null when unavailable and otherwise names the engine a request
+would construct.
 
 ---
 
@@ -834,11 +848,24 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "dbu_ref_vrms":      <float>,   // optional
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
-    "backend":           "jack" | "sounddevice" | null,  // optional
+    "backend":           "jack" | "cpal" | "fake" | null,  // optional
     "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
     "snapshot_spool_dir":"<path>" | null  // optional — see `snapshot`
   }
 }
+```
+
+`backend` is a requirement, not a preference. `null` selects the platform's
+real default and never falls back to fake. `fake` is the persistent explicit
+opt-in used for deliberate synthetic operation. Legacy `sounddevice` is
+accepted as an alias for `cpal` and is persisted canonically as `cpal` on a
+successful setup write. Other values are rejected.
+
+When a required real backend is unavailable, audio commands fail before a
+worker starts:
+
+```json
+{ "ok": false, "error": "audio backend unavailable — required jack; measurement not started" }
 ```
 
 When `output_channel`, `input_channel`, `reference_channel`, or

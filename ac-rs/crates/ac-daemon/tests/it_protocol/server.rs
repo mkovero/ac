@@ -19,6 +19,27 @@ fn server_connections_reports_daemon_identity() {
     assert_eq!(r["spawn_mode"], json!("manual"));
 }
 
+#[test]
+fn setup_validates_and_canonicalizes_backend_requirement() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let invalid = c.call(json!({"cmd":"setup","update":{"backend":"alsa"}}));
+    assert_eq!(invalid["ok"], json!(false));
+    assert!(invalid["error"]
+        .as_str()
+        .unwrap()
+        .contains("jack, cpal, fake"));
+
+    let alias = c.call(json!({"cmd":"setup","update":{"backend":"sounddevice"}}));
+    assert_eq!(alias["ok"], json!(true));
+    assert_eq!(alias["config"]["backend"], json!("cpal"));
+
+    let explicit_fake = c.call(json!({"cmd":"setup","update":{"backend":"fake"}}));
+    assert_eq!(explicit_fake["ok"], json!(true));
+    assert_eq!(explicit_fake["config"]["backend"], json!("fake"));
+}
+
 /// #385: a second daemon that loses the bind race must report the
 /// incumbent's identity to stderr rather than fail silently or guess.
 #[test]

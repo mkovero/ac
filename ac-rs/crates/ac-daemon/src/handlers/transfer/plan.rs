@@ -20,9 +20,9 @@ use serde_json::{json, Value};
 use ac_core::shared::calibration::Calibration;
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
-use crate::audio::make_engine;
 use crate::handlers::{
-    apply_drive_ceiling, ref_output_migration_warning, resolve_output, resolve_ref_output,
+    apply_drive_ceiling, make_engine_for_state, ref_output_migration_warning, resolve_output,
+    resolve_ref_output,
 };
 use crate::server::ServerState;
 
@@ -44,6 +44,8 @@ pub(super) struct SessionPlan {
     /// `set_drive` is ever called in this session.
     pub(super) level_dbfs: f64,
     pub(super) fake: bool,
+    pub(super) backend_required: Option<String>,
+    pub(super) backend: String,
     pub(super) fake_correlated_pair: Option<(f64, usize)>,
     pub(super) fake_ring_process_secs: Option<f64>,
     pub(super) fake_ring_period: usize,
@@ -133,15 +135,15 @@ impl SessionPlan {
         // immediate REP error instead of a silent worker exit that the UI never
         // sees (the async `send_pub("error", …)` path below is still needed for
         // per-capture failures once the worker is live).
-        {
-            let probe_eng = make_engine(state.fake_audio);
-            if !probe_eng.supports_routing() {
-                return Err(json!({
-                    "ok": false,
-                    "error": format!("{} backend does not support port routing", probe_eng.backend_name()),
-                }));
-            }
+        let probe_eng =
+            make_engine_for_state(state).map_err(|e| json!({"ok": false, "error": e}))?;
+        if !probe_eng.supports_routing() {
+            return Err(json!({
+                "ok": false,
+                "error": format!("{} backend does not support port routing", probe_eng.backend_name()),
+            }));
         }
+        let backend = probe_eng.backend_name().to_string();
 
         let out_ch = cfg.output_channel;
 
@@ -221,6 +223,8 @@ impl SessionPlan {
             drivable,
             level_dbfs,
             fake: state.fake_audio,
+            backend_required: cfg.backend.clone(),
+            backend,
             fake_correlated_pair,
             fake_ring_process_secs,
             fake_ring_period,
@@ -261,6 +265,7 @@ impl SessionPlan {
             // Legacy fields — filled with the first pair so old clients keep working.
             "meas_channel": self.pairs.first().map(|p| p.0).unwrap_or(0),
             "ref_channel":  self.pairs.first().map(|p| p.1).unwrap_or(0),
+            "backend":      self.backend,
         });
         // #225 migration notice — see `ref_output_migration_warning`. Repeated on
         // every launch reply rather than once, so a client that connects to an
@@ -274,7 +279,7 @@ impl SessionPlan {
     /// Every frame input fixed for the worker's life, once the sample rate
     /// is known. Consumes the plan's `integration_tag` and the ladder
     /// description, both of which the frame builder then owns.
-    pub(super) fn frame_statics(&self, sr: u32) -> FrameStatics {
+    pub(super) fn frame_statics(&self, sr: u32, backend: &str) -> FrameStatics {
         // Fixed log-column grid for `meas_spectrum`/`ref_spectrum` (D18) —
         // computed once since it's constant for the worker's lifetime
         // (sr never changes mid-session); `spectrum_to_columns_wire`'s
@@ -320,6 +325,7 @@ impl SessionPlan {
         // once. `mtw_stages` is moved in rather than cloned per frame.
         FrameStatics {
             sr,
+            backend: backend.to_string(),
             spec_f_min,
             spec_f_max,
             spec_n_columns,

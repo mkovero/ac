@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use ac_core::config::Config;
 use ac_core::shared::calibration::Calibration;
 
-use crate::audio::{make_engine, AudioEngine};
+use crate::audio::AudioEngine;
 use crate::server::ServerState;
 use crate::workers::{cmd_group, Group, WorkerHandle};
 
@@ -132,6 +132,14 @@ where
     }
 }
 
+/// Construct the backend required by this daemon's explicit fake flag or
+/// current config. All measurement handlers cross this single fail-closed
+/// boundary and take wire provenance from the returned live engine.
+pub(super) fn make_engine_for_state(state: &ServerState) -> Result<Box<dyn AudioEngine>, String> {
+    let required = state.cfg.lock().unwrap().backend.clone();
+    crate::audio::make_engine(state.fake_audio, required.as_deref()).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Drive ceiling (#360)
 // ---------------------------------------------------------------------------
@@ -167,8 +175,11 @@ pub(super) fn apply_drive_ceiling(ceiling_dbfs: f64, requested_dbfs: f64) -> f64
 pub(super) fn cached_playback_ports(state: &ServerState) -> Vec<String> {
     let mut guard = state.playback_ports_cache.lock().unwrap();
     if guard.is_none() {
-        let eng = make_engine(state.fake_audio);
-        *guard = Some(eng.playback_ports());
+        *guard = Some(
+            make_engine_for_state(state)
+                .map(|eng| eng.playback_ports())
+                .unwrap_or_default(),
+        );
     }
     guard.clone().unwrap_or_default()
 }
@@ -176,17 +187,21 @@ pub(super) fn cached_playback_ports(state: &ServerState) -> Vec<String> {
 pub(super) fn cached_capture_ports(state: &ServerState) -> Vec<String> {
     let mut guard = state.capture_ports_cache.lock().unwrap();
     if guard.is_none() {
-        let eng = make_engine(state.fake_audio);
-        *guard = Some(eng.capture_ports());
+        *guard = Some(
+            make_engine_for_state(state)
+                .map(|eng| eng.capture_ports())
+                .unwrap_or_default(),
+        );
     }
     guard.clone().unwrap_or_default()
 }
 
 /// Force a rescan on the next port query. Called by `devices`.
 pub(super) fn refresh_port_cache(state: &ServerState) {
-    let eng = make_engine(state.fake_audio);
-    *state.playback_ports_cache.lock().unwrap() = Some(eng.playback_ports());
-    *state.capture_ports_cache.lock().unwrap() = Some(eng.capture_ports());
+    if let Ok(eng) = make_engine_for_state(state) {
+        *state.playback_ports_cache.lock().unwrap() = Some(eng.playback_ports());
+        *state.capture_ports_cache.lock().unwrap() = Some(eng.capture_ports());
+    }
 }
 
 // ---------------------------------------------------------------------------

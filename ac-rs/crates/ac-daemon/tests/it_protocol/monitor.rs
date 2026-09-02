@@ -115,6 +115,7 @@ fn monitor_spectrum_wire_values_match_fake_tone() {
     }
     let _ = c.call(json!({"cmd": "stop"}));
     let frame = frame.expect("no usable spectrum frame within 5 s");
+    assert_eq!(frame["backend"], json!("fake"));
 
     // ── 1. Wire schema: cal offsets are null when no cal is loaded ──
     assert!(

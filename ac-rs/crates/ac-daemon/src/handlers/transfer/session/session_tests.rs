@@ -29,6 +29,7 @@ fn noise(n: usize, seed: u32) -> Vec<f32> {
 fn statics() -> FrameStatics {
     FrameStatics {
         sr: SR,
+        backend: "fake".to_string(),
         spec_f_min: 20.0,
         spec_f_max: SR as f64 / 2.0,
         spec_n_columns: ac_core::visualize::aggregate::transfer_spectrum_n_columns(

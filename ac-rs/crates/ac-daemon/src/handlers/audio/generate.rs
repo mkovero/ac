@@ -4,12 +4,11 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cfg_guard, resolve_output, resolve_output_by_channel,
-    send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, make_engine_for_state, resolve_output,
+    resolve_output_by_channel, send_pub, spawn_worker,
 };
 
 /// Resolve the `channels` field in a generate command into playback ports.
@@ -69,11 +68,14 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let ports_for_worker = out_ports.clone();
 
     let worker = spawn_worker(state, "generate", move |stop| {
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&ports_for_worker, None) {
             send_pub(
                 &pub_tx,
@@ -89,7 +91,11 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"generate"}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"generate","backend":backend}),
+        );
     });
 
     {
@@ -97,7 +103,7 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs})
+    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs, "backend": backend})
 }
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
@@ -117,11 +123,14 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let ports_for_worker = out_ports.clone();
 
     let worker = spawn_worker(state, "generate_pink", move |stop| {
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&ports_for_worker, None) {
             send_pub(
                 &pub_tx,
@@ -137,7 +146,11 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"generate_pink"}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"generate_pink","backend":backend}),
+        );
     });
 
     {
@@ -145,5 +158,5 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs})
+    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs, "backend": backend})
 }

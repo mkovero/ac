@@ -13,6 +13,9 @@ fn status_replies_ok() {
     assert_eq!(r["ok"], json!(true));
     assert_eq!(r["busy"], json!(false));
     assert_eq!(r["listen_mode"], json!("local"));
+    assert_eq!(r["backend_required"], json!("fake"));
+    assert_eq!(r["backend_available"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
 }
 
 /// #385: `status` carries the identity fields a client needs to tell this
@@ -24,6 +27,7 @@ fn status_reports_daemon_identity() {
     let c = Client::new(&d);
     let r = c.call(json!({"cmd":"status"}));
     assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
     assert_eq!(
         r["home"],
         json!(d.home.display().to_string()),
