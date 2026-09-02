@@ -177,6 +177,17 @@ qa_loop() {
       # report "raised nothing", which is how a request-changes verdict turns
       # into "yours to merge". Leave the label. Stop.
       if [[ $pre == "$post" ]]; then
+        ils="$(labels "$n")" || { echo "  #$n: cannot read issue labels — stopping"; return 1; }
+        if has needs-design "$ils"; then
+          echo "  #$n PR #$pr: developer handed back to architect (needs-design)"
+          echo "     the PR stays unchanged; architect must amend the design/manifest"
+          STATE=needs-design; return 0
+        fi
+        if has needs-ux "$ils"; then
+          echo "  #$n PR #$pr: developer handed back to ux (needs-ux)"
+          echo "     the PR stays unchanged; ux must resolve the output decision"
+          STATE=needs-ux; return 0
+        fi
         echo "  #$n PR #$pr: revise pushed nothing — tip is still $post"
         echo "     needs-work stays. re-reviewing an identical tip cannot change"
         echo "     the verdict, so the block is one only you can clear: a rig"
