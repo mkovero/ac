@@ -482,6 +482,10 @@ drive_epic() {
       needs-human|blocked)
         echo "  #$c needs you — stopping epic."
         [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+      *)
+        echo "  #$c did not reach a terminal workflow state — stopping epic."
+        echo "  Inspect its labels and session log before continuing."
+        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
     esac
   done
   echo "  #$e: all children processed"
