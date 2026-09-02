@@ -290,7 +290,7 @@ pub fn backend_status(fake_audio: bool, required: Option<&str>) -> (String, bool
                 false
             }
         }
-        "cpal" => cfg!(feature = "cpal-audio"),
+        "cpal" => cfg!(all(feature = "cpal-audio", not(target_os = "linux"))),
         _ => false,
     };
     (
@@ -325,11 +325,11 @@ pub fn make_engine(fake_audio: bool, required: Option<&str>) -> Result<Box<dyn A
             unreachable!("availability check rejects an uncompiled JACK backend")
         }
         "cpal" => {
-            #[cfg(feature = "cpal-audio")]
+            #[cfg(all(feature = "cpal-audio", not(target_os = "linux")))]
             {
                 Ok(Box::new(cpal_backend::CpalEngine::new()))
             }
-            #[cfg(not(feature = "cpal-audio"))]
+            #[cfg(any(not(feature = "cpal-audio"), target_os = "linux"))]
             unreachable!("availability check rejects an uncompiled CPAL backend")
         }
         _ => bail!("invalid audio backend requirement {required:?}"),
@@ -352,11 +352,16 @@ mod backend_selection_tests {
         );
     }
 
-    #[cfg(not(feature = "cpal-audio"))]
+    #[cfg(any(not(feature = "cpal-audio"), target_os = "linux"))]
     #[test]
-    fn unavailable_real_backend_fails_closed() {
+    fn unavailable_cpal_backend_fails_closed() {
+        let (required, available, selected) = backend_status(false, Some("cpal"));
+        assert_eq!(required, "cpal");
+        assert!(!available);
+        assert_eq!(selected, None);
+
         let err = match make_engine(false, Some("cpal")) {
-            Ok(_) => panic!("uncompiled CPAL backend unexpectedly constructed"),
+            Ok(_) => panic!("unavailable CPAL backend unexpectedly constructed"),
             Err(e) => e.to_string(),
         };
         assert!(err.contains("audio backend unavailable"), "{err}");
