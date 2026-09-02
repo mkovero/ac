@@ -371,7 +371,28 @@ drive() {
     echo "  #$n: implementing${continue_arg:+ (continuation)}"
     "$BIN/implement.sh" "$n" $continue_arg $fg || { echo "  #$n: implement failed"; return 1; }
     pr="$(pr_for "$n")"
-    [[ -n $pr ]] || { echo "  #$n: no PR opened — check the session log"; return 1; }
+    if [[ -z $pr ]]; then
+      # A developer may discover an out-of-manifest dependency and correctly
+      # hand the issue back to design without committing or opening a PR. Read
+      # the issue labels before calling that a failed implementation; the next
+      # loop must drive the design gate against the preserved worktree.
+      ls="$(labels "$n")" || { echo "  #$n: cannot read post-implementation labels"; return 1; }
+      if has needs-design "$ls"; then
+        echo "  #$n: implementation handed back to architect — routing design"
+        continue
+      fi
+      if has needs-ux "$ls"; then
+        echo "  #$n: implementation handed back to UX — routing design"
+        continue
+      fi
+      if has blocked "$ls" || has needs-discussion "$ls"; then
+        echo "  #$n: implementation stopped on a human/design gate"
+        STATE=needs-human
+        return 0
+      fi
+      echo "  #$n: no PR opened — check the session log"
+      return 1
+    fi
     echo "  #$n: opened PR #$pr"
     st=0; qa_loop "$n" "$pr" || st=$?
     (( st == 0 )) || return "$st"
