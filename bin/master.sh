@@ -286,8 +286,26 @@ drive() {
       fi
       # Spec comment but no routing label: triage stopped mid-way, or a label
       # was removed by hand. Either way the next step is a decision, not a run.
-      echo "  #$n: triage spec present but no routing label — yours to set"
-      STATE=needs-human; return 0
+      # If a real implementation branch already contains work, however, an
+      # architect handback may have removed needs-design without restoring the
+      # ready label. Preserve the work and treat the existing branch as an
+      # implicit continuation; do not invent a fresh implementation.
+      if stale_branch "$n"; then
+        local unlabeled_wt="$WT_BASE/issue-$n" unlabeled_dirty=0 unlabeled_ahead=0
+        [[ -d $unlabeled_wt ]] && unlabeled_dirty="$(git -C "$unlabeled_wt" status --porcelain | wc -l)"
+        unlabeled_ahead="$(git rev-list --count "origin/main..issue-$n" 2>/dev/null || echo 0)"
+        if (( unlabeled_dirty > 0 || unlabeled_ahead > 0 )); then
+          echo "  #$n: routing label missing but existing implementation work is present — continuing"
+          ls+=$'\nready-to-implement'
+          continue_arg=--continue
+        else
+          echo "  #$n: triage spec present but no routing label — yours to set"
+          STATE=needs-human; return 0
+        fi
+      else
+        echo "  #$n: triage spec present but no routing label — yours to set"
+        STATE=needs-human; return 0
+      fi
     fi
 
     # ux step 6 runs first: it clears needs-ux but defers ready-to-implement to
