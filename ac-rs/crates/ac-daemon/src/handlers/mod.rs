@@ -140,6 +140,24 @@ pub(super) fn make_engine_for_state(state: &ServerState) -> Result<Box<dyn Audio
     crate::audio::make_engine(state.fake_audio, required.as_deref()).map_err(|e| e.to_string())
 }
 
+/// Whether fake-only controls apply to the engine that was actually selected.
+/// This deliberately follows the live engine rather than only `--fake-audio`:
+/// persisted `backend: fake` is an equally explicit fake selection.
+pub(super) fn selected_backend_is_fake(engine: &dyn AudioEngine) -> bool {
+    engine.backend_name() == "fake"
+}
+
+#[cfg(test)]
+mod selected_backend_tests {
+    use super::*;
+
+    #[test]
+    fn config_selected_fake_enables_fake_only_controls() {
+        let engine = crate::audio::make_engine(false, Some("fake")).unwrap();
+        assert!(selected_backend_is_fake(engine.as_ref()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Drive ceiling (#360)
 // ---------------------------------------------------------------------------

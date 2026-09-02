@@ -29,7 +29,8 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use crate::server::{MonitorParams, ServerState};
 
 use super::super::{
-    busy_guard, cfg_guard, make_engine_for_state, resolve_input, send_pub, spawn_worker,
+    busy_guard, cfg_guard, make_engine_for_state, resolve_input, selected_backend_is_fake,
+    send_pub, spawn_worker,
 };
 
 use self::capture::{
@@ -146,11 +147,11 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let primary_in_port = in_ports.first().cloned().unwrap_or_default();
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
     let mut eng = match make_engine_for_state(state) {
         Ok(eng) => eng,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    let fake = selected_backend_is_fake(eng.as_ref());
     let backend = eng.backend_name();
     let out_ch = cfg.output_channel;
     let n_channels = channels.len() as u32;

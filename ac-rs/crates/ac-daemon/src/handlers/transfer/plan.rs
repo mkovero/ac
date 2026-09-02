@@ -22,7 +22,7 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::handlers::{
     apply_drive_ceiling, make_engine_for_state, ref_output_migration_warning, resolve_output,
-    resolve_ref_output,
+    resolve_ref_output, selected_backend_is_fake,
 };
 use crate::server::ServerState;
 
@@ -143,6 +143,7 @@ impl SessionPlan {
                 "error": format!("{} backend does not support port routing", probe_eng.backend_name()),
             }));
         }
+        let fake = selected_backend_is_fake(probe_eng.as_ref());
         let backend = probe_eng.backend_name().to_string();
 
         let out_ch = cfg.output_channel;
@@ -222,7 +223,7 @@ impl SessionPlan {
             drive,
             drivable,
             level_dbfs,
-            fake: state.fake_audio,
+            fake,
             backend_required: cfg.backend.clone(),
             backend,
             fake_correlated_pair,
