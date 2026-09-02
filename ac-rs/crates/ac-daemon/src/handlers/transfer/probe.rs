@@ -9,6 +9,21 @@ use serde_json::{json, Value};
 use crate::handlers::{busy_guard, make_engine_for_state, read_dmm_vrms, send_pub, spawn_worker};
 use crate::server::ServerState;
 
+fn output_result_frame(
+    channel: usize,
+    port: &str,
+    vrms: Option<f64>,
+    analog: bool,
+    backend: &str,
+) -> Value {
+    json!({
+        "cmd": "probe", "phase": "output",
+        "channel": channel, "port": port,
+        "vrms": vrms, "analog": analog,
+        "backend": backend,
+    })
+}
+
 pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
     busy_guard!(state, "probe");
 
@@ -91,11 +106,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                 send_pub(
                     &pub_tx,
                     "data",
-                    &json!({
-                        "cmd": "probe", "phase": "output",
-                        "channel": i, "port": port,
-                        "vrms": vrms, "analog": is_analog,
-                    }),
+                    &output_result_frame(i, port, vrms, is_analog, backend),
                 );
             }
         } else {
@@ -186,4 +197,16 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
         workers.insert("probe".to_string(), worker);
     }
     json!({ "ok": true, "n_playback": n_play, "n_capture": n_cap, "backend": backend })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_result_frame;
+
+    #[test]
+    fn output_result_identifies_live_backend() {
+        let frame = output_result_frame(2, "system:playback_3", Some(0.125), true, "fake");
+
+        assert_eq!(frame["backend"], "fake");
+    }
 }
