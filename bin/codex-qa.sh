@@ -67,7 +67,7 @@ if ! gh_retry gh auth status >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Checking for open PRs with '$CLAUDE_LABEL', without '$CODEX_LABEL', '$NEEDS_WORK_LABEL', or '$REQUIRES_RIG_LABEL'..."
+echo "<codex/qa> Checking for open PRs with '$CLAUDE_LABEL', without '$CODEX_LABEL', '$NEEDS_WORK_LABEL', or '$REQUIRES_RIG_LABEL'..."
 
 # IMPORTANT:
 # This is exactly:
@@ -108,16 +108,16 @@ if [[ -n "$prs_output" ]]; then
 fi
 
 if ((${#prs[@]} == 0)); then
-    echo "No PRs require Codex QA."
+    echo "<codex/qa> No PRs require Codex QA."
     exit 0
 fi
 
-echo "Found ${#prs[@]} PR(s): ${prs[*]}"
+echo "<codex/qa> Found ${#prs[@]} PR(s): ${prs[*]}"
 
 for pr in "${prs[@]}"; do
     echo
     echo "============================================================"
-    echo "Codex QA: PR #$pr"
+    echo "<codex/qa> Reviewing PR #$pr"
     echo "============================================================"
 
     # Re-check state immediately before handing the PR to Codex.
@@ -156,22 +156,22 @@ for pr in "${prs[@]}"; do
     done
 
     if [[ "$has_claude_approved" != true ]]; then
-        echo "Skipping PR #$pr: '$CLAUDE_LABEL' is no longer present."
+        echo "<codex/qa> Skipping PR #$pr: '$CLAUDE_LABEL' is no longer present."
         continue
     fi
 
     if [[ "$has_codex_approved" == true ]]; then
-        echo "Skipping PR #$pr: '$CODEX_LABEL' is already present."
+        echo "<codex/qa> Skipping PR #$pr: '$CODEX_LABEL' is already present."
         continue
     fi
 
     if [[ "$has_needs_work" == true ]]; then
-        echo "Skipping PR #$pr: '$NEEDS_WORK_LABEL' is present."
+        echo "<codex/qa> Skipping PR #$pr: '$NEEDS_WORK_LABEL' is present."
         continue
     fi
 
     if [[ "$has_requires_rig" == true ]]; then
-        echo "Skipping PR #$pr: '$REQUIRES_RIG_LABEL' is present."
+        echo "<codex/qa> Skipping PR #$pr: '$REQUIRES_RIG_LABEL' is present."
         continue
     fi
 
@@ -187,8 +187,8 @@ for pr in "${prs[@]}"; do
             --jq '.title'
     )"
 
-    echo "Title: $pr_title"
-    echo "URL:   $pr_url"
+    echo "<codex/qa> Title: $pr_title"
+    echo "<codex/qa> URL:   $pr_url"
 
     # Review the exact GitHub tip in an isolated, disposable worktree. Using
     # refs/pull/N/head also works when the PR branch originates from a fork.
@@ -222,8 +222,8 @@ for pr in "${prs[@]}"; do
     active_worktree="$review_worktree"
     link_support "$active_worktree"
 
-    echo "Review worktree: $active_worktree [$pr_head]"
-    echo "Starting Codex..."
+    echo "<codex/qa> Review worktree: $active_worktree [$pr_head]"
+    echo "<codex/qa> Starting Codex..."
 
     # Codex owns the actual review and GitHub state transition.
     # The wrapper intentionally does not parse a PASS/FAIL file and does
@@ -271,9 +271,9 @@ and do not add '$CODEX_LABEL'.
 The GitHub PR is the persistent record of your review.
 "
 
-    echo "Codex finished PR #$pr."
+    echo "<codex/qa> Done. Review posted for PR #$pr."
     cleanup_worktree
 done
 
 echo
-echo "Codex QA run complete."
+echo "<codex/qa> Codex QA run complete."

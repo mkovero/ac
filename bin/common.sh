@@ -416,6 +416,7 @@ $prompt"
   local raw="$AC_LOG_DIR/$stamp.jsonl"
   local out="$AC_SESSION_DIR/$stamp.md"
   local last="$AC_LOG_DIR/$stamp.last.md"
+  local prefix="<${provider}/${role}> "
 
   # Stream to the terminal and retain the provider's native JSONL transcript.
   if [[ $provider == claude ]]; then
@@ -436,7 +437,8 @@ $prompt"
          | if .type=="text" then .text
            elif .type=="tool_use" then "  → \(.name)  \(arg)"
            else empty end)
-      else empty end' || status=$?
+      else empty end' \
+    | sed -u "s|^|$prefix|" || status=$?
   else
     local sandbox=workspace-write
     local -a model_arg=()
@@ -451,7 +453,8 @@ $prompt"
         if .type=="item.completed" and .item.type=="agent_message" then .item.text
         elif .type=="item.started" and .item.type=="command_execution" then
           "  → Bash  " + ((.item.command // "") | gsub("[\\r\\n]+"; " ") | .[0:100])
-        else empty end' || status=$?
+        else empty end' \
+    | sed -u "s|^|$prefix|" || status=$?
   fi
 
   # Header says what this file is: a point-in-time record of one run, not
