@@ -225,51 +225,29 @@ for pr in "${prs[@]}"; do
     echo "<codex/qa> Review worktree: $active_worktree [$pr_head]"
     echo "<codex/qa> Starting Codex..."
 
-    # Codex owns the actual review and GitHub state transition.
-    # The wrapper intentionally does not parse a PASS/FAIL file and does
-    # not maintain local workflow state.
-    CARGO_TARGET_DIR="$AC_TARGET" codex exec \
-        -c 'approval_policy="never"' \
-        -s workspace-write \
-        -c 'sandbox_workspace_write.network_access=true' \
-        -C "$active_worktree" \
-        --add-dir "$AC_TARGET" "
-You are the independent Codex QA worker for GitHub PR #$pr.
+    # The shared runner owns provider invocation, transcript capture, model
+    # metadata, and prefixed terminal output. This role still owns the
+    # independent queue, disposable worktree, and Codex label contract.
+    cd "$active_worktree"
+    AC_TAG="pr-$pr" run codex-qa "Review PR #$pr in $AC_REPO as the independent Codex QA worker.
 
-Read .agents/codex-qa.md before doing anything else.
+Inspect the linked issue, triage/design/UX comments, PR discussion, commits,
+complete diff, checks, relevant source, tests, configuration, documentation,
+and git history as needed. You own the independent Codex QA labels and PR
+comment: on pass add '$CODEX_LABEL' and remove 'needs-work'; on blocking
+defects add 'needs-work' and remove '$CODEX_LABEL'. Never touch
+'$CLAUDE_LABEL', 'in-review', 'requires-rig', or any agent label.
 
-Also follow the repository's normal AGENTS.md instructions.
+Before applying the final label decision, re-check the PR's current HEAD. If
+it changed since this review began, treat the review as stale and do not add
+'$CODEX_LABEL'. The GitHub PR is the persistent review record." --read
 
-Source bin/common.sh and run every GitHub CLI operation through gh_retry.
-Inspect the PR, linked issue, PR discussion,
-commits, complete diff, checks, relevant source, tests, configuration,
-documentation, and git history as needed.
-
-You are responsible for the Codex QA labels and the PR comment.
-
-If the reviewed PR passes:
-    add '$CODEX_LABEL'
-    remove 'needs-work' if present
-    post the QA result as a PR comment
-
-If the reviewed PR has blocking defects:
-    add 'needs-work'
-    remove '$CODEX_LABEL' if present
-    post detailed findings as a PR comment
-
-Do not modify source code, tests, configuration, or git history.
-
-Do not create local workflow state files.
-
-Do not touch '$CLAUDE_LABEL' unless the repository's explicit workflow
-instructions require it; normally that label belongs to Claude.
-
-Before applying the final label decision, re-check the PR's current HEAD
-on GitHub. If the PR changed during your review, treat the review as stale
-and do not add '$CODEX_LABEL'.
-
-The GitHub PR is the persistent record of your review.
-"
+    current_head="$(gh_retry gh pr view "$pr" --json headRefOid --jq '.headRefOid')"
+    if [[ "$current_head" != "$pr_head" ]]; then
+        echo "<codex/qa> PR #$pr changed during review; result is stale and no approval was accepted."
+        cleanup_worktree
+        continue
+    fi
 
     echo "<codex/qa> Done. Review posted for PR #$pr."
     cleanup_worktree

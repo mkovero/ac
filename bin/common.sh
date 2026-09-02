@@ -275,6 +275,8 @@ provider_for() {
     value="${!key}"
   elif [[ $role == qa ]]; then
     value=claude
+  elif [[ $role == codex-qa ]]; then
+    value=codex
   else
     value="${AC_PROVIDER:-claude}"
   fi
@@ -322,7 +324,7 @@ run() {
   if [[ -z $turns ]]; then
     case "$role" in
       developer)          turns=160 ;;  # implementation across crates is long
-      qa|architect|audit) turns=120 ;;
+      qa|codex-qa|architect|audit) turns=120 ;;
       *)                  turns=80  ;;
     esac
   fi
