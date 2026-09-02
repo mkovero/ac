@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+requested_prs=()
 if [[ "${1:-}" == "--daemon" ]]; then
     if (($# != 1)); then
         echo "Usage: $0 [--daemon]" >&2
@@ -23,9 +24,11 @@ if [[ "${1:-}" == "--daemon" ]]; then
         fi
         sleep "$POLL_SECONDS"
     done
-elif (($# != 0)); then
-    echo "Usage: $0 [--daemon]" >&2
-    exit 2
+elif (($# > 0)); then
+    for arg in "$@"; do
+        [[ "$arg" =~ ^[0-9]+$ ]] || { echo "Usage: $0 [--daemon|<pr>...]" >&2; exit 2; }
+        requested_prs+=("$arg")
+    done
 fi
 
 source "$(dirname "$0")/common.sh"
@@ -82,6 +85,8 @@ echo "<codex/qa> Checking for open PRs with '$CLAUDE_LABEL', without '$CODEX_LAB
 # to Claude QA. Excluding needs-work prevents the daemon from reviewing the
 # same rejected tip again on every poll. A revised tip re-enters only after
 # Claude QA has reviewed it and restored claude-approved.
+prs_output=""
+if ((${#requested_prs[@]} == 0)); then
 prs_output="$(
     gh_retry gh pr list \
         --state open \
@@ -101,6 +106,9 @@ prs_output="$(
             | .number
         '
 )"
+else
+    prs_output="$(printf '%s\n' "${requested_prs[@]}")"
+fi
 
 prs=()
 if [[ -n "$prs_output" ]]; then

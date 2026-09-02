@@ -80,6 +80,22 @@ stale_branch() {
 # does. Require positive evidence that QA spoke. qa_evidence() is in common.sh.
 qa_comments() { qa_evidence "$1"; }
 
+codex_gate() {
+  local pr="$1" pls
+  echo "  PR #$pr: independent Codex QA"
+  "$BIN/codex-qa.sh" "$pr" || return 1
+  pls="$(pr_labels "$pr")" || return 1
+  if has needs-work "$pls"; then
+    echo "  PR #$pr: Codex QA requested changes"
+    return 2
+  fi
+  if ! has codex-approved "$pls"; then
+    echo "  PR #$pr: Codex QA posted no approval — stopping"
+    return 1
+  fi
+  echo "  PR #$pr: independent Codex QA approved"
+}
+
 # Has anything routed this issue? Any one of these labels means triage,
 # architect, ux or you already decided where it goes. blocked, needs-discussion
 # and needs-clarification are not listed: drive() returns on them earlier, so
@@ -192,8 +208,14 @@ qa_loop() {
         STATE=needs-rig; return 0
       fi
       if has claude-approved "$ls"; then
-        echo "  #$n PR #$pr: qa approved $head — yours to merge"
-        STATE=awaiting-merge; return 0
+        if ! has codex-approved "$ls"; then
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && continue; return "$rc"; }
+          ls="$(pr_labels "$pr")"
+        fi
+        if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge; return 0
+        fi
       fi
       echo "  #$n PR #$pr: rig gate cleared — full QA must incorporate its evidence"
       force=full
@@ -233,8 +255,17 @@ qa_loop() {
         echo "     see the review's 'rig verification required' field."
         STATE=needs-rig
       elif has claude-approved "$ls"; then
-        echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"
-        STATE=awaiting-merge
+        if ! has codex-approved "$ls"; then
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && continue; return "$rc"; }
+          ls="$(pr_labels "$pr")"
+        fi
+        if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge
+        else
+          echo "  #$n PR #$pr: independent QA did not approve — stopping"
+          STATE=needs-human
+        fi
       else
         echo "  #$n PR #$pr: qa posted no approval or routed finding — stopping"
         STATE=needs-human
