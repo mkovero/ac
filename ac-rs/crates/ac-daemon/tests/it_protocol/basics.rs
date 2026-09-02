@@ -249,7 +249,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(5));
+                    assert_eq!(v["report"]["schema_version"], json!(6));
                     got_report = true;
                 }
             }

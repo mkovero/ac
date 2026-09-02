@@ -105,6 +105,7 @@ pub(crate) mod tests_support {
             schema_version: SCHEMA_VERSION,
             ac_version: "0.2.0".into(),
             timestamp_utc: "2026-04-23T10:00:00Z".into(),
+            backend: None,
             method: MeasurementMethod::SteppedSine { n_points: 3 },
             stimulus: StimulusParams {
                 sample_rate_hz: 48_000,

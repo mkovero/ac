@@ -105,17 +105,18 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (`schema_version: 1`); readers that
-see an unknown version must refuse to decode. Example payload:
+configured. Schema is versioned (currently `schema_version: 6`); the
+capture backend is archived at report top level. Example payload:
 
 ```json
 {
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 1,
+    "schema_version": 6,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
+    "backend":        "jack",
     "method": {
       "kind":     "stepped_sine",
       "n_points": 3,
@@ -1120,7 +1121,7 @@ also stated in the report `notes`.
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "report": { "schema_version": 5, "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 6, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }

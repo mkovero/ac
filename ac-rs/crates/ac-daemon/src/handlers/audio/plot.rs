@@ -200,6 +200,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_utc: timestamp.clone(),
+            backend: Some(backend.to_string()),
             method: MeasurementMethod::SteppedSine { n_points: n },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,
@@ -504,6 +505,7 @@ fn emit_spectrum_bands(
         schema_version: SCHEMA_VERSION,
         ac_version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp_utc: timestamp.to_string(),
+        backend: Some(backend.to_string()),
         method: MeasurementMethod::SteppedSine {
             n_points: centres.len(),
         },
@@ -909,6 +911,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_utc: timestamp.clone(),
+            backend: Some(backend.to_string()),
             method: MeasurementMethod::SweptSine {
                 f1_hz,
                 f2_hz,

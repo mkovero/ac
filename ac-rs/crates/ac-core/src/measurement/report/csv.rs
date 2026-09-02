@@ -20,6 +20,9 @@ impl MeasurementReport {
     /// [`super::report_html::render_html`].
     pub fn to_csv(&self) -> String {
         let mut s = String::new();
+        if let Some(backend) = &self.backend {
+            let _ = writeln!(s, "# backend: {backend}");
+        }
         for (i, payload) in self.data.iter().enumerate() {
             if i > 0 {
                 let _ = writeln!(s);
@@ -139,9 +142,9 @@ mod tests {
         let a = r.to_csv();
         let b = r.to_csv();
         assert_eq!(a, b);
-        // Payload comment + header + 3 data lines.
-        assert_eq!(a.lines().count(), 5);
-        assert!(a.starts_with("# payload 1: frequency_response"));
+        // Backend + payload comments, header, and 3 data lines.
+        assert_eq!(a.lines().count(), 6);
+        assert!(a.starts_with("# backend: fake\n# payload 1: frequency_response"));
         assert!(a.contains("freq_hz,fundamental_dbfs,"));
     }
 
