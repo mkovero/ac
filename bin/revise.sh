@@ -25,8 +25,11 @@ link_support "$wt"
 AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
 Read the agent:qa review comment on it and address every point raised. This is \
 a revision: the branch and the PR already exist — commit and push to this \
-branch, do not open a new PR and do not change labels. Reply to the review \
-points in a PR comment so the next QA pass can see what you did and why. Any \
+branch, do not open a new PR. Preserve PR labels except the mandatory removal \
+of claude-approved when the branch changes. If the finding is outside the \
+manifest or requires a design/UX decision, apply needs-design or needs-ux on \
+the ISSUE as required by your role spec, leave the PR unchanged, and stop. Reply \
+to the review points in a PR comment so the next QA pass can see what you did and why. Any \
 point you disagree with, say so there rather than silently leaving it.
 
 Before you start: check the linked issue for an architect or ux comment newer \
