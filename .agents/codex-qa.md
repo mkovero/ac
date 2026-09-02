@@ -37,7 +37,7 @@ tip on every poll. The developer removes both labels when picking up the
 finding. After the revision, Claude QA re-reviews the new tip and restores
 `claude-approved`; that puts the PR back in this queue.
 
-There is no queue state anywhere but GitHub. `bin/codex-qa.sh` walks this list
+There is no queue state anywhere but GitHub. `bin/review.sh --independent` walks this list
 and holds nothing.
 
 ## read order — this order is the mechanism, not a preference

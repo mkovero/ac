@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # review.sh <pr> [--full] [--since <sha>] [--fg]
+# review.sh --independent [--daemon|<pr>...]
 #
 # QA role. No Edit/Write against the tree — a reviewer that can fix what it
 # finds will fix it, and the finding never reaches you as a finding.
@@ -12,6 +13,66 @@
 # is the right way to fail: toward more scrutiny, not less.
 
 source "$(dirname "$0")/common.sh"
+
+# Independent review slot.  This used to live in codex-qa.sh; keeping it here
+# makes the review interface one command while preserving the separate label
+# and model gate.
+independent_review() {
+  local -a prs=()
+  if (($#)); then
+    local p
+    for p in "$@"; do
+      [[ $p =~ ^[0-9]+$ ]] || { echo "usage: review.sh --independent [<pr>...]" >&2; return 2; }
+      prs+=("$p")
+    done
+  else
+    mapfile -t prs < <(gh_retry gh pr list -R "$AC_REPO" --state open --label claude-approved \
+      --limit 100 --json number,labels --jq '.[] | select(all(.labels[]?; .name != "codex-approved" and .name != "needs-work" and .name != "requires-rig")) | .number')
+  fi
+  ((${#prs[@]})) || { echo "<codex/qa> No PRs require independent QA."; return 0; }
+
+  local pr head wt labels
+  for pr in "${prs[@]}"; do
+    labels="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name')"
+    has_label() { printf '%s\n' "$labels" | grep -qx "$1"; }
+    has_label claude-approved || { echo "<codex/qa> Skipping PR #$pr: claude-approved absent."; continue; }
+    has_label codex-approved && continue
+    has_label needs-work && continue
+    has_label requires-rig && continue
+    head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+    wt="$WT_BASE/codex-pr-$pr"
+    [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
+    require_space "$wt"; mkdir -p "$WT_BASE" "$AC_TARGET"
+    git fetch -q origin "pull/$pr/head"
+    [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
+    git worktree add --detach "$wt" "$head" >/dev/null
+    link_support "$wt"
+    local rc=0
+    ( cd "$wt" && AC_TAG="pr-$pr" run codex-qa "Review PR #$pr in $AC_REPO as the independent Codex QA worker.
+
+Inspect the linked issue, decisions, complete diff, checks, tests, and relevant
+history. On pass add codex-approved and remove needs-work; on blocking defects
+add needs-work and remove codex-approved. Never touch claude-approved,
+in-review, requires-rig, or agent labels. Re-check the PR HEAD before applying
+the final decision; if it changed, do not approve." --read ) || rc=$?
+    git worktree remove --force "$wt" || true
+    ((rc == 0)) || return "$rc"
+    echo "<codex/qa> Done. Review posted for PR #$pr."
+  done
+}
+
+if [[ ${1:-} == --independent ]]; then
+  shift
+  if [[ ${1:-} == --daemon ]]; then
+    shift; (($# == 0)) || { echo "usage: review.sh --independent --daemon" >&2; exit 2; }
+    poll="${CODEX_QA_POLL_SECONDS:-300}"
+    [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "CODEX_QA_POLL_SECONDS must be positive" >&2; exit 2; }
+    while true; do independent_review || echo "<codex/qa> pass failed; retrying in ${poll}s" >&2; sleep "$poll"; done
+  fi
+  independent_review "$@"
+  exit $?
+fi
+
 n="${1:?usage: review.sh <pr> [--full] [--since <sha>] [--fg]}"; shift || true
 
 mode=auto since=""

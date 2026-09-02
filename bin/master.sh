@@ -83,7 +83,7 @@ qa_comments() { qa_evidence "$1"; }
 codex_gate() {
   local pr="$1" pls
   echo "  PR #$pr: independent Codex QA"
-  "$BIN/codex-qa.sh" "$pr" || return 1
+  "$BIN/review.sh" --independent "$pr" || return 1
   pls="$(pr_labels "$pr")" || return 1
   if has needs-work "$pls"; then
     echo "  PR #$pr: Codex QA requested changes"
