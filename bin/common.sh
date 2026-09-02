@@ -224,11 +224,32 @@ qa_evidence() {
 # The architect's file manifest for an issue: repo-relative paths, one per line.
 # Empty output means no manifest — the caller decides whether that is fatal.
 manifest_of() {
-  gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
-    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""' \
-  | sed -n '/^```files[[:space:]]*$/,/^```[[:space:]]*$/p' \
-  | sed '1d;$d; s/^[[:space:]]*//; s/[[:space:]]*$//' \
-  | grep -v '^$' || true
+  local body out
+  body=$(gh_retry gh issue view "$1" -R "$AC_REPO" --json comments \
+    --jq '[.comments[] | select(.body | test("<!-- agent: architect -->"))] | last | .body // ""') \
+    || return 1
+
+  # Newer comments may use an explicit files fence. Prefer it because its end
+  # marker is unambiguous.
+  out=$(printf '%s\n' "$body" \
+    | sed -n '/^```files[[:space:]]*$/,/^```[[:space:]]*$/p' \
+    | sed '1d;$d; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -v '^$' || true)
+  if [[ -n $out ]]; then printf '%s\n' "$out"; return 0; fi
+
+  # The architect template in existing issues uses a Markdown section with
+  # one bare path per line. Stop at the next bold field and emit paths only;
+  # prose such as "(none — coordination-only epic)" is not a manifest.
+  printf '%s\n' "$body" | awk '
+    /^\*\*file manifest\*\*[[:space:]]*$/ { in_manifest=1; next }
+    in_manifest && /^\*\*/ { exit }
+    in_manifest {
+      line=$0
+      sub(/^[[:space:]]*[-*][[:space:]]*/, "", line)
+      gsub(/`/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      if (line ~ /^[[:alnum:]_.-]+\//) print line
+    }'
 }
 # Extract the session's final message from a finished transcript.
 # Prefer the result event; fall back to the last assistant text block, because
@@ -242,10 +263,54 @@ distill() {
            | select(.type=="text") | .text] | last // empty' "$raw" 2>/dev/null || true
 }
 
-# run <role> <prompt> [--fg] [--read] [extra claude args...]
-# --fg drops into interactive Claude Code: you see everything and can steer,
-# but the allowlist is not enforced — you are prompted instead, and nothing
-# is written to $AC_SESSION_DIR.
+# Provider selection, in descending precedence:
+#   AC_<ROLE>_PROVIDER=codex  one role (AC_DEVELOPER_PROVIDER, AC_QA_PROVIDER...)
+#   AC_PROVIDER=codex         every non-QA role in this invocation
+#   claude                    backwards-compatible default
+provider_for() {
+  local role="$1" key value
+  key="AC_${role^^}_PROVIDER"
+  key="${key//-/_}"
+  if [[ -n ${!key:-} ]]; then
+    value="${!key}"
+  elif [[ $role == qa ]]; then
+    value=claude
+  else
+    value="${AC_PROVIDER:-claude}"
+  fi
+  case "$value" in
+    claude|codex) printf '%s\n' "$value" ;;
+    *) echo "unsupported provider '$value' for $role (expected claude or codex)" >&2; return 2 ;;
+  esac
+}
+
+# A role-specific model wins, followed by the old global AC_MODEL. Provider
+# defaults are deliberately separate: Claude aliases are not Codex model IDs.
+model_for() {
+  local role="$1" provider="$2" key value
+  key="AC_${role^^}_MODEL"; key="${key//-/_}"
+  value="${!key:-${AC_MODEL:-}}"
+  if [[ -z $value ]]; then
+    case "$provider:$role" in
+      claude:architect|claude:ux|claude:triage) value="${AC_CLAUDE_MODEL:-opus}" ;;
+      claude:*) value="${AC_CLAUDE_MODEL:-sonnet}" ;;
+      codex:*) value="${AC_CODEX_MODEL:-}" ;;
+    esac
+  fi
+  printf '%s\n' "$value"
+}
+
+distill_codex() {
+  local raw="$1" last="$2"
+  if [[ -s $last ]]; then cat "$last"; return; fi
+  jq -rs '[.[] | select(.type=="item.completed") | .item
+           | select(.type=="agent_message") | .text] | last // empty' \
+    "$raw" 2>/dev/null || true
+}
+
+# run <role> <prompt> [--fg] [--read] [extra provider args...]
+# --fg drops into the selected provider's interactive CLI: you see everything
+# and can steer, and nothing is written to $AC_SESSION_DIR.
 run() {
   local role="$1" prompt="$2"; shift 2
 
@@ -261,23 +326,18 @@ run() {
       *)                  turns=80  ;;
     esac
   fi
-  # Opus for the roles whose output is a judgement nobody re-derives: a design
-  # decision, an output-surface decision, and a spec's acceptance criteria are
-  # all read as settled by every role downstream, so a weak one propagates
-  # instead of failing. Triage belongs here for a second reason — it also sets
-  # the scope label that decides whether qa runs the standards check at all.
-  # The rest produce something a later step re-checks: the developer's code
-  # meets the test suite, qa's findings meet the diff.
-  #
-  # An AC_MODEL from the environment wins. It used to be overwritten here
-  # unconditionally, so `AC_MODEL=opus bin/review.sh 384` silently ran sonnet
-  # and the `:-sonnet` fallback below was unreachable.
-  local model="${AC_MODEL:-}"
-  if [[ -z $model ]]; then
-    case "$role" in
-      architect|ux|triage) model=opus ;;
-      *)                   model=sonnet ;;
-    esac
+  local provider model
+  provider="$(provider_for "$role")" || return
+  model="$(model_for "$role" "$provider")"
+
+  # The current approval labels are reviewer identities, not generic slots:
+  # qa owns claude-approved and codex-qa owns codex-approved. Until those specs
+  # and labels are migrated together, letting Codex occupy qa would make both
+  # supposedly independent gates Codex reviews.
+  if [[ $role == qa && $provider != claude ]]; then
+    echo "qa provider is fixed to claude by the current two-review gate" >&2
+    echo "migrate claude-approved/codex-approved to provider-neutral review slots first" >&2
+    return 2
   fi
   local fg="" tools="$TOOLS_WRITE" deny="$DENY_ASYNC" mode="acceptEdits" arg
   local -a extra=()
@@ -288,6 +348,18 @@ run() {
       *)      extra+=("$arg") ;;
     esac
   done
+
+  command -v "$provider" >/dev/null 2>&1 \
+    || { echo "provider CLI not found: $provider" >&2; return 127; }
+
+  # Codex has no --system-prompt-file equivalent. Make reading the same role
+  # spec the first task instruction; AGENTS.md is loaded by Codex itself.
+  local task_prompt="$prompt"
+  if [[ $provider == codex ]]; then
+    task_prompt="Read $(spec "$role") fully before doing anything else. It is your role specification and is binding.
+
+$prompt"
+  fi
 
   if [[ -n $fg ]]; then
     # Same options as the -p run below, minus only the three that are about
@@ -301,12 +373,23 @@ run() {
     #
     # --permission-mode still differs in effect, not in value: interactively
     # it prompts where -p auto-approves, which is the point of --fg.
-    claude --system-prompt-file "$(spec "$role")" \
-      --model "$model" \
-      --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
-      ${deny:+--disallowedTools "$deny"} \
-      --permission-mode "$mode" \
-      "${extra[@]}" "$prompt"
+    if [[ $provider == claude ]]; then
+      claude --system-prompt-file "$(spec "$role")" \
+        --model "$model" \
+        --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
+        ${deny:+--disallowedTools "$deny"} \
+        --permission-mode "$mode" \
+        "${extra[@]}" "$task_prompt"
+    else
+      # Read-only roles still run tests and gh label/comment operations. Codex
+      # therefore needs a writable sandbox; the binding role spec forbids
+      # source edits, like the existing Claude review convention around Bash.
+      local sandbox=workspace-write
+      local -a model_arg=()
+      [[ -n $model ]] && model_arg=(-m "$model")
+      codex -C "$PWD" -s "$sandbox" -a on-request \
+        "${model_arg[@]}" "${extra[@]}" "$task_prompt"
+    fi
     return
   fi
 
@@ -332,20 +415,19 @@ run() {
 
   local raw="$AC_LOG_DIR/$stamp.jsonl"
   local out="$AC_SESSION_DIR/$stamp.md"
+  local last="$AC_LOG_DIR/$stamp.last.md"
 
-  # Stream to the terminal, keep the raw transcript. Distillation happens after
-  # the run, not inside the pipe — a process-substitution tee races the
-  # pipeline's exit and truncates exactly the long sessions worth reading.
-#  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 \
-  claude -p --system-prompt-file "$(spec "$role")" "$prompt" \
-    --model "$model" \
-    --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
-    ${deny:+--disallowedTools "$deny"} \
-    --permission-mode "$mode" \
-    --max-turns "$turns" \
-    --output-format stream-json --verbose "${extra[@]}" \
-  | tee "$raw" \
-  | jq -r --unbuffered '
+  # Stream to the terminal and retain the provider's native JSONL transcript.
+  if [[ $provider == claude ]]; then
+    claude -p --system-prompt-file "$(spec "$role")" "$task_prompt" \
+      --model "$model" \
+      --allowedTools "$tools${GH_TOOLS:+,$GH_TOOLS}" \
+      ${deny:+--disallowedTools "$deny"} \
+      --permission-mode "$mode" \
+      --max-turns "$turns" \
+      --output-format stream-json --verbose "${extra[@]}" \
+    | tee "$raw" \
+    | jq -r --unbuffered '
       def arg: (.input.file_path // .input.pattern // .input.command
                 // .input.description // "") | tostring
                | gsub("[\r\n]+"; " ") | .[0:100];
@@ -355,31 +437,57 @@ run() {
            elif .type=="tool_use" then "  → \(.name)  \(arg)"
            else empty end)
       else empty end' || status=$?
+  else
+    local sandbox=workspace-write
+    local -a model_arg=()
+    [[ -n $model ]] && model_arg=(-m "$model")
+    codex exec -C "$PWD" -s "$sandbox" \
+      -c 'approval_policy="never"' \
+      -c "sandbox_${sandbox//-/_}.network_access=true" \
+      --add-dir "$AC_TARGET" --json -o "$last" \
+      "${model_arg[@]}" "${extra[@]}" "$task_prompt" \
+    | tee "$raw" \
+    | jq -r --unbuffered '
+        if .type=="item.completed" and .item.type=="agent_message" then .item.text
+        elif .type=="item.started" and .item.type=="command_execution" then
+          "  → Bash  " + ((.item.command // "") | gsub("[\\r\\n]+"; " ") | .[0:100])
+        else empty end' || status=$?
+  fi
 
   # Header says what this file is: a point-in-time record of one run, not
   # state. The tracker still owns whether the issue or PR is open.
   local sid
-  sid=$(jq -r 'select(.type=="system") | .session_id // empty' "$raw" 2>/dev/null | head -1 || true)
+  if [[ $provider == claude ]]; then
+    sid=$(jq -r 'select(.type=="system") | .session_id // empty' "$raw" 2>/dev/null | head -1 || true)
+  else
+    sid=$(jq -r 'select(.type=="thread.started") | .thread_id // empty' "$raw" 2>/dev/null | head -1 || true)
+  fi
 
   { printf '<!-- %s session %s — %s — exit %s -->\n' \
       "$role" "$tag" "$(date -Iminutes)" "$status"
     printf '<!-- record of one run, not status. raw: %s -->\n' "${raw/#$HOME/\~}"
-    printf '<!-- resume: claude --resume %s -->\n\n' "${sid:-unknown}"
-    distill "$raw"
+    printf '<!-- provider: %s; model: %s -->\n' "$provider" "${model:-default}"
+    if [[ $provider == claude ]]; then
+      printf '<!-- resume: claude --resume %s -->\n\n' "${sid:-unknown}"
+      distill "$raw"
+    else
+      printf '<!-- resume: codex exec resume %s -->\n\n' "${sid:-unknown}"
+      distill_codex "$raw" "$last"
+    fi
   } > "$out"
 
   # A capped run ends mid-task with a final message that reads like progress,
   # not like failure. Say so plainly rather than leaving it to be inferred.
   local used
   used=$(jq -r 'select(.type=="result") | .num_turns // empty' "$raw" 2>/dev/null | tail -1 || true)
-  if [[ -n $used ]] && (( used >= turns )); then
+  if [[ $provider == claude && -n $used ]] && (( used >= turns )); then
     echo "WARNING: hit the $turns-turn cap (used $used) — this run was cut off." >&2
     echo "  work is uncommitted in the worktree. resume:" >&2
     echo "  cd \$(git rev-parse --show-toplevel) && claude --resume ${sid:-<id>}" >&2
     echo "  or raise it: AC_MAX_TURNS=$(( turns * 2 )) ..." >&2
   fi
 
-  [[ -s $raw ]] || echo "warning: empty transcript — check claude exited cleanly" >&2
+  [[ -s $raw ]] || echo "warning: empty transcript — check $provider exited cleanly" >&2
   echo "session: $out" >&2
   echo "raw:     $raw" >&2
   return "$status"

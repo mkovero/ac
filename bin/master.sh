@@ -22,6 +22,12 @@
 #   AC_DESIGN_PASSES=2   max architect passes per issue per run (default 2)
 #   AC_UX_PASSES=2       max ux passes per issue per run (default 2)
 #   AC_NO_TRIAGE=1       never triage; an unrouted issue is nothing to do
+#   AC_PROVIDER=codex    use Codex for ordinary roles except the model-bound
+#                        QA gates (default: claude)
+#   AC_DEVELOPER_PROVIDER=codex
+#                        override one role; likewise TRIAGE, ARCHITECT, and UX.
+#                        Per-role settings win over AC_PROVIDER. QA remains
+#                        model-bound until its two approval labels are migrated.
 #
 # Verify label names first — a wrong one makes this do nothing while looking
 # like it worked:  gh label list -R mkovero/ac
@@ -244,7 +250,7 @@ qa_loop() {
 }
 
 drive() {
-  local n="$1" step=0 ls pr tc st force=""
+  local n="$1" step=0 ls pr tc st force="" continue_arg="" mf=""
   local ran_design=0 ran_ux=0 ran_triage=0
   local design_passes=0 ux_passes=0
   qa_round=0
@@ -340,21 +346,30 @@ drive() {
         # Work is present. Deleting here throws away a whole run.
         echo "     it has work: ${dirty:-0} uncommitted file(s), $ahead commit(s) ahead of main."
         echo "     an earlier run was probably cut off. do NOT delete it. resume:"
-        echo "       jq -r 'select(.type==\"system\") | .session_id // empty' \\"
-        echo "         ${AC_LOG_DIR}/*developer-issue-$n.jsonl | head -1"
-        echo "       cd $wt && claude --resume <id>"
+        echo "       continuing in the same worktree with the currently selected provider"
+        continue_arg=--continue
       else
-        echo "     it is empty — no commits, nothing uncommitted. safe to clear:"
-        echo "       git worktree remove --force $wt; git branch -D issue-$n"
+        echo "     it is empty — reusing it for this implementation attempt."
       fi
-      return 0
     fi
 
     has ready-to-implement "$ls" \
       || { echo "  #$n: no PR, not ready-to-implement — nothing to do"; return 0; }
 
-    echo "  #$n: implementing"
-    "$BIN/implement.sh" "$n" $fg || { echo "  #$n: implement failed"; return 1; }
+    # Every developer invocation needs a hard file boundary. Issues triaged
+    # straight to ready-to-implement have no architect comment, so create that
+    # boundary before opening a worktree instead of asking dev to implement
+    # from triage's non-exhaustive "files likely affected" list.
+    mf="$(manifest_of "$n")" \
+      || { echo "  #$n: cannot read architect manifest — stopping"; return 1; }
+    if [[ -z $mf ]]; then
+      echo "  #$n: no architect manifest — running design preflight"
+      "$BIN/design.sh" "$n" $fg || { echo "  #$n: design preflight failed"; return 1; }
+      continue
+    fi
+
+    echo "  #$n: implementing${continue_arg:+ (continuation)}"
+    "$BIN/implement.sh" "$n" $continue_arg $fg || { echo "  #$n: implement failed"; return 1; }
     pr="$(pr_for "$n")"
     [[ -n $pr ]] || { echo "  #$n: no PR opened — check the session log"; return 1; }
     echo "  #$n: opened PR #$pr"
