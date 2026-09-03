@@ -507,17 +507,26 @@ is_epic() {
 }
 
 wait_for_merge() {
-  local child="$1" pr="$2" state merged_at poll="${AC_MERGE_POLL_SECONDS:-60}"
+  local child="$1" pr="$2" state pr_state merged_at mergeable merge_status
+  local poll="${AC_MERGE_POLL_SECONDS:-60}"
   [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "  invalid AC_MERGE_POLL_SECONDS: $poll" >&2; return 2; }
   [[ -n $pr ]] || { echo "  cannot identify the open PR for #$child" >&2; return 1; }
   while true; do
     state="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
     [[ $state == CLOSED ]] && { echo "  #$child merged; continuing epic"; return 0; }
-    merged_at="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json mergedAt \
-      --jq '.mergedAt // empty' 2>/dev/null || true)"
-    if [[ -n $merged_at ]]; then
+    pr_state="$(gh_retry gh pr view "$pr" -R "$AC_REPO" \
+      --json mergedAt,mergeable,mergeStateStatus \
+      --jq '[.mergedAt // "-", .mergeable // "UNKNOWN", .mergeStateStatus // "UNKNOWN"] | join("|")' \
+      2>/dev/null || true)"
+    IFS='|' read -r merged_at mergeable merge_status <<< "$pr_state"
+    if [[ -n $merged_at && $merged_at != - ]]; then
       echo "  #$child PR merged; continuing epic"
       return 0
+    fi
+    if [[ $mergeable == CONFLICTING || $merge_status == DIRTY ]]; then
+      echo "  #$child PR #$pr has merge conflicts with main — stopping wait."
+      echo "     Resolve the conflicts and push; both QA approvals must then be refreshed."
+      return 3
     fi
     echo "  #$child awaiting your merge — checking again in ${poll}s"
     sleep "$poll"
@@ -525,7 +534,7 @@ wait_for_merge() {
 }
 
 drive_epic() {
-  local e="$1" kids c st
+  local e="$1" kids c st wait_rc
   mapfile -t kids < <(children "$e")
   (( ${#kids[@]} )) || { echo "  #$e: no sub-issues or task-list refs found"; return 0; }
   echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
@@ -556,7 +565,9 @@ drive_epic() {
         echo "  #$c is ready for your merge."
         echo "  Later children branch from main and would not see #$c's work."
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
-          wait_for_merge "$c" "$(pr_for "$c" || true)" || return $?
+          wait_rc=0
+          wait_for_merge "$c" "$(pr_for "$c" || true)" || wait_rc=$?
+          (( wait_rc == 0 )) || return 0
         else
           echo "  Merge it, then rerun: master.sh $e"
           [[ -n ${KEEP_GOING:-} ]] || return 0
