@@ -213,7 +213,7 @@ fn one_sided_power(spec: &[f64], range: Range<usize>, has_nyquist: bool) -> f64 
     range
         .map(|bin| {
             let endpoint_weight = if bin == 0 || (has_nyquist && bin + 1 == spec.len()) {
-                0.5
+                0.25
             } else {
                 1.0
             };
@@ -393,6 +393,23 @@ mod tests {
     #[test]
     fn symmetric_fundamental_notch_excludes_both_edge_bins() {
         assert_eq!(symmetric_bin_range(10, 2, 32), 8..13);
+    }
+
+    #[test]
+    fn one_sided_power_corrects_dc_and_nyquist_amplitude_doubling() {
+        let amplitude = 0.5_f64;
+        let spec = vec![2.0 * amplitude, 0.0, 2.0 * amplitude];
+
+        assert_relative_eq!(
+            one_sided_power(&spec, 0..1, true),
+            amplitude * amplitude,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            one_sided_power(&spec, 2..3, true),
+            amplitude * amplitude,
+            epsilon = 1e-12
+        );
     }
 
     #[test]
