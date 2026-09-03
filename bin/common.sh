@@ -331,6 +331,14 @@ run() {
   local provider model
   provider="$(provider_for "$role")" || return
   model="$(model_for "$role" "$provider")"
+  local -a codex_write_dirs=(--add-dir "$AC_TARGET")
+  if [[ $role == developer ]]; then
+    # A linked worktree's .git file points back into the main repository.
+    # Without this grant Codex can edit source but cannot update the index,
+    # commit, or advance the local branch, which leaves a dirty projection of
+    # a commit it may still manage to create remotely.
+    codex_write_dirs+=(--add-dir "$(git rev-parse --path-format=absolute --git-common-dir)")
+  fi
 
   # The current approval labels are reviewer identities, not generic slots:
   # qa owns claude-approved and codex-qa owns codex-approved. Until those specs
@@ -390,6 +398,7 @@ $prompt"
       local -a model_arg=()
       [[ -n $model ]] && model_arg=(-m "$model")
       codex -C "$PWD" -s "$sandbox" -a on-request \
+        "${codex_write_dirs[@]}" \
         "${model_arg[@]}" "${extra[@]}" "$task_prompt"
     fi
     return
@@ -448,7 +457,7 @@ $prompt"
     codex exec -C "$PWD" -s "$sandbox" \
       -c 'approval_policy="never"' \
       -c "sandbox_${sandbox//-/_}.network_access=true" \
-      --add-dir "$AC_TARGET" --json -o "$last" \
+      "${codex_write_dirs[@]}" --json -o "$last" \
       "${model_arg[@]}" "${extra[@]}" "$task_prompt" \
     | tee "$raw" \
     | jq -r --unbuffered '

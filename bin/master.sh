@@ -169,7 +169,17 @@ qa_loop() {
       echo "  #$n PR #$pr: revising (round $qa_round)"
       pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — not starting a revise"; return 1; }
-      "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
+      local revise_rc=0 retry_head
+      "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+      if (( revise_rc != 0 && revise_rc != 130 && revise_rc != 143 )); then
+        retry_head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" || return 1
+        if [[ $retry_head == "$pre" ]]; then
+          echo "  #$n: revision worker exited before pushing — retrying once in the preserved worktree"
+          revise_rc=0
+          "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+        fi
+      fi
+      (( revise_rc == 0 )) || { echo "  #$n: revise failed"; return 1; }
       post="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — check the PR by hand"; return 1; }
 
