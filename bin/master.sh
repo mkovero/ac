@@ -507,14 +507,15 @@ is_epic() {
 }
 
 wait_for_merge() {
-  local child="$1" pr state poll="${AC_MERGE_POLL_SECONDS:-60}"
+  local child="$1" pr="$2" state merged_at poll="${AC_MERGE_POLL_SECONDS:-60}"
   [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "  invalid AC_MERGE_POLL_SECONDS: $poll" >&2; return 2; }
+  [[ -n $pr ]] || { echo "  cannot identify the open PR for #$child" >&2; return 1; }
   while true; do
     state="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
     [[ $state == CLOSED ]] && { echo "  #$child merged; continuing epic"; return 0; }
-    pr="$(pr_for "$child" || true)"
-    if [[ -n $pr ]] && gh_retry gh pr view "$pr" -R "$AC_REPO" --json state,mergedAt \
-        --jq 'select(.state == "MERGED" or .mergedAt != null) | .number' >/dev/null 2>&1; then
+    merged_at="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json mergedAt \
+      --jq '.mergedAt // empty' 2>/dev/null || true)"
+    if [[ -n $merged_at ]]; then
       echo "  #$child PR merged; continuing epic"
       return 0
     fi
@@ -555,7 +556,7 @@ drive_epic() {
         echo "  #$c is ready for your merge."
         echo "  Later children branch from main and would not see #$c's work."
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
-          wait_for_merge "$c" || return $?
+          wait_for_merge "$c" "$(pr_for "$c" || true)" || return $?
         else
           echo "  Merge it, then rerun: master.sh $e"
           [[ -n ${KEEP_GOING:-} ]] || return 0
