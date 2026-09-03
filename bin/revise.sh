@@ -36,8 +36,10 @@ a revision: the branch and the PR already exist — commit and push to this \
 branch, do not open a new PR. Preserve PR labels except the mandatory removal \
 of claude-approved and codex-approved when the branch changes. If the finding is outside the \
 manifest or requires a design/UX decision, apply needs-design or needs-ux on \
-the ISSUE as required by your role spec, leave the PR unchanged, and stop. Reply \
-to the review points in a PR comment so the next QA pass can see what you did and why. Any \
+the ISSUE as required by your role spec, leave the PR unchanged, and stop. \
+Only architect may expand the file manifest: files named by a newer UX comment \
+remain out of scope until architect adds them. Reply to the review points in a \
+PR comment so the next QA pass can see what you did and why. Any \
 point you disagree with, say so there rather than silently leaving it.
 
 Before you start: check the linked issue for an architect or ux comment newer \

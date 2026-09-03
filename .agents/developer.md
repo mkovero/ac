@@ -167,6 +167,10 @@ changed; do not restore either label.
 ## hard constraints
 - Touch only files justified by spec + listed in step 1. Integration mode also
   authorises the merge's unmerged paths, and only for resolving those conflicts.
+- Only architect amends the file manifest. A newer UX decision supersedes the
+  presentation requirement, but paths UX names are orientation, not write
+  authority. If implementing that decision needs an out-of-manifest file,
+  apply `needs-design` on the issue and stop so architect can amend the scope.
 - Search result is evidence about location, not licence to widen scope. Turn up file outside step 1 list → same rule: stop, comment on issue.
 - No reformat or style cleanup outside scope. `cargo fmt --check` must pass, but run `cargo fmt` only on files you edited.
 - No TODO comments. Implement it or open follow-up issue.
