@@ -1,12 +1,15 @@
 //! Tier 1 — THD / THD+N / noise-floor analysis of a stepped-sine capture.
 //!
 //! Citation for `MeasurementReport`s produced from this analyser is
-//! provided by [`citation`] and tracks IEC 60268-3:2018 §15.12.3
+//! provided by [`citation`] and tracks IEC 60268-3:2018 §15.12.3.2
 //! ("Total harmonic distortion under standard measuring conditions"),
 //! verified against the full text at
 //! `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf`.
 //! §15.12.3.2 defines the ratio as `d_tot = (U2'/U2) × 100 %` or
-//! `L_d,tot = 20·lg(U2'/U2)` dB, which matches the analyser output.
+//! `L_d,tot = 20·lg(U2'/U2)` dB, which matches the THD+N output. The
+//! harmonic-only THD numerator follows §15.12.5 and uses the same total-output
+//! denominator. Residual power is integrated over the full analysis band up
+//! to Nyquist; the AES17 20 kHz low-pass filter is not applied here.
 //!
 //! The public entry point is [`analyze`]: mono `f32` PCM in, a fully
 //! populated [`AnalysisResult`] out. All intermediate DSP is `f64`. The
@@ -25,18 +28,34 @@ use crate::shared::fft_cache::{freq_axis, real_fft_plan, with_hann_window};
 use crate::shared::reference_levels::amplitude_to_dbfs;
 use crate::shared::types::AnalysisResult;
 
+/// Relative headroom for the `thdn_pct >= thd_pct` physical-law check.
+///
+/// `thd_pct` sums harmonic **peak-bin amplitudes**; `thdn_pct` sums
+/// **ENBW-normalized bin power** over the residual region (which is a
+/// superset of the harmonic bins). Both are true ratios to the same
+/// `total_output_rms` denominator, so the inequality holds physically, but
+/// the two numerators are formed by different summations and disagree by a
+/// small numerical residue once no `.max()` clamp forces the order. Measured
+/// residue on the coherent 1 % H2 fixture (`thdn_is_never_below_thd_for_coherent_harmonic`,
+/// 48 000-sample FFT): ~1.9e-9 relative. This constant is ~500x that
+/// headroom — enough to absorb float accumulation, not enough to hide a real
+/// estimator inversion, which is percent-scale. Used at every site that
+/// compares the two fields; do not raise it to fit a failing fixture — that
+/// is an estimator defect, not a tolerance shortfall.
+pub const THDN_GE_THD_REL_TOL: f64 = 1e-6;
+
 /// Citation for a `MeasurementReport` populated from [`analyze`] output.
 ///
 /// IEC 60268-3:2018 "Sound system equipment — Part 3: Amplifiers". THD is
-/// defined in §15.12 "Amplitude non-linearity"; §15.12.3 is the specific
-/// measurement under standard conditions that matches this analyser.
+/// defined in §15.12 "Amplitude non-linearity"; §15.12.3.2 is the specific
+/// total-distortion measurement that matches this analyser's THD+N output.
 /// Verified against the full text at
 /// `stddocs/iec-full/Sound system equipment_ Amplifiers … 2018 …pdf`:
 /// §15.12.3.2 gives the ratio and dB formulae implemented here.
 pub fn citation() -> StandardsCitation {
     StandardsCitation {
         standard: "IEC 60268-3:2018".into(),
-        clause: "§15.12.3 Total harmonic distortion under standard measuring conditions".into(),
+        clause: "§15.12.3.2 Total harmonic distortion under standard measuring conditions".into(),
         verified: true,
     }
 }
@@ -86,15 +105,15 @@ pub fn analyze(
     let spec: Vec<f64> = win_spectrum.iter().map(|c| c.norm() / norm).collect();
     let freqs = freq_axis(n, sr);
 
-    let f1_bin = find_peak(&spec, &freqs, fundamental, 20.0);
+    let bin_hz = sr as f64 / n as f64;
+    let fundamental_bin = fundamental / bin_hz;
+    let f1_bin = find_fundamental_peak(&spec, fundamental_bin);
     let f1_amp = spec[f1_bin];
 
     if f1_amp < 1e-9 {
         bail!("No signal -- check connections");
     }
 
-    let bin_hz = sr as f64 / n as f64;
-    let fundamental_bin = fundamental / bin_hz;
     // A Hann tone's main lobe extends two bins either side of its peak.
     let bw = ((fundamental * 0.1 / bin_hz) as usize).max(2);
     let notch = symmetric_bin_range(f1_bin, bw, spec.len());
@@ -114,7 +133,7 @@ pub fn analyze(
         harmonic_levels.push((hf, amp));
     }
 
-    let thd = h_amps.iter().map(|a| a * a).sum::<f64>().sqrt() / f1_amp * 100.0;
+    let harmonic_power = h_amps.iter().map(|a| a * a).sum::<f64>();
 
     // THD+N: notch the fundamental and sum |spec|² outside. Direct sum
     // beats `total − notch` when nearly all energy sits in the notch.
@@ -124,8 +143,10 @@ pub fn analyze(
     // `spec` is coherent-gain normalized for tone amplitudes. Dividing its
     // power by the Hann equivalent noise bandwidth converts the broadband
     // bin sum to the same RMS ratio used by IEC 60268-3.
-    let thdn_sq = thdn_sq / enbw_bins;
-    let thdn = (thdn_sq.sqrt() / f1_amp * 100.0).max(thd);
+    let residual_power = thdn_sq / enbw_bins;
+    let total_amp = (f1_amp * f1_amp + residual_power).sqrt();
+    let thd = (harmonic_power.sqrt() / total_amp * 100.0).clamp(0.0, 100.0);
+    let thdn = (residual_power.sqrt() / total_amp * 100.0).clamp(0.0, 100.0);
 
     let fundamental_dbfs = amplitude_to_dbfs(f1_amp);
 
@@ -181,11 +202,10 @@ pub fn analyze(
 
     let clipping = mono[trim..n - trim].iter().any(|&x| x.abs() >= 0.9999);
 
-    // AC-coupling heuristic: at < 50 Hz a dominant 2nd harmonic (> 80 % of
-    // THD) indicates capacitor-coupling asymmetry rather than real distortion.
-    let ac_coupled = if fundamental < 50.0 && !h_amps.is_empty() && thd > 0.0 {
-        let h2_pct = h_amps[0] / f1_amp * 100.0;
-        (h2_pct / thd) > 0.80
+    // AC-coupling heuristic: at < 50 Hz a 2nd harmonic carrying > 80 % of
+    // harmonic power indicates capacitor-coupling asymmetry.
+    let ac_coupled = if fundamental < 50.0 && !h_amps.is_empty() && harmonic_power > 0.0 {
+        (h_amps[0] * h_amps[0] / harmonic_power) > 0.80
     } else {
         false
     };
@@ -196,6 +216,7 @@ pub fn analyze(
         linear_rms,
         thd_pct: thd,
         thdn_pct: thdn,
+        total_output_rms: total_amp,
         harmonic_levels,
         noise_floor_dbfs,
         spectrum: spec,
@@ -207,6 +228,17 @@ pub fn analyze(
 
 fn symmetric_bin_range(center: usize, radius: usize, len: usize) -> Range<usize> {
     center.saturating_sub(radius)..center.saturating_add(radius).saturating_add(1).min(len)
+}
+
+/// Locate the fundamental in a relative window that never includes DC.
+fn find_fundamental_peak(spec: &[f64], fundamental_bin: f64) -> usize {
+    let center = (fundamental_bin.round() as usize).min(spec.len() - 1);
+    let radius = (fundamental_bin * 0.1).floor().max(1.0) as usize;
+    let mut range = symmetric_bin_range(center, radius, spec.len());
+    range.start = range.start.max(1).min(range.end.saturating_sub(1));
+    range
+        .max_by(|&a, &b| spec[a].partial_cmp(&spec[b]).unwrap())
+        .unwrap_or(center)
 }
 
 fn one_sided_power(spec: &[f64], range: Range<usize>, has_nyquist: bool) -> f64 {
@@ -367,6 +399,23 @@ mod tests {
     }
 
     #[test]
+    fn fundamental_search_at_20_hz_excludes_dc_offset() {
+        let tone_amp = 0.25_f64;
+        let samples: Vec<f32> = pure_sine(20.0, tone_amp, SR, SR as usize)
+            .into_iter()
+            .map(|sample| sample + 0.5)
+            .collect();
+
+        let r = analyze(&samples, SR, 20.0, 10).unwrap();
+        assert_relative_eq!(
+            r.fundamental_dbfs,
+            amplitude_to_dbfs(tone_amp),
+            epsilon = 0.001
+        );
+        assert!(r.thd_pct < 0.01, "20 Hz THD was {:.4}%", r.thd_pct);
+    }
+
+    #[test]
     fn pure_50_hz_has_low_thd_and_noise() {
         let samples = pure_sine(50.0, 0.5, SR, SR as usize);
         let r = analyze(&samples, SR, 50.0, 10).unwrap();
@@ -405,7 +454,8 @@ mod tests {
             .collect();
 
         let r = analyze(&samples, SR, F1, 10).unwrap();
-        let expected_pct = residual_rms / (0.5 / std::f64::consts::SQRT_2) * 100.0;
+        let residual_amp = residual_rms * std::f64::consts::SQRT_2;
+        let expected_pct = residual_amp / (0.5_f64.powi(2) + residual_amp.powi(2)).sqrt() * 100.0;
         assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.001);
     }
 
@@ -427,7 +477,31 @@ mod tests {
             .collect();
 
         let r = analyze(&samples, SR, F1, 10).unwrap();
-        let expected_pct = residual_rms / (0.5 / std::f64::consts::SQRT_2) * 100.0;
+        let residual_amp = residual_rms * std::f64::consts::SQRT_2;
+        let expected_pct = residual_amp / (0.5_f64.powi(2) + residual_amp.powi(2)).sqrt() * 100.0;
+        assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.001);
+    }
+
+    #[test]
+    fn distortion_ratios_are_referenced_to_total_output() {
+        let fundamental_amp = 0.5_f64;
+        let harmonic_amp = 0.25_f64;
+        let samples: Vec<f32> = (0..SR as usize)
+            .map(|i| {
+                let t = i as f64 / SR as f64;
+                (fundamental_amp * (2.0 * PI * F1 * t).sin()
+                    + harmonic_amp * (2.0 * PI * 2.0 * F1 * t).sin()) as f32
+            })
+            .collect();
+
+        let r = analyze(&samples, SR, F1, 10).unwrap();
+        let expected_pct =
+            harmonic_amp / (fundamental_amp.powi(2) + harmonic_amp.powi(2)).sqrt() * 100.0;
+        let rejected_re_fundamental = harmonic_amp / fundamental_amp * 100.0;
+        assert_relative_eq!(expected_pct, 44.721_359_550, epsilon = 1e-9);
+        assert_relative_eq!(rejected_re_fundamental, 50.0, epsilon = 1e-12);
+        assert!((r.thd_pct - rejected_re_fundamental).abs() > 1.0);
+        assert_relative_eq!(r.thd_pct, expected_pct, epsilon = 0.001);
         assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.001);
     }
 
@@ -456,7 +530,12 @@ mod tests {
             })
             .collect();
         let r = analyze(&samples, SR, F1, 10).unwrap();
-        assert!(r.thdn_pct >= r.thd_pct);
+        assert!(
+            r.thdn_pct + THDN_GE_THD_REL_TOL * r.thd_pct.abs() >= r.thd_pct,
+            "THD+N {:.12}% was below THD {:.12}%",
+            r.thdn_pct,
+            r.thd_pct
+        );
     }
 
     #[test]
@@ -639,7 +718,7 @@ mod tests {
                 prop_assert!(r.linear_rms.is_finite());
                 prop_assert_eq!(r.spectrum.len(), SR as usize / 2 + 1);
                 prop_assert_eq!(r.freqs.len(), r.spectrum.len());
-                prop_assert!(r.thdn_pct + 1e-9 >= r.thd_pct);
+                prop_assert!(r.thdn_pct + THDN_GE_THD_REL_TOL * r.thd_pct.abs() >= r.thd_pct);
             }
 
             #[test]

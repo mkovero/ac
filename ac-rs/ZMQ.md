@@ -126,7 +126,7 @@ capture backend is archived at report top level. Example payload:
     "method": {
       "kind":     "stepped_sine",
       "n_points": 3,
-      "standard": { "standard": "IEC 60268-3:2018", "clause": "§15.12.3 Total harmonic distortion under standard measuring conditions", "verified": true }
+      "standard": { "standard": "IEC 60268-3:2018", "clause": "§15.12.3.2 Total harmonic distortion under standard measuring conditions", "verified": true }
     },
     "stimulus":    { "sample_rate_hz": 48000, "f_start_hz": 100, "f_stop_hz": 10000, "level_dbfs": -20, "n_points": 3 },
     "integration": { "duration_s": 1.0, "window": "hann" },
@@ -139,6 +139,10 @@ capture backend is archived at report top level. Example payload:
   }
 }
 ```
+
+In the inline frequency-response point above, `thd_pct` and `thdn_pct` are
+percent ratios referenced to total output, as in the live frame definitions
+below.
 
 `method.kind` values currently defined:
 
@@ -204,8 +208,8 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "n":                <int>,          // 0-based sequence number
   "drive_db":         <float>,        // stimulus level in dBFS
   "freq_hz":          <float>,        // present for plot_level; absent for plot (freq is the sweep axis)
-  "thd_pct":          <float>,
-  "thdn_pct":         <float>,
+  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thdn_pct":         <float>,        // notched residual / total output, percent
   "fundamental_hz":   <float>,
   "fundamental_dbfs": <float>,
   "linear_rms":       <float>,        // 0–1 dBFS scale
@@ -250,8 +254,8 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "freqs":            [<float>, ...], // downsampled, DC removed
   "spectrum":         [<float>, ...], // linear amplitude, one-sided, [0, 1] for bounded input — NOT dB
   "fundamental_dbfs": <float>,
-  "thd_pct":          <float>,
-  "thdn_pct":         <float>,
+  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thdn_pct":         <float>,        // notched residual / total output, percent
   "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
   "spl_offset_db":    <float> | null, // additive dBFS → dB SPL offset (calibration §)
   "mic_correction":   "on" | "off" | "none",   // mic frequency-response state

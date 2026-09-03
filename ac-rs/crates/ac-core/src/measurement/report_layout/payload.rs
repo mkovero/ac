@@ -95,8 +95,8 @@ pub fn frequency_response_columns() -> &'static [Column] {
 /// One string per cell, in `FR_COLUMNS` order.
 ///
 /// `thd_pct` and `thdn_pct` are already percentages — `thd::analyze`
-/// divides by the fundamental and multiplies by 100 before storing
-/// them. The PDF backend used to scale them by a further 100, printing
+/// divides each residual by the total output and multiplies by 100 before
+/// storing them. The PDF backend used to scale them by a further 100, printing
 /// distortion a hundredfold high under a `%` header. Formatting them
 /// here means there is one place left to get that wrong.
 pub fn frequency_response_cells(points: &[FrequencyResponsePoint]) -> Vec<Vec<String>> {
