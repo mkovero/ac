@@ -43,9 +43,9 @@ STEPS="${AC_STEPS:-8}"
 DESIGN_PASSES="${AC_DESIGN_PASSES:-2}"
 UX_PASSES="${AC_UX_PASSES:-2}"
 
-# dev→qa rounds, counted per ISSUE rather than per qa_loop() call. A design
-# handback re-enters qa_loop, and a counter local to it would reset there —
-# turning ROUNDS from a bound into a suggestion.
+# dev→qa rounds are reset at the start of each issue and after an authoritative
+# design/UX handback. DESIGN_PASSES, UX_PASSES, and STEPS independently bound
+# cross-role loops.
 qa_round=0
 
 fg=""; ids=()
@@ -376,6 +376,7 @@ drive() {
       fi
       ran_ux=1; (( ++ux_passes )); echo "  #$n: ux (pass $ux_passes)"
       "$BIN/ux.sh" "$n" $fg || { echo "  #$n: ux failed"; return 1; }
+      qa_round=0
       continue
     fi
 
@@ -390,6 +391,7 @@ drive() {
       fi
       ran_design=1; (( ++design_passes )); echo "  #$n: architect (pass $design_passes)"
       "$BIN/design.sh" "$n" $fg || { echo "  #$n: design failed"; return 1; }
+      qa_round=0
       continue
     fi
 
