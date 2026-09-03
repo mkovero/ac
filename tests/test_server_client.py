@@ -444,8 +444,15 @@ def test_plot_thd_numerical_accuracy(server_client):
     # FakeJackEngine: amp=0.1, 2nd harmonic = 0.01*0.1 = 0.001 → THD = 1.0%
     assert 0.8 < f["thd_pct"] < 1.3, \
         f"THD should be ≈1.0% from FakeJackEngine, got {f['thd_pct']:.4f}%"
-    # THD+N should be close to THD (no real noise in synthetic signal)
-    assert f["thdn_pct"] >= f["thd_pct"], \
+    # THD+N should be close to THD (no real noise in synthetic signal).
+    # Relative tolerance, not exact: thd_pct sums harmonic peak-bin
+    # amplitudes while thdn_pct sums ENBW-normalized bin power, so the two
+    # numerators disagree by a small numerical residue even though both are
+    # true ratios to the same total-output denominator. Mirrors
+    # ac_core::measurement::thd::THDN_GE_THD_REL_TOL (Rust is the source of
+    # truth for this constant; Python cannot import it).
+    THDN_GE_THD_REL_TOL = 1e-6
+    assert f["thdn_pct"] + THDN_GE_THD_REL_TOL * abs(f["thd_pct"]) >= f["thd_pct"], \
         f"THD+N ({f['thdn_pct']:.4f}%) < THD ({f['thd_pct']:.4f}%) — impossible"
     # fundamental_dbfs should be ≈ -20 dBFS (amplitude 0.1)
     assert -22 < f["fundamental_dbfs"] < -18, \

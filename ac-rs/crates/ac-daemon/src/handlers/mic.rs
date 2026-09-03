@@ -65,6 +65,13 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 /// THD-as-ratio changes accordingly when the curve isn't flat across
 /// the harmonic series.
 ///
+/// `thd_pct`'s denominator, `total_output_rms`, is **not** corrected: it
+/// is the uncorrected total output `thd::analyze` published, and only the
+/// numerator (the harmonic sum) is rescaled here. This mirrors the
+/// existing, documented choice not to mic-correct `thdn_pct` below — the
+/// residual is not corrected, so the total it contributes to is not
+/// either.
+///
 /// Untouched (intentional, documented):
 ///
 /// - `linear_rms` — time-domain integral of the raw electrical signal.
@@ -75,22 +82,25 @@ pub(crate) fn mic_correction_tag(curve_loaded: bool, enabled: bool) -> &'static 
 ///   require integrating the curve over the noise band, beyond the
 ///   scope of #97. The displayed spectrum is corrected, so users can
 ///   eyeball the noise floor at frequencies they care about.
-/// - `thdn_pct` — depends on `noise_floor_dbfs`; same reason.
+/// - `thdn_pct` and `total_output_rms` — `thdn_pct` depends on
+///   `noise_floor_dbfs`; same reason. `total_output_rms` is their shared
+///   denominator and the residual within it is likewise uncorrected, so
+///   leaving it alone keeps `thd_pct` and `thdn_pct` on the same basis.
 pub(crate) fn apply_mic_curve_to_analysis(curve: &MicResponse, r: &mut AnalysisResult) {
     apply_mic_curve_inplace_f64(curve, &r.freqs, &mut r.spectrum);
     r.fundamental_dbfs -= curve.correction_at(r.fundamental_hz as f32) as f64;
     for h in r.harmonic_levels.iter_mut() {
         h.1 -= curve.correction_at(h.0 as f32) as f64;
     }
-    // Recompute THD from corrected fundamental + harmonics.
-    let fund_amp = 10f64.powf(r.fundamental_dbfs / 20.0);
-    if fund_amp > 1e-30 && !r.harmonic_levels.is_empty() {
+    // Recompute THD from corrected harmonics over the uncorrected total
+    // output denominator -- the same basis `thdn_pct` already uses.
+    if r.total_output_rms > 1e-30 && !r.harmonic_levels.is_empty() {
         let harm_pow: f64 = r
             .harmonic_levels
             .iter()
             .map(|(_, db)| 10f64.powf(db / 10.0))
             .sum();
-        r.thd_pct = (harm_pow.sqrt() / fund_amp) * 100.0;
+        r.thd_pct = (harm_pow.sqrt() / r.total_output_rms) * 100.0;
     }
 }
 
@@ -190,12 +200,20 @@ mod tests {
         let _ = curve_text;
         let curve = parse_mic_curve(&text, None).unwrap();
 
+        // Uncorrected total output: sqrt(fund_amp^2 + h2_amp^2) at the
+        // pre-correction levels (-10 dBFS fundamental, -40 dBFS H2) -- the
+        // denominator thd::analyze would have published, and which mic
+        // correction must leave alone.
+        let total_output_rms =
+            (10f64.powf(-10.0 / 20.0).powi(2) + 10f64.powf(-40.0 / 20.0).powi(2)).sqrt();
+
         let mut r = AnalysisResult {
             fundamental_hz: 1000.0,
             fundamental_dbfs: -10.0,
             linear_rms: 0.1,
             thd_pct: 0.0, // recomputed
             thdn_pct: 0.5,
+            total_output_rms,
             harmonic_levels: vec![(2000.0, -40.0)],
             noise_floor_dbfs: -90.0,
             spectrum: vec![-90.0; 4],
@@ -206,6 +224,7 @@ mod tests {
         let orig_thdn = r.thdn_pct;
         let orig_floor = r.noise_floor_dbfs;
         let orig_rms = r.linear_rms;
+        let orig_total_output_rms = r.total_output_rms;
         super::apply_mic_curve_to_analysis(&curve, &mut r);
         assert!(
             (r.fundamental_dbfs - -12.0).abs() < 0.01,
@@ -225,17 +244,29 @@ mod tests {
                 "spec[{i}] got {m}"
             );
         }
-        // THD recomputed: corrected fund -12 dBFS = 0.2512, h2 -45 dBFS = 0.005623.
-        // THD = 0.005623 / 0.2512 * 100 ≈ 2.238%.
+        // THD recomputed over the *uncorrected* total-output denominator:
+        // corrected h2 -45 dBFS = 0.005623, total_output_rms unchanged =
+        // 0.316386. THD = 0.005623 / 0.316386 * 100 ≈ 1.777%.
+        // The rejected re-fundamental value (corrected fund -12 dBFS =
+        // 0.2512) would give 0.005623 / 0.2512 * 100 ≈ 2.238% -- assert
+        // against that too so a revert to the fundamental denominator
+        // cannot pass silently.
+        let rejected_re_fundamental = 2.238;
         assert!(
-            (r.thd_pct - 2.238).abs() < 0.01,
+            (r.thd_pct - 1.777).abs() < 0.01,
             "thd_pct: got {}",
+            r.thd_pct
+        );
+        assert!(
+            (r.thd_pct - rejected_re_fundamental).abs() > 0.1,
+            "thd_pct must not match the rejected re-fundamental value: got {}",
             r.thd_pct
         );
         // Untouched fields stay untouched.
         assert_eq!(r.thdn_pct, orig_thdn);
         assert_eq!(r.noise_floor_dbfs, orig_floor);
         assert_eq!(r.linear_rms, orig_rms);
+        assert_eq!(r.total_output_rms, orig_total_output_rms);
     }
 
     #[test]

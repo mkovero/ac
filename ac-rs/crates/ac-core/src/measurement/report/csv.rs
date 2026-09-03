@@ -52,7 +52,7 @@ impl MeasurementData {
             MeasurementData::FrequencyResponse { points } => {
                 let _ = writeln!(
                     s,
-                    "freq_hz,fundamental_dbfs,thd_pct,thdn_pct,noise_floor_dbfs,linear_rms,clipping,ac_coupled"
+                    "freq_hz,fundamental_dbfs,thd_pct_re_total,thdn_pct_re_total,noise_floor_dbfs,linear_rms,clipping,ac_coupled"
                 );
                 for p in points {
                     let _ = writeln!(
@@ -145,7 +145,7 @@ mod tests {
         // Backend + payload comments, header, and 3 data lines.
         assert_eq!(a.lines().count(), 6);
         assert!(a.starts_with("# backend: fake\n# payload 1: frequency_response"));
-        assert!(a.contains("freq_hz,fundamental_dbfs,"));
+        assert!(a.contains("freq_hz,fundamental_dbfs,thd_pct_re_total,thdn_pct_re_total,"));
     }
 
     #[test]
