@@ -213,7 +213,7 @@ fn one_sided_power(spec: &[f64], range: Range<usize>, has_nyquist: bool) -> f64 
     range
         .map(|bin| {
             let endpoint_weight = if bin == 0 || (has_nyquist && bin + 1 == spec.len()) {
-                0.25
+                0.5
             } else {
                 1.0
             };
@@ -396,20 +396,39 @@ mod tests {
     }
 
     #[test]
-    fn one_sided_power_corrects_dc_and_nyquist_amplitude_doubling() {
-        let amplitude = 0.5_f64;
-        let spec = vec![2.0 * amplitude, 0.0, 2.0 * amplitude];
+    fn dc_residual_uses_time_domain_rms() {
+        let n = SR as usize;
+        let residual_rms = 0.01_f64;
+        let samples: Vec<f32> = pure_sine(F1, 0.5, SR, n)
+            .into_iter()
+            .map(|sample| sample + residual_rms as f32)
+            .collect();
 
-        assert_relative_eq!(
-            one_sided_power(&spec, 0..1, true),
-            amplitude * amplitude,
-            epsilon = 1e-12
-        );
-        assert_relative_eq!(
-            one_sided_power(&spec, 2..3, true),
-            amplitude * amplitude,
-            epsilon = 1e-12
-        );
+        let r = analyze(&samples, SR, F1, 10).unwrap();
+        let expected_pct = residual_rms / (0.5 / std::f64::consts::SQRT_2) * 100.0;
+        assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.001);
+    }
+
+    #[test]
+    fn nyquist_residual_uses_time_domain_rms() {
+        let n = SR as usize;
+        let residual_rms = 0.01_f64;
+        let samples: Vec<f32> = pure_sine(F1, 0.5, SR, n)
+            .into_iter()
+            .enumerate()
+            .map(|(i, sample)| {
+                let nyquist = if i.is_multiple_of(2) {
+                    residual_rms
+                } else {
+                    -residual_rms
+                };
+                sample + nyquist as f32
+            })
+            .collect();
+
+        let r = analyze(&samples, SR, F1, 10).unwrap();
+        let expected_pct = residual_rms / (0.5 / std::f64::consts::SQRT_2) * 100.0;
+        assert_relative_eq!(r.thdn_pct, expected_pct, epsilon = 0.001);
     }
 
     #[test]
