@@ -1,7 +1,7 @@
 # rig-verify-125-results — 2026-08-03/04, 192.168.9.25
 
 Executes `$AC_HOME/handoff/handoff-rig-verify-125.md` at the fixed 3 m on-axis position, and
-the parts of `rig/rig-verify-queue.md` that need no microphone movement.
+the parts of `$AC_HOME/rig-verify-queue.md` that need no microphone movement.
 
 **Build under test: `main` @ `447f417`** — not a branch. PR #237
 ("fix(transfer): causal-only delay search, and captures that reproduce their

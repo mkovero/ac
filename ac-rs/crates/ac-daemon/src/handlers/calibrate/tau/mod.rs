@@ -52,13 +52,14 @@ pub(super) enum TauAttempt {
 /// re-registered client can catch a shift that only shows up between them.
 pub(super) fn measure_tau_twice(
     fake: bool,
+    required: Option<&str>,
     device: u32,
     out_port: &str,
     in_port: &str,
     amp: f64,
 ) -> TauAttempt {
     let run_once = || -> anyhow::Result<(f64, TauConditions)> {
-        let mut eng = make_engine(fake);
+        let mut eng = make_engine(fake, required)?;
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
             device,

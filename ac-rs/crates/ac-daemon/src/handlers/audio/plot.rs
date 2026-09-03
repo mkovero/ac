@@ -22,12 +22,11 @@ use ac_core::measurement::sweep::{
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, TauConditions};
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cal_guard, cfg_guard, resolve_input, resolve_output, send_pub,
-    snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
+    apply_drive_ceiling, busy_guard, cal_guard, cfg_guard, make_engine_for_state, resolve_input,
+    resolve_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
 };
 use crate::handlers::mic;
 
@@ -64,7 +63,11 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let in_port_reply = in_port.clone();
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
@@ -87,7 +90,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
             send_pub(
                 &pub_tx,
@@ -163,6 +165,8 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                         Some(*freq),
                         &ctx,
                     );
+                    let mut frame = frame;
+                    frame["backend"] = json!(backend);
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
@@ -196,6 +200,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_utc: timestamp.clone(),
+            backend: Some(backend.to_string()),
             method: MeasurementMethod::SteppedSine { n_points: n },
             stimulus: StimulusParams {
                 sample_rate_hz: sr,
@@ -231,6 +236,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 "cmd":      "plot",
                 "n_points": n,
                 "xruns":    xruns,
+                "backend":  backend,
             }),
         );
 
@@ -243,6 +249,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                         "type":   "measurement/report",
                         "cmd":    "plot",
                         "report": report_json,
+                        "backend": backend,
                     }),
                 );
             }
@@ -272,13 +279,14 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                 cal.as_ref(),
                 chain.clone(),
                 temperature_c,
+                backend,
             );
         }
 
         send_pub(
             &pub_tx,
             "done",
-            &json!({"cmd":"plot","n_points":n,"xruns":xruns}),
+            &json!({"cmd":"plot","n_points":n,"xruns":xruns,"backend":backend}),
         );
     });
 
@@ -291,6 +299,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         "out_port": out_port_reply,
         "in_port": in_port_reply,
         "level_dbfs": level_dbfs,
+        "backend": backend,
     })
 }
 
@@ -325,7 +334,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
@@ -333,6 +341,11 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
 
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
@@ -342,7 +355,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         // whole shape.
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
             send_pub(
                 &pub_tx,
@@ -406,6 +418,8 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                         Some(freq_hz),
                         &ctx,
                     );
+                    let mut frame = frame;
+                    frame["backend"] = json!(backend);
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
@@ -417,7 +431,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         send_pub(
             &pub_tx,
             "done",
-            &json!({"cmd":"plot_level","n_points":n,"xruns":xruns}),
+            &json!({"cmd":"plot_level","n_points":n,"xruns":xruns,"backend":backend}),
         );
     });
 
@@ -431,6 +445,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         "in_port": in_port_reply,
         "start_dbfs": start_dbfs_applied,
         "stop_dbfs": stop_dbfs_applied,
+        "backend": backend,
     })
 }
 
@@ -455,6 +470,7 @@ fn emit_spectrum_bands(
     cal: Option<&Calibration>,
     chain: ProcessingChain,
     temperature_c: Option<f64>,
+    backend: &'static str,
 ) {
     let f_max = (sr as f64 * 0.45).min(stop_hz.max(start_hz));
     let f_min = start_hz.max(1.0);
@@ -477,6 +493,7 @@ fn emit_spectrum_bands(
             "class":       fb.class().label(),
             "centres_hz":  centres.clone(),
             "levels_dbfs": levels.clone(),
+            "backend":     backend,
         }),
     );
 
@@ -488,6 +505,7 @@ fn emit_spectrum_bands(
         schema_version: SCHEMA_VERSION,
         ac_version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp_utc: timestamp.to_string(),
+        backend: Some(backend.to_string()),
         method: MeasurementMethod::SteppedSine {
             n_points: centres.len(),
         },
@@ -529,6 +547,7 @@ fn emit_spectrum_bands(
                 &json!({
                     "cmd":    "plot",
                     "report": report_json,
+                    "backend": backend,
                 }),
             );
         }
@@ -645,7 +664,11 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
 
     let worker = spawn_worker(state, "plot_ir", move |_stop| {
         // Calibration snapshot. The linear IR itself is never mic-curve
@@ -658,7 +681,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // gate is anchored to.
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
 
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
             send_pub(
                 &pub_tx,
@@ -802,6 +824,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 "data": &data,
                 "window_len_requested": irs.window_len_requested,
                 "window_len_used": irs.window_len_used,
+                "backend": backend,
             }),
         );
 
@@ -888,6 +911,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_utc: timestamp.clone(),
+            backend: Some(backend.to_string()),
             method: MeasurementMethod::SweptSine {
                 f1_hz,
                 f2_hz,
@@ -954,6 +978,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             &json!({
                 "cmd": "plot_ir",
                 "report": &report,
+                "backend": backend,
             }),
         );
 
@@ -977,12 +1002,12 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         }
 
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"plot_ir"}));
+        send_pub(&pub_tx, "done", &json!({"cmd":"plot_ir","backend":backend}));
     });
 
     {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_ir".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs})
+    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs, "backend": backend})
 }

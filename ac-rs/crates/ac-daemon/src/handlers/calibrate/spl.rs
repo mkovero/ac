@@ -6,11 +6,11 @@ use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    busy_guard, capture_rms, cfg_guard, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
+    busy_guard, capture_rms, cfg_guard, make_engine_for_state, rms_to_dbfs, send_pub, spawn_worker,
+    wait_cal_reply,
 };
 use super::{channels_from, finish_cal, resolve_input_by_channel};
 
@@ -22,7 +22,11 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     let capture_s = cmd.get("capture_s").and_then(Value::as_f64).unwrap_or(1.0);
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let in_port = match resolve_input_by_channel(&cfg, state, in_ch) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -30,7 +34,6 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate_spl", move |stop| {
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[], Some(&in_port)) {
             send_pub(
                 &pub_tx,
@@ -77,6 +80,7 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
             "key":                              key,
             "mic_sensitivity_dbfs_at_94db_spl": dbfs,
             "kind":                             "spl",
+            "backend":                          backend,
         });
         finish_cal(&pub_tx, "calibrate_spl", &key, cal_done_frame, save_err);
     });
@@ -85,5 +89,5 @@ pub fn calibrate_spl(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("calibrate_spl".to_string(), worker);
     }
-    json!({"ok": true})
+    json!({"ok": true, "backend": backend})
 }
