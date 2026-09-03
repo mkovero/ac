@@ -41,7 +41,7 @@ answered.
 
 It is also the expensive direction. A false green hides a defect; a false red
 sends someone hunting a regression that does not exist — the same shape as the
-stale `ac-view` snapshots in `rig/rig-verify-queue.md`, where the first
+stale `ac-view` snapshots in `$AC_HOME/rig-verify-queue.md`, where the first
 pixel-diff failure is a real defect the tests could not see and reads as one
 they introduced.
 
