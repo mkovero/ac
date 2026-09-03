@@ -31,10 +31,17 @@ pub struct AnalysisResult {
     /// (%), as defined by IEC 60268-3:2018 §15.12.3.2.
     pub thdn_pct: f64,
 
-    /// The `thd_pct` / `thdn_pct` denominator: `U2` in IEC 60268-3:2018
-    /// §15.12.3.2, `sqrt(fundamental_amp² + residual_power)` in the same
+    /// NOT the signal's literal RMS voltage — it is `√2 ×` that, i.e. a
+    /// coherent-gain-normalized *peak*-consistent amplitude (compare
+    /// `linear_rms`, which is literal RMS). The `thd_pct` / `thdn_pct`
+    /// denominator: `U2` in IEC 60268-3:2018 §15.12.3.2,
+    /// `sqrt(fundamental_amp² + residual_power)` in the same
     /// coherent-gain-normalized amplitude units as `fundamental_dbfs`'s
-    /// input. Not corrected by the mic curve — see
+    /// input. Safe as that ratio's shared denominator only because both
+    /// numerator and this field use the same convention and the `√2`
+    /// cancels; a future direct consumer (report field, dBu conversion,
+    /// wire-schema addition) that treats it as physical RMS will read
+    /// 3.01 dB too hot. Not corrected by the mic curve — see
     /// `ac-daemon::handlers::mic::apply_mic_curve_to_analysis`, which
     /// divides by this field unchanged. Never serialized onto the wire;
     /// `ac-daemon` publishes `thd_pct` / `thdn_pct` field-by-field.

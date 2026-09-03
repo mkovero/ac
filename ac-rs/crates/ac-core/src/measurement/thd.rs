@@ -396,6 +396,12 @@ mod tests {
         let r = analyze(&samples, SR, 20.0, 10).unwrap();
         assert!(r.thd_pct < 0.01, "20 Hz THD was {:.4}%", r.thd_pct);
         assert!(r.thdn_pct < 0.01, "20 Hz THD+N was {:.4}%", r.thdn_pct);
+        assert!(
+            r.thdn_pct + THDN_GE_THD_REL_TOL * r.thd_pct.abs() >= r.thd_pct,
+            "THD+N {:.12}% was below THD {:.12}% at 20 Hz",
+            r.thdn_pct,
+            r.thd_pct
+        );
     }
 
     #[test]
@@ -437,6 +443,12 @@ mod tests {
         let r = analyze(&samples, SR, F1, 10).unwrap();
         assert!(r.thd_pct < 1.0, "256-sample THD was {:.4}%", r.thd_pct);
         assert!(r.thdn_pct < 2.0, "256-sample THD+N was {:.4}%", r.thdn_pct);
+        assert!(
+            r.thdn_pct + THDN_GE_THD_REL_TOL * r.thd_pct.abs() >= r.thd_pct,
+            "THD+N {:.12}% was below THD {:.12}% at 256 samples",
+            r.thdn_pct,
+            r.thd_pct
+        );
     }
 
     #[test]
