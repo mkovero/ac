@@ -13,7 +13,7 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, cfg_guard, median,
+    busy_guard, cal_dbu_str, cal_guard, cal_out_dbu_str, capture_rms, cfg_guard, median,
     ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
     resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
@@ -55,6 +55,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     };
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
+    let cal = cal_guard!(out_ch, in_ch);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -98,7 +99,6 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         }
 
         let sr = eng.sample_rate();
-        let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_loaded = cal
             .as_ref()
             .map(|c| c.mic_response.is_some())

@@ -47,6 +47,12 @@ Every CTRL reply contains at minimum:
 
 On failure: `"ok": false, "error": "<human-readable string>"`.
 
+Commands that use calibration refuse synchronously when `cal.json` exists
+but cannot be read or parsed. No worker starts and no measurement frames are
+published. The error string names the store and cause and confirms that the
+existing file was preserved; transfer refusals also state that the failure
+applies to all requested pairs.
+
 ---
 
 ## DATA frame envelope

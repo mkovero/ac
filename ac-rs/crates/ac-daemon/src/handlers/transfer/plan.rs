@@ -22,7 +22,8 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::audio::make_engine;
 use crate::handlers::{
-    apply_drive_ceiling, ref_output_migration_warning, resolve_output, resolve_ref_output,
+    apply_drive_ceiling, load_calibration_or_refuse, ref_output_migration_warning, resolve_output,
+    resolve_ref_output,
 };
 use crate::server::ServerState;
 
@@ -159,8 +160,11 @@ impl SessionPlan {
         // the exact split this check exists to prevent.
         let unique_cals: Vec<Option<Calibration>> = unique_chans
             .iter()
-            .map(|&ch| Calibration::load(out_ch, ch, None).ok().flatten())
-            .collect();
+            .map(|&ch| {
+                load_calibration_or_refuse(out_ch, ch, "transfer", Some("all requested pairs"))
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|msg| json!({"ok": false, "error": msg}))?;
         // Every channel named in `pairs` is in `unique_chans` by
         // construction, so this never misses: `None` means "no calibration
         // stored for this channel", never "channel not found".

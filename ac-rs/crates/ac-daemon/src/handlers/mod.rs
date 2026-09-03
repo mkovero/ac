@@ -18,7 +18,7 @@ use std::thread;
 use serde_json::{json, Value};
 
 use ac_core::config::Config;
-use ac_core::shared::calibration::Calibration;
+use ac_core::shared::calibration::{default_cal_path, Calibration};
 
 use crate::audio::{make_engine, AudioEngine};
 use crate::server::ServerState;
@@ -114,6 +114,48 @@ macro_rules! cfg_guard {
     };
 }
 pub(super) use cfg_guard;
+
+// ---------------------------------------------------------------------------
+// Calibration-freshness guard (#425)
+// ---------------------------------------------------------------------------
+
+/// Load one calibration entry, refusing the operation if the shared store
+/// exists but cannot be read or parsed. A read error is not "no calibration":
+/// continuing would silently relabel an uncalibrated result as successful.
+pub(super) fn load_calibration_or_refuse(
+    output_channel: u32,
+    input_channel: u32,
+    operation: &str,
+    scope: Option<&str>,
+) -> Result<Option<Calibration>, String> {
+    Calibration::load(output_channel, input_channel, None).map_err(|e| {
+        let scope = scope
+            .map(|value| format!("\n         scope  {value}"))
+            .unwrap_or_default();
+        format!(
+            "calibration unreadable — {operation} not started{scope}\n\
+             \x20        store  {}\n\
+             \x20        cause  {e:#}\n\
+             \x20        data   existing file preserved",
+            default_cal_path().display()
+        )
+    })
+}
+
+macro_rules! cal_guard {
+    ($output_channel:expr, $input_channel:expr) => {
+        match $crate::handlers::load_calibration_or_refuse(
+            $output_channel,
+            $input_channel,
+            "measurement",
+            None,
+        ) {
+            Ok(cal) => cal,
+            Err(msg) => return ::serde_json::json!({"ok": false, "error": msg}),
+        }
+    };
+}
+pub(super) use cal_guard;
 
 // ---------------------------------------------------------------------------
 // Worker spawn

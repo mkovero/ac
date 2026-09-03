@@ -50,13 +50,7 @@ fn read_all_entries(path: &Path) -> Result<HashMap<String, CalibrationEntry>> {
     }
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&raw).with_context(|| {
-        format!(
-            "parsing {} — refusing to treat it as empty, because saving over it would \
-             discard every calibration it holds",
-            path.display()
-        )
-    })
+    serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// Serialize `all` to `path` atomically: write a sibling temporary, then
@@ -90,7 +84,12 @@ impl Calibration {
     /// Existing entries for other channel pairs are preserved.
     pub fn save(&self, path: Option<&Path>) -> Result<()> {
         let path = resolve_path(path);
-        let mut all = read_all_entries(&path)?;
+        let mut all = read_all_entries(&path).with_context(|| {
+            format!(
+                "refusing to save over unreadable calibration store {} — existing file preserved",
+                path.display()
+            )
+        })?;
         all.insert(self.key(), self.to_entry());
         write_all_entries(&path, &all)?;
         eprintln!(

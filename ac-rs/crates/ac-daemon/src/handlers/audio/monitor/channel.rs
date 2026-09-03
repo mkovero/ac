@@ -368,12 +368,11 @@ impl ChannelState {
     pub(super) fn new(
         channel: u32,
         in_port: String,
-        out_ch: u32,
+        cal: Option<Calibration>,
         sr: u32,
         freq_hz: f64,
         caps: &RingCaps,
     ) -> Self {
-        let cal = Calibration::load(out_ch, channel, None).ok().flatten();
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let mic_curve = cal.as_ref().and_then(|c| c.mic_response.clone());
         let loudness_fir = mic_curve

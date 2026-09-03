@@ -29,7 +29,9 @@ use ac_core::visualize::weighting_curves::WeightingCurve;
 use crate::audio::make_engine;
 use crate::server::{MonitorParams, ServerState};
 
-use super::super::{busy_guard, cfg_guard, resolve_input, send_pub, spawn_worker};
+use super::super::{
+    busy_guard, cfg_guard, load_calibration_or_refuse, resolve_input, send_pub, spawn_worker,
+};
 
 use self::capture::{
     capture_budget_samples, capture_into_ring, capture_or_report, log_transform_time,
@@ -143,10 +145,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let primary_in_port = in_ports.first().cloned().unwrap_or_default();
+    let out_ch = cfg.output_channel;
+
+    let mut channel_cals = Vec::with_capacity(channels.len());
+    for &channel in &channels {
+        match load_calibration_or_refuse(out_ch, channel, "measurement", None) {
+            Ok(cal) => channel_cals.push(cal),
+            Err(msg) => return json!({"ok": false, "error": msg}),
+        }
+    }
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
-    let out_ch = cfg.output_channel;
     let n_channels = channels.len() as u32;
     let channels_worker = channels.clone();
     let in_ports_worker = in_ports.clone();
@@ -280,8 +290,9 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
         let mut channel_states: Vec<ChannelState> = channels_worker
             .iter()
             .zip(in_ports_worker.iter())
-            .map(|(&channel, in_port)| {
-                ChannelState::new(channel, in_port.clone(), out_ch, sr, freq_hz, &ring_caps)
+            .zip(channel_cals)
+            .map(|((&channel, in_port), cal)| {
+                ChannelState::new(channel, in_port.clone(), cal, sr, freq_hz, &ring_caps)
             })
             .collect();
         let single_channel = channel_states.len() == 1;
