@@ -162,6 +162,8 @@ Post PR review in this structure:
 ```
 <!-- agent: qa -->
 
+## qa — PR #N at <full current head SHA>
+
 ### spec coverage
 | criterion | provenance | covered | notes |
 |---|---|---|---|

@@ -31,7 +31,7 @@ independent_review() {
   fi
   ((${#prs[@]})) || { echo "<codex/qa> No PRs require independent QA."; return 0; }
 
-  local pr head wt labels
+  local pr head wt labels qa_record
   for pr in "${prs[@]}"; do
     labels="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name')"
     has_label() { printf '%s\n' "$labels" | grep -qx "$1"; }
@@ -40,6 +40,16 @@ independent_review() {
     has_label needs-work && continue
     has_label requires-rig && continue
     head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+    qa_record="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments,reviews --jq '
+      ([.comments[] | {at: .createdAt, body: .body}]
+       + [.reviews[] | {at: .submittedAt, body: .body}])
+      | map(select(.body | startswith("<!-- agent: qa -->")))
+      | sort_by(.at) | last | .body // empty')"
+    if [[ $qa_record != *"$head"* ]]; then
+      echo "<codex/qa> PR #$pr: newest Claude QA record does not name current tip $head." >&2
+      echo "<codex/qa> A fresh Claude QA pass with explicit SHA evidence is required." >&2
+      return 1
+    fi
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
     require_space "$wt"; mkdir -p "$WT_BASE" "$AC_TARGET"
@@ -49,6 +59,12 @@ independent_review() {
     link_support "$wt"
     local rc=0
     ( cd "$wt" && AC_TAG="pr-$pr" run codex-qa "Review PR #$pr in $AC_REPO as the independent Codex QA worker.
+
+The runner combined GitHub PR comments and reviews and verified that the newest
+<!-- agent: qa --> record explicitly covers current tip $head. Treat that SHA
+identity as the fresh-Claude-approval pre-check. Do not compare commit and
+comment timestamps; commit timestamps are author-controlled and are not
+workflow chronology.
 
 Inspect the linked issue, decisions, complete diff, checks, tests, and relevant
 history. On pass add codex-approved and remove needs-work; on blocking defects
@@ -132,7 +148,8 @@ Scope of this pass:
 - The delta may break something outside itself. Where it plausibly does, say
   where you looked.
 
-State at the top of your comment which commit range you reviewed.
+State at the top of your comment which commit range you reviewed, including
+the full $head_sha SHA as the range endpoint.
 
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 else
@@ -143,6 +160,8 @@ comment, this invocation is a new review pass: governing specs, issue decisions,
 or human evidence may have changed without a code push. Apply the current QA
 spec, post a new superseding QA comment, and update labels to its verdict. Do
 not decline to post merely because the PR tip is unchanged.
+
+State the full current head SHA $head_sha at the top of the review comment.
 
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi

@@ -72,24 +72,28 @@ Your own comment carries `<!-- agent: codex-qa -->` as its first line.
 
 ## pre-check — stale approval
 
-Before reviewing anything, compare the timestamp of the last commit on the
-branch against the timestamp of the QA comment that applied `claude-approved`.
+Before reviewing anything, establish that the newest `<!-- agent: qa -->`
+record explicitly names the current full PR head SHA as the reviewed tip (or as
+the endpoint of its reviewed range). Search both GitHub PR comments and review
+bodies: `gh pr view --json comments` does not include review bodies.
 
-```bash
-gh pr view N --json commits,comments,labels
-```
+The runner performs this identity check before invoking you and supplies the
+verified head SHA in the task prompt. You may confirm it, but do not replace it
+with timestamp inference. Git commit timestamps are author-controlled and can
+postdate a review that actually inspected that exact commit.
 
-**Commits postdate the approval → the label is stale. Do not review.** Post a
-short comment saying the approval predates commit `<sha>` and that a fresh
-Claude QA pass is needed, and stop. Apply no labels.
+**Newest QA record does not name the current head → the approval is stale or
+unverifiable. Do not review.** Post a short comment requesting a fresh Claude
+QA pass that names the full current SHA, and stop. Apply no labels.
 
 Reviewing past a stale label produces an independent review of a tree that
 Claude QA never approved, presented as the second half of a two-review gate.
 That is worse than no review, because the merge gate reads as satisfied.
 
 `developer.md` requires the pusher to remove `claude-approved`, and `qa.md`
-removes it at re-review. This is the third place, and it is the only one that
-catches a label that survived both.
+removes it at re-review. This identity check is the third guard and catches a
+label that survived both without rejecting a valid review because of clock
+metadata.
 
 ## what you must do
 
