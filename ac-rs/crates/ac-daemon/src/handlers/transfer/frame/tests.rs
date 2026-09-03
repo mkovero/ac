@@ -19,6 +19,7 @@ fn test_statics() -> FrameStatics {
     let spec_f_max = TEST_SR as f64 / 2.0;
     FrameStatics {
         sr: TEST_SR,
+        backend: "fake".to_string(),
         spec_f_min,
         spec_f_max,
         spec_n_columns: ac_core::visualize::aggregate::transfer_spectrum_n_columns(

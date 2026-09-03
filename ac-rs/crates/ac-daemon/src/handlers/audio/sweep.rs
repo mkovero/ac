@@ -8,11 +8,11 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cfg_guard, resolve_output, send_pub, spawn_worker,
+    apply_drive_ceiling, busy_guard, cfg_guard, make_engine_for_state, resolve_output, send_pub,
+    spawn_worker,
 };
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
@@ -47,10 +47,13 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
 
     let worker = spawn_worker(state, "sweep_level", move |stop| {
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], None) {
             send_pub(
                 &pub_tx,
@@ -75,7 +78,11 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"sweep_level"}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"sweep_level","backend":backend}),
+        );
     });
 
     {
@@ -87,6 +94,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         "out_port": out_port_reply,
         "start_dbfs": start_dbfs_applied,
         "stop_dbfs": stop_dbfs_applied,
+        "backend": backend,
     })
 }
 
@@ -114,10 +122,13 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
 
     let worker = spawn_worker(state, "sweep_frequency", move |stop| {
-        let mut eng = make_engine(fake);
         if let Err(e) = eng.start(&[out_port], None) {
             send_pub(
                 &pub_tx,
@@ -140,12 +151,16 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
-        send_pub(&pub_tx, "done", &json!({"cmd":"sweep_frequency"}));
+        send_pub(
+            &pub_tx,
+            "done",
+            &json!({"cmd":"sweep_frequency","backend":backend}),
+        );
     });
 
     {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_frequency".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs})
+    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs, "backend": backend})
 }

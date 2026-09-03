@@ -80,13 +80,19 @@ pub use provenance::{
 ///   treat as no τ-corrected flight time being derivable from the
 ///   uncorrected arrival (#391 — the ms → m conversion this used to feed
 ///   is gone; τ itself, and this field, are not).
-pub const SCHEMA_VERSION: u32 = 5;
+/// - v6: optional capture `backend`; v1-v5 reports decode with it absent.
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
     pub schema_version: u32,
     pub ac_version: String,
     pub timestamp_utc: String,
+    /// Live audio backend that produced this capture. This is distinct from
+    /// the backend nested in `interface_latency`, which describes the τ
+    /// measurement rather than this report's capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     pub method: MeasurementMethod,
     pub stimulus: StimulusParams,
     pub integration: IntegrationParams,
@@ -179,7 +185,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 5"));
+        assert!(json.contains("\"schema_version\": 6"));
     }
 
     #[test]
@@ -203,7 +209,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 5"));
+            assert!(json.contains("\"schema_version\": 6"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
@@ -230,6 +236,7 @@ mod tests {
         let r: MeasurementReport =
             serde_json::from_str(legacy).expect("legacy v2 report must still decode");
         assert_eq!(r.schema_version, 2);
+        assert_eq!(r.backend, None);
         assert_eq!(r.processing_chain, ProcessingChain::default());
         assert_eq!(r.data.len(), 1);
         assert!(r.data[0].standard.is_empty());

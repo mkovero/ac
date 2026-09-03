@@ -36,6 +36,7 @@ pub(super) fn raw_peak_dbfs(block: &[f32]) -> Option<f64> {
 /// can drift between ticks.
 pub(super) struct FrameStatics {
     pub(super) sr: u32,
+    pub(super) backend: String,
     /// Fixed log-column grid for `meas_spectrum`/`ref_spectrum` (D18).
     pub(super) spec_f_min: f64,
     pub(super) spec_f_max: f64,
@@ -174,6 +175,7 @@ pub(super) fn settling_frame(
         "spl_integration": statics.integration_tag.as_str(),
         "cal_tags":        cal_tags_value(ctx.meas_cal.as_ref(), ctx.ref_cal.as_ref(), mc_tag, mc_enabled),
         "drive":           drive_msg.clone(),
+        "backend":         statics.backend.as_str(),
     })
 }
 
@@ -346,6 +348,7 @@ pub(super) fn build_pair_messages(
         "spl_integration": statics.integration_tag.as_str(),
         "cal_tags":        cal_tags,
         "drive":           drive_msg.clone(),
+        "backend":         statics.backend.as_str(),
     });
 
     let mut out = vec![transfer_msg];
@@ -364,6 +367,7 @@ pub(super) fn build_pair_messages(
             "delay_ms":      a.delay_ms,
             "delay_locked":  st.delay.is_some(),
             "analysis_seq":  a.seq,
+            "backend":       statics.backend.as_str(),
         }));
     }
     Some((pos, out, a.spl_raw))

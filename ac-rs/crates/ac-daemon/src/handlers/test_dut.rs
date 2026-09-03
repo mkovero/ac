@@ -8,13 +8,13 @@ use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
 
-use crate::audio::{make_engine, AudioEngine};
+use crate::audio::AudioEngine;
 use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, cfg_guard, median,
-    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
+    busy_guard, cal_dbu_str, cal_out_dbu_str, capture_rms, cfg_guard, make_engine_for_state,
+    median, ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
     resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
 
@@ -57,7 +57,11 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     let in_ch = cfg.input_channel;
 
     let pub_tx = state.pub_tx.clone();
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let dut_reply_tx = state.dut_reply_tx.clone();
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
@@ -73,7 +77,6 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             vec![out_port.clone()]
         };
 
-        let mut eng = make_engine(fake);
         if !eng.supports_routing() {
             send_pub(
                 &pub_tx,
@@ -119,6 +122,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                     "detail": $r.detail, "tolerance": $r.tolerance,
                     "mic_correction":   mc_tag,
                     "spl_offset_db":    spl_offset_db,
+                    "backend":          backend,
                 }));
             }};
             ($r:expr, $tag:expr) => {{
@@ -133,6 +137,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
                     "detail": $r.detail, "tolerance": $r.tolerance,
                     "mic_correction":   mc_tag,
                     "spl_offset_db":    spl_offset_db,
+                    "backend":          backend,
                 }));
             }};
         }
@@ -216,6 +221,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
             &json!({
                 "cmd": "test_dut",
                 "tests_run": tests_done, "compare": compare_mode, "xruns": xruns,
+                "backend": backend,
             }),
         );
     });
@@ -230,6 +236,7 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
+        "backend":      backend,
     });
     // #225 migration notice — present on every reply, not just the first, so a
     // client that connects later still sees it. Omitted entirely when it does

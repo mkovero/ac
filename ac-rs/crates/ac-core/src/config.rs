@@ -31,6 +31,19 @@ fn default_snapshot_ring_s() -> f64 {
     30.0
 }
 
+/// Validate and canonicalize a backend requirement supplied by setup or
+/// loaded from persistent config. The legacy `sounddevice` spelling maps to
+/// CPAL; callers writing config persist the canonical spelling.
+pub fn canonical_backend(value: Option<&str>) -> std::result::Result<Option<&'static str>, String> {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        None => Ok(None),
+        Some("jack") => Ok(Some("jack")),
+        Some("cpal") | Some("sounddevice") => Ok(Some("cpal")),
+        Some("fake") => Ok(Some("fake")),
+        Some(_) => Err("backend must be jack, cpal, fake, or null".to_string()),
+    }
+}
+
 /// Complete hardware configuration.  All fields match the Python DEFAULTS dict.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -97,7 +110,9 @@ pub struct Config {
     /// Active session name.
     pub session: Option<String>,
 
-    /// Force audio backend: `"jack"`, `"sounddevice"`, or `None` for auto.
+    /// Required audio backend: `"jack"`, `"cpal"`, `"fake"`, or `None`
+    /// for the platform's real default. `"sounddevice"` is accepted while
+    /// loading legacy config and canonicalized to `"cpal"` by setup.
     pub backend: Option<String>,
 
     /// Remote server host for CLI connections. `None` means localhost.
@@ -218,6 +233,9 @@ pub fn load(path: Option<&Path>) -> Result<Config> {
     // serde fills missing fields from defaults; extra fields are ignored.
     let cfg: Config =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    canonical_backend(cfg.backend.as_deref())
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("parsing {}", path.display()))?;
     Ok(cfg)
 }
 

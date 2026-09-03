@@ -11,6 +11,7 @@ pub(super) fn sample_report() -> MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: "0.1.0".into(),
         timestamp_utc: "2026-04-21T20:00:00Z".into(),
+        backend: Some("fake".into()),
         method: MeasurementMethod::SteppedSine { n_points: 3 },
         stimulus: StimulusParams {
             sample_rate_hz: 48_000,
@@ -75,6 +76,7 @@ pub(super) fn sample_spectrum_bands_report() -> MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: "0.1.0".into(),
         timestamp_utc: "2026-04-22T12:00:00Z".into(),
+        backend: None,
         method: MeasurementMethod::SteppedSine { n_points: 0 },
         stimulus: StimulusParams {
             sample_rate_hz: 48_000,
@@ -112,6 +114,7 @@ pub(super) fn sample_impulse_response_report() -> MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: "0.1.0".into(),
         timestamp_utc: "2026-04-22T12:00:00Z".into(),
+        backend: None,
         method: MeasurementMethod::SweptSine {
             f1_hz: 20.0,
             f2_hz: 20_000.0,
@@ -201,6 +204,7 @@ pub(super) fn sample_noise_report() -> MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: "0.1.0".into(),
         timestamp_utc: "2026-04-22T12:00:00Z".into(),
+        backend: None,
         method: MeasurementMethod::SteppedSine { n_points: 0 },
         stimulus: StimulusParams {
             sample_rate_hz: 48_000,

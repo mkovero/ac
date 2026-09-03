@@ -39,7 +39,12 @@ ac-daemon [--local] [--fake-audio] [--ctrl-port N] [--data-port N]
 |------|-----------|
 | `jack_backend.rs` | Default (JACK must run). **Required on Linux** — see issue #27. |
 | `cpal_backend.rs` | macOS/Windows fallback when no JACK. Disabled on Linux at runtime (`#[cfg(not(target_os = "linux"))]` in `make_engine`). |
-| `fake.rs` | `--fake-audio` flag; returns clean sine so `analyze()` gets plausible output. Also Linux fallback when JACK not running, so missing-JACK fails loud instead of silently grabbing ALSA. |
+| `fake.rs` | Explicit synthetic backend (`--fake-audio` or `backend: fake`); returns clean sine so `analyze()` gets plausible output. It is never an implicit fallback. |
+
+Backend selection is fail-closed. Config `backend` is a requirement
+(`jack`, `cpal`, `fake`, or null for the platform's real default; legacy
+`sounddevice` aliases `cpal`). If the required real backend is unavailable,
+the command fails before measurement instead of substituting fake data.
 
 ## Protocol reference
 
@@ -54,4 +59,3 @@ See `ac-rs/ZMQ.md` — authoritative for both Python and Rust.
 | GPIO handler | USB2GPIO (Arduino Mega) handler in `gpio.rs`, spawned by `--gpio <port>` |
 | CPAL backend | Runs when no JACK. **Note:** CPAL backend inherits `AudioEngine` default no-op routing methods — commands needing port routing (`probe`, `transfer`, `test_hardware`, `test_dut`) behave wrong now. See issue #27. |
 | `--fake-audio` | Synthetic sine loopback; bypasses routing (see issue #34) |
-
