@@ -28,6 +28,9 @@
 #                        override one role; likewise TRIAGE, ARCHITECT, and UX.
 #                        Per-role settings win over AC_PROVIDER. QA remains
 #                        model-bound until its two approval labels are migrated.
+#   AC_WAIT_MERGE=1      wait at an epic child until its human merge, then
+#                        continue with the next child (default: stop and return)
+#   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
 #
 # Verify label names first — a wrong one makes this do nothing while looking
 # like it worked:  gh label list -R mkovero/ac
@@ -503,6 +506,23 @@ is_epic() {
   [[ -n "$(children "$1")" ]]
 }
 
+wait_for_merge() {
+  local child="$1" pr state poll="${AC_MERGE_POLL_SECONDS:-60}"
+  [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "  invalid AC_MERGE_POLL_SECONDS: $poll" >&2; return 2; }
+  while true; do
+    state="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+    [[ $state == CLOSED ]] && { echo "  #$child merged; continuing epic"; return 0; }
+    pr="$(pr_for "$child" || true)"
+    if [[ -n $pr ]] && gh_retry gh pr view "$pr" -R "$AC_REPO" --json state,mergedAt \
+        --jq 'select(.state == "MERGED" or .mergedAt != null) | .number' >/dev/null 2>&1; then
+      echo "  #$child PR merged; continuing epic"
+      return 0
+    fi
+    echo "  #$child awaiting your merge — checking again in ${poll}s"
+    sleep "$poll"
+  done
+}
+
 drive_epic() {
   local e="$1" kids c st
   mapfile -t kids < <(children "$e")
@@ -532,10 +552,14 @@ drive_epic() {
     case "$STATE" in
       awaiting-merge)
         echo
-        echo "  #$c is ready for your merge. Stopping here."
+        echo "  #$c is ready for your merge."
         echo "  Later children branch from main and would not see #$c's work."
-        echo "  Merge it, then rerun: master.sh $e"
-        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+        if [[ -n ${AC_WAIT_MERGE:-} ]]; then
+          wait_for_merge "$c" || return $?
+        else
+          echo "  Merge it, then rerun: master.sh $e"
+          [[ -n ${KEEP_GOING:-} ]] || return 0
+        fi ;;
       needs-rig)
         echo "  #$c needs a rig measurement — stopping epic."
         [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
