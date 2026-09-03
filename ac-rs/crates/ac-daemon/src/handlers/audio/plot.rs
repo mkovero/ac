@@ -25,7 +25,7 @@ use ac_core::shared::calibration::{Calibration, TauConditions};
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cfg_guard, make_engine_for_state, resolve_input,
+    apply_drive_ceiling, busy_guard, cal_guard, cfg_guard, make_engine_for_state, resolve_input,
     resolve_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
 };
 use crate::handlers::mic;
@@ -70,6 +70,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let backend = eng.backend_name();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
+    let cal = cal_guard!(out_ch, in_ch);
     // Processing-context shared state — same Arc clones the monitor
     // worker uses so #97 + #98 wire the same envelope onto Tier 1.
     let mic_corr_enabled = state.mic_correction_enabled.clone();
@@ -84,7 +85,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let temperature_c = cfg.temperature_c;
 
     let worker = spawn_worker(state, "plot", move |stop| {
-        let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
@@ -336,6 +336,7 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let pub_tx = state.pub_tx.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
+    let cal = cal_guard!(out_ch, in_ch);
     let mic_corr_enabled = state.mic_correction_enabled.clone();
     let band_weighting_shared = state.band_weighting.clone();
     let time_integration_shared = state.time_integration_mode.clone();
@@ -346,7 +347,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let backend = eng.backend_name();
     let worker = spawn_worker(state, "plot_level", move |stop| {
-        let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         // Raw request shape — each computed level is clamped individually
@@ -655,6 +655,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let out_port_reply = out_port.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
+    let cal = cal_guard!(out_ch, in_ch);
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
     let device = cfg.device;
@@ -678,7 +679,6 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // `gated_points` correction step below for why: `MicCurveFir`'s
         // linear-phase group delay would otherwise move the IR peak the
         // gate is anchored to.
-        let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
 
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {

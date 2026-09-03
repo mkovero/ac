@@ -13,8 +13,8 @@ use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, capture_rms, cfg_guard, make_engine_for_state, read_dmm_vrms,
-    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
+    analyze_mono, busy_guard, cal_guard, capture_rms, cfg_guard, make_engine_for_state,
+    read_dmm_vrms, ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
     resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, std_dev, TestResult,
 };
 
@@ -59,6 +59,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     let dmm_host = cfg.dmm_host.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
+    let cal_ctx = cal_guard!(out_ch, in_ch);
     let mic_corr_enabled = state.mic_correction_enabled.clone();
 
     let out_port_r = out_port.clone();
@@ -101,7 +102,6 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         // once per worker, stamped on every emitted `test_result` so
         // downstream readers can tell whether the test ran on a
         // mic-curve'd channel and at what SPL offset (#103).
-        let cal_ctx = Calibration::load(out_ch, in_ch, None).ok().flatten();
         let mic_curve_loaded = cal_ctx
             .as_ref()
             .map(|c| c.mic_response.is_some())
@@ -151,8 +151,6 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         let mut dmm_pass = 0usize;
         if dmm_mode {
             if let Some(ref host) = dmm_host {
-                let cal = Calibration::load(out_ch, in_ch, None).ok().flatten();
-
                 macro_rules! emit_dmm {
                     ($r:expr) => {{
                         if $r.pass { dmm_pass += 1; }
@@ -167,10 +165,10 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
                 }
 
                 if !stop.load(Ordering::Relaxed) {
-                    emit_dmm!(hw_dmm_absolute(&mut *eng, host, cal.as_ref()));
+                    emit_dmm!(hw_dmm_absolute(&mut *eng, host, cal_ctx.as_ref()));
                 }
                 if !stop.load(Ordering::Relaxed) {
-                    emit_dmm!(hw_dmm_tracking(&mut *eng, host, cal.as_ref()));
+                    emit_dmm!(hw_dmm_tracking(&mut *eng, host, cal_ctx.as_ref()));
                 }
                 if !stop.load(Ordering::Relaxed) {
                     emit_dmm!(hw_dmm_freq_response(&mut *eng, host));
