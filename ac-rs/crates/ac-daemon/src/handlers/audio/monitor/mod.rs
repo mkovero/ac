@@ -103,18 +103,6 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
 
     let lf_fft_n = defaults.lf_fft_n;
     let crossover_hz = defaults.crossover_hz;
-    {
-        let mut mp = state.monitor_params.lock().unwrap();
-        *mp = MonitorParams {
-            interval,
-            fft_n,
-            lf_fft_n,
-            crossover_hz,
-            active: true,
-        };
-    }
-    let monitor_params_shared = state.monitor_params.clone();
-
     let cfg = state.cfg.lock().unwrap().clone();
 
     let channels: Vec<u32> = cmd
@@ -169,6 +157,18 @@ pub fn monitor_spectrum(state: &ServerState, cmd: &Value) -> Value {
     let leq_reset_shared = state.leq_reset_request.clone();
     let loudness_reset_shared = state.loudness_reset_request.clone();
     let band_weighting_shared = state.band_weighting.clone();
+
+    {
+        let mut mp = state.monitor_params.lock().unwrap();
+        *mp = MonitorParams {
+            interval,
+            fft_n,
+            lf_fft_n,
+            crossover_hz,
+            active: true,
+        };
+    }
+    let monitor_params_shared = state.monitor_params.clone();
 
     let worker = spawn_worker(state, "monitor_spectrum", move |stop| {
         let mut eng = make_engine(fake);

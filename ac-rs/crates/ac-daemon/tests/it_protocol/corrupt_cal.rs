@@ -92,6 +92,18 @@ fn corrupt_cal_refuses_monitor_and_preserves_store() {
 
     let reply = client.call(json!({"cmd": "monitor_spectrum", "channels": [0, 1]}));
     assert_refused(&reply, &path, "measurement", None);
+
+    let params_reply = client.call(json!({
+        "cmd": "set_monitor_params",
+        "interval": 0.1,
+        "fft_n": 4096
+    }));
+    assert_eq!(
+        params_reply["ok"], false,
+        "stale monitor state: {params_reply}"
+    );
+    assert_eq!(params_reply["error"], "no active monitor");
+
     assert_store_preserved(&path);
 }
 
