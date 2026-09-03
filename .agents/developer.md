@@ -144,8 +144,29 @@ way to agreement is precisely the failure mode an independent second review
 exists to prevent, and it is the one outcome that would make the whole
 arrangement worthless while looking like it worked.
 
+## integration mode
+
+Invoked as `"integrate main into PR #N"` when an approved PR conflicts after
+another epic child merged. This is not a new feature pass.
+
+1. The runner has fetched the current PR head and `origin/main` into a
+   disposable worktree and attempted the merge.
+2. Inspect every unmerged path and the two sides of each conflict. Conflict
+   paths are authorised integration scope even when only one side appeared in
+   the original architect manifest; do not edit unrelated paths.
+3. Preserve both already-reviewed intents. If they cannot coexist without a
+   new design decision, abort the merge, apply `needs-design` on the issue, and
+   stop without pushing.
+4. Resolve all conflicts, run the full workspace verification gate, commit the
+   merge, and push `HEAD` to the existing PR branch. Do not open another PR.
+
+Any integration push invalidates both commit-bound approvals. The runner
+removes `claude-approved` and `codex-approved` after confirming the remote head
+changed; do not restore either label.
+
 ## hard constraints
-- Touch only files justified by spec + listed in step 1.
+- Touch only files justified by spec + listed in step 1. Integration mode also
+  authorises the merge's unmerged paths, and only for resolving those conflicts.
 - Search result is evidence about location, not licence to widen scope. Turn up file outside step 1 list → same rule: stop, comment on issue.
 - No reformat or style cleanup outside scope. `cargo fmt --check` must pass, but run `cargo fmt` only on files you edited.
 - No TODO comments. Implement it or open follow-up issue.
@@ -159,12 +180,12 @@ arrangement worthless while looking like it worked.
   Stopping without a label is stopping with nothing to route on: the issue sit
   at `ready-to-implement` looking dispatchable, and the next run pick it up and
   hit the same ambiguity.
-- **Pushing to a PR branch that carries `claude-approved` → remove
-  `claude-approved` in the same action.** Applies to every push in every mode:
+- **Pushing to a PR branch that carries either approval → invalidate both
+  `claude-approved` and `codex-approved`.** Applies to every push in every mode:
   the issue flow, codex-finding mode, a one-line fixup, a `cargo fmt` reflow.
-  The label attests to a specific commit (`qa.md`, post-approval rule) and the
-  human merge gate reads it, so a push that leaves it standing hands a reviewer
-  an approval of a tree that no longer exists. Whether the commit "looks
+  Each label attests to a specific commit (`qa.md`, post-approval rule) and the
+  human merge gate reads them, so a push that leaves either standing hands a
+  reviewer an approval of a tree that no longer exists. Whether the commit "looks
   harmless" is not a criterion — the gate cannot distinguish a whitespace
   change from a logic change by trust, only by running.
 - Do not merge. Do not close issue. PR closes it automatically on merge.

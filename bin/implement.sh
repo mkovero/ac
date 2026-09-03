@@ -17,6 +17,12 @@ for arg in "$@"; do
   esac
 done
 
+# Epic children may have been planned before an earlier child merged. Always
+# refresh the base before deciding whether an existing empty branch can be
+# reused; an ff-only merge against a stale origin/main merely preserves the
+# stale base while appearing to synchronize it.
+git fetch -q origin main
+
 # Reuse only the exact empty branch/worktree shape left by a failed preflight.
 # Anything dirty or ahead may contain a cut-off implementation and is refused.
 if git show-ref -q "refs/heads/issue-$n"; then
@@ -36,7 +42,6 @@ if git show-ref -q "refs/heads/issue-$n"; then
   [[ -n $dirty || $ahead != 0 ]] || git -C "$wt" merge -q --ff-only origin/main
 else
   require_space "$wt" || exit 1
-  git fetch -q origin main
   git worktree add -B "issue-$n" "$wt" origin/main >/dev/null
 fi
 

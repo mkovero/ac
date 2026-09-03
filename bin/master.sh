@@ -524,9 +524,9 @@ wait_for_merge() {
       return 0
     fi
     if [[ $mergeable == CONFLICTING || $merge_status == DIRTY ]]; then
-      echo "  #$child PR #$pr has merge conflicts with main — stopping wait."
-      echo "     Resolve the conflicts and push; both QA approvals must then be refreshed."
-      return 3
+      echo "  #$child PR #$pr has merge conflicts with main — integrating"
+      "$BIN/integrate.sh" "$pr" $fg || return 3
+      return 4
     fi
     echo "  #$child awaiting your merge — checking again in ${poll}s"
     sleep "$poll"
@@ -565,9 +565,22 @@ drive_epic() {
         echo "  #$c is ready for your merge."
         echo "  Later children branch from main and would not see #$c's work."
         if [[ -n ${AC_WAIT_MERGE:-} ]]; then
-          wait_rc=0
-          wait_for_merge "$c" "$(pr_for "$c" || true)" || wait_rc=$?
-          (( wait_rc == 0 )) || return 0
+          while true; do
+            wait_rc=0
+            wait_for_merge "$c" "$(pr_for "$c" || true)" || wait_rc=$?
+            if (( wait_rc == 4 )); then
+              echo "  #$c: integration pushed — rerunning both QA gates"
+              STATE=""
+              drive "$c" || { echo "  #$c: post-integration QA aborted"; return 1; }
+              [[ $STATE == awaiting-merge ]] || {
+                echo "  #$c stopped after integration in state: ${STATE:-unknown}"
+                return 0
+              }
+              continue
+            fi
+            (( wait_rc == 0 )) || return 0
+            break
+          done
         else
           echo "  Merge it, then rerun: master.sh $e"
           [[ -n ${KEEP_GOING:-} ]] || return 0
