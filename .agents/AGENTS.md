@@ -100,5 +100,24 @@ acceptance criterion instead of living only in this section.** triage and archit
 An untagged numeric criterion defaults to `assumed` — the default fails
 toward more scrutiny, not less. 
 
+## bounded reading discipline — every role
+
+Reading a file means obtaining enough direct evidence for the decision at
+hand; it does not mean printing every byte of every named file. Start with the
+diff, named symbols, headings, or a search restricted to the already-authorised
+paths, then open the surrounding region. Read a small file in full when that is
+cheaper. Expand into callers, adjacent sections, or the full file only when the
+local context leaves a concrete question unanswered.
+
+Do not batch-dump large files. Tool-output truncation in one batch does not
+invalidate files or regions that were returned successfully, and is not a
+reason to reread them. Continue only from the missing region. A required read
+order governs the first inspection of each source; it does not require an
+exhaustive linear scan before useful work begins.
+
+This rule narrows reading cost, not evidence. A location cited in a durable
+comment must still have been opened, and a scope manifest remains the boundary
+for what may be changed.
+
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

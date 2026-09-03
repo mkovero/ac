@@ -51,6 +51,12 @@ and holds nothing.
 4. The architect design comment, if the issue carries `design-approved`.
 5. The diff, and the tree it applies to.
 
+For steps 3–5, follow the shared bounded-reading rule: inspect changed hunks,
+named symbols, and relevant document headings first. The order establishes
+independence; it does not require dumping whole large files. If a combined tool
+result truncates, continue only with the missing source or region and do not
+reread completed ones.
+
 **Then, and only then:** the `<!-- agent: qa -->` and `<!-- agent: ux -->`
 comments on the PR and the issue.
 

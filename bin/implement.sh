@@ -77,7 +77,15 @@ The architect's design comment names the files this change touches. That list is
 
 $(printf '%s\n' "${files[@]}")
 
-Read those files first, in that order, before anything else. Do not sweep the tree. Do not Glob or Grep to find what to work on — the search has already been done and its result is above. Grep is for locating a symbol inside a file already on this list.
+Read the issue's triage spec and architect decision first, then inspect these
+files in the listed order. For large files, use the issue, architect pointers,
+and searches restricted to that file to open
+the relevant symbols or headings; do not dump the entire file. The order means
+first inspection, not exhaustive linear reading. If batched output truncates,
+continue from the missing region without rereading successful output. Do not
+sweep the tree or use Glob/Grep to rebuild the file list — that search has
+already happened. Grep is for locating a symbol inside a file already on this
+list.
 
 A file you need that is not on the list is a finding about the design, not a gap for you to fill. Stop, comment on the issue with the path and why it is needed, apply needs-design, and end the run. Adding it silently is the exact failure this list exists to prevent." "${run_args[@]}"
 

@@ -107,6 +107,12 @@ file opens, and both are cheap:
 
 Both are leads, not findings. The checklist below runs in full either way.
 
+Open changed hunks and their enclosing symbols first. Do not read an entire
+large file merely because it appears in the diff or manifest; expand outward
+only to answer a concrete caller, invariant, or compatibility question. If a
+batched tool result truncates, continue from the missing region without
+replaying regions already returned.
+
 Check:
 - **correctness** — implementation do what spec says?
 - **numerical correctness** — estimator/measurement code: window sizes, normalization factors, array indices correct?

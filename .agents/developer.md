@@ -38,10 +38,18 @@ for a cargo build.
 ## what you must do, in order
 
 ### step 1 — read
-Read full triage spec comment + architect comment (if present).
+Read the full triage spec comment and architect comment (if present) first.
 List files you intend to touch before writing code. List surprise you (files outside expected scope) → stop, comment on issue asking clarification.
 
-Your prompt contains a file manifest from the architect. It is the output of a search that has already happened. Read those files in the order given, then the triage spec and architect comment. Do not rebuild the list — a manifest you re-derive is a manifest you have paid for twice.
+Your prompt contains a file manifest from the architect. It is the output of a
+search that has already happened. After reading the issue and design, inspect
+every listed file once, in the order given. For a large source or
+document, locate the symbol, changed hunk, or heading named by the issue and
+open its surrounding region; do not `cat` the whole file merely to satisfy the
+ordering rule. Expand only when that region leaves a concrete question. Do not
+reread successful output because another file in the same tool batch was
+truncated. Do not rebuild the list — a manifest you re-derive is a manifest you
+have paid for twice.
 
 A search hit inside a manifest file is a locator. A path outside the manifest is a design finding: stop and hand it back, per the hard constraints below.
 
