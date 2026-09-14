@@ -16,7 +16,7 @@ pub mod jack_backend;
 #[cfg(feature = "cpal-audio")]
 pub mod cpal_backend;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 /// Minimal trait for audio playback + capture, matching Python's JackEngine duck-type contract.
 pub trait AudioEngine: Send + 'static {
@@ -260,7 +260,48 @@ pub trait AudioEngine: Send + 'static {
     fn enable_ring_mode(&mut self, _process_secs: f64, _n_refs: usize, _period: usize) {}
 }
 
-/// Build an audio engine: fake → JACK (if available) → CPAL (non-Linux only) → fake.
+/// Resolve the configured backend requirement without opening or starting an
+/// engine. The returned tuple is `(required, available, selected)`; `selected`
+/// is absent when the requirement cannot be met.
+pub fn backend_status(fake_audio: bool, required: Option<&str>) -> (String, bool, Option<String>) {
+    let required = if fake_audio {
+        "fake"
+    } else {
+        required.unwrap_or(if cfg!(target_os = "linux") {
+            "jack"
+        } else {
+            "cpal"
+        })
+    };
+    let canonical = if required == "sounddevice" {
+        "cpal"
+    } else {
+        required
+    };
+    let available = match canonical {
+        "fake" => true,
+        "jack" => {
+            #[cfg(feature = "jack-audio")]
+            {
+                jack_backend::JackEngine::available()
+            }
+            #[cfg(not(feature = "jack-audio"))]
+            {
+                false
+            }
+        }
+        "cpal" => cfg!(all(feature = "cpal-audio", not(target_os = "linux"))),
+        _ => false,
+    };
+    (
+        canonical.to_string(),
+        available,
+        available.then(|| canonical.to_string()),
+    )
+}
+
+/// Build the explicitly requested audio engine. Real-audio requirements fail
+/// closed: fake audio is selected only by `--fake-audio` or `backend: fake`.
 ///
 /// Linux is JACK-only on purpose: CPAL on Linux means ALSA, which both
 /// competes with JACK for the hardware and inherits the no-op routing
@@ -268,31 +309,62 @@ pub trait AudioEngine: Send + 'static {
 /// that relies on port routing (probe, transfer, test_hardware, test_dut
 /// — see issue #27). If you actually want CPAL on Linux, run with
 /// `--fake-audio` for tests or wire JACK up over ALSA the normal way.
-pub fn make_engine(fake_audio: bool) -> Box<dyn AudioEngine> {
-    if fake_audio {
-        return Box::new(fake::FakeEngine::new());
+pub fn make_engine(fake_audio: bool, required: Option<&str>) -> Result<Box<dyn AudioEngine>> {
+    let (required, available, _) = backend_status(fake_audio, required);
+    if !available {
+        bail!("audio backend unavailable — required {required}; measurement not started");
     }
-
-    #[cfg(feature = "jack-audio")]
-    if jack_backend::JackEngine::available() {
-        return Box::new(jack_backend::JackEngine::new());
+    match required.as_str() {
+        "fake" => Ok(Box::new(fake::FakeEngine::new())),
+        "jack" => {
+            #[cfg(feature = "jack-audio")]
+            {
+                Ok(Box::new(jack_backend::JackEngine::new()))
+            }
+            #[cfg(not(feature = "jack-audio"))]
+            unreachable!("availability check rejects an uncompiled JACK backend")
+        }
+        "cpal" => {
+            #[cfg(all(feature = "cpal-audio", not(target_os = "linux")))]
+            {
+                Ok(Box::new(cpal_backend::CpalEngine::new()))
+            }
+            #[cfg(any(not(feature = "cpal-audio"), target_os = "linux"))]
+            unreachable!("availability check rejects an uncompiled CPAL backend")
+        }
+        _ => bail!("invalid audio backend requirement {required:?}"),
     }
+}
 
-    #[cfg(all(feature = "cpal-audio", not(target_os = "linux")))]
-    {
-        return Box::new(cpal_backend::CpalEngine::new());
-    }
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
 
-    #[allow(unreachable_code)]
-    {
-        #[cfg(target_os = "linux")]
-        eprintln!(
-            "ac-daemon: JACK not running — falling back to fake audio. \
-             Start JACK first (e.g. `jackd -d alsa -d hw:0 -r 48000 -p 1024 -n 2`); \
-             CPAL/ALSA fallback is disabled on Linux on purpose."
+    #[test]
+    fn explicit_fake_is_available_and_constructed() {
+        let (required, available, selected) = backend_status(false, Some("fake"));
+        assert_eq!(required, "fake");
+        assert!(available);
+        assert_eq!(selected.as_deref(), Some("fake"));
+        assert_eq!(
+            make_engine(false, Some("fake")).unwrap().backend_name(),
+            "fake"
         );
-        #[cfg(not(target_os = "linux"))]
-        eprintln!("ac-daemon: no audio backend available, falling back to fake audio");
-        Box::new(fake::FakeEngine::new())
+    }
+
+    #[cfg(any(not(feature = "cpal-audio"), target_os = "linux"))]
+    #[test]
+    fn unavailable_cpal_backend_fails_closed() {
+        let (required, available, selected) = backend_status(false, Some("cpal"));
+        assert_eq!(required, "cpal");
+        assert!(!available);
+        assert_eq!(selected, None);
+
+        let err = match make_engine(false, Some("cpal")) {
+            Ok(_) => panic!("unavailable CPAL backend unexpectedly constructed"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("audio backend unavailable"), "{err}");
+        assert!(err.contains("measurement not started"), "{err}");
     }
 }

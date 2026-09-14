@@ -19,6 +19,7 @@ fn base_report() -> MeasurementReport {
         schema_version: SCHEMA_VERSION,
         ac_version: "0.1.0".into(),
         timestamp_utc: "2026-08-16T00:00:00Z".into(),
+        backend: None,
         method: MeasurementMethod::SweptSine {
             f1_hz: 20.0,
             f2_hz: 20_000.0,

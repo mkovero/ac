@@ -10,7 +10,7 @@ below pointed at nothing. Keep the map and the rows in one file.
 
 | Module | Standard | Clause | Verified against |
 |--------|----------|--------|------------------|
-| `thd.rs` | IEC 60268-3:2018 | §15.12.3 Total harmonic distortion under standard measuring conditions | see document map |
+| `thd.rs` | IEC 60268-3:2018 | §15.12.3.2 Total harmonic distortion under standard measuring conditions | see document map |
 | `filterbank.rs` | IEC 61260-1:2014 | §5.2.1 base-10 G; §5.10 Class 1 relative-attenuation | see document map |
 | `weighting.rs` | IEC 61672-1:2013 | §5.5 Frequency weightings; Annex E eqs. (E.1)–(E.8) | see document map |
 | `noise.rs` | AES17-2020 | §6.4.2 Idle channel noise level | see document map |
@@ -79,16 +79,17 @@ Not standards, but hold authoritative derivations + worked examples. Consult whe
 ### how to use them during review
 
 **AES-17** = primary normative reference for `ac-core/measurement/thd.rs`. Read relevant clause — no paraphrase. Check:
-- THD+N residual computed after fundamental removal, not as ratio to total RMS
+- THD+N residual computed after fundamental removal and divided by total signal level
 - Measurement bandwidth explicitly stated or match standard default
 - Notch filter attenuation at fundamental sufficient before residual capture
-- Results labelled unambiguous as `%` or `dB re fundamental` — never bare numbers
+- Results labelled unambiguously as `%` or `dB re total` — never bare numbers
 
 **AES-17-2020** supersede 2015 for any digital signal path. PR touch digital I/O, sampling, or dithering → use 2020 doc.
 
 **IEC 60268-3** govern frequency response + S/N display in `ac-cli`. Check:
 - Frequency response referenced to 1 kHz level unless otherwise stated (§12)
 - S/N expressed as dB relative to rated output, weighting stated (§14)
+- THD+N follows `d_tot = (U2'/U2) × 100 %`, with notched residual `U2'` and measured total output `U2` (§15.12.3.2)
 - Measurement conditions (source impedance, load impedance) present in output if logged
 
 **IEC 61260-1** apply to any fractional-octave band analysis. Check:
@@ -122,7 +123,7 @@ Every PR touching output formatting, unit display, or measurement computation:
 2. Read relevant clause in actual PDF — no memory, no summary above; summaries are orientation, not authoritative
 3. Answer: does implementation match standard's requirements for both value computation AND display/labelling format?
 4. Cite standard + clause number in review comment, e.g.:
-   `AES-17-2015 §6.3: THD+N must be referenced to fundamental level, not total RMS`
+   `AES-17-2020 §6.3.1: THD+N residual must be referenced to total signal level`
 5. PR output format differ from standard → flag as correctness issue even if math right — display conformance is part of correctness here
 
 No applicable standard covers changed behaviour → write

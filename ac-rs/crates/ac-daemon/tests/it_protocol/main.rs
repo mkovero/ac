@@ -14,6 +14,7 @@ mod common;
 
 mod basics;
 mod calibrate;
+mod corrupt_cal;
 mod level_clamp;
 mod modes;
 mod monitor;
