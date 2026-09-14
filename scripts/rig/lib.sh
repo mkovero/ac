@@ -93,6 +93,34 @@ push_helpers() {
     rig_scp "$RIG_SCRIPTS"/lib/*.py "$RIG_USER@$RIG_HOST:$RIG_STAGE_BASE/lib/" >/dev/null
 }
 
+# rig_port_order — silent: record 1 s of every system capture port and check
+# the analog block sits at RIG_ANALOG_CAPTURE_FIRST (see lib/port_order.py).
+# Prints the finding; returns non-zero when the order does not match.
+rig_port_order() {
+    push_helpers
+    # shellcheck disable=SC2016  # expanded on the rig
+    rig_bash "FIRST=$(printf %q "$RIG_ANALOG_CAPTURE_FIRST") NA=$(printf %q "$RIG_ANALOG_CAPTURES") \
+LIB=$(printf %q "$RIG_STAGE_BASE/lib")" '
+n=$(jack_lsp | grep -c "^system:capture_")
+f=$(mktemp --suffix=.wav)
+ports=""; for i in $(seq 1 "$n"); do ports="$ports system:capture_$i"; done
+jack_rec -f "$f" -d 1 -b 24 $ports >/dev/null 2>&1
+python3 "$LIB/port_order.py" "$f" "$FIRST" "$NA"
+s=$?
+rm -f "$f"
+exit $s'
+}
+
+# require_port_order — die unless the analog block is where the profile says.
+require_port_order() {
+    local out
+    if ! out="$(rig_port_order)"; then
+        echo "$out" >&2
+        die "$RIG_NAME's JACK port order does not match its profile — the ports this script would drive are not the ones the profile names. Nothing was emitted."
+    fi
+    echo "- $out" | tail -1
+}
+
 # require_level <dbfs> [ceiling] — refuse anything above the given ceiling
 # (default: the rig's standing ceiling).
 require_level() {

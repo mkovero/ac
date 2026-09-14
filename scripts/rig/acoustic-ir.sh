@@ -36,6 +36,7 @@ while (($#)); do
 done
 require_consent "$consent"
 require_level "$level" "$(speaker_ceiling)"
+require_port_order
 rev="$(resolve_rev "$rev")"
 dest="$(rig_dest "$rev")"
 run="$(rig_run_dir acoustic-ir)"

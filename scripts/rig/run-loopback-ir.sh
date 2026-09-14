@@ -43,6 +43,7 @@ case $route in
         ;;
     *) die "--route must be ref or speaker" ;;
 esac
+require_port_order
 rev="$(resolve_rev "$rev")"
 dest="$(rig_dest "$rev")"
 run="$(rig_run_dir "loopback-ir-$route")"

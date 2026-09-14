@@ -35,6 +35,7 @@ for o in $outputs; do
     [[ $o == "$RIG_SPEAKER_OUT_INDEX" ]] && ceiling="$(speaker_ceiling)"
 done
 require_level "$level" "$ceiling"
+require_port_order
 [[ $seconds =~ ^[0-9]+$ && $seconds -ge 3 && $seconds -le 10 ]] || die "--seconds must be an integer 3..10"
 
 dest=""

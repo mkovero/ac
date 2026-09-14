@@ -3,7 +3,8 @@
 #
 #   scripts/rig/preflight.sh <rig> [rev|none]
 #
-# Checks JACK (service, rate, period, required flags), the interface's ALSA
+# Checks JACK (service, rate, period, required flags), where the analog
+# capture block sits (the FF400's port order moves), the interface's ALSA
 # baseline, the ac config (ceiling, channel map), what is running, installed
 # binary hashes, and — given a rev — the staged build's hashes on the rig.
 # Exit 1 if any FAIL line. Emits no audio; wiring is NOT checked here
@@ -14,6 +15,7 @@
 source "$(dirname "$0")/lib.sh"
 
 load_rig "${1:-}"
+push_helpers
 rev_arg=${2:-latest}
 dest=""
 if [[ $rev_arg != none ]]; then
@@ -41,6 +43,13 @@ cmd="$(pgrep -ax jackd | head -1 | cut -d' ' -f2-)"
 for f in $FLAGS; do
     [[ " $cmd " == *" $f "* ]] && row PASS "jackd flag $f" present || row FAIL "jackd flag $f" "missing — cmdline: $cmd"
 done
+
+pf="$(mktemp --suffix=.wav)"
+ports=""; for i in $(seq 1 "$(jack_lsp | grep -c '^system:capture_')"); do ports="$ports system:capture_$i"; done
+jack_rec -f "$pf" -d 1 -b 24 $ports >/dev/null 2>&1
+po="$(python3 "$LIB/port_order.py" "$pf" "$FIRST" "$NA")"
+[[ $? == 0 ]] && row PASS "JACK port order" "$(echo "$po" | head -1)" || row FAIL "JACK port order" "$(echo "$po" | tr '\n' ' ')"
+rm -f "$pf"
 
 for kv in $ALSA; do
     id=${kv%%=*}; want=${kv#*=}
@@ -97,4 +106,5 @@ rig_bash "RATE=$(printf %q "$RIG_JACK_RATE") PERIOD=$(printf %q "$RIG_JACK_PERIO
 FLAGS=$(printf %q "$RIG_JACK_REQUIRED_FLAGS") CARD=$(printf %q "$RIG_ALSA_CARD") \
 CEIL=$(printf %q "$RIG_DRIVE_CEILING_DBFS") ALSA=$(printf %q "${RIG_ALSA_EXPECT[*]}") \
 CFG=$(printf %q "${RIG_AC_CONFIG_EXPECT[*]}") DEST=$(printf %q "$dest") \
-RIGNAME=$(printf %q "$RIG_NAME")" "$remote"
+RIGNAME=$(printf %q "$RIG_NAME") FIRST=$(printf %q "$RIG_ANALOG_CAPTURE_FIRST") \
+NA=$(printf %q "$RIG_ANALOG_CAPTURES") LIB=$(printf %q "$RIG_STAGE_BASE/lib")" "$remote"

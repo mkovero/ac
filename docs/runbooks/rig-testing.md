@@ -77,8 +77,10 @@ Scripts that spawn a daemon print its `/proc/<pid>/exe`.
 scripts/rig/preflight.sh pupu [rev|latest|none]
 ```
 
-JACK service, rate, period and required flags; the interface's ALSA
-baseline; the ac config's ceiling and channel map; running daemons; installed
+JACK service, rate, period and required flags; where the analog capture
+block sits (silently — the FF400's port order moves between orders, and the
+emitting scripts refuse to run when it is not where the profile says); the
+interface's ALSA baseline; the ac config's ceiling and channel map; running daemons; installed
 hashes; the staged build's hashes and daemon link; jackd xruns in the last
 10 minutes. Exit 1 on any FAIL — fix it, or record why the session proceeds.
 It does **not** check wiring; that needs emission (step 6).
@@ -245,5 +247,8 @@ left behind", with the mic position and anything deliberately left changed.
 - **An auto-spawned daemon's stderr goes to `/dev/null`**, so an analysis
   error can show as an empty result table.
 - **JACK aliases are not evidence of physical ports** — probe by emission.
+- **The FF400's JACK port order moves** (ADAT block first or last). A profile
+  that was right yesterday can point every port name at ADAT today; the
+  scripts check, a manual command does not.
 - **A window edge imitates a latency**: an arrival outside the analysis
   window returns a stable, repeatable, wrong number.

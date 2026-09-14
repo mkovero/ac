@@ -22,6 +22,9 @@ Last verified: 2026-09-14.
 | IN1 (mic pre, phantom **on**) | `system:capture_1` | input 0 | measurement mic |
 | IN2 (mic pre, phantom **off**) | `system:capture_2` | input 1 | loopback from AN2 |
 
+JACK port names and `ac` indices here assume the analog-first order — see
+"JACK port order"; it moves.
+
 - Mic static at **1 m** on the speaker axis; tape marks on the floor at
   **2 m** and **3 m** for manual moves. Put it back at 1 m after a move and
   state the position in the run record.
@@ -70,12 +73,24 @@ Last verified: 2026-09-14.
 
 ### JACK port order
 
-`snd_fireface` exposes **analog first**: `capture_1..8` / `playback_1..8` =
-AN1..AN8, then S/PDIF and ADAT (`capture_9..18` read exact digital zero).
-Measured with a silent 18-channel `jack_rec` and the FF400
-`meter:analog-output` / `meter:stream-input` controls during a tone. JACK
-aliases are not evidence — the old `FF400:capture_ADAT1` aliases were
-written by the helper script itself.
+**Not stable.** `snd_fireface` sometimes puts the ADAT/S/PDIF block before
+the analog block and sometimes after it; the operator treats this as expected
+for now (issue #444). The table above and `scripts/rig/hosts/pupu.env` assume
+**analog first** — `capture_1..8` / `playback_1..8` = AN1..AN8 — which is what
+2026-09-14 measured (silent 18-channel `jack_rec` at 48 kHz, and the FF400
+`meter:analog-output` / `meter:stream-input` controls during a tone). The
+port count depends on the rate — 18 capture ports at 48 kHz, 14 at 96 kHz —
+so a moved block does not land at a fixed offset.
+
+Silent check: with nothing on ADAT/S/PDIF, those captures read **exact
+digital zero** and analog inputs never do, so the live channels show where
+the analog block sits. `preflight.sh` reports it and every emitting script
+refuses to run when the block is not at `capture_1..8`; the playback order has
+matched the capture order whenever both were checked, which is an
+observation, not a guarantee. If the block has moved, do not quietly edit the
+profile to chase it — record it and settle the ports with the operator. JACK
+aliases are not evidence — the old `FF400:capture_ADAT1` aliases were written
+by the helper script itself.
 
 ## `ac` configuration
 
