@@ -23,9 +23,25 @@ use super::rings::CaptureRings;
 use super::AudioEngine;
 use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 
-/// 16 s at 192 kHz — comfortably larger than any single capture request.
-/// Fixed at construction so neither thread ever reallocates.
-const RING_CAPACITY: usize = 16 * 192_000;
+/// 120 s at 192 kHz — sized to the `plot_ir` protocol budget
+/// (`handlers::MAX_STIMULUS_DURATION_S` = 60 s applies independently to
+/// both `duration` and `tail_s`, so `play_and_capture_cancellable` can be
+/// asked for up to 120 s combined) at the project's highest supported
+/// sample rate. Fixed at construction so neither thread ever reallocates.
+///
+/// Before #437's rig verification this was `16 * 192_000` — "comfortably
+/// larger than any single capture request" was true only because nothing
+/// yet validated a request up to the 60 s budget; a rig run at 96 kHz
+/// (`rig-2026-09-14-pr437-plot-budget`, finding 1) showed a within-budget
+/// `plot_ir` request play its full stimulus and then time out with no IR,
+/// because 60 s alone already exceeded the old ring's 32 s capacity at that
+/// rate. Sizing the ring to the full documented ceiling at 192 kHz (the
+/// worst case — capacity in *time* shrinks as sample rate rises) makes
+/// every combination the protocol accepts also completable by every
+/// backend, at every rate the project supports. See
+/// `ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_supported_rate`
+/// below.
+const RING_CAPACITY: usize = 120 * 192_000;
 
 /// 4 s at 192 kHz — ref inputs are only used by (multi-pair) transfer_stream
 /// whose `capture_duration(4, sr)` ≈ 2.5 s, so this leaves a comfortable
@@ -633,6 +649,36 @@ mod tests {
     // through `CaptureRings`), but these tests still inspect raw consumers.
     use ringbuf::traits::Observer;
     use ringbuf::HeapRb;
+
+    // ---- capture ring vs. protocol budget (#437 rig finding 1) ----
+
+    #[test]
+    fn ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_supported_rate() {
+        // Mirrors `handlers::MAX_STIMULUS_DURATION_S` (60.0) rather than
+        // importing it: that constant lives in the (non-feature-gated)
+        // handlers layer, while this ring is a `jack-audio`-only backend
+        // fact. Duplicating keeps this test able to catch a future change
+        // to either number without coupling audio's layering to handlers'.
+        const MAX_STIMULUS_DURATION_S: f64 = 60.0;
+        // Both `duration` and `tail_s` are validated against the same
+        // per-field ceiling independently (`plot.rs::bounded_duration`), so
+        // a request can combine up to twice that before
+        // `play_and_capture_cancellable` sees it.
+        let max_combined_s = MAX_STIMULUS_DURATION_S * 2.0;
+        // Time capacity shrinks as sample rate rises, so the highest rate
+        // is the tightest case — but check every rate the project claims
+        // to support (see e.g. `mtw::ladder`'s test matrix) rather than
+        // trusting that 192 kHz alone bounds the others.
+        for sr in [44_100.0_f64, 48_000.0, 96_000.0, 192_000.0] {
+            let n_total = (max_combined_s * sr) as usize;
+            assert!(
+                n_total <= RING_CAPACITY,
+                "sr={sr}: {max_combined_s}s combined duration+tail_s needs \
+                 {n_total} samples, ring only holds {RING_CAPACITY} — \
+                 plot_ir would accept a request it cannot complete"
+            );
+        }
+    }
 
     // ---- fill_one_shot ----
 
