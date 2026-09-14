@@ -57,3 +57,35 @@ pub(super) fn period_size_override() -> Option<u32> {
             .and_then(|s| s.parse().ok())
     })
 }
+
+/// Opt-in, fake-only test hook (#369): lets a test drive one or both of
+/// `measure_tau_twice`'s two lifecycles across a nonzero xrun count.
+/// Without this, `FakeEngine::xruns()` never leaves the 0 it is
+/// constructed with, so `tau_result`'s `refused_xrun` path — reachable
+/// only when a lifecycle's own `xruns()` delta is nonzero — has no way to
+/// go red under `--fake-audio`.
+///
+/// `AC_FAKE_XRUNS_OVERRIDE`: comma-separated delta list, one value
+/// consumed per `play_and_capture` call in this process (0-based — same
+/// call indexing as [`TAU_DELAY_CALL_COUNT`] above, so slot *N* of this
+/// list and slot *N* of the delay override line up with the same
+/// `measure_tau_twice` lifecycle). A call past the end of the list adds 0.
+/// Unset ⇒ every call adds 0, byte-identical to today's hardcoded-0 count.
+static XRUNS_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn xruns_override_list() -> &'static [u32] {
+    static LIST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("AC_FAKE_XRUNS_OVERRIDE")
+            .ok()
+            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Next `play_and_capture` xrun delta, consuming one slot of the override
+/// list (see [`XRUNS_CALL_COUNT`] doc above).
+pub(super) fn next_xruns_delta() -> u32 {
+    let call_idx = XRUNS_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    xruns_override_list().get(call_idx).copied().unwrap_or(0)
+}

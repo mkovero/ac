@@ -38,7 +38,7 @@ mod stimulus;
 use anyhow::Result;
 use std::time::Duration;
 
-use self::hooks::{next_loopback_delay_samples, period_size_override};
+use self::hooks::{next_loopback_delay_samples, next_xruns_delta, period_size_override};
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
 use super::AudioEngine;
@@ -247,6 +247,7 @@ impl AudioEngine for FakeEngine {
     /// peaks at the expected offset.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         let delay_samples = next_loopback_delay_samples();
+        self.xruns += next_xruns_delta();
         let tail = (tail_s * self.sample_rate as f64).round() as usize;
         let total = samples.len() + tail;
         let mut out = vec![0.0f32; total];
