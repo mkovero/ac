@@ -60,7 +60,11 @@ if ! cargo test --release -p ac-daemon --test it_loopback_ir --no-run \
 fi
 
 compiled=no
-grep -qE '^\s*Compiling ac-daemon ' "$stage/build.log" "$stage/test-build.log" && compiled=yes
+# Any workspace crate (all package names start "ac-": ac-cli, ac-core,
+# ac-daemon, ac-scene, ac-view), not just ac-daemon — a rebuild that only
+# touches ac-cli or an ac-core change that never reaches the daemon's inputs
+# is still a real rebuild, and compiled_this_run must not read "no" for it.
+grep -qE '^\s*Compiling ac-[a-z]+ ' "$stage/build.log" "$stage/test-build.log" && compiled=yes
 
 itbin="$(python3 - "$stage/test-build.jsonl" <<'EOF'
 import json, sys
@@ -107,5 +111,5 @@ note "staged $stage"
 cat "$stage/MANIFEST.txt"
 cat "$stage/SHA256SUMS"
 if [[ $compiled == no ]]; then
-    note "no 'Compiling ac-daemon' line: this target dir already held $rev's build. Fine for a rerun of the same commit; if RIG_TARGET_DIR is shared across refs, distrust these hashes."
+    note "no 'Compiling ac-*' line: this target dir already held $rev's build. Fine for a rerun of the same commit; if RIG_TARGET_DIR is shared across refs, distrust these hashes."
 fi
