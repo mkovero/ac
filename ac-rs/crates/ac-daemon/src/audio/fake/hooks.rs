@@ -64,9 +64,14 @@ pub(super) fn period_size_override() -> Option<u32> {
 /// clean, noiseless delayed copy of the played signal (the loopback shape
 /// every other τ test relies on).
 ///
-/// `AC_FAKE_TAU_GAIN_OVERRIDE`: scales the played-signal copy that would
-/// otherwise land unattenuated at `delay_samples`. `1.0` (unset) keeps the
-/// existing unity loopback; `0.0` simulates a fully muted route.
+/// `AC_FAKE_TAU_GAIN_OVERRIDE`: models the loopback cable's own gain, so it
+/// scales both `play_and_capture`'s played-signal copy (the τ ESS) and
+/// `capture_block`'s tone synthesis (`calibrate` step 2's captured level,
+/// via `capture_rms`) — the same cable, read by two different captures.
+/// `1.0` (unset) keeps the existing unity loopback on both paths; `0.0`
+/// simulates a fully muted route. Before PR #384's codex-qa finding this
+/// scaled only `play_and_capture`, so an off-unity gain never reached step
+/// 2's `captured_dbfs`/`loopback` fields.
 /// `AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE`: peak amplitude of broadband
 /// dither added to every sample of `play_and_capture`'s output. `0.0`
 /// (unset) is byte-identical to pre-#368 behaviour — with the gain also at

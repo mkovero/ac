@@ -124,17 +124,28 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
     );
 }
 
-/// #368 AC8 (QA request-changes on PR #384): closes the gap the muted-route
-/// test alone leaves. `calibrate_measures_tau_against_fake_loopback_delay`
-/// above passes at the fake backend's default unity gain — exactly the one
-/// case the old `is_loopback` ±2 dB gate already handled correctly, so it
-/// cannot tell "measured because SNR is genuinely adequate" apart from
-/// "measured because the gate was deleted" for any off-unity level. This
-/// drives the +3.01 dB hot loopback from the issue's own rig case (drive
-/// -30 dBFS, captured -30.0 dBFS) through `AC_FAKE_TAU_GAIN_OVERRIDE` and
-/// asserts `measured` — a regression that reintroduced any captured-level
-/// check keyed near unity would fail this without touching the muted-route
-/// test.
+/// #368 AC8 (QA request-changes on PR #384; codex-qa finding on the first
+/// attempt at this test — see below). `calibrate_measures_tau_against_
+/// fake_loopback_delay` above passes at the fake backend's default unity
+/// gain — exactly the one case the old `is_loopback` ±2 dB gate already
+/// handled correctly, so it cannot tell "measured because SNR is genuinely
+/// adequate" apart from "measured because the gate was deleted" for any
+/// off-unity level. This drives the +3.01 dB hot loopback from the issue's
+/// own rig case (drive -30 dBFS, captured -30.0 dBFS) through
+/// `AC_FAKE_TAU_GAIN_OVERRIDE` and asserts `measured` — a regression that
+/// reintroduced any captured-level check keyed near unity would fail this
+/// without touching the muted-route test.
+///
+/// codex-qa on PR #384 caught that the first version of this test asserted
+/// only the final `tau_state`, never the off-unity level it claimed to
+/// drive: `AC_FAKE_TAU_GAIN_OVERRIDE` at the time scaled only
+/// `play_and_capture` (the τ ESS), not the step-2 tone capture
+/// `capture_rms` reads — so step 2 still saw the unity-loopback level and
+/// `measured` proved nothing about the off-unity path. Fixed at the
+/// source (`audio/fake/mod.rs::capture_block` now applies the same
+/// override) and pinned here: step 2's own `captured_dbfs`/`loopback`
+/// fields are asserted before the final `tau_state` check, so a regression
+/// in either the fake model or a reintroduced level gate fails this test.
 #[test]
 fn calibrate_measures_tau_on_hot_off_unity_fake_loopback() {
     let d = Daemon::spawn_with_env(&[
@@ -146,10 +157,26 @@ fn calibrate_measures_tau_on_hot_off_unity_fake_loopback() {
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
-    for step in 1..=2 {
-        expect_prompt(&c, step);
-        reply_vrms(&c, None);
-    }
+    expect_prompt(&c, 1);
+    reply_vrms(&c, None);
+    let step2 = expect_prompt(&c, 2);
+    // Unity loopback at ref_dbfs -30.0 would capture at -33.01 dBFS
+    // (the sine peak/RMS factor); the +3.01 dB override must land step 2
+    // at -30.0, matching the issue's own hot-loopback rig case, and take
+    // it outside the old ±2 dB `is_loopback` window.
+    let captured_dbfs = step2["captured_dbfs"]
+        .as_f64()
+        .expect("captured_dbfs present on step 2");
+    assert!(
+        (captured_dbfs - (-30.0)).abs() < 0.1,
+        "step 2 must see the +3.01 dB hot level (#368 AC1), not unity loopback: {step2}"
+    );
+    assert_eq!(
+        step2["loopback"],
+        json!(false),
+        "3.01 dB off unity must fall outside the ±2 dB is_loopback window: {step2}"
+    );
+    reply_vrms(&c, None);
     let done = expect_cal_done(&c);
 
     assert_eq!(

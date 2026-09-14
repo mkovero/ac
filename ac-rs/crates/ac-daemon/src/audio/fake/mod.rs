@@ -221,6 +221,14 @@ impl AudioEngine for FakeEngine {
         self.gen.set_correlated_pair(gain, delay_samples);
     }
 
+    /// #368 codex-qa finding on PR #384: `AC_FAKE_TAU_GAIN_OVERRIDE` models
+    /// the loopback cable's own gain, and `calibrate`'s step-2 captured
+    /// level (read through this path via `capture_rms`) is that same cable
+    /// — so the override has to reach it, not just `play_and_capture`'s τ
+    /// ESS. Before this it was applied only there, so a test driving an
+    /// off-unity gain through this hook could never actually see step 2
+    /// report the off-unity `captured_dbfs`/`loopback` it claimed to
+    /// exercise. Unset (`1.0`) multiplies by 1.0, i.e. unchanged.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         let n = self.samples_in(duration);
         if let Some(out) = self.ring_capture(n, duration, RingDrain::Block) {
@@ -228,7 +236,12 @@ impl AudioEngine for FakeEngine {
         }
         std::thread::sleep(Duration::from_secs_f64(duration));
         let port = self.input_port.clone();
-        Ok(self.synth().block(port.as_deref(), duration, 0))
+        let gain = tau_gain_override();
+        let mut block = self.synth().block(port.as_deref(), duration, 0);
+        for v in block.iter_mut() {
+            *v *= gain;
+        }
+        Ok(block)
     }
 
     /// Non-clearing drain. In ring mode this is the *contiguous* control arm:
