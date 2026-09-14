@@ -23,13 +23,52 @@ set -e
 CARD=0
 
 # ── ALSA control width helpers ───────────────────────────────────────────────
-# The FF400's array controls (output-volume, stream-source-gain) carry a
-# values= list whose length follows the driver's live port count, which is
-# not fixed: 18 at 48 kHz, 14 at 96 kHz on this card (issue #444). Read the
-# width from the control itself instead of assuming a literal count.
+# The FF400's array controls (output-volume, analog-source-gain,
+# adat-source-gain, stream-source-gain) each carry a values= list whose
+# length is fixed by the userspace snd-firewire-ctl-services model
+# (runtime/fireface/src/former_ctls.rs, protocols/fireface/src/former/ff400.rs
+# upstream) — it does NOT follow sample rate or the JACK port count from
+# issue #444 (that's a separate, kernel-side quantity: pcm_capture_channels
+# in sound/firewire/fireface/ff.c). Read the width from the control itself
+# rather than trusting a literal, since the ctl-service version actually
+# installed has not been checked against upstream.
 _ctl_width() {
     amixer -c "$CARD" cget numid="$1" 2>/dev/null \
         | grep ': values=' | sed 's/.*values=//' | awk -F, '{print NF}'
+}
+
+# Read and validate every array control's width before any mixer write
+# (issue #444). A missing or non-numeric width, or — for stream-source-gain
+# — a width too narrow for the row's own index, means the numid layout this
+# script assumes does not match the running ctl-service: exit non-zero,
+# name the numid, and write nothing.
+declare -A CTL_WIDTH
+check_ctl_width() {
+    local numid="$1" name="$2" width
+    width=$(_ctl_width "$numid")
+    if [[ -z "$width" || ! "$width" =~ ^[0-9]+$ || "$width" -eq 0 ]]; then
+        echo "  mixer widths:        could not read value count for numid=$numid ($name); nothing written" >&2
+        exit 1
+    fi
+    CTL_WIDTH[$numid]="$width"
+}
+check_all_ctl_widths() {
+    local numid i
+    check_ctl_width 8 "output-volume"
+    for numid in $(seq 9 26); do
+        check_ctl_width "$numid" "analog-source-gain"
+    done
+    for numid in $(seq 45 62); do
+        check_ctl_width "$numid" "adat-source-gain"
+    done
+    for i in $(seq 0 17); do
+        numid=$((63 + i))
+        check_ctl_width "$numid" "stream-source-gain"
+        if [[ "${CTL_WIDTH[$numid]}" -le "$i" ]]; then
+            echo "  mixer widths:        numid=$numid (stream-source-gain) reports width ${CTL_WIDTH[$numid]}, too narrow for index $i; nothing written" >&2
+            exit 1
+        fi
+    done
 }
 
 # ── JACK alias cleanup ───────────────────────────────────────────────────────
@@ -122,8 +161,11 @@ case "${MODE,,}" in
                    | grep ': values' \
                    | sed 's/.*values=//' \
                    | python3 -c "import sys; v=sys.stdin.read().strip().split(','); print(v[$idx])" 2>/dev/null)
-            [[ -n "$diag" ]] || continue
-            printf "    ch%02d %s\n" $idx "$diag"
+            if [[ -n "$diag" ]]; then
+                printf "    ch%02d %s\n" $idx "$diag"
+            else
+                printf "    ch%02d %s\n" $idx "(could not be read)"
+            fi
         done
         exit 0
         ;;
@@ -142,6 +184,9 @@ echo "=== Fireface 400 init  (card $CARD, level mode: $LEVEL_NAME) ==="
 # Runs first: with set -e, a failing mixer write below must not leave a wrong
 # alias in place (issue #444).
 clear_ff400_aliases
+
+# ── Validate every array control's width before any mixer write ─────────────
+check_all_ctl_widths
 
 # ── Ensure snd-fireface-ctl service is running (bridges ALSA → FireWire hw) ──
 #systemctl --user restart snd-fireface-ctl.service
@@ -170,27 +215,23 @@ amixer -c $CARD cset numid=92 off,off >/dev/null  # line-3/4-pad   → off
 echo "  line-3/4 inst/pad:  off"
 
 # ── Output volume (numid 8, unity = 32768 = 0 dB) ────────────────────────────
-vol_width=$(_ctl_width 8)
-vol_vals=$(python3 -c "print(','.join(['32768'] * $vol_width))")
+vol_vals=$(python3 -c "print(','.join(['32768'] * ${CTL_WIDTH[8]}))")
 amixer -c $CARD cset numid=8 "$vol_vals" >/dev/null
-echo "  output-volume:      unity (32768) × $vol_width"
+echo "  output-volume:      unity (32768) × ${CTL_WIDTH[8]}"
 
 # ── PCM stream → hardware output routing (identity, 32768 = 0 dB) ────────────
-# numid 63..80 = mixer:stream-source-gain index 0..17
-# Each row's value-list width follows the control's live width, not a
-# literal count (issue #444); index i is only set when it falls inside that
-# width.
+# numid 63..80 = mixer:stream-source-gain index 0..17. Width is fixed by the
+# ctl-service model (see _ctl_width above), validated for every index by
+# check_all_ctl_widths before this loop runs, so index i is always in range.
 echo "  stream routing:     identity @ 0 dB (32768)"
 for i in $(seq 0 17); do
     numid=$((63 + i))
-    width=$(_ctl_width "$numid")
-    [[ -n "$width" && "$width" -gt 0 ]] || continue
+    width="${CTL_WIDTH[$numid]}"
     vals=$(python3 -c "
 n=$width
 i=$i
 v=[0]*n
-if i < n:
-    v[i]=32768
+v[i]=32768
 print(','.join(map(str,v)))
 ")
     amixer -c $CARD cset numid=$numid "$vals" >/dev/null
@@ -200,9 +241,12 @@ done
 # (analog-source-gain and adat-source-gain all 0 — no hardware loopback)
 # numid 9..26  = mixer:analog-source-gain index 0..17
 # numid 45..62 = mixer:adat-source-gain   index 0..17
+# Each row's width is fixed by the ctl-service model (8, not 18 — see
+# _ctl_width above) and validated by check_all_ctl_widths before this loop.
 echo "  analog/adat loopback: muted"
 for numid in $(seq 9 26) $(seq 45 62); do
-    amixer -c $CARD cset numid=$numid "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0" >/dev/null
+    zeros=$(python3 -c "print(','.join(['0'] * ${CTL_WIDTH[$numid]}))")
+    amixer -c $CARD cset numid=$numid "$zeros" >/dev/null
 done
 
 echo ""

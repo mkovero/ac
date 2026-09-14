@@ -19,9 +19,19 @@ fail() { echo "FAIL: $1"; FAILED=1; }
 # STUBDIR/jack_lsp, /jack_alias mutate JACK_STATE, a directory with one file
 # per port holding that port's current aliases (one per line, in the order
 # they were set — file line 1 stands in for jackd's own alsa_pcm alias).
-# amixer answers `cget numid=8` and `cget numid=63..80` with a values= list
-# AMIXER_WIDTH long, everything else with a single value; `cset` always
-# succeeds. All three log every invocation.
+#
+# amixer's `cget numid=N` answers with a values= list whose width is fixed
+# per control family, matching the upstream ctl-service model (architect,
+# issue #444 re-entry): numid=8 → WIDTH_8 (default 18), numid 9..26 →
+# WIDTH_ANALOG (default 8), numid 45..62 → WIDTH_ADAT (default 8), numid
+# 63..80 → WIDTH_STREAM (default 18). These widths do NOT follow JACK port
+# count — reset_state's port count and the mixer widths are independent
+# knobs, on purpose (case (e)). FAIL_NUMID, if set, makes that one numid's
+# cget answer with no `values=` line at all, simulating an unreadable
+# control. `cset` always succeeds (real amixer never rejects a count
+# mismatch — see architect's evidence — so this stub doesn't simulate one;
+# case (h) checks the *sent* width against the reported one instead). All
+# three log every invocation.
 
 write_stubs() {
     local bindir="$1"
@@ -33,13 +43,22 @@ echo "$*" >> "${AMIXER_LOG:?}"
 case "$*" in
     *"cget numid="*)
         numid=$(echo "$*" | grep -oE 'numid=[0-9]+' | grep -oE '[0-9]+')
-        if [[ "$numid" == 8 || ( "$numid" -ge 63 && "$numid" -le 80 ) ]]; then
-            n="${AMIXER_WIDTH:-18}"
-            vals=$(python3 -c "print(','.join(['0']*int(\"$n\")))")
-            echo ": values=$vals"
-        else
-            echo ": values=0"
+        if [[ -n "${FAIL_NUMID:-}" && "$numid" == "$FAIL_NUMID" ]]; then
+            exit 0   # no values= line at all: simulates an unreadable control
         fi
+        if [[ "$numid" == 8 ]]; then
+            n="${WIDTH_8:-18}"
+        elif [[ "$numid" -ge 9 && "$numid" -le 26 ]]; then
+            n="${WIDTH_ANALOG:-8}"
+        elif [[ "$numid" -ge 45 && "$numid" -le 62 ]]; then
+            n="${WIDTH_ADAT:-8}"
+        elif [[ "$numid" -ge 63 && "$numid" -le 80 ]]; then
+            n="${WIDTH_STREAM:-18}"
+        else
+            n=1
+        fi
+        vals=$(python3 -c "print(','.join(['0']*int(\"$n\")))")
+        echo ": values=$vals"
         exit 0
         ;;
     *"cset"*)
@@ -103,12 +122,13 @@ export AMIXER_LOG="$WORK/amixer.log"
 export ALIAS_LOG="$WORK/alias.log"
 
 reset_state() {
-    # $1 = capture/playback port count for this run
+    # $1 = capture/playback port count for this run. Mixer control widths
+    # are a separate knob (WIDTH_8/WIDTH_ANALOG/WIDTH_ADAT/WIDTH_STREAM,
+    # FAIL_NUMID) — reset_state does not touch them, on purpose (case (e)).
     rm -rf "$STATE"; mkdir -p "$STATE"
     rm -f "$JACK_DOWN"
     : > "$AMIXER_LOG"; : > "$ALIAS_LOG"
     unset FORCE_UNALIAS_FAIL
-    export AMIXER_WIDTH="$1"
     for i in $(seq 1 "$1"); do
         echo "alsa_pcm:hw:Card:out$i" > "$STATE/system:capture_$i"
         echo "alsa_pcm:hw:Card:in$i"  > "$STATE/system:playback_$i"
@@ -130,16 +150,58 @@ grep -qxF "alsa_pcm:hw:Card:out1" "$STATE/system:capture_1" \
 grep -vE '^-u ' "$ALIAS_LOG" | grep -q . && fail "(c) jack_alias called without -u: $(cat "$ALIAS_LOG")"
 grep -q 'cset numid=90' "$AMIXER_LOG" && fail "(d) phantom power (numid=90) was written"
 
-# ── (e): same checks at 14 capture ports (96 kHz) and 18 (48 kHz) ─────────
+# ── (e): mixer writes are unchanged across 14 and 18 JACK ports ───────────
+# Control width must not follow JACK port count (architect, re-entry): with
+# the mixer widths held fixed, the alias result and every cset the script
+# issues must be identical whether JACK exposes 14 or 18 ports.
+prev_csets=""
 for n in 14 18; do
     reset_state "$n"
     plant_ff400_alias
     out="$(bash "$FF400" 2>&1)"; rc=$?
-    [[ $rc -eq 0 ]] || fail "(e) script exited $rc with $n ports: $out"
-    grep -qF "FF400:" "$STATE/system:capture_1" && fail "(e) FF400: alias survived with $n ports"
-    volwidth=$(grep -oE '^-c 0 cset numid=8 [0-9,]+' "$AMIXER_LOG" | tail -1 | awk '{print $NF}' | awk -F, '{print NF}')
-    [[ "$volwidth" == "$n" ]] || fail "(e) output-volume width was $volwidth, want $n ports"
+    [[ $rc -eq 0 ]] || fail "(e) script exited $rc with $n JACK ports: $out"
+    grep -qF "FF400:" "$STATE/system:capture_1" && fail "(e) FF400: alias survived with $n JACK ports"
+    csets="$(grep 'cset numid=' "$AMIXER_LOG")"
+    if [[ -n "$prev_csets" ]]; then
+        [[ "$csets" == "$prev_csets" ]] \
+            || fail "(e) mixer writes changed between 14 and 18 JACK ports (control width must not follow port count)"
+    fi
+    prev_csets="$csets"
 done
+
+# ── (h): every cset's value count matches the width amixer reported ───────
+# Must go red against an unrevised ff400.sh that still sends 18 values to
+# an 8-wide analog-source-gain/adat-source-gain control (correctness issue
+# 1, PR #450 qa review).
+expected_width() {
+    local numid="$1"
+    if [[ "$numid" == 8 ]]; then echo "${WIDTH_8:-18}"
+    elif [[ "$numid" -ge 9 && "$numid" -le 26 ]]; then echo "${WIDTH_ANALOG:-8}"
+    elif [[ "$numid" -ge 45 && "$numid" -le 62 ]]; then echo "${WIDTH_ADAT:-8}"
+    elif [[ "$numid" -ge 63 && "$numid" -le 80 ]]; then echo "${WIDTH_STREAM:-18}"
+    fi
+}
+reset_state 18
+plant_ff400_alias
+out="$(bash "$FF400" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "(h) script exited $rc with default control widths: $out"
+while IFS= read -r line; do
+    numid=$(echo "$line" | grep -oE 'numid=[0-9]+' | head -1 | grep -oE '[0-9]+')
+    want="$(expected_width "$numid")"
+    [[ -n "$want" ]] || continue
+    got=$(echo "$line" | awk '{print $NF}' | awk -F, '{print NF}')
+    [[ "$got" == "$want" ]] \
+        || fail "(h) numid=$numid cset sent $got values, amixer reported width $want"
+done < <(grep 'cset numid=' "$AMIXER_LOG")
+
+# ── (i): an unreadable control width aborts before any cset ────────────────
+reset_state 18
+export FAIL_NUMID=70   # inside 63..80 (stream-source-gain)
+out="$(bash "$FF400" 2>&1)"; rc=$?
+unset FAIL_NUMID
+[[ $rc -ne 0 ]] || fail "(i) script exited 0 despite an unreadable numid=70 width: $out"
+echo "$out" | grep -q '\bnumid=70\b' || fail "(i) failure message did not name numid=70: $out"
+grep -q 'cset' "$AMIXER_LOG" && fail "(i) a cset was issued despite an unreadable control width: $(cat "$AMIXER_LOG")"
 
 # ── (f): JACK unreachable — must not claim "no aliases" ────────────────────
 reset_state 18
