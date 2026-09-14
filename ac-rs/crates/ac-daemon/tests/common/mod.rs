@@ -15,10 +15,16 @@
 //! links its own copy, so every item is `pub` and the module carries a
 //! blanket `dead_code` allow — no single binary uses the whole surface.
 //!
-//! `it_loopback_ir.rs` is deliberately not a client of the `Daemon` here: it
-//! drives a *real* JACK server rather than `--fake-audio`, and folding its
-//! routing/`spawn_jack` setup in would put hardware-only concerns in the path
-//! of every fake-audio test. It shares [`alloc_ports`] and [`alloc_home`] only.
+//! `it_loopback_ir.rs`'s `#[ignore]`'d JACK test is deliberately not a
+//! client of the [`Daemon`] here: it drives a *real* JACK server rather than
+//! `--fake-audio`, and folding its routing/`spawn_jack` setup in would put
+//! hardware-only concerns in the path of every fake-audio test. That test
+//! shares [`alloc_ports`] and [`alloc_home`] only. Its non-`#[ignore]`d
+//! harm-case test (`real_port_config_clamps_requested_level_to_rig_ceiling`,
+//! #442) *is* a client of [`Daemon`]/[`Client`] like every test below,
+//! though — it runs `--fake-audio` deliberately, to check the config a
+//! real-port run would carry without needing the JACK server that route
+//! implies.
 
 #![allow(dead_code)]
 
