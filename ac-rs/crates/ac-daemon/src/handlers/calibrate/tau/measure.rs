@@ -220,8 +220,11 @@ impl std::error::Error for LowSnrRefusal {}
 /// than noise (#368, replacing the old pre-attempt `is_loopback` level
 /// gate). Modeled on [`check_peak_within_window`]'s shape — a small pure
 /// function over already-computed values, unit-testable without an
-/// `AudioEngine` — and called before it in `measure_tau`, since a peak that
-/// isn't real shouldn't be judged against the edge margin at all.
+/// `AudioEngine` — and called before it in `measure_tau`, since a peak
+/// that isn't real shouldn't be judged against the edge margin at all.
+///
+/// Skipped by `measure_tau` entirely when this lifecycle's own capture
+/// crossed an xrun (#368/#369 merge precedence) — see its doc comment.
 fn check_peak_snr(snr_db: f64, threshold_db: f64) -> anyhow::Result<()> {
     if snr_db < threshold_db {
         return Err(LowSnrRefusal {
@@ -258,14 +261,25 @@ fn check_peak_within_window(
 
 /// Play a short ESS, deconvolve it, and return the interface round-trip
 /// delay in seconds (peak of the linear IR, converted from samples)
-/// alongside that peak's pre-impulse SNR in dB (#368) — the caller needs
-/// the SNR value even on success, since `cal_done` reports it on every
-/// state that reached deconvolution, not only on a refusal.
+/// alongside that peak's pre-impulse SNR in dB (#368) and the xrun count
+/// `AudioEngine::xruns()` reported across the `play_and_capture` call
+/// specifically (#369) — the caller needs both even on success, since
+/// `cal_done` reports the SNR on every state that reached deconvolution
+/// (not only a refusal) and the xrun count on every state where both
+/// lifecycles ran.
+///
+/// A capture that crossed an xrun skips the SNR gate entirely
+/// (#368/#369 merge precedence): its SNR figure is meaningless — the
+/// contamination, not the noise floor it produced, is what `tau_result`
+/// reports (`refused_xrun`) once both lifecycles are in. A lifecycle
+/// with no xrun keeps the original order (SNR gate before the edge-margin
+/// check, unchanged from #368: a peak that isn't distinguishable from
+/// noise shouldn't be judged against the window edge at all).
 ///
 /// Reuses the Farina machinery from `ac_core::measurement::sweep` exactly
 /// as `plot_ir` does — see `handlers/audio/plot.rs` for the longer-form
 /// version of the same technique.
-pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<(f64, f64)> {
+pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<(f64, f64, u32)> {
     let sr = eng.sample_rate();
     let f2_hz = (sr as f64 * 0.45).min(20_000.0);
     let params = SweepParams {
@@ -277,7 +291,9 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
     let sweep = log_sweep(&params)?;
     let amp = amp as f32;
     let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
+    let xruns_before = eng.xruns();
     let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
+    let xruns = eng.xruns().saturating_sub(xruns_before);
     let inv = inverse_sweep(&params)?;
     let full = deconvolve_full(&captured, &inv);
     let half_window_s = tau_half_window_s();
@@ -311,13 +327,18 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
     );
     #[cfg(not(feature = "tau-window-override"))]
     let _ = peak_val;
-    // #368: the SNR gate runs before the edge-margin check — a peak that
-    // isn't distinguishable from noise shouldn't be judged against the
-    // window edge at all.
-    check_peak_snr(snr_db, tau_snr_threshold_db())?;
+    // #368/#369 merge precedence: a lifecycle that crossed an xrun skips
+    // its own SNR gate — that reading's SNR is not evaluated at all, and
+    // `tau_result` reports `refused_xrun` for the run once both lifecycles
+    // are in, regardless of what this figure would have said. A clean
+    // lifecycle keeps the original #368 order: SNR gate before the
+    // edge-margin check.
+    if xruns == 0 {
+        check_peak_snr(snr_db, tau_snr_threshold_db())?;
+    }
     check_peak_within_window(peak_idx, window_len, tau_edge_margin_frac())?;
     let offset_samples = peak_idx as i64 - half as i64;
-    Ok((offset_samples as f64 / sr as f64, snr_db))
+    Ok((offset_samples as f64 / sr as f64, snr_db, xruns))
 }
 
 #[cfg(test)]

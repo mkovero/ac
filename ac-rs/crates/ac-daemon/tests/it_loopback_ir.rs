@@ -35,10 +35,17 @@
 //! without it rather than inheriting the self-loop's `-6.0`. As of #360,
 //! `plot_ir` clamps its requested level to the config's `drive_max_dbfs`
 //! ceiling the same way `set_drive` always has (`handlers/mod.rs`'s
-//! `apply_drive_ceiling`) — so this value is a request, not the only thing
-//! bounding what reaches the converter, but it should still be set
-//! explicitly here rather than relying on whatever ceiling happens to be
-//! configured on the box this runs against.
+//! `apply_drive_ceiling`).
+//!
+//! Before #442, that ceiling was whatever the daemon's isolated `HOME`
+//! happened to carry — nothing, by default, so the daemon fell back to its
+//! own `-10` dBFS default and `AC_LOOPBACK_LEVEL_DBFS` was the *only* thing
+//! actually holding a sweep down on a rig. On the real-port route this test
+//! now writes `drive_max_dbfs` into that config itself, at the rig's
+//! standing `-40` dBFS ceiling (`.agents/rig.md` → hard constraints; see
+//! `RIG_DRIVE_CEILING_DBFS` below) — so `AC_LOOPBACK_LEVEL_DBFS` is a
+//! request bounded by a clamp that cannot be silently missing, not the only
+//! thing bounding what reaches the converter.
 
 use std::env;
 use std::fs;
@@ -61,6 +68,21 @@ const SELF_LOOP_IN: &str = "ac-daemon:out";
 
 /// Default drive for the self-loop, where nothing physical is driven.
 const SELF_LOOP_LEVEL_DBFS: f64 = -6.0;
+
+/// Standing rig emission ceiling (`.agents/rig.md` → hard constraints:
+/// "Emission ceiling is −40 dBFS, standing. An exception above it requires
+/// … a server-side clamp enforcing it (`drive_max_dbfs` in the daemon
+/// config actually running the session — not a request-side limit only).").
+///
+/// Fixed here rather than read from an env var or the rig's own
+/// `~/.config/ac/config.json`: either source can be absent at runtime, and
+/// #442 is precisely that a real-port run must not fall back to the
+/// daemon's own `-10` dBFS default when a ceiling is missing. A constant
+/// cannot be missing. An authorized exception above this value
+/// (`rig-session-2-results.md`'s worked example) is a change to this
+/// constant, not a runtime override — a committed edit is a stronger record
+/// of the authorization `.agents/rig.md` requires than an env var would be.
+const RIG_DRIVE_CEILING_DBFS: f64 = -40.0;
 
 /// Sweep duration. Not a free parameter: the linear IR's window is clamped
 /// to the gap between the linear IR and the order-2 IR
@@ -180,40 +202,60 @@ struct Routing {
     /// in the path. Recorded so the assertions can say which chain they ran
     /// against instead of implying the self-loop.
     external: bool,
+    /// The config's `drive_max_dbfs` this routing will be written with.
+    /// `Some(RIG_DRIVE_CEILING_DBFS)` on the real-port route; `None` on the
+    /// self-loop, so `build_loopback_config` writes no such key at all —
+    /// unchanged from before #442.
+    drive_max_dbfs: Option<f64>,
 }
 
 impl Routing {
-    /// Read the routing from the environment, defaulting to the self-loop.
+    /// Pure constructor over already-read raw values — no `std::env` calls,
+    /// so a test can build a real-port `Routing` without mutating the
+    /// process-global env that other tests in this binary read concurrently.
+    ///
+    /// `duration_s` and `level_dbfs` are the *raw* (not-yet-defaulted)
+    /// values: a `None` duration becomes `DEFAULT_DURATION_S`; a `None`
+    /// level on the self-loop becomes `SELF_LOOP_LEVEL_DBFS`, and on the
+    /// real-port route is refused outright (see the `expect` below).
     ///
     /// Both port variables must be set together: half a route is a route
     /// through the wrong thing, and silently completing it with a self-loop
     /// end would produce a plausible-looking IR of the ring while the
     /// operator believed they were measuring a converter.
-    fn from_env() -> Self {
-        let out = env::var("AC_LOOPBACK_OUT").ok().filter(|s| !s.is_empty());
-        let inp = env::var("AC_LOOPBACK_IN").ok().filter(|s| !s.is_empty());
-
+    fn new(
+        out: Option<String>,
+        inp: Option<String>,
+        level_dbfs: Option<f64>,
+        duration_s: Option<f64>,
+    ) -> Self {
+        let duration_s = duration_s.unwrap_or(DEFAULT_DURATION_S);
         match (out, inp) {
             (None, None) => Self {
                 output_port: SELF_LOOP_OUT.to_string(),
                 input_port: SELF_LOOP_IN.to_string(),
-                level_dbfs: level_from_env().unwrap_or(SELF_LOOP_LEVEL_DBFS),
-                duration_s: duration_from_env(),
+                level_dbfs: level_dbfs.unwrap_or(SELF_LOOP_LEVEL_DBFS),
+                duration_s,
                 external: false,
+                drive_max_dbfs: None,
             },
             (Some(output_port), Some(input_port)) => {
                 // Real ports means real emission. Refuse to pick the level.
-                let level_dbfs = level_from_env().expect(
+                let level_dbfs = level_dbfs.expect(
                     "AC_LOOPBACK_OUT/IN name real JACK ports, so this run drives \
-                     hardware: set AC_LOOPBACK_LEVEL_DBFS explicitly. plot_ir does \
-                     not apply drive_max_dbfs, so this value is the only ceiling.",
+                     hardware: set AC_LOOPBACK_LEVEL_DBFS explicitly. plot_ir \
+                     clamps to drive_max_dbfs (this route's config carries the \
+                     rig's standing -40 dBFS ceiling, RIG_DRIVE_CEILING_DBFS), \
+                     but the request still decides how hard the sweep is \
+                     authored below that ceiling, so it stays mandatory.",
                 );
                 Self {
                     output_port,
                     input_port,
                     level_dbfs,
-                    duration_s: duration_from_env(),
+                    duration_s,
                     external: true,
+                    drive_max_dbfs: Some(RIG_DRIVE_CEILING_DBFS),
                 }
             }
             (out, inp) => panic!(
@@ -224,11 +266,18 @@ impl Routing {
         }
     }
 
+    /// Read the routing from the environment, defaulting to the self-loop.
+    fn from_env() -> Self {
+        let out = env::var("AC_LOOPBACK_OUT").ok().filter(|s| !s.is_empty());
+        let inp = env::var("AC_LOOPBACK_IN").ok().filter(|s| !s.is_empty());
+        Self::new(out, inp, level_from_env(), duration_from_env())
+    }
+
     /// One line naming the chain under test, for the failure messages and
     /// for the operator's record of which patch produced which number.
     fn describe(&self) -> String {
         format!(
-            "{} → {} at {:.1} dBFS, {:.3} s sweep ({})",
+            "{} → {} at {:.1} dBFS, {:.3} s sweep ({}, drive_max_dbfs {})",
             self.output_port,
             self.input_port,
             self.level_dbfs,
@@ -237,21 +286,25 @@ impl Routing {
                 "external ports"
             } else {
                 "daemon self-loop"
+            },
+            match self.drive_max_dbfs {
+                Some(c) => format!("{c:.1} dBFS"),
+                None => "unset".to_string(),
             }
         )
     }
 }
 
-fn duration_from_env() -> f64 {
-    match env::var("AC_LOOPBACK_DURATION_S")
+/// The raw, not-yet-defaulted `AC_LOOPBACK_DURATION_S` value. `None` when
+/// unset; `Routing::new` applies `DEFAULT_DURATION_S`.
+fn duration_from_env() -> Option<f64> {
+    let raw = env::var("AC_LOOPBACK_DURATION_S")
         .ok()
-        .filter(|s| !s.is_empty())
-    {
-        None => DEFAULT_DURATION_S,
-        Some(raw) => raw
-            .parse::<f64>()
+        .filter(|s| !s.is_empty())?;
+    Some(
+        raw.parse::<f64>()
             .unwrap_or_else(|e| panic!("AC_LOOPBACK_DURATION_S={raw:?} is not a number: {e}")),
-    }
+    )
 }
 
 fn level_from_env() -> Option<f64> {
@@ -264,11 +317,13 @@ fn level_from_env() -> Option<f64> {
     )
 }
 
-/// Pre-write `$HOME/.config/ac/config.json` so the daemon picks up the sticky
-/// port names the run is routed over — by default the self-loop of the JACK
-/// client (`ac-daemon:out → ac-daemon:in`).
-fn write_loopback_config(home: &Path, routing: &Routing) {
-    let cfg = json!({
+/// Build the `$HOME/.config/ac/config.json` value for this routing — the
+/// sticky port names the run is routed over (by default the self-loop of
+/// the JACK client, `ac-daemon:out → ac-daemon:in`), and, on the real-port
+/// route only, the `drive_max_dbfs` ceiling (#442). The self-loop's `Value`
+/// carries no such key, unchanged from before #442.
+fn build_loopback_config(routing: &Routing) -> Value {
+    let mut cfg = json!({
         "device":           0,
         "output_channel":   0,
         "input_channel":    0,
@@ -279,8 +334,16 @@ fn write_loopback_config(home: &Path, routing: &Routing) {
         "range_stop_hz":    20_000.0,
         "server_enabled":   false,
     });
+    if let Some(ceiling) = routing.drive_max_dbfs {
+        cfg["drive_max_dbfs"] = json!(ceiling);
+    }
+    cfg
+}
+
+/// Write `cfg` to `home`'s `.config/ac/config.json`.
+fn write_loopback_config(home: &Path, cfg: &Value) {
     let path = home.join(".config").join("ac").join("config.json");
-    fs::write(&path, serde_json::to_vec_pretty(&cfg).unwrap()).expect("write config");
+    fs::write(&path, serde_json::to_vec_pretty(cfg).unwrap()).expect("write config");
 }
 
 struct Daemon {
@@ -294,7 +357,7 @@ impl Daemon {
     fn spawn_jack(routing: &Routing) -> Self {
         let (ctrl, data) = alloc_ports();
         let home = alloc_home();
-        write_loopback_config(&home, routing);
+        write_loopback_config(&home, &build_loopback_config(routing));
 
         let bin = env!("CARGO_BIN_EXE_ac-daemon");
         let child = Command::new(bin)
@@ -454,6 +517,34 @@ fn loopback_ir_recovers_sharp_peak() {
     }));
     assert_eq!(ack["ok"], json!(true), "plot_ir REQ rejected: {ack}");
 
+    // Record guard, not the interlock (#442): the daemon may already be
+    // emitting the (clamped) sweep by the time this ack arrives, so this
+    // only confirms the applied level was recorded correctly — the actual
+    // clamp is `apply_drive_ceiling` inside the handler, exercised directly
+    // by `real_port_config_clamps_requested_level_to_rig_ceiling` below.
+    let applied_level_dbfs = ack["level_dbfs"].as_f64();
+    eprintln!(
+        "level:        requested {:.1} dBFS → applied {} (ceiling {})",
+        routing.level_dbfs,
+        match applied_level_dbfs {
+            Some(a) => format!("{a:.1} dBFS"),
+            None => "(absent from ack)".to_string(),
+        },
+        match routing.drive_max_dbfs {
+            Some(c) => format!("{c:.1} dBFS"),
+            None => "none (self-loop)".to_string(),
+        }
+    );
+    if let (true, Some(applied), Some(ceiling)) =
+        (routing.external, applied_level_dbfs, routing.drive_max_dbfs)
+    {
+        assert!(
+            applied <= ceiling + 1e-9,
+            "applied level {applied} dBFS exceeds the rig ceiling {ceiling} dBFS \
+             over {chain} — the real-port route's clamp did not hold"
+        );
+    }
+
     let frame = c.wait_for_or_error("measurement/impulse_response", Duration::from_secs(15));
     let data = &frame["data"];
     let sample_rate_hz = data["sample_rate_hz"].as_f64();
@@ -594,6 +685,108 @@ fn loopback_ir_recovers_sharp_peak() {
     // Drain the trailing report + done frames so Drop doesn't race on shutdown.
     let _ = c.recv_pub(2_000);
     let _ = c.recv_pub(2_000);
+}
+
+/// The self-loop's config never carries a `drive_max_dbfs` key — unchanged
+/// from before #442. Guards acceptance criterion 4, but is only a
+/// key-presence check: it cannot show the harm case going red on its own,
+/// which is why `real_port_config_clamps_requested_level_to_rig_ceiling`
+/// below exists.
+#[test]
+fn self_loop_config_carries_no_drive_max_dbfs_key() {
+    let routing = Routing::new(None, None, None, None);
+    assert!(
+        !routing.external,
+        "sanity: this must be the self-loop route"
+    );
+    let cfg = build_loopback_config(&routing);
+    assert!(
+        cfg.get("drive_max_dbfs").is_none(),
+        "self-loop config must not gain a drive_max_dbfs key: {cfg}"
+    );
+}
+
+/// #442's harm case: on the real-port route, the daemon's own config must
+/// carry a `drive_max_dbfs` ceiling that does not depend on
+/// `AC_LOOPBACK_LEVEL_DBFS` being set correctly (or at all) on the box this
+/// runs against.
+///
+/// Not `#[ignore]`'d: it drives `--fake-audio`
+/// (`common::Daemon::spawn_with_config`), so it needs no JACK server and no
+/// rig — a guard that only runs on the rig is a guard that does not run.
+/// Referring to the harness types by path (`common::Daemon`,
+/// `common::Client`) because this file has its own `Daemon`/`Client`, used
+/// by the JACK-only test above.
+///
+/// Modelled on `it_protocol/plot_ir.rs`'s
+/// `plot_ir_clamps_level_to_drive_max_dbfs`: the deconvolved IR itself can't
+/// be the observable (the handler re-scales it to unity peak regardless of
+/// `level_dbfs` on this backend), so this asserts on the sync reply's
+/// `level_dbfs` and the report's `stimulus.level_dbfs` instead, for the
+/// same reason that test does.
+///
+/// Requests 0.0 dBFS: above the daemon's own `-10` dBFS default (so
+/// deleting the key from `build_loopback_config` would change the applied
+/// level and this test would go red) and above `RIG_DRIVE_CEILING_DBFS`
+/// itself (so a raised or missing ceiling would also show up).
+#[test]
+fn real_port_config_clamps_requested_level_to_rig_ceiling() {
+    // Two JACK-looking port names; --fake-audio never opens them, so any
+    // names exercise the real-port branch of the pure constructor.
+    let routing = Routing::new(
+        Some("Fake Interface:playback_1".to_string()),
+        Some("Fake Interface:capture_1".to_string()),
+        Some(0.0),
+        Some(0.5),
+    );
+    assert!(routing.external, "sanity: this must be the real-port route");
+    assert_eq!(routing.drive_max_dbfs, Some(RIG_DRIVE_CEILING_DBFS));
+    let cfg = build_loopback_config(&routing);
+
+    let d = common::Daemon::spawn_with_config(Some(cfg));
+    let c = common::Client::new(&d);
+
+    let r = c.call(json!({
+        "cmd": "plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": 0.0,
+        "tail_s": 0.1,
+        "window_len": 1024,
+        "n_harmonics": 3,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot_ir REQ rejected: {r}");
+    // Literal -40.0, not RIG_DRIVE_CEILING_DBFS: raising the constant must
+    // not carry this assertion along with it and stay green — the rig's
+    // standing ceiling is the number under test, not whatever the constant
+    // currently says.
+    assert_eq!(
+        r["level_dbfs"],
+        json!(-40.0),
+        "sync reply must echo the -40 dBFS rig ceiling, not the 0.0 dBFS request: {r}"
+    );
+    assert_ne!(
+        r["level_dbfs"],
+        json!(0.0),
+        "sync reply must not be the raw request: {r}"
+    );
+
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let applied = v["report"]["stimulus"]["level_dbfs"]
+        .as_f64()
+        .expect("stimulus.level_dbfs");
+    assert!(
+        (applied - (-40.0)).abs() < 1e-9,
+        "report recorded level {applied}, requested 0.0 dBFS against the rig's \
+         -40 dBFS ceiling — the real-port route's config did not clamp it"
+    );
+    assert!(
+        (applied - 0.0).abs() > 1e-9,
+        "report recorded the raw 0.0 dBFS request instead of the clamped level: {applied}"
+    );
 }
 
 /// Plain unit tests over the round-trip-latency bound math, not `#[ignore]`d

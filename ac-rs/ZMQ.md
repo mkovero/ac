@@ -1552,13 +1552,15 @@ reading either.
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
   "tau_state":            "measured" | "not_measured_low_snr" | "error"
-                           | "disagree_period_shift" | "disagree_other",
+                           | "disagree_period_shift" | "disagree_other" | "refused_xrun",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
   "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
-  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_*)
+  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
+  "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
+  "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
@@ -1614,6 +1616,7 @@ still-unity-keyed decision.
 | `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
@@ -1627,13 +1630,19 @@ never fire on that backend — any disagreement there is `disagree_other`).
 
 `tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
 every state where at least one lifecycle reached deconvolution
-(`measured`, `not_measured_low_snr`, `disagree_*`) and absent on `error`,
-which can fail before a peak was ever located. On `measured` and
-`disagree_*`, the SNR reported is the worse (lower) of the two
-lifecycles' — both necessarily cleared the threshold, since a lifecycle
-that didn't would have produced `not_measured_low_snr` instead, so this is
-a diagnostic figure alongside the result rather than a second gate.
-`tau_snr_threshold_db` is a derived constant (see
+(`measured`, `not_measured_low_snr`, `disagree_*`), absent on `error`
+(which can fail before a peak was ever located), and **also absent on
+`refused_xrun`** (#369): an xrun-crossed lifecycle's SNR gate never runs
+(see the `refused_xrun` row above), so there is no SNR figure to report —
+the state name itself names the cause, and no number is offered that
+could be misread as a scored noise floor. On `measured` and `disagree_*`,
+the SNR reported is the worse (lower) of the two lifecycles' — both
+necessarily cleared the threshold, since a lifecycle that didn't, and
+carried no xrun, would have produced `not_measured_low_snr` instead, and
+a lifecycle that did carry one would have diverted the whole run to
+`refused_xrun` before either `measured` or `disagree_*` could be reached
+— so this is a diagnostic figure alongside the result rather than a
+second gate. `tau_snr_threshold_db` is a derived constant (see
 `ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
 comment for its provenance), not measured on this exact sweep.
 
@@ -1644,6 +1653,20 @@ period-shift jump is the diagnostic clue #347 itself was found from.
 `tau_delta_samples` and (on `disagree_period_shift`) `tau_periods` are
 the already-classified delta, so a client doesn't have to re-derive the
 rounding/period-multiple logic itself.
+
+`tau_reading1_xruns` / `tau_reading2_xruns` (#369) are the count of xruns
+`AudioEngine::xruns()` reported during that reading's own lifecycle —
+scoped to the `measure_tau` call specifically (sweep synthesis + the
+`play_and_capture` I/O + deconvolve), not the whole `start`..`stop` span.
+Present exactly when the matching `tau_reading{1,2}_s` is, always as a
+concrete integer including 0, on `measured` / `disagree_*` / `refused_xrun`
+alike — an old daemon has none of these fields, and a client must not read
+their absence on an old frame as "zero", only as "unknown". A nonzero
+value on either reading always yields `refused_xrun` regardless of what
+the two readings' comparison would otherwise have said (dispatch checks
+the xrun counts before consulting `compare_tau_readings`'s result), so
+`tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured` or
+one of the `disagree_*` states.
 
 ---
 

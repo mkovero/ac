@@ -35,12 +35,23 @@ pub(super) enum TauAttempt {
         conditions: TauConditions,
         reading1_s: f64,
         reading2_s: f64,
+        /// #369: xruns crossed during each reading's own lifecycle, kept
+        /// per-reading rather than summed so a dirty pair is attributable
+        /// to reading 1 or reading 2, not just "the run".
+        reading1_xruns: u32,
+        reading2_xruns: u32,
         comparison: TauComparison,
         /// The worse (lower) of the two lifecycles' pre-impulse SNR. Both
-        /// necessarily cleared the τ SNR threshold — a lifecycle that
-        /// didn't would have produced [`TauAttempt::LowSnr`] instead — so
-        /// this is a diagnostic figure alongside the comparison, not a
-        /// second gate.
+        /// cleared the τ SNR threshold — a lifecycle that didn't, and
+        /// carried no xrun, would have produced [`TauAttempt::LowSnr`]
+        /// instead — with one exception (#368/#369 merge precedence): a
+        /// lifecycle that crossed an xrun skips the SNR gate entirely, so
+        /// this figure can be sub-threshold when `reading1_xruns > 0 ||
+        /// reading2_xruns > 0`. `tau_result` routes that case to
+        /// `TauOutcome::RefusedXrun` before either the comparison or this
+        /// field is consulted, so `Measured`/`Disagree` — the only
+        /// `TauOutcome`s this field survives into — still only ever see a
+        /// value that genuinely cleared the threshold.
         pre_impulse_snr_db: f64,
     },
     /// A lifecycle's peak sits below the SNR threshold (#368). Short-
@@ -74,7 +85,16 @@ pub(super) fn measure_tau_twice(
     in_port: &str,
     amp: f64,
 ) -> TauAttempt {
-    let run_once = || -> anyhow::Result<((f64, f64), TauConditions)> {
+    // ((tau_s, snr_db), conditions, xruns) — `measure_tau` scopes the xrun
+    // count to its own `play_and_capture` I/O call (#369 architect note:
+    // the only I/O call its body makes, so this already excludes `start`'s
+    // JACK client registration) and, per the #368/#369 merge precedence
+    // documented on its own doc comment, skips its internal SNR gate
+    // entirely on a lifecycle that crossed one — that lifecycle still
+    // needs its own `(tau_s, snr_db)` to reach `TauAttempt::Compared`
+    // below, where `reading{1,2}_xruns` decides `refused_xrun` regardless
+    // of what either SNR figure says.
+    let run_once = || -> anyhow::Result<((f64, f64), TauConditions, u32)> {
         let mut eng = make_engine(fake, required)?;
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
@@ -88,13 +108,13 @@ pub(super) fn measure_tau_twice(
         let reading = measure_tau(&mut *eng, amp);
         eng.set_silence();
         eng.stop();
-        reading.map(|r| (r, conditions))
+        reading.map(|(offset_s, snr_db, xruns)| ((offset_s, snr_db), conditions, xruns))
     };
 
     // #368: a low-SNR refusal is recovered from the error by type, not by
     // matching the message — it is a distinct `tau_state`, and a reworded
     // message must not silently collapse it back into `error`.
-    let ((reading1_s, snr1_db), conditions) = match run_once() {
+    let ((reading1_s, snr1_db), conditions, reading1_xruns) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -109,7 +129,7 @@ pub(super) fn measure_tau_twice(
             }
         }
     };
-    let ((reading2_s, snr2_db), conditions2) = match run_once() {
+    let ((reading2_s, snr2_db), conditions2, reading2_xruns) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -134,6 +154,8 @@ pub(super) fn measure_tau_twice(
         conditions: conditions2,
         reading1_s,
         reading2_s,
+        reading1_xruns,
+        reading2_xruns,
         comparison,
         pre_impulse_snr_db: snr1_db.min(snr2_db),
     }
@@ -178,6 +200,26 @@ pub(super) enum TauOutcome {
         /// how much margin a *passing* run actually had.
         pre_impulse_snr_db: f64,
         snr_threshold_db: f64,
+        /// #369: always 0 on this variant — a nonzero count on either
+        /// lifecycle diverts to [`TauOutcome::RefusedXrun`] before the
+        /// comparison is consulted. Carried anyway so the wire frame's
+        /// presence rule ("alongside `tau_reading{1,2}_s`") holds without
+        /// the frame writer inventing a zero of its own.
+        reading1_xruns: u32,
+        reading2_xruns: u32,
+    },
+    /// #369: a lifecycle crossed an xrun, so the reading is refused before
+    /// its comparison is even consulted — a contaminated pair agreeing or
+    /// disagreeing is equally uninformative, and this is the only way to
+    /// close the corroboration hole a doubly-corrupted *agreeing* pair
+    /// would otherwise leave open (the two-lifetime rule from #347 only
+    /// catches a disagreement). Nothing is stored.
+    RefusedXrun {
+        conditions: TauConditions,
+        reading1_s: f64,
+        reading2_s: f64,
+        reading1_xruns: u32,
+        reading2_xruns: u32,
     },
     /// Both lifecycles ran and their readings disagreed. Nothing is
     /// stored; `periods` separates #347's own root cause (a
@@ -190,6 +232,10 @@ pub(super) enum TauOutcome {
         /// the threshold, they just did not agree with each other.
         pre_impulse_snr_db: f64,
         snr_threshold_db: f64,
+        /// #369: always 0 here for the same reason as on
+        /// [`TauOutcome::Measured`] — the xrun check runs first.
+        reading1_xruns: u32,
+        reading2_xruns: u32,
         delta_samples: i64,
         periods: Option<i64>,
         message: String,
@@ -209,6 +255,7 @@ impl TauOutcome {
         match self {
             Self::NotMeasuredLowSnr { .. } => "not_measured_low_snr",
             Self::Measured { .. } => "measured",
+            Self::RefusedXrun { .. } => "refused_xrun",
             Self::Disagree { periods, .. } => {
                 if periods.is_some() {
                     "disagree_period_shift"
@@ -226,9 +273,9 @@ impl TauOutcome {
     /// `tau_sample_rate` / `tau_period_size` on every `cal_done`.
     pub(super) fn conditions(&self) -> Option<&TauConditions> {
         match self {
-            Self::Measured { conditions, .. } | Self::Disagree { conditions, .. } => {
-                Some(conditions)
-            }
+            Self::Measured { conditions, .. }
+            | Self::RefusedXrun { conditions, .. }
+            | Self::Disagree { conditions, .. } => Some(conditions),
             Self::NotMeasuredLowSnr { conditions, .. } | Self::Error { conditions, .. } => {
                 conditions.as_ref()
             }
@@ -302,14 +349,27 @@ impl TauOutcome {
             Self::Measured {
                 reading1_s,
                 reading2_s,
+                reading1_xruns,
+                reading2_xruns,
+                ..
+            }
+            | Self::RefusedXrun {
+                reading1_s,
+                reading2_s,
+                reading1_xruns,
+                reading2_xruns,
                 ..
             } => {
                 frame["tau_reading1_s"] = json!(reading1_s);
                 frame["tau_reading2_s"] = json!(reading2_s);
+                frame["tau_reading1_xruns"] = json!(reading1_xruns);
+                frame["tau_reading2_xruns"] = json!(reading2_xruns);
             }
             Self::Disagree {
                 reading1_s,
                 reading2_s,
+                reading1_xruns,
+                reading2_xruns,
                 delta_samples,
                 periods,
                 message,
@@ -317,6 +377,8 @@ impl TauOutcome {
             } => {
                 frame["tau_reading1_s"] = json!(reading1_s);
                 frame["tau_reading2_s"] = json!(reading2_s);
+                frame["tau_reading1_xruns"] = json!(reading1_xruns);
+                frame["tau_reading2_xruns"] = json!(reading2_xruns);
                 frame["tau_delta_samples"] = json!(delta_samples);
                 if let Some(p) = periods {
                     frame["tau_periods"] = json!(p);
@@ -358,10 +420,40 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             pre_impulse_snr_db,
             snr_threshold_db: tau_snr_threshold_db(),
         },
+        // #368/#369 precedence: an xrun-crossed lifecycle is refused
+        // (`refused_xrun`) even when its own SNR would also have been
+        // below threshold — a contaminated capture's SNR figure is
+        // meaningless, so there is nothing to gain by reporting it. This
+        // only matters when a lifecycle both completes far enough to
+        // produce a `Compared` attempt (i.e. its own SNR gate already
+        // passed — `measure_tau` checks SNR before returning) *and*
+        // crossed an xrun; `LowSnr`, produced entirely inside a single
+        // lifecycle before xruns for that lifecycle are even read here,
+        // never competes with `refused_xrun` for the same reading. Dispatch
+        // is xrun-first among the `Compared` arms below: a lifecycle that
+        // crossed an xrun is refused without the comparison being
+        // consulted at all, which is what catches the doubly-corrupted
+        // pair that would otherwise have *agreed* its way into `measured`.
         TauAttempt::Compared {
             conditions,
             reading1_s,
             reading2_s,
+            reading1_xruns,
+            reading2_xruns,
+            ..
+        } if reading1_xruns > 0 || reading2_xruns > 0 => TauOutcome::RefusedXrun {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_xruns,
+            reading2_xruns,
+        },
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_xruns,
+            reading2_xruns,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db,
         } => TauOutcome::Measured {
@@ -372,11 +464,15 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_s,
             pre_impulse_snr_db,
             snr_threshold_db: tau_snr_threshold_db(),
+            reading1_xruns,
+            reading2_xruns,
         },
         TauAttempt::Compared {
             conditions,
             reading1_s,
             reading2_s,
+            reading1_xruns,
+            reading2_xruns,
             comparison: TauComparison::Disagree(d),
             pre_impulse_snr_db,
         } => TauOutcome::Disagree {
@@ -385,6 +481,8 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_s,
             pre_impulse_snr_db,
             snr_threshold_db: tau_snr_threshold_db(),
+            reading1_xruns,
+            reading2_xruns,
             delta_samples: d.delta_samples,
             periods: d.periods,
             message: d.message(),
@@ -459,6 +557,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.000_667,
             reading2_s: 0.000_667,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
         });
@@ -488,6 +588,11 @@ mod tests {
             f["tau_snr_threshold_db"].as_f64(),
             Some(TAU_SNR_THRESHOLD_DB)
         );
+        // #369: presence tracks "both readings were taken", so a clean run
+        // still carries concrete 0s, not an absent field — a consumer must
+        // never have to read absence as zero.
+        assert_eq!(f["tau_reading1_xruns"], json!(0), "{f}");
+        assert_eq!(f["tau_reading2_xruns"], json!(0), "{f}");
     }
 
     #[test]
@@ -496,6 +601,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.001_000_00,
             reading2_s: 0.001_000_02,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
         });
@@ -515,6 +622,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 4262.064 / 96_000.0,
             reading2_s: 5286.064 / 96_000.0,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison,
             pre_impulse_snr_db: 40.0,
         });
@@ -544,6 +653,8 @@ mod tests {
             conditions: dummy_conditions(),
             reading1_s: 0.0,
             reading2_s: 0.000_5,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
             comparison,
             pre_impulse_snr_db: 40.0,
         });
@@ -586,5 +697,94 @@ mod tests {
         // ever located, so there is no SNR to report.
         assert!(f.get("tau_pre_impulse_snr_db").is_none(), "{f}");
         assert!(f.get("tau_snr_threshold_db").is_none(), "{f}");
+    }
+
+    /// #369 acceptance criterion: an xrun crossing either lifecycle refuses
+    /// the reading regardless of what the comparison would have said — this
+    /// pair would otherwise agree, which is exactly the doubly-corrupted
+    /// case the two-lifetime rule alone cannot catch.
+    #[test]
+    fn tau_result_xrun_on_one_reading_refuses_even_when_readings_agree() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 0,
+            reading2_xruns: 1,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+        });
+        assert_eq!(outcome.state(), "refused_xrun");
+        // Refused, never stored — the corroboration hole this closes is
+        // precisely a pair that would have reached `tau_history`.
+        assert!(outcome.stored_entry("m").is_none());
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_s"], Value::Null);
+        assert_eq!(f["tau_agreement_count"], json!(0));
+        assert_eq!(f["tau_reading1_s"].as_f64(), Some(0.000_667));
+        assert_eq!(f["tau_reading2_s"].as_f64(), Some(0.000_667));
+        assert_eq!(f["tau_reading1_xruns"], json!(0), "{f}");
+        assert_eq!(f["tau_reading2_xruns"], json!(1), "{f}");
+        // ZMQ.md lists tau_delta_samples / tau_periods under disagree_*
+        // only, and tau_error under error / disagree_* — refused_xrun is
+        // none of those.
+        assert!(f.get("tau_delta_samples").is_none(), "{f}");
+        assert!(f.get("tau_periods").is_none(), "{f}");
+        assert!(f.get("tau_error").is_none(), "{f}");
+    }
+
+    /// Symmetric with the above: reading 1 dirty, reading 2 clean.
+    #[test]
+    fn tau_result_xrun_on_reading1_is_attributed_to_reading1() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 3,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+        });
+        assert_eq!(outcome.state(), "refused_xrun");
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_reading1_xruns"], json!(3), "{f}");
+        assert_eq!(f["tau_reading2_xruns"], json!(0), "{f}");
+    }
+
+    /// Both lifecycles dirty — both counts carried, not summed into one.
+    #[test]
+    fn tau_result_xrun_on_both_readings_carries_both_counts() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.000_667,
+            reading2_s: 0.000_667,
+            reading1_xruns: 2,
+            reading2_xruns: 1,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+        });
+        assert_eq!(outcome.state(), "refused_xrun");
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_reading1_xruns"], json!(2), "{f}");
+        assert_eq!(f["tau_reading2_xruns"], json!(1), "{f}");
+    }
+
+    /// A disagreeing pair that is *also* dirty takes the xrun path, not the
+    /// disagreement path — dispatch order is xrun-first (architect note).
+    #[test]
+    fn tau_result_xrun_takes_priority_over_disagreement() {
+        let comparison = compare_tau_readings(0.0, 0.000_5, 48_000, Some(1024));
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.0,
+            reading2_s: 0.000_5,
+            reading1_xruns: 1,
+            reading2_xruns: 0,
+            comparison,
+            pre_impulse_snr_db: 40.0,
+        });
+        assert_eq!(outcome.state(), "refused_xrun");
+        let f = frame_for(&outcome);
+        assert!(f.get("tau_delta_samples").is_none(), "{f}");
     }
 }

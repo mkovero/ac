@@ -58,6 +58,11 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
         done["tau_snr_threshold_db"].as_f64().is_some(),
         "frame: {done}"
     );
+    // #369 clean-path regression: a run with no xruns still carries the
+    // fields, present-as-zero rather than absent (per ZMQ.md's presence
+    // rule), and does not take the refused_xrun path.
+    assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(0), "frame: {done}");
 }
 
 /// #368: the pre-attempt `is_loopback` level gate is gone — τ is refused
@@ -76,6 +81,13 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
 #[test]
 fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
     let d = Daemon::spawn_with_env(&[
+        // Deterministic dither seeded from the loopback delay (see
+        // `audio/fake/hooks.rs`'s doc comment); the default 32-sample
+        // delay happens to land this noise-only IR's peak within the
+        // edge margin, refusing via `check_peak_within_window` instead
+        // of the SNR gate this test means to exercise — 800 lands well
+        // clear of either edge (empirically probed, not derived).
+        ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "800,800"),
         ("AC_FAKE_TAU_GAIN_OVERRIDE", "0.0"),
         ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.01"),
     ]);
@@ -121,6 +133,131 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
                 .as_array()
                 .is_some_and(|a| a.is_empty()),
         "a low-SNR refusal must not append to tau_history: {after}"
+    );
+}
+
+/// #369: a lifecycle that crosses an xrun refuses the reading end-to-end,
+/// through the real `measure_tau_twice` → `tau_result` → `cal_done` path —
+/// not just the hand-constructed `TauAttempt::Compared` unit tests. Uses
+/// the fake backend's `AC_FAKE_XRUNS_OVERRIDE` hook
+/// (`audio/fake/hooks.rs`) to make reading 2's lifecycle report one xrun
+/// while reading 1 stays clean; both lifecycles' delays are left at the
+/// default so the two readings would otherwise agree — the exact
+/// doubly-corrupted-but-agreeing shape the xrun-first dispatch order
+/// exists to catch (a disagreement would have been refused anyway, and
+/// would not have exercised this).
+#[test]
+fn calibrate_reports_refused_xrun_end_to_end() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_XRUNS_OVERRIDE", "0,1")]);
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        expect_prompt(&c, step);
+        reply_vrms(&c, None);
+    }
+    let done = expect_cal_done(&c);
+
+    assert_eq!(done["tau_state"], json!("refused_xrun"), "frame: {done}");
+    assert_eq!(
+        done["tau_s"],
+        json!(null),
+        "a refused reading must not report a τ: {done}"
+    );
+    assert_eq!(done["tau_agreement_count"], json!(0), "frame: {done}");
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+    // Per-reading attribution, not summed — reading 1 stayed clean.
+    assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(1), "frame: {done}");
+
+    // Refused, not stored — no entry in tau_history at all.
+    let after = read_cal_entry(&cal_path);
+    assert!(
+        after.get("tau_history").is_none()
+            || after["tau_history"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+        "a refused-xrun reading must not append to tau_history: {after}"
+    );
+}
+
+/// #368/#369 merge precedence: when a lifecycle both crosses an xrun and
+/// would independently have failed the SNR gate (a muted/noise-only
+/// route — `AC_FAKE_TAU_GAIN_OVERRIDE`/`AC_FAKE_TAU_NOISE_AMPLITUDE_
+/// OVERRIDE` apply to both lifecycles here, since those two hooks are not
+/// call-indexed), the run is reported `refused_xrun`, not
+/// `not_measured_low_snr` — a contaminated capture's SNR figure is
+/// meaningless, so the xrun is what gets named, not the noise floor it
+/// produced. Both lifecycles carry an xrun (`AC_FAKE_XRUNS_OVERRIDE`
+/// `"1,1"`) so that both reach `TauAttempt::Compared` at all: if only one
+/// did, the *other* (clean-of-xruns, still muted) lifecycle would fail its
+/// own SNR gate on its own account and short-circuit into
+/// `not_measured_low_snr` before the dirty lifecycle's xrun ever entered
+/// the picture — a different mechanism than the one this test exists to
+/// pin down.
+///
+/// Swap the precedence (restore the SNR gate to run unconditionally
+/// inside `measure_tau`, i.e. revert `calibrate/tau/mod.rs`'s `run_once`
+/// to call `check_peak_snr` regardless of `xruns`) and this goes red: the
+/// first lifecycle would refuse via `not_measured_low_snr` before its own
+/// xrun count is ever consulted, and the run never reaches
+/// `refused_xrun` at all.
+#[test]
+fn calibrate_reports_refused_xrun_over_low_snr_when_both_conditions_hold() {
+    let d = Daemon::spawn_with_env(&[
+        ("AC_FAKE_XRUNS_OVERRIDE", "1,1"),
+        // See the sibling low-SNR test above for why 800 (not the
+        // default 32): it keeps this noise-only peak clear of the
+        // edge-margin refusal so the SNR-vs-xrun precedence is what
+        // this test actually exercises.
+        ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "800,800"),
+        ("AC_FAKE_TAU_GAIN_OVERRIDE", "0.0"),
+        ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.01"),
+    ]);
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+
+    for step in 1..=2 {
+        expect_prompt(&c, step);
+        reply_vrms(&c, None);
+    }
+    let done = expect_cal_done(&c);
+
+    assert_eq!(
+        done["tau_state"],
+        json!("refused_xrun"),
+        "both lifecycles crossed an xrun *and* are muted (low SNR) — xrun \
+         must be the reported cause: {done}"
+    );
+    assert_eq!(
+        done["tau_s"],
+        json!(null),
+        "a refused reading must not report a τ: {done}"
+    );
+    assert_eq!(done["tau_reading1_xruns"], json!(1), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(1), "frame: {done}");
+    // Not the low-SNR fields' job to report on this path — the state name
+    // itself is the assertion that xrun, not SNR, was named as the cause.
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+
+    // Refused, not stored — no entry in tau_history at all.
+    let after = read_cal_entry(&cal_path);
+    assert!(
+        after.get("tau_history").is_none()
+            || after["tau_history"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+        "a refused-xrun reading must not append to tau_history: {after}"
     );
 }
 

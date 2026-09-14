@@ -39,7 +39,7 @@ use anyhow::Result;
 use std::time::Duration;
 
 use self::hooks::{
-    next_loopback_delay_samples, period_size_override, tau_gain_override,
+    next_loopback_delay_samples, next_xruns_delta, period_size_override, tau_gain_override,
     tau_noise_amplitude_override,
 };
 use self::ring_mode::{FakeRings, RingDrain};
@@ -265,6 +265,7 @@ impl AudioEngine for FakeEngine {
         let delay_samples = next_loopback_delay_samples();
         let gain = tau_gain_override();
         let noise_amp = tau_noise_amplitude_override();
+        self.xruns += next_xruns_delta();
         let tail = (tail_s * self.sample_rate as f64).round() as usize;
         let total = samples.len() + tail;
         let mut out = vec![0.0f32; total];
