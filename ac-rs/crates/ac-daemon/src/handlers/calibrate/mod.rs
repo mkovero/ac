@@ -15,12 +15,12 @@ use serde_json::{json, Value};
 use ac_core::config::Config;
 use ac_core::shared::calibration::Calibration;
 
-use crate::audio::make_engine;
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, read_dmm_vrms, resolve_input,
-    resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply, CalReply,
+    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, make_engine_for_state, read_dmm_vrms,
+    resolve_input, resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
+    CalReply,
 };
 
 mod mic_curve;
@@ -153,6 +153,11 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     // #358: `out_ch` above already keys the saved calibration entry — it
     // must also decide which port the tone actually leaves on, or the key
     // and the port can name different channels (rig repro: key `out1_in3`,
@@ -175,7 +180,6 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     let cal_reply_tx = state.cal_reply_tx.clone();
 
     let worker = spawn_worker(state, "calibrate", move |stop| {
-        let mut eng = make_engine(fake);
         // Open both directions: output for the reference tone, input so
         // step 2 can measure the actual ADC dBFS instead of assuming
         // unity-gain loopback when scaling the user's DMM reading.
@@ -300,7 +304,14 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         // function's doc for why the lifecycle boundary matters.
         let ref_amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
         let tau_outcome = tau_result(is_loopback, || {
-            measure_tau_twice(fake, cfg.device, &out_port, &in_port, ref_amp)
+            measure_tau_twice(
+                fake,
+                cfg.backend.as_deref(),
+                cfg.device,
+                &out_port,
+                &in_port,
+                ref_amp,
+            )
         });
 
         // Convert from "Vrms at the played/captured dBFS" → "Vrms at 0 dBFS".
@@ -346,6 +357,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
             // in use never surfaced anywhere.
             "input_port":           in_port,
             "output_port":          out_port,
+            "backend":              backend,
         });
         tau_outcome.write_frame(&mut cal_done_frame);
         finish_cal(&pub_tx, "calibrate", &key, cal_done_frame, save_err);
@@ -355,7 +367,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("calibrate".to_string(), worker);
     }
-    json!({"ok": true, "ref_dbfs": ref_dbfs})
+    json!({"ok": true, "ref_dbfs": ref_dbfs, "backend": backend})
 }
 
 pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {

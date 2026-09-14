@@ -13,6 +13,11 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
         "thdn_pct",
         "noise_floor_dbfs",
     ];
+    let headers = fields.map(|field| match field {
+        "thd_pct" => "thd_pct_re_total",
+        "thdn_pct" => "thdn_pct_re_total",
+        _ => field,
+    });
 
     let mut wtr = match csv::Writer::from_path(path) {
         Ok(w) => w,
@@ -22,7 +27,7 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
         }
     };
 
-    wtr.write_record(fields).ok();
+    wtr.write_record(headers).ok();
     for r in results {
         let mut row = Vec::with_capacity(fields.len());
         for &f in &fields {
@@ -43,13 +48,13 @@ pub fn save_csv(results: &[serde_json::Value], path: &Path) {
     println!("  CSV  -> {}", path.display());
 }
 
-/// THD/THD+N percent expressed as dB relative to the fundamental.
+/// THD/THD+N percent expressed as dB relative to the total output.
 ///
 /// `dB = 20·log10(pct/100)`. Percent compresses the interesting region near
-/// the floor; the dB-re-fundamental form is linear in the floor and is the
+/// the floor; the dB-re-total form is linear in the floor and is the
 /// meaningful engineering figure. Returns `-` for a non-positive percent (no
 /// valid measurement), where the dB form is undefined.
-fn thd_db_re_fund(pct: f64) -> String {
+fn thd_db_re_total(pct: f64) -> String {
     if pct > 0.0 {
         format!("{:.1}", 20.0 * (pct / 100.0).log10())
     } else {
@@ -116,12 +121,12 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
         println!("  AC-coupled pts:   {ac_n}  (excluded -- coupling cap rolloff)");
     }
     println!(
-        "  Worst THD:        {worst_thd:.4} %    {} dB re fund",
-        thd_db_re_fund(worst_thd)
+        "  Worst THD:        {worst_thd:.4} %    {} dB re total",
+        thd_db_re_total(worst_thd)
     );
     println!(
-        "  Worst THD+N:      {worst_thdn:.4} %    {} dB re fund",
-        thd_db_re_fund(worst_thdn)
+        "  Worst THD+N:      {worst_thdn:.4} %    {} dB re total",
+        thd_db_re_total(worst_thdn)
     );
     let note = if clipped_n > 0 || ac_n > 0 {
         "  (valid points only)"
@@ -129,8 +134,8 @@ pub fn print_summary(results: &[serde_json::Value], device_name: &str, have_cal:
         ""
     };
     println!(
-        "  Average THD:      {avg_thd:.4} %    {} dB re fund{note}",
-        thd_db_re_fund(avg_thd)
+        "  Average THD:      {avg_thd:.4} %    {} dB re total{note}",
+        thd_db_re_total(avg_thd)
     );
 
     if have_cal {
@@ -193,6 +198,7 @@ pub fn timestamp() -> String {
 
 pub fn print_freq_header(have_cal: bool) {
     println!("\n{}", "\u{2500}".repeat(78));
+    println!("  THD, THD+N: residual / total output  (IEC 60268-3 §15.12.3.2)");
     if have_cal {
         println!(
             "  {:>8}  {:>12}  {:>8}  {:>12}  {:>8}  {:>8}  {:>9}  {:>9}",
@@ -277,19 +283,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thd_db_re_fund_matches_formula() {
-        // 100% THD is the fundamental itself -> 0 dB re fund.
-        assert_eq!(thd_db_re_fund(100.0), "0.0");
+    fn thd_db_re_total_matches_formula() {
+        // 100% THD is equal to the total output -> 0 dB re total.
+        assert_eq!(thd_db_re_total(100.0), "0.0");
         // 1% -> 20*log10(0.01) = -40 dB.
-        assert_eq!(thd_db_re_fund(1.0), "-40.0");
-        // Spec example: 0.0042% -> -87.5 dB re fund (1 decimal).
-        assert_eq!(thd_db_re_fund(0.0042), "-87.5");
+        assert_eq!(thd_db_re_total(1.0), "-40.0");
+        // Spec example: 0.0042% -> -87.5 dB re total (1 decimal).
+        assert_eq!(thd_db_re_total(0.0042), "-87.5");
     }
 
     #[test]
-    fn thd_db_re_fund_dash_for_non_positive() {
+    fn thd_db_re_total_dash_for_non_positive() {
         // dB form is undefined for a non-positive percent (no valid point).
-        assert_eq!(thd_db_re_fund(0.0), "-");
-        assert_eq!(thd_db_re_fund(-1.0), "-");
+        assert_eq!(thd_db_re_total(0.0), "-");
+        assert_eq!(thd_db_re_total(-1.0), "-");
     }
 }

@@ -6,14 +6,32 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use crate::audio::make_engine;
-use crate::handlers::{busy_guard, read_dmm_vrms, send_pub, spawn_worker};
+use crate::handlers::{busy_guard, make_engine_for_state, read_dmm_vrms, send_pub, spawn_worker};
 use crate::server::ServerState;
+
+fn output_result_frame(
+    channel: usize,
+    port: &str,
+    vrms: Option<f64>,
+    analog: bool,
+    backend: &str,
+) -> Value {
+    json!({
+        "cmd": "probe", "phase": "output",
+        "channel": channel, "port": port,
+        "vrms": vrms, "analog": analog,
+        "backend": backend,
+    })
+}
 
 pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
     busy_guard!(state, "probe");
 
-    let fake = state.fake_audio;
+    let mut eng = match make_engine_for_state(state) {
+        Ok(eng) => eng,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let backend = eng.backend_name();
     let pub_tx = state.pub_tx.clone();
     let cfg = state.cfg.lock().unwrap().clone();
     let dmm_host = cfg.dmm_host.clone();
@@ -31,7 +49,6 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
         let freq = 1000.0;
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
 
-        let mut eng = make_engine(fake);
         if !eng.supports_routing() {
             send_pub(
                 &pub_tx,
@@ -71,6 +88,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                 "data",
                 &json!({
                     "cmd": "probe", "phase": "output_start", "n_ports": n_play
+                    , "backend": backend
                 }),
             );
             for (i, port) in playback.iter().enumerate() {
@@ -88,11 +106,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                 send_pub(
                     &pub_tx,
                     "data",
-                    &json!({
-                        "cmd": "probe", "phase": "output",
-                        "channel": i, "port": port,
-                        "vrms": vrms, "analog": is_analog,
-                    }),
+                    &output_result_frame(i, port, vrms, is_analog, backend),
                 );
             }
         } else {
@@ -102,6 +116,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                 &json!({
                     "cmd": "probe", "phase": "output_skip",
                     "message": "no DMM configured — skipping output scan",
+                    "backend": backend,
                 }),
             );
             analog_channels = (0..n_play).collect();
@@ -115,6 +130,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                 &json!({
                     "cmd": "probe", "phase": "loopback_start",
                     "n_outputs": analog_channels.len(), "n_inputs": n_cap,
+                    "backend": backend,
                 }),
             );
         }
@@ -155,6 +171,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
                             "out_ch": out_idx, "out_port": &playback[out_idx],
                             "in_ch": j, "in_port": cap_port,
                             "level_dbfs": (level_dbfs * 10.0).round() / 10.0,
+                            "backend": backend,
                         }),
                     );
                 }
@@ -170,6 +187,7 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
             &json!({
                 "cmd": "probe",
                 "analog_channels": analog_channels,
+                "backend": backend,
             }),
         );
     });
@@ -178,5 +196,17 @@ pub fn probe(state: &ServerState, _cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("probe".to_string(), worker);
     }
-    json!({ "ok": true, "n_playback": n_play, "n_capture": n_cap })
+    json!({ "ok": true, "n_playback": n_play, "n_capture": n_cap, "backend": backend })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_result_frame;
+
+    #[test]
+    fn output_result_identifies_live_backend() {
+        let frame = output_result_frame(2, "system:playback_3", Some(0.125), true, "fake");
+
+        assert_eq!(frame["backend"], "fake");
+    }
 }

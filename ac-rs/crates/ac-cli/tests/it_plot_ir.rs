@@ -182,6 +182,49 @@ fn printed_arrival_samples(stdout: &str) -> i64 {
         .unwrap_or_else(|_| panic!("arrival value not an integer: {field:?}"))
 }
 
+/// #424: backend provenance must survive in the archived files themselves,
+/// independently of the transient ZMQ envelope that announced each report.
+#[test]
+fn persisted_plot_artifacts_identify_the_live_backend() {
+    let rig = Rig::start();
+
+    let _ = rig.run_ac(&["plot", "200hz", "400hz", "-20dbfs", "1ppd", "3bpo"]);
+    let _ = rig.run_ac(&[
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+    ]);
+
+    let dir = rig.report_dir();
+    for suffix in ["-plot.json", "-plot-bands.json", "-plot_ir.json"] {
+        let path = fs::read_dir(&dir)
+            .expect("read report dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.to_string_lossy().ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix} in {}", dir.display()));
+        let report: ac_core::measurement::report::MeasurementReport = serde_json::from_str(
+            &fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("decode {}: {e}", path.display()));
+        assert_eq!(
+            report.backend.as_deref(),
+            Some("fake"),
+            "{}",
+            path.display()
+        );
+    }
+
+    let csv_path = fs::read_dir(&dir)
+        .expect("read report dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with("-plot_ir.csv"))
+        .unwrap_or_else(|| panic!("missing plot_ir CSV in {}", dir.display()));
+    let csv = fs::read_to_string(&csv_path).expect("read plot_ir CSV");
+    assert!(
+        csv.starts_with("# backend: fake\n"),
+        "{} lacks fake backend provenance:\n{csv}",
+        csv_path.display()
+    );
+}
+
 /// The whole of #283 in one run: `ac plot ir` must print its result and
 /// persist it. Before the fix the command printed nothing past "Running
 /// IR measurement..." and wrote no report at all.

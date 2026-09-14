@@ -47,6 +47,12 @@ Every CTRL reply contains at minimum:
 
 On failure: `"ok": false, "error": "<human-readable string>"`.
 
+Commands that use calibration refuse synchronously when `cal.json` exists
+but cannot be read or parsed. No worker starts and no measurement frames are
+published. The error string names the store and cause and confirms that the
+existing file was preserved; transfer refusals also state that the failure
+applies to all requested pairs.
+
 ---
 
 ## DATA frame envelope
@@ -76,6 +82,11 @@ stop consuming frames when it receives either of these:
 
 Every frame carries a tier-prefixed `"type"`:
 
+Every measurement DATA frame also carries `"backend": "jack" | "cpal" |
+"fake"`, taken from the live engine that produced it. This is provenance,
+not a copy of config; an unmet real-backend requirement produces no
+measurement frame.
+
 | Tier  | `type`                                      |
 |-------|---------------------------------------------|
 | 1     | `measurement/frequency_response/point`      |
@@ -100,21 +111,22 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (`schema_version: 1`); readers that
-see an unknown version must refuse to decode. Example payload:
+configured. Schema is versioned (currently `schema_version: 6`); the
+capture backend is archived at report top level. Example payload:
 
 ```json
 {
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 1,
+    "schema_version": 6,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
+    "backend":        "jack",
     "method": {
       "kind":     "stepped_sine",
       "n_points": 3,
-      "standard": { "standard": "IEC 60268-3:2018", "clause": "§15.12.3 Total harmonic distortion under standard measuring conditions", "verified": true }
+      "standard": { "standard": "IEC 60268-3:2018", "clause": "§15.12.3.2 Total harmonic distortion under standard measuring conditions", "verified": true }
     },
     "stimulus":    { "sample_rate_hz": 48000, "f_start_hz": 100, "f_stop_hz": 10000, "level_dbfs": -20, "n_points": 3 },
     "integration": { "duration_s": 1.0, "window": "hann" },
@@ -127,6 +139,10 @@ see an unknown version must refuse to decode. Example payload:
   }
 }
 ```
+
+In the inline frequency-response point above, `thd_pct` and `thdn_pct` are
+percent ratios referenced to total output, as in the live frame definitions
+below.
 
 `method.kind` values currently defined:
 
@@ -192,8 +208,8 @@ Emitted by `plot` and `plot_level` for each measured frequency or level point.
   "n":                <int>,          // 0-based sequence number
   "drive_db":         <float>,        // stimulus level in dBFS
   "freq_hz":          <float>,        // present for plot_level; absent for plot (freq is the sweep axis)
-  "thd_pct":          <float>,
-  "thdn_pct":         <float>,
+  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thdn_pct":         <float>,        // notched residual / total output, percent
   "fundamental_hz":   <float>,
   "fundamental_dbfs": <float>,
   "linear_rms":       <float>,        // 0–1 dBFS scale
@@ -238,8 +254,8 @@ Emitted continuously by `monitor_spectrum` when `analysis_mode == "fft"`
   "freqs":            [<float>, ...], // downsampled, DC removed
   "spectrum":         [<float>, ...], // linear amplitude, one-sided, [0, 1] for bounded input — NOT dB
   "fundamental_dbfs": <float>,
-  "thd_pct":          <float>,
-  "thdn_pct":         <float>,
+  "thd_pct":          <float>,        // harmonic residual / total output, percent
+  "thdn_pct":         <float>,        // notched residual / total output, percent
   "in_dbu":           <float> | null, // analog-domain level when voltage-cal'd
   "spl_offset_db":    <float> | null, // additive dBFS → dB SPL offset (calibration §)
   "mic_correction":   "on" | "off" | "none",   // mic frequency-response state
@@ -491,7 +507,10 @@ Returns server health and current state.
   "config_path":    "<path>",         // config.json path in use
   "pid":            <int>,
   "started_at":     "<RFC3339>",      // UTC, second precision — process start
-  "spawn_mode":     "auto" | "manual" // "auto" = started via ac-cli's spawn_daemon()
+  "spawn_mode":     "auto" | "manual", // "auto" = started via ac-cli's spawn_daemon()
+  "backend_required": "jack" | "cpal" | "fake",
+  "backend_available": <bool>,
+  "backend":         "jack" | "cpal" | "fake" | null
 }
 ```
 
@@ -499,6 +518,12 @@ Returns server health and current state.
 this daemon apart from another one squatting the same hardcoded 5556/5557
 ports under a different `HOME` — e.g. a leftover auto-spawn from an isolated
 test/rig run. Additive fields; a client that doesn't read them is unaffected.
+
+`backend_required` is the canonical configured requirement (or the platform's
+real default; `--fake-audio` reports `fake`). `backend_available` reports
+whether that requirement can be met without opening or starting an engine.
+`backend` is null when unavailable and otherwise names the engine a request
+would construct.
 
 ---
 
@@ -838,11 +863,24 @@ Reads or updates persistent hardware config (`~/.config/ac/config.json`).
     "dbu_ref_vrms":      <float>,   // optional
     "dmm_host":          "<host>" | null,  // optional
     "server_enabled":    <bool>,    // optional
-    "backend":           "jack" | "sounddevice" | null,  // optional
+    "backend":           "jack" | "cpal" | "fake" | null,  // optional
     "snapshot_ring_s":   <float>,   // optional, > 0 — see `snapshot`
     "snapshot_spool_dir":"<path>" | null  // optional — see `snapshot`
   }
 }
+```
+
+`backend` is a requirement, not a preference. `null` selects the platform's
+real default and never falls back to fake. `fake` is the persistent explicit
+opt-in used for deliberate synthetic operation. Legacy `sounddevice` is
+accepted as an alias for `cpal` and is persisted canonically as `cpal` on a
+successful setup write. Other values are rejected.
+
+When a required real backend is unavailable, audio commands fail before a
+worker starts:
+
+```json
+{ "ok": false, "error": "audio backend unavailable — required jack; measurement not started" }
 ```
 
 When `output_channel`, `input_channel`, `reference_channel`, or
@@ -1108,7 +1146,7 @@ also stated in the report `notes`.
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "report": { "schema_version": 5, "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 6, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }

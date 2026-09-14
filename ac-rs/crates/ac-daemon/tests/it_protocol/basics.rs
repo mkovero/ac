@@ -13,6 +13,9 @@ fn status_replies_ok() {
     assert_eq!(r["ok"], json!(true));
     assert_eq!(r["busy"], json!(false));
     assert_eq!(r["listen_mode"], json!("local"));
+    assert_eq!(r["backend_required"], json!("fake"));
+    assert_eq!(r["backend_available"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
 }
 
 /// #385: `status` carries the identity fields a client needs to tell this
@@ -24,6 +27,7 @@ fn status_reports_daemon_identity() {
     let c = Client::new(&d);
     let r = c.call(json!({"cmd":"status"}));
     assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
     assert_eq!(
         r["home"],
         json!(d.home.display().to_string()),
@@ -245,7 +249,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(5));
+                    assert_eq!(v["report"]["schema_version"], json!(6));
                     got_report = true;
                 }
             }

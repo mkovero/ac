@@ -63,7 +63,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(5));
+                assert_eq!(v["report"]["schema_version"], json!(6));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");

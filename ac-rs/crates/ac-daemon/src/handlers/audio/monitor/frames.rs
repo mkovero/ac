@@ -41,6 +41,7 @@ pub(super) fn emit_loudness_frame(
         "mic_correction":   mic_correction,
         "timestamp":        ts_ns,
         "xruns":            xruns,
+        "backend":          ctx.backend,
     });
     send_pub(ctx.pub_tx, "data", &frame);
 }
@@ -75,6 +76,7 @@ pub(super) fn emit_scope_frame(ch: &ChannelState, ctx: &TickCtx, samples: &[f32]
         "samples":    tail,
         "timestamp":  ctx.tick_ts_ns,
         "xruns":      xruns,
+        "backend":    ctx.backend,
     });
     send_pub(ctx.pub_tx, "data", &frame);
 }
@@ -96,6 +98,7 @@ pub(super) struct TickCtx<'a> {
     pub(super) pub_tx: &'a crossbeam_channel::Sender<Vec<u8>>,
     pub(super) n_channels: u32,
     pub(super) sr: u32,
+    pub(super) backend: &'static str,
     /// Per-tick monotonic counter; identical for every channel of a tick
     /// so the UI can pair L and R scope frames.
     pub(super) frame_idx: u64,
@@ -140,6 +143,7 @@ pub(super) fn emit_ring_frames(
         "mic_correction": mc_tag,
         "timestamp":      ts_ns,
         "xruns":          xruns,
+        "backend":        ctx.backend,
     });
     if let Some(obj) = frame.as_object_mut() {
         for (k, v) in extra {
