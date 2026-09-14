@@ -94,8 +94,12 @@ if [[ -n $DEST ]]; then
     fi
 fi
 
-xr="$(journalctl --since '-10min' --no-pager 2>/dev/null | grep -ciE 'jackd.*xrun')"
-[[ $xr == 0 ]] && row PASS "jackd xrun log lines, last 10 min" 0 || row FAIL "jackd xrun log lines, last 10 min" "$xr"
+if jlog="$(journalctl --since '-10min' --no-pager 2>&1)"; then
+    xr="$(grep -ciE 'jackd.*xrun' <<<"$jlog")"
+    [[ $xr == 0 ]] && row PASS "jackd xrun log lines, last 10 min" 0 || row FAIL "jackd xrun log lines, last 10 min" "$xr"
+else
+    row FAIL "jackd xrun log lines, last 10 min" "journalctl unreadable, not 0: $(head -c 120 <<<"$jlog")"
+fi
 
 echo
 [[ $fails == 0 ]] && echo "preflight: all checks passed" || echo "preflight: $fails FAIL"

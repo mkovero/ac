@@ -40,7 +40,11 @@ t0=\$(date +%s)
 script -qc "timeout \$SECS ac monitor 0-\$((NCAP - 1)) --tui" "\$ts" >/dev/null 2>&1
 ac stop >/dev/null 2>&1
 wait
-log=\$(journalctl --since "@\$t0" --no-pager 2>/dev/null | grep -ciE 'jackd.*xrun')
+if jlog=\$(journalctl --since "@\$t0" --no-pager 2>&1); then
+    log=\$(grep -ciE 'jackd.*xrun' <<<"\$jlog")
+else
+    log=unreadable
+fi
 daemon=\$(tr -d '\033' <"\$ts" | grep -o 'xruns=[0-9]*' | tail -1)
 cat "\$ts.mid"
 echo "- JACK: \$(jack_samplerate) Hz, \$(jack_bufsize) frames, jackd: \$(pgrep -ax jackd | cut -d' ' -f2-)"
