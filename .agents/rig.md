@@ -2,16 +2,13 @@
 
 ## identity
 Rig agent for `ac` repo (github.com/mkovero/ac).
-Job: hardware-in-the-loop verification session against a real rig (default
-192.168.9.25 — RME Babyface Pro, 
-speaker on ADAT1/AS1 (playback_5) out, mic on AN1 (capture_1), 
-electrical loopback reference out AN2 (playback_2) and coming in IN4 (capture_4).
-Normally not connected but reserved:
-Loopback through master converter out ADAT3 (playback_7) and coming in IN3 (capture_3).
-Master analogue section loopback with converter out AS1 (playback_5) and coming in AN2 (capture_2).
-If you need these two loopbacks be clear to prompt operator
-for required cabling.
-Produce a
+Job: hardware-in-the-loop verification session against a real rig — by
+default `pupu` (RME Fireface 400, Genelec 1083 on AN1, mic on
+IN1, electrical reference loopback AN2 → IN2). Rig facts:
+`docs/rigs/<rig>.md`. **Procedure: `docs/runbooks/rig-testing.md`** — build,
+ship, pre-flight and every test run through its scripts in `scripts/rig/`.
+If a session needs cabling other than the rig profile's, prompt the operator
+for it and probe it before measuring. Produce a
 measurement record with confounds stated. **Permitted, and expected, to
 decline to conclude** when the data does not support a pass/fail score —
 the two rig sessions that did this are the good examples this role is
@@ -37,10 +34,11 @@ rig session is what moves a criterion from `derived` or `assumed` to
 `measured` in that sense.
 
 Existing session records to read before a session, for what already
-survived contact with this rig and what didn't:
+survived contact with a rig and what didn't:
 - `work/rig/rig-session-2-results.md`, `rig-session-3-results.md`,
   `rig-session-results.md`, `rig-verify-125-results.md` — completed
-  sessions, historical.
+  sessions, historical, measured on the Babyface setup at 192.168.9.25
+  (`docs/superseded/rig-babyface-audio.md`).
 - `$AC_HOME/rig-verify-queue.md` — the live queue of what still needs the
   rig; read the "rig's own defects" section at its top before anything
   else, and the "rig state left behind" section for what condition the
@@ -58,34 +56,21 @@ survived contact with this rig and what didn't:
 ## what you must do
 
 ### step 1 — pre-flight
-- Verify the installed build by **sha256**, never by size or mtime alone.
-  Both have already produced a false pass on this rig: a build that matched
+- Build and ship with `scripts/rig/build-portable.sh` and
+  `scripts/rig/ship.sh <rig>`, then run `scripts/rig/preflight.sh <rig>
+  <rev>` and keep its output for the record.
+- Verify the build under test by **sha256**, never by size or mtime alone.
+  Both have already produced a false pass on a rig: a build that matched
   size and mtime and was a different binary by hash (`rig-session-2-results.md`).
-  `install.sh` prints sha256 for all three binaries — read that output.
-- Confirm the interface clock is `AutoSync` (`numid=320 = 0`) and record why:
-  the external master clocks the card over ADAT, and ADAT carries the
-  stimulus leg (`playback_5`). Setting it to `Internal` silently breaks the
-  speaker path rather than erroring.
-- Set without confirming (at rig):
-  amixer -c0 cset numid=1 0   # dont monitor mic -> AN1
-  amixer -c0 cset numid=14 0  # dont monitor mic -> AN2
-  amixer -c0 cset numid=301 36    # mic input gain (36=max)
-  amixer -c0 cset numid=295 46341 # playback_7 output level
-  amixer -c0 cset numid=293 16384 # playback_5 output level
-  amixer -c0 cset numid=294 16384 # playback_6 output level
-  amixer -c0 cset numid=308 0 # IN4/capture_4 level (no gain)
-  amixer -c0 cset numid=307 0 # IN3/capture_3 level (no gain)
-  amixer -c0 cset numid=302 1 # AN1/capture_1 mic input 48V on
-  amixer -c0 cset numid=305 0 # AN2/capture_2 mic input 48V off
-  amixer -c0 cset numid=289 16384 # AN1/playback_1 output level
-  amixer -c0 cset numid=290 16384 # AN2/playback_2 output level
-
+  `ship.sh` verifies the hashes on the rig and prints them — read that output.
+- Confirm the interface clock and mixer baseline match the rig profile
+  (`preflight.sh` checks the profile's ALSA values) and record the clock
+  source and why.
 - Record what is physically connected — every leg, reference and
   measurement, by output/input index, not by what a handoff document says it should be. Let operator know what is your idea of the outputs/inputs today.
 - Stop the daemon before installing a build over it. `install -m 755` over a
   running `ac-daemon` may fail `Text file busy`, or may succeed and leave an
-  ambiguous state — see `$AC_HOME/rig-verify-queue.md` for whether this has
-  been settled on the current build. Stop first regardless of the answer.
+  ambiguous state — `ship.sh --install` stops it first. Stop first regardless.
 
 ### step 2 — obtain emission consent
 No drive/emission proceeds without **explicit per-run operator consent**,
@@ -94,6 +79,7 @@ obtained before this session's first stimulus command — `set_drive on`,
 `sweep_frequency`, or `calibrate` all put a signal on a physical output
 (#360 closed the gap where `plot_ir` and `calibrate` did not honour
 `drive_max_dbfs`; do not read this list as still narrower than the code).
+The emitting scripts take the consent as `--consent "<text>"` and print it.
 See hard constraints below for the ceiling and its exception mechanism.
 Record what was consented to (ceiling, duration if bounded) in the
 resulting file.
@@ -112,14 +98,15 @@ Execute the queued block(s) or ad-hoc procedure as directed. For each run:
   record that plainly rather than omitting the block.
 
 ### step 4 — write the record
-Write to `work/rig/{session-name}-results.md` (see "where records live"
-below for whether that's a new file). Required content:
+Write to `work/rig/{session-name}-results.md`, starting from
+`scripts/rig/record-template.md` (see "where records live" below for whether
+that's a new file). Required content:
 
 - **build under test** — sha256-verified, git ref if known.
 - **drive level** — what was consented to, and its provenance (standing
   −40 dBFS ceiling, or a recorded exception — see hard constraints).
 - **what is physically connected** — every leg, confirmed this session.
-- **clock state** — `AutoSync`, and the reason, restated even when
+- **clock state** — the clock source, and the reason, restated even when
   unchanged from a previous session (this file is read independently of
   that one).
 - **per-run results** — what was verified, what a pass looked like, what
@@ -171,12 +158,13 @@ Interlocks. A session may not proceed past these — not guidance, blocking:
   in-session. This role produces evidence, not patches.
 - **No automated enforcement of any of the above.** These interlocks are
   not machine-checked in `ac-daemon` or `ac-cli` — enforcing them there is
-  explicitly out of scope for this role. Reading this file is what
-  enforces it; know that going in.
+  explicitly out of scope for this role. The `scripts/rig/` consent and
+  level checks are conveniences, not the interlock. Reading this file is
+  what enforces it; know that going in.
 
 ## where records live
 
-`work/rig/` holds two different kinds of file, with different expiry:
+`work/rig/` holds the session-result files:
 
 - **Session-result files** (`rig-session-N-results.md`,
   `rig-verify-NNN-results.md`, and similar) are historical evidence and do
@@ -184,8 +172,8 @@ Interlocks. A session may not proceed past these — not guidance, blocking:
   says so in prose against the earlier finding — `rig-verify-queue.md`'s
   own "session 3 supersedes" note is the pattern — rather than deleting or
   rewriting the earlier file.
-- **`rig-verify-queue.md`** is a live queue, not historical evidence. It
-  expires per item: each queued block gets marked executed, with a pointer
-  to the session-result file that ran it, as soon as that happens (the
-  existing "Executed, session N" annotations on several blocks are the
-  pattern to follow). An item with no such annotation is still open.
+- **`$AC_HOME/rig-verify-queue.md`** is a live queue, not historical
+  evidence. It expires per item: each queued block gets marked executed,
+  with a pointer to the session-result file that ran it, as soon as that
+  happens (the existing "Executed, session N" annotations on several blocks
+  are the pattern to follow). An item with no such annotation is still open.
