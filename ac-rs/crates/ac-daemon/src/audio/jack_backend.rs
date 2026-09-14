@@ -654,12 +654,14 @@ mod tests {
 
     #[test]
     fn ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_supported_rate() {
-        // Mirrors `handlers::MAX_STIMULUS_DURATION_S` (60.0) rather than
-        // importing it: that constant lives in the (non-feature-gated)
-        // handlers layer, while this ring is a `jack-audio`-only backend
-        // fact. Duplicating keeps this test able to catch a future change
-        // to either number without coupling audio's layering to handlers'.
-        const MAX_STIMULUS_DURATION_S: f64 = 60.0;
+        // Import the real policy value rather than duplicating it: a
+        // test-local literal stays green if `handlers::MAX_STIMULUS_DURATION_S`
+        // changes without a matching `RING_CAPACITY` update, which is
+        // exactly the coupled-constant failure mode this test exists to
+        // catch (codex-qa, PR #437 at a5b7d761). `handlers` is not
+        // feature-gated, so it's reachable from this `jack-audio`-only
+        // test.
+        use crate::handlers::MAX_STIMULUS_DURATION_S;
         // Both `duration` and `tail_s` are validated against the same
         // per-field ceiling independently (`plot.rs::bounded_duration`), so
         // a request can combine up to twice that before
