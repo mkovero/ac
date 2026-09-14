@@ -66,11 +66,13 @@ pub(super) fn period_size_override() -> Option<u32> {
 /// go red under `--fake-audio`.
 ///
 /// `AC_FAKE_XRUNS_OVERRIDE`: comma-separated delta list, one value
-/// consumed per `play_and_capture` call in this process (0-based — same
-/// call indexing as [`TAU_DELAY_CALL_COUNT`] above, so slot *N* of this
-/// list and slot *N* of the delay override line up with the same
-/// `measure_tau_twice` lifecycle). A call past the end of the list adds 0.
-/// Unset ⇒ every call adds 0, byte-identical to today's hardcoded-0 count.
+/// consumed per `play_and_capture` call in this process (0-based: the
+/// first call gets the first value); a call past the end of the list adds
+/// 0. Unset ⇒ every call adds 0, byte-identical to today's hardcoded-0
+/// count. Deliberately scoped to `play_and_capture` alone — sharing this
+/// counter with `capture_block` (below) would shift call indices for
+/// every unrelated calibrate/monitor path that also captures via
+/// `capture_block`, breaking the fixed indexing this doc promises.
 static XRUNS_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn xruns_override_list() -> &'static [u32] {
@@ -88,4 +90,42 @@ fn xruns_override_list() -> &'static [u32] {
 pub(super) fn next_xruns_delta() -> u32 {
     let call_idx = XRUNS_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     xruns_override_list().get(call_idx).copied().unwrap_or(0)
+}
+
+/// Opt-in, fake-only test hook (#428): lets a test drive a `plot`/
+/// `plot_level` sweep's `capture_block` calls across a nonzero xrun count,
+/// independent of [`next_xruns_delta`] above. Without this, a sweep that
+/// only calls `capture_block` (`plot`, `plot_level` — never
+/// `play_and_capture`) has no way to exercise a nonzero session xrun
+/// delta under `--fake-audio`, and the #428 fix (report the delta since
+/// baseline, not a per-point cumulative sum) has no reproduction outside
+/// unit tests.
+///
+/// `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE`: comma-separated delta list, one
+/// value consumed per `capture_block` call in this process (0-based). A
+/// `plot`/`plot_level` point issues two calls — a discarded 0.1 s warm-up,
+/// then the real capture — so both consume a slot. A call past the end of
+/// the list adds 0. Unset ⇒ every call adds 0, unchanged from before #428.
+static CAPTURE_BLOCK_XRUNS_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn capture_block_xruns_override_list() -> &'static [u32] {
+    static LIST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE")
+            .ok()
+            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Next `capture_block` xrun delta, consuming one slot of the override
+/// list (see [`CAPTURE_BLOCK_XRUNS_CALL_COUNT`] doc above).
+pub(super) fn next_capture_block_xruns_delta() -> u32 {
+    let call_idx =
+        CAPTURE_BLOCK_XRUNS_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    capture_block_xruns_override_list()
+        .get(call_idx)
+        .copied()
+        .unwrap_or(0)
 }

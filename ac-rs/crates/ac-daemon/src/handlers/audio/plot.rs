@@ -68,6 +68,12 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let backend = eng.backend_name();
+    // Baseline taken right at engine creation (#428): the terminal xruns
+    // count is the wrapping-safe delta against this snapshot, not a sum of
+    // repeated cumulative reads — `AudioEngine::xruns()` already counts
+    // since start, so summing it once per point double- (then triple-,
+    // quadruple-...) counts every xrun that happened before the last point.
+    let xruns_start = eng.xruns();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
@@ -101,7 +107,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let sr = eng.sample_rate();
 
         let mut n = 0usize;
-        let mut xruns = 0u32;
         let mut points: Vec<FrequencyResponsePoint> = Vec::with_capacity(freqs.len());
         let mut concat_capture: Vec<f32> = Vec::new();
         for freq in &freqs {
@@ -122,7 +127,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     return;
                 }
             };
-            xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, *freq, 10) {
                 Ok(mut r) => {
@@ -170,7 +174,27 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
-                Err(e) => eprintln!("plot: analyze error at {freq}Hz: {e}"),
+                Err(e) => {
+                    // Atomic failure exit (#428): an analyzer failure must
+                    // not archive the successful prefix as a complete sweep.
+                    // Stop the engine and publish the terminal error before
+                    // any of `frequency_response/complete`, `measurement/
+                    // report`, the report file, or `done` — none of those
+                    // run past this `return`.
+                    eng.set_silence();
+                    eng.stop();
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({
+                            "cmd": "plot",
+                            "message": format!("{e}"),
+                            "requested_points": freqs.len(),
+                            "completed_points": n,
+                        }),
+                    );
+                    return;
+                }
             }
             if bpo.is_some() {
                 concat_capture.extend_from_slice(&samples);
@@ -178,6 +202,11 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
+
+        // Session xrun delta (#428): a single wrapping-safe subtraction
+        // against the baseline taken at engine creation, not a sum of
+        // repeated cumulative reads.
+        let xruns = eng.xruns().wrapping_sub(xruns_start);
 
         let timestamp = ac_core::shared::time::now_utc_iso8601();
         // Snapshot the processing-chain state at report-build time so a
@@ -346,6 +375,9 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let backend = eng.backend_name();
+    // Baseline taken right at engine creation (#428) — see `plot`'s
+    // identical comment.
+    let xruns_start = eng.xruns();
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
@@ -366,7 +398,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let sr = eng.sample_rate();
 
         let mut n = 0usize;
-        let mut xruns = 0u32;
         for &level_req in &levels {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -389,7 +420,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     return;
                 }
             };
-            xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
                 Ok(mut r) => {
@@ -423,11 +453,29 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
-                Err(e) => eprintln!("plot_level: analyze error at {level_dbfs}dBFS: {e}"),
+                Err(e) => {
+                    // Atomic failure exit (#428) — see `plot`'s identical
+                    // comment: no `done` past this point for this sweep.
+                    eng.set_silence();
+                    eng.stop();
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({
+                            "cmd": "plot_level",
+                            "message": format!("{e}"),
+                            "requested_points": levels.len(),
+                            "completed_points": n,
+                        }),
+                    );
+                    return;
+                }
             }
         }
         eng.set_silence();
         eng.stop();
+        // Session xrun delta (#428) — see `plot`'s identical comment.
+        let xruns = eng.xruns().wrapping_sub(xruns_start);
         send_pub(
             &pub_tx,
             "done",
