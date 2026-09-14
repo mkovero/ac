@@ -83,7 +83,10 @@ emitting scripts refuse to run when it is not where the profile says); the
 interface's ALSA baseline; the ac config's ceiling and channel map; running daemons; installed
 hashes; the staged build's hashes and daemon link; jackd xruns in the last
 10 minutes. Exit 1 on any FAIL — fix it, or record why the session proceeds.
-It does **not** check wiring; that needs emission (step 6).
+It does **not** check wiring; that needs emission (step 6). Its ALSA rows
+read the driver's cached control values, not the interface: on pupu a JACK
+restart left the FF400 at driver defaults while every ALSA row still
+passed. After a restart or power cycle, confirm levels by probe (step 6).
 
 After a rig power cycle expect the interface baseline to FAIL — the restore
 commands are in the rig profile.
@@ -107,9 +110,10 @@ it into its output, and refuses a `--level` above the rig profile's
 `RIG_SPEAKER_CEILING_DBFS` (pupu: −50 dBFS; a −40 dBFS sweep through its
 speaker is too loud). The speaker ceiling is script-only: the daemon's
 `drive_max_dbfs` cannot tell outputs apart. These checks are the scripts'
-own; the daemon's `drive_max_dbfs` clamp still applies to a daemon started
-from the rig's config (`plot_ir` and friends clamp since #360), but not to one started under
-an isolated `HOME` — see step 7c.
+own; the daemon's `drive_max_dbfs` clamp also applies to a daemon started
+from the rig's config (`plot_ir` and friends clamp since #360), and to
+`it_loopback_ir`'s own isolated-`HOME` daemon on the real-port route, which
+writes `drive_max_dbfs` at −40 dBFS since #442 — see step 7c.
 
 ### 6. Wiring probe — EMITS, after any cable work
 
@@ -159,9 +163,12 @@ chain, sample rate, window, peak index and magnitude, floor, SNR and the
 peak's offset from window centre — the chain's round trip. It is printed
 before the assertions, so a failing run still leaves its numbers.
 
-The test spawns its daemon under an isolated `HOME` whose config sets no
-`drive_max_dbfs`, so that daemon's default ceiling (−10 dBFS) is all it
-enforces: the script's `--level` check holds the rig ceiling. The 60 ms
+The test spawns its daemon under an isolated `HOME`. On the real-port route
+it writes `drive_max_dbfs: -40.0` into that config itself (#442), so the
+daemon clamps any request above the standing ceiling and the record prints
+`requested → applied`. The script's `--level` check is a convenience in front
+of that clamp, and the only limit for the speaker route's lower −50 dBFS
+ceiling, which the daemon cannot tell apart from the loopback. The 60 ms
 round-trip bound was derived on a Babyface chain (#277); check a new chain's
 measured offset against it before reading a red result as a defect. The
 speaker route can fail the electrical-chain assertions for acoustic reasons —

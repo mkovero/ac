@@ -10,9 +10,11 @@
 #   assertions were derived for an electrical chain; an acoustic run can fail
 #   them for acoustic reasons, so read the record block, not the verdict.
 #
-# The test spawns its own daemon under an isolated HOME whose config sets no
-# drive_max_dbfs, so the daemon's default ceiling applies there, not the
-# rig's. This script's --level check is what holds the rig ceiling.
+# The test spawns its own daemon under an isolated HOME. On the real-port
+# route it writes drive_max_dbfs -40 into that config (#442), so the daemon
+# clamps above the standing ceiling. This script's --level check is a
+# convenience in front of that clamp, and the only enforcement of the lower
+# speaker ceiling (RIG_SPEAKER_CEILING_DBFS), which the daemon cannot see.
 #
 # Procedure: docs/runbooks/rig-testing.md.
 

@@ -57,15 +57,27 @@ JACK port names and `ac` indices here assume the analog-first order — see
   volume; identity stream routing; every analog/S/PDIF/ADAT source gain 0 (no
   hardware monitor path); metering on.
 - **A power cycle resets the FF400 to driver defaults** (line out *High*,
-  line in *Low*, phantom off, gains 0); JACK restarts and rate changes do
-  not. Restore — gains before phantom:
+  line in *Low*, phantom off, gains 0). **So did a `jack-ac.service` restart**
+  on 2026-09-15: a −60 dBFS tone on output 1 read IN2 −51.5 dBFS (baseline
+  −57.5) and the mic channel went to a dead −106 dBFS floor, while
+  `amixer cget` still returned the baseline values, so preflight's ALSA rows
+  passed. One observation: treat every JACK restart as a possible reset
+  until shown otherwise.
+- **Restore with toggle writes.** Writing a value the driver already caches
+  does not reach the device, so set a different value first, then the
+  baseline — gains before phantom:
 
   ```sh
   C=Fireface400
+  amixer -c $C cset numid=93 1; amixer -c $C cset numid=94 1; amixer -c $C cset numid=89 1
   amixer -c $C cset numid=93 2; amixer -c $C cset numid=94 2; amixer -c $C cset numid=89 2
-  amixer -c $C cset numid=81 0,0; amixer -c $C cset numid=90 on,off; sleep 2
+  amixer -c $C cset numid=81 0,0; amixer -c $C cset numid=90 off,off; sleep 1
+  amixer -c $C cset numid=90 on,off; sleep 2
   amixer -c $C cset numid=81 20,0; amixer -c $C cset numid=102 on
   ```
+
+  Verify by emission, not by readback: `probe-outputs.sh pupu --level -60
+  --outputs 1` must read IN2 ≈ −57.5 dBFS and IN1 room noise (≈ −74 dBFS rms).
 
   Do **not** use `ff400-card1.sh` / `scripts/ff400.sh`: it forces phantom
   off, and its `jack_alias` table is ADAT-first, which is wrong for this
