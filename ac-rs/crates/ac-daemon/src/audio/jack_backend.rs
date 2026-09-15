@@ -21,27 +21,34 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::rings::CaptureRings;
 use super::AudioEngine;
+use crate::handlers::MAX_STIMULUS_DURATION_S;
 use ac_core::shared::generator::{generate_pink_noise, generate_sine_1s};
 
-/// 120 s at 192 kHz — sized to the `plot_ir` protocol budget
-/// (`handlers::MAX_STIMULUS_DURATION_S` = 60 s applies independently to
+/// Capture-ring capacity, in samples, needed to hold the full `plot_ir`
+/// budget (`handlers::MAX_STIMULUS_DURATION_S` applies independently to
 /// both `duration` and `tail_s`, so `play_and_capture_cancellable` can be
-/// asked for up to 120 s combined) at the project's highest supported
-/// sample rate. Fixed at construction so neither thread ever reallocates.
+/// asked for up to twice that combined) at a given sample rate.
 ///
-/// Before #437's rig verification this was `16 * 192_000` — "comfortably
-/// larger than any single capture request" was true only because nothing
-/// yet validated a request up to the 60 s budget; a rig run at 96 kHz
-/// (`rig-2026-09-14-pr437-plot-budget`, finding 1) showed a within-budget
-/// `plot_ir` request play its full stimulus and then time out with no IR,
-/// because 60 s alone already exceeded the old ring's 32 s capacity at that
-/// rate. Sizing the ring to the full documented ceiling at 192 kHz (the
-/// worst case — capacity in *time* shrinks as sample rate rises) makes
-/// every combination the protocol accepts also completable by every
-/// backend, at every rate the project supports. See
-/// `ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_supported_rate`
+/// Before #437's rig verification the ring was a fixed `16 * 192_000` —
+/// "comfortably larger than any single capture request" was true only
+/// because nothing yet validated a request up to the 60 s budget; a rig run
+/// at 96 kHz (`rig-2026-09-14-pr437-plot-budget`, finding 1) showed a
+/// within-budget `plot_ir` request play its full stimulus and then time out
+/// with no IR, because 60 s alone already exceeded that ring's 32 s
+/// capacity at that rate. The fix after that (`120 * 192_000`, sized to the
+/// budget at the project's then-assumed highest rate) reintroduced the same
+/// class of bug one level up: `start()` accepts JACK's actual live sample
+/// rate with no ceiling, and a rig running above 192 kHz (e.g. the 384 kHz
+/// path `ac_core::visualize::mtw::ladder` already exercises) again exceeds
+/// a fixed capacity sized only for the assumed worst case (codex-qa, PR
+/// #437 at 942c0e27). Computing capacity from the *actual* live rate at
+/// `start()` instead of any fixed assumption closes both bugs at once: the
+/// ring always fits the accepted budget, at whatever rate JACK reports. See
+/// `meas_ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_rate`
 /// below.
-const RING_CAPACITY: usize = 120 * 192_000;
+fn meas_ring_capacity(sample_rate: u32) -> usize {
+    ((MAX_STIMULUS_DURATION_S * 2.0) * sample_rate as f64).ceil() as usize
+}
 
 /// 4 s at 192 kHz — ref inputs are only used by (multi-pair) transfer_stream
 /// whose `capture_duration(4, sr)` ≈ 2.5 s, so this leaves a comfortable
@@ -304,7 +311,9 @@ impl AudioEngine for JackEngine {
         self.state.silence.store(true, Ordering::Relaxed);
 
         // Split SPSC rings: producer → RT callback, consumer → worker thread.
-        let rb = HeapRb::<f32>::new(RING_CAPACITY);
+        // Sized from the live rate JACK just reported, not a fixed
+        // assumption (#437, codex-qa at 942c0e27).
+        let rb = HeapRb::<f32>::new(meas_ring_capacity(self.sample_rate));
         let (ring_prod, ring_cons) = rb.split();
         self.rings.set_meas(ring_cons);
 
@@ -650,34 +659,28 @@ mod tests {
     use ringbuf::traits::Observer;
     use ringbuf::HeapRb;
 
-    // ---- capture ring vs. protocol budget (#437 rig finding 1) ----
+    // ---- capture ring vs. protocol budget (#437 rig finding 1; codex-qa
+    // live-sample-rate finding at 942c0e27) ----
 
     #[test]
-    fn ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_supported_rate() {
-        // Import the real policy value rather than duplicating it: a
-        // test-local literal stays green if `handlers::MAX_STIMULUS_DURATION_S`
-        // changes without a matching `RING_CAPACITY` update, which is
-        // exactly the coupled-constant failure mode this test exists to
-        // catch (codex-qa, PR #437 at a5b7d761). `handlers` is not
-        // feature-gated, so it's reachable from this `jack-audio`-only
-        // test.
-        use crate::handlers::MAX_STIMULUS_DURATION_S;
-        // Both `duration` and `tail_s` are validated against the same
-        // per-field ceiling independently (`plot.rs::bounded_duration`), so
-        // a request can combine up to twice that before
-        // `play_and_capture_cancellable` sees it.
+    fn meas_ring_capacity_fits_stimulus_duration_and_tail_budget_at_every_rate() {
+        // `meas_ring_capacity` derives capacity from the *live* rate at
+        // `start()` rather than a fixed assumption, so this isn't a
+        // coupled-constant check against a hardcoded ceiling any more (the
+        // fixed `120 * 192_000` this replaced broke silently above 192 kHz,
+        // e.g. the 384 kHz path `mtw::ladder` already exercises — codex-qa,
+        // PR #437 at 942c0e27). What's still worth asserting is that the
+        // *formula* actually covers the full accepted budget at a rate,
+        // including rates above the old fixed ceiling, rather than trusting
+        // the arithmetic by inspection alone.
         let max_combined_s = MAX_STIMULUS_DURATION_S * 2.0;
-        // Time capacity shrinks as sample rate rises, so the highest rate
-        // is the tightest case — but check every rate the project claims
-        // to support (see e.g. `mtw::ladder`'s test matrix) rather than
-        // trusting that 192 kHz alone bounds the others.
-        for sr in [44_100.0_f64, 48_000.0, 96_000.0, 192_000.0] {
-            let n_total = (max_combined_s * sr) as usize;
+        for sr in [44_100_u32, 48_000, 96_000, 192_000, 384_000] {
+            let cap = meas_ring_capacity(sr);
+            let n_total = (max_combined_s * sr as f64) as usize;
             assert!(
-                n_total <= RING_CAPACITY,
+                cap >= n_total,
                 "sr={sr}: {max_combined_s}s combined duration+tail_s needs \
-                 {n_total} samples, ring only holds {RING_CAPACITY} — \
-                 plot_ir would accept a request it cannot complete"
+                 {n_total} samples, meas_ring_capacity returned only {cap}"
             );
         }
     }
