@@ -68,7 +68,7 @@ fn main() -> eframe::Result<()> {
             ref_channel,
             WeightingCurve::Z,
             "fast",
-            cfg.drive_max_dbfs,
+            ac_core::shared::emission_level::MAX_EMISSION_DBFS,
         )
     } else {
         connect_and_launch(

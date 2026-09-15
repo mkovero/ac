@@ -60,7 +60,10 @@ fn params_defaults_are_passive_and_z_weighted() {
     let p = params(json!({"pairs": [[0, 1]]})).unwrap();
     assert!(!p.drive, "default session must not drive");
     assert!(!p.drivable, "default session must open no output ports");
-    assert_eq!(p.level_dbfs, -10.0);
+    assert_eq!(
+        p.level_dbfs,
+        ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS
+    );
     assert_eq!(p.weighting.tag(), "Z");
     assert_eq!(p.integration_tag, "fast");
     assert_eq!(
@@ -86,9 +89,9 @@ fn params_drivable_alone_does_not_drive() {
     assert!(!p.drive);
 }
 
-// #360: the ceiling is `cfg.drive_max_dbfs`, which this fn cannot see.
-// It must therefore hand back exactly what was asked for — a clamp
-// appearing here would be a second, config-blind ceiling.
+// #459: the maximum is a build constant this fn deliberately cannot see
+// (see `parse_params`'s doc). It must therefore hand back exactly what
+// was asked for — a check appearing here would duplicate the caller's.
 #[test]
 fn params_do_not_clamp_level() {
     let p = params(json!({"pairs": [[0, 1]], "level_dbfs": 0.0})).unwrap();

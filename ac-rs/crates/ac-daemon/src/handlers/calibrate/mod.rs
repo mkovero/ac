@@ -14,11 +14,12 @@ use serde_json::{json, Value};
 
 use ac_core::config::Config;
 use ac_core::shared::calibration::Calibration;
+use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
 
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, make_engine_for_state, read_dmm_vrms,
+    busy_guard, capture_rms, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms,
     resolve_input, resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
     CalReply,
 };
@@ -137,19 +138,20 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let (out_ch, in_ch) = channels_from(cmd, &cfg);
-    // #360: an omitted `ref_dbfs` becomes "whatever this session's ceiling
-    // is", not a second hardcoded number (-10.0) that has to be kept in
-    // sync with `drive_max_dbfs`'s own default by convention. An
-    // explicitly-passed value is then clamped the same way — defense in
-    // depth, and the single binding every downstream quantity (amp,
-    // ref_amp, out_scale, in_scale, cal.ref_dbfs) derives from, so the
-    // calibration stays internally consistent (measured-and-scaled-at-the-
-    // same-level).
+    // #459: an omitted `ref_dbfs` takes the one named default
+    // (`DEFAULT_LEVEL_DBFS`), same as every other emitting command — not
+    // "whatever the ceiling is" (#360's shape, which tied the default to a
+    // settable config value). An explicitly-passed value above the fixed
+    // maximum is refused, not clamped — the single binding every
+    // downstream quantity (amp, ref_amp, out_scale, in_scale, cal.ref_dbfs)
+    // derives from, so the calibration stays internally consistent
+    // (measured-and-scaled-at-the-same-level) and is never silently
+    // measured at a level lower than the one recorded.
     let ref_dbfs = cmd
         .get("ref_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(cfg.drive_max_dbfs);
-    let ref_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, ref_dbfs);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
+    let ref_dbfs = emission_guard!(state, &cfg, ref_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -369,7 +371,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("calibrate".to_string(), worker);
     }
-    json!({"ok": true, "ref_dbfs": ref_dbfs, "backend": backend})
+    json!({
+        "ok": true,
+        "ref_dbfs": ref_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    })
 }
 
 pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {

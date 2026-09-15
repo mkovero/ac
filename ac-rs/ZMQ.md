@@ -893,9 +893,13 @@ vice versa.
 ```json
 {
   "ok":     true,
+  "max_dbfs": -20.0,
   "config": { /* full config dict, all keys */ }
 }
 ```
+
+`max_dbfs` is the fixed build maximum, not a config setting. A retired
+`drive_max_dbfs` key remains inside `config` until the operator removes it.
 
 ---
 
@@ -1003,19 +1007,15 @@ its CLI parent noun moved.
 }
 ```
 
-`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
-ceiling (#360) — each point on the ramp individually, not just the
-endpoints, so a range whose top end exceeds the ceiling flattens there
-rather than running unclamped.
+The defaults are −40 and −30 dBFS. Either endpoint above the fixed −20 dBFS
+maximum is refused before worker spawn; no point is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`start_dbfs`/`stop_dbfs` in the reply are the *applied* endpoints — what
-was requested clamped to the ceiling — same convention as `set_drive`'s
-`level_dbfs` echo.
+The reply echoes the requested endpoints unchanged.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1047,15 +1047,14 @@ is a deprecated alias). Wire `cmd` unchanged — same reasoning as
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`level_dbfs` in the reply is the applied value after the clamp — same
-convention as `set_drive`.
+`level_dbfs` in the reply equals the accepted request.
 
 **DATA**
 ```json
@@ -1098,7 +1097,7 @@ only the default trait impl bails.
   "f1_hz":        <float>,   // default 20
   "f2_hz":        <float>,   // default 20000 (must be < sr/2)
   "duration":     <float>,   // seconds, default 1.0
-  "level_dbfs":   <float>,   // default -6
+  "level_dbfs":   <float>,   // default -40
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
   "window_len":   <int>      // requested IR gate length in samples, default 4096
@@ -1116,9 +1115,7 @@ An out-of-budget request returns `ok: false`, confirms that the stimulus is
 silent, and emits no audio. `stop` cancels both the sweep and tail portions of
 an accepted `plot_ir` request.
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
-before #360 this was the one command besides `calibrate` that emitted
-whatever was asked for with nothing bounding it.
+`level_dbfs` above the fixed −20 dBFS maximum is refused before worker spawn.
 
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
 orders must not overlap, so each order's gate is clamped down to the
@@ -1130,11 +1127,11 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`level_dbfs` in the reply is the applied (clamped) level, and the report's
-`stimulus.level_dbfs` field (below) is the same applied value.
+`level_dbfs` in the reply equals the accepted request, and the report's
+`stimulus.level_dbfs` field is the same value.
 
 **DATA**
 ```json
@@ -1240,14 +1237,14 @@ before resolving ports or spawning a worker, when `max(duration, 3.0 /
 start_hz)` is non-finite or exceeds the same 60-second ceiling — so a very low
 `start_hz` can be rejected even when `duration` itself is within range.
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`level_dbfs` in the reply is the applied value; each
+`level_dbfs` in the reply equals the accepted request; each
 `measurement/frequency_response/point` frame's `drive_db` (below) is the
 same applied value.
 
@@ -1302,20 +1299,19 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
 `duration` must be greater than 0 and at most 60 seconds. `steps` must be from
 1 through 10000. Both are validated before worker spawn.
 
-`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
-ceiling (#360), each computed step individually — a range whose top end
-exceeds the ceiling flattens there rather than running unclamped.
+The defaults are −40 and −30 dBFS. Either endpoint above −20 dBFS is
+refused before worker spawn; no step is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float> }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
 `start_dbfs`/`stop_dbfs` in the reply are the applied endpoints.
 
 **DATA** — one per level step (measurement/frequency_response/point frame, `"cmd": "plot_level"`,
-includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
-post-clamp level for that step).
+includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the accepted
+level for that step).
 
 **DATA** — terminal, success:
 ```json
@@ -1478,14 +1474,14 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`level_dbfs` in the reply is the applied value.
+`level_dbfs` in the reply equals the accepted request.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1510,11 +1506,11 @@ Plays continuous pink noise until stopped.
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
 `level_dbfs` in the reply is the applied value.
@@ -1536,23 +1532,20 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 ```json
 {
   "cmd":            "calibrate",
-  "ref_dbfs":       <float>,   // optional, default: the session's drive_max_dbfs
+  "ref_dbfs":       <float>,   // optional, default -40
   "output_channel": <int>,     // optional, defaults to config
   "input_channel":  <int>      // optional, defaults to config
 }
 ```
 
-`ref_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
-an omitted value now defaults to that same ceiling rather than a
-hardcoded -10.0, so it can never itself sit above the config it is
-supposed to respect.
+`ref_dbfs` above the fixed −20 dBFS maximum is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "ref_dbfs": <float> }
+{ "ok": true, "ref_dbfs": <float>, "max_dbfs": -20.0 }
 ```
 
-`ref_dbfs` in the reply is the applied (clamped, or defaulted) value.
+`ref_dbfs` in the reply is the accepted (or defaulted) value.
 
 **DATA — `cal_prompt`** (step 1: output voltage at the DAC, while a
 1 kHz tone is playing at `ref_dbfs`):
@@ -2007,8 +2000,8 @@ every other observable looking correct.
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
   "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
                              //   silent until `set_drive`. Implied by drive=true.
-  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10; clamped to
-                             //   drive_max_dbfs (#360) before it seeds the drive state
+  "level_dbfs":   <float>,   // meaningful when drive or drivable=true; default -40;
+                             //   refused above the fixed -20 dBFS maximum
 
   // Either the multi-pair form …
   "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
@@ -2047,7 +2040,8 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "meas_port":    "<capture-port>",
   "ref_port":     "<capture-port>",
   "meas_channel": <int>,
-  "ref_channel":  <int>
+  "ref_channel":  <int>,
+  "max_dbfs":     -20.0
 }
 ```
 
@@ -2298,8 +2292,8 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   },
   "drive": {                             // observed stimulus state (#228)
     "on":         <bool>,                // what is applied to the engine on this
-                                          // tick, after the dead-man and clamp
-    "level_dbfs": <float> | null,        // applied (clamped) level; null while off
+                                          // tick, after the dead-man
+    "level_dbfs": <float> | null,        // accepted level; null while off
     "drivable":   <bool>                 // session opened output ports at launch
   }
 }
@@ -2307,13 +2301,11 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 
 **`drive` is observed, not commanded.** It is built from the values applied
 to the engine on that tick — after the `set_drive` dead-man (1.5 s) has
-expired a stale drive, and after the clamp to `drive_max_dbfs`. A client that
+expired a stale drive. A client that
 rendered its own last `set_drive` instead would show the drive live while the
 daemon had already silenced it, or show the requested level while a lower one
 was being emitted. `level_dbfs` is `null` while off so there is no stale
-number to misread, and carries the applied value while on — a drive clamped
-to something inaudible is a real measurement with a bad SNR, which is neither
-"on" nor "off" as a fault.
+number to misread, and carries the accepted value while on.
 
 `drivable` is `false` for a fully passive session (external-DUT workflow, no
 output ports opened). `drivable: true, on: false` is a session that could
@@ -2498,20 +2490,14 @@ Every message doubles as the keepalive (below), so every message is a
 full state assertion rather than a delta against server-remembered
 state.
 
-**Reply** — echoes the **applied** state:
+**Reply** — echoes the accepted state:
 ```json
-{ "ok": true, "on": true, "level_dbfs": -10.0 }
+{ "ok": true, "on": true, "level_dbfs": -20.0, "max_dbfs": -20.0 }
 ```
 
-`level_dbfs` in the reply is what was applied after the server-side
-clamp to `drive_max_dbfs` (config, default `-10.0`), which may differ
-from what was requested. **A clamp is success, not a partial failure**:
-a stimulus command that errors instead of applying a safe level is a
-worse failure in the field than one that quietly applies the ceiling.
-There is no `clamped` flag — the client knows what it asked for, and a
-second field that must agree with the first is a second thing to keep
-consistent. The client is expected to clamp too; this one is
-authoritative.
+When `on` is true, a level above −20 dBFS is refused and the drive state is
+unchanged. When `on` is false, the level is not checked so silencing can never
+be refused. Successful replies echo the request exactly.
 
 A missing `on`, or a missing or non-finite `level_dbfs`, is a request
 error (`{"ok": false, "error": ...}`) rather than something to coerce —
@@ -2734,10 +2720,8 @@ Discovers routing: which playback ports carry an analog signal, and which
 capture ports are looped back to them. Spawns a worker and reports on
 DATA; the CTRL reply only confirms the launch.
 
-**The worker emits a 1 kHz tone at −10 dBFS**, on one playback port at a
-time, with every other output disconnected. Nothing else on the wire
-announces this, so a caller driving unattended hardware is responsible
-for the level at the far end.
+**The worker emits a 1 kHz tone at −20 dBFS**, on one playback port at a
+time, with every other output disconnected.
 
 The output scan needs a DMM (`dmm_host` in config). Without one it is
 skipped entirely and **every** playback port is treated as analog for the
@@ -2753,7 +2737,7 @@ No arguments.
 
 **Reply**
 ```json
-{ "ok": true, "n_playback": <int>, "n_capture": <int> }
+{ "ok": true, "n_playback": <int>, "n_capture": <int>, "level_dbfs": -20.0, "max_dbfs": -20.0 }
 ```
 
 **DATA frames.** Every frame carries `"cmd": "probe"` and a `"phase"`:
@@ -2769,7 +2753,8 @@ No arguments.
 `vrms` is `<float> | null` — null when the DMM read failed, which is not
 the same as a measured zero. `analog` is `vrms > 10 mVrms`.
 
-`loopback` is emitted **only** for a pair measuring above −30 dBFS, so a
+`loopback` is emitted **only** for a pair measuring above 20 dB below the
+probe tone (−40 dBFS in this build), so a
 pair that never appears means no loopback was detected, not that a frame
 was dropped. `level_dbfs` is rounded to one decimal.
 
@@ -2846,6 +2831,7 @@ terminal frame.
   "ref_out_port": "<port>",
   "in_port":      "<port>",
   "ref_port":     "<port>",
+  "max_dbfs":     -20.0,
   "warnings":     ["<string>", ...]   // optional — see `warnings` above
 }
 ```
@@ -2900,7 +2886,8 @@ Requires a reference channel, and refuses with the same error as
 ```
 
 `compare` optional, default `false`. `level_dbfs` optional, default
-`-20.0` — it sets the drive for the gain and frequency-response tests.
+`-40.0` — it sets the drive for the gain and frequency-response tests and
+is refused above the fixed −20 dBFS maximum.
 
 **Reply** — same shape as `test_hardware`:
 ```json
@@ -2910,6 +2897,8 @@ Requires a reference channel, and refuses with the same error as
   "ref_out_port": "<port>",
   "in_port":      "<port>",
   "ref_port":     "<port>",
+  "level_dbfs":   <float>,
+  "max_dbfs":     -20.0,
   "warnings":     ["<string>", ...]   // optional
 }
 ```

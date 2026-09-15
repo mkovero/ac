@@ -403,17 +403,19 @@ fn run_session(mut plan: SessionPlan, io: SessionIo, stop: Arc<AtomicBool>) {
 
         // Observed drive state (#228). Built from `engine_on`/`engine_level`
         // — what was actually applied to the engine on this tick, after the
-        // dead-man above and after `set_drive`'s clamp to `drive_max_dbfs`
-        // — not from what a client last asked for. A fault indicator fed by
-        // commanded state would show `NO REFERENCE` while the daemon had
-        // already dead-manned the drive, or show nothing while the drive
-        // was live at a clamped level; reporting belief rather than
-        // observation is the defect class #228 exists to make visible.
+        // dead-man above and after `set_drive`'s refusal check against the
+        // fixed emission maximum (#459) — not from what a client last asked
+        // for. A fault indicator fed by commanded state would show `NO
+        // REFERENCE` while the daemon had already dead-manned the drive, or
+        // show nothing while a stale level lingered; reporting belief
+        // rather than observation is the defect class #228 exists to make
+        // visible.
         //
         // `level_dbfs` is null while off, so there is no stale number to
-        // misread, and carries the applied (clamped) value while on: drive
-        // on but clamped to something inaudible is a real measurement with
-        // a bad SNR, which is a different fault from either on or off.
+        // misread, and carries the applied value while on — a value that,
+        // since #459, is exactly the level the client asked for (a level
+        // above the maximum never reaches `engine_level` at all; `set_drive`
+        // refused it instead).
         //
         // `drivable` distinguishes "this session could drive and is not"
         // (the indicator's idle row) from "this session never drives" —

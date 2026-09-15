@@ -53,7 +53,7 @@ pub struct SettingsOverlay {
     ref_channel: u32,
     out_channel: u32,
     start_level_dbfs: f64,
-    /// The ceiling the level is clamped to on edit (config `drive_max_dbfs`).
+    /// The fixed build ceiling enforced while editing the level.
     drive_max_dbfs: f64,
 }
 
@@ -67,8 +67,9 @@ impl SettingsOverlay {
             meas_channel: cfg.input_channel,
             ref_channel: cfg.reference_channel.unwrap_or(1),
             out_channel: cfg.output_channel,
-            start_level_dbfs: start_level_dbfs.min(cfg.drive_max_dbfs),
-            drive_max_dbfs: cfg.drive_max_dbfs,
+            start_level_dbfs: start_level_dbfs
+                .min(ac_core::shared::emission_level::MAX_EMISSION_DBFS),
+            drive_max_dbfs: ac_core::shared::emission_level::MAX_EMISSION_DBFS,
         }
     }
 
@@ -97,8 +98,8 @@ impl SettingsOverlay {
     }
 
     /// ←/→: change the selected row's value. Channels step by 1 (floored
-    /// at 0); the level steps by 1 dB, clamped to `drive_max_dbfs` — the
-    /// overlay is one of the level clamp's entry points (drive-path AC).
+    /// at 0); the level steps by 1 dB and cannot be raised beyond the
+    /// fixed build ceiling.
     pub fn adjust_value(&mut self, increase: bool) {
         match self.selected_row() {
             Row::Meas => self.meas_channel = step_channel(self.meas_channel, increase),
@@ -171,20 +172,18 @@ mod tests {
 
     #[test]
     fn channel_edits_floor_at_zero_and_level_clamps_to_ceiling() {
-        let mut cfg = cfg_with(0, Some(0), 0);
-        cfg.drive_max_dbfs = -10.0;
+        let cfg = cfg_with(0, Some(0), 0);
         let mut o = SettingsOverlay::from_config(&cfg, -12.0);
         // Meas at 0, decrease floors at 0.
         o.adjust_value(false);
         assert_eq!(o.rows()[0].1, "0");
-        // Level row: raising past the ceiling clamps (an entry point for
-        // the drive-path level clamp).
+        // The view cannot propose a level above the shared emission ceiling.
         o.selected = 3;
         for _ in 0..10 {
             o.adjust_value(true);
         }
         assert!(
-            o.start_level_dbfs <= -10.0,
+            o.start_level_dbfs <= ac_core::shared::emission_level::MAX_EMISSION_DBFS,
             "level {} exceeded ceiling",
             o.start_level_dbfs
         );

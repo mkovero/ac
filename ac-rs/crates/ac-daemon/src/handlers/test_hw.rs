@@ -7,15 +7,17 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
+use ac_core::shared::emission_level::{MAX_EMISSION_DBFS, SELF_TEST_LEVEL_DBFS};
 
 use crate::audio::AudioEngine;
 use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    analyze_mono, busy_guard, cal_guard, capture_rms, cfg_guard, make_engine_for_state,
-    read_dmm_vrms, ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
-    resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, std_dev, TestResult,
+    analyze_mono, busy_guard, cal_guard, capture_rms, cfg_guard, emission_guard,
+    make_engine_for_state, read_dmm_vrms, ref_output_migration_warning, resolve_input,
+    resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker,
+    std_dev, TestResult,
 };
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
@@ -23,6 +25,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     cfg_guard!(state);
 
     let cfg = state.cfg.lock().unwrap().clone();
+    let _ = emission_guard!(state, &cfg, SELF_TEST_LEVEL_DBFS);
 
     if cfg.reference_channel.is_none() && cfg.reference_port.is_none() {
         return json!({"ok": false, "error": "reference channel not configured — run: ac setup reference <channel>"});
@@ -201,6 +204,7 @@ pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
+        "max_dbfs":     MAX_EMISSION_DBFS,
         "backend":      backend,
     });
     // #225 migration notice — present on every reply, not just the first, so a
@@ -235,7 +239,14 @@ fn hw_noise_floor(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, _sr: u32) -
 }
 
 fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let levels: Vec<i32> = (-42..=-5).step_by(6).collect();
+    let all_levels: Vec<i32> = (-42..=-5).step_by(6).collect();
+    // #459: filtered against the fixed maximum, never moved down to it.
+    let levels: Vec<i32> = all_levels
+        .iter()
+        .copied()
+        .filter(|&l| f64::from(l) <= MAX_EMISSION_DBFS)
+        .collect();
+    let skipped = all_levels.len() - levels.len();
     eng.reconnect_input(in_port).ok();
     let mut measured: Vec<Option<f64>> = Vec::new();
     for &level in &levels {
@@ -278,19 +289,30 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
         .map(|(a, b, d)| format!("{a}→{b}:{d:.2}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let skip_note = if skipped > 0 {
+        format!("  ({skipped} points above maximum not run)")
+    } else {
+        String::new()
+    };
     TestResult::new(
         "Level linearity",
         pass,
-        format!("[{step_detail}]"),
+        format!("[{step_detail}]{skip_note}"),
         "monotonic, step error < 1 dB (1.5 dB top step)",
     )
 }
 
 fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -3.0];
+    let all_levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -3.0];
+    let levels: Vec<f64> = all_levels
+        .iter()
+        .copied()
+        .filter(|&l| l <= MAX_EMISSION_DBFS)
+        .collect();
+    let skipped = all_levels.len() - levels.len();
     eng.reconnect_input(in_port).ok();
     let mut results: Vec<(f64, f64, f64)> = Vec::new();
-    for &level in levels {
+    for &level in &levels {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         if let Some(r) = analyze_mono(eng, 1000.0, 1.0, sr) {
@@ -306,17 +328,22 @@ fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult
         .map(|(l, t, _)| format!("{l:.0}:{t:.4}%"))
         .collect::<Vec<_>>()
         .join(", ");
+    let skip_note = if skipped > 0 {
+        format!("  ({skipped} points above maximum not run)")
+    } else {
+        String::new()
+    };
     TestResult::new(
         "THD floor (1 kHz)",
         best < 0.05,
-        format!("best {best:.4}%  [{parts}]"),
+        format!("best {best:.4}%  [{parts}]{skip_note}"),
         "best THD < 0.05%",
     )
 }
 
 fn hw_freq_response(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
     let freqs: &[f64] = &[50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 20000.0];
-    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
     eng.reconnect_input(in_port).ok();
     let mut results: Vec<(f64, f64)> = Vec::new();
     for &freq in freqs {
@@ -357,7 +384,7 @@ fn hw_freq_response(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
 }
 
 fn hw_channel_match(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) -> TestResult {
-    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
     eng.set_tone(1000.0, amp);
     let mut measurements: Vec<(String, f64, f64)> = Vec::new();
     for (label, port) in [("A", in_a), ("B", in_b)] {
@@ -382,7 +409,7 @@ fn hw_channel_match(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, sr: u32) 
 }
 
 fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
     eng.set_tone(1000.0, amp);
     eng.reconnect_input(in_port).ok();
     let mut levels: Vec<f64> = Vec::new();
@@ -419,7 +446,7 @@ fn hw_repeatability(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestRe
 // ---- DMM hardware tests ----
 
 fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibration>) -> TestResult {
-    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
     eng.set_tone(1000.0, amp);
     std::thread::sleep(std::time::Duration::from_millis(500));
     let vrms_dmm = match read_dmm_vrms(host, 5) {
@@ -433,7 +460,7 @@ fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
             )
         }
     };
-    let vrms_pred = match cal.and_then(|c| c.out_vrms(-10.0)) {
+    let vrms_pred = match cal.and_then(|c| c.out_vrms(SELF_TEST_LEVEL_DBFS)) {
         Some(v) => v,
         None => {
             return TestResult::new(
@@ -458,10 +485,21 @@ fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
 }
 
 fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibration>) -> TestResult {
-    let levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0, 0.0];
+    let all_levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0, 0.0];
+    // #459: filtered against the fixed maximum. This test's own
+    // `n_pts >= 5` threshold was tuned against the unfiltered 7-point
+    // ladder; it is left as-is per spec rather than loosened to stay
+    // green against a now-3-point ladder — a real change in what this
+    // test can pass, to report, not to paper over.
+    let levels: Vec<f64> = all_levels
+        .iter()
+        .copied()
+        .filter(|&l| l <= MAX_EMISSION_DBFS)
+        .collect();
+    let skipped = all_levels.len() - levels.len();
     let mut max_err = 0.0f64;
     let mut n_pts = 0usize;
-    for &level in levels {
+    for &level in &levels {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -473,17 +511,22 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
             n_pts += 1;
         }
     }
+    let skip_note = if skipped > 0 {
+        format!("  ({skipped} points above maximum not run)")
+    } else {
+        String::new()
+    };
     TestResult::new(
         "DMM level tracking",
         max_err < 2.0 && n_pts >= 5,
-        format!("max error {max_err:.2}% over {n_pts} points"),
+        format!("max error {max_err:.2}% over {n_pts} points{skip_note}"),
         "< 2% error at all levels",
     )
 }
 
 fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
     let freqs: &[f64] = &[100.0, 1000.0, 5000.0, 10000.0, 20000.0];
-    let amp = ac_core::shared::generator::dbfs_to_amplitude(-10.0);
+    let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
     let mut readings: Vec<(f64, f64)> = Vec::new();
     for &freq in freqs {
         eng.set_tone(freq, amp);

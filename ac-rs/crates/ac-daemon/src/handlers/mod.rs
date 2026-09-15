@@ -19,6 +19,9 @@ use serde_json::{json, Value};
 
 use ac_core::config::Config;
 use ac_core::shared::calibration::{default_cal_path, Calibration};
+use ac_core::shared::emission_level::{
+    check_emission_level, check_emission_range, MAX_EMISSION_DBFS,
+};
 
 use crate::audio::AudioEngine;
 use crate::server::ServerState;
@@ -201,25 +204,104 @@ mod selected_backend_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Drive ceiling (#360)
+// Emission level — single ceiling, refusal, no second state (#459)
 // ---------------------------------------------------------------------------
 
-/// Clamp a requested dBFS level to the session's `drive_max_dbfs` ceiling.
-///
-/// Mirrors `set_drive`'s inline clamp (`transfer.rs`, `level.min(ceiling)`):
-/// clamping is normal operation, not an error, so a stimulus command that
-/// fails instead of applying a safe level is a worse field failure than one
-/// that quietly applies the ceiling. Every command that turns a requested
-/// dBFS into an emitted amplitude runs its value through this single
-/// chokepoint immediately after parsing — before #360, `set_drive` was the
-/// only one that did, and `plot_ir`/`calibrate` emitted whatever was asked
-/// for with nothing bounding it (issue #360).
-///
-/// The return value is always the value to actually use — callers echo it
-/// back on the wire as the *applied* level, never the raw request.
-pub(super) fn apply_drive_ceiling(ceiling_dbfs: f64, requested_dbfs: f64) -> f64 {
-    requested_dbfs.min(ceiling_dbfs)
+/// Build the `{"ok": false, ...}` reply for a level refused by
+/// [`ac_core::shared::emission_level`]. `max_dbfs` rides every refusal, not
+/// just every success, so a client can print the ceiling from the same
+/// place regardless of which way the request went.
+fn emission_refused(message: String) -> Value {
+    json!({
+        "ok": false,
+        "error": format!("{message}\n         nothing was emitted"),
+        "max_dbfs": MAX_EMISSION_DBFS,
+    })
 }
+
+/// The retired `drive_max_dbfs` config key is present. Loud and specific —
+/// names the key, the config file, and the fixed maximum — because
+/// silently ignoring a key that used to do something is the #225 defect
+/// class, and refusing every emission until it is removed is the loud form
+/// of the fix #225 already established (`orphaned_sticky`, above).
+fn retired_drive_max_dbfs_error(state: &ServerState, configured: f64) -> Value {
+    json!({
+        "ok": false,
+        "error": format!(
+            "drive_max_dbfs no longer sets a limit ({configured} in config) — remove it \
+             from {}\n         the maximum is {MAX_EMISSION_DBFS:.1} dBFS, fixed in this build \
+             — nothing was emitted",
+            state.config_path.display()
+        ),
+        "max_dbfs": MAX_EMISSION_DBFS,
+    })
+}
+
+/// The single chokepoint every emitting command runs its requested level
+/// through, immediately after parsing and before port resolution or
+/// `spawn_worker` — replaces #360's `apply_drive_ceiling`, which clamped a
+/// level down to `cfg.drive_max_dbfs` instead of refusing it. A level above
+/// [`MAX_EMISSION_DBFS`] now gets an error reply and nothing plays; #459's
+/// spec: refusal is the only outcome under which the typed level, the
+/// emitted level and the reported level are the same number by
+/// construction — a clamp-and-report was rejected (design option C) because
+/// a clamped `plot level` measures a flat-topped ramp nobody asked for.
+///
+/// Checks the retired config key first (see [`retired_drive_max_dbfs_error`]):
+/// while it is present every emitting command refuses, regardless of what
+/// level was requested.
+pub(super) fn check_emission_or_refuse(
+    state: &ServerState,
+    cfg: &Config,
+    requested_dbfs: f64,
+) -> Result<f64, Value> {
+    if let Some(configured) = cfg.retired_drive_max_dbfs {
+        return Err(retired_drive_max_dbfs_error(state, configured));
+    }
+    check_emission_level(requested_dbfs).map_err(emission_refused)
+}
+
+/// Same chokepoint, for a level ramp's two endpoints (`plot_level`,
+/// `sweep_level`). A linear ramp never exceeds its larger endpoint, so
+/// checking both bounds up front bounds every point on it — the per-point
+/// `apply_drive_ceiling` call the ramp workers used to carry inside their
+/// loop comes out entirely; there is no longer a point that could exceed
+/// what launch already refused.
+pub(super) fn check_emission_range_or_refuse(
+    state: &ServerState,
+    cfg: &Config,
+    start_dbfs: f64,
+    stop_dbfs: f64,
+) -> Result<(f64, f64), Value> {
+    if let Some(configured) = cfg.retired_drive_max_dbfs {
+        return Err(retired_drive_max_dbfs_error(state, configured));
+    }
+    check_emission_range(start_dbfs, stop_dbfs).map_err(emission_refused)
+}
+
+/// `return`s the daemon's `{"ok": false, ...}` reply on a refused level —
+/// same early-return shape as `busy_guard!`/`cfg_guard!`. Binds the checked
+/// value to `$level`.
+macro_rules! emission_guard {
+    ($state:expr, $cfg:expr, $dbfs:expr) => {
+        match $crate::handlers::check_emission_or_refuse($state, $cfg, $dbfs) {
+            Ok(v) => v,
+            Err(reply) => return reply,
+        }
+    };
+}
+pub(super) use emission_guard;
+
+/// Same as [`emission_guard`] for a ramp's two endpoints.
+macro_rules! emission_range_guard {
+    ($state:expr, $cfg:expr, $start:expr, $stop:expr) => {
+        match $crate::handlers::check_emission_range_or_refuse($state, $cfg, $start, $stop) {
+            Ok(v) => v,
+            Err(reply) => return reply,
+        }
+    };
+}
+pub(super) use emission_range_guard;
 
 // ---------------------------------------------------------------------------
 // Port cache (Issue #30)
@@ -846,31 +928,6 @@ pub(super) fn median(vals: &[f64]) -> f64 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
-    }
-}
-
-#[cfg(test)]
-mod ceiling_tests {
-    use super::apply_drive_ceiling;
-
-    #[test]
-    fn passes_through_below_ceiling() {
-        assert_eq!(apply_drive_ceiling(-10.0, -25.0), -25.0);
-    }
-
-    #[test]
-    fn clamps_above_ceiling() {
-        assert_eq!(apply_drive_ceiling(-10.0, -3.0), -10.0);
-    }
-
-    #[test]
-    fn passes_through_exactly_at_ceiling() {
-        assert_eq!(apply_drive_ceiling(-10.0, -10.0), -10.0);
-    }
-
-    #[test]
-    fn clamps_a_positive_request() {
-        assert_eq!(apply_drive_ceiling(-30.0, 6.0), -30.0);
     }
 }
 

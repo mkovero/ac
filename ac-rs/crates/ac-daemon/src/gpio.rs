@@ -374,7 +374,14 @@ impl ReqClient {
     }
 }
 
-/// Resolve 0 dBu in dBFS from calibration, or fall back to -20 dBFS.
+/// Resolve 0 dBu in dBFS from calibration, or fall back to the named
+/// default (#459 — the same fallback every other emitting command takes
+/// when no level was chosen). The `-60.0..-0.5` clamp on the calibrated
+/// branch is unrelated to the emission maximum and stays: it bounds an
+/// unreasonable calibration (a 0 dBu target far below the noise floor or
+/// above full scale), not a requested level — `generate`'s own refusal
+/// path (`ac-daemon/src/handlers/audio/generate.rs`) is what enforces the
+/// maximum once this value reaches it.
 fn resolve_level(req: &mut ReqClient) -> f64 {
     let ack = req.call(json!({"cmd": "get_calibration"}));
     if let Some(vrms) = ack.get("vrms_at_0dbfs_out").and_then(Value::as_f64) {
@@ -382,8 +389,11 @@ fn resolve_level(req: &mut ReqClient) -> f64 {
         let dbfs = 20.0 * (vrms_ref / vrms).log10();
         dbfs.clamp(-60.0, -0.5)
     } else {
-        eprintln!("gpio: calibration unavailable, using -20 dBFS");
-        -20.0
+        eprintln!(
+            "gpio: calibration unavailable, using {:.1} dBFS",
+            ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS
+        );
+        ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS
     }
 }
 

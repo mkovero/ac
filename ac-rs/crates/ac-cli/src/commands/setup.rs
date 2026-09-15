@@ -205,6 +205,13 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         .and_then(|v| v.as_f64())
         .unwrap_or(20000.0);
     println!("  Range:         {r_start:.0} – {r_stop:.0} Hz");
+    match ack.get("max_dbfs").and_then(|v| v.as_f64()) {
+        Some(max) => println!("  Emission max:  {max:.1} dBFS  (fixed)"),
+        None => println!("  Emission max:  (not reported by this daemon)"),
+    }
+    if let Some(retired) = srv_cfg.get("drive_max_dbfs").and_then(|v| v.as_f64()) {
+        println!("  drive_max_dbfs: {retired:.1}  (retired — remove it; it limits nothing)");
+    }
 
     // Both the temperature and the speed it implies. #391 removed the
     // delay readout's ms → m conversion this used to serve exclusively —

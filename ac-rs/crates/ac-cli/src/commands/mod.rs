@@ -178,84 +178,121 @@ pub fn level_to_dbfs(level: &LevelSpec, cal: Option<&serde_json::Value>) -> f64 
     }
 }
 
-/// #380 QA (PR #395): pure line-rendering core of [`print_level_clamp`],
-/// split out the same way `calibrate.rs`'s `render_tau_history_leg` is split
-/// from `print_tau_history_leg` — so the acceptance criterion ("applied ==
-/// requested prints nothing, applied != requested prints this exact line")
-/// is a unit test against a return value, not something that needs a
-/// stdout-capturing harness to check.
-fn render_level_clamp(requested_dbfs: f64, applied_dbfs: f64) -> Option<String> {
-    if applied_dbfs == requested_dbfs {
-        return None;
+#[derive(Clone, Copy)]
+pub enum LevelOrigin {
+    Default,
+    Typed,
+    Fixed,
+}
+
+impl LevelOrigin {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Typed => "typed",
+            Self::Fixed => "fixed",
+        }
     }
-    Some(format!(
-        "  level clamped to ceiling  {requested_dbfs:.1} dBFS \u{2192} {applied_dbfs:.1} dBFS  (drive_max_dbfs)"
+}
+
+fn dbfs_to_dbu(dbfs: f64, cal: Option<&serde_json::Value>) -> Option<f64> {
+    let vrms_0dbfs = cal?.get("vrms_at_0dbfs_out")?.as_f64()?;
+    Some(ac_core::shared::conversions::vrms_to_dbu(
+        vrms_0dbfs * 10.0_f64.powf(dbfs / 20.0),
     ))
 }
 
-/// #380: print the "level clamped to ceiling" line for a scalar level
-/// command (`plot`, `plot_ir`, `generate`, `generate_pink`,
-/// `sweep_frequency`, `calibrate`) once the applied value is read back from
-/// the sync ack (#360's server-side `drive_max_dbfs` clamp). No-op when
-/// `applied_dbfs == requested_dbfs`, so the unclamped path's output stays
-/// byte-for-byte identical to before #360 — the acceptance criterion this
-/// exists to satisfy, not an incidental property.
-pub fn print_level_clamp(requested_dbfs: f64, applied_dbfs: f64) {
-    if let Some(line) = render_level_clamp(requested_dbfs, applied_dbfs) {
+fn render_level_block(
+    level_dbfs: Option<f64>,
+    origin: LevelOrigin,
+    max_dbfs: Option<f64>,
+    cal: Option<&serde_json::Value>,
+    show_dbu: bool,
+) -> Vec<String> {
+    let level = match level_dbfs {
+        Some(v) => {
+            let analog = show_dbu
+                .then(|| dbfs_to_dbu(v, cal))
+                .flatten()
+                .map(|dbu| format!("  =  {dbu:6.2} dBu"))
+                .unwrap_or_default();
+            format!("  level      {v:.1} dBFS{analog}  ({})", origin.label())
+        }
+        None => "  level      (not reported by this daemon)".to_string(),
+    };
+    let maximum = match max_dbfs {
+        Some(v) => {
+            let analog = show_dbu
+                .then(|| dbfs_to_dbu(v, cal))
+                .flatten()
+                .map(|dbu| format!("  =  {dbu:6.2} dBu"))
+                .unwrap_or_default();
+            format!("  maximum    {v:.1} dBFS{analog}")
+        }
+        None => "  maximum    (not reported by this daemon)".to_string(),
+    };
+    vec![level, maximum]
+}
+
+fn render_level_range_block(
+    start_dbfs: f64,
+    stop_dbfs: f64,
+    origin: LevelOrigin,
+    max_dbfs: Option<f64>,
+    cal: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let analog = match (dbfs_to_dbu(start_dbfs, cal), dbfs_to_dbu(stop_dbfs, cal)) {
+        (Some(start), Some(stop)) => format!("  =  {start:.2} \u{2192} {stop:.2} dBu"),
+        _ => String::new(),
+    };
+    let mut lines = vec![format!(
+        "  level      {start_dbfs:.1} \u{2192} {stop_dbfs:.1} dBFS{analog}  ({})",
+        origin.label()
+    )];
+    lines.extend(
+        render_level_block(None, origin, max_dbfs, cal, true)
+            .into_iter()
+            .skip(1),
+    );
+    lines
+}
+
+pub fn print_level(
+    level_dbfs: Option<f64>,
+    defaulted: bool,
+    max_dbfs: Option<f64>,
+    cal: Option<&serde_json::Value>,
+    show_dbu: bool,
+) {
+    let origin = if defaulted {
+        LevelOrigin::Default
+    } else {
+        LevelOrigin::Typed
+    };
+    for line in render_level_block(level_dbfs, origin, max_dbfs, cal, show_dbu) {
         println!("{line}");
     }
 }
 
-/// #380 QA (PR #395): pure line-rendering core of [`print_level_clamp_range`]
-/// — same split, same reason as [`render_level_clamp`] above.
-fn render_level_clamp_range(
-    requested_start: f64,
-    requested_stop: f64,
-    applied_start: f64,
-    applied_stop: f64,
-) -> Vec<String> {
-    if applied_start == requested_start && applied_stop == requested_stop {
-        return Vec::new();
+pub fn print_fixed_level(level_dbfs: Option<f64>, max_dbfs: Option<f64>) {
+    for line in render_level_block(level_dbfs, LevelOrigin::Fixed, max_dbfs, None, false) {
+        println!("{line}");
     }
-    // Whichever bound actually moved is the ceiling — the clamp is
-    // `.min(ceiling)` per-bound, so an unmoved bound tells us nothing about
-    // it. When both moved they're equal, so either arm gives the same value.
-    let ceiling = if applied_start != requested_start {
-        applied_start
-    } else {
-        applied_stop
-    };
-    let mut lines = vec![
-        format!("  level clamped to ceiling  (drive_max_dbfs {ceiling:.1} dBFS)"),
-        format!("  requested  {requested_start:.1} \u{2192} {requested_stop:.1} dBFS"),
-    ];
-    if applied_start == applied_stop {
-        lines.push(format!(
-            "  applied    {applied_start:.1} dBFS  (flat \u{2014} entire requested range exceeds ceiling)"
-        ));
-    } else {
-        lines.push(format!(
-            "  applied    {applied_start:.1} \u{2192} {applied_stop:.1} dBFS"
-        ));
-    }
-    lines
 }
 
-/// Range form (`plot_level`, `sweep_level`): reports requested and applied
-/// bounds on their own lines, per #360's UX mockup, and calls out the
-/// degenerate case — the whole requested range sits above the ceiling and
-/// collapses to one flat level — rather than letting it print as an
-/// ordinary sweep (the exact case #360's UX comment designed the
-/// `(flat — ...)` annotation for).
-pub fn print_level_clamp_range(
-    requested_start: f64,
-    requested_stop: f64,
-    applied_start: f64,
-    applied_stop: f64,
+pub fn print_level_range(
+    start_dbfs: f64,
+    stop_dbfs: f64,
+    defaulted: bool,
+    max_dbfs: Option<f64>,
+    cal: Option<&serde_json::Value>,
 ) {
-    for line in
-        render_level_clamp_range(requested_start, requested_stop, applied_start, applied_stop)
-    {
+    let origin = if defaulted {
+        LevelOrigin::Default
+    } else {
+        LevelOrigin::Typed
+    };
+    for line in render_level_range_block(start_dbfs, stop_dbfs, origin, max_dbfs, cal) {
         println!("{line}");
     }
 }
@@ -271,7 +308,7 @@ pub fn get_cal(client: &mut AcClient) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ac_view_args, render_level_clamp, render_level_clamp_range};
+    use super::{ac_view_args, render_level_block, render_level_range_block, LevelOrigin};
 
     // The CLI-path drive-off AC (#185), asserted through the CLI's own arg
     // construction — not by reusing ac-view's in-app proof. `ac transfer`
@@ -308,83 +345,48 @@ mod tests {
         assert_eq!(args[i + 1], "5");
     }
 
-    // ─── #380 QA (PR #395): level-clamp line rendering ─────────────────
-    //
-    // Unit tests against the pure renderers rather than a stdout capture —
-    // same rationale `render_tau_history_leg` (calibrate.rs) already
-    // established for this crate. These cover the branch QA flagged as
-    // untested and refactor-fragile: which bound's applied value gets
-    // reported as the ceiling.
-
     #[test]
-    fn scalar_clamp_unclamped_renders_nothing() {
-        assert_eq!(render_level_clamp(-10.0, -10.0), None);
-    }
-
-    #[test]
-    fn scalar_clamp_renders_the_reconciling_line() {
+    fn scalar_default_typed_fixed_and_missing_maximum_render() {
         assert_eq!(
-            render_level_clamp(-6.0, -30.0),
-            Some(
-                "  level clamped to ceiling  -6.0 dBFS \u{2192} -30.0 dBFS  (drive_max_dbfs)"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn range_clamp_unclamped_renders_nothing() {
-        assert_eq!(
-            render_level_clamp_range(-40.0, -20.0, -40.0, -20.0),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn range_clamp_partial_reports_the_moved_bound_as_ceiling() {
-        // Only the stop bound (-20.0 -> -30.0) moved; start (-40.0) is
-        // unchanged and must not be mistaken for the ceiling.
-        let lines = render_level_clamp_range(-40.0, -20.0, -40.0, -30.0);
-        assert_eq!(
-            lines,
+            render_level_block(Some(-40.0), LevelOrigin::Default, Some(-20.0), None, false),
             vec![
-                "  level clamped to ceiling  (drive_max_dbfs -30.0 dBFS)".to_string(),
-                "  requested  -40.0 \u{2192} -20.0 dBFS".to_string(),
-                "  applied    -40.0 \u{2192} -30.0 dBFS".to_string(),
+                "  level      -40.0 dBFS  (default)",
+                "  maximum    -20.0 dBFS"
             ]
         );
-    }
-
-    #[test]
-    fn range_clamp_partial_start_side_reports_the_moved_bound_as_ceiling() {
-        // Mirror of the above with the *start* bound the one that moved —
-        // the arm-selection branch QA named as untested picks between
-        // `applied_start`/`applied_stop`; both arms need a test.
-        let lines = render_level_clamp_range(6.0, 10.0, -30.0, 10.0);
+        assert!(
+            render_level_block(Some(-30.0), LevelOrigin::Typed, Some(-20.0), None, false)[0]
+                .ends_with("(typed)")
+        );
+        assert!(
+            render_level_block(Some(-20.0), LevelOrigin::Fixed, Some(-20.0), None, false)[0]
+                .ends_with("(fixed)")
+        );
         assert_eq!(
-            lines,
-            vec![
-                "  level clamped to ceiling  (drive_max_dbfs -30.0 dBFS)".to_string(),
-                "  requested  6.0 \u{2192} 10.0 dBFS".to_string(),
-                "  applied    -30.0 \u{2192} 10.0 dBFS".to_string(),
-            ]
+            render_level_block(Some(-40.0), LevelOrigin::Default, None, None, false)[1],
+            "  maximum    (not reported by this daemon)"
+        );
+        assert_eq!(
+            render_level_block(None, LevelOrigin::Fixed, Some(-20.0), None, false)[0],
+            "  level      (not reported by this daemon)"
         );
     }
 
     #[test]
-    fn range_clamp_degenerate_range_collapses_to_the_flat_annotation() {
-        // Entire requested range sits above the ceiling: both bounds move
-        // to the same applied value, and that must read as an explicit
-        // flat-collapse, not an ordinary (zero-width) sweep.
-        let lines = render_level_clamp_range(-10.0, 6.0, -30.0, -30.0);
+    fn range_and_calibrated_scalar_render() {
         assert_eq!(
-            lines,
-            vec![
-                "  level clamped to ceiling  (drive_max_dbfs -30.0 dBFS)".to_string(),
-                "  requested  -10.0 \u{2192} 6.0 dBFS".to_string(),
-                "  applied    -30.0 dBFS  (flat \u{2014} entire requested range exceeds ceiling)"
-                    .to_string(),
-            ]
+            render_level_range_block(-40.0, -30.0, LevelOrigin::Default, Some(-20.0), None)[0],
+            "  level      -40.0 \u{2192} -30.0 dBFS  (default)"
         );
+        let cal = serde_json::json!({"vrms_at_0dbfs_out": 1.0});
+        let lines = render_level_block(
+            Some(-40.0),
+            LevelOrigin::Typed,
+            Some(-20.0),
+            Some(&cal),
+            true,
+        );
+        assert!(lines[0].contains("dBu"));
+        assert!(lines[1].contains("dBu"));
     }
 }

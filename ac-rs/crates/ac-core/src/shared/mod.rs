@@ -4,6 +4,7 @@
 pub mod calibration;
 pub mod constants;
 pub mod conversions;
+pub mod emission_level;
 pub(crate) mod fft_cache;
 pub mod generator;
 pub mod mic_curve_filter;

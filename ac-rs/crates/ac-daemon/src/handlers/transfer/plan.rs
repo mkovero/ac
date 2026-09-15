@@ -21,7 +21,7 @@ use ac_core::shared::calibration::Calibration;
 use ac_core::visualize::weighting_curves::WeightingCurve;
 
 use crate::handlers::{
-    apply_drive_ceiling, load_calibration_or_refuse, make_engine_for_state,
+    check_emission_or_refuse, load_calibration_or_refuse, make_engine_for_state,
     ref_output_migration_warning, resolve_output, resolve_ref_output, selected_backend_is_fake,
 };
 use crate::server::ServerState;
@@ -39,8 +39,9 @@ pub(super) struct SessionPlan {
     // ---- launch parameters, past validation ----
     pub(super) drive: bool,
     pub(super) drivable: bool,
-    /// Already clamped to `cfg.drive_max_dbfs` (#360), so the stored
-    /// `DriveState` never holds an unclamped value whether or not
+    /// Already checked against the fixed emission maximum (#459) when the
+    /// session can emit at all (`drive || drivable`), so the stored
+    /// `DriveState` never holds an over-maximum value whether or not
     /// `set_drive` is ever called in this session.
     pub(super) level_dbfs: f64,
     pub(super) fake: bool,
@@ -97,14 +98,18 @@ impl SessionPlan {
         } = parse_params(cmd).map_err(|e| json!({"ok": false, "error": e}))?;
 
         let cfg = state.cfg.lock().unwrap().clone();
-        // #360: a second, independent unclamped path from the same field
-        // `set_drive` already clamps — this seeds `DriveState` directly when
-        // `drive: true`, and is never touched by `set_drive`'s own clamp
-        // unless the client calls it again later. Clamped here, before the
-        // `DriveState::new` construction below, so the stored state never
-        // holds an unclamped value regardless of whether `set_drive` is ever
-        // called in this session.
-        let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+        // #459: checked here, before the `DriveState::new` construction
+        // below, so the stored state never holds an over-maximum value
+        // regardless of whether `set_drive` is ever called in this
+        // session — `set_drive` runs the same check again on its own path
+        // (`transfer/ctrl.rs`). Only checked when the session can emit at
+        // all: a fully passive session (external-DUT workflow) opens no
+        // output ports and this field is otherwise unused.
+        let level_dbfs = if drive || drivable {
+            check_emission_or_refuse(state, &cfg, level_dbfs)?
+        } else {
+            level_dbfs
+        };
         let capture_ports = crate::handlers::cached_capture_ports(state);
 
         // Resolve each unique capture channel to a port name once. `unique_ports`
@@ -269,6 +274,7 @@ impl SessionPlan {
             // Legacy fields — filled with the first pair so old clients keep working.
             "meas_channel": self.pairs.first().map(|p| p.0).unwrap_or(0),
             "ref_channel":  self.pairs.first().map(|p| p.1).unwrap_or(0),
+            "max_dbfs":     ac_core::shared::emission_level::MAX_EMISSION_DBFS,
             "backend":      self.backend,
         });
         // #225 migration notice — see `ref_output_migration_warning`. Repeated on

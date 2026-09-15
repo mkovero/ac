@@ -33,7 +33,8 @@ pub(super) fn parse_test(args: &mut Vec<String>) -> Result<ParsedCommand, String
         }
         "dut" => {
             let mut compare = false;
-            let mut level = LevelSpec::Dbfs(-20.0);
+            let mut level = LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS);
+            let mut level_defaulted = true;
             let mut leftover = Vec::new();
             for a in args.iter() {
                 if expand(a) == "compare" {
@@ -42,6 +43,7 @@ pub(super) fn parse_test(args: &mut Vec<String>) -> Result<ParsedCommand, String
                 }
                 if let Ok(l) = parse_level(a) {
                     level = l;
+                    level_defaulted = false;
                     continue;
                 }
                 leftover.push(a.clone());
@@ -50,7 +52,11 @@ pub(super) fn parse_test(args: &mut Vec<String>) -> Result<ParsedCommand, String
                 return Err(format!("test dut: unexpected argument(s): {leftover:?}"));
             }
             Ok(ParsedCommand {
-                cmd: CommandKind::TestDut { compare, level },
+                cmd: CommandKind::TestDut {
+                    compare,
+                    level,
+                    level_defaulted,
+                },
                 show_plot: false,
             })
         }
@@ -89,11 +95,24 @@ mod tests {
     fn test_test_dut_compare() {
         let p = parse(&args("test dut compare -10dbfs")).unwrap();
         match p.cmd {
-            CommandKind::TestDut { compare, level } => {
+            CommandKind::TestDut {
+                compare,
+                level,
+                level_defaulted,
+            } => {
                 assert!(compare);
+                assert!(!level_defaulted);
                 assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-10.0)).abs() < 1e-9));
             }
             other => panic!("expected TestDut, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_dut_uses_the_named_default_and_marks_it() {
+        let p = parse(&args("test dut")).unwrap();
+        assert!(
+            matches!(p.cmd, CommandKind::TestDut { level: LevelSpec::Dbfs(v), level_defaulted: true, .. } if v == ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+        );
     }
 }

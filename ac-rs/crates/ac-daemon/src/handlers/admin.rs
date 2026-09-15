@@ -205,7 +205,18 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Err(e) = ac_core::config::save(&cfg, None) {
         eprintln!("setup: save failed: {e}");
     }
-    json!({"ok": true, "config": cfg_value})
+    // #459: the fixed emission maximum, at the top level (beside `config`,
+    // not inside it — `config` is the config file, and the maximum is a
+    // build constant; putting it there would make it look settable). This
+    // is the one place the maximum is visible without starting an
+    // emission — `setup` is never refused, retired key or not, so it stays
+    // reachable exactly when an operator needs to find out what the
+    // maximum is.
+    json!({
+        "ok": true,
+        "config": cfg_value,
+        "max_dbfs": ac_core::shared::emission_level::MAX_EMISSION_DBFS,
+    })
 }
 
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {

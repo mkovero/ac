@@ -100,7 +100,7 @@ fn get_and_list_calibrations_carry_tau_history() {
             "ref_freq":                         1000.0,
             "vrms_at_0dbfs_out":                null,
             "vrms_at_0dbfs_in":                 null,
-            "ref_dbfs":                         -10.0,
+            "ref_dbfs":                         -20.0,
             "mic_sensitivity_dbfs_at_94db_spl": null,
             "mic_response":                     null,
             "tau_history": [
@@ -138,7 +138,7 @@ fn get_and_list_calibrations_carry_tau_history() {
             "ref_freq":                         1000.0,
             "vrms_at_0dbfs_out":                null,
             "vrms_at_0dbfs_in":                 null,
-            "ref_dbfs":                         -10.0,
+            "ref_dbfs":                         -20.0,
             "mic_sensitivity_dbfs_at_94db_spl": null,
             "mic_response":                     null,
             "tau_history":                      []

@@ -1,15 +1,16 @@
-use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp, print_level_clamp_range};
+use super::{check_ack, get_cal, level_to_dbfs, print_level, print_level_range};
 use crate::client::AcClient;
 use crate::parse::CommandKind;
 
 pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
-    let (start, stop, freq, duration) = match cmd {
+    let (start, stop, level_defaulted, freq, duration) = match cmd {
         CommandKind::SweepLevel {
             start,
             stop,
+            level_defaulted,
             freq,
             duration,
-        } => (start, stop, *freq, *duration),
+        } => (start, stop, *level_defaulted, *freq, *duration),
         _ => unreachable!(),
     };
 
@@ -17,9 +18,7 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
     let start_db = level_to_dbfs(start, cal.as_ref());
     let stop_db = level_to_dbfs(stop, cal.as_ref());
 
-    println!(
-        "\n  Sweep: {start_db:.1} \u{2192} {stop_db:.1} dBFS  |  {freq:.0} Hz  |  {duration:.1}s"
-    );
+    println!("\n  Sweep: {freq:.0} Hz  |  {duration:.1}s");
 
     let ack = check_ack(
         client.send_cmd(
@@ -34,15 +33,13 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
         ),
         "sweep_level",
     );
-    let start_applied = ack
-        .get("start_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(start_db);
-    let stop_applied = ack
-        .get("stop_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(stop_db);
-    print_level_clamp_range(start_db, stop_db, start_applied, stop_applied);
+    print_level_range(
+        start_db,
+        stop_db,
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+    );
     if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
         println!("  Output: {p}");
     }
@@ -52,13 +49,14 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
 }
 
 pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (start, stop, level, duration) = match cmd {
+    let (start, stop, level, level_defaulted, duration) = match cmd {
         CommandKind::SweepFrequency {
             start,
             stop,
             level,
+            level_defaulted,
             duration,
-        } => (*start, *stop, level, *duration),
+        } => (*start, *stop, level, *level_defaulted, *duration),
         _ => unreachable!(),
     };
 
@@ -67,9 +65,7 @@ pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
-    println!(
-        "\n  Sweep: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s"
-    );
+    println!("\n  Sweep: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  |  {duration:.1}s");
 
     let ack = check_ack(
         client.send_cmd(
@@ -84,11 +80,13 @@ pub fn run_frequency(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &
         ),
         "sweep_frequency",
     );
-    let applied_db = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(level_db);
-    print_level_clamp(level_db, applied_db);
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
     if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
         println!("  Output: {p}");
     }

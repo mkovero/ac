@@ -18,7 +18,7 @@ fn calibrate_measures_tau_against_fake_loopback_delay() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -94,7 +94,7 @@ fn calibrate_reports_not_measured_low_snr_on_muted_fake_loopback() {
     let cal_path = d.home.join(".config").join("ac").join("cal.json");
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -152,7 +152,7 @@ fn calibrate_reports_refused_xrun_end_to_end() {
     let cal_path = d.home.join(".config").join("ac").join("cal.json");
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -222,7 +222,7 @@ fn calibrate_reports_refused_xrun_over_low_snr_when_both_conditions_hold() {
     let cal_path = d.home.join(".config").join("ac").join("cal.json");
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -342,7 +342,7 @@ fn calibrate_reports_disagree_period_shift_end_to_end() {
     let cal_path = d.home.join(".config").join("ac").join("cal.json");
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -395,7 +395,7 @@ fn calibrate_cheap_refresh_still_measures_tau() {
     let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 

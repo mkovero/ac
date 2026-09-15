@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{check_ack, get_cal, level_to_dbfs};
+use super::{check_ack, get_cal, level_to_dbfs, print_level};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -99,8 +99,12 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
 }
 
 pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (compare, level) = match cmd {
-        CommandKind::TestDut { compare, level } => (*compare, level),
+    let (compare, level, level_defaulted) = match cmd {
+        CommandKind::TestDut {
+            compare,
+            level,
+            level_defaulted,
+        } => (*compare, level, *level_defaulted),
         _ => unreachable!(),
     };
 
@@ -113,8 +117,16 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         json["compare"] = true.into();
     }
 
-    check_ack(client.send_cmd(&json, None), "test_dut");
-    println!("\n  DUT test at {level_db:.1} dBFS\n");
+    let ack = check_ack(client.send_cmd(&json, None), "test_dut");
+    println!("\n  DUT test");
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
+    println!();
 
     io::print_freq_header(have_cal);
 
