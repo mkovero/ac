@@ -13,6 +13,12 @@ RIG_NAME=lib-test-rig
 RIG_DRIVE_CEILING_DBFS=-40
 # shellcheck disable=SC2034  # read by speaker_ceiling() in lib.sh
 RIG_SPEAKER_CEILING_DBFS=-50
+# shellcheck disable=SC2034  # read by rig_dest() in lib.sh. Set here (not
+# left unset like the rest of load_rig's state) so the resolve_dest test
+# below exercises the real bug: with this unset, rig_dest itself dies on
+# `set -u` before a broken (unguarded) resolve_dest could silently succeed,
+# which would let that test pass for the wrong reason.
+RIG_STAGE_BASE=/rig-stage-lib-test
 
 assert_refuses() {
     # require_level dies (hard `exit`) on refusal; a subshell keeps that
@@ -54,53 +60,27 @@ echo "lib.sh resolve_rev: fails closed on a missing revision"
 # rig_dest: `dest="$(rig_dest "$(resolve_rev "$rev_arg")")"` buries
 # resolve_rev's exit 1 inside the inner command substitution, where only
 # rig_dest's own (always-0, it just echoes) exit status reaches the
-# assignment — set -e never sees the failure. Exercise preflight.sh's
-# actual composed form (the fixed `rev="$(resolve_rev ...)" || exit 1`
-# split), not a bare resolve_rev call, so a regression back to the nested
-# form would be caught here (PR #441 QA finding, third pass).
+# assignment — set -e never sees the failure. xrun-soak.sh and
+# probe-outputs.sh composed the same nested, broken form separately and
+# were unfixed by the commit that first fixed preflight.sh (PR #441 QA
+# finding, fifth pass). All three now call one function, lib.sh's
+# resolve_dest, instead of each inlining the split form.
+#
+# This block used to carry three hardcoded copies of that split form (one
+# per script) rather than calling resolve_dest — which meant reverting any
+# one script's actual call site back to the nested, broken form left this
+# test green, since it never read the scripts at all (PR #441 QA finding,
+# sixth pass, confirmed by live reproduction: reverting xrun-soak.sh alone
+# left all blocks passing). Calling resolve_dest directly closes that gap:
+# a regression in the function itself, or in any caller that stops using
+# it, is now the only way for preflight.sh/xrun-soak.sh/probe-outputs.sh to
+# regress, and this is that function's own test.
 AC_HOME="$(mktemp -d)"
 mkdir -p "$AC_HOME/target-rig-stage"
-if (
-    rev="$(resolve_rev nonexistent-rev)" || exit 1
-    rig_dest "$rev"
-) >/dev/null 2>&1; then
-    echo "FAIL: preflight.sh's composed rev/dest resolution should fail closed on a missing revision"
+if (resolve_dest nonexistent-rev) >/dev/null 2>&1; then
+    echo "FAIL: resolve_dest should fail closed on a missing revision"
     exit 1
 fi
 rm -rf "$AC_HOME"
 unset AC_HOME
-echo "lib.sh resolve_rev + rig_dest composition (preflight.sh's actual line): fails closed on a missing revision"
-
-# preflight.sh's fix above only closed the bug where preflight.sh itself hit
-# it; xrun-soak.sh:26 and probe-outputs.sh:42 composed resolve_rev/rig_dest
-# the same nested, broken way and were unfixed by that commit (PR #441 QA
-# finding, fifth pass). Both are now split identically to preflight.sh — run
-# each script's exact `rev`/`dest` lines (copied here, not re-derived) so a
-# regression back to the nested form in either file is caught.
-AC_HOME="$(mktemp -d)"
-mkdir -p "$AC_HOME/target-rig-stage"
-# xrun-soak.sh's composed form
-rev=nonexistent-rev
-if (
-    if [[ $rev != installed ]]; then
-        rev="$(resolve_rev "$rev")" || exit 1
-        rig_dest "$rev"
-    fi
-) >/dev/null 2>&1; then
-    echo "FAIL: xrun-soak.sh's rev/dest resolution should fail closed on a missing revision"
-    exit 1
-fi
-# probe-outputs.sh's composed form (identical shape, separate call site)
-rev=nonexistent-rev
-if (
-    if [[ $rev != installed ]]; then
-        rev="$(resolve_rev "$rev")" || exit 1
-        rig_dest "$rev"
-    fi
-) >/dev/null 2>&1; then
-    echo "FAIL: probe-outputs.sh's rev/dest resolution should fail closed on a missing revision"
-    exit 1
-fi
-rm -rf "$AC_HOME"
-unset AC_HOME
-echo "lib.sh resolve_rev + rig_dest composition (xrun-soak.sh / probe-outputs.sh): fails closed on a missing revision"
+echo "lib.sh resolve_dest: fails closed on a missing revision"

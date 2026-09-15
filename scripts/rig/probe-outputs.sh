@@ -39,15 +39,13 @@ require_port_order
 [[ $seconds =~ ^[0-9]+$ && $seconds -ge 3 && $seconds -le 10 ]] || die "--seconds must be an integer 3..10"
 
 dest=""
-# See preflight.sh for why this must be split rather than nested: resolve_rev's
-# exit 1 would otherwise only kill the inner command substitution, and
-# rig_dest's own (always-0) exit status is what `set -e` would see (PR #441
-# QA finding, fifth pass). Matters more here: this is an EMIT script, so an
-# unresolved rev falling through silently would drive real audio through
-# whatever is installed instead of refusing.
+# See lib.sh's resolve_dest for why resolve_rev's failure must reach this
+# shell directly rather than through a nested `rig_dest "$(resolve_rev ...)"`
+# (PR #441 QA finding, fifth pass). Matters more here: this is an EMIT
+# script, so an unresolved rev falling through silently would drive real
+# audio through whatever is installed instead of refusing.
 if [[ $rev != installed ]]; then
-    rev="$(resolve_rev "$rev")" || exit 1
-    dest="$(rig_dest "$rev")"
+    dest="$(resolve_dest "$rev")"
 fi
 run="$(rig_run_dir probe-outputs)"
 push_helpers

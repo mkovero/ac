@@ -94,6 +94,25 @@ build_compiled_this_run() {
 # Remote directory a staged revision is shipped to.
 rig_dest() { echo "$RIG_STAGE_BASE/$1-x86_64"; }
 
+# resolve_dest <rev> — dest dir for a staged rev. The composition every
+# rev-consuming script needs: resolve_rev's die()/exit 1 must reach the
+# caller directly. Nested inside `dest="$(rig_dest "$(resolve_rev "$rev")")"`,
+# that exit 1 only terminates the inner command-substitution subshell — the
+# outer assignment sees rig_dest's own (always-0, it just echoes) exit
+# status, so `set -e` never fires on resolve_rev's failure. preflight.sh,
+# xrun-soak.sh and probe-outputs.sh each hit this composed nested form
+# separately before being fixed to call this one function instead (PR #441
+# QA findings, second and fifth passes; lib_test.sh had grown three
+# hardcoded copies of the fix rather than calling it, which stayed green
+# through a reversion of the actual scripts — same review, sixth pass).
+# Caller still guards on rev != installed itself; this doesn't special-case
+# "installed".
+resolve_dest() {
+    local rev
+    rev="$(resolve_rev "$1")" || exit 1
+    rig_dest "$rev"
+}
+
 # rig_run_dir <label> — a fresh remote directory for one run's artefacts.
 rig_run_dir() { echo "$RIG_STAGE_BASE/runs/$(date -u +%Y%m%dT%H%M%SZ)-$1"; }
 
