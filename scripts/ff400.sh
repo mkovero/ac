@@ -6,6 +6,12 @@
 # on this card's 0–65536 / -90..+6 dB scale).  Analog inputs/ADAT inputs are
 # muted in the DSP mixer (hardware loopback = 0).
 #
+# This script sets no JACK channel-name aliases and does not change phantom
+# power. snd_fireface's ADAT/analog block order is not stable across boots
+# (see issue #444), so a fixed alias table would sometimes label an analog
+# port as ADAT or vice versa. It only clears any `FF400:`-prefixed alias
+# left over from an earlier run of an older version of this script.
+#
 # Usage:
 #   ./ff400.sh          — apply defaults
 #   ./ff400.sh show     — print current relevant settings
@@ -15,6 +21,129 @@
 
 set -e
 CARD=0
+
+# ── ALSA control width helpers ───────────────────────────────────────────────
+# The FF400's array controls (output-volume, analog-source-gain,
+# adat-source-gain, stream-source-gain) each carry a values= list whose
+# length is fixed by the userspace snd-firewire-ctl-services model
+# (runtime/fireface/src/former_ctls.rs, protocols/fireface/src/former/ff400.rs
+# upstream) — it does NOT follow sample rate or the JACK port count from
+# issue #444 (that's a separate, kernel-side quantity: pcm_capture_channels
+# in sound/firewire/fireface/ff.c). Read the width from the control itself
+# rather than trusting a literal, since the ctl-service version actually
+# installed has not been checked against upstream.
+_ctl_width() {
+    amixer -c "$CARD" cget numid="$1" 2>/dev/null \
+        | grep ': values=' | sed 's/.*values=//' | awk -F, '{print NF}'
+}
+
+# Read and validate every array control's width before any mixer write
+# (issue #444). A missing or non-numeric width, or — for stream-source-gain
+# — a width too narrow for the row's own index, means the numid layout this
+# script assumes does not match the running ctl-service: exit non-zero,
+# name the numid, and write nothing.
+declare -A CTL_WIDTH
+check_ctl_width() {
+    local numid="$1" name="$2" width
+    width=$(_ctl_width "$numid")
+    if [[ -z "$width" || ! "$width" =~ ^[0-9]+$ || "$width" -eq 0 ]]; then
+        echo "  mixer widths:        could not read value count for numid=$numid ($name); nothing written" >&2
+        exit 1
+    fi
+    CTL_WIDTH[$numid]="$width"
+}
+check_all_ctl_widths() {
+    local numid i
+    check_ctl_width 8 "output-volume"
+    for numid in $(seq 9 26); do
+        check_ctl_width "$numid" "analog-source-gain"
+    done
+    for numid in $(seq 45 62); do
+        check_ctl_width "$numid" "adat-source-gain"
+    done
+    for i in $(seq 0 17); do
+        numid=$((63 + i))
+        check_ctl_width "$numid" "stream-source-gain"
+        if [[ "${CTL_WIDTH[$numid]}" -le "$i" ]]; then
+            echo "  mixer widths:        numid=$numid (stream-source-gain) reports width ${CTL_WIDTH[$numid]}, too narrow for index $i; nothing written" >&2
+            exit 1
+        fi
+    done
+}
+
+# ── JACK alias cleanup ───────────────────────────────────────────────────────
+# This script publishes no channel-name aliases: on snd_fireface the block
+# order is not determined here (issue #444), and a wrong alias looks like
+# driver output. It only removes any `FF400:`-prefixed alias a previous run
+# of this script may have left on a capture/playback port; any other alias
+# (e.g. jackd's own `alsa_pcm:...`) is left untouched.
+clear_ff400_aliases() {
+    if ! jack_lsp &>/dev/null; then
+        echo "  JACK aliases:       could not reach a JACK server; did not check aliases"
+        echo "  JACK aliases:       check: jack_lsp from the user jackd runs as; ss -xlp | grep jack"
+        return
+    fi
+
+    # jack_lsp -A's exit status must be checked explicitly, both here and
+    # below: a process substitution's failure isn't seen by `set -e`, and a
+    # pipe into awk without pipefail hides the exit status of jack_lsp behind
+    # awk's own success. Either masked failure would let this function print
+    # "cleared" / "none set here" while never having actually looked.
+    local lsp_out
+    if ! lsp_out=$(jack_lsp -A); then
+        echo "  JACK aliases:       jack_lsp -A failed after the reachability check; did not clear or confirm any alias" >&2
+        exit 1
+    fi
+
+    local port="" line stale=0
+    while IFS= read -r line; do
+        case "$line" in
+            "   "*)
+                local alias="${line#   }"
+                case "$port" in
+                    system:capture_*|system:playback_*)
+                        case "$alias" in
+                            FF400:*)
+                                if ! jack_alias -u "$port" "$alias" 2>/dev/null; then
+                                    echo "  JACK aliases:       could not unalias ${alias} on ${port}" >&2
+                                    stale=1
+                                fi
+                                ;;
+                        esac
+                        ;;
+                esac
+                ;;
+            *)
+                port="$line"
+                ;;
+        esac
+    done <<< "$lsp_out"
+
+    local verify_out
+    if ! verify_out=$(jack_lsp -A); then
+        echo "  JACK aliases:       jack_lsp -A failed during verification; did not confirm any alias was cleared" >&2
+        exit 1
+    fi
+    local remaining
+    remaining=$(awk '
+        /^   / { if ($0 ~ /^   FF400:/ && port ~ /^system:(capture|playback)_/) print port ": " $0; next }
+        { port = $0 }
+    ' <<< "$verify_out")
+    if [[ -n "$remaining" ]]; then
+        echo "  JACK aliases:       FF400: alias still present after clearing:" >&2
+        echo "$remaining" >&2
+        exit 1
+    fi
+    if [[ $stale -ne 0 ]]; then
+        exit 1
+    fi
+
+    echo "  JACK aliases:       cleared any FF400: alias left by an earlier run"
+    echo "  JACK aliases:       none set here; block order is not determined by this script — to find it:"
+    echo "                        silent capture: unconnected ADAT/S/PDIF inputs read exact digital zero"
+    echo "                        drive a tone, watch meter:stream-input / meter:analog-output"
+    echo "                        scripts/rig/preflight.sh's port-order row, where scripts/rig/ exists"
+}
 
 # ── Level mode ────────────────────────────────────────────────────────────────
 # line-output-level / headphone-output-level / line-input-level
@@ -38,22 +167,24 @@ case "${MODE,,}" in
         printf "  %-26s %s\n" "line-input-gain:"        "$(_int 82) dB"
         printf "  %-26s %s\n" "line-3/4-inst:"          "$(_bool 91)"
         printf "  %-26s %s\n" "line-3/4-pad:"           "$(_bool 92)"
-        printf "  %-26s %s\n" "mic-1/2-powering:"       "$(_bool 90)"
-        # FF400 hardware output order (ALSA/JACK, 0-indexed) — confirmed empirically:
-        #   0-7  : ADAT 1–8
-        #   8-9  : SPDIF L/R
-        #   10-17: Analog AN1–AN8  (rear line outputs)
-        CHNAME=(ADAT1 ADAT2 ADAT3 ADAT4 ADAT5 ADAT6 ADAT7 ADAT8 SPDIF-L SPDIF-R AN1 AN2 AN3 AN4 AN5 AN6 AN7 AN8)
+        printf "  %-26s %s\n" "mic-1/2-powering (driver cache, not set by this script):" "$(_bool 90)"
         echo ""
-        echo "  stream-source-gain diagonal (JACK ch → hw output):"
+        echo "  stream-source-gain diagonal (JACK ch → hw output), by index only:"
+        echo "  (this script does not know which name belongs to which index — see JACK aliases below)"
         for i in $(seq 63 80); do
             idx=$((i - 63))
             diag=$(amixer -c $CARD cget numid=$i 2>/dev/null \
                    | grep ': values' \
                    | sed 's/.*values=//' \
-                   | python3 -c "import sys; v=sys.stdin.read().strip().split(','); print(v[$idx])")
-            printf "    ch%02d %-10s %s\n" $idx "${CHNAME[$idx]}" "$diag"
+                   | python3 -c "import sys; v=sys.stdin.read().strip().split(','); print(v[$idx])" 2>/dev/null) || true
+            if [[ -n "$diag" ]]; then
+                printf "    ch%02d %s\n" $idx "$diag"
+            else
+                printf "    ch%02d %s\n" $idx "(could not be read)"
+            fi
         done
+        echo ""
+        clear_ff400_aliases
         exit 0
         ;;
     +4dbu|+4)   LEVEL_IDX=2 ; LEVEL_NAME="+4 dBu"  ;;
@@ -66,6 +197,14 @@ case "${MODE,,}" in
 esac
 
 echo "=== Fireface 400 init  (card $CARD, level mode: $LEVEL_NAME) ==="
+
+# ── Clear any FF400: JACK alias left by an earlier run ───────────────────────
+# Runs first: with set -e, a failing mixer write below must not leave a wrong
+# alias in place (issue #444).
+clear_ff400_aliases
+
+# ── Validate every array control's width before any mixer write ─────────────
+check_all_ctl_widths
 
 # ── Ensure snd-fireface-ctl service is running (bridges ALSA → FireWire hw) ──
 #systemctl --user restart snd-fireface-ctl.service
@@ -87,25 +226,32 @@ echo "  mic-input-gain:     0 dB"
 echo "  line-input-gain:    0 dB"
 
 # ── Input mode ────────────────────────────────────────────────────────────────
+# Phantom power (numid=90, mic-1/2-powering) is not touched here: it belongs
+# to the rig profile, not to this generic init (issue #444).
 amixer -c $CARD cset numid=91 off,off >/dev/null  # line-3/4-inst  → off
 amixer -c $CARD cset numid=92 off,off >/dev/null  # line-3/4-pad   → off
-amixer -c $CARD cset numid=90 off,off >/dev/null  # mic-1/2-powering (phantom) → off
 echo "  line-3/4 inst/pad:  off"
-echo "  phantom power:      off"
 
-# ── Output volume (numid 8, 18 channels, unity = 32768 = 0 dB) ───────────────
-amixer -c $CARD cset numid=8 \
-    32768,32768,32768,32768,32768,32768,32768,32768,32768,\
-    32768,32768,32768,32768,32768,32768,32768,32768,32768 >/dev/null
-echo "  output-volume:      unity (32768) × 18"
+# ── Output volume (numid 8, unity = 32768 = 0 dB) ────────────────────────────
+vol_vals=$(python3 -c "print(','.join(['32768'] * ${CTL_WIDTH[8]}))")
+amixer -c $CARD cset numid=8 "$vol_vals" >/dev/null
+echo "  output-volume:      unity (32768) × ${CTL_WIDTH[8]}"
 
 # ── PCM stream → hardware output routing (identity, 32768 = 0 dB) ────────────
-# numid 63..80 = mixer:stream-source-gain index 0..17
-# Each row is 18 values; set position [N] = 32768, rest = 0
+# numid 63..80 = mixer:stream-source-gain index 0..17. Width is fixed by the
+# ctl-service model (see _ctl_width above), validated for every index by
+# check_all_ctl_widths before this loop runs, so index i is always in range.
 echo "  stream routing:     identity @ 0 dB (32768)"
 for i in $(seq 0 17); do
     numid=$((63 + i))
-    vals=$(python3 -c "v=[0]*18; v[$i]=32768; print(','.join(map(str,v)))")
+    width="${CTL_WIDTH[$numid]}"
+    vals=$(python3 -c "
+n=$width
+i=$i
+v=[0]*n
+v[i]=32768
+print(','.join(map(str,v)))
+")
     amixer -c $CARD cset numid=$numid "$vals" >/dev/null
 done
 
@@ -113,27 +259,13 @@ done
 # (analog-source-gain and adat-source-gain all 0 — no hardware loopback)
 # numid 9..26  = mixer:analog-source-gain index 0..17
 # numid 45..62 = mixer:adat-source-gain   index 0..17
+# Each row's width is fixed by the ctl-service model (8, not 18 — see
+# _ctl_width above) and validated by check_all_ctl_widths before this loop.
 echo "  analog/adat loopback: muted"
 for numid in $(seq 9 26) $(seq 45 62); do
-    amixer -c $CARD cset numid=$numid "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0" >/dev/null
+    zeros=$(python3 -c "print(','.join(['0'] * ${CTL_WIDTH[$numid]}))")
+    amixer -c $CARD cset numid=$numid "$zeros" >/dev/null
 done
-
-# ── JACK port aliases ─────────────────────────────────────────────────────────
-# Sets human-readable aliases on all 18 playback and capture ports.
-# Aliases show up in QjackCtl, Carla, Catia etc. but jack_lsp still shows
-# the real name.  Safe to run even if JACK is not running (fails silently).
-CHNAME=(ADAT1 ADAT2 ADAT3 ADAT4 ADAT5 ADAT6 ADAT7 ADAT8 SPDIF-L SPDIF-R AN1 AN2 AN3 AN4 AN5 AN6 AN7 AN8)
-if jack_lsp &>/dev/null; then
-    echo "  JACK aliases:       setting..."
-    for i in $(seq 0 17); do
-        n=$((i + 1))
-        jack_alias "system:playback_${n}"  "FF400:playback_${CHNAME[$i]}"  2>/dev/null || true
-        jack_alias "system:capture_${n}"   "FF400:capture_${CHNAME[$i]}"   2>/dev/null || true
-    done
-    echo "  JACK aliases:       done"
-else
-    echo "  JACK aliases:       skipped (JACK not running)"
-fi
 
 echo ""
 echo "Done.  Run  ./ff400.sh show  to verify."

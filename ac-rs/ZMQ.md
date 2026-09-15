@@ -1256,11 +1256,29 @@ same applied value.
 // topic: data  (measurement/frequency_response/point frame, see Shared types)
 ```
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot", "n_points": <int>, "xruns": <int> }
 ```
+
+`xruns` is the session delta — `AudioEngine::xruns()` sampled once at
+engine creation and once at sweep completion, then subtracted
+(wrapping-safe) — not a sum of that per-point cumulative reading (#428).
+
+**DATA** — terminal, analyzer failure (#428):
+```json
+// topic: error
+{ "cmd": "plot", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
+```
+
+An analyzer failure at any point aborts the sweep atomically: the engine
+stops, this `error` is published, and none of `measurement/frequency_
+response/complete`, `measurement/report`, the report file, or `done`
+follow — a failed sweep never archives its completed prefix as a
+successful measurement. `requested_points` is the full sweep's point
+count; `completed_points` is how many points had already published a
+`measurement/frequency_response/point` frame before the failure.
 
 ---
 
@@ -1299,10 +1317,20 @@ exceeds the ceiling flattens there rather than running unclamped.
 includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
 post-clamp level for that step).
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot_level", "n_points": <int>, "xruns": <int> }
+```
+
+`xruns` is the session delta, same accounting as `plot`'s (#428).
+
+**DATA** — terminal, analyzer failure (#428): same shape and same
+atomic-failure guarantee as `plot`'s, above, with `"cmd": "plot_level"`
+and `requested_points` the level-step count (`steps`).
+```json
+// topic: error
+{ "cmd": "plot_level", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
 ```
 
 ---
@@ -1580,17 +1608,21 @@ reading either.
   "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
-  "tau_state":            "measured" | "not_measured_no_loopback" | "error"
-                           | "disagree_period_shift" | "disagree_other",
+  "tau_state":            "measured" | "not_measured_low_snr" | "error"
+                           | "disagree_period_shift" | "disagree_other" | "refused_xrun",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
   "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
-  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_*)
+  "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
+  "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
+  "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, absent on error
+  "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
   "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
   "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
@@ -1614,33 +1646,62 @@ not only what this run measured, and the `*_state` word says which:
 | `unchanged` | the prompt was skipped; the previously stored value stands |
 | `absent` | the field holds no value — never set, or just cleared |
 
-**τ (interface latency, #281/#347)** is not prompt-driven — it piggybacks
-on the loopback state `cal_prompt` step 2 already established, so there is
-no third interactive step and no `unchanged` state (skipping a voltage
+**τ (interface latency, #281/#347)** is not prompt-driven — it is not a
+third interactive step and has no `unchanged` state (skipping a voltage
 prompt does not affect it). #347: a single reading is not a measurement of
 τ on this stack — round-trip latency for a fixed path can vary by exactly
 one period between client lifetimes, invisible within any one lifetime
 (stable to 0.001 frames). `calibrate` therefore always runs τ as **two**
 independent client lifecycles (fresh `start`/`stop` each) and compares
-them before storing anything:
+them before storing anything.
+
+**#368**: τ used to run only when `cal_prompt` step 2's `loopback` flag
+was `true` — a captured-level proxy for "is this cable patched" that a
+loopback 3 dB hot or 4 dB low both failed even though both carried a real,
+measurable arrival, and that a loud but uncorrelated interferer could
+still pass. τ is now attempted unconditionally; the gate lives inside the
+measurement itself, on the deconvolved peak's own pre-impulse SNR, which
+is the quantity that actually distinguishes "patched" from "not patched."
+`cal_prompt` step 2's own `loopback` flag is unchanged and keeps gating
+only whether the DMM prompt pre-fills the output reading — a separate,
+still-unity-keyed decision.
 
 | `tau_state` | meaning |
 |-------------|---------|
-| `measured` | loopback detected this run; two independent readings agreed to the whole sample and their average was appended to `tau_history` |
-| `not_measured_no_loopback` | loopback not detected this run — nothing to measure τ against |
-| `error` | loopback was detected but a lifecycle's own measurement failed (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `measured` | two independent readings agreed to the whole sample and their average was appended to `tau_history` |
+| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR — not distinguishable from noise, so nothing was measured |
+| `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
-`not_measured_no_loopback` or `error` result is still legible against
+`not_measured_low_snr` or `error` result is still legible against
 `cal.json` history without a second round trip. `tau_period_size: null`
 does not mean unknown — see `AudioEngine::period_size` in
 `ac-daemon/src/audio/mod.rs`: some backends cannot report a period size
 at all, which is a documented backend limitation, distinct from a period
 size that simply wasn't queried (and means `disagree_period_shift` can
 never fire on that backend — any disagreement there is `disagree_other`).
+
+`tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
+every state where at least one lifecycle reached deconvolution
+(`measured`, `not_measured_low_snr`, `disagree_*`), absent on `error`
+(which can fail before a peak was ever located), and **also absent on
+`refused_xrun`** (#369): an xrun-crossed lifecycle's SNR gate never runs
+(see the `refused_xrun` row above), so there is no SNR figure to report —
+the state name itself names the cause, and no number is offered that
+could be misread as a scored noise floor. On `measured` and `disagree_*`,
+the SNR reported is the worse (lower) of the two lifecycles' — both
+necessarily cleared the threshold, since a lifecycle that didn't, and
+carried no xrun, would have produced `not_measured_low_snr` instead, and
+a lifecycle that did carry one would have diverted the whole run to
+`refused_xrun` before either `measured` or `disagree_*` could be reached
+— so this is a diagnostic figure alongside the result rather than a
+second gate. `tau_snr_threshold_db` is a derived constant (see
+`ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
+comment for its provenance), not measured on this exact sweep.
 
 On either disagreement state, `tau_reading1_s` / `tau_reading2_s` are the
 raw seconds values from the two lifecycles, shown verbatim rather than
@@ -1649,6 +1710,20 @@ period-shift jump is the diagnostic clue #347 itself was found from.
 `tau_delta_samples` and (on `disagree_period_shift`) `tau_periods` are
 the already-classified delta, so a client doesn't have to re-derive the
 rounding/period-multiple logic itself.
+
+`tau_reading1_xruns` / `tau_reading2_xruns` (#369) are the count of xruns
+`AudioEngine::xruns()` reported during that reading's own lifecycle —
+scoped to the `measure_tau` call specifically (sweep synthesis + the
+`play_and_capture` I/O + deconvolve), not the whole `start`..`stop` span.
+Present exactly when the matching `tau_reading{1,2}_s` is, always as a
+concrete integer including 0, on `measured` / `disagree_*` / `refused_xrun`
+alike — an old daemon has none of these fields, and a client must not read
+their absence on an old frame as "zero", only as "unknown". A nonzero
+value on either reading always yields `refused_xrun` regardless of what
+the two readings' comparison would otherwise have said (dispatch checks
+the xrun counts before consulting `compare_tau_readings`'s result), so
+`tau_reading{1,2}_xruns` are both 0 whenever `tau_state` is `measured` or
+one of the `disagree_*` states.
 
 ---
 
@@ -2945,6 +3020,8 @@ When the guard fires:
 // topic: error
 { "cmd": "<name>", "message": "<exception string>" }
 ```
+`plot`/`plot_level` add `requested_points`/`completed_points` to this
+shape on an analyzer failure (#428) — see their sections above.
 
 ### Unparseable config.json (#370)
 ```json

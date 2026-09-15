@@ -1,5 +1,6 @@
 use serde_json::json;
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 use crate::common::{Client, Daemon};
 
@@ -234,6 +235,75 @@ fn plot_family_rejects_resource_budgets_before_spawn() {
         &c,
         json!({"cmd":"plot", "start_hz":1e-300, "stop_hz":1e-300, "ppd":1, "duration":60.0}),
         "start_hz",
+    );
+}
+
+/// #428: a tiny `duration` (0.001 s) makes `plot`'s per-point capture length
+/// `max(duration, 3.0 / freq)`, which falls under `analyze`'s 256-sample
+/// minimum for any point above 562.5 Hz at the fake backend's 48 kHz rate
+/// (`3.0 / 562.5 * 48_000 == 256`). A sweep that fails partway through
+/// must not archive the successful prefix as a complete measurement: it
+/// must terminate on `error`, carrying how much of the request actually
+/// completed, and never reach `done` or `measurement/report` for this run.
+///
+/// Not `duration: 0`: the request budget rejects it before spawn (#437;
+/// ZMQ.md documents `duration` as greater than 0). 0.001 s is below every
+/// point's `3.0 / freq` floor, so the per-point lengths — and the failure —
+/// are the same as with 0.
+#[test]
+fn plot_tiny_duration_fails_atomically_instead_of_archiving_partial_sweep() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   100.0,
+        "stop_hz":    2000.0,
+        "level_dbfs": -20.0,
+        "ppd":        5,
+        "duration":   0.001,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot ack: {r}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut error_frame: Option<Value> = None;
+    while Instant::now() < deadline && error_frame.is_none() {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "error" => error_frame = Some(v),
+            Some((t, _)) if t == "done" => {
+                panic!("a sweep that failed partway through must not reach done")
+            }
+            Some((_, v)) if v["type"] == json!("measurement/report") => panic!(
+                "a sweep that failed partway through must not archive a measurement/report: {v}"
+            ),
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let err = error_frame.expect("plot never published a terminal error");
+    assert_eq!(err["cmd"], json!("plot"), "frame: {err}");
+    let message = err["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("256"),
+        "error message should name the analyzer's 256-sample minimum, got: {message:?}"
+    );
+    let requested = err["requested_points"]
+        .as_u64()
+        .expect("requested_points missing");
+    let completed = err["completed_points"]
+        .as_u64()
+        .expect("completed_points missing");
+    assert!(
+        completed < requested,
+        "completed_points ({completed}) should be less than requested_points \
+         ({requested}) — some points at/below 562.5 Hz must have succeeded \
+         before the failure: {err}"
+    );
+    assert!(
+        completed > 0,
+        "the low-frequency prefix should have completed: {err}"
     );
 }
 

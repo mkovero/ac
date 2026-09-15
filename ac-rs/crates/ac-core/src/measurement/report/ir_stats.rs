@@ -62,7 +62,10 @@ impl MeasurementReport {
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
 
         let pre_region = pre_impulse_region(linear_ir, peak_index);
-        let pre_impulse_snr_db = pre_impulse_snr_db(pre_region, peak_magnitude);
+        // Same formula `ac-daemon`'s τ gate calls (#368) — one definition
+        // of "pre-impulse SNR", not two that can drift.
+        let pre_impulse_snr_db =
+            crate::measurement::sweep::pre_impulse_snr_db(linear_ir, peak_index);
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
         let verdict = ir_verdict(peak_magnitude, pre_region, pre_impulse_snr_db);
@@ -104,25 +107,13 @@ pub(super) fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 /// floor estimate upward. Empty when the guard band consumes the whole
 /// pre-peak window — which [`ir_verdict`] treats as a failure, not as a
 /// clean floor.
+///
+/// The guard arithmetic itself lives in `measurement::sweep` (#368), so
+/// `ac-daemon`'s τ gate and this read-out cannot drift apart on what
+/// "pre-impulse" means; this only turns the length into the slice
+/// [`ir_verdict`] needs for its empty check.
 pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64] {
-    let guard = (linear_ir.len() / 32).max(8);
-    &linear_ir[..peak_index.saturating_sub(guard)]
-}
-
-/// `20·log10(peak / rms(pre_region))`. `+inf` for an empty region (nothing
-/// to measure) and for a true-silent one (`rms == 0.0`); [`ir_verdict`] is
-/// what separates those two cases, since only the first is a failure.
-pub(super) fn pre_impulse_snr_db(pre_region: &[f64], peak_magnitude: f64) -> f64 {
-    if pre_region.is_empty() {
-        return f64::INFINITY;
-    }
-    let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
-    let rms = mean_sq.sqrt();
-    if rms > 0.0 {
-        20.0 * (peak_magnitude / rms).log10()
-    } else {
-        f64::INFINITY
-    }
+    &linear_ir[..crate::measurement::sweep::pre_impulse_region_len(linear_ir.len(), peak_index)]
 }
 
 /// Gate duration, low-frequency limit and window shape for an IR payload.
