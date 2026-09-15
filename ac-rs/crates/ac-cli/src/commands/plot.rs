@@ -236,6 +236,74 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
+/// Derives the short terminal tag from `IrStats::onset_rule`'s full
+/// sentence (#346 AC4, revised for #378's picker). Two facts a reader
+/// needs a year later: which window the pick was made over, and whether
+/// the pick landed inside it or on its edge — a pick sitting on the
+/// window start is a stable, repeatable, possibly wrong number, and it
+/// has to be visible on the line rather than inferable from the JSON.
+///
+/// Returns 2 lines normally and 3 when the pick is pinned to the window
+/// start or when the picker declined. On a decline the second line is
+/// the degenerate case named in `rule`, printed verbatim from between
+/// its parentheses, so a case added in `ac-core` later reaches the
+/// terminal without a change here. Falls back to the full string
+/// verbatim if its shape ever changes underneath this, so a reader never
+/// sees nothing.
+fn short_onset_rule(rule: &str, onset_index: usize) -> Vec<String> {
+    if rule.contains("picker declined") {
+        let case = rule
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(inside, _)| inside.to_string());
+        let mut lines = vec!["picker declined \u{2014} no onset estimate".to_string()];
+        if let Some(case) = case {
+            lines.push(case);
+        }
+        lines.push("check: gate length, peak position in gate".to_string());
+        return lines;
+    }
+    let Some(start) = rule.find("window start at sample ").map(|at| {
+        rule[at + "window start at sample ".len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }) else {
+        return vec![rule.to_string()];
+    };
+    let limit = if rule.contains("search span is the tighter limit") {
+        "search span"
+    } else if rule.contains("causal bound enforced") {
+        "causal bound"
+    } else if rule.contains("no causal bound") {
+        "search span, no geometry known"
+    } else {
+        return vec![rule.to_string()];
+    };
+    let intro = format!(
+        "AIC change-point pick, {:.1} ms window",
+        ac_core::measurement::sweep::ONSET_SEARCH_WINDOW_S * 1000.0
+    );
+    let pinned = rule.contains("pick landed on the window start");
+    let clear = start
+        .parse::<usize>()
+        .map(|s| onset_index.saturating_sub(s))
+        .unwrap_or(0);
+    let mut lines = vec![
+        intro,
+        if pinned {
+            format!("window start {start} ({limit}), pick ON start")
+        } else {
+            format!("window start {start} ({limit}), pick {clear} clear")
+        },
+    ];
+    if pinned {
+        lines.push("onset may lie earlier than the window allows".to_string());
+    }
+    lines
+}
+
 /// The read-out: arrival (samples and ms, re gate centre), peak,
 /// pre-impulse SNR, and the gate that produced them — decoded from the
 /// `measurement/report` frame rather than recomputed off the raw IR
@@ -285,6 +353,31 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     );
     if matches!(stats.verdict, IrVerdict::Failed { .. }) {
         println!("                diagnostic only \u{2014} not a valid arrival");
+    } else {
+        // `arrival` is the peak's offset (#378 contingency, AC6 rig run
+        // 2026-09-15); the onset is printed under the peak it is measured
+        // against, as a diagnostic. #346 AC4's requirement still holds for
+        // it: the rule that produced the onset reaches the terminal, not
+        // only the JSON. Printed as a short derived tag rather than
+        // `onset_rule` verbatim (the full sentence runs past 80 columns at
+        // this indent); the untruncated rule still rides the persisted
+        // JSON via `IrStats::onset_rule`.
+        let onset_lines = short_onset_rule(&stats.onset_rule, stats.onset_index);
+        println!("                onset: {}", onset_lines[0]);
+        let continuation_indent = " ".repeat("                onset: ".len());
+        for line in &onset_lines[1..] {
+            println!("{continuation_indent}{line}");
+        }
+        // #378: the onset-to-peak distance is the quantity AC6 found moving
+        // with position (492.5 samples at 1.000 m, 627.6 at 2.000 m on the
+        // rig). Printed in one place so an operator who moves the mic sees
+        // it move, and labelled so it cannot be read as the arrival.
+        if stats.onset_index < stats.peak_index {
+            println!(
+                "                diagnostic \u{2014} onset {} samples before peak, not the arrival",
+                stats.peak_index - stats.onset_index,
+            );
+        }
     }
     if stats.pre_impulse_snr_db.is_finite() {
         if matches!(stats.verdict, IrVerdict::Failed { .. }) {
@@ -495,9 +588,39 @@ fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::confi
     io::save_csv(results, &path);
 }
 
+/// What `launch_ui` should do post-command. The GPU viewer this used to
+/// spawn is gone; `Monitor` now always renders via the
+/// terminal (`monitor_tui`), and the sweep variants just note that no
+/// visual plot is shown — the CSV/stdout output already carries the data.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LaunchKind {
+    /// Frequency sweep (paired with `ac plot ... show`).
+    SweepFreq,
+    /// Level sweep (paired with `ac plot level ... show`).
+    SweepLevel,
+    /// Live monitor view.
+    Monitor,
+}
+
+pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
+    match kind {
+        LaunchKind::Monitor => run_tui_fallback(cfg, channels),
+        LaunchKind::SweepFreq | LaunchKind::SweepLevel => {
+            eprintln!("  note: no visual plot display available — see CSV/stdout output above");
+        }
+    }
+}
+
+fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
+    let chs: Vec<u32> = channels.map(|s| s.to_vec()).unwrap_or_default();
+    if let Err(e) = super::monitor_tui::run(cfg, &chs) {
+        eprintln!("  monitor: tui error: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_sweep_frames, SweepOutcome};
+    use super::{collect_sweep_frames, short_onset_rule, SweepOutcome};
     use std::collections::VecDeque;
 
     fn point(freq_hz: f64) -> serde_json::Value {
@@ -556,34 +679,135 @@ mod tests {
         assert_eq!(outcome, SweepOutcome::Done);
         assert_eq!(results.len(), 2);
     }
-}
 
-/// What `launch_ui` should do post-command. The GPU viewer this used to
-/// spawn is gone; `Monitor` now always renders via the
-/// terminal (`monitor_tui`), and the sweep variants just note that no
-/// visual plot is shown — the CSV/stdout output already carries the data.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum LaunchKind {
-    /// Frequency sweep (paired with `ac plot ... show`).
-    SweepFreq,
-    /// Level sweep (paired with `ac plot level ... show`).
-    SweepLevel,
-    /// Live monitor view.
-    Monitor,
-}
-
-pub(crate) fn launch_ui(kind: LaunchKind, cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
-    match kind {
-        LaunchKind::Monitor => run_tui_fallback(cfg, channels),
-        LaunchKind::SweepFreq | LaunchKind::SweepLevel => {
-            eprintln!("  note: no visual plot display available — see CSV/stdout output above");
-        }
+    /// QA (PR #377), carried into #378: `short_onset_rule`'s decline
+    /// branch had no test naming its output — a typo in the
+    /// `.contains("picker declined")` match here, or in the string it
+    /// matches against in `ac_core::measurement::sweep::estimate_onset`,
+    /// would fall through to the window-clause branch instead, silently
+    /// dropping the operator-facing warning at the terminal.
+    #[test]
+    fn short_onset_rule_surfaces_the_decline_line() {
+        let rule = "onset picker declined (search window shorter than 2 samples) — index is \
+                    the peak, not an onset";
+        let lines = short_onset_rule(rule, 1479);
+        assert_eq!(
+            lines,
+            vec![
+                "picker declined — no onset estimate".to_string(),
+                "search window shorter than 2 samples".to_string(),
+                "check: gate length, peak position in gate".to_string(),
+            ]
+        );
     }
-}
 
-fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
-    let chs: Vec<u32> = channels.map(|s| s.to_vec()).unwrap_or_default();
-    if let Err(e) = super::monitor_tui::run(cfg, &chs) {
-        eprintln!("  monitor: tui error: {e}");
+    /// A degenerate case added in `ac-core` later must reach the terminal
+    /// without a change here: the parenthetical is printed verbatim, not
+    /// matched against a list.
+    #[test]
+    fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
+        let rule = "onset picker declined (a case invented by this test) — index is the peak, \
+                    not an onset";
+        let lines = short_onset_rule(rule, 1479);
+        assert_eq!(lines[1], "a case invented by this test".to_string());
+    }
+
+    #[test]
+    fn short_onset_rule_reports_the_window_start_and_how_clear_the_pick_is() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced";
+        let lines = short_onset_rule(rule, 1369);
+        assert_eq!(
+            lines,
+            vec![
+                "AIC change-point pick, 10.0 ms window".to_string(),
+                "window start 1305 (causal bound), pick 64 clear".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn short_onset_rule_names_the_search_span_when_no_geometry_is_known() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
+                    no causal bound (geometry not known for this capture)";
+        let lines = short_onset_rule(rule, 519);
+        assert_eq!(
+            lines[1],
+            "window start 455 (search span, no geometry known), pick 64 clear".to_string()
+        );
+    }
+
+    /// A causal bound that did not set the window start must not read as
+    /// though it did — the operator's question is which limit the pick is
+    /// pinned against.
+    #[test]
+    fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
+                    causal bound enforced at sample 10, search span is the tighter limit";
+        let lines = short_onset_rule(rule, 519);
+        assert_eq!(
+            lines[1],
+            "window start 455 (search span), pick 64 clear".to_string()
+        );
+    }
+
+    /// The one case that costs a third line: a pick sitting on the window
+    /// start is a confident number that may be an artefact of the search
+    /// bounds, and it has to be distinguishable at a glance in a
+    /// scrollback of many runs.
+    #[test]
+    fn short_onset_rule_flags_a_pick_pinned_to_the_window_start() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced; pick landed on the window start — the true onset \
+                    may lie earlier";
+        let lines = short_onset_rule(rule, 1305);
+        assert_eq!(
+            lines,
+            vec![
+                "AIC change-point pick, 10.0 ms window".to_string(),
+                "window start 1305 (causal bound), pick ON start".to_string(),
+                "onset may lie earlier than the window allows".to_string(),
+            ]
+        );
+    }
+
+    /// Every line this function can emit must fit the 80-column budget at
+    /// the 16- and 23-column indents `print_ir_report` uses, at a 6-digit
+    /// sample index — the width check the #378 UX comment ran by hand.
+    #[test]
+    fn short_onset_rule_lines_fit_eighty_columns() {
+        let mut rules = vec![
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             causal bound enforced; pick landed on the window start — the true onset may \
+             lie earlier"
+                .to_string(),
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             causal bound enforced at sample 9, search span is the tighter limit"
+                .to_string(),
+        ];
+        // Every decline case `estimate_onset` can name, so a new one that
+        // does not fit is caught here rather than at a rig terminal.
+        for case in [
+            "search window shorter than 2 samples",
+            "zero variance in the search window",
+            "peak at sample 0",
+            "nothing in the search window above the pre-impulse floor",
+            "no change point earlier than the peak in the window",
+        ] {
+            rules.push(format!(
+                "onset picker declined ({case}) — index is the peak, not an onset"
+            ));
+        }
+        for rule in &rules {
+            for (i, line) in short_onset_rule(rule, 262_144).iter().enumerate() {
+                let indent = if i == 0 { 16 + "onset: ".len() } else { 23 };
+                assert!(
+                    indent + line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    indent + line.chars().count()
+                );
+            }
+        }
     }
 }

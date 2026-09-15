@@ -21,6 +21,7 @@
 
 use std::time::{Duration, Instant};
 
+use ac_core::measurement::sweep::estimate_onset;
 use serde_json::{json, Value};
 
 struct Args {
@@ -218,27 +219,27 @@ fn main() {
         }
     );
 
-    // Onset, not peak. On a multi-way loudspeaker the largest sample in a
-    // band-limited deconvolution is not the arrival: LF and crossover group
-    // delay pull the maximum later than the wavefront that actually left the
-    // baffle first. Distance wants the onset. Report where the IR first
-    // crosses a few fractions of the peak, searching backward from the peak
-    // so a later reflection cannot be mistaken for the start.
-    println!("--- onset ---");
-    for frac in [0.5_f64, 0.25, 0.1, 0.05] {
-        let thresh = frac * peak_abs;
-        let mut onset = peak_idx;
-        while onset > 0 && ir[onset - 1].abs() >= thresh {
-            onset -= 1;
-        }
-        let o = onset as i64 - centre as i64;
-        println!(
-            "  {:>4.0}% of peak: index {onset}, offset {o:+} samples = {:+.4} ms  ({} before peak)",
-            frac * 100.0,
-            o as f64 * 1000.0 / sr,
-            peak_idx - onset
-        );
-    }
+    // Onset, not peak (#346). On a multi-way loudspeaker the largest sample
+    // in a band-limited deconvolution is not the arrival: LF and crossover
+    // group delay pull the maximum later than the wavefront that actually
+    // left the baffle first. Distance wants the onset. Shared with
+    // `MeasurementReport::ir_stats` (`ac_core::measurement::sweep::
+    // estimate_onset`) rather than a third independent backward-scan — no
+    // known geometry here, so no causal bound is enforced.
+    println!("--- onset (#346, #378) ---");
+    let floor_rms = {
+        let mean_sq = ir[..far_end].iter().map(|v| v * v).sum::<f64>() / far_end as f64;
+        mean_sq.sqrt()
+    };
+    let onset = estimate_onset(&ir, peak_idx, sr as u32, floor_rms, None);
+    let o = onset.index as i64 - centre as i64;
+    println!(
+        "  onset:         index {}, offset {o:+} samples = {:+.4} ms  ({} before peak)",
+        onset.index,
+        o as f64 * 1000.0 / sr,
+        peak_idx.saturating_sub(onset.index)
+    );
+    println!("  rule:          {}", onset.rule);
 
     if let Some(tau) = a.tau_ms {
         println!("--- against τ ---");

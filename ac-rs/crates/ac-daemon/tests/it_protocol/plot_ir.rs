@@ -276,13 +276,31 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // fake loopback), the τ-corrected flight time must land near zero —
     // the fake backend has no acoustic path. A τ that failed to subtract
     // would read ~0.67 ms instead (32 samples at 48 kHz).
+    //
+    // `measure_tau` locates τ via `argmax|h|`, and under #378's
+    // contingency (AC6 rig run, 2026-09-15) `ir_stats().arrival_s` is
+    // peak-derived again, so both halves share one rule and cancel on
+    // this fixture. The onset-vs-argmax phantom #351 tracked (-2.458 ms,
+    // 118 samples of bandlimited pre-ring before the peak) no longer
+    // reaches the arrival.
+    //
+    // Pinned tight around this fixture's known, computable answer (QA on
+    // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
+    // exact value could hide unrelated regression) rather than left as an
+    // open-ended bound — this fixture is deterministic (fake backend,
+    // fixed 200 Hz–8 kHz / 1024-sample window), so its exact phantom
+    // flight time is a known quantity, not measurement noise. Value moved
+    // -0.310 → -2.458 ms under #378, and to 0 under its contingency.
+    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = 0.0;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     let stats = report.ir_stats().expect("ir_stats");
     let flight_ms = (stats.arrival_s - used_tau) * 1000.0;
     assert!(
-        flight_ms.abs() < 0.15,
-        "fake loopback has no acoustic path, got {flight_ms} ms"
+        (flight_ms - EXPECTED_PHANTOM_FLIGHT_MS).abs() < 0.03,
+        "fake loopback has no acoustic path; τ and arrival are both \
+         peak-derived, so the flight time must be {EXPECTED_PHANTOM_FLIGHT_MS} ms \
+         ± 0.03, got {flight_ms} ms"
     );
 }
 
