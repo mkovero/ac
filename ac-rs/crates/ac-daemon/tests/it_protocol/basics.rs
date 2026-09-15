@@ -13,6 +13,9 @@ fn status_replies_ok() {
     assert_eq!(r["ok"], json!(true));
     assert_eq!(r["busy"], json!(false));
     assert_eq!(r["listen_mode"], json!("local"));
+    assert_eq!(r["backend_required"], json!("fake"));
+    assert_eq!(r["backend_available"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
 }
 
 /// #385: `status` carries the identity fields a client needs to tell this
@@ -24,6 +27,7 @@ fn status_reports_daemon_identity() {
     let c = Client::new(&d);
     let r = c.call(json!({"cmd":"status"}));
     assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["backend"], json!("fake"));
     assert_eq!(
         r["home"],
         json!(d.home.display().to_string()),
@@ -245,7 +249,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
             Some((t, v)) if t == "measurement/report" => {
                 if v["report"]["data"][0]["data"]["kind"] == json!("spectrum_bands") {
                     assert_eq!(v["report"]["data"][0]["data"]["bpo"], json!(3));
-                    assert_eq!(v["report"]["schema_version"], json!(5));
+                    assert_eq!(v["report"]["schema_version"], json!(6));
                     got_report = true;
                 }
             }
@@ -360,6 +364,47 @@ fn plot_frames_carry_processing_context_envelope() {
         .expect("mic_response missing");
     assert_eq!(mr["n_points"], json!(24));
     assert!(mr["imported_at"].is_string());
+}
+
+/// #428: `AudioEngine::xruns()` is cumulative "since start" (see the trait
+/// doc), so summing it once per sweep point double-, triple-, ...-counts
+/// every xrun that happened before the sweep's last point. One real xrun
+/// injected mid-sweep must show up as exactly 1 in the terminal `done`
+/// frame, not accumulate across the remaining points.
+///
+/// The fake backend's `capture_block` consumes one
+/// `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` slot per call
+/// (`audio/fake/hooks.rs`), and each sweep point issues two calls — a
+/// discarded 0.1 s warm-up, then the real capture — so the 4th call
+/// (index 3, 0-based) is point 1's real capture.
+#[test]
+fn plot_reports_session_xrun_delta_not_cumulative_sum() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE", "0,0,0,1")]);
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   100.0,
+        "stop_hz":    1000.0,
+        "level_dbfs": -20.0,
+        "ppd":        3,
+        "duration":   0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot ack: {r}");
+
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(10))
+        .expect("plot never finished");
+    assert_eq!(done["cmd"], json!("plot"));
+    assert_eq!(
+        done["n_points"],
+        json!(3),
+        "all 3 points should have completed cleanly: {done}"
+    );
+    assert_eq!(
+        done["xruns"],
+        json!(1),
+        "session xrun delta must be 1, not a per-point cumulative sum: {done}"
+    );
 }
 
 // ---------------------------------------------------------------------------

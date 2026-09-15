@@ -13,6 +13,9 @@ pub fn status(state: &ServerState) -> Value {
     let workers = state.workers.lock().unwrap();
     let running: Option<String> = workers.keys().next().cloned();
     let listen_mode = state.listen_mode.lock().unwrap().clone();
+    let cfg = state.cfg.lock().unwrap();
+    let (backend_required, backend_available, backend) =
+        crate::audio::backend_status(state.fake_audio, cfg.backend.as_deref());
     json!({
         "ok":            true,
         "busy":          !workers.is_empty(),
@@ -27,6 +30,9 @@ pub fn status(state: &ServerState) -> Value {
         "pid":           state.pid,
         "started_at":    state.started_at.clone(),
         "spawn_mode":    state.spawn_mode.clone(),
+        "backend_required": backend_required,
+        "backend_available": backend_available,
+        "backend": backend,
     })
 }
 
@@ -141,8 +147,20 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Some(v) = update.get("server_enabled").and_then(Value::as_bool) {
         cfg.server_enabled = v;
     }
-    if let Some(v) = update.get("backend").and_then(Value::as_str) {
-        cfg.backend = Some(v.to_string());
+    if let Some(v) = update.get("backend") {
+        if v.is_null() {
+            cfg.backend = None;
+        } else if let Some(raw) = v.as_str() {
+            let canonical = match ac_core::config::canonical_backend(Some(raw)) {
+                Ok(Some(v)) => v,
+                Ok(None) => unreachable!("a string canonicalizes to a backend"),
+                Err(e) => return json!({"ok": false, "error": e}),
+            };
+            cfg.backend = Some(canonical.to_string());
+        } else {
+            return json!({"ok": false, "error":
+                "backend must be jack, cpal, fake, or null"});
+        }
     }
     if update.get("dmm_host").is_some() {
         cfg.dmm_host = update["dmm_host"].as_str().map(str::to_string);

@@ -66,7 +66,10 @@ impl MeasurementReport {
         let centre = window_len / 2;
 
         let pre_region = pre_impulse_region(linear_ir, peak_index);
-        let pre_impulse_snr_db = pre_impulse_snr_db(pre_region, peak_magnitude);
+        // Same formula `ac-daemon`'s τ gate calls (#368) — one definition
+        // of "pre-impulse SNR", not two that can drift.
+        let pre_impulse_snr_db =
+            crate::measurement::sweep::pre_impulse_snr_db(linear_ir, peak_index);
 
         // The onset picker's validity gate runs off a *median* floor over
         // the same region, not off `pre_impulse_snr_db`'s RMS one — see
@@ -152,30 +155,19 @@ pub(super) fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 /// floor estimate upward. Empty when the guard band consumes the whole
 /// pre-peak window — which [`ir_verdict`] treats as a failure, not as a
 /// clean floor.
+///
+/// The guard arithmetic itself lives in `measurement::sweep` (#368), so
+/// `ac-daemon`'s τ gate and this read-out cannot drift apart on what
+/// "pre-impulse" means; this only turns the length into the slice
+/// [`ir_verdict`] needs for its empty check.
 pub(super) fn pre_impulse_region(linear_ir: &[f64], peak_index: usize) -> &[f64] {
-    let guard = (linear_ir.len() / 32).max(8);
-    &linear_ir[..peak_index.saturating_sub(guard)]
-}
-
-/// `20·log10(peak / rms(pre_region))`. `+inf` for an empty region (nothing
-/// to measure) and for a true-silent one (`rms == 0.0`); [`ir_verdict`] is
-/// what separates those two cases, since only the first is a failure.
-pub(super) fn pre_impulse_snr_db(pre_region: &[f64], peak_magnitude: f64) -> f64 {
-    if pre_region.is_empty() {
-        return f64::INFINITY;
-    }
-    let mean_sq = pre_region.iter().map(|v| v * v).sum::<f64>() / pre_region.len() as f64;
-    let rms = mean_sq.sqrt();
-    if rms > 0.0 {
-        20.0 * (peak_magnitude / rms).log10()
-    } else {
-        f64::INFINITY
-    }
+    &linear_ir[..crate::measurement::sweep::pre_impulse_region_len(linear_ir.len(), peak_index)]
 }
 
 /// Contamination-robust pre-impulse floor: the median absolute sample of
 /// `pre_region`, scaled by the standard MAD-to-σ constant so it targets
-/// the same quantity [`pre_impulse_snr_db`]'s RMS floor does on clean
+/// the same quantity [`crate::measurement::sweep::pre_impulse_snr_db`]'s
+/// RMS floor does on clean
 /// noise. `0.0` for an empty region.
 ///
 /// #353 (option A′), retained under #378 with a narrower job. The RMS
@@ -190,7 +182,8 @@ pub(super) fn pre_impulse_snr_db(pre_region: &[f64], peak_magnitude: f64) -> f64
 /// only whether the search window holds anything above the floor, never
 /// where inside it the onset is. Its 50% breakdown point is what makes
 /// that gate trustworthy on a contaminated pre-impulse region.
-/// [`pre_impulse_snr_db`] and its RMS floor stay exactly as they were —
+/// [`crate::measurement::sweep::pre_impulse_snr_db`] and its RMS floor
+/// stay exactly as they were —
 /// this is a second floor for a second question, not a replacement (#346
 /// architect review, #378 AC5).
 pub(super) fn onset_floor(pre_region: &[f64]) -> f64 {

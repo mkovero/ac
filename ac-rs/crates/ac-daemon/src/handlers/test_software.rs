@@ -152,7 +152,7 @@ fn check_thdn_ge_thd() -> Check {
     let sr = 48_000;
     let s = synth_with_h2(0.5, 0.01, sr);
     let r = thd::analyze(&s, sr, 1000.0, 10).expect("analyze");
-    let pass = r.thdn_pct + 1e-9 >= r.thd_pct;
+    let pass = r.thdn_pct + thd::THDN_GE_THD_REL_TOL * r.thd_pct.abs() >= r.thd_pct;
     Check {
         name: "Physical law: THD+N ≥ THD",
         pass,

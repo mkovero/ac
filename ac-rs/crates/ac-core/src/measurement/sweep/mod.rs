@@ -46,7 +46,9 @@ mod tail_decay;
 
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
 pub use gated::{gated_frequency_response, tukey_window, GatedResponsePoint};
-pub use harmonics::{extract_irs, DeconvolvedIrs, HarmonicIr};
+pub use harmonics::{
+    extract_irs, pre_impulse_region_len, pre_impulse_snr_db, DeconvolvedIrs, HarmonicIr,
+};
 pub use onset::{estimate_onset, OnsetEstimate, ONSET_SEARCH_WINDOW_S};
 pub use tail_decay::{check_tail_decay, TailDecayCheck};
 

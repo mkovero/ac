@@ -149,7 +149,9 @@ pub struct GatedFrequencyResponsePoint {
 pub struct FrequencyResponsePoint {
     pub freq_hz: f64,
     pub fundamental_dbfs: f64,
+    /// Harmonic residual over total output (%), using the same denominator as THD+N.
     pub thd_pct: f64,
+    /// Notched residual over total output (%), per IEC 60268-3:2018 §15.12.3.2.
     pub thdn_pct: f64,
     pub noise_floor_dbfs: f64,
     pub linear_rms: f64,
