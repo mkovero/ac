@@ -40,7 +40,8 @@ use std::time::Duration;
 
 use self::hooks::{
     next_capture_block_xruns_delta, next_loopback_delay_samples, next_xruns_delta,
-    period_size_override, tau_gain_override, tau_noise_amplitude_override,
+    period_size_override, ref_delay_samples, ref_gain, tau_gain_override,
+    tau_noise_amplitude_override,
 };
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
@@ -314,6 +315,59 @@ impl AudioEngine for FakeEngine {
             std::thread::sleep(Duration::from_millis(10));
         }
         Ok(out)
+    }
+
+    fn supports_reference_capture(&self) -> bool {
+        true
+    }
+
+    /// Measurement leg: [`Self::play_and_capture`], with its delay, gain,
+    /// noise and xrun hooks. Reference leg: the same stimulus delayed by its
+    /// **own** hook ([`hooks::ref_delay_samples`], default 20, not the
+    /// measurement leg's 32), scaled by [`hooks::ref_gain`], with the noise
+    /// override's dither on a different seed. Both are exactly
+    /// `samples.len() + tail` long (invariant a); both come from one call, so
+    /// they are aligned by construction (invariant b). Paced and cancellable
+    /// like `play_and_capture_cancellable`. The fake does not route by port,
+    /// so `reference_port` only has to be present.
+    fn play_and_capture_with_reference(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        _reference_port: &str,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let meas = self.play_and_capture(samples, tail_s)?;
+        let total = meas.len();
+        let delay = ref_delay_samples();
+        let gain = ref_gain();
+        let noise_amp = tau_noise_amplitude_override();
+        let mut reference = vec![0.0f32; total];
+        if noise_amp > 0.0 {
+            let mut state: u64 = 0xD1B5_4A32_D192_ED03 ^ (delay as u64);
+            for v in reference.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                *v = (noise_amp as f64 * u) as f32;
+            }
+        }
+        for (i, &s) in samples.iter().enumerate() {
+            let j = i + delay;
+            if j < total {
+                reference[j] += s * gain;
+            }
+        }
+        let chunk = (self.sample_rate as usize / 100).max(1);
+        for _ in (0..total).step_by(chunk) {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                self.set_silence();
+                anyhow::bail!("play_and_capture cancelled");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok((meas, reference))
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {

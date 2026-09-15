@@ -196,9 +196,9 @@ fn tau_probe_log(
 /// the message — a message wording change must not silently break the
 /// state split.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct LowSnrRefusal {
-    pub(super) snr_db: f64,
-    pub(super) threshold_db: f64,
+pub(crate) struct LowSnrRefusal {
+    pub(crate) snr_db: f64,
+    pub(crate) threshold_db: f64,
 }
 
 impl std::fmt::Display for LowSnrRefusal {
@@ -214,6 +214,58 @@ impl std::fmt::Display for LowSnrRefusal {
 }
 
 impl std::error::Error for LowSnrRefusal {}
+
+/// A τ peak within the edge margin of its window (#340), typed so a
+/// same-capture reference reading (#460) can say "peak at reference window
+/// edge" without matching message text. The message is unchanged from when
+/// this was a bare `bail!`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EdgeRefusal {
+    pub(crate) peak_idx: usize,
+    pub(crate) window_len: usize,
+    pub(crate) margin: usize,
+}
+
+impl std::fmt::Display for EdgeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\u{3c4} peak at sample {} of a {}-sample window (half-width {} samples) sits \
+             within {} samples of the window edge \u{2014} the arrival is likely outside the \
+             window rather than at this position, so no value is reported",
+            self.peak_idx,
+            self.window_len,
+            self.window_len / 2,
+            self.margin
+        )
+    }
+}
+
+impl std::error::Error for EdgeRefusal {}
+
+/// The capture tail cannot hold the τ window. Typed for the same reason as
+/// [`EdgeRefusal`]: a same-capture reference (#460) reads `plot_ir`'s own
+/// tail, which the operator sets, so this case is reachable there and needs
+/// its own operator-facing reason.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TailTooShort {
+    pub(crate) half_window_s: f64,
+    pub(crate) tail_s: f64,
+    pub(crate) needed_s: f64,
+}
+
+impl std::fmt::Display for TailTooShort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\u{3c4} half-window {} s needs a {:.4} s gate but the capture tail is only {} s \
+             \u{2014} the window would run off the end of the capture",
+            self.half_window_s, self.needed_s, self.tail_s
+        )
+    }
+}
+
+impl std::error::Error for TailTooShort {}
 
 /// Refuse a τ lifecycle whose deconvolved peak sits below `threshold_db`
 /// pre-impulse SNR — the peak cannot be trusted as a real arrival rather
@@ -250,12 +302,14 @@ fn check_peak_within_window(
     let dist_from_start = peak_idx;
     let dist_from_end = window_len.saturating_sub(1).saturating_sub(peak_idx);
     if dist_from_start <= margin || dist_from_end <= margin {
-        anyhow::bail!(
-            "\u{3c4} peak at sample {peak_idx} of a {window_len}-sample window (half-width \
-             {half} samples) sits within {margin} samples of the window edge — the arrival is \
-             likely outside the window rather than at this position, so no value is reported"
-        );
+        return Err(EdgeRefusal {
+            peak_idx,
+            window_len,
+            margin,
+        }
+        .into());
     }
+    let _ = half;
     Ok(())
 }
 
@@ -294,19 +348,43 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
     let xruns_before = eng.xruns();
     let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
     let xruns = eng.xruns().saturating_sub(xruns_before);
-    let inv = inverse_sweep(&params)?;
-    let full = deconvolve_full(&captured, &inv);
+    let (tau_s, snr_db) = analyse_tau_leg(&captured, &params, TAU_TAIL_S, xruns)?;
+    Ok((tau_s, snr_db, xruns))
+}
+
+/// Analyse one captured τ leg: deconvolve with `params`' inverse sweep, find
+/// the linear-IR peak inside a `2 × TAU_MIN_HALF_WINDOW_S` window, and apply
+/// the single-reading gates — capture tail long enough to hold the window,
+/// pre-impulse SNR (skipped when `xruns > 0`, per the #368/#369 merge
+/// precedence), and the window-edge margin. Returns the round trip in seconds
+/// and the peak's pre-impulse SNR in dB.
+///
+/// Split out of [`measure_tau`] (#460) so a same-capture reference leg in
+/// `plot_ir` is judged by exactly the gates `calibrate` applies — one
+/// definition of what a τ reading is, not two that can drift. Refusals are
+/// typed ([`LowSnrRefusal`], [`EdgeRefusal`], [`TailTooShort`]) so each caller
+/// can phrase its own reason without matching message text.
+pub(crate) fn analyse_tau_leg(
+    captured: &[f32],
+    params: &SweepParams,
+    tail_s: f64,
+    xruns: u32,
+) -> anyhow::Result<(f64, f64)> {
+    let sr = params.sample_rate;
     let half_window_s = tau_half_window_s();
-    if 2.0 * half_window_s > TAU_TAIL_S {
-        anyhow::bail!(
-            "\u{3c4} half-window {half_window_s} s needs a {:.4} s gate but the capture tail is \
-             only {TAU_TAIL_S} s \u{2014} the window would run off the end of the capture",
-            2.0 * half_window_s
-        );
+    if 2.0 * half_window_s > tail_s {
+        return Err(TailTooShort {
+            half_window_s,
+            tail_s,
+            needed_s: 2.0 * half_window_s,
+        }
+        .into());
     }
+    let inv = inverse_sweep(params)?;
+    let full = deconvolve_full(captured, &inv);
     let half = (half_window_s * sr as f64).ceil() as usize;
     let window_len = 2 * half;
-    let irs = extract_irs(&full, &params, 1, window_len)?;
+    let irs = extract_irs(&full, params, 1, window_len)?;
     let (peak_idx, peak_val) = irs
         .linear
         .iter()
@@ -338,7 +416,7 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
     }
     check_peak_within_window(peak_idx, window_len, tau_edge_margin_frac())?;
     let offset_samples = peak_idx as i64 - half as i64;
-    Ok((offset_samples as f64 / sr as f64, snr_db, xruns))
+    Ok((offset_samples as f64 / sr as f64, snr_db))
 }
 
 #[cfg(test)]

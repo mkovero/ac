@@ -28,6 +28,7 @@ pub(super) fn sample_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::FrequencyResponse {
                 points: vec![
@@ -93,6 +94,7 @@ pub(super) fn sample_spectrum_bands_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: 3,
@@ -135,6 +137,7 @@ pub(super) fn sample_impulse_response_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::ImpulseResponse {
                 sample_rate_hz: 48_000,
@@ -223,6 +226,18 @@ pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
     })
 }
 
+/// Same-capture reference latency (#460) at `tau_s`, on nominal reference
+/// ports distinct from [`measured_tau`]'s capture pair.
+pub(super) fn measured_reference(tau_s: f64) -> ReferenceLatency {
+    ReferenceLatency::Measured(MeasuredReferenceLatency {
+        tau_s,
+        pre_impulse_snr_db: Some(60.0),
+        method: "farina_same_capture_reference_v1".into(),
+        output_port: "ref_out".into(),
+        input_port: "ref_in".into(),
+    })
+}
+
 pub(super) fn sample_noise_report() -> MeasurementReport {
     MeasurementReport {
         schema_version: SCHEMA_VERSION,
@@ -245,6 +260,7 @@ pub(super) fn sample_noise_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::NoiseResult {
                 sample_rate_hz: 48_000,

@@ -23,6 +23,8 @@ enum TokenKind {
     Harmonics,
     /// `<N>win` — `plot ir`'s `window_len` gate parameter, in samples (#282).
     Window,
+    /// `<N>m` — `plot ir`'s source-to-receiver distance, metres (#460).
+    Distance,
 }
 
 type Token = (TokenKind, TokenValue);
@@ -162,6 +164,27 @@ fn parse_window(s: &str) -> Result<u32, ()> {
         .ok_or(())
 }
 
+/// Accepts `"<N>m"` — `plot ir`'s source-to-receiver distance in metres, the
+/// input to the onset search's causal bound (#460). A marker is required: a
+/// bare number is dBFS. `mm`, `cm` and `1ms` do not leave a number before the
+/// final `m`, so they are `Ok(None)` here and end as an unrecognised token
+/// rather than being read as a distance. A value that does parse but is not
+/// finite and positive is refused, naming the token.
+fn parse_distance(s: &str) -> Result<Option<f64>, String> {
+    let lower = s.to_lowercase();
+    let Some(rest) = lower.strip_suffix('m') else {
+        return Ok(None);
+    };
+    let Ok(v) = rest.parse::<f64>() else {
+        return Ok(None);
+    };
+    if v.is_finite() && v > 0.0 {
+        Ok(Some(v))
+    } else {
+        Err(format!("distance must be finite and > 0 m, got {s:?}"))
+    }
+}
+
 fn classify(token: &str) -> Result<Token, String> {
     if let Ok(v) = parse_ppd(token) {
         return Ok((TokenKind::Ppd, TokenValue::Int(v)));
@@ -177,6 +200,9 @@ fn classify(token: &str) -> Result<Token, String> {
     }
     if let Ok(v) = parse_window(token) {
         return Ok((TokenKind::Window, TokenValue::Int(v)));
+    }
+    if let Some(v) = parse_distance(token)? {
+        return Ok((TokenKind::Distance, TokenValue::Float(v)));
     }
     if let Ok(v) = parse_time(token) {
         return Ok((TokenKind::Time, TokenValue::Float(v)));
@@ -359,6 +385,8 @@ pub enum CommandKind {
         n_harmonics: Option<u32>,
         window_len: Option<u32>,
         tail_s: Option<f64>,
+        /// Source-to-receiver distance, metres (#460 causal bound).
+        distance_m: Option<f64>,
     },
     Plot {
         start: Option<f64>,
@@ -722,6 +750,7 @@ Units:  20hz 1khz              frequency
         10ppd 26steps          sweep density
         6bpo 3bands            fractional-octave bins-per-octave
         5harm 4096win          plot ir gate params: n_harmonics, window_len
+        1.5m                   plot ir source-to-mic distance (causal bound)
         show                   also open GPU view window (abbrev: sh)
 
 Short forms:  s(weep) m(onitor) g(enerate) c(alibrate) p(lot) pr(obe) te(st)
@@ -750,7 +779,7 @@ Examples:
   ac plot level -20dbu 6dbu 1khz 26steps show
   ac m cwt 0-3 show
   ac g f 20hz 20khz 0dbu 2s
-  ac plot ir 20hz 20khz 1s -6dbu 5harm 4096win 0.8s";
+  ac plot ir 20hz 20khz 1s -6dbu 5harm 4096win 0.8s 1.5m";
 
 // ---------------------------------------------------------------------------
 // Display impl for LevelSpec

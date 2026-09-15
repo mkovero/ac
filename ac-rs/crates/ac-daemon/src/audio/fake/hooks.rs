@@ -99,6 +99,41 @@ pub(super) fn tau_noise_amplitude_override() -> f32 {
     })
 }
 
+/// Default reference-leg delay for `play_and_capture_with_reference` (#460).
+/// Deliberately different from [`DEFAULT_LOOPBACK_DELAY_SAMPLES`]: a causal
+/// bound built by mistake from the measurement leg's peak, or from a stored τ,
+/// then lands on a different index than one built from the reference leg, and
+/// a test can tell them apart. At 48 kHz, 20 samples of reference τ plus a few
+/// centimetres of flight stays below the 32-sample measurement peak (bound
+/// enforced); a larger distance crosses it (the at-or-after-peak decline).
+pub(super) const DEFAULT_REF_DELAY_SAMPLES: usize = 20;
+
+/// `AC_FAKE_REF_DELAY_SAMPLES`: the reference leg's own delay, in samples.
+/// Unset ⇒ [`DEFAULT_REF_DELAY_SAMPLES`].
+pub(super) fn ref_delay_samples() -> usize {
+    static OVERRIDE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_REF_DELAY_SAMPLES")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(DEFAULT_REF_DELAY_SAMPLES)
+    })
+}
+
+/// `AC_FAKE_REF_GAIN`: the reference cable's own gain. Unset ⇒ `1.0`. `0.0`
+/// together with `AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE > 0` leaves only
+/// dither on the reference leg, which makes the reference reading's SNR
+/// refusal reachable (#460).
+pub(super) fn ref_gain() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_REF_GAIN")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1.0)
+    })
+}
+
 /// Opt-in, fake-only test hook (#369): lets a test drive one or both of
 /// `measure_tau_twice`'s two lifecycles across a nonzero xrun count.
 /// Without this, `FakeEngine::xruns()` never leaves the 0 it is

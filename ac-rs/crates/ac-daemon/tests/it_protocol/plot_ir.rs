@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::time::Duration;
 use std::time::Instant;
 
+use ac_core::measurement::report::{MeasurementReport, ReferenceLatency};
+
 use crate::common::{Client, Daemon};
 
 #[test]
@@ -63,7 +65,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(6));
+                assert_eq!(v["report"]["schema_version"], json!(7));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -549,6 +551,266 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
     assert!(
         (noise_tail - 0.5).abs() < 1e-9,
         "noise_tail_start_s should equal the sweep duration (0.5s): {noise_tail}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Causal bound inputs (#460): a per-capture distance and a same-capture
+// reference leg.
+// ---------------------------------------------------------------------------
+
+/// The fake reference leg's default delay (`DEFAULT_REF_DELAY_SAMPLES` in
+/// `audio/fake/hooks.rs`) and the measurement leg's (32), at 48 kHz.
+const FAKE_REF_DELAY_SAMPLES: usize = 20;
+const FAKE_MEAS_DELAY_SAMPLES: usize = 32;
+const FAKE_SR: f64 = 48_000.0;
+
+/// A reference loopback pair on the fake backend: capture 1, playback 1.
+fn reference_config() -> Value {
+    json!({ "reference_channel": 1, "reference_output_channel": 1 })
+}
+
+/// `plot_ir` at a 4096-sample window (the IR's pre-impulse SNR clears #376's
+/// floor on the fake) with a 0.2 s tail (holds the 0.1 s reference window),
+/// plus `extra` fields.
+fn plot_ir_request(extra: Value) -> Value {
+    let mut req = json!({
+        "cmd": "plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.2,
+        "window_len": 4096,
+        "n_harmonics": 3,
+    });
+    if let (Some(r), Some(e)) = (req.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            r.insert(k.clone(), v.clone());
+        }
+    }
+    req
+}
+
+fn report_for(c: &Client, req: Value) -> (Value, MeasurementReport) {
+    let reply = c.call(req);
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let report = serde_json::from_value(v["report"].clone()).expect("decode report");
+    (reply, report)
+}
+
+/// #460 AC1 + AC4, through the producer: a supplied distance reaches
+/// `report.position.distance_m`, the same-capture reference is measured, and
+/// `ir_stats()`'s causal bound is built from exactly those two. The expected
+/// bound index is computed here from the fake's reference delay and `c`; so
+/// is the index a bound built by mistake from the measurement leg would give,
+/// which must differ. Two distances, one either side of the peak, so both
+/// outcomes — bound enforced and the at-or-after-peak decline — are reached,
+/// and which one each distance gives is computed rather than assumed.
+#[test]
+fn plot_ir_builds_the_causal_bound_from_distance_and_same_capture_reference() {
+    let mut outcomes = Vec::new();
+    for distance_m in [0.05_f64, 0.5] {
+        let d = Daemon::spawn_with_config(Some(reference_config()));
+        let c = Client::new(&d);
+        let (reply, report) = report_for(&c, plot_ir_request(json!({ "distance_m": distance_m })));
+        assert_eq!(reply["ref_in_port"], json!("fake:capture_1"), "{reply}");
+        assert_eq!(reply["ref_out_port"], json!("fake:playback_1"), "{reply}");
+
+        let position = report.position.as_ref().expect("position recorded");
+        assert_eq!(position.distance_m, Some(distance_m));
+
+        let reference = match report.reference_latency.as_ref() {
+            Some(ReferenceLatency::Measured(m)) => m.clone(),
+            other => panic!("reference not measured: {other:?}"),
+        };
+        let expected_tau_s = FAKE_REF_DELAY_SAMPLES as f64 / FAKE_SR;
+        assert!(
+            (reference.tau_s - expected_tau_s).abs() < 1e-12,
+            "reference τ {} vs the fake reference leg's {expected_tau_s}",
+            reference.tau_s
+        );
+        assert_eq!(reference.method, "farina_same_capture_reference_v1");
+        assert_eq!(reference.input_port, "fake:capture_1");
+        assert_eq!(reference.output_port, "fake:playback_1");
+
+        let stats = report.ir_stats().expect("ir_stats");
+        let centre = stats.window_len / 2;
+        let c_m_s = ac_core::shared::conversions::speed_of_sound_from_config(None);
+        let expected_bound =
+            (centre as f64 + (expected_tau_s + distance_m / c_m_s) * FAKE_SR).round() as usize;
+        let measurement_leg_bound = (centre as f64
+            + (FAKE_MEAS_DELAY_SAMPLES as f64 / FAKE_SR + distance_m / c_m_s) * FAKE_SR)
+            .round() as usize;
+        assert_ne!(
+            expected_bound, measurement_leg_bound,
+            "test setup: the two legs must give different bounds"
+        );
+        assert_eq!(
+            stats.causal_bound.min_admissible_index(),
+            Some(expected_bound),
+            "distance {distance_m}: {:?}",
+            stats.causal_bound
+        );
+        if expected_bound < stats.peak_index {
+            assert!(
+                stats.onset_rule.contains("causal bound enforced"),
+                "distance {distance_m}: {}",
+                stats.onset_rule
+            );
+            assert!(stats.onset_index >= expected_bound);
+            outcomes.push("enforced");
+        } else {
+            assert!(
+                stats
+                    .onset_rule
+                    .contains("causal bound at or after the peak"),
+                "distance {distance_m}: {}",
+                stats.onset_rule
+            );
+            outcomes.push("declined");
+        }
+    }
+    assert_eq!(
+        outcomes,
+        vec!["enforced", "declined"],
+        "test setup: the two distances must reach both outcomes"
+    );
+}
+
+/// #460 AC3 through the producer: a distance with no reference configured
+/// records the reference as unavailable, with the reason the read-out prints,
+/// and the bound names the reference latency as the missing input.
+#[test]
+fn plot_ir_with_a_distance_but_no_reference_names_the_reference_as_missing() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let (reply, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 1.0 })));
+    assert!(reply.get("ref_in_port").is_none(), "{reply}");
+    assert_eq!(
+        report.position.as_ref().and_then(|p| p.distance_m),
+        Some(1.0)
+    );
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(reason, "no reference configured (ac setup reference)")
+        }
+        other => panic!("expected an unavailable reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+    assert!(
+        stats
+            .onset_rule
+            .contains("no causal bound (reference latency unavailable)"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// #460 AC3: a measured reference with no distance names the distance.
+#[test]
+fn plot_ir_with_a_reference_but_no_distance_names_the_distance_as_missing() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({})));
+    assert_eq!(report.position.as_ref().and_then(|p| p.distance_m), None);
+    assert!(
+        matches!(
+            report.reference_latency,
+            Some(ReferenceLatency::Measured(_))
+        ),
+        "{:?}",
+        report.reference_latency
+    );
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(
+        stats
+            .onset_rule
+            .contains("no causal bound (distance not given)"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// A reference leg that fails `calibrate`'s SNR gate is recorded as
+/// unavailable with an observation and a `check:` part, and no bound is built
+/// from it. `AC_FAKE_REF_GAIN=0` leaves only the noise override's dither on
+/// the reference leg.
+#[test]
+fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[
+            ("AC_FAKE_REF_GAIN", "0"),
+            ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.001"),
+        ],
+    );
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert!(reason.starts_with("peak SNR "), "{reason}");
+            assert!(
+                reason.contains("; check: reference loopback cable, ref input gain"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected an SNR-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+    assert!(
+        stats.onset_rule.contains("reference latency unavailable"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// A reference that is configured but does not resolve is refused before
+/// any audio, not silently run single-ended (#225).
+#[test]
+fn plot_ir_refuses_an_unresolvable_reference_before_any_audio() {
+    let d = Daemon::spawn_with_config(Some(json!({ "reference_channel": 99 })));
+    let c = Client::new(&d);
+    let r = c.call(plot_ir_request(json!({})));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains("99"),
+        "{r}"
+    );
+    assert!(
+        c.wait_for_topic("measurement/report", Duration::from_millis(1500))
+            .is_none(),
+        "a refused request must not produce a report"
+    );
+    let status = c.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
+}
+
+/// `distance_m` budget: anything but a finite, positive number is refused
+/// before port resolution, with the stimulus stated silent.
+#[test]
+fn plot_ir_refuses_an_unusable_distance_before_any_audio() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    for bad in [json!(0.0), json!(-1.0), json!("1m")] {
+        let r = c.call(plot_ir_request(json!({ "distance_m": bad })));
+        assert_eq!(r["ok"], json!(false), "{bad}: {r}");
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("distance_m must be finite and > 0 m"),
+            "{bad}: {err}"
+        );
+        assert!(err.contains("stimulus  silent"), "{bad}: {err}");
+    }
+    assert!(
+        c.wait_for_topic("measurement/report", Duration::from_millis(1000))
+            .is_none(),
+        "a refused request must not produce a report"
     );
 }
 

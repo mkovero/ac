@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use ac_core::measurement::sweep::estimate_onset;
+use ac_core::measurement::sweep::{estimate_onset, CausalBound, MissingBoundInput};
 use serde_json::{json, Value};
 
 struct Args {
@@ -231,7 +231,11 @@ fn main() {
         let mean_sq = ir[..far_end].iter().map(|v| v * v).sum::<f64>() / far_end as f64;
         mean_sq.sqrt()
     };
-    let onset = estimate_onset(&ir, peak_idx, sr as u32, floor_rms, None);
+    // The probe takes no geometry and captures no reference leg (#460).
+    let no_bound = CausalBound::Unavailable(MissingBoundInput::Both {
+        reference_reason: "ir_probe captures no reference".to_string(),
+    });
+    let onset = estimate_onset(&ir, peak_idx, sr as u32, floor_rms, &no_bound);
     let o = onset.index as i64 - centre as i64;
     println!(
         "  onset:         index {}, offset {o:+} samples = {:+.4} ms  ({} before peak)",

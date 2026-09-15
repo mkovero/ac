@@ -111,7 +111,7 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 6`); the
+configured. Schema is versioned (currently `schema_version: 7`); the
 capture backend is archived at report top level. Example payload:
 
 ```json
@@ -119,7 +119,7 @@ capture backend is archived at report top level. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 6,
+    "schema_version": 7,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -1089,7 +1089,11 @@ guessed beforehand (`ac_core::measurement::sweep::check_tail_decay`).
 
 Fake, JACK, and CPAL backends all implement the required
 `play_and_capture` engine path (`jack_backend.rs`, `cpal_backend.rs`) —
-only the default trait impl bails.
+only the default trait impl bails. Capturing a same-capture reference leg
+(#460, `play_and_capture_with_reference`) is implemented by the fake and JACK
+backends; on CPAL `plot_ir` runs single-input and records
+`reference_latency: unavailable` naming the backend, never silently dropping
+a configured reference.
 
 **Request**
 ```json
@@ -1101,7 +1105,9 @@ only the default trait impl bails.
   "level_dbfs":   <float>,   // default -6
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
-  "window_len":   <int>      // requested IR gate length in samples, default 4096
+  "window_len":   <int>,     // requested IR gate length in samples, default 4096
+  "distance_m":   <float>    // optional, metres source to receiver; feeds only the
+                             // onset search's causal bound (#460)
 }
 ```
 
@@ -1111,6 +1117,7 @@ Request budgets are enforced before port resolution or worker spawn:
 - `tail_s`: from 0 through 60 seconds
 - `n_harmonics`: from 1 through 32
 - `window_len`: from 1 through 1048576 samples
+- `distance_m`: finite and greater than 0 metres; absent means no distance
 
 An out-of-budget request returns `ok: false`, confirms that the stimulus is
 silent, and emits no audio. `stop` cancels both the sweep and tail portions of
@@ -1130,11 +1137,26 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>,
+  "ref_in_port": "<reference-capture-port>",    // only when a reference is configured
+  "ref_out_port": "<reference-playback-port>",  // only when a reference is configured
+  "warnings": ["<#225 migration warning>"] }    // only when it applies
 ```
 
 `level_dbfs` in the reply is the applied (clamped) level, and the report's
 `stimulus.level_dbfs` field (below) is the same applied value.
+
+**Reference leg (#460).** `plot_ir` takes a same-capture reference from the
+config keys `transfer_stream` and `test_dut` already use: `reference_channel` /
+`reference_port` for capture, `reference_output_channel` /
+`reference_output_port` for playback. With `reference_output_channel` unset the
+reference is driven from the main output (the sweep drives no second port);
+with it set to a different port, **the sweep also leaves through that port** at
+the same clamped level, which is why the reply names it. A reference that is
+configured but does not resolve (out-of-range channel, or a sticky port with no
+channel to gate it) returns `ok: false` before any audio, rather than running
+single-ended. No reference configured is a legitimate state: the report records
+`reference_latency: unavailable` and no causal bound is built.
 
 **DATA**
 ```json
@@ -1146,7 +1168,7 @@ also stated in the report `notes`.
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 6, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 7, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }
@@ -1204,6 +1226,37 @@ conversion this used to also unlock). It is a tagged union on `state`:
 A reader must not subtract τ from the arrival when `state` is
 `unavailable`: the arrival still contains the uncorrected interface
 latency, which at 48 kHz is routinely tens of samples of phantom path.
+
+`reference_latency` (schema v7, #460) is τ of the **reference loopback pair**,
+read from the reference leg captured in this same run under `calibrate`'s
+single-reading gates (pre-impulse SNR, window-edge margin, xrun). It describes
+a *different* port pair from `interface_latency`: a reader must never subtract
+it from the arrival as though it were the capture pair's own τ — τ is per
+channel pair. Its only consumer is the onset search's causal bound
+(`IrStats::causal_bound`), which needs a τ from the same client lifetime and
+stream epoch as the IR, because a stored τ re-picks by a multiple of the
+FireWire SYT interval on every device enumeration (#461). Tagged union on
+`state`:
+
+```json
+{ "state": "measured", "tau_s": 0.017822917, "pre_impulse_snr_db": 61.8,
+  "method": "farina_same_capture_reference_v1",
+  "output_port": "system:playback_2", "input_port": "system:capture_2" }
+
+{ "state": "unavailable", "reason": "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain" }
+```
+
+`pre_impulse_snr_db` is omitted when the pre-impulse region measured true
+silence (an infinite SNR, which JSON cannot carry). `reason` names what was
+observed and, after `; check: `, where to look — never a cause. `plot_ir`
+always records the field, so `unavailable` with `no reference configured (ac
+setup reference)` is what no reference looks like; reports written before v7
+lack it, which readers treat as no reference.
+
+`report.position.distance_m` is the request's `distance_m`, recorded when
+supplied. It is an **input** to the causal bound, converted to seconds inside
+`ir_stats`, never a read-out: no ms → m figure returns (#391). From v7,
+`position` may be present carrying only `distance_m`.
 
 When `cfg.report_dir` is configured the daemon also writes the pair
 `<ISO8601>-plot_ir.json` and `<ISO8601>-plot_ir.csv` there (colons

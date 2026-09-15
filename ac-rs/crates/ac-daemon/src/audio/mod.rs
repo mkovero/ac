@@ -72,6 +72,42 @@ pub trait AudioEngine: Send + 'static {
         self.play_and_capture(samples, tail_s)
     }
 
+    /// Whether [`Self::play_and_capture_with_reference`] is implemented. A
+    /// caller checks this before emitting, so a backend that cannot capture a
+    /// reference records that as the reference's reason instead of the capture
+    /// failing — and never silently drops a configured reference (#460).
+    fn supports_reference_capture(&self) -> bool {
+        false
+    }
+
+    /// Play `samples` once on every connected output, and capture the
+    /// measurement input plus `reference_port` in the same run (#460).
+    ///
+    /// Invariants every implementation holds; each closes a failure that
+    /// would otherwise pass unnoticed:
+    /// - **(a) never padded.** Both buffers are exactly `samples.len() +
+    ///   tail` samples long, `tail` truncated from `tail_s · sample_rate` as
+    ///   in [`Self::play_and_capture_cancellable`]. A short reference is an
+    ///   error, not zero-filled.
+    /// - **(b) sample-aligned by construction.** The stimulus's first output
+    ///   sample and both captures' first samples come from the same
+    ///   process-callback period. A one-period meas/ref offset is a stable,
+    ///   repeatable, wrong τ (#347, #467).
+    /// - **(c) capacity follows the request**, not a fixed constant (#437).
+    /// - **(d) the reference port is adopted by the audio callback** before
+    ///   the capture is armed.
+    ///
+    /// Cancellation silences output before returning its error.
+    fn play_and_capture_with_reference(
+        &mut self,
+        _samples: &[f32],
+        _tail_s: f64,
+        _reference_port: &str,
+        _stop: &AtomicBool,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        anyhow::bail!("backend {} cannot capture a reference", self.backend_name())
+    }
+
     /// Non-blocking drain of up to `max_samples` from the capture ring,
     /// without the pre-clear that `capture_block` performs. Returns whatever
     /// has accumulated since the last call (possibly empty on backends that
