@@ -50,7 +50,7 @@ mtime: the convenient reading is not the evidence, and it fails quietly.
 
 Among the `#[ignore]`'d, `it_loopback_ir` drives a Farina sweep through real
 JACK port-to-port loopback and is run manually after starting `jackd -d dummy`
-— see ARCHITECTURE.md → "Loopback IR runbook". The rest need real hardware, a
+— see `docs/runbooks/rig-testing.md` (7b; 7c for real hardware). The rest need real hardware, a
 live daemon, or a real GPU adapter.
 
 No JACK daemon or audio hardware required for the default suite — pytest spawns `ac-daemon --fake-audio` (synthetic sine + 1% 2nd harmonic) on free ports and connects via ZMQ.

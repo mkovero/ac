@@ -6,8 +6,8 @@
 //! pre-impulse floor.
 //!
 //! This test is `#[ignore]`'d so it does not run as part of `cargo test`.
-//! It needs a live JACK server. See `ARCHITECTURE.md` → "Testing strategy"
-//! → "Loopback IR runbook" for invocation.
+//! It needs a live JACK server. See `docs/runbooks/rig-testing.md` (7b, and
+//! 7c for real hardware) for invocation.
 //!
 //! The internal loopback works because both the daemon's output and input
 //! ports are registered under the same JACK client (`ac-daemon`). Setting
@@ -22,12 +22,13 @@
 //! hardware, set both of these to real JACK port names:
 //!
 //! ```text
-//! AC_LOOPBACK_OUT="Babyface Pro Pro:playback_2"   # daemon's out connects here
-//! AC_LOOPBACK_IN="Babyface Pro Pro:capture_4"     # daemon's in connects here
+//! AC_LOOPBACK_OUT="system:playback_2"   # daemon's out connects here (pupu: AN2)
+//! AC_LOOPBACK_IN="system:capture_2"     # daemon's in connects here (pupu: IN2)
 //! ```
 //!
-//! Unset, both default to the self-loop, so the `jackd -d dummy` runbook in
-//! `ARCHITECTURE.md` is unchanged.
+//! Unset, both default to the self-loop, so the `jackd -d dummy` route is
+//! unchanged. On a rig, `scripts/rig/run-loopback-ir.sh` sets all three from
+//! the rig profile.
 //!
 //! Setting them puts a stimulus on physical outputs, which is behind the
 //! rig's standing drive-level policy. So when `AC_LOOPBACK_OUT` is set,
@@ -98,7 +99,7 @@ const RIG_DRIVE_CEILING_DBFS: f64 = -40.0;
 /// being placed by `MAX_ROUND_TRIP_S`, and a peak pinned at that edge —
 /// exactly what a too-short window produces — passes the position check
 /// as if it were a plausible round trip. 2.0 s (the reference rig's own
-/// runbook duration, ARCHITECTURE.md's "Loopback IR runbook") fixes this,
+/// runbook duration, `docs/runbooks/rig-testing.md`) fixes this,
 /// but the two runnable sample rates hit different limits and so land at
 /// different margins: at 48 kHz the harmonic gap is still the smaller
 /// number (11536 samples), giving a half-window of ~120 ms — 2.00×
@@ -112,7 +113,7 @@ const DEFAULT_DURATION_S: f64 = 2.0;
 
 /// Maximum acceptable round-trip latency, in seconds. #277 measured
 /// 43.75 ms on the reference rig (Babyface Pro leg, 96 kHz, 2.0 s sweep —
-/// ARCHITECTURE.md's "Loopback IR runbook"). This is that figure with
+/// `docs/runbooks/rig-testing.md`). This is that figure with
 /// ~37% headroom for rig-to-rig jitter, not a bound fitted to one run.
 /// If a chain ever needs more than this, the number moves and this
 /// comment's citation moves with it — it must never grow silently.
@@ -489,7 +490,7 @@ impl Client {
 }
 
 #[test]
-#[ignore = "needs a live JACK server — see ARCHITECTURE.md"]
+#[ignore = "needs a live JACK server — see docs/runbooks/rig-testing.md"]
 fn loopback_ir_recovers_sharp_peak() {
     let routing = Routing::from_env();
     let chain = routing.describe();
@@ -861,7 +862,7 @@ mod round_trip_bound_tests {
     /// `DEFAULT_DURATION_S` must genuinely bind `MAX_ROUND_TRIP_S` at the
     /// sample rates this repo can actually exercise the loopback test at:
     /// `jackd -d dummy` self-loop configs (48 kHz) and the rig's own
-    /// Babyface Pro leg (96 kHz — ARCHITECTURE.md's "Loopback IR runbook").
+    /// Babyface Pro leg (96 kHz — `docs/runbooks/rig-testing.md`).
     /// Regression guard for #361's acceptance criterion: `hi_bound` must
     /// not saturate at any configuration that actually runs.
     #[test]
