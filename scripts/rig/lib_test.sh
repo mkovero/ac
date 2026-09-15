@@ -48,3 +48,25 @@ fi
 rm -rf "$AC_HOME"
 unset AC_HOME
 echo "lib.sh resolve_rev: fails closed on a missing revision"
+
+# The block above tests resolve_rev in isolation, which never had the bug.
+# preflight.sh's actual failure was in how it composed resolve_rev with
+# rig_dest: `dest="$(rig_dest "$(resolve_rev "$rev_arg")")"` buries
+# resolve_rev's exit 1 inside the inner command substitution, where only
+# rig_dest's own (always-0, it just echoes) exit status reaches the
+# assignment — set -e never sees the failure. Exercise preflight.sh's
+# actual composed form (the fixed `rev="$(resolve_rev ...)" || exit 1`
+# split), not a bare resolve_rev call, so a regression back to the nested
+# form would be caught here (PR #441 QA finding, third pass).
+AC_HOME="$(mktemp -d)"
+mkdir -p "$AC_HOME/target-rig-stage"
+if (
+    rev="$(resolve_rev nonexistent-rev)" || exit 1
+    rig_dest "$rev"
+) >/dev/null 2>&1; then
+    echo "FAIL: preflight.sh's composed rev/dest resolution should fail closed on a missing revision"
+    exit 1
+fi
+rm -rf "$AC_HOME"
+unset AC_HOME
+echo "lib.sh resolve_rev + rig_dest composition (preflight.sh's actual line): fails closed on a missing revision"

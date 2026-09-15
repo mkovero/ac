@@ -21,10 +21,16 @@ dest=""
 # An unresolved rev must not fall through to "" like `none` does — that
 # silently skipped the staged-build check (PR #441 QA finding). Only the
 # explicit `none` means "don't check a staged build"; anything else that
-# doesn't resolve is a usage error and resolve_rev's own die() should end
-# the script here, not read as "nothing staged."
+# doesn't resolve is a usage error and must end the script here, not read
+# as "nothing staged." resolve_rev's own die() can't do that by itself:
+# nested inside `dest="$(rig_dest "$(resolve_rev "$rev_arg")")"`, its exit 1
+# only terminates the inner command-substitution subshell — the assignment
+# sees rig_dest's exit status (always 0, it just echoes), so `set -e` never
+# fires on resolve_rev's failure. Split so resolve_rev's own exit status
+# reaches this shell (PR #441 QA finding, second pass).
 if [[ $rev_arg != none ]]; then
-    dest="$(rig_dest "$(resolve_rev "$rev_arg")")"
+    rev="$(resolve_rev "$rev_arg")" || exit 1
+    dest="$(rig_dest "$rev")"
 fi
 
 remote="$(cat <<'REMOTE'
