@@ -84,6 +84,17 @@ clear_ff400_aliases() {
         return
     fi
 
+    # jack_lsp -A's exit status must be checked explicitly, both here and
+    # below: a process substitution's failure isn't seen by `set -e`, and a
+    # pipe into awk without pipefail hides the exit status of jack_lsp behind
+    # awk's own success. Either masked failure would let this function print
+    # "cleared" / "none set here" while never having actually looked.
+    local lsp_out
+    if ! lsp_out=$(jack_lsp -A); then
+        echo "  JACK aliases:       jack_lsp -A failed after the reachability check; did not clear or confirm any alias" >&2
+        exit 1
+    fi
+
     local port="" line stale=0
     while IFS= read -r line; do
         case "$line" in
@@ -106,13 +117,18 @@ clear_ff400_aliases() {
                 port="$line"
                 ;;
         esac
-    done < <(jack_lsp -A)
+    done <<< "$lsp_out"
 
+    local verify_out
+    if ! verify_out=$(jack_lsp -A); then
+        echo "  JACK aliases:       jack_lsp -A failed during verification; did not confirm any alias was cleared" >&2
+        exit 1
+    fi
     local remaining
-    remaining=$(jack_lsp -A | awk '
+    remaining=$(awk '
         /^   / { if ($0 ~ /^   FF400:/ && port ~ /^system:(capture|playback)_/) print port ": " $0; next }
         { port = $0 }
-    ')
+    ' <<< "$verify_out")
     if [[ -n "$remaining" ]]; then
         echo "  JACK aliases:       FF400: alias still present after clearing:" >&2
         echo "$remaining" >&2
@@ -160,13 +176,15 @@ case "${MODE,,}" in
             diag=$(amixer -c $CARD cget numid=$i 2>/dev/null \
                    | grep ': values' \
                    | sed 's/.*values=//' \
-                   | python3 -c "import sys; v=sys.stdin.read().strip().split(','); print(v[$idx])" 2>/dev/null)
+                   | python3 -c "import sys; v=sys.stdin.read().strip().split(','); print(v[$idx])" 2>/dev/null) || true
             if [[ -n "$diag" ]]; then
                 printf "    ch%02d %s\n" $idx "$diag"
             else
                 printf "    ch%02d %s\n" $idx "(could not be read)"
             fi
         done
+        echo ""
+        clear_ff400_aliases
         exit 0
         ;;
     +4dbu|+4)   LEVEL_IDX=2 ; LEVEL_NAME="+4 dBu"  ;;

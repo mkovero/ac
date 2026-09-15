@@ -32,6 +32,13 @@ fail() { echo "FAIL: $1"; FAILED=1; }
 # mismatch — see architect's evidence — so this stub doesn't simulate one;
 # case (h) checks the *sent* width against the reported one instead). All
 # three log every invocation.
+#
+# jack_lsp's `-A` calls are counted in JACK_A_CALLS: when JACK_A_DOWN is
+# set, the Nth `-A` call fails once N exceeds JACK_A_DOWN_AFTER (default 0,
+# i.e. the very first `-A` call fails) — this simulates JACK going away
+# *after* the plain reachability probe (`jack_lsp` with no args) already
+# succeeded, which a masked pipe/process-substitution failure would miss
+# (codex-qa, PR #450 re-review).
 
 write_stubs() {
     local bindir="$1"
@@ -73,6 +80,14 @@ EOF
 [[ -e "${JACK_DOWN:?}" ]] && exit 1
 state="${JACK_STATE:?}"
 if [[ "${1:-}" == "-A" ]]; then
+    if [[ -n "${JACK_A_DOWN:-}" ]]; then
+        calls="${JACK_A_CALLS:?}"
+        n=0
+        [[ -e "$calls" ]] && n=$(cat "$calls")
+        n=$((n + 1))
+        echo "$n" > "$calls"
+        [[ "$n" -gt "${JACK_A_DOWN_AFTER:-0}" ]] && exit 1
+    fi
     for f in "$state"/*; do
         [[ -e "$f" ]] || continue
         echo "$(basename "$f")"
@@ -118,6 +133,7 @@ export PATH="$STUBDIR:$PATH"
 STATE="$WORK/state"
 export JACK_STATE="$STATE"
 export JACK_DOWN="$WORK/jack_down"     # file exists => jack_lsp fails
+export JACK_A_CALLS="$WORK/jack_a_calls"   # jack_lsp -A call counter, see JACK_A_DOWN
 export AMIXER_LOG="$WORK/amixer.log"
 export ALIAS_LOG="$WORK/alias.log"
 
@@ -126,9 +142,9 @@ reset_state() {
     # are a separate knob (WIDTH_8/WIDTH_ANALOG/WIDTH_ADAT/WIDTH_STREAM,
     # FAIL_NUMID) — reset_state does not touch them, on purpose (case (e)).
     rm -rf "$STATE"; mkdir -p "$STATE"
-    rm -f "$JACK_DOWN"
+    rm -f "$JACK_DOWN" "$JACK_A_CALLS"
     : > "$AMIXER_LOG"; : > "$ALIAS_LOG"
-    unset FORCE_UNALIAS_FAIL
+    unset FORCE_UNALIAS_FAIL JACK_A_DOWN JACK_A_DOWN_AFTER
     for i in $(seq 1 "$1"); do
         echo "alsa_pcm:hw:Card:out$i" > "$STATE/system:capture_$i"
         echo "alsa_pcm:hw:Card:in$i"  > "$STATE/system:playback_$i"
@@ -221,6 +237,56 @@ export FORCE_UNALIAS_FAIL=1
 out="$(bash "$FF400" 2>&1)"; rc=$?
 unset FORCE_UNALIAS_FAIL
 [[ $rc -ne 0 ]] || fail "(g) script exited 0 despite a failing unalias: $out"
+
+# ── (j): `show` also clears a stale FF400: alias and prints guidance ───────
+# Must go red against a `show` branch that exits before clear_ff400_aliases
+# runs (codex-qa major finding, PR #450 re-review).
+reset_state 18
+plant_ff400_alias
+out="$(bash "$FF400" show 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "(j) show exited $rc: $out"
+grep -qF "FF400:" "$STATE/system:capture_1" && fail "(j) show did not clear the planted FF400: alias"
+echo "$out" | grep -qi "none set here" \
+    || fail "(j) show did not print the no-alias/where-to-look guidance: $out"
+
+# ── (k): jack_lsp -A failing right after the reachability probe must not
+# claim aliases were cleared or confirmed absent (codex-qa major finding:
+# the initial enumeration ran inside a process substitution whose failure
+# `set -e` never saw) ────────────────────────────────────────────────────
+reset_state 18
+plant_ff400_alias
+export JACK_A_DOWN=1 JACK_A_DOWN_AFTER=0   # fail on the 1st -A call (enumeration)
+out="$(bash "$FF400" 2>&1)"; rc=$?
+unset JACK_A_DOWN JACK_A_DOWN_AFTER
+[[ $rc -ne 0 ]] || fail "(k) script exited 0 despite jack_lsp -A failing during enumeration: $out"
+echo "$out" | grep -qi "cleared any FF400" && fail "(k) claimed aliases cleared despite jack_lsp -A failing: $out"
+echo "$out" | grep -qi "none set here" && fail "(k) claimed no aliases set despite jack_lsp -A failing: $out"
+
+# ── (m): jack_lsp -A failing on the post-clear verify pass (enumeration
+# itself succeeded) must not claim aliases were confirmed cleared (codex-qa
+# major finding: the verify pipe into awk masked jack_lsp's exit status
+# without pipefail) ─────────────────────────────────────────────────────
+reset_state 18
+plant_ff400_alias
+export JACK_A_DOWN=1 JACK_A_DOWN_AFTER=1   # 1st -A (enumeration) ok, 2nd (verify) fails
+out="$(bash "$FF400" 2>&1)"; rc=$?
+unset JACK_A_DOWN JACK_A_DOWN_AFTER
+[[ $rc -ne 0 ]] || fail "(m) script exited 0 despite jack_lsp -A failing during verification: $out"
+echo "$out" | grep -qi "cleared any FF400" && fail "(m) claimed aliases cleared despite the verify jack_lsp -A failing: $out"
+
+# ── (l): `show` must not abort on an unreadable stream-source-gain row ─────
+# numid=64 is ch01 of the diagonal; FAIL_NUMID makes it answer with no
+# `values=` line, which previously made an unguarded `$(...)` assignment
+# trip `set -e` mid-loop (codex-qa minor finding, PR #450 re-review).
+reset_state 18
+export FAIL_NUMID=64
+out="$(bash "$FF400" show 2>&1)"; rc=$?
+unset FAIL_NUMID
+[[ $rc -eq 0 ]] || fail "(l) show exited $rc on an unreadable numid=64 diagonal row: $out"
+echo "$out" | grep -q 'ch01 (could not be read)' \
+    || fail "(l) show did not report ch01 as unreadable: $out"
+echo "$out" | grep -q 'ch02 ' \
+    || fail "(l) show aborted before printing ch02 after an unreadable row: $out"
 
 if [[ $FAILED -ne 0 ]]; then
     echo "ff400.sh alias handling: FAILED"
