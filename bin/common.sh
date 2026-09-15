@@ -127,10 +127,15 @@ spec() { printf '%s/.agents/%s.md' "$ROOT" "$1"; }
 # Where is <branch> checked out, if anywhere? A branch can live in only one
 # worktree at a time, so a revise must reuse the implement worktree rather than
 # try to create a second one.
+#
+# awk reads to EOF instead of exiting on the match. An early exit closes the
+# pipe while git is still writing; git dies of SIGPIPE, pipefail makes that the
+# function's status, and set -e then kills the caller at the assignment with no
+# message. With ~50 worktrees that happened on most calls.
 worktree_of_branch() {
   git worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$1" '
     /^worktree /  { wt = $2 }
-    /^branch /    { if ($2 == b) { print wt; exit } }'
+    /^branch /    { if (!found && $2 == b) { print wt; found = 1 } }'
 }
 
 # Resolve a worktree for <branch>, preferring <path>. Emits the path to use.
@@ -240,9 +245,11 @@ manifest_of() {
   # The architect template in existing issues uses a Markdown section with
   # one bare path per line. Stop at the next bold field and emit paths only;
   # prose such as "(none — coordination-only epic)" is not a manifest.
+  # No early exit, for the same SIGPIPE reason as worktree_of_branch.
   printf '%s\n' "$body" | awk '
+    done { next }
     /^\*\*file manifest\*\*[[:space:]]*$/ { in_manifest=1; next }
-    in_manifest && /^\*\*/ { exit }
+    in_manifest && /^\*\*/ { in_manifest=0; done=1; next }
     in_manifest {
       line=$0
       sub(/^[[:space:]]*[-*][[:space:]]*/, "", line)
