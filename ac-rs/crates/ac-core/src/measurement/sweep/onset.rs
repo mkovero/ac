@@ -8,8 +8,15 @@
 //! that records which of them produced a given index.
 
 /// Result of [`estimate_onset`]: the onset sample index plus the rule
-/// that produced it, so a persisted arrival can be told apart from a
-/// bare peak read a year later (#346, acceptance criterion 4).
+/// that produced it, so a persisted onset can be told apart from a bare
+/// peak read a year later (#346, acceptance criterion 4).
+///
+/// Reported, not used as the arrival: `MeasurementReport::ir_stats`
+/// derives `delay_samples` / `arrival_s` from the magnitude peak and
+/// carries this beside it as a diagnostic. #378's contingency, triggered
+/// by its AC6 rig run (pupu, 2026-09-15): between 1.000 m and 2.000 m
+/// the onset's increment missed `transfer_stream`'s by 143.75 samples
+/// while the peak's missed by 8.62.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnsetEstimate {
     pub index: usize,

@@ -244,36 +244,27 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
     ]);
 
-    // ── printed arrival is onset-derived, not peak-derived (#346) ─────
+    // ── printed arrival is the peak's offset (#378 contingency) ───────
     // The gate re-centres the linear IR on the sweep endpoint, so the
-    // fake backend's 32-sample loopback still shows up as the *peak's*
-    // offset from centre — but `arrival` now comes from
-    // `estimate_onset`, which under #378 picks the change point in the
-    // IR's own variance over a window ending at the peak. No geometry is
-    // recorded for this run, so no causal bound applies and the pick can
-    // legitimately land before the peak — and on this fixture it lands
-    // well before it, inside the bandlimited deconvolution's pre-ring
-    // (a 200 Hz lower sweep limit puts the main lobe's leading skirt
-    // ~240 samples wide at 48 kHz). That is the case the causal bound
-    // exists to reject, and there is none here.
+    // fake backend's 32-sample loopback shows up as the peak's offset
+    // from centre, and that is what `arrival` prints. #378's AC6 rig run
+    // (2026-09-15) triggered the contingency fixed in its design: the
+    // onset estimate's 1 m → 2 m increment missed `transfer_stream`'s by
+    // 143.75 samples, the peak's by 8.62, so the arrival reverted to the
+    // peak and the onset is printed as a diagnostic below it.
     let arrival = printed_arrival_samples(&stdout);
-    // Pinned exact, not just bounded (QA on #352): this fixture's IR
-    // shape is deterministic (fake backend, fixed 200hz/8000hz/4096win
-    // sweep), so the estimator's answer for it is a known, computable
-    // value — pinning it catches a regression in the estimator's exact
-    // behaviour, not only a sign or bound violation. Recompute if the
-    // fixture's stimulus parameters above ever change. Value moved
-    // 19 → 17 under #353 (median floor) and 17 → -86 under #378: the
-    // level crossing stopped where the skirt fell below floor+12 dB,
-    // while the change-point pick keys on where the skirt's variance
-    // leaves the numerical floor, which on a 200 Hz-limited sweep is
-    // much earlier. Expected per the #378 design decision — the pick is
-    // deliberately not amplitude-referenced — not a regression.
-    const EXPECTED_ONSET_SAMPLES: i64 = -86;
     assert_eq!(
-        arrival, EXPECTED_ONSET_SAMPLES,
-        "printed arrival should be the fake backend's exact onset sample \
-         for this fixture, not just somewhere in (0, {FAKE_LOOPBACK_DELAY_SAMPLES}]:\n{stdout}"
+        arrival, FAKE_LOOPBACK_DELAY_SAMPLES,
+        "printed arrival should be the fake loopback's peak offset:\n{stdout}"
+    );
+    // The rejected implementation, computed rather than assumed: on this
+    // fixture the onset picker lands 118 samples before the peak (inside
+    // the 200 Hz-limited deconvolution's leading skirt, no causal bound),
+    // so an arrival still wired to the onset would print -86, not 32.
+    assert_ne!(
+        arrival,
+        FAKE_LOOPBACK_DELAY_SAMPLES - 118,
+        "arrival must not be the onset-derived value:\n{stdout}"
     );
 
     // ── the rest of the printed summary ───────────────────────────────
@@ -283,10 +274,9 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
-    // #346 AC4 / #378: the onset rule must reach the terminal, and the
-    // peak line must carry the onset-to-peak distance now that the two
-    // can legitimately disagree — a silent divergence between them would
-    // read as a bug in the tool rather than the fix working.
+    // #346 AC4 / #378: the onset rule must still reach the terminal, and
+    // the onset-to-peak distance is printed under the peak labelled as a
+    // diagnostic — it must not read as the arrival now that it is not one.
     assert!(
         stdout.contains("onset: AIC change-point pick, 10.0 ms window"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
@@ -296,8 +286,12 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "printed summary missing the window-start clause (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("diagnostic \u{2014} arrival is onset-derived, 118 samples earlier"),
-        "peak line must carry the onset-to-peak distance (#378):\n{stdout}"
+        stdout.contains("diagnostic \u{2014} onset 118 samples before peak, not the arrival"),
+        "onset-to-peak distance must print as a diagnostic (#378):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("onset-derived"),
+        "no line may still claim the arrival is onset-derived:\n{stdout}"
     );
     assert!(
         !stdout.contains("median floor"),

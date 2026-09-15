@@ -38,12 +38,14 @@ impl MeasurementReport {
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
     ///
-    /// Arrival (`delay_samples`/`arrival_s`) is derived from an onset
-    /// estimate ([`crate::measurement::sweep::estimate_onset`]), not from
-    /// the IR's magnitude peak — see [`IrStats::onset_index`]'s doc for why
-    /// (#346). When this report carries both a measured interface latency
-    /// and a recorded `position.distance_m`, the onset estimate is bound
-    /// to reject any candidate earlier than pure flight time allows.
+    /// Arrival (`delay_samples`/`arrival_s`) is derived from the IR's
+    /// magnitude peak. An onset estimate
+    /// ([`crate::measurement::sweep::estimate_onset`]) is computed and
+    /// carried beside it as a diagnostic, not used as the arrival — #378's
+    /// contingency, see [`IrStats::onset_index`]. When this report carries
+    /// both a measured interface latency and a recorded
+    /// `position.distance_m`, the onset estimate is bound to reject any
+    /// candidate earlier than pure flight time allows.
     pub fn ir_stats(&self) -> Option<IrStats> {
         let (payload, sample_rate_hz, linear_ir) =
             self.data.iter().find_map(|p| match &p.data {
@@ -106,11 +108,15 @@ impl MeasurementReport {
         let onset_index = onset.index;
         let onset_rule = onset.rule;
 
-        // The onset's offset from the window centre is the arrival —
-        // not `peak_index`'s (#346): on a multi-way loudspeaker the
-        // largest sample sits at a fixed group-delay offset past the
-        // wavefront that actually left the baffle first.
-        let delay_samples = onset_index as i64 - centre as i64;
+        // The peak's offset from the window centre is the arrival; the
+        // onset above is reported beside it as a diagnostic only. #378's
+        // contingency, triggered by its AC6 rig run (pupu, 2026-09-15): on
+        // a 1.000 m → 2.000 m move the onset's increment missed
+        // `transfer_stream`'s by 143.75 samples (19.5 se) while the peak's
+        // missed by 8.62 — the onset-to-peak distance itself moved 135
+        // samples between positions. #346's absolute-arrival claim stays
+        // open rather than being answered by the worse estimator.
+        let delay_samples = peak_index as i64 - centre as i64;
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
@@ -266,27 +272,30 @@ pub struct IrStats {
     pub sample_rate_hz: u32,
     /// Length of the gated linear IR, in samples.
     pub window_len: usize,
-    /// Index of the peak-magnitude sample within the gated IR. Kept as a
-    /// diagnostic — since #346 this is **not** what `delay_samples` /
-    /// `arrival_s` are derived from; on a multi-way loudspeaker the
-    /// largest sample sits at a fixed group-delay offset past the actual
-    /// wavefront (see [`crate::measurement::sweep::estimate_onset`]).
+    /// Index of the peak-magnitude sample within the gated IR, and what
+    /// `delay_samples` / `arrival_s` are derived from. On a multi-way
+    /// loudspeaker this sits a group-delay offset past the wavefront, so
+    /// the absolute arrival carries that offset (#346, still open); the
+    /// onset that was meant to remove it did worse on the rig — see
+    /// [`Self::onset_index`].
     pub peak_index: usize,
     /// `|linear_ir[peak_index]|`.
     pub peak_magnitude: f64,
     /// Index of the estimated onset within the gated IR — see
-    /// [`crate::measurement::sweep::estimate_onset`]. `delay_samples` and
-    /// `arrival_s` are derived from this, not from `peak_index` (#346).
+    /// [`crate::measurement::sweep::estimate_onset`]. A diagnostic, **not**
+    /// the arrival: #378's contingency, triggered by its AC6 rig run
+    /// (pupu, 2026-09-15), where the onset's 1.000 m → 2.000 m increment
+    /// missed `transfer_stream`'s by 143.75 samples and the peak's by 8.62.
     pub onset_index: usize,
     /// The rule that produced `onset_index`, from
     /// [`crate::measurement::sweep::OnsetEstimate::rule`] — states
-    /// whether a causal bound (known geometry) was enforced. Travels with
-    /// `arrival_s` so a persisted number can be told apart from a bare
-    /// peak read a year later (#346 acceptance criterion 4).
+    /// whether a causal bound (known geometry) was enforced, so a
+    /// persisted onset can be told apart from a bare peak read a year
+    /// later (#346 acceptance criterion 4).
     pub onset_rule: String,
-    /// `onset_index - window_len / 2` — signed offset of the estimated
-    /// onset from the gate centre, in samples. Positive means the
-    /// response arrived after the zero-delay reference position.
+    /// `peak_index - window_len / 2` — signed offset of the magnitude
+    /// peak from the gate centre, in samples. Positive means the response
+    /// arrived after the zero-delay reference position.
     pub delay_samples: i64,
     /// `delay_samples / sample_rate_hz` — arrival time relative to the
     /// gate's zero-delay reference. This is **not** acoustic path delay:
@@ -577,14 +586,14 @@ mod tests {
 
     // ─── interface latency (τ), archived alongside the arrival ─────────
 
-    /// #346: `delay_samples`/`arrival_s` must be onset-derived, not
-    /// peak-derived. Test against the rejected implementation — a
+    /// #378 contingency (AC6 rig run, 2026-09-15): `delay_samples` /
+    /// `arrival_s` are peak-derived, and the onset is still computed and
+    /// carried as a diagnostic. Tested against the rejected wiring — a
     /// synthetic multi-way-like IR where sustained onset energy sits well
-    /// before a group-delay-inflated peak, with the peak position
-    /// computed here directly (not just asserted "close to the true
-    /// arrival", which the old behaviour would also pass).
+    /// before the peak, so an arrival still taken from the onset would
+    /// differ from the peak-derived value asserted here.
     #[test]
-    fn ir_stats_arrival_is_onset_derived_not_peak_derived() {
+    fn ir_stats_arrival_is_peak_derived_onset_is_diagnostic() {
         let window_len = 1024;
         let centre = window_len / 2;
         let noise = 0.001;
@@ -609,14 +618,18 @@ mod tests {
 
         let r = ir_report_with_custom_ir(ir, 48_000);
         let stats = r.ir_stats().unwrap();
-        assert_eq!(stats.peak_index, peak_true, "peak_index stays diagnostic");
-        assert_eq!(stats.onset_index, onset_true);
+        assert_eq!(stats.peak_index, peak_true);
+        assert_eq!(
+            stats.onset_index, onset_true,
+            "the onset is still estimated and carried as a diagnostic"
+        );
         assert_ne!(
             stats.delay_samples,
-            peak_true as i64 - centre as i64,
-            "arrival must not be the peak-derived delay — #346"
+            onset_true as i64 - centre as i64,
+            "arrival must not be the onset-derived delay — #378 contingency"
         );
-        assert_eq!(stats.delay_samples, onset_true as i64 - centre as i64);
+        assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
+        assert!((stats.arrival_s - (peak_true as f64 - centre as f64) / 48_000.0).abs() < 1e-12);
         assert!(stats.onset_rule.contains("no causal bound"));
     }
 

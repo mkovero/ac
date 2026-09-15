@@ -256,8 +256,7 @@ fn short_onset_rule(rule: &str, onset_index: usize) -> Vec<String> {
             .split_once('(')
             .and_then(|(_, rest)| rest.split_once(')'))
             .map(|(inside, _)| inside.to_string());
-        let mut lines =
-            vec!["picker declined \u{2014} arrival is the peak, not an onset".to_string()];
+        let mut lines = vec!["picker declined \u{2014} no onset estimate".to_string()];
         if let Some(case) = case {
             lines.push(case);
         }
@@ -345,20 +344,6 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
             stats.arrival_s * 1000.0,
             stats.sample_rate_hz,
         );
-        // #346 AC4 / #378's UX comment: the rule that produced `arrival`
-        // must reach the terminal, not stop at the JSON — a reader a year
-        // from now must be able to tell a pick found in the signal from
-        // one pinned by the search bracket, from the same line a human
-        // actually looks at. Printed as a short derived tag rather than
-        // `onset_rule` verbatim (the full sentence runs past 80 columns at
-        // this indent); the untruncated rule still rides the persisted
-        // JSON via `IrStats::onset_rule`.
-        let onset_lines = short_onset_rule(&stats.onset_rule, stats.onset_index);
-        println!("                onset: {}", onset_lines[0]);
-        let continuation_indent = " ".repeat("                onset: ".len());
-        for line in &onset_lines[1..] {
-            println!("{continuation_indent}{line}");
-        }
     }
     println!(
         "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
@@ -368,18 +353,31 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     );
     if matches!(stats.verdict, IrVerdict::Failed { .. }) {
         println!("                diagnostic only \u{2014} not a valid arrival");
-    } else if stats.onset_index < stats.peak_index {
-        // #378: the onset-to-peak distance is the quantity the issue is
-        // fought over (110.4 samples at 1.000 m, 92.2 at 3.000 m). An
-        // operator who moves the mic sees the estimator's distance bias,
-        // or its absence, in one place instead of doing arithmetic across
-        // two lines with different origins. Suppressed when the two
-        // numbers agree — then the peak is the arrival and saying so once,
-        // on the onset line, is enough.
-        println!(
-            "                diagnostic \u{2014} arrival is onset-derived, {} samples earlier",
-            stats.peak_index - stats.onset_index,
-        );
+    } else {
+        // `arrival` is the peak's offset (#378 contingency, AC6 rig run
+        // 2026-09-15); the onset is printed under the peak it is measured
+        // against, as a diagnostic. #346 AC4's requirement still holds for
+        // it: the rule that produced the onset reaches the terminal, not
+        // only the JSON. Printed as a short derived tag rather than
+        // `onset_rule` verbatim (the full sentence runs past 80 columns at
+        // this indent); the untruncated rule still rides the persisted
+        // JSON via `IrStats::onset_rule`.
+        let onset_lines = short_onset_rule(&stats.onset_rule, stats.onset_index);
+        println!("                onset: {}", onset_lines[0]);
+        let continuation_indent = " ".repeat("                onset: ".len());
+        for line in &onset_lines[1..] {
+            println!("{continuation_indent}{line}");
+        }
+        // #378: the onset-to-peak distance is the quantity AC6 found moving
+        // with position (492.5 samples at 1.000 m, 627.6 at 2.000 m on the
+        // rig). Printed in one place so an operator who moves the mic sees
+        // it move, and labelled so it cannot be read as the arrival.
+        if stats.onset_index < stats.peak_index {
+            println!(
+                "                diagnostic \u{2014} onset {} samples before peak, not the arrival",
+                stats.peak_index - stats.onset_index,
+            );
+        }
     }
     if stats.pre_impulse_snr_db.is_finite() {
         if matches!(stats.verdict, IrVerdict::Failed { .. }) {
@@ -696,7 +694,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "picker declined — arrival is the peak, not an onset".to_string(),
+                "picker declined — no onset estimate".to_string(),
                 "search window shorter than 2 samples".to_string(),
                 "check: gate length, peak position in gate".to_string(),
             ]
