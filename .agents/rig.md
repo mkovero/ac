@@ -91,10 +91,10 @@ survived contact with this rig and what didn't:
 No drive/emission proceeds without **explicit per-run operator consent**,
 obtained before this session's first stimulus command — `set_drive on`,
 `plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`, `sweep_level`,
-`sweep_frequency`, or `calibrate` all put a signal on a physical output
-(#360 closed the gap where `plot_ir` and `calibrate` did not honour
-`drive_max_dbfs`; do not read this list as still narrower than the code).
-See hard constraints below for the ceiling and its exception mechanism.
+`sweep_frequency`, `calibrate`, `transfer_stream` with drive, `probe`,
+`test_hardware` and `test_dut` all put a signal on a physical output. Do not
+read this list as narrower than the code: anything that can play is covered.
+See hard constraints below for the ceiling and how it is enforced.
 Record what was consented to (ceiling, duration if bounded) in the
 resulting file.
 
@@ -117,7 +117,8 @@ below for whether that's a new file). Required content:
 
 - **build under test** — sha256-verified, git ref if known.
 - **drive level** — what was consented to, and its provenance (standing
-  −40 dBFS ceiling, or a recorded exception — see hard constraints).
+  −40 dBFS ceiling, or a recorded exception — see hard constraints), plus
+  the level each emitting run requested and the level its reply reported.
 - **what is physically connected** — every leg, confirmed this session.
 - **clock state** — `AutoSync`, and the reason, restated even when
   unchanged from a previous session (this file is read independently of
@@ -142,13 +143,32 @@ Interlocks. A session may not proceed past these — not guidance, blocking:
   before this session's drive starts. Consent from a previous session does
   not carry over.
 - **Emission ceiling is −40 dBFS**, standing. An exception above it
-  requires both an explicit operator authorization recorded in this
-  session's file *and* a server-side clamp enforcing it
-  (`drive_max_dbfs` in the daemon config actually running the session —
-  not a request-side limit only). `rig-session-2-results.md` is the
-  worked example: −30 dBFS nominal, authorized for that session, enforced
-  by `drive_max_dbfs: -30.0` under an isolated `HOME`. A request-side-only
-  limit is not the interlock.
+  requires an explicit operator authorization recorded in this session's
+  file. The daemon does not enforce the rig ceiling: from #459 it plays a
+  typed level exactly, up to full scale, and a bare command plays the
+  product default, which is not guaranteed to be at or below the rig
+  ceiling. The interlock is
+  therefore the level on every request:
+  - every emitting request carries an explicitly typed level at or below
+    the consented ceiling. Never rely on a default;
+  - commands whose level cannot be typed (`probe`, `test_hardware`, the
+    fixed-level parts of `test_dut`) play their built-in level. Read that
+    level from the build under test, and get consent for it by number, not
+    for the session ceiling;
+  - before sending, check the request's level against the ceiling. After
+    the run, check the reply's `level_dbfs` (or the CLI's `level` line).
+    Record both;
+  - a scripted session enforces the ceiling in the script and refuses to
+    send anything above it (`RIG_SPEAKER_CEILING_DBFS` on pupu is the
+    model).
+
+  `drive_max_dbfs` is not the interlock. From #459, a daemon config that
+  still carries it refuses every emitting command, so do not set it. On a
+  build from before #459 it still clamps; use it there as an extra
+  backstop, never as the only one. Records from before #459, including
+  `rig-session-2-results.md` (−30 dBFS, enforced by
+  `drive_max_dbfs: -30.0` under an isolated `HOME`), describe the old
+  mechanism.
 - **Stop the daemon before installing a build over it.** Do not install
   against a running `ac-daemon`.
 - **Pre-flight build verification is sha256, always.** Size and mtime
