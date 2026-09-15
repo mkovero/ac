@@ -129,7 +129,7 @@ fn three_distinct_channels_publish_or_refuse_but_never_stall() {
         "cmd":        "transfer_stream",
         "pairs":      [[0, 1]],
         "drive":      true,
-        "level_dbfs": -12.0,
+        "level_dbfs": -20.0,
     }));
     assert_eq!(r["ok"], json!(true), "control session refused: {r:?}");
 
@@ -176,7 +176,7 @@ fn three_distinct_channels_publish_or_refuse_but_never_stall() {
         "cmd":        "transfer_stream",
         "pairs":      [[0, 3], [1, 3]],
         "drive":      true,
-        "level_dbfs": -12.0,
+        "level_dbfs": -20.0,
     }));
 
     // A refusal at launch is a pass: it is the recoverable outcome direction 1
@@ -266,7 +266,7 @@ fn three_distinct_channels_publish_both_pairs_on_fake_audio() {
         "cmd":        "transfer_stream",
         "pairs":      [[0, 3], [1, 3]],
         "drive":      true,
-        "level_dbfs": -12.0,
+        "level_dbfs": -20.0,
     }));
     assert_eq!(r["ok"], json!(true), "unexpected REP: {r:?}");
 

@@ -135,7 +135,7 @@ Read your own earlier review comment on the PR first — the one marked 'agent: 
 
 Scope of this pass:
 - Re-run the full mechanical gate against the new tip regardless of how small
-  the delta looks: cargo test --workspace, cargo clippy -- -D warnings,
+  the delta looks: cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings,
   cargo fmt --check. Not the delta's crate — the workspace. Two changes that
   each pass alone can break in combination, and that is precisely what a
   narrowed pass would miss.

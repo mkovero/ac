@@ -39,15 +39,11 @@ AC_LOOPBACK_LEVEL_DBFS=-40 \
 
 Both port variables must be set together — half a route is a route
 through the wrong thing. `AC_LOOPBACK_LEVEL_DBFS` is **mandatory**
-whenever they are set: naming real ports means driving real outputs. As of
-#360 `plot_ir` clamps its requested level to the config's `drive_max_dbfs`
-ceiling the same way `set_drive` always has, and as of #442 the real-port
-route writes that daemon's own config with `drive_max_dbfs` fixed at the
-rig's standing −40 dBFS ceiling (`.agents/rig.md` → hard constraints) — so
-`AC_LOOPBACK_LEVEL_DBFS` is a request bounded by a clamp that cannot be
-silently missing, not the only limit on what reaches the converter. Unset,
-all three default to the self-loop at −6 dBFS and the dummy invocation
-above is unchanged.
+whenever they are set: naming real ports means driving real outputs. The
+test refuses a value above the rig's standing −40 dBFS limit before it
+starts the daemon. The daemon independently refuses anything above its
+full-scale (0 dBFS) product maximum; it never clamps. Unset, all three default
+to the self-loop at −40 dBFS and the dummy invocation above is unchanged.
 
 `--nocapture` prints the record block: chain, sample rate, window length,
 peak index, peak magnitude, floor, SNR, and the peak's offset from the

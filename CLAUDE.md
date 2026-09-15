@@ -14,5 +14,5 @@ Documents: root holds entry points only (this file, README, ARCHITECTURE, TESTIN
 | `ac-scene` | — | Pure scene/data layer for views: traces, axes, readouts as plain data. No rendering, no egui, no ZMQ. |
 | `ac-view` | `ac-view` | Keyboard-driven egui shell. Draws `ac-scene` scenes; no numeric computation of own. |
 
-Build (run in ac-rs/): cargo test | cargo clippy -- -D warnings | cargo fmt --check
+Build (run in ac-rs/): cargo test | cargo clippy --workspace --all-targets -- -D warnings | cargo fmt --check
 Crate/module map: ac-rs/CLAUDE.md + ARCHITECTURE.md. Tier 1 / Tier 2 split in ARCHITECTURE.md decides where new analysis feature belongs; `ac-scene` vs `ac-view` = display-truth boundary.

@@ -1,32 +1,32 @@
-use super::{check_ack, level_to_dbfs, print_level_clamp};
+use super::{check_ack, level_to_dbfs, print_level};
 use crate::client::AcClient;
-use crate::parse::{CommandKind, LevelSpec};
+use crate::parse::CommandKind;
 
 pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
-    let (level, freq, ch_spec) = match cmd {
+    let (level, level_defaulted, freq, ch_spec) = match cmd {
         CommandKind::GenerateSine {
             level,
+            level_defaulted,
             freq,
             channels,
-        } => (level, *freq, channels),
+        } => (level, *level_defaulted, *freq, channels),
         _ => unreachable!(),
     };
 
-    let level = resolve_level(level, client);
     let channels = resolve_channels(ch_spec, client);
 
     println!();
     let mut first_dbfs = None;
     for &ch in &channels {
         let cal = get_cal_for_channel(client, ch);
-        let dbfs = level_to_dbfs(&level, cal.as_ref());
+        let dbfs = level_to_dbfs(level, cal.as_ref());
         if first_dbfs.is_none() {
             first_dbfs = Some(dbfs);
         }
         print_channel_info(ch, Some(freq), dbfs, &cal);
     }
 
-    let dbfs = first_dbfs.unwrap_or(-12.0);
+    let dbfs = first_dbfs.unwrap_or(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS);
     let ack = check_ack(
         client.send_cmd(
             &serde_json::json!({
@@ -39,14 +39,13 @@ pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
         ),
         "generate",
     );
-    let applied_dbfs = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(dbfs);
-    if applied_dbfs != dbfs {
-        println!();
-        print_level_clamp(dbfs, applied_dbfs);
-    }
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        None,
+        false,
+    );
     if let Some(ports) = ack.get("out_ports").and_then(|v| v.as_array()) {
         for p in ports {
             if let Some(s) = p.as_str() {
@@ -61,26 +60,29 @@ pub fn run_sine(cmd: &CommandKind, client: &mut AcClient) {
 }
 
 pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
-    let (level, ch_spec) = match cmd {
-        CommandKind::GeneratePink { level, channels } => (level, channels),
+    let (level, level_defaulted, ch_spec) = match cmd {
+        CommandKind::GeneratePink {
+            level,
+            level_defaulted,
+            channels,
+        } => (level, *level_defaulted, channels),
         _ => unreachable!(),
     };
 
-    let level = resolve_level(level, client);
     let channels = resolve_channels(ch_spec, client);
 
     println!();
     let mut first_dbfs = None;
     for &ch in &channels {
         let cal = get_cal_for_channel(client, ch);
-        let dbfs = level_to_dbfs(&level, cal.as_ref());
+        let dbfs = level_to_dbfs(level, cal.as_ref());
         if first_dbfs.is_none() {
             first_dbfs = Some(dbfs);
         }
         print_channel_info(ch, None, dbfs, &cal);
     }
 
-    let dbfs = first_dbfs.unwrap_or(-12.0);
+    let dbfs = first_dbfs.unwrap_or(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS);
     let ack = check_ack(
         client.send_cmd(
             &serde_json::json!({
@@ -92,14 +94,13 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
         ),
         "generate_pink",
     );
-    let applied_dbfs = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(dbfs);
-    if applied_dbfs != dbfs {
-        println!();
-        print_level_clamp(dbfs, applied_dbfs);
-    }
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        None,
+        false,
+    );
     if let Some(ports) = ack.get("out_ports").and_then(|v| v.as_array()) {
         for p in ports {
             if let Some(s) = p.as_str() {
@@ -111,20 +112,6 @@ pub fn run_pink(cmd: &CommandKind, client: &mut AcClient) {
     println!("\n  Playing pink noise on {n} channel(s)... Ctrl+C or q to stop.\n");
 
     wait_for_stop(client, "generate_pink");
-}
-
-fn resolve_level(level: &Option<LevelSpec>, client: &mut AcClient) -> LevelSpec {
-    match level {
-        Some(l) => l.clone(),
-        None => {
-            let cal = super::get_cal(client);
-            if cal.is_some() {
-                LevelSpec::Dbu(0.0)
-            } else {
-                LevelSpec::Dbfs(-20.0)
-            }
-        }
-    }
 }
 
 fn resolve_channels(ch_spec: &Option<String>, client: &mut AcClient) -> Vec<u32> {

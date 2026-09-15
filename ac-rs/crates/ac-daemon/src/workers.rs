@@ -31,7 +31,7 @@ pub const DRIVE_DEADMAN_MS: u64 = 1500;
 /// a `u64`.
 pub struct DriveState {
     on: AtomicBool,
-    /// `f64::to_bits` of the applied (already clamped) level in dBFS.
+    /// `f64::to_bits` of the validated, applied level in dBFS.
     level_bits: AtomicU64,
     last_keepalive_ms: AtomicU64,
     /// The dead-man is armed by the first `set_drive`, not at worker
@@ -56,9 +56,9 @@ impl DriveState {
         }
     }
 
-    /// Apply a `set_drive` request. `level_dbfs` must already be clamped
-    /// by the caller — this type stores what was applied, so the CTRL
-    /// echo and the engine can never disagree.
+    /// Apply a `set_drive` request. `level_dbfs` must already have passed
+    /// the daemon's fixed-maximum refusal guard; this type stores exactly
+    /// what was requested and applied, so the CTRL echo and engine agree.
     ///
     /// Every call refreshes the keepalive: there is no separate
     /// keepalive command, and an unchanged resend is the normal case.

@@ -42,7 +42,8 @@ use ac_view::stimulus::StimulusMachine;
 use ac_view::zmq_client::{Client, Endpoint};
 use support::DaemonProcess;
 
-const CEILING: f64 = -10.0;
+const CEILING: f64 = ac_core::shared::emission_level::MAX_EMISSION_DBFS;
+const DRIVE_DBFS: f64 = -35.0;
 const IDLE_DBFS: f64 = -20.0; // fake idle tone (0.1 amplitude)
 
 fn endpoint(d: &DaemonProcess) -> Endpoint {
@@ -119,7 +120,7 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
         "idle peak {idle} not near {IDLE_DBFS}"
     );
 
-    let mut m = StimulusMachine::new(CEILING, CEILING);
+    let mut m = StimulusMachine::new(CEILING, DRIVE_DBFS);
     let relay = |session: &Session, cmd| {
         if let Some(c) = cmd {
             let c: ac_view::stimulus::DriveCmd = c;
@@ -131,7 +132,7 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
     let t = Instant::now();
     m.press_space(t);
     relay(&session, m.press_enter(t)); // fire → set_drive on
-    let up = wait_for_peak(&mut session, true, IDLE_DBFS + 5.0, Duration::from_secs(3));
+    let up = wait_for_peak(&mut session, false, IDLE_DBFS - 5.0, Duration::from_secs(3));
     assert!(
         up.is_some(),
         "fire did not drive the daemon (peak never rose)"
@@ -145,7 +146,7 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
         relay(&session, m.tick(Instant::now())); // 250 ms keepalive
         if let Some(p) = next_peak(&mut session, Duration::from_millis(200)) {
             assert!(
-                p > IDLE_DBFS + 5.0,
+                p < IDLE_DBFS - 5.0,
                 "drive dropped mid-keepalive (peak {p}) — cadence gapped past the dead-man"
             );
             samples += 1;
@@ -155,7 +156,7 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
 
     // --- 3. panic (Esc) → stop, bounded latency over real REQ/REP ---
     relay(&session, m.press_esc(Instant::now())); // set_drive off
-    let stop_latency = wait_for_peak(&mut session, false, IDLE_DBFS + 3.0, Duration::from_secs(2))
+    let stop_latency = wait_for_peak(&mut session, true, IDLE_DBFS - 3.0, Duration::from_secs(2))
         .expect("panic did not stop the drive");
     assert!(
         stop_latency < Duration::from_secs(1),
@@ -168,12 +169,12 @@ fn stimulus_arm_fire_keepalive_panic_and_deadman_over_real_zmq() {
     m.press_space(t);
     relay(&session, m.press_enter(t)); // drive on again
     assert!(
-        wait_for_peak(&mut session, true, IDLE_DBFS + 5.0, Duration::from_secs(3)).is_some(),
+        wait_for_peak(&mut session, false, IDLE_DBFS - 5.0, Duration::from_secs(3)).is_some(),
         "re-fire did not drive"
     );
     // Now FREEZE: send no keepalives at all. The daemon's dead-man must
     // drop the drive on its own within ~1.5 s (+ margin).
-    let dropped = wait_for_peak(&mut session, false, IDLE_DBFS + 3.0, Duration::from_secs(3));
+    let dropped = wait_for_peak(&mut session, true, IDLE_DBFS - 3.0, Duration::from_secs(3));
     assert!(
         dropped.is_some(),
         "dead-man did not drop a frozen drive — the UI's absence must not keep it alive"

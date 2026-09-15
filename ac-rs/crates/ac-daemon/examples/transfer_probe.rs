@@ -206,11 +206,10 @@ fn main() {
                     panic!("set_drive rejected: {r}");
                 }
                 if !drove {
-                    // The reply echoes the *applied* level after the server
-                    // clamp to drive_max_dbfs. Print it: a clamp is success,
-                    // and the number that reached the interface is the one
-                    // the session record needs.
-                    eprintln!("drive on, applied level_dbfs = {}", r["level_dbfs"]);
+                    // A level above the fixed maximum is refused, so an
+                    // accepted reply echoes the exact level that reached
+                    // the interface.
+                    eprintln!("drive on, level_dbfs = {}", r["level_dbfs"]);
                     drove = true;
                 }
                 last_ka = Instant::now();

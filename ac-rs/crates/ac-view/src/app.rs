@@ -144,13 +144,8 @@ impl AcViewApp {
     /// view. `ac transfer` (M4d-CLI, #185) launches through this; the
     /// view is fixed at construction and never switches (§1).
     ///
-    /// `drive_max_dbfs` is the stimulus ceiling, seeded from config by
-    /// the caller so the client clamp matches the server's
-    /// authoritative one. Passed in rather than loaded here: `main` has
-    /// already read the config to resolve the channels, so re-reading
-    /// it inside a constructor was a second disk hit that could observe
-    /// a different file than the first, and it made the constructor
-    /// untestable without touching the real user config.
+    /// `drive_max_dbfs` is the fixed stimulus ceiling supplied by the
+    /// caller so the editor cannot propose a value the server will refuse.
     pub fn new_transfer(endpoint: Endpoint, drive_max_dbfs: f64) -> Self {
         let mut app = Self::new(endpoint);
         app.view = ViewKind::Transfer(TransferViewState::new(drive_max_dbfs, -30.0));
@@ -655,9 +650,7 @@ impl AcViewApp {
         // Re-read rather than reuse a construction-time value: `apply`
         // has just persisted the overlay, so this is the one place the
         // ceiling is deliberately picked up fresh off disk.
-        let drive_max_dbfs = ac_core::config::load(None)
-            .unwrap_or_default()
-            .drive_max_dbfs;
+        let drive_max_dbfs = ac_core::shared::emission_level::MAX_EMISSION_DBFS;
         self.with_transfer(|t| {
             t.stimulus =
                 crate::stimulus::StimulusMachine::new(drive_max_dbfs, applied.start_level_dbfs);
@@ -996,8 +989,8 @@ pub fn connect_and_launch_transfer(
 
 /// Shared body of the two entry points. `drive_max_dbfs` doubles as the
 /// view selector — `Some` is the transfer view and carries the stimulus
-/// ceiling it needs, `None` is the spectrum view, which has no stimulus
-/// and so has nothing to clamp. Encoding it this way rather than as a
+/// ceiling it needs, `None` is the spectrum view, which has no stimulus.
+/// Encoding it this way rather than as a
 /// separate `transfer: bool` means the spectrum path structurally
 /// cannot be handed a ceiling it would silently drop.
 fn connect_and_launch_view(

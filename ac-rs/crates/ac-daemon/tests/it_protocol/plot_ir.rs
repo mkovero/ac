@@ -20,7 +20,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 3,
@@ -155,63 +155,6 @@ fn plot_ir_stop_cancels_during_tail() {
     assert_plot_ir_stops_promptly(0.1, 5.0, Duration::from_millis(300));
 }
 
-// ---------------------------------------------------------------------
-// Drive ceiling (#360) — plot_ir and calibrate previously emitted an
-// unclamped level; both are commands whose whole point is to put a
-// stimulus on a physical output, and `drive_max_dbfs` governed neither.
-// ---------------------------------------------------------------------
-
-/// `plot_ir` clamps its requested level to `drive_max_dbfs`.
-///
-/// The deconvolved IR itself cannot be used as the observable here: the
-/// handler deliberately re-scales the recovered impulse response by
-/// `1/amp` (`plot.rs`, "so the reported IR has unity peak for an identity
-/// loopback regardless of `level_dbfs`"), and the fake backend's
-/// `play_and_capture` is a noiseless echo of exactly what was played — so
-/// on this backend the published IR is invariant to level by construction,
-/// clamped or not, and asserting on it would prove nothing.
-///
-/// `report.stimulus.level_dbfs` is emitted from inside the worker, after
-/// the capture, from the same binding that scaled the actually-played
-/// sweep (`let amp = dbfs_to_amplitude(level_dbfs)`) — a different
-/// computation from the synchronous CTRL reply, so this does not just
-/// re-check the same echo twice under two names.
-#[test]
-fn plot_ir_clamps_level_to_drive_max_dbfs() {
-    const CEILING_DBFS: f64 = -35.0;
-    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
-    let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "plot_ir",
-        "f1_hz": 200.0,
-        "f2_hz": 8_000.0,
-        "duration": 0.5,
-        "level_dbfs": 12.0,
-        "tail_s": 0.1,
-        "window_len": 1024,
-        "n_harmonics": 3,
-    }));
-    assert_eq!(r["ok"], json!(true), "{r}");
-    assert_eq!(
-        r["level_dbfs"],
-        json!(CEILING_DBFS),
-        "sync reply must echo the applied (clamped) level, not the request: {r}"
-    );
-
-    let v = c
-        .wait_for_topic("measurement/report", Duration::from_secs(15))
-        .expect("measurement/report frame");
-    let applied = v["report"]["stimulus"]["level_dbfs"]
-        .as_f64()
-        .expect("stimulus.level_dbfs");
-    assert!(
-        (applied - CEILING_DBFS).abs() < 1e-9,
-        "report recorded level {applied}, requested 12.0 dBFS against a {CEILING_DBFS} \
-         ceiling — plot_ir emitted the raw request instead of the clamped level"
-    );
-}
-
 /// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
 /// the entry it must hit was written by `calibrate`. Nothing but a test
 /// couples those two condition tuples — they are built in different
@@ -228,7 +171,7 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // 1. Measure τ. Both voltage prompts skipped — τ is keyed on
     //    loopback detection, not on either reply (see
     //    `calibrate_cheap_refresh_still_measures_tau`).
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
     for step in 1..=2 {
@@ -248,7 +191,7 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 3,
@@ -326,7 +269,7 @@ fn plot_ir_reports_the_gate_lengths_it_actually_used() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 4096,
         "n_harmonics": 5,
@@ -416,7 +359,7 @@ fn plot_ir_records_the_gate_it_used_not_the_one_requested() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.3,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 4096,
         "n_harmonics": 3,
@@ -488,7 +431,7 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 1,

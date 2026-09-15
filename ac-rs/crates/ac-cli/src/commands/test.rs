@@ -59,7 +59,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
     }
 
     check_ack(client.send_cmd(&json, None), "test_hardware");
-    println!("\n  Hardware test started...\n");
+    println!("\n  Hardware test\n");
 
     io::print_freq_header(false);
 
@@ -99,10 +99,17 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
 }
 
 pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (compare, level) = match cmd {
-        CommandKind::TestDut { compare, level } => (*compare, level),
+    let (compare, level, level_defaulted) = match cmd {
+        CommandKind::TestDut {
+            compare,
+            level,
+            level_defaulted,
+        } => (*compare, level, *level_defaulted),
         _ => unreachable!(),
     };
+    // Provenance remains part of parsing and its default tests, but the
+    // operator's final #459 ruling exempts self-test level rows.
+    let _ = level_defaulted;
 
     let cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -114,7 +121,7 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
     }
 
     check_ack(client.send_cmd(&json, None), "test_dut");
-    println!("\n  DUT test at {level_db:.1} dBFS\n");
+    println!("\n  DUT test\n");
 
     io::print_freq_header(have_cal);
 

@@ -19,12 +19,16 @@ pub(super) fn parse_generate(
         // these commands do (ramp output, no capture).
         "level" => {
             let mut tokens = classify_all(args)?;
-            let start = pull(&mut tokens, TokenKind::Level)
-                .map(|v| v.as_level())
-                .unwrap_or(LevelSpec::Dbfs(-40.0));
+            let start_arg = pull(&mut tokens, TokenKind::Level);
+            let level_defaulted = start_arg.is_none();
+            let start = start_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+                ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS,
+            ));
             let stop = pull(&mut tokens, TokenKind::Level)
                 .map(|v| v.as_level())
-                .unwrap_or(LevelSpec::Dbfs(0.0));
+                .unwrap_or(LevelSpec::Dbfs(
+                    ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS,
+                ));
             let freq = pull(&mut tokens, TokenKind::Freq)
                 .map(|v| v.as_f64())
                 .unwrap_or(1000.0);
@@ -36,6 +40,7 @@ pub(super) fn parse_generate(
                 cmd: CommandKind::SweepLevel {
                     start,
                     stop,
+                    level_defaulted,
                     freq,
                     duration,
                 },
@@ -46,9 +51,11 @@ pub(super) fn parse_generate(
             let mut tokens = classify_all(args)?;
             let start = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
             let stop = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
-            let level = pull(&mut tokens, TokenKind::Level)
-                .map(|v| v.as_level())
-                .unwrap_or(LevelSpec::Dbfs(-20.0));
+            let level_arg = pull(&mut tokens, TokenKind::Level);
+            let level_defaulted = level_arg.is_none();
+            let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+                ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+            ));
             let duration = pull(&mut tokens, TokenKind::Time)
                 .map(|v| v.as_f64())
                 .unwrap_or(1.0);
@@ -58,6 +65,7 @@ pub(super) fn parse_generate(
                     start,
                     stop,
                     level,
+                    level_defaulted,
                     duration,
                 },
                 show_plot,
@@ -70,7 +78,11 @@ pub(super) fn parse_generate(
                 None
             };
             let mut tokens = classify_all(args)?;
-            let level = pull(&mut tokens, TokenKind::Level).map(|v| v.as_level());
+            let level_arg = pull(&mut tokens, TokenKind::Level);
+            let level_defaulted = level_arg.is_none();
+            let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+                ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+            ));
             let freq = pull(&mut tokens, TokenKind::Freq)
                 .map(|v| v.as_f64())
                 .unwrap_or(1000.0);
@@ -78,6 +90,7 @@ pub(super) fn parse_generate(
             Ok(ParsedCommand {
                 cmd: CommandKind::GenerateSine {
                     level,
+                    level_defaulted,
                     freq,
                     channels,
                 },
@@ -91,10 +104,18 @@ pub(super) fn parse_generate(
                 None
             };
             let mut tokens = classify_all(args)?;
-            let level = pull(&mut tokens, TokenKind::Level).map(|v| v.as_level());
+            let level_arg = pull(&mut tokens, TokenKind::Level);
+            let level_defaulted = level_arg.is_none();
+            let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+                ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+            ));
             check_empty(&tokens)?;
             Ok(ParsedCommand {
-                cmd: CommandKind::GeneratePink { level, channels },
+                cmd: CommandKind::GeneratePink {
+                    level,
+                    level_defaulted,
+                    channels,
+                },
                 show_plot,
             })
         }
@@ -120,8 +141,9 @@ mod tests {
                 level,
                 freq,
                 channels,
+                ..
             } => {
-                assert!(matches!(level, Some(LevelSpec::Dbu(v)) if v.abs() < 1e-9));
+                assert!(matches!(level, LevelSpec::Dbu(v) if v.abs() < 1e-9));
                 assert!((freq - 1000.0).abs() < 1e-9);
                 assert!(channels.is_none());
             }
@@ -144,8 +166,10 @@ mod tests {
     fn test_generate_pink() {
         let p = parse(&args("g pk -10dbfs")).unwrap();
         match p.cmd {
-            CommandKind::GeneratePink { level, channels } => {
-                assert!(matches!(level, Some(LevelSpec::Dbfs(v)) if (v - (-10.0)).abs() < 1e-9));
+            CommandKind::GeneratePink {
+                level, channels, ..
+            } => {
+                assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-10.0)).abs() < 1e-9));
                 assert!(channels.is_none());
             }
             other => panic!("expected GeneratePink, got {other:?}"),
@@ -176,8 +200,14 @@ mod tests {
             CommandKind::SweepLevel {
                 start, stop, freq, ..
             } => {
-                assert!(matches!(start, LevelSpec::Dbfs(v) if (v - (-40.0)).abs() < 1e-9));
-                assert!(matches!(stop, LevelSpec::Dbfs(v) if v.abs() < 1e-9));
+                assert_eq!(
+                    start,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS)
+                );
+                assert_eq!(
+                    stop,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS)
+                );
                 assert!((freq - 1000.0).abs() < 1e-9);
             }
             other => panic!("expected SweepLevel, got {other:?}"),
@@ -197,5 +227,25 @@ mod tests {
             }
             other => panic!("expected SweepFrequency, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn every_generate_form_marks_and_uses_its_named_default() {
+        let sine = parse(&args("generate sine")).unwrap();
+        assert!(
+            matches!(sine.cmd, CommandKind::GenerateSine { level: LevelSpec::Dbfs(v), level_defaulted: true, .. } if v == ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+        );
+        let pink = parse(&args("generate pink")).unwrap();
+        assert!(
+            matches!(pink.cmd, CommandKind::GeneratePink { level: LevelSpec::Dbfs(v), level_defaulted: true, .. } if v == ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+        );
+        let ramp = parse(&args("generate level")).unwrap();
+        assert!(
+            matches!(ramp.cmd, CommandKind::SweepLevel { start: LevelSpec::Dbfs(a), stop: LevelSpec::Dbfs(b), level_defaulted: true, .. } if a == ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS && b == ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS)
+        );
+        let frequency = parse(&args("generate frequency")).unwrap();
+        assert!(
+            matches!(frequency.cmd, CommandKind::SweepFrequency { level: LevelSpec::Dbfs(v), level_defaulted: true, .. } if v == ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+        );
     }
 }

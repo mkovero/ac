@@ -15,9 +15,9 @@
 //! ir_probe --level-dbfs -30 --duration 2.0 --f2 16000 --window 16384
 //! ```
 //!
-//! `--level-dbfs` is required. `plot_ir` does not apply the config's
-//! `drive_max_dbfs` ceiling — only `set_drive` does — so the value passed
-//! here is the only limit on what reaches the interface.
+//! `--level-dbfs` is required. The daemon refuses a value above its fixed
+//! emission maximum; the explicit value here still records the operator's
+//! deliberate choice for this hardware run.
 
 use std::time::{Duration, Instant};
 
@@ -85,8 +85,7 @@ fn parse_args() -> Args {
     }
     assert!(
         a.level_dbfs.is_finite(),
-        "--level-dbfs is required: plot_ir does not apply drive_max_dbfs, so \
-         this value is the only ceiling on what reaches the interface"
+        "--level-dbfs is required for an explicit hardware-run level"
     );
     a
 }

@@ -4,10 +4,12 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
+use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
+
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cfg_guard, make_engine_for_state, resolve_output,
+    busy_guard, cfg_guard, emission_guard, make_engine_for_state, resolve_output,
     resolve_output_by_channel, send_pub, spawn_worker,
 };
 
@@ -54,13 +56,12 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `generate` puts a stimulus on a physical output, so the
-    // requested level is clamped to the session ceiling here, before it
-    // ever reaches the engine. The echoed reply below carries this applied
-    // value, not the raw request.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `generate` puts a stimulus on a physical output, so the
+    // requested level is refused here, before it ever reaches the engine,
+    // if it is above the fixed maximum — never clamped down to it.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
@@ -103,7 +104,13 @@ pub fn generate(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs, "backend": backend})
+    json!({
+        "ok": true,
+        "out_ports": out_ports,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    })
 }
 
 pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
@@ -112,10 +119,10 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: same ceiling discipline as `generate` above.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: same refusal discipline as `generate` above.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
     let out_ports = match resolve_channels(cmd, &cfg, state) {
         Ok(p) => p,
@@ -158,5 +165,11 @@ pub fn generate_pink(state: &ServerState, cmd: &Value) -> Value {
         workers.insert("generate_pink".to_string(), worker);
     }
 
-    json!({"ok": true, "out_ports": out_ports, "level_dbfs": level_dbfs, "backend": backend})
+    json!({
+        "ok": true,
+        "out_ports": out_ports,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    })
 }

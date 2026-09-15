@@ -6,12 +6,16 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
     if args.first().map(|a| expand(a)) == Some("level") {
         args.remove(0);
         let mut tokens = classify_all(args)?;
-        let start = pull(&mut tokens, TokenKind::Level)
-            .map(|v| v.as_level())
-            .unwrap_or(LevelSpec::Dbfs(-40.0));
+        let start_arg = pull(&mut tokens, TokenKind::Level);
+        let level_defaulted = start_arg.is_none();
+        let start = start_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+            ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS,
+        ));
         let stop = pull(&mut tokens, TokenKind::Level)
             .map(|v| v.as_level())
-            .unwrap_or(LevelSpec::Dbfs(0.0));
+            .unwrap_or(LevelSpec::Dbfs(
+                ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS,
+            ));
         let freq = pull(&mut tokens, TokenKind::Freq)
             .map(|v| v.as_f64())
             .unwrap_or(1000.0);
@@ -23,6 +27,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
             cmd: CommandKind::PlotLevel {
                 start,
                 stop,
+                level_defaulted,
                 freq,
                 steps,
             },
@@ -42,9 +47,11 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
         let duration = pull(&mut tokens, TokenKind::Time)
             .map(|v| v.as_f64())
             .unwrap_or(1.0);
-        let level = pull(&mut tokens, TokenKind::Level)
-            .map(|v| v.as_level())
-            .unwrap_or(LevelSpec::Dbfs(-6.0));
+        let level_arg = pull(&mut tokens, TokenKind::Level);
+        let level_defaulted = level_arg.is_none();
+        let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+            ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+        ));
         let n_harmonics = pull(&mut tokens, TokenKind::Harmonics).map(|v| v.as_u32());
         let window_len = pull(&mut tokens, TokenKind::Window).map(|v| v.as_u32());
         // Second `Time` token, pulled after `duration` — same positional
@@ -58,6 +65,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
                 f2,
                 duration,
                 level,
+                level_defaulted,
                 n_harmonics,
                 window_len,
                 tail_s,
@@ -84,9 +92,11 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
     let mut tokens = classify_all(args)?;
     let start = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
     let stop = pull(&mut tokens, TokenKind::Freq).map(|v| v.as_f64());
-    let level = pull(&mut tokens, TokenKind::Level)
-        .map(|v| v.as_level())
-        .unwrap_or(LevelSpec::Dbfs(-20.0));
+    let level_arg = pull(&mut tokens, TokenKind::Level);
+    let level_defaulted = level_arg.is_none();
+    let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+        ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+    ));
     let ppd = pull(&mut tokens, TokenKind::Ppd)
         .map(|v| v.as_u32())
         .unwrap_or(10);
@@ -97,6 +107,7 @@ pub(super) fn parse_plot(args: &mut Vec<String>, show_plot: bool) -> Result<Pars
             start,
             stop,
             level,
+            level_defaulted,
             ppd,
             bpo,
         },
@@ -123,6 +134,7 @@ mod tests {
                 level,
                 ppd,
                 bpo,
+                ..
             } => {
                 assert!((start.unwrap() - 20.0).abs() < 1e-9);
                 assert!((stop.unwrap() - 20000.0).abs() < 1e-9);
@@ -171,6 +183,7 @@ mod tests {
                 stop,
                 freq,
                 steps,
+                ..
             } => {
                 assert!(matches!(start, LevelSpec::Dbu(v) if (v - (-20.0)).abs() < 1e-9));
                 assert!(matches!(stop, LevelSpec::Dbu(v) if (v - 6.0).abs() < 1e-9));
@@ -207,6 +220,7 @@ mod tests {
                 window_len,
                 tail_s,
                 distance_m,
+                ..
             } => {
                 assert_eq!(distance_m, None);
                 assert!((f1 - 20.0).abs() < 1e-9);
@@ -230,6 +244,7 @@ mod tests {
                 f2,
                 duration,
                 level,
+                level_defaulted,
                 n_harmonics,
                 window_len,
                 tail_s,
@@ -239,7 +254,11 @@ mod tests {
                 assert!((f1 - 20.0).abs() < 1e-9);
                 assert!((f2 - 20000.0).abs() < 1e-9);
                 assert!((duration - 1.0).abs() < 1e-9);
-                assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-6.0)).abs() < 1e-9));
+                assert_eq!(
+                    level,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+                );
+                assert!(level_defaulted);
                 // Unset — the daemon applies its own defaults, not the CLI.
                 assert_eq!(n_harmonics, None);
                 assert_eq!(window_len, None);
@@ -247,6 +266,18 @@ mod tests {
             }
             other => panic!("expected PlotIr, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plot_and_plot_level_defaults_are_named_and_marked() {
+        let p = parse(&args("plot")).unwrap();
+        assert!(
+            matches!(p.cmd, CommandKind::Plot { level: LevelSpec::Dbfs(v), level_defaulted: true, .. } if v == ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+        );
+        let p = parse(&args("plot level")).unwrap();
+        assert!(
+            matches!(p.cmd, CommandKind::PlotLevel { start: LevelSpec::Dbfs(a), stop: LevelSpec::Dbfs(b), level_defaulted: true, .. } if a == ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS && b == ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS)
+        );
     }
 
     #[test]

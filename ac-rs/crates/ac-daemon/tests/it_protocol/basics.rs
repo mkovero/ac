@@ -82,7 +82,7 @@ fn devices_lists_ports() {
 fn generate_stop_emits_done_frame() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    let r = c.call(json!({"cmd":"generate","freq_hz":1000.0,"level_dbfs":-12.0}));
+    let r = c.call(json!({"cmd":"generate","freq_hz":1000.0,"level_dbfs":-20.0}));
     assert_eq!(r["ok"], json!(true));
 
     // Should now be busy.
@@ -203,7 +203,7 @@ fn plot_with_bpo_emits_spectrum_bands() {
         "cmd":        "plot",
         "start_hz":   start_hz,
         "stop_hz":    stop_hz,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "ppd":        3,
         "duration":   0.2,
         "bpo":        3,
@@ -310,7 +310,7 @@ fn plot_frames_carry_processing_context_envelope() {
         "cmd":        "plot",
         "start_hz":   1000.0,
         "stop_hz":    1000.0,
-        "level_dbfs": -10.0,
+        "level_dbfs": -20.0,
         "ppd":        1,
         "duration":   0.1,
     }));

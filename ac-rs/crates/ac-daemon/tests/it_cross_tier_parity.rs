@@ -449,7 +449,7 @@ fn parity_transfer_meas_spectrum_matches_monitor_after_voltage_cal_scale() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
     let _ = c
@@ -712,7 +712,7 @@ fn parity_transfer_spl_is_independent_of_voltage_cal_scale() {
         let c = Client::new(&d);
 
         if let Some(vrms) = vrms {
-            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                                    "output_channel": 0, "input_channel": 0}));
             assert_eq!(r["ok"], json!(true));
             let _ = c
@@ -881,7 +881,7 @@ fn parity_monitor_spl_is_independent_of_voltage_cal_scale() {
         let c = Client::new(&d);
 
         if let Some(vrms) = vrms {
-            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+            let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                                    "output_channel": 0, "input_channel": 0}));
             assert_eq!(r["ok"], json!(true));
             let _ = c

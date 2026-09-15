@@ -22,11 +22,14 @@ use ac_core::measurement::sweep::{
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, TauConditions};
+use ac_core::shared::emission_level::{
+    DEFAULT_LEVEL_DBFS, DEFAULT_RAMP_START_DBFS, DEFAULT_RAMP_STOP_DBFS, MAX_EMISSION_DBFS,
+};
 
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cal_guard, cfg_guard, make_engine_for_state,
+    busy_guard, cal_guard, cfg_guard, emission_guard, emission_range_guard, make_engine_for_state,
     ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
     resolve_ref_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
     MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
@@ -177,7 +180,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
     let ppd = match bounded_usize(cmd, "ppd", 10, 1, usize::MAX, "plot") {
         Ok(v) => v,
         Err(e) => return e,
@@ -214,10 +217,10 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     }
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `plot` puts a stimulus on a physical output, so it is clamped
-    // to the session ceiling here — the same discipline `set_drive` has
-    // always had.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `plot` puts a stimulus on a physical output, so a level above
+    // the fixed maximum is refused here — before ports are resolved or the
+    // worker spawned — rather than quietly lowered to it.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -498,6 +501,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         "out_port": out_port_reply,
         "in_port": in_port_reply,
         "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
     })
 }
@@ -509,8 +513,11 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let start_dbfs = cmd
         .get("start_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-40.0);
-    let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
+        .unwrap_or(DEFAULT_RAMP_START_DBFS);
+    let stop_dbfs = cmd
+        .get("stop_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_RAMP_STOP_DBFS);
     let steps = match bounded_usize(cmd, "steps", 26, 1, MAX_SWEEP_POINTS, "plot_level") {
         Ok(v) => v,
         Err(e) => return e,
@@ -520,7 +527,12 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return e,
     };
     let cfg = state.cfg.lock().unwrap().clone();
-    let ceiling = cfg.drive_max_dbfs;
+    // #459: both endpoints are checked up front — a ramp whose top end
+    // exceeds the maximum is refused outright, never flattened at the
+    // ceiling. Since a linear ramp never exceeds its larger endpoint, this
+    // bounds every point on it; the per-point clamp that used to live in
+    // the worker loop below is gone.
+    let (start_dbfs, stop_dbfs) = emission_range_guard!(state, &cfg, start_dbfs, stop_dbfs);
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -532,11 +544,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let out_port_reply = out_port.clone();
     let in_port_reply = in_port.clone();
-    // Applied endpoints echoed on the sync reply — see `sweep_level`'s
-    // identical reasoning (#360): monotone under a `min` clamp, so this is
-    // exactly the range the sweep's levels actually cover.
-    let start_dbfs_applied = apply_drive_ceiling(ceiling, start_dbfs);
-    let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let out_ch = cfg.output_channel;
@@ -557,10 +564,9 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
-        // Raw request shape — each computed level is clamped individually
-        // below (#360), not the endpoints here, so a range whose top end
-        // exceeds the ceiling flattens there rather than shifting the
-        // whole shape.
+        // #459: both endpoints already passed `emission_range_guard!` above
+        // and a linear ramp never exceeds its larger endpoint, so every
+        // point here is already within the maximum — no per-point check.
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
@@ -574,14 +580,10 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let sr = eng.sample_rate();
 
         let mut n = 0usize;
-        for &level_req in &levels {
+        for &level_dbfs in &levels {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            // Applied value (#360) — the frame below carries this, not the
-            // raw request, so `drive_db` on the wire always matches what
-            // reached the engine.
-            let level_dbfs = apply_drive_ceiling(ceiling, level_req);
             let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
             eng.set_tone(freq_hz, amplitude);
             let _ = eng.capture_block(0.1);
@@ -667,8 +669,9 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         "ok": true,
         "out_port": out_port_reply,
         "in_port": in_port_reply,
-        "start_dbfs": start_dbfs_applied,
-        "stop_dbfs": stop_dbfs_applied,
+        "start_dbfs": start_dbfs,
+        "stop_dbfs": stop_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
     })
 }
@@ -826,8 +829,8 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// Renamed from `sweep_ir` by #282 (CLI moved to `ac plot ir`): the wire
 /// `cmd` now follows its new `plot` family, matching `plot`/`plot_level`.
 ///
-/// Generates an ESS at `level_dbfs` (clamped to `drive_max_dbfs`, #360),
-/// plays it out via the audio engine,
+/// Generates an ESS at `level_dbfs` (refused above the fixed emission
+/// maximum, #459), plays it out via the audio engine,
 /// synchronously captures `duration + tail_s` of the measurement input,
 /// deconvolves via the normalized inverse filter, gates the linear IR and
 /// the first few pre-impulse harmonic IRs, and emits them as a
@@ -851,7 +854,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-6.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
     let tail_s = match bounded_duration(cmd, "tail_s", 0.5, true, "plot_ir") {
         Ok(v) => v,
         Err(e) => return e,
@@ -890,11 +893,10 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     };
 
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `plot_ir` had no clamp at all — the module doc on
-    // `tests/it_loopback_ir.rs` documented this gap outright. Every other
-    // field derived from `level_dbfs` below (the report's `StimulusParams`,
-    // the actual played amplitude) now derives from the applied value.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `plot_ir` had no ceiling check at all before #360, and #360's
+    // clamp let it emit a flat-topped level nobody asked for. Refused here
+    // instead, before a worker or a port is touched.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -1334,7 +1336,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_ir".to_string(), worker);
     }
-    let mut reply = json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs, "backend": backend});
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
     // #460: every port the sweep leaves through or is referenced against,
     // named before any result (UX: "Also driven" / "Ref input").
     if let Some(p) = ref_in_port_reply {

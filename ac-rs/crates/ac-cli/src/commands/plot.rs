@@ -1,4 +1,4 @@
-use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp, print_level_clamp_range};
+use super::{check_ack, get_cal, level_to_dbfs, print_level, print_level_range};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -9,14 +9,15 @@ pub fn run(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, level, ppd, bpo) = match cmd {
+    let (start, stop, level, level_defaulted, ppd, bpo) = match cmd {
         CommandKind::Plot {
             start,
             stop,
             level,
+            level_defaulted,
             ppd,
             bpo,
-        } => (*start, *stop, level, *ppd, *bpo),
+        } => (*start, *stop, level, *level_defaulted, *ppd, *bpo),
         _ => unreachable!(),
     };
 
@@ -32,10 +33,7 @@ pub fn run(
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
-    println!(
-        "\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {} pts/decade  |  {level_db:.1} dBFS",
-        ppd
-    );
+    println!("\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
     io::print_freq_header(have_cal);
 
     let mut cmd_json = serde_json::json!({
@@ -49,11 +47,13 @@ pub fn run(
         cmd_json["bpo"] = serde_json::json!(b);
     }
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot");
-    let applied_db = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(level_db);
-    print_level_clamp(level_db, applied_db);
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -82,13 +82,14 @@ pub fn run_level(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, freq, steps) = match cmd {
+    let (start, stop, level_defaulted, freq, steps) = match cmd {
         CommandKind::PlotLevel {
             start,
             stop,
+            level_defaulted,
             freq,
             steps,
-        } => (start, stop, *freq, *steps),
+        } => (start, stop, *level_defaulted, *freq, *steps),
         _ => unreachable!(),
     };
 
@@ -102,9 +103,7 @@ pub fn run_level(
     let start_db = level_to_dbfs(start, cal.as_ref());
     let stop_db = level_to_dbfs(stop, cal.as_ref());
 
-    println!(
-        "\n  Plot level: {start_db:.1} \u{2192} {stop_db:.1} dBFS  {freq:.0} Hz  |  {steps} steps"
-    );
+    println!("\n  Plot level: {freq:.0} Hz  |  {steps} steps");
     io::print_freq_header(have_cal);
 
     let ack = check_ack(
@@ -120,15 +119,13 @@ pub fn run_level(
         ),
         "plot_level",
     );
-    let start_applied = ack
-        .get("start_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(start_db);
-    let stop_applied = ack
-        .get("stop_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(stop_db);
-    print_level_clamp_range(start_db, stop_db, start_applied, stop_applied);
+    print_level_range(
+        ack.get("start_dbfs").and_then(|v| v.as_f64()),
+        ack.get("stop_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+    );
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -156,28 +153,31 @@ pub fn run_level(
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
 pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (f1, f2, duration, level, n_harmonics, window_len, tail_s, distance_m) = match cmd {
-        CommandKind::PlotIr {
-            f1,
-            f2,
-            duration,
-            level,
-            n_harmonics,
-            window_len,
-            tail_s,
-            distance_m,
-        } => (
-            *f1,
-            *f2,
-            *duration,
-            level,
-            *n_harmonics,
-            *window_len,
-            *tail_s,
-            *distance_m,
-        ),
-        _ => unreachable!(),
-    };
+    let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s, distance_m) =
+        match cmd {
+            CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                level_defaulted,
+                n_harmonics,
+                window_len,
+                tail_s,
+                distance_m,
+            } => (
+                *f1,
+                *f2,
+                *duration,
+                level,
+                *level_defaulted,
+                *n_harmonics,
+                *window_len,
+                *tail_s,
+                *distance_m,
+            ),
+            _ => unreachable!(),
+        };
 
     let cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -200,15 +200,14 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
             .map(|v| format!("{v:.2}s"))
             .unwrap_or_else(|| "default".into()),
     );
-    println!(
-        "\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s  |  {gate}"
-    );
+    println!("\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {duration:.1}s");
+    println!("  gate       {gate}");
     // #460 UX: echo the typed distance before emission, so a token typo
     // (`0.8m` meant as `0.8s`) is visible before the result, and state its
     // absence rather than hide it.
     match distance_m {
-        Some(d) => println!("  distance      {d} m"),
-        None => println!("  distance      not given"),
+        Some(d) => println!("  distance   {d} m"),
+        None => println!("  distance   not given"),
     }
 
     let mut cmd_json = serde_json::json!({
@@ -232,25 +231,28 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
-    let applied_db = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(level_db);
-    print_level_clamp(level_db, applied_db);
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
     let out_port = ack.get("out_port").and_then(|v| v.as_str());
     if let Some(p) = out_port {
-        println!("  Output:       {p}");
+        println!("  output     {p}");
     }
     // #460 UX: every port the sweep leaves through or is referenced against,
-    // printed before the result. A reference output equal to the main output
-    // drives nothing extra, so it is not named twice.
+    // printed before the result, on the same label grid as `gate` and
+    // `level`. A reference output equal to the main output drives nothing
+    // extra, so it is not named twice.
     if let Some(p) = ack.get("ref_out_port").and_then(|v| v.as_str()) {
         if Some(p) != out_port {
-            println!("  Also driven:  {p}");
+            println!("  ref out    {p}");
         }
     }
     if let Some(p) = ack.get("ref_in_port").and_then(|v| v.as_str()) {
-        println!("  Ref input:    {p}");
+        println!("  ref in     {p}");
     }
     println!("  Running IR measurement...\n");
 

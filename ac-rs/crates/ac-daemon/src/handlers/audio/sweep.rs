@@ -8,11 +8,15 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
+use ac_core::shared::emission_level::{
+    DEFAULT_LEVEL_DBFS, DEFAULT_RAMP_START_DBFS, DEFAULT_RAMP_STOP_DBFS, MAX_EMISSION_DBFS,
+};
+
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cfg_guard, make_engine_for_state, resolve_output, send_pub,
-    spawn_worker,
+    busy_guard, cfg_guard, emission_guard, emission_range_guard, make_engine_for_state,
+    resolve_output, send_pub, spawn_worker,
 };
 
 pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
@@ -22,29 +26,25 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
         Some(v) => v,
         None => return json!({"ok": false, "error": "missing freq_hz"}),
     };
-    // Raw request, unclamped: this is the shape of the ramp, not the level
-    // that reaches the engine. Each computed point on the ramp is clamped
-    // individually below (#360) — a sweep whose top end exceeds the
-    // ceiling flattens there rather than running unclamped or being
-    // refused outright, mirroring `set_drive`'s "clamp is normal
-    // operation" discipline.
     let start_dbfs = cmd
         .get("start_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-20.0);
-    let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
+        .unwrap_or(DEFAULT_RAMP_START_DBFS);
+    let stop_dbfs = cmd
+        .get("stop_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_RAMP_STOP_DBFS);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
-    let ceiling = cfg.drive_max_dbfs;
+    // #459: both endpoints checked up front — see `plot_level`'s identical
+    // reasoning. The per-point clamp the ramp loop below used to carry is
+    // gone; every point between two in-range endpoints is in range.
+    let (start_dbfs, stop_dbfs) = emission_range_guard!(state, &cfg, start_dbfs, stop_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let out_port_reply = out_port.clone();
-    // Applied endpoints echoed on the sync reply — monotone under a `min`
-    // clamp, so this is exactly the range the ramp actually covers.
-    let start_dbfs_applied = apply_drive_ceiling(ceiling, start_dbfs);
-    let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let mut eng = match make_engine_for_state(state) {
@@ -62,8 +62,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
             );
             return;
         }
-        let start_amp =
-            ac_core::shared::generator::dbfs_to_amplitude(apply_drive_ceiling(ceiling, start_dbfs));
+        let start_amp = ac_core::shared::generator::dbfs_to_amplitude(start_dbfs);
         eng.set_tone(freq_hz, start_amp);
         let t0 = std::time::Instant::now();
         while !stop.load(Ordering::Relaxed) {
@@ -72,7 +71,7 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
                 break;
             }
             let t = elapsed / duration;
-            let db = apply_drive_ceiling(ceiling, start_dbfs + (stop_dbfs - start_dbfs) * t);
+            let db = start_dbfs + (stop_dbfs - start_dbfs) * t;
             eng.set_tone(freq_hz, ac_core::shared::generator::dbfs_to_amplitude(db));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -92,8 +91,9 @@ pub fn sweep_level(state: &ServerState, cmd: &Value) -> Value {
     json!({
         "ok": true,
         "out_port": out_port_reply,
-        "start_dbfs": start_dbfs_applied,
-        "stop_dbfs": stop_dbfs_applied,
+        "start_dbfs": start_dbfs,
+        "stop_dbfs": stop_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
     })
 }
@@ -109,11 +109,11 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
     let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `sweep_frequency` puts a stimulus on a physical output.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `sweep_frequency` puts a stimulus on a physical output.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -162,5 +162,11 @@ pub fn sweep_frequency(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("sweep_frequency".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs, "backend": backend})
+    json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    })
 }

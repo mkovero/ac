@@ -117,7 +117,7 @@ def test_sweep_level_frames(server_client):
         "cmd":        "sweep_level",
         "freq_hz":    1000.0,
         "start_dbfs": -20.0,
-        "stop_dbfs":  -16.0,
+        "stop_dbfs":  -20.0,
         "duration":    0.1,   # short ramp for the test
     })
     assert ack["ok"] is True
@@ -258,7 +258,7 @@ def test_stop_sweep(server_client):
         "cmd":        "sweep_level",
         "freq_hz":    1000.0,
         "start_dbfs": -60.0,
-        "stop_dbfs":    0.0,
+        "stop_dbfs":  -20.0,
         "duration":    10.0,   # 10-second ramp
     })
     assert ack["ok"] is True
@@ -332,7 +332,7 @@ def test_plot_level_fields(server_client):
         "cmd":        "plot_level",
         "freq_hz":    1000.0,
         "start_dbfs": -20.0,
-        "stop_dbfs":  -16.0,
+        "stop_dbfs":  -20.0,
         "steps":       3,
     })
     assert ack["ok"] is True
@@ -367,7 +367,7 @@ def test_plot_level_step_count(server_client):
         "cmd":        "plot_level",
         "freq_hz":    1000.0,
         "start_dbfs": -20.0,
-        "stop_dbfs":  -18.0,
+        "stop_dbfs":  -20.0,
         "steps":       3,
     })
     assert ack["ok"] is True

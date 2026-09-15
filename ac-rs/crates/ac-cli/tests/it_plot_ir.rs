@@ -243,7 +243,7 @@ fn persisted_plot_artifacts_identify_the_live_backend() {
 
     let _ = rig.run_ac(&["plot", "200hz", "400hz", "-20dbfs", "1ppd", "3bpo"]);
     let _ = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     let dir = rig.report_dir();
@@ -294,7 +294,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // 18.0 dB threshold #376 added) — 4096 samples clears it with
     // margin (~27 dB) so this fixture still exercises the passing path.
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     // ── printed arrival is the peak's offset (#378 contingency) ───────
@@ -349,7 +349,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
         "the pre-#460 clause must not survive:\n{stdout}"
     );
     assert!(
-        stdout.contains("  distance      not given"),
+        stdout.contains("  distance   not given"),
         "the header must state that no distance was given (#460):\n{stdout}"
     );
     assert!(
@@ -443,7 +443,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
 fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
     let rig = Rig::start();
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "1024win", "0.1s",
     ]);
 
     assert!(
@@ -504,10 +504,10 @@ fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.2s", "0.05m",
     ]);
     for want in [
-        "  distance      0.05 m",
-        "  Output:       fake:playback_0",
-        "  Also driven:  fake:playback_2",
-        "  Ref input:    fake:capture_1",
+        "  distance   0.05 m",
+        "  output     fake:playback_0",
+        "  ref out    fake:playback_2",
+        "  ref in     fake:capture_1",
         "(causal bound), pick",
         "bound from ref latency + 0.05 m, c 343.0 m/s assumed",
         "  ref latency   0.4167 ms  (20 samples, SNR",
