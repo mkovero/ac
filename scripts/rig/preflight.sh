@@ -18,10 +18,13 @@ load_rig "${1:-}"
 push_helpers
 rev_arg=${2:-latest}
 dest=""
+# An unresolved rev must not fall through to "" like `none` does — that
+# silently skipped the staged-build check (PR #441 QA finding). Only the
+# explicit `none` means "don't check a staged build"; anything else that
+# doesn't resolve is a usage error and resolve_rev's own die() should end
+# the script here, not read as "nothing staged."
 if [[ $rev_arg != none ]]; then
-    if rev="$(resolve_rev "$rev_arg" 2>/dev/null)"; then
-        dest="$(rig_dest "$rev")"
-    fi
+    dest="$(rig_dest "$(resolve_rev "$rev_arg")")"
 fi
 
 remote="$(cat <<'REMOTE'

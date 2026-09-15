@@ -81,6 +81,16 @@ resolve_rev() {
     echo "$want"
 }
 
+# build_compiled_this_run <log-file>... — did any workspace crate (all
+# package names start "ac-": ac-cli, ac-core, ac-daemon, ac-scene, ac-view)
+# actually compile, per the given cargo build logs. Shared by
+# build-portable.sh and build_portable_test.sh so the two can't drift apart
+# (PR #441 QA: an earlier version of the test kept its own copy of this
+# pattern, which would stay green if the production grep were narrowed back).
+build_compiled_this_run() {
+    grep -qE '^\s*Compiling ac-[a-z]+ ' "$@" && echo yes || echo no
+}
+
 # Remote directory a staged revision is shipped to.
 rig_dest() { echo "$RIG_STAGE_BASE/$1-x86_64"; }
 

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # build_portable_test.sh — regression test for build-portable.sh's
 # compiled_this_run derivation. No rig, no cargo build: synthetic build.log
-# fixtures piped through the same grep pattern the script uses.
+# fixtures piped through the actual build_compiled_this_run() (lib.sh) that
+# build-portable.sh itself calls — not a re-derived copy of its pattern, so
+# narrowing the production grep back to "ac-daemon" fails this test instead
+# of leaving it green (PR #441 QA finding: the previous version of this file
+# kept its own independent copy of the regex).
 #
 #   bash scripts/rig/build_portable_test.sh
 #
 # Procedure these scripts implement: docs/runbooks/rig-testing.md.
 
-set -euo pipefail
-
-# Keep this pattern identical to build-portable.sh's own grep — the point of
-# this test is to catch a future narrowing of it, not to re-derive it.
-pattern='^\s*Compiling ac-[a-z]+ '
+source "$(dirname "$0")/lib.sh"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 check() {
     local name=$1 want=$2 file=$3
-    local got=no
-    grep -qE "$pattern" "$file" && got=yes
+    local got
+    got="$(build_compiled_this_run "$file")"
     if [[ $got != "$want" ]]; then
         echo "FAIL: $name — want compiled=$want, got compiled=$got"
         exit 1

@@ -24,7 +24,12 @@ esac
 top="$(git rev-parse --show-toplevel)"
 rev_full="$(git -C "$top" rev-parse HEAD)"
 rev="${rev_full:0:12}"
-dirty="$(git -C "$top" status --porcelain --untracked-files=no -- ac-rs | wc -l)"
+# Untracked files count too — Cargo builds from the working filesystem, not
+# just the index, so an untracked build.rs or source file can change the
+# compiled binary without a tracked diff to show for it. --untracked-files
+# defaults to "normal" (one line per untracked file, or per untracked dir)
+# and still respects .gitignore, so target/ stays out of the count.
+dirty="$(git -C "$top" status --porcelain -- ac-rs | wc -l)"
 if ((dirty > 0 && allow_dirty == 0)); then
     die "ac-rs/ has $dirty uncommitted change(s) — commit them, or pass --allow-dirty (recorded in the manifest)"
 fi
@@ -59,12 +64,11 @@ if ! cargo test --release -p ac-daemon --test it_loopback_ir --no-run \
     die "it_loopback_ir build failed — full log $stage/test-build.log"
 fi
 
-compiled=no
-# Any workspace crate (all package names start "ac-": ac-cli, ac-core,
-# ac-daemon, ac-scene, ac-view), not just ac-daemon — a rebuild that only
-# touches ac-cli or an ac-core change that never reaches the daemon's inputs
-# is still a real rebuild, and compiled_this_run must not read "no" for it.
-grep -qE '^\s*Compiling ac-[a-z]+ ' "$stage/build.log" "$stage/test-build.log" && compiled=yes
+# build_compiled_this_run (lib.sh) covers any workspace crate, not just
+# ac-daemon — a rebuild that only touches ac-cli or an ac-core change that
+# never reaches the daemon's inputs is still a real rebuild, and
+# compiled_this_run must not read "no" for it.
+compiled="$(build_compiled_this_run "$stage/build.log" "$stage/test-build.log")"
 
 itbin="$(python3 - "$stage/test-build.jsonl" <<'EOF'
 import json, sys

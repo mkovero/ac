@@ -51,37 +51,14 @@ echo "- build: ${dest:-installed /usr/local/bin}"
 echo "- artefacts on rig: $run"
 echo
 
-remote="$(cat <<REMOTE
-set -u
+# probe_remote.sh is a real file, not an inline heredoc, so the same text
+# that runs here also runs under probe_outputs_remote_test.sh's stubs —
+# see that file's header for why. set -e (upgraded from the sibling
+# scripts' set -u) so a failed ac setup/generate/jack_rec stops the loop
+# instead of falling through to the next command with nothing checking it.
+remote="set -eu
 $REMOTE_USE_BUILD
-mkdir -p "\$RUN" && cd "\$RUN"
-cfg="\$HOME/.config/ac/config.json"
-orig_out="\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["output_channel"])' "\$cfg")"
-orig_in="\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["input_channel"])' "\$cfg")"
-cleanup() {
-    ac stop >/dev/null 2>&1
-    ac setup output "\$orig_out" input "\$orig_in" >/dev/null 2>&1
-    pkill -x ac-daemon 2>/dev/null
-}
-trap cleanup EXIT
-ac setup output "\${OUTS%% *}" >/dev/null 2>&1
-echo "- daemon executable: \$(daemon_identity)"
-caps=""; for i in \$(seq 1 "\$NCAP"); do caps="\$caps system:capture_\$i"; done
-rec=\$((SECS - 2))
-for ch in \$OUTS; do
-    ac setup output "\$ch" >/dev/null 2>&1
-    ac generate level "\$LEVEL" "\$LEVEL" "\${FREQ}hz" "\${SECS}s" >"gen_\$ch.log" 2>&1 &
-    sleep 0.7
-    jack_rec -f "probe_out\$ch.wav" -d "\$rec" -b 24 \$caps >/dev/null 2>&1
-    wait
-    ac stop >/dev/null 2>&1
-    echo
-    echo "#### ac output \$ch — \$(grep -o 'system:playback_[0-9]*' "gen_\$ch.log" | head -1)"
-    echo
-    python3 "\$LIB/chan_levels.py" "probe_out\$ch.wav" "\$FREQ" | tail -n +2
-done
-REMOTE
-)"
+$(cat "$RIG_SCRIPTS/lib/probe_remote.sh")"
 rig_bash "DEST=$(printf %q "$dest") RUN=$(printf %q "$run") LEVEL=$(printf %q "$level") \
 SECS=$(printf %q "$seconds") FREQ=$(printf %q "$freq") OUTS=$(printf %q "$outputs") \
 NCAP=$(printf %q "$RIG_ANALOG_CAPTURES") LIB=$(printf %q "$RIG_STAGE_BASE/lib")" "$remote"

@@ -34,3 +34,17 @@ assert_refuses -45 "$(speaker_ceiling)"        # between the two ceilings — th
 assert_allows -60 "$(speaker_ceiling)"         # well under
 
 echo "lib.sh require_level: all cases as expected"
+
+# resolve_rev must fail closed on a bogus/missing revision — this is the
+# guarantee preflight.sh's `rev != none` branch relies on (PR #441 QA
+# finding: preflight.sh used to catch this failure in an `if` and silently
+# skip the staged-build check, same as passing `none`).
+AC_HOME="$(mktemp -d)"
+mkdir -p "$AC_HOME/target-rig-stage"
+if (resolve_rev nonexistent-rev) 2>/dev/null; then
+    echo "FAIL: resolve_rev should refuse a revision with nothing staged for it"
+    exit 1
+fi
+rm -rf "$AC_HOME"
+unset AC_HOME
+echo "lib.sh resolve_rev: fails closed on a missing revision"
