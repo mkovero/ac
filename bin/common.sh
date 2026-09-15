@@ -340,6 +340,29 @@ run() {
   model="$(model_for "$role" "$provider")"
   local -a codex_write_dirs=(--add-dir "$AC_TARGET")
 
+  # Codex's workspace-write sandbox leaves git metadata read-only. A worktree's
+  # git dir lives under the main repo's .git, outside -C, and --add-dir of .git
+  # itself stays protected, so a codex developer could not commit. On #459 it
+  # worked around that with throwaway metadata, which pushed the sparse
+  # checkout's absent work/ and audit/ as deletions. The subdirectories below
+  # are writable; .git's root files (config, packed-refs) are not, so
+  # `git push -u` and deleting a packed branch still fail inside codex.
+  local git_dir git_common
+  if git_dir="$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)" \
+     && git_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    if [[ $git_dir != "$git_common" ]]; then
+      codex_write_dirs+=(--add-dir "$git_dir")
+    fi
+    codex_write_dirs+=(--add-dir "$git_common/objects" --add-dir "$git_common/refs" \
+                       --add-dir "$git_common/logs")
+  fi
+  # ssh refuses to run inside the sandbox (it rejects the ownership of
+  # /etc/ssh/ssh_config.d as the sandbox presents it), so fetch and push over
+  # https with the gh credential helper instead, for this process only.
+  local -a codex_env=(GIT_CONFIG_COUNT=1
+                      GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
+                      GIT_CONFIG_VALUE_0=git@github.com:)
+
   # The current approval labels are reviewer identities, not generic slots:
   # qa owns claude-approved and codex-qa owns codex-approved. Until those specs
   # and labels are migrated together, letting Codex occupy qa would make both
@@ -397,7 +420,7 @@ $prompt"
       local sandbox=workspace-write
       local -a model_arg=()
       [[ -n $model ]] && model_arg=(-m "$model")
-      codex -C "$PWD" -s "$sandbox" -a on-request \
+      env "${codex_env[@]}" codex -C "$PWD" -s "$sandbox" -a on-request \
         "${codex_write_dirs[@]}" \
         "${model_arg[@]}" "${extra[@]}" "$task_prompt"
     fi
@@ -454,7 +477,7 @@ $prompt"
     local sandbox=workspace-write
     local -a model_arg=()
     [[ -n $model ]] && model_arg=(-m "$model")
-    codex exec -C "$PWD" -s "$sandbox" \
+    env "${codex_env[@]}" codex exec -C "$PWD" -s "$sandbox" \
       -c 'approval_policy="never"' \
       -c "sandbox_${sandbox//-/_}.network_access=true" \
       "${codex_write_dirs[@]}" --json -o "$last" \
