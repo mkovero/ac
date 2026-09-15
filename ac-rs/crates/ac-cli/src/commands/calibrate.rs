@@ -270,15 +270,33 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
         "disagree_period_shift" | "disagree_other" => {
             render_tau_disagreement_leg(state, data, sample_rate)
         }
+        // #368: the peak's own SNR fell short of the threshold it was
+        // judged against — both are what the daemon actually measured, so
+        // print them rather than an inferred wiring conclusion.
+        "not_measured_low_snr" => {
+            match (
+                data.get("tau_pre_impulse_snr_db").and_then(|v| v.as_f64()),
+                data.get("tau_snr_threshold_db").and_then(|v| v.as_f64()),
+            ) {
+                (Some(snr), Some(threshold)) => vec![format!(
+                    "  {:<8}not measured (peak SNR {snr:.2} dB, need {threshold:.2} dB, \
+                     threshold derived)",
+                    "Delay:"
+                )],
+                // Fields absent (older daemon claiming this state without
+                // them): fall through to the raw-state rendering below
+                // rather than assert numbers the daemon never sent.
+                _ => vec![format!("  {:<8}not measured (state: {state})", "Delay:")],
+            }
+        }
         "refused_xrun" => render_tau_xrun_leg(data),
-        // "not_measured_no_loopback" and anything unrecognised (older
-        // daemon without this field): state the observation, not an
-        // inferred cause — `is_loopback` is what the daemon saw, not a
-        // claim about physical wiring the instrument cannot verify.
-        _ => vec![format!(
-            "  {:<8}not measured (loopback not detected this run)",
-            "Delay:"
-        )],
+        // Anything unrecognised (older daemon, or a future state this
+        // client doesn't know): state the raw wire value, not an inferred
+        // cause the instrument cannot verify. Also covers the retired
+        // `"not_measured_no_loopback"` state — an old daemon predating
+        // #368 that still sends it renders here, on the raw value, rather
+        // than asserting the wiring conclusion #368 removed.
+        _ => vec![format!("  {:<8}not measured (state: {state})", "Delay:")],
     }
 }
 
