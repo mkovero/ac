@@ -309,12 +309,19 @@ model_for() {
   printf '%s\n' "$value"
 }
 
+# A codex run that fails before its first message (usage limit, auth) leaves
+# no agent_message, so the session file used to be header-only and master.sh
+# could only say the worker "exited before pushing". Fall back to the last
+# error event so the reason reaches the session record.
 distill_codex() {
-  local raw="$1" last="$2"
+  local raw="$1" last="$2" msg
   if [[ -s $last ]]; then cat "$last"; return; fi
-  jq -rs '[.[] | select(.type=="item.completed") | .item
+  msg=$(jq -rs '[.[] | select(.type=="item.completed") | .item
            | select(.type=="agent_message") | .text] | last // empty' \
-    "$raw" 2>/dev/null || true
+    "$raw" 2>/dev/null || true)
+  if [[ -n $msg ]]; then printf '%s\n' "$msg"; return; fi
+  jq -rs '[.[] | select(.type=="error") | .message] | last // empty
+          | "codex error: " + .' "$raw" 2>/dev/null || true
 }
 
 # run <role> <prompt> [--fg] [--read] [extra provider args...]
@@ -487,6 +494,7 @@ $prompt"
         if .type=="item.completed" and .item.type=="agent_message" then .item.text
         elif .type=="item.started" and .item.type=="command_execution" then
           "  → Bash  " + ((.item.command // "") | gsub("[\\r\\n]+"; " ") | .[0:100])
+        elif .type=="error" then "ERROR: " + (.message // "codex reported an error")
         else empty end' \
     | sed -u "s|^|$prefix|" || status=$?
   fi
