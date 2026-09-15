@@ -32,7 +32,7 @@ link_support "$wt"
 if git merge --no-edit origin/main; then
   echo "<runner/integration> PR #$n merged current main without conflicts"
   ( cd ac-rs && cargo test --workspace )
-  ( cd ac-rs && cargo clippy -- -D warnings )
+  ( cd ac-rs && cargo clippy --workspace --all-targets -- -D warnings )
   ( cd ac-rs && cargo fmt --check )
 else
   echo "<runner/integration> PR #$n requires developer conflict resolution"

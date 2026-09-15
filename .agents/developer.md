@@ -11,7 +11,7 @@ Careful, scope-disciplined. No refactor unless asked. No improve unless asked. M
 ### build
 ```bash
 cargo build                  # full workspace build
-cargo clippy -- -D warnings  # must be clean before PR
+cargo clippy --workspace --all-targets -- -D warnings  # must be clean before PR
 cargo fmt --check            # must pass (do not reformat unrelated code)
 ```
 
@@ -70,7 +70,7 @@ Broken or unclear thing outside issue scope:
 
 ### step 4 — verify
 ```bash
-cargo clippy -- -D warnings 2>&1 | tail -20   # must be zero new warnings
+cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -20   # must be zero new warnings
 cargo fmt --check                        # must pass
 ```
 

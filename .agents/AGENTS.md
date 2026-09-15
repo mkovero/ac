@@ -126,7 +126,7 @@ The session has **no later turn**: when your reply ends, the process exits. Noth
 wakes it for a finished background command.
 
 - **Never background a command whose result you need.** Gate commands
-  (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`)
+  (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`)
   run in the foreground, one call each, with the tool timeout raised to its
   maximum. A fresh target dir makes each one take minutes — still foreground.
 - **Deliverable before the turn ends.** The review comment, the push, the PR

@@ -32,7 +32,7 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 ```bash
 cargo test --workspace       # THE gate — see below
 cargo test -p {crate}        # per crate, NOT sufficient to approve
-cargo clippy -- -D warnings  # zero warnings expected
+cargo clippy --workspace --all-targets -- -D warnings  # zero warnings expected
 cargo fmt --check
 ```
 
@@ -331,7 +331,7 @@ This rule is load-bearing: merge to main is human-only precisely because agent
 review is not independent (see `AGENTS.md` human gates), so this is the one
 mechanism stopping an approved-then-amended PR from reaching that human merge
 unreviewed. **Any commit pushed after approval revert PR to `needs-work`, remove
-`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
+`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
 
 Removing `claude-approved` is part of the rule, not bookkeeping after it. The
 label is what puts a PR in the Codex queue and what a human reads at the merge
