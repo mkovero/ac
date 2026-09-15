@@ -366,6 +366,47 @@ fn plot_frames_carry_processing_context_envelope() {
     assert!(mr["imported_at"].is_string());
 }
 
+/// #428: `AudioEngine::xruns()` is cumulative "since start" (see the trait
+/// doc), so summing it once per sweep point double-, triple-, ...-counts
+/// every xrun that happened before the sweep's last point. One real xrun
+/// injected mid-sweep must show up as exactly 1 in the terminal `done`
+/// frame, not accumulate across the remaining points.
+///
+/// The fake backend's `capture_block` consumes one
+/// `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` slot per call
+/// (`audio/fake/hooks.rs`), and each sweep point issues two calls — a
+/// discarded 0.1 s warm-up, then the real capture — so the 4th call
+/// (index 3, 0-based) is point 1's real capture.
+#[test]
+fn plot_reports_session_xrun_delta_not_cumulative_sum() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE", "0,0,0,1")]);
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   100.0,
+        "stop_hz":    1000.0,
+        "level_dbfs": -20.0,
+        "ppd":        3,
+        "duration":   0.05,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot ack: {r}");
+
+    let done = c
+        .wait_for_topic("done", Duration::from_secs(10))
+        .expect("plot never finished");
+    assert_eq!(done["cmd"], json!("plot"));
+    assert_eq!(
+        done["n_points"],
+        json!(3),
+        "all 3 points should have completed cleanly: {done}"
+    );
+    assert_eq!(
+        done["xruns"],
+        json!(1),
+        "session xrun delta must be 1, not a per-point cumulative sum: {done}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // server_idle_timeout — daemon folds the public bind back to localhost after
 // the configured idle CTRL-activity window expires. See issue #58.

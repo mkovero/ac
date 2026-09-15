@@ -1230,11 +1230,29 @@ same applied value.
 // topic: data  (measurement/frequency_response/point frame, see Shared types)
 ```
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot", "n_points": <int>, "xruns": <int> }
 ```
+
+`xruns` is the session delta — `AudioEngine::xruns()` sampled once at
+engine creation and once at sweep completion, then subtracted
+(wrapping-safe) — not a sum of that per-point cumulative reading (#428).
+
+**DATA** — terminal, analyzer failure (#428):
+```json
+// topic: error
+{ "cmd": "plot", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
+```
+
+An analyzer failure at any point aborts the sweep atomically: the engine
+stops, this `error` is published, and none of `measurement/frequency_
+response/complete`, `measurement/report`, the report file, or `done`
+follow — a failed sweep never archives its completed prefix as a
+successful measurement. `requested_points` is the full sweep's point
+count; `completed_points` is how many points had already published a
+`measurement/frequency_response/point` frame before the failure.
 
 ---
 
@@ -1270,10 +1288,20 @@ exceeds the ceiling flattens there rather than running unclamped.
 includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
 post-clamp level for that step).
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot_level", "n_points": <int>, "xruns": <int> }
+```
+
+`xruns` is the session delta, same accounting as `plot`'s (#428).
+
+**DATA** — terminal, analyzer failure (#428): same shape and same
+atomic-failure guarantee as `plot`'s, above, with `"cmd": "plot_level"`
+and `requested_points` the level-step count (`steps`).
+```json
+// topic: error
+{ "cmd": "plot_level", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
 ```
 
 ---
@@ -2963,6 +2991,8 @@ When the guard fires:
 // topic: error
 { "cmd": "<name>", "message": "<exception string>" }
 ```
+`plot`/`plot_level` add `requested_points`/`completed_points` to this
+shape on an analyzer failure (#428) — see their sections above.
 
 ### Unparseable config.json (#370)
 ```json

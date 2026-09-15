@@ -68,8 +68,8 @@ pub fn run(
         launch_ui(LaunchKind::SweepFreq, cfg, None);
     }
 
-    let results = collect_sweep(client, "plot");
-    if results.is_empty() {
+    let (results, outcome) = collect_sweep(client, "plot");
+    if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
     io::print_summary(&results, "DUT", have_cal);
@@ -140,8 +140,8 @@ pub fn run_level(
         launch_ui(LaunchKind::SweepLevel, cfg, None);
     }
 
-    let results = collect_sweep(client, "plot_level");
-    if results.is_empty() {
+    let (results, outcome) = collect_sweep(client, "plot_level");
+    if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
     io::print_summary(&results, "DUT", have_cal);
@@ -415,11 +415,34 @@ fn print_ir_notes(report_frame: Option<&serde_json::Value>) {
     }
 }
 
-fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value> {
+/// Whether a sweep reached its terminal `done` frame. Anything else — a
+/// terminal `error` (analyzer failure, #428) or a timeout — leaves
+/// `results` holding only a prefix that must never be treated as a
+/// complete artifact: no summary printed, no CSV written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepOutcome {
+    Done,
+    Failed,
+}
+
+fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> (Vec<serde_json::Value>, SweepOutcome) {
+    collect_sweep_frames(|| client.recv_data(300_000), cmd_name)
+}
+
+/// Core of `collect_sweep`, generic over the frame source so the
+/// atomic-failure gating (a terminal `error` must never leave `outcome ==
+/// Done`, however many `measurement/frequency_response/point` frames
+/// preceded it) can be unit-tested without a real `AcClient`/socket —
+/// see `tests::error_after_points_is_failed_not_done` below (#428 QA).
+fn collect_sweep_frames(
+    mut next_frame: impl FnMut() -> Option<(String, serde_json::Value)>,
+    cmd_name: &str,
+) -> (Vec<serde_json::Value>, SweepOutcome) {
     let mut results = Vec::new();
+    let mut outcome = SweepOutcome::Failed;
 
     loop {
-        let frame = match client.recv_data(300_000) {
+        let frame = match next_frame() {
             Some(f) => f,
             None => {
                 eprintln!("\n  error: timeout waiting for {cmd_name} data");
@@ -441,17 +464,27 @@ fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value
                     println!("\n  !! {xruns} xrun(s) during {cmd_name}");
                 }
             }
+            outcome = SweepOutcome::Done;
             break;
         } else if topic == "error" {
             let msg = data
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("error");
-            eprintln!("\n  !! {msg}");
+            let partial = match (
+                data.get("requested_points").and_then(|v| v.as_u64()),
+                data.get("completed_points").and_then(|v| v.as_u64()),
+            ) {
+                (Some(requested), Some(completed)) => {
+                    format!(" ({completed} of {requested} points completed; no report written)")
+                }
+                _ => String::new(),
+            };
+            eprintln!("\n  !! {msg}{partial}");
             break;
         }
     }
-    results
+    (results, outcome)
 }
 
 fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::config::Config) {
@@ -460,6 +493,69 @@ fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::confi
     let safe = label.replace(' ', "_");
     let path = dir.join(format!("{safe}_{ts}.csv"));
     io::save_csv(results, &path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_sweep_frames, SweepOutcome};
+    use std::collections::VecDeque;
+
+    fn point(freq_hz: f64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "measurement/frequency_response/point",
+            "freq_hz": freq_hz,
+        })
+    }
+
+    /// PR #451 QA finding (#428): a terminal `error` after some points had
+    /// already streamed must report `SweepOutcome::Failed` and only the
+    /// completed prefix — `run`/`run_level` gate `print_summary`/
+    /// `save_results` on `outcome == Done`, so this is what makes the
+    /// atomic-failure guarantee reach the CLI's own summary/CSV output,
+    /// not just the daemon's wire frames.
+    #[test]
+    fn error_after_points_is_failed_not_done() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            ("data".to_string(), point(100.0)),
+            ("data".to_string(), point(200.0)),
+            (
+                "error".to_string(),
+                serde_json::json!({
+                    "cmd": "plot",
+                    "message": "capture at 1000 Hz has 48 samples; minimum is 256",
+                    "requested_points": 5,
+                    "completed_points": 2,
+                }),
+            ),
+            // Must never be reached: a real daemon does not publish a
+            // point or `done` after a terminal `error`, and the loop must
+            // not either.
+            ("done".to_string(), serde_json::json!({"xruns": 0})),
+        ]);
+
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+
+        assert_eq!(outcome, SweepOutcome::Failed);
+        assert_eq!(
+            results.len(),
+            2,
+            "only the pre-failure points should be retained: {results:?}"
+        );
+    }
+
+    #[test]
+    fn done_after_points_is_done() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            ("data".to_string(), point(100.0)),
+            ("data".to_string(), point(200.0)),
+            ("done".to_string(), serde_json::json!({"xruns": 0})),
+        ]);
+
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+
+        assert_eq!(outcome, SweepOutcome::Done);
+        assert_eq!(results.len(), 2);
+    }
 }
 
 /// What `launch_ui` should do post-command. The GPU viewer this used to

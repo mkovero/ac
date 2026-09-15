@@ -39,8 +39,8 @@ use anyhow::Result;
 use std::time::Duration;
 
 use self::hooks::{
-    next_loopback_delay_samples, next_xruns_delta, period_size_override, tau_gain_override,
-    tau_noise_amplitude_override,
+    next_capture_block_xruns_delta, next_loopback_delay_samples, next_xruns_delta,
+    period_size_override, tau_gain_override, tau_noise_amplitude_override,
 };
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
@@ -234,6 +234,10 @@ impl AudioEngine for FakeEngine {
         if let Some(out) = self.ring_capture(n, duration, RingDrain::Block) {
             return Ok(out?.into_iter().next().unwrap_or_default());
         }
+        // Opt-in xrun injection (#428) — see
+        // `hooks::next_capture_block_xruns_delta`'s doc. Inert (adds 0)
+        // unless `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` is set.
+        self.xruns += next_capture_block_xruns_delta();
         std::thread::sleep(Duration::from_secs_f64(duration));
         let port = self.input_port.clone();
         let gain = tau_gain_override();
