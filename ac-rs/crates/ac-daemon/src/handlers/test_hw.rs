@@ -522,33 +522,6 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
     )
 }
 
-#[cfg(test)]
-mod emission_level_tests {
-    use super::*;
-
-    #[test]
-    fn every_self_test_ladder_is_nonempty_and_within_the_untyped_bound() {
-        for all in [
-            LINEARITY_LEVELS_DBFS,
-            THD_FLOOR_LEVELS_DBFS,
-            DMM_TRACKING_LEVELS_DBFS,
-        ] {
-            let retained = untyped_levels(all);
-            assert!(!retained.is_empty());
-            assert!(retained
-                .iter()
-                .all(|&level| level <= UNTYPED_LEVEL_MAX_DBFS));
-        }
-    }
-
-    #[test]
-    fn dmm_tracking_requires_every_retained_point_to_be_read() {
-        assert!(dmm_tracking_passes(1.9, 2, 2));
-        assert!(!dmm_tracking_passes(1.9, 1, 2));
-        assert!(!dmm_tracking_passes(2.0, 2, 2));
-    }
-}
-
 fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
     let freqs: &[f64] = &[100.0, 1000.0, 5000.0, 10000.0, 20000.0];
     let amp = ac_core::shared::generator::dbfs_to_amplitude(SELF_TEST_LEVEL_DBFS);
@@ -592,4 +565,31 @@ fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {
         format!("max deviation {max_dev:.2} dB  [{parts}]"),
         "< 1.0 dB vs 1 kHz ref",
     )
+}
+
+#[cfg(test)]
+mod emission_level_tests {
+    use super::*;
+
+    #[test]
+    fn every_self_test_ladder_is_nonempty_and_within_the_untyped_bound() {
+        for all in [
+            LINEARITY_LEVELS_DBFS,
+            THD_FLOOR_LEVELS_DBFS,
+            DMM_TRACKING_LEVELS_DBFS,
+        ] {
+            let retained = untyped_levels(all);
+            assert!(!retained.is_empty());
+            assert!(retained
+                .iter()
+                .all(|&level| level <= UNTYPED_LEVEL_MAX_DBFS));
+        }
+    }
+
+    #[test]
+    fn dmm_tracking_requires_every_retained_point_to_be_read() {
+        assert!(dmm_tracking_passes(1.9, 2, 2));
+        assert!(!dmm_tracking_passes(1.9, 1, 2));
+        assert!(!dmm_tracking_passes(2.0, 2, 2));
+    }
 }

@@ -104,12 +104,16 @@ mod tests {
     // ramp stop to −29; either exceeds the untyped bound.
     #[test]
     fn untyped_bound_sits_between_defaults_and_the_maximum() {
-        assert!(DEFAULT_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
-        assert!(DEFAULT_RAMP_START_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
-        assert!(DEFAULT_RAMP_STOP_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
-        assert!(SELF_TEST_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
-        assert!(UNTYPED_LEVEL_MAX_DBFS <= MAX_EMISSION_DBFS);
-        assert!(DEFAULT_RAMP_START_DBFS <= DEFAULT_RAMP_STOP_DBFS);
+        // All operands are `const`, so clippy resolves these at compile time
+        // and flags a runtime `assert!` as vacuous (`assertions_on_constants`).
+        // Wrapping each in a `const` block keeps the check (it still fails to
+        // compile against a red value) while satisfying the lint.
+        const { assert!(DEFAULT_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS) };
+        const { assert!(DEFAULT_RAMP_START_DBFS <= UNTYPED_LEVEL_MAX_DBFS) };
+        const { assert!(DEFAULT_RAMP_STOP_DBFS <= UNTYPED_LEVEL_MAX_DBFS) };
+        const { assert!(SELF_TEST_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS) };
+        const { assert!(UNTYPED_LEVEL_MAX_DBFS <= MAX_EMISSION_DBFS) };
+        const { assert!(DEFAULT_RAMP_START_DBFS <= DEFAULT_RAMP_STOP_DBFS) };
     }
 
     #[test]
