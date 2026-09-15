@@ -65,11 +65,18 @@ done
 
 cfgf="$HOME/.config/ac/config.json"
 if [[ -f $cfgf ]]; then
+    # #459 retired `drive_max_dbfs`. Its PRESENCE now refuses every emitting
+    # command in the daemon (`retired_drive_max_dbfs_error`), so the check is
+    # the inverse of what it was before: absent is the only good state. The
+    # old rule ("must be <= the standing ceiling") failed a correct config and
+    # pushed the operator toward re-adding the key, which would silence the
+    # whole rig. The ceiling now lives in the emitting scripts' require_level,
+    # which is the only thing left that can tell the speaker path apart.
     ceil_got="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("drive_max_dbfs"))' "$cfgf")"
-    if python3 -c 'import sys; sys.exit(0 if sys.argv[1] != "None" and float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$ceil_got" "$CEIL"; then
-        row PASS "ac drive_max_dbfs" "$ceil_got"
+    if [[ $ceil_got == None ]]; then
+        row PASS "ac drive_max_dbfs" "absent (retired by #459)"
     else
-        row FAIL "ac drive_max_dbfs" "$ceil_got (must be ≤ $CEIL)"
+        row FAIL "ac drive_max_dbfs" "$ceil_got present — retired by #459; every emitting command refuses until it is removed"
     fi
     for kv in $CFG; do
         k=${kv%%=*}; want=${kv#*=}
