@@ -39,6 +39,10 @@ cargo fmt --check
 `--workspace` not `-p`. Two branches each passing `-p` can still break in
 combination.
 
+Run each in the foreground, one call each. Never background the gate and wait:
+the session does not resume, and the review is lost (AGENTS.md → headless
+sessions).
+
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
 log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,

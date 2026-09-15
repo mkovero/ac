@@ -169,6 +169,8 @@ qa_loop() {
       echo "  #$n PR #$pr: revising (round $qa_round)"
       pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — not starting a revise"; return 1; }
+      cpre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" \
+        || { echo "  #$n: cannot count PR comments — not starting a revise"; return 1; }
       local revise_rc=0 retry_head
       "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
       if (( revise_rc != 0 && revise_rc != 130 && revise_rc != 143 )); then
@@ -183,12 +185,20 @@ qa_loop() {
       post="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — check the PR by hand"; return 1; }
 
-      # A revise that pushed nothing is the developer saying the block is not
-      # code-fixable. Clearing needs-work here would be this script overruling
-      # that on the developer's behalf — and worse, the reviewed-SHA cache below
-      # would then see a tip qa has already reviewed with a comment on it and
-      # report "raised nothing", which is how a request-changes verdict turns
-      # into "yours to merge". Leave the label. Stop.
+      # A revise that pushed nothing is a design/ux handback (label on the
+      # issue, handled first below) or one of two different facts:
+      #  - the developer posted a PR comment: it is saying the block is not
+      #    code-fixable (a rig measurement, an assumed criterion, a design call);
+      #  - no push AND no comment: the session did not finish — a crash, a turn
+      #    limit, or a headless session that backgrounded its gate and ended its
+      #    turn waiting (AGENTS.md → headless sessions). revise.sh still exits 0
+      #    then, so the retry above never fires. That is not a decline, and the
+      #    fix may be sitting uncommitted in the worktree.
+      # Either way, clearing needs-work here would be this script overruling
+      # the verdict — and the reviewed-SHA cache below would then see a tip qa
+      # has already reviewed with a comment on it and report "raised nothing",
+      # which is how a request-changes verdict turns into "yours to merge".
+      # Leave the label. Stop.
       if [[ $pre == "$post" ]]; then
         ils="$(labels "$n")" || { echo "  #$n: cannot read issue labels — stopping"; return 1; }
         if has needs-design "$ils"; then
@@ -201,11 +211,34 @@ qa_loop() {
           echo "     the PR stays unchanged; ux must resolve the output decision"
           STATE=needs-ux; return 0
         fi
+        local cpost branch dirty
+        cpost="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" || cpost=""
         echo "  #$n PR #$pr: revise pushed nothing — tip is still $post"
-        echo "     needs-work stays. re-reviewing an identical tip cannot change"
-        echo "     the verdict, so the block is one only you can clear: a rig"
-        echo "     measurement, acceptance of an assumed criterion, a design call."
-        echo "     read the developer's PR comment for which."
+        if [[ -n $cpost ]] && (( cpost > cpre )); then
+          echo "     the developer commented: needs-work stays. re-reviewing an"
+          echo "     identical tip cannot change the verdict, so the block is one"
+          echo "     only you can clear: a rig measurement, acceptance of an assumed"
+          echo "     criterion, a design call. read the developer's PR comment for which."
+        else
+          branch="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefName --jq .headRefName 2>/dev/null)" || branch=""
+          dirty=""
+          [[ -n $branch && -d $WT_BASE/$branch ]] \
+            && dirty="$(git -C "$WT_BASE/$branch" status --porcelain --untracked-files=no 2>/dev/null | wc -l)"
+          if [[ -z $cpost ]]; then
+            echo "     cannot count PR comments — either the developer declined (read"
+            echo "     its PR comment) or the session did not finish (below)."
+          else
+            echo "     and posted no PR comment: the developer session did not finish."
+            echo "     this is NOT a decline — likely a crash, a turn limit, or a"
+            echo "     headless session that backgrounded its gate and ended its turn."
+          fi
+          if [[ -n $dirty ]] && (( dirty > 0 )); then
+            echo "     $WT_BASE/$branch has $dirty uncommitted tracked file(s) — the"
+            echo "     fix may be written but not committed. inspect before re-running."
+          fi
+          echo "     needs-work stays. session log:"
+          echo "       ls -t ${AC_LOG_DIR}/*developer-pr-$pr-rev*.jsonl | head -1"
+        fi
         STATE=needs-human; return 0
       fi
 
