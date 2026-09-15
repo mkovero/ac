@@ -70,3 +70,37 @@ fi
 rm -rf "$AC_HOME"
 unset AC_HOME
 echo "lib.sh resolve_rev + rig_dest composition (preflight.sh's actual line): fails closed on a missing revision"
+
+# preflight.sh's fix above only closed the bug where preflight.sh itself hit
+# it; xrun-soak.sh:26 and probe-outputs.sh:42 composed resolve_rev/rig_dest
+# the same nested, broken way and were unfixed by that commit (PR #441 QA
+# finding, fifth pass). Both are now split identically to preflight.sh — run
+# each script's exact `rev`/`dest` lines (copied here, not re-derived) so a
+# regression back to the nested form in either file is caught.
+AC_HOME="$(mktemp -d)"
+mkdir -p "$AC_HOME/target-rig-stage"
+# xrun-soak.sh's composed form
+rev=nonexistent-rev
+if (
+    if [[ $rev != installed ]]; then
+        rev="$(resolve_rev "$rev")" || exit 1
+        rig_dest "$rev"
+    fi
+) >/dev/null 2>&1; then
+    echo "FAIL: xrun-soak.sh's rev/dest resolution should fail closed on a missing revision"
+    exit 1
+fi
+# probe-outputs.sh's composed form (identical shape, separate call site)
+rev=nonexistent-rev
+if (
+    if [[ $rev != installed ]]; then
+        rev="$(resolve_rev "$rev")" || exit 1
+        rig_dest "$rev"
+    fi
+) >/dev/null 2>&1; then
+    echo "FAIL: probe-outputs.sh's rev/dest resolution should fail closed on a missing revision"
+    exit 1
+fi
+rm -rf "$AC_HOME"
+unset AC_HOME
+echo "lib.sh resolve_rev + rig_dest composition (xrun-soak.sh / probe-outputs.sh): fails closed on a missing revision"

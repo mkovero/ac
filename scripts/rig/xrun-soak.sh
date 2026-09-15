@@ -23,7 +23,14 @@ while (($#)); do
 done
 [[ $secs =~ ^[0-9]+$ && $secs -ge 10 ]] || die "seconds must be an integer ≥ 10"
 dest=""
-if [[ $rev != installed ]]; then dest="$(rig_dest "$(resolve_rev "$rev")")"; fi
+# See preflight.sh for why this must be split rather than nested: resolve_rev's
+# exit 1 would otherwise only kill the inner command substitution, and
+# rig_dest's own (always-0) exit status is what `set -e` would see (PR #441
+# QA finding, fifth pass).
+if [[ $rev != installed ]]; then
+    rev="$(resolve_rev "$rev")" || exit 1
+    dest="$(rig_dest "$rev")"
+fi
 
 echo "### xrun soak ($RIG_NAME, ${secs} s, capture-only ac monitor on $RIG_ANALOG_CAPTURES inputs)"
 echo
