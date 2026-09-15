@@ -361,6 +361,15 @@ impl AudioEngine for CpalEngine {
     }
 
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
+        self.play_and_capture_cancellable(samples, tail_s, &AtomicBool::new(false))
+    }
+
+    fn play_and_capture_cancellable(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        stop: &AtomicBool,
+    ) -> Result<Vec<f32>> {
         if samples.is_empty() {
             anyhow::bail!("play_and_capture: empty stimulus");
         }
@@ -381,6 +390,11 @@ impl AudioEngine for CpalEngine {
         let mut ok = false;
         loop {
             std::thread::sleep(Duration::from_millis(10));
+            if stop.load(Ordering::Relaxed) {
+                self.state.silence.store(true, Ordering::Relaxed);
+                self.state.one_shot_active.store(false, Ordering::Release);
+                anyhow::bail!("play_and_capture cancelled");
+            }
             if self.state.ring.lock().unwrap().len() >= n_total {
                 ok = true;
                 break;
