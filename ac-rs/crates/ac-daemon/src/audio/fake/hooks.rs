@@ -58,6 +58,47 @@ pub(super) fn period_size_override() -> Option<u32> {
     })
 }
 
+/// Opt-in, fake-only test hooks (#368): let an external integration test
+/// simulate a low/no-SNR capture — the muted-route rig case #368's AC3
+/// needs reachable under `--fake-audio`, which by default always returns a
+/// clean, noiseless delayed copy of the played signal (the loopback shape
+/// every other τ test relies on).
+///
+/// `AC_FAKE_TAU_GAIN_OVERRIDE`: models the loopback cable's own gain, so it
+/// scales both `play_and_capture`'s played-signal copy (the τ ESS) and
+/// `capture_block`'s tone synthesis (`calibrate` step 2's captured level,
+/// via `capture_rms`) — the same cable, read by two different captures.
+/// `1.0` (unset) keeps the existing unity loopback on both paths; `0.0`
+/// simulates a fully muted route. Before PR #384's codex-qa finding this
+/// scaled only `play_and_capture`, so an off-unity gain never reached step
+/// 2's `captured_dbfs`/`loopback` fields.
+/// `AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE`: peak amplitude of broadband
+/// dither added to every sample of `play_and_capture`'s output. `0.0`
+/// (unset) is byte-identical to pre-#368 behaviour — with the gain also at
+/// its default, `out[j] = 0.0 + s * 1.0 == s`. Combined with a `0.0` gain,
+/// the deconvolved IR then contains only the dither at every position, so
+/// the peak the daemon finds is indistinguishable from its own noise
+/// floor, matching a real muted route's low pre-impulse SNR.
+pub(super) fn tau_gain_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_GAIN_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0)
+    })
+}
+
+pub(super) fn tau_noise_amplitude_override() -> f32 {
+    static OVERRIDE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        std::env::var("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0)
+    })
+}
+
 /// Opt-in, fake-only test hook (#369): lets a test drive one or both of
 /// `measure_tau_twice`'s two lifecycles across a nonzero xrun count.
 /// Without this, `FakeEngine::xruns()` never leaves the 0 it is
