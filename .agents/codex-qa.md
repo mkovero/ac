@@ -152,7 +152,9 @@ QA comment, as required by the read-order rule.
 Run a targeted test only when it would resolve a concrete uncertainty or
 attempt to disprove one of your findings. Do not run the full workspace gate
 merely to reproduce the fresh Claude QA result. Never use test output from the
-PR body or developer comment as substitute evidence.
+PR body or developer comment as substitute evidence. Any test you do run
+goes in the foreground: the session does not resume after a backgrounded
+command (AGENTS.md → headless sessions).
 
 ### step 4 — disprove your own findings
 

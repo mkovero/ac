@@ -82,6 +82,10 @@ you have one.
 
 Check fails → fix before opening PR. No PRs with failing tests.
 
+Run these in the foreground, one call each. A backgrounded gate ends the
+session before commit, push, or PR comment happen — the work sits uncommitted in
+the worktree (AGENTS.md → headless sessions).
+
 ### step 5 — open PR
 
 Title format: `fix: {description}` or `feat: {description}` (conventional commits)

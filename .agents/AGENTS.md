@@ -119,5 +119,27 @@ This rule narrows reading cost, not evidence. A location cited in a durable
 comment must still have been opened, and a scope manifest remains the boundary
 for what may be changed.
 
+## headless sessions — every role
+
+Pipeline roles run non-interactively (`bin/*.sh` → `claude -p` or `codex exec`).
+The session has **no later turn**: when your reply ends, the process exits. Nothing
+wakes it for a finished background command.
+
+- **Never background a command whose result you need.** Gate commands
+  (`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`)
+  run in the foreground, one call each, with the tool timeout raised to its
+  maximum. A fresh target dir makes each one take minutes — still foreground.
+- **Deliverable before the turn ends.** The review comment, the push, the PR
+  comment, the labels — whatever your role produces must already exist when you
+  stop. "Waiting for the background run" is the end of the session, with
+  nothing posted.
+- **A step that cannot finish in one call** (e.g. over the timeout): say so in
+  your comment and give the verdict the evidence supports. Don't park it.
+
+Concrete bad output, 2026-09-15, PR #437 — three rounds lost:
+- qa: *"Holding here — clippy compiling full workspace in a fresh isolated target dir … Will resume automatically once it finishes."* → no review.
+- developer: *"Standing by for the `cargo test --workspace` background run to finish before posting the PR comment."* → fix written, never committed or pushed.
+- qa: *"Waiting on background gate run — will continue the review once notified."* → no review.
+
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.
