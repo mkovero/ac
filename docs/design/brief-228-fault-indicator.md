@@ -141,4 +141,4 @@ Four facts not yet in those documents:
 Constraint on stimulus, if any part of this reaches the rig: -40 dBFS maximum, and
 never emit without explicit per-run consent from Markus.
 
-Build gates, run in ac-rs/: cargo test | cargo clippy -- -D warnings | cargo fmt --check
+Build gates, run in ac-rs/: cargo test | cargo clippy --workspace --all-targets -- -D warnings | cargo fmt --check

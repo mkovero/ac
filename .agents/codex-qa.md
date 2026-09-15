@@ -137,7 +137,7 @@ name the field the assertion checks and confirm the fake models it.
 
 ```bash
 cargo test --workspace
-cargo clippy -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
