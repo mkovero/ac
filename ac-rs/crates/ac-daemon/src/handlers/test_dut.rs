@@ -7,16 +7,42 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
+use ac_core::shared::emission_level::{
+    DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS, UNTYPED_LEVEL_MAX_DBFS,
+};
 
 use crate::audio::AudioEngine;
 use crate::handlers::mic;
 use crate::server::ServerState;
 
 use super::{
-    busy_guard, cal_dbu_str, cal_guard, cal_out_dbu_str, capture_rms, cfg_guard,
+    busy_guard, cal_dbu_str, cal_guard, cal_out_dbu_str, capture_rms, cfg_guard, emission_guard,
     make_engine_for_state, median, ref_output_migration_warning, resolve_input, resolve_output,
     resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker, TestResult,
 };
+
+const THD_LEVELS_DBFS: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0];
+const CLIPPING_LEVELS_DBFS: &[f64] = &[
+    -30.0, -27.0, -24.0, -21.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0,
+];
+
+fn untyped_levels(all: &[f64]) -> Vec<f64> {
+    all.iter()
+        .copied()
+        .filter(|&level| level <= UNTYPED_LEVEL_MAX_DBFS)
+        .collect()
+}
+
+fn skipped_level_note(skipped: usize, total: usize) -> String {
+    if skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            "  ({skipped} of {total} points not run: above \
+             {UNTYPED_LEVEL_MAX_DBFS:.1} dBFS, the limit for untyped levels)"
+        )
+    }
+}
 
 pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "test_dut");
@@ -32,7 +58,11 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-20.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
+    // #459: `test_dut` emits, so it goes through the same chokepoint as
+    // every other emitting command — added here per the architect's
+    // manifest, since #360 never covered it.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -236,6 +266,8 @@ pub fn test_dut(state: &ServerState, cmd: &Value) -> Value {
         "ref_out_port": ref_out_port_r,
         "in_port":      in_port_r,
         "ref_port":     ref_port_r,
+        "level_dbfs":   level_dbfs,
+        "max_dbfs":     MAX_EMISSION_DBFS,
         "backend":      backend,
     });
     // #225 migration notice — present on every reply, not just the first, so a
@@ -313,9 +345,10 @@ fn dut_gain(
 }
 
 fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration>) -> TestResult {
-    let levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0];
+    let levels = untyped_levels(THD_LEVELS_DBFS);
+    let skipped = THD_LEVELS_DBFS.len() - levels.len();
     let mut results: Vec<(f64, f64, f64, f64)> = Vec::new(); // (level, thd, thdn, gain)
-    for &level in levels {
+    for &level in &levels {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -348,10 +381,11 @@ fn dut_thd_vs_level(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let skip_note = skipped_level_note(skipped, THD_LEVELS_DBFS.len());
     TestResult::new(
         "THD vs level",
         true,
-        format!("best {best_thd:.4}%  [{parts}]"),
+        format!("best {best_thd:.4}%  [{parts}]{skip_note}"),
         "THD%/gain at each drive level",
     )
 }
@@ -412,7 +446,9 @@ fn dut_freq_response(
 }
 
 fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibration>) -> TestResult {
-    let levels: Vec<f64> = (-30..=0).step_by(3).map(|x| x as f64).collect();
+    let levels = untyped_levels(CLIPPING_LEVELS_DBFS);
+    let skipped = CLIPPING_LEVELS_DBFS.len() - levels.len();
+    let skip_note = skipped_level_note(skipped, CLIPPING_LEVELS_DBFS.len());
     let mut last_clean = None::<f64>;
     let mut clip_level = None::<f64>;
 
@@ -443,19 +479,19 @@ fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibrati
             TestResult::new(
                 "Clipping point",
                 true,
-                format!("onset at {onset} (last clean: {clean})"),
+                format!("onset at {onset} (last clean: {clean}){skip_note}"),
                 "THD > 1% threshold",
             )
         }
         None => match last_clean {
             Some(lv) => {
                 let clean = cal_out_dbu_str(lv, cal);
-                TestResult::new(
-                    "Clipping point",
-                    true,
-                    format!("clean through {clean} (no clipping detected)"),
-                    "THD > 1% threshold",
-                )
+                let detail = if skip_note.is_empty() {
+                    format!("clean through {clean} (no clipping detected)")
+                } else {
+                    format!("no clipping up to {clean}{skip_note}")
+                };
+                TestResult::new("Clipping point", true, detail, "THD > 1% threshold")
             }
             None => TestResult::new(
                 "Clipping point",
@@ -464,5 +500,21 @@ fn dut_clipping_point(eng: &mut dyn AudioEngine, sr: u32, cal: Option<&Calibrati
                 "",
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod emission_level_tests {
+    use super::*;
+
+    #[test]
+    fn every_self_test_ladder_is_nonempty_and_within_the_untyped_bound() {
+        for all in [THD_LEVELS_DBFS, CLIPPING_LEVELS_DBFS] {
+            let retained = untyped_levels(all);
+            assert!(!retained.is_empty());
+            assert!(retained
+                .iter()
+                .all(|&level| level <= UNTYPED_LEVEL_MAX_DBFS));
+        }
     }
 }

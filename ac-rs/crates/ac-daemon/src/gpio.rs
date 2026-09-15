@@ -95,8 +95,8 @@ fn run(serial_path: &str, ctrl_port: u16, data_port: u16) -> anyhow::Result<()> 
     // the level on every button press anyway.
     let out_channel = fetch_output_channel(&mut req);
     eprintln!(
-        "gpio: level={:.2} dBFS  out_ch={}",
-        resolve_level(&mut req),
+        "gpio: level={:.1} dBFS (default)  out_ch={}",
+        resolve_level(),
         out_channel
     );
 
@@ -267,8 +267,8 @@ fn event_processor(
                             req.call(json!({"cmd": "stop", "name": "generate_pink"}));
                             pink_active = false;
                         }
-                        level = resolve_level(&mut req);
-                        eprintln!("gpio: SINE @ {level:.2} dBFS ch {out_channel}");
+                        level = resolve_level();
+                        eprintln!("gpio: SINE @ {level:.1} dBFS (default) ch {out_channel}");
                         sine_active = true;
                         update_leds(&write_port, true, false);
                         let ack = req.call(json!({
@@ -290,8 +290,8 @@ fn event_processor(
                             req.call(json!({"cmd": "stop", "name": "generate"}));
                             sine_active = false;
                         }
-                        level = resolve_level(&mut req);
-                        eprintln!("gpio: PINK @ {level:.2} dBFS ch {out_channel}");
+                        level = resolve_level();
+                        eprintln!("gpio: PINK @ {level:.1} dBFS (default) ch {out_channel}");
                         pink_active = true;
                         update_leds(&write_port, false, true);
                         let ack = req.call(json!({
@@ -374,17 +374,10 @@ impl ReqClient {
     }
 }
 
-/// Resolve 0 dBu in dBFS from calibration, or fall back to -20 dBFS.
-fn resolve_level(req: &mut ReqClient) -> f64 {
-    let ack = req.call(json!({"cmd": "get_calibration"}));
-    if let Some(vrms) = ack.get("vrms_at_0dbfs_out").and_then(Value::as_f64) {
-        let vrms_ref = 0.7745966692_f64; // 0 dBu
-        let dbfs = 20.0 * (vrms_ref / vrms).log10();
-        dbfs.clamp(-60.0, -0.5)
-    } else {
-        eprintln!("gpio: calibration unavailable, using -20 dBFS");
-        -20.0
-    }
+/// A button press carries no typed level, so gpio always uses the shared
+/// default. Calibration must not turn an untyped press into a 0 dBu tone.
+fn resolve_level() -> f64 {
+    ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS
 }
 
 /// Read output_channel from daemon config.
@@ -414,6 +407,13 @@ fn update_leds(port: &Arc<Mutex<Box<dyn serialport::SerialPort>>>, sine: bool, p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpio_level_is_always_the_named_untyped_default() {
+        let level = resolve_level();
+        assert_eq!(level, ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS);
+        assert!(level <= ac_core::shared::emission_level::UNTYPED_LEVEL_MAX_DBFS);
+    }
 
     fn frame(pin: u8, value: u8) -> Vec<u8> {
         vec![0xAA, pin, value, 0x00, 0x00]

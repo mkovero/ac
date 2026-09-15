@@ -24,7 +24,7 @@ mod common;
 
 use common::{Client, Daemon};
 
-const CEILING_DBFS: f64 = -10.0;
+const CEILING_DBFS: f64 = -20.0;
 /// The configured `fake_correlated_pair` delay most tests lock onto.
 const LOCK_DELAY_SAMPLES: i64 = 400;
 /// Generous — a throttled CI runner's FFT/rayon fan-out can fall well

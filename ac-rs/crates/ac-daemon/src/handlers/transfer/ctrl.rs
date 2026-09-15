@@ -7,6 +7,9 @@
 
 use serde_json::{json, Value};
 
+use ac_core::shared::emission_level::MAX_EMISSION_DBFS;
+
+use crate::handlers::check_emission_or_refuse;
 use crate::server::ServerState;
 
 /// `set_drive` (§4.3) — start, stop, or re-level the stimulus of a
@@ -24,6 +27,12 @@ use crate::server::ServerState;
 /// every message doubles as the keepalive, so every message is a full
 /// state assertion rather than a delta against state the server would
 /// otherwise have to remember.
+///
+/// #459: a level above the fixed maximum is refused, never clamped —
+/// except when `on: false`, which is never checked (ZMQ.md): turning
+/// drive off must never be the one request that can be rejected, or a
+/// client trying to silence a session could be refused into leaving it
+/// driving.
 pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
     let drive = {
         let slot = state.drive_state.lock().unwrap();
@@ -45,15 +54,18 @@ pub fn set_drive(state: &ServerState, cmd: &Value) -> Value {
         _ => return json!({"ok": false, "error": "'level_dbfs' required (finite number)"}),
     };
 
-    let ceiling = state.cfg.lock().unwrap().drive_max_dbfs;
-    // Clamping is normal operation, not an error: a stimulus command
-    // that fails instead of applying a safe level is a worse field
-    // failure than one that quietly applies the ceiling. The echo below
-    // is always the APPLIED value, so the client can see what happened.
-    let applied = level.min(ceiling);
+    let applied = if on {
+        let cfg = state.cfg.lock().unwrap().clone();
+        match check_emission_or_refuse(state, &cfg, level) {
+            Ok(v) => v,
+            Err(reply) => return reply,
+        }
+    } else {
+        level
+    };
     drive.set(on, applied);
 
-    json!({"ok": true, "on": on, "level_dbfs": applied})
+    json!({"ok": true, "on": on, "level_dbfs": applied, "max_dbfs": MAX_EMISSION_DBFS})
 }
 
 /// `relock` (#226) — discard every pair's held delay lock in the

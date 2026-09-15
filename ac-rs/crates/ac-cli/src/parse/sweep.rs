@@ -84,9 +84,17 @@ mod tests {
                 stop,
                 freq,
                 duration,
+                level_defaulted,
             } => {
-                assert!(matches!(start, LevelSpec::Dbfs(v) if (v - (-40.0)).abs() < 1e-9));
-                assert!(matches!(stop, LevelSpec::Dbfs(v) if v.abs() < 1e-9));
+                assert_eq!(
+                    start,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_RAMP_START_DBFS)
+                );
+                assert_eq!(
+                    stop,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_RAMP_STOP_DBFS)
+                );
+                assert!(level_defaulted);
                 assert!((freq - 1000.0).abs() < 1e-9);
                 assert!((duration - 1.0).abs() < 1e-9);
             }

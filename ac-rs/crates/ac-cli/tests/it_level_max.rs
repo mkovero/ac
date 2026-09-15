@@ -1,10 +1,6 @@
-//! End-to-end coverage for #380 (PR #395's QA finding): the CLI must read
-//! the *applied* level back off a clamped sync ack and print the
-//! reconciling line, per #360's UX mockups. `it_plot_ir.rs`'s own tests
-//! only ever run against the default `drive_max_dbfs` (-10 dBFS) with
-//! requests already under it, so none of them exercise the clamp path this
-//! issue is about — this file seeds a lower ceiling instead so a clamp
-//! actually fires.
+//! End-to-end coverage for #459's fixed emission maximum and unified level
+//! display. A successful run prints the emitted level, its provenance, and
+//! the maximum reported by the daemon; an over-maximum request is refused.
 //!
 //! Self-contained `Rig` rather than importing `it_plot_ir.rs`'s: there is
 //! no shared test-support module in this crate to put one in without
@@ -13,7 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,25 +41,15 @@ struct Rig {
 }
 
 impl Rig {
-    /// Spawn `ac-daemon --fake-audio` with `drive_max_dbfs` set to
-    /// `ceiling_dbfs` in its scratch `config.json`, so a request above the
-    /// ceiling actually gets clamped.
-    fn start_with_ceiling(ceiling_dbfs: f64) -> Self {
+    fn start() -> Self {
         let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
         let (ctrl, data) = (base, base + 1);
         let home =
-            std::env::temp_dir().join(format!("ac-cli-clamp-it-{}-{base}", std::process::id()));
+            std::env::temp_dir().join(format!("ac-cli-level-it-{}-{base}", std::process::id()));
         let cfg_dir = home.join(".config").join("ac");
         fs::create_dir_all(&cfg_dir).expect("create scratch config dir");
 
-        fs::write(
-            cfg_dir.join("config.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "drive_max_dbfs": ceiling_dbfs,
-            }))
-            .unwrap(),
-        )
-        .expect("seed config.json");
+        fs::write(cfg_dir.join("config.json"), b"{}\n").expect("seed config.json");
 
         let daemon = Command::new(sibling_binary("ac-daemon"))
             .env("HOME", &home)
@@ -118,15 +104,19 @@ impl Rig {
     /// `current_dir` pinned to the scratch home so `plot level`'s CSV
     /// export (no `session` configured → cwd, see `io::output_dir`) lands
     /// somewhere `Drop` cleans up instead of the crate's own directory.
-    fn run_ac(&self, args: &[&str]) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_ac"))
+    fn run_ac_raw(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ac"))
             .env("HOME", &self.home)
             .env("AC_CTRL_PORT", self.ctrl.to_string())
             .env("AC_DATA_PORT", self.data.to_string())
             .current_dir(&self.home)
             .args(args)
             .output()
-            .expect("run ac");
+            .expect("run ac")
+    }
+
+    fn run_ac(&self, args: &[&str]) -> String {
+        let out = self.run_ac_raw(args);
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(
             out.status.success(),
@@ -147,65 +137,54 @@ impl Drop for Rig {
     }
 }
 
-/// Scalar clamp, `plot ir` leg: requested -6 dBFS against a -30 dBFS
-/// ceiling must print the reconciling line before the IR run starts.
 #[test]
-fn plot_ir_clamped_run_prints_the_reconciling_line() {
-    let rig = Rig::start_with_ceiling(-30.0);
+fn plot_ir_typed_run_prints_level_origin_and_maximum() {
+    let rig = Rig::start();
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
     assert!(
-        stdout
-            .contains("level clamped to ceiling  -6.0 dBFS \u{2192} -30.0 dBFS  (drive_max_dbfs)"),
-        "clamped plot_ir must print the reconciling line:\n{stdout}"
+        stdout.contains("level       -20.0 dBFS  (typed)"),
+        "typed plot_ir must identify its level:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("maximum       0.0 dBFS  (full scale)"),
+        "plot_ir must print the daemon-reported maximum:\n{stdout}"
     );
 }
 
-/// Scalar clamp, unclamped path: ceiling above the requested level must
-/// add no line at all — the byte-for-byte-identical acceptance criterion,
-/// checked here against the real ack round trip rather than just the pure
-/// renderer (see `commands/mod.rs`'s unit tests for that half).
 #[test]
-fn plot_ir_unclamped_run_prints_no_clamp_line() {
-    let rig = Rig::start_with_ceiling(0.0); // ceiling above the requested -6.0 dBFS
-    let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
-    ]);
+fn plot_level_default_run_prints_named_range_and_maximum() {
+    let rig = Rig::start();
+    let stdout = rig.run_ac(&["plot", "level", "1000hz", "3steps"]);
     assert!(
-        !stdout.contains("level clamped"),
-        "unclamped run must add no line:\n{stdout}"
+        stdout.contains("level       -40.0 \u{2192} -30.0 dBFS  (default)"),
+        "default ramp must print its named range:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("maximum       0.0 dBFS  (full scale)"),
+        "{stdout}"
     );
 }
 
-/// Range clamp, degenerate case: the whole requested range sits above the
-/// ceiling and must collapse to the explicit flat annotation, not print as
-/// an ordinary sweep.
 #[test]
-fn plot_level_degenerate_range_prints_the_flat_annotation() {
-    let rig = Rig::start_with_ceiling(-30.0);
-    let stdout = rig.run_ac(&["plot", "level", "-10dbfs", "6dbfs", "1000hz", "3steps"]);
-    assert!(
-        stdout.contains(
-            "applied    -30.0 dBFS  (flat \u{2014} entire requested range exceeds ceiling)"
-        ),
-        "degenerate range must print the flat-collapse annotation:\n{stdout}"
-    );
-}
+fn over_maximum_run_is_refused_without_a_success_level_block() {
+    let rig = Rig::start();
+    let out = rig.run_ac_raw(&["generate", "sine", "1000hz", "1dbfs"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
 
-/// Range clamp, partial case: only the top of the range exceeds the
-/// ceiling — the unmoved bound (start) must not be reported as the
-/// ceiling value.
-#[test]
-fn plot_level_partial_clamp_reports_the_moved_bound_as_ceiling() {
-    let rig = Rig::start_with_ceiling(-30.0);
-    let stdout = rig.run_ac(&["plot", "level", "-40dbfs", "-20dbfs", "1000hz", "3steps"]);
+    assert!(!out.status.success(), "over-maximum request succeeded");
     assert!(
-        stdout.contains("level clamped to ceiling  (drive_max_dbfs -30.0 dBFS)"),
-        "partial clamp must report the ceiling value, not the unmoved bound:\n{stdout}"
+        stderr.contains("level +1.0 dBFS is above full scale (0.0 dBFS)"),
+        "refusal must name the ceiling:\n{stderr}"
     );
     assert!(
-        stdout.contains("applied    -40.0 \u{2192} -30.0 dBFS"),
-        "partial clamp must leave the unmoved bound alone:\n{stdout}"
+        stderr.contains("nothing was emitted"),
+        "refusal must state its side effect:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("level      "),
+        "a refusal must not print a successful level block:\n{stdout}"
     );
 }

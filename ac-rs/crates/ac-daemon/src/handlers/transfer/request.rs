@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS;
+
 /// Parse the `pairs` and legacy `meas_channel`/`ref_channel` shapes of
 /// `transfer_stream` into a canonical pair list. Returns an Err message
 /// suitable for `{"ok": false, "error": ...}` on malformed input.
@@ -57,15 +59,18 @@ pub(super) fn parse_transfer_pairs(cmd: &Value) -> Result<Vec<(u32, u32)>, Strin
 /// Deliberately a pure function of `cmd`: it reads no `ServerState` and
 /// no config, so the whole of the request contract — defaults, ranges,
 /// and the three rejections — is decidable without a daemon, a socket, or
-/// an audio backend. That is why `level_dbfs` is left UNCLAMPED here; the
-/// ceiling is `cfg.drive_max_dbfs`, and folding it in would drag the
-/// config in and make the reachable-value tests need one.
+/// an audio backend. That is why `level_dbfs` is left UNCHECKED here; the
+/// maximum is a build constant checked by the caller
+/// (`ac_core::shared::emission_level::check_emission_level`, #459), and
+/// folding that in here would drag `ServerState` into what is otherwise a
+/// pure function, only to refuse the same way every time.
 #[derive(Debug)]
 pub(super) struct TransferParams {
     pub(super) drive: bool,
     pub(super) drivable: bool,
-    /// As requested. Still to be clamped to `cfg.drive_max_dbfs` by the
-    /// caller (#360) before it reaches `DriveState` or a loudspeaker.
+    /// As requested. Still to be checked against the fixed emission
+    /// maximum by the caller (#459) before it reaches `DriveState` or a
+    /// loudspeaker.
     pub(super) level_dbfs: f64,
     pub(super) fake_correlated_pair: Option<(f64, usize)>,
     pub(super) fake_ring_process_secs: Option<f64>,
@@ -105,7 +110,7 @@ pub(super) fn parse_params(cmd: &Value) -> Result<TransferParams, String> {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
 
     // Fake-audio-only stimulus knob (handoff: parity-completion M1.5),
     // same pattern as `monitor_spectrum`'s `fake_tones`/`fake_noise_dbfs`

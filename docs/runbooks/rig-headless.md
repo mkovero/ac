@@ -23,6 +23,7 @@ measurements share one client (below).
 `transfer_probe` starts the session `drivable`, so it comes up silent and
 `set_drive` raises it, refreshing the 1500 ms dead-man every 250 ms. Without
 `--drive-dbfs` the session is passive and opens no output port.
-`--level-dbfs` is **mandatory** on `ir_probe`: `plot_ir` does not apply the
-config's `drive_max_dbfs` ceiling — only `set_drive` does — so that value is
-the only limit on what reaches the interface.
+`--level-dbfs` is **mandatory** on `ir_probe`, recording an explicit level
+choice for a hardware run. The daemon refuses anything above its fixed
+full-scale (0 dBFS) maximum rather than reducing it silently; the rig's stricter
+standing −40 dBFS rule still applies to the value you type.

@@ -101,7 +101,7 @@ fn capture_live_frame() -> Vec<u8> {
     }));
     assert_eq!(r["ok"], json!(true), "calibrate_mic_curve: {r}");
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true), "calibrate start: {r}");
     c.wait_for_topic("cal_prompt", Duration::from_secs(3))

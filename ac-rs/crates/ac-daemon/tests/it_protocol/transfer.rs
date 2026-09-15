@@ -48,7 +48,7 @@ fn transfer_stream_emits_data_and_done() {
         "meas_channel": 0,
         "ref_channel":  1,
         "drive":        true,
-        "level_dbfs":   -12.0,
+        "level_dbfs":   -20.0,
     }));
     assert_eq!(r["ok"], json!(true), "unexpected REP: {r:?}");
 
@@ -127,7 +127,7 @@ fn transfer_stream_emits_data_and_done() {
 
 #[test]
 fn transfer_stream_default_level_ok() {
-    // `level_dbfs` omitted — the handler's documented default (−10 dBFS
+    // `level_dbfs` omitted — the handler's documented default (−40 dBFS
     // when `drive=true`) must be used without a REP error.
     let d = Daemon::spawn();
     let c = Client::new(&d);
@@ -155,7 +155,7 @@ fn transfer_stream_emits_ir_sidecar() {
         "meas_channel": 0,
         "ref_channel":  1,
         "drive":        true,
-        "level_dbfs":   -12.0,
+        "level_dbfs":   -20.0,
     }));
     assert_eq!(r["ok"], json!(true), "REP: {r:?}");
 
@@ -541,7 +541,7 @@ fn transfer_stream_cal_tags_and_spl_reflect_loaded_calibration() {
     let c = Client::new(&d);
 
     // Voltage cal on channel 0 (both directions get saved by `calibrate`).
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
     let _ = c

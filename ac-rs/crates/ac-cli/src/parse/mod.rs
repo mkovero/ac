@@ -334,6 +334,7 @@ pub enum CommandKind {
     SweepLevel {
         start: LevelSpec,
         stop: LevelSpec,
+        level_defaulted: bool,
         freq: f64,
         duration: f64,
     },
@@ -341,6 +342,7 @@ pub enum CommandKind {
         start: Option<f64>,
         stop: Option<f64>,
         level: LevelSpec,
+        level_defaulted: bool,
         duration: f64,
     },
     // `SweepIr` removed by #282 — `ac sweep ir` is now an alias parsed
@@ -356,6 +358,7 @@ pub enum CommandKind {
         f2: f64,
         duration: f64,
         level: LevelSpec,
+        level_defaulted: bool,
         n_harmonics: Option<u32>,
         window_len: Option<u32>,
         tail_s: Option<f64>,
@@ -364,6 +367,7 @@ pub enum CommandKind {
         start: Option<f64>,
         stop: Option<f64>,
         level: LevelSpec,
+        level_defaulted: bool,
         ppd: u32,
         /// If set, run the concatenated sweep capture through an
         /// IEC 61260-1 filterbank at this bands-per-octave resolution
@@ -373,6 +377,7 @@ pub enum CommandKind {
     PlotLevel {
         start: LevelSpec,
         stop: LevelSpec,
+        level_defaulted: bool,
         freq: f64,
         steps: u32,
     },
@@ -414,16 +419,19 @@ pub enum CommandKind {
         channels: Option<Vec<u32>>,
     },
     GenerateSine {
-        level: Option<LevelSpec>,
+        level: LevelSpec,
+        level_defaulted: bool,
         freq: f64,
         channels: Option<String>,
     },
     GeneratePink {
-        level: Option<LevelSpec>,
+        level: LevelSpec,
+        level_defaulted: bool,
         channels: Option<String>,
     },
     Calibrate {
         level: LevelSpec,
+        level_defaulted: bool,
         output_channel: Option<u32>,
         input_channel: Option<u32>,
     },
@@ -464,6 +472,7 @@ pub enum CommandKind {
     TestDut {
         compare: bool,
         level: LevelSpec,
+        level_defaulted: bool,
     },
     Probe,
     DmmShow,
@@ -693,7 +702,7 @@ Commands:
                   [device <N>] [range <freqStart freqStop>] [dburef <vrms>]
                   [temp <°C>|none] [dmm <host>] [gpio <serialDevice>|off]
                   [server-timeout <2h|30m|120s|off>]                  persist config (~/.config/ac/config.json)
-  calibrate       [output <N>] [input <N>] [level] [show]             level calibration (default: -10dBFS)
+  calibrate       [output <N>] [input <N>] [level] [show]             level calibration
   generate sine   [channels] [level] [freq]                           sine at ch (default all, 1kHz)
   generate pink   [channels] [level]                                  pink noise
   generate level  <start> <stop> [freq] [duration]                    level sweep at fixed frequency (output-only)
@@ -711,6 +720,10 @@ Commands:
   dmm                                                                 read AC Vrms from configured DMM over SCPI
   gpio            [log]                                               USB2GPIO status (log = stream frames)
   report          <path.json> [html|pdf]                              render MeasurementReport JSON (default html, sibling file)
+
+  levels    dBFS, dBu or Vrms — a typed level plays exactly as typed
+            maximum 0 dBFS (full scale); above it is refused, not reduced
+            default -40 dBFS, ramps -40 → -30 dBFS
 
 Deprecated aliases (still work, print a warning, no new spelling):
   sweep level | sweep frequency   -> generate level | generate frequency

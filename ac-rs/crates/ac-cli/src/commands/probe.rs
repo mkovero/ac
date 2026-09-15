@@ -1,4 +1,4 @@
-use super::check_ack;
+use super::{check_ack, print_fixed_level};
 use crate::client::AcClient;
 
 pub fn run(client: &mut AcClient) {
@@ -7,17 +7,12 @@ pub fn run(client: &mut AcClient) {
         "probe",
     );
 
-    println!("\n  Port probe");
-    println!("  {}", "\u{2500}".repeat(50));
-
-    if let Some(ports) = ack.get("ports").and_then(|v| v.as_array()) {
-        for p in ports {
-            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let dir = p.get("direction").and_then(|v| v.as_str()).unwrap_or("?");
-            let active = p.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-            let mark = if active { "*" } else { " " };
-            println!("  {mark} {dir:<8} {name}");
-        }
-    }
+    let n_playback = ack.get("n_playback").and_then(|v| v.as_u64()).unwrap_or(0);
+    let n_capture = ack.get("n_capture").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("\n  Port probe: {n_playback} playback, {n_capture} capture ports");
+    print_fixed_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+    );
     println!();
 }

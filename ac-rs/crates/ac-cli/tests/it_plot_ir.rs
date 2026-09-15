@@ -190,7 +190,7 @@ fn persisted_plot_artifacts_identify_the_live_backend() {
 
     let _ = rig.run_ac(&["plot", "200hz", "400hz", "-20dbfs", "1ppd", "3bpo"]);
     let _ = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     let dir = rig.report_dir();
@@ -241,7 +241,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // 18.0 dB threshold #376 added) — 4096 samples clears it with
     // margin (~27 dB) so this fixture still exercises the passing path.
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     // ── printed arrival is the peak's offset (#378 contingency) ───────
@@ -370,7 +370,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
 fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
     let rig = Rig::start();
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "1024win", "0.1s",
     ]);
 
     assert!(

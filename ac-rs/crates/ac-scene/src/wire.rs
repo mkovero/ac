@@ -39,7 +39,7 @@ use serde::Deserialize;
 
 /// Observed stimulus state (#228) — what the daemon applied to its engine
 /// on this frame's tick, after the `set_drive` dead-man expired a stale
-/// drive and after the clamp to `drive_max_dbfs`.
+/// drive and after the fixed-maximum refusal guard.
 ///
 /// **Observed, not commanded.** A consumer that read its own last
 /// `set_drive` instead would believe the drive was live while the daemon
@@ -50,8 +50,8 @@ pub struct WireDrive {
     /// Applied on this tick.
     #[serde(default)]
     pub on: bool,
-    /// The applied (clamped) level; `null` while off, so there is no stale
-    /// number to misread.
+    /// The requested-and-applied level; `null` while off, so there is no
+    /// stale number to misread. An over-maximum request is refused.
     #[serde(default)]
     pub level_dbfs: Option<f64>,
     /// The session opened and connected output ports at launch. `false` is

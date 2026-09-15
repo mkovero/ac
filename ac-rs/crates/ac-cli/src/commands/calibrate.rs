@@ -1,29 +1,24 @@
 use std::io::{self, Write};
 
-use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp};
+use super::{check_ack, get_cal, level_to_dbfs, print_level};
 use crate::client::AcClient;
 use crate::parse::{CommandKind, LevelSpec};
 
 pub fn run(cmd: &CommandKind, client: &mut AcClient) {
-    let (level, out_ch, in_ch) = match cmd {
+    let (level, level_defaulted, out_ch, in_ch) = match cmd {
         CommandKind::Calibrate {
             level,
+            level_defaulted,
             output_channel,
             input_channel,
-        } => (level, output_channel, input_channel),
+        } => (level, *level_defaulted, output_channel, input_channel),
         _ => unreachable!(),
     };
 
     let cal_info = get_cal(client);
     let ref_dbfs = match level {
         LevelSpec::Dbfs(v) => *v,
-        other => {
-            if let Some(ref cal) = cal_info {
-                level_to_dbfs(other, Some(cal))
-            } else {
-                -10.0
-            }
-        }
+        other => level_to_dbfs(other, cal_info.as_ref()),
     };
 
     let mut cmd_json = serde_json::json!({"cmd": "calibrate", "ref_dbfs": ref_dbfs});
@@ -35,12 +30,14 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
     }
 
     let ack = check_ack(client.send_cmd(&cmd_json, Some(5000)), "calibrate");
-    let applied_dbfs = ack
-        .get("ref_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(ref_dbfs);
-    println!("  Calibration started: 1 kHz  |  {ref_dbfs:.1} dBFS");
-    print_level_clamp(ref_dbfs, applied_dbfs);
+    println!("  Calibration started: 1 kHz");
+    print_level(
+        ack.get("ref_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal_info.as_ref(),
+        true,
+    );
     println!("  Press Ctrl+C or type q to cancel.\n");
 
     loop {

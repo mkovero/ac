@@ -27,14 +27,17 @@ pub(super) fn parse_calibrate(args: &[String], show_plot: bool) -> Result<Parsed
     }
 
     let mut tokens = classify_all(&clean)?;
-    let level = pull(&mut tokens, TokenKind::Level)
-        .map(|v| v.as_level())
-        .unwrap_or(LevelSpec::Dbfs(-10.0));
+    let level_arg = pull(&mut tokens, TokenKind::Level);
+    let level_defaulted = level_arg.is_none();
+    let level = level_arg.map(|v| v.as_level()).unwrap_or(LevelSpec::Dbfs(
+        ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS,
+    ));
     check_empty(&tokens)?;
 
     Ok(ParsedCommand {
         cmd: CommandKind::Calibrate {
             level,
+            level_defaulted,
             output_channel,
             input_channel,
         },
@@ -142,10 +145,15 @@ mod tests {
         match p.cmd {
             CommandKind::Calibrate {
                 level,
+                level_defaulted,
                 output_channel,
                 input_channel,
             } => {
-                assert!(matches!(level, LevelSpec::Dbfs(v) if (v - (-10.0)).abs() < 1e-9));
+                assert_eq!(
+                    level,
+                    LevelSpec::Dbfs(ac_core::shared::emission_level::DEFAULT_LEVEL_DBFS)
+                );
+                assert!(level_defaulted);
                 assert!(output_channel.is_none());
                 assert!(input_channel.is_none());
             }
