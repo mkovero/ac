@@ -713,6 +713,106 @@ fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
     );
 }
 
+/// A capture tail too short to hold the reference window is recorded as
+/// unavailable with the tail reason, not silently retried and not folded
+/// into "no reference configured" — the operator supplied one.
+///
+/// This branch was unreachable before #460: `calibrate` measures τ with a
+/// fixed `TAU_TAIL_S` that `tau_tail_s_clears_tau_min_half_window_s_with_margin`
+/// pins clear of the window. `plot_ir`'s `tail_s` is operator-controlled
+/// (budget 0–60 s), so #460 makes it reachable and this is what it produces.
+/// The reference window is `2 × TAU_MIN_HALF_WINDOW_S` = 0.10 s.
+#[test]
+fn plot_ir_reports_a_short_tail_reference_as_unavailable() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let mut req = plot_ir_request(json!({ "distance_m": 0.05 }));
+    req["tail_s"] = json!(0.05);
+    let (_, report) = report_for(&c, req);
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "tail 0.05 s, reference window needs 0.10 s; \
+                 check: lengthen the tail token (e.g. 0.8s)"
+            );
+        }
+        other => panic!("expected a tail-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// An xrun across the capture refuses the reference reading outright,
+/// whatever its SNR — the precedence `analyse_tau_leg` inherits from
+/// #368/#369. A reading taken across a discontinuity is a stable,
+/// repeatable, wrong τ, which is exactly what the bound must not be built
+/// from.
+#[test]
+fn plot_ir_reports_an_xrun_during_capture_as_unavailable() {
+    let d = Daemon::spawn_with(Some(reference_config()), &[("AC_FAKE_XRUNS_OVERRIDE", "1")]);
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "xrun during capture; check: JACK period size, system load"
+            );
+        }
+        other => panic!("expected an xrun-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// A reference peak inside the edge margin of its own window is refused,
+/// not reported — a peak that close to the edge is indistinguishable from
+/// one pinned by an arrival outside the window entirely (#340 AC4), and a
+/// window edge imitates a latency.
+///
+/// The delay is derived, not guessed. At the fake's 48 kHz:
+/// `half = ceil(0.05 × 48000) = 2400`, `window_len = 4800`, and
+/// `check_peak_within_window` refuses when the peak sits within
+/// `round(0.10 × half) = 240` of either edge. The reference peak lands at
+/// `half + delay`, so refusal needs `half + delay ≥ 4800 - 1 - 240`, i.e.
+/// `delay ≥ 2159`. 2200 clears that by 41 samples and still fits the
+/// capture.
+#[test]
+fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
+    let half = (0.05 * FAKE_SR).ceil() as usize;
+    let window_len = 2 * half;
+    let margin = (0.10 * half as f64).round() as usize;
+    let delay: usize = 2200;
+    assert!(
+        half + delay >= window_len - 1 - margin,
+        "test setup: delay {delay} does not reach the edge margin"
+    );
+    assert!(
+        half + delay < window_len,
+        "test setup: delay {delay} puts the peak outside the window"
+    );
+
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[("AC_FAKE_REF_DELAY_SAMPLES", &delay.to_string())],
+    );
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "peak at reference window edge; \
+                 check: reference loopback routing, capture tail"
+            );
+        }
+        other => panic!("expected an edge-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
 /// A reference that is configured but does not resolve is refused before
 /// any audio, not silently run single-ended (#225).
 #[test]
