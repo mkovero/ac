@@ -133,6 +133,27 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         Ok(n) => return point_budget_error("plot", n),
         Err(e) => return request_error("plot", e),
     };
+    // #437 codex-qa: the worker floors each point's capture at `3.0 /
+    // freq` so low frequencies get enough cycles to analyse — but the log
+    // grid is non-decreasing (`checked_log_freq_point_count` above already
+    // refused `stop < start`), so `start_hz` is always the smallest point
+    // and therefore the largest `3.0 / freq` floor. Reject here, before
+    // ports are resolved or the worker spawned, whenever that floor alone
+    // would blow the same ceiling `duration` is already bounded by —
+    // otherwise a tiny `start_hz` bypasses the duration budget entirely
+    // and can hand the backend a non-finite `Duration`.
+    let max_point_duration = f64::max(duration, 3.0 / start_hz);
+    if !max_point_duration.is_finite() || max_point_duration > MAX_STIMULUS_DURATION_S {
+        // Scientific notation: `start_hz` near the low end of this check
+        // (e.g. the codex-qa repro's `1e-300`) makes `3.0 / start_hz` a
+        // several-hundred-digit decimal in fixed-point form.
+        return request_error(
+            "plot",
+            format!(
+                "start_hz {start_hz:e} forces a per-point duration of {max_point_duration:e} s (max(duration, 3/start_hz)), exceeding {MAX_STIMULUS_DURATION_S:.3} s maximum"
+            ),
+        );
+    }
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
     // #360: `plot` puts a stimulus on a physical output, so it is clamped

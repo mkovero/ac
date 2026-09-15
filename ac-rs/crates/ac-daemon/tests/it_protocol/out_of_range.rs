@@ -217,6 +217,24 @@ fn plot_family_rejects_resource_budgets_before_spawn() {
     );
     assert_budget_rejection(&c, json!({"cmd":"plot_ir", "duration":"NaN"}), "duration");
     assert_budget_rejection(&c, json!({"cmd":"plot", "ppd":u64::MAX}), "point");
+    // #437 codex-qa: `plot`'s worker floors each point's capture at
+    // `3.0 / freq`, which the request-level `duration` bound alone does
+    // not cover — a low enough `start_hz` (the smallest point on the
+    // non-decreasing log grid) must be rejected before spawn even though
+    // `duration` itself is within budget.
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":0.001, "stop_hz":0.001, "ppd":1}),
+        "start_hz",
+    );
+    // The codex-qa repro itself: unrejected, this request used to reach
+    // the worker and panic converting the resulting `3.0 / freq` seconds
+    // (well past `Duration`'s representable range) into a `Duration`.
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":1e-300, "stop_hz":1e-300, "ppd":1, "duration":60.0}),
+        "start_hz",
+    );
 }
 
 // ---------------------------------------------------------------------------
