@@ -50,13 +50,13 @@ Always human-only:
 | `ready-to-implement` | triage, architect or ux | developer can pick up |
 | `tier-1` `tier-2` `scene` `view` `scope-none` | triage, architect corrects, qa raises | exactly one. `tier-1` = a standard in the document map governs correctness, so qa runs the standards check. Unlabelled is a triage gap and reads as `tier-1`. qa may raise a label to `tier-1`, never lower one |
 | `in-review` | developer (via PR) | PR open |
-| `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed** |
-| `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed |
+| `claude-approved` | qa (step 5, approve verdict) | Claude QA passed **at the commit it reviewed**, with no pending rig gate |
+| `codex-approved` | codex-qa (pass verdict) | independent Codex QA passed at the commit it reviewed, with no pending rig gate |
 | `needs-work` | qa **or** codex-qa | PR has issues, developer must revise |
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
-| `requires-rig` | qa | correctness rests on a measurement only the rig can make — human clears it after the measurement exists |
+| `requires-rig` | qa | correctness rests on a measurement only the rig can make — blocks both approval labels; human clears it after the measurement exists |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
@@ -67,6 +67,10 @@ Always human-only:
 `claude-approved` and `codex-approved` are set by different reviewers running
 under different models, and both must be present for a human to merge (see
 human gates). Neither agent may set the other's label.
+
+Neither approval label may be applied while `requires-rig` is present. Tree QA
+defines the measurement and stops at the rig gate; after the measurement is
+recorded and a human clears `requires-rig`, QA runs again at the same commit.
 
 **Whoever applies `blocked` names the exact condition that lifts it**, in the
 comment that applies it: *"#180 merged → remove `blocked`"*. #181 and #182 are
@@ -95,6 +99,25 @@ acceptance criterion instead of living only in this section.** triage and archit
 
 An untagged numeric criterion defaults to `assumed` — the default fails
 toward more scrutiny, not less. 
+
+## bounded reading discipline — every role
+
+Reading a file means obtaining enough direct evidence for the decision at
+hand; it does not mean printing every byte of every named file. Start with the
+diff, named symbols, headings, or a search restricted to the already-authorised
+paths, then open the surrounding region. Read a small file in full when that is
+cheaper. Expand into callers, adjacent sections, or the full file only when the
+local context leaves a concrete question unanswered.
+
+Do not batch-dump large files. Tool-output truncation in one batch does not
+invalidate files or regions that were returned successfully, and is not a
+reason to reread them. Continue only from the missing region. A required read
+order governs the first inspection of each source; it does not require an
+exhaustive linear scan before useful work begins.
+
+This rule narrows reading cost, not evidence. A location cited in a durable
+comment must still have been opened, and a scope manifest remains the boundary
+for what may be changed.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

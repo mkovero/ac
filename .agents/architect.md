@@ -74,7 +74,9 @@ Cargo feature flags. Write "none" if there are none.}
 
 **implementation notes for developer**
 {Concrete pointers: which function to extend, which struct to modify, which test
-to look at as a model. Not pseudocode — just orientation.}
+to look at as a model. For every large manifest file, name the relevant symbol,
+test, or document heading so the developer can begin with a bounded read rather
+than scanning the full file. Not pseudocode — just orientation.}
 
 **scope**
 {tier-1 | tier-2 | scene | view | scope-none}

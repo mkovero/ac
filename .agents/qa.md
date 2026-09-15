@@ -68,8 +68,7 @@ memory, no redefinition here):
   `AGENTS.md` states for an agent asserting a mechanism, applied here to a
   reviewer inheriting one.
 
-A flagged `derived`/`assumed` criterion withholds `in-review` — apply
-`needs-work` — unless one of:
+A flagged `derived`/`assumed` criterion needs one of:
 - the gap is closed with evidence in the PR (a measurement, a rig run, a
   cited derivation the review comment can point to directly), or
 - a human has already posted an explicit comment on the issue accepting the
@@ -77,9 +76,23 @@ A flagged `derived`/`assumed` criterion withholds `in-review` — apply
   gates: merge is human-only because agent review is not independent, and
   neither is an agent's acceptance of another agent's assumption).
 
-This blocks only the flagged criterion. A `measured` criterion failing spec
-coverage is a correctness issue, reported in that section below, not folded
-into this one.
+Route an unresolved gap by what can close it:
+
+- Evidence the developer can add in the tree or derive from already-known
+  quantities → `request-changes` and `needs-work`. Name the missing artifact or
+  derivation. This is developer work.
+- Evidence only a physical rig can produce, while the implementation correctly
+  enforces the specified value → `rig-pending` and `requires-rig`, as specified
+  in the dedicated section below. Do **not** apply `needs-work`: sending this to a
+  developer cannot produce the measurement and creates a dev→QA loop with no
+  possible source change.
+- The implementation does not enforce the specified value correctly →
+  `request-changes` and `needs-work`, independently of provenance. This is a
+  code defect, not an evidence gap.
+
+In every case, flag the unresolved criterion in the spec-coverage table. A
+`measured` criterion failing spec coverage is a correctness issue, reported in
+that section below, not folded into this one.
 
 ### step 2 — review the diff
 
@@ -93,6 +106,12 @@ file opens, and both are cheap:
   one level out.
 
 Both are leads, not findings. The checklist below runs in full either way.
+
+Open changed hunks and their enclosing symbols first. Do not read an entire
+large file merely because it appears in the diff or manifest; expand outward
+only to answer a concrete caller, invariant, or compatibility question. If a
+batched tool result truncates, continue from the missing region without
+replaying regions already returned.
 
 Check:
 - **correctness** — implementation do what spec says?
@@ -143,6 +162,8 @@ Post PR review in this structure:
 ```
 <!-- agent: qa -->
 
+## qa — PR #N at <full current head SHA>
+
 ### spec coverage
 | criterion | provenance | covered | notes |
 |---|---|---|---|
@@ -171,7 +192,7 @@ Post PR review in this structure:
 {Any files touched outside spec scope. If none: "none."}
 
 ### verdict
-{approve | request-changes | request-changes: design}
+{approve | rig-pending | request-changes | request-changes: design}
 {One sentence justification.}
 
 ### sent back to
@@ -186,12 +207,16 @@ would falsify the claim. See step 5.}
 
 ### step 5 — apply label
 - Approving → apply `claude-approved`, leave `in-review` in place
+- Rig pending → apply `requires-rig`, remove `claude-approved` and
+  `needs-work`, and leave `in-review` in place. The human clears
+  `requires-rig` after recording the measurement; the next full QA pass can
+  then approve at the same commit.
 - Requesting changes → apply `needs-work`, remove `in-review`. Do **not** apply
   `claude-approved`; the pairing of `claude-approved` with a request-changes
   verdict is what tells a reader the finding came from Codex, so never produce
   it here.
-- Correctness turn on a physical measurement you cannot make from the tree →
-  apply `requires-rig` **in addition to** whichever of the above applies
+- Correctness turns on a physical measurement you cannot make from the tree →
+  use the `rig-pending` verdict above, not an approval or request-changes
 - The defect is in the **design**, not the implementation → apply `needs-work`
   as above, and additionally apply `needs-design` **on the issue** (or
   `needs-ux` on the issue, where the thing that is wrong is what the operator
@@ -200,6 +225,13 @@ would falsify the claim. See step 5.}
 
 `claude-approved` is not a merge signal. It puts the PR in the Codex queue merge needs a human. You never set or clear `codex-approved` — if you disagree with a Codex
 finding, say so in your review comment and leave the label alone.
+
+An explicit full re-review at the same commit is a new review pass when the
+governing agent spec, issue decision, or human evidence changed after the old
+verdict. Re-evaluate under the current inputs, post a superseding review
+comment, and update labels to the new verdict. "No new commit" is not a reason
+to preserve a verdict whose governing rule changed; the commit is the subject
+of review, not the only review input.
 
 ### sending it back to architect or ux — the design is wrong, not the code
 
@@ -262,11 +294,18 @@ Apply it when the PR change or depend on:
 - timing that depend on real device or driver behaviour rather than the test
   clock
 
-Verdict and `requires-rig` are separate axes. A PR can be `approve` +
-`requires-rig`: the code is right as far as the tree can show, and one
-measurement remain before it should land. Say that plainly in the
-justification — do not downgrade to `request-changes` to express it, because
-that send the PR back to a developer who cannot take the measurement either.
+`requires-rig` is a pre-approval state. The code may be right as far as the
+tree can show, but QA has not established the acceptance criterion until the
+measurement exists. Use `rig-pending`; do not apply `claude-approved` and do
+not downgrade to `request-changes`, because that sends the PR back to a
+developer who cannot take the measurement either.
+This includes an unresolved `derived`/`assumed` acceptance criterion when the
+implementation correctly enforces the specified value and only physical rig
+evidence can validate that value. Step 1 routes that case here explicitly.
+
+After the measurement record exists and a human clears `requires-rig`, run a
+full QA pass even when the commit is unchanged. Verify the record closes the
+named falsification test before applying `claude-approved`.
 
 Where the measurement is one the rig role would take, say which block of
 `$AC_HOME/rig-verify-queue.md` it belong to, or that it needs a new one. The

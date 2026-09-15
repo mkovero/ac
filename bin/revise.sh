@@ -19,14 +19,27 @@ wt="$(ensure_worktree "$branch" "$WT_BASE/$branch")" \
   || { echo "cannot get a worktree for $branch" >&2; exit 1; }
 cd "$wt"
 sparse_trim "$wt"
-git pull -q --ff-only 2>/dev/null || true
+git fetch -q origin "$branch"
+# A cut-off Codex run may have pushed the PR commit while its sandbox was
+# unable to advance this linked worktree's Git metadata. If the local tip is a
+# strict ancestor of the remote PR tip, advance only HEAD/index and preserve
+# every working-tree edit for the resumed revision.
+if [[ $(git rev-parse HEAD) != $(git rev-parse "origin/$branch") ]] \
+    && git merge-base --is-ancestor HEAD "origin/$branch"; then
+  git reset --mixed "origin/$branch"
+fi
 link_support "$wt"
 
 AC_TAG="pr-$n-rev" run developer "PR #$n in $AC_REPO is labelled needs-work. \
 Read the agent:qa review comment on it and address every point raised. This is \
 a revision: the branch and the PR already exist — commit and push to this \
-branch, do not open a new PR and do not change labels. Reply to the review \
-points in a PR comment so the next QA pass can see what you did and why. Any \
+branch, do not open a new PR. Preserve PR labels except the mandatory removal \
+of claude-approved and codex-approved when the branch changes. If the finding is outside the \
+manifest or requires a design/UX decision, apply needs-design or needs-ux on \
+the ISSUE as required by your role spec, leave the PR unchanged, and stop. \
+Only architect may expand the file manifest: files named by a newer UX comment \
+remain out of scope until architect adds them. Reply to the review points in a \
+PR comment so the next QA pass can see what you did and why. Any \
 point you disagree with, say so there rather than silently leaving it.
 
 Before you start: check the linked issue for an architect or ux comment newer \
