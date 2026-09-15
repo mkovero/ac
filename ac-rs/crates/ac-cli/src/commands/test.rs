@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{check_ack, get_cal, level_to_dbfs, print_level};
+use super::{check_ack, get_cal, level_to_dbfs};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -59,7 +59,7 @@ pub fn run_hardware(cmd: &CommandKind, client: &mut AcClient) {
     }
 
     check_ack(client.send_cmd(&json, None), "test_hardware");
-    println!("\n  Hardware test started...\n");
+    println!("\n  Hardware test\n");
 
     io::print_freq_header(false);
 
@@ -107,6 +107,9 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         } => (*compare, level, *level_defaulted),
         _ => unreachable!(),
     };
+    // Provenance remains part of parsing and its default tests, but the
+    // operator's final #459 ruling exempts self-test level rows.
+    let _ = level_defaulted;
 
     let cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -117,16 +120,8 @@ pub fn run_dut(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut Ac
         json["compare"] = true.into();
     }
 
-    let ack = check_ack(client.send_cmd(&json, None), "test_dut");
-    println!("\n  DUT test");
-    print_level(
-        ack.get("level_dbfs").and_then(|v| v.as_f64()),
-        level_defaulted,
-        ack.get("max_dbfs").and_then(|v| v.as_f64()),
-        cal.as_ref(),
-        true,
-    );
-    println!();
+    check_ack(client.send_cmd(&json, None), "test_dut");
+    println!("\n  DUT test\n");
 
     io::print_freq_header(have_cal);
 

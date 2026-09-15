@@ -893,7 +893,7 @@ vice versa.
 ```json
 {
   "ok":     true,
-  "max_dbfs": -20.0,
+  "max_dbfs": 0.0,
   "config": { /* full config dict, all keys */ }
 }
 ```
@@ -1007,12 +1007,12 @@ its CLI parent noun moved.
 }
 ```
 
-The defaults are −40 and −30 dBFS. Either endpoint above the fixed −20 dBFS
-maximum is refused before worker spawn; no point is clamped.
+The defaults are −40 and −30 dBFS. Either endpoint above full scale (0 dBFS)
+is refused before worker spawn; no point is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 The reply echoes the requested endpoints unchanged.
@@ -1047,11 +1047,12 @@ is a deprecated alias). Wire `cmd` unchanged — same reasoning as
 }
 ```
 
-The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply equals the accepted request.
@@ -1115,7 +1116,7 @@ An out-of-budget request returns `ok: false`, confirms that the stimulus is
 silent, and emits no audio. `stop` cancels both the sweep and tail portions of
 an accepted `plot_ir` request.
 
-`level_dbfs` above the fixed −20 dBFS maximum is refused before worker spawn.
+`level_dbfs` above full scale (0 dBFS) is refused before worker spawn.
 
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
 orders must not overlap, so each order's gate is clamped down to the
@@ -1127,7 +1128,7 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply equals the accepted request, and the report's
@@ -1237,11 +1238,12 @@ before resolving ports or spawning a worker, when `max(duration, 3.0 /
 start_hz)` is non-finite or exceeds the same 60-second ceiling — so a very low
 `start_hz` can be rejected even when `duration` itself is within range.
 
-The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply equals the accepted request; each
@@ -1299,12 +1301,12 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
 `duration` must be greater than 0 and at most 60 seconds. `steps` must be from
 1 through 10000. Both are validated before worker spawn.
 
-The defaults are −40 and −30 dBFS. Either endpoint above −20 dBFS is
-refused before worker spawn; no step is clamped.
+The defaults are −40 and −30 dBFS. Either endpoint above full scale
+(0 dBFS) is refused before worker spawn; no step is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `start_dbfs`/`stop_dbfs` in the reply are the applied endpoints.
@@ -1474,11 +1476,12 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
-The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply equals the accepted request.
@@ -1506,11 +1509,12 @@ Plays continuous pink noise until stopped.
 }
 ```
 
-The default is −40 dBFS. A value above −20 dBFS is refused, never clamped.
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply is the applied value.
@@ -1538,11 +1542,11 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 }
 ```
 
-`ref_dbfs` above the fixed −20 dBFS maximum is refused, never clamped.
+`ref_dbfs` above full scale (0 dBFS) is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "ref_dbfs": <float>, "max_dbfs": -20.0 }
+{ "ok": true, "ref_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `ref_dbfs` in the reply is the accepted (or defaulted) value.
@@ -2001,7 +2005,7 @@ every other observable looking correct.
   "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
                              //   silent until `set_drive`. Implied by drive=true.
   "level_dbfs":   <float>,   // meaningful when drive or drivable=true; default -40;
-                             //   refused above the fixed -20 dBFS maximum
+                             //   refused above full scale (0 dBFS)
 
   // Either the multi-pair form …
   "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
@@ -2041,7 +2045,7 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "ref_port":     "<capture-port>",
   "meas_channel": <int>,
   "ref_channel":  <int>,
-  "max_dbfs":     -20.0
+  "max_dbfs":     0.0
 }
 ```
 
@@ -2492,10 +2496,10 @@ state.
 
 **Reply** — echoes the accepted state:
 ```json
-{ "ok": true, "on": true, "level_dbfs": -20.0, "max_dbfs": -20.0 }
+{ "ok": true, "on": true, "level_dbfs": -20.0, "max_dbfs": 0.0 }
 ```
 
-When `on` is true, a level above −20 dBFS is refused and the drive state is
+When `on` is true, a level above full scale (0 dBFS) is refused and the drive state is
 unchanged. When `on` is false, the level is not checked so silencing can never
 be refused. Successful replies echo the request exactly.
 
@@ -2720,7 +2724,7 @@ Discovers routing: which playback ports carry an analog signal, and which
 capture ports are looped back to them. Spawns a worker and reports on
 DATA; the CTRL reply only confirms the launch.
 
-**The worker emits a 1 kHz tone at −20 dBFS**, on one playback port at a
+**The worker emits a 1 kHz tone at −30 dBFS**, on one playback port at a
 time, with every other output disconnected.
 
 The output scan needs a DMM (`dmm_host` in config). Without one it is
@@ -2737,7 +2741,7 @@ No arguments.
 
 **Reply**
 ```json
-{ "ok": true, "n_playback": <int>, "n_capture": <int>, "level_dbfs": -20.0, "max_dbfs": -20.0 }
+{ "ok": true, "n_playback": <int>, "n_capture": <int>, "level_dbfs": -30.0, "max_dbfs": 0.0 }
 ```
 
 **DATA frames.** Every frame carries `"cmd": "probe"` and a `"phase"`:
@@ -2754,7 +2758,7 @@ No arguments.
 the same as a measured zero. `analog` is `vrms > 10 mVrms`.
 
 `loopback` is emitted **only** for a pair measuring above 20 dB below the
-probe tone (−40 dBFS in this build), so a
+probe tone (−50 dBFS in this build), so a
 pair that never appears means no loopback was detected, not that a frame
 was dropped. `level_dbfs` is rounded to one decimal.
 
@@ -2831,7 +2835,7 @@ terminal frame.
   "ref_out_port": "<port>",
   "in_port":      "<port>",
   "ref_port":     "<port>",
-  "max_dbfs":     -20.0,
+  "max_dbfs":     0.0,
   "warnings":     ["<string>", ...]   // optional — see `warnings` above
 }
 ```
@@ -2887,7 +2891,7 @@ Requires a reference channel, and refuses with the same error as
 
 `compare` optional, default `false`. `level_dbfs` optional, default
 `-40.0` — it sets the drive for the gain and frequency-response tests and
-is refused above the fixed −20 dBFS maximum.
+is refused above full scale (0 dBFS).
 
 **Reply** — same shape as `test_hardware`:
 ```json
@@ -2898,7 +2902,7 @@ is refused above the fixed −20 dBFS maximum.
   "in_port":      "<port>",
   "ref_port":     "<port>",
   "level_dbfs":   <float>,
-  "max_dbfs":     -20.0,
+  "max_dbfs":     0.0,
   "warnings":     ["<string>", ...]   // optional
 }
 ```

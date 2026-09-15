@@ -34,8 +34,8 @@ pub fn run_level(cmd: &CommandKind, client: &mut AcClient) {
         "sweep_level",
     );
     print_level_range(
-        start_db,
-        stop_db,
+        ack.get("start_dbfs").and_then(|v| v.as_f64()),
+        ack.get("stop_dbfs").and_then(|v| v.as_f64()),
         level_defaulted,
         ack.get("max_dbfs").and_then(|v| v.as_f64()),
         cal.as_ref(),

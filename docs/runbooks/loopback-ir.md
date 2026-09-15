@@ -42,7 +42,7 @@ through the wrong thing. `AC_LOOPBACK_LEVEL_DBFS` is **mandatory**
 whenever they are set: naming real ports means driving real outputs. The
 test refuses a value above the rig's standing −40 dBFS limit before it
 starts the daemon. The daemon independently refuses anything above its
-fixed −20 dBFS product maximum; it never clamps. Unset, all three default
+full-scale (0 dBFS) product maximum; it never clamps. Unset, all three default
 to the self-loop at −40 dBFS and the dummy invocation above is unchanged.
 
 `--nocapture` prints the record block: chain, sample rate, window length,

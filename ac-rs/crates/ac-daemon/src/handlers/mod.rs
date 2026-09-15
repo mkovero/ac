@@ -220,7 +220,7 @@ fn emission_refused(message: String) -> Value {
 }
 
 /// The retired `drive_max_dbfs` config key is present. Loud and specific —
-/// names the key, the config file, and the fixed maximum — because
+/// names the key, the config file, and the full-scale maximum — because
 /// silently ignoring a key that used to do something is the #225 defect
 /// class, and refusing every emission until it is removed is the loud form
 /// of the fix #225 already established (`orphaned_sticky`, above).
@@ -228,9 +228,10 @@ fn retired_drive_max_dbfs_error(state: &ServerState, configured: f64) -> Value {
     json!({
         "ok": false,
         "error": format!(
-            "drive_max_dbfs no longer sets a limit ({configured} in config) — remove it \
-             from {}\n         the maximum is {MAX_EMISSION_DBFS:.1} dBFS, fixed in this build \
-             — nothing was emitted",
+            "drive_max_dbfs {configured:.1} no longer limits emission\n\
+             typed levels play exactly as typed, up to {MAX_EMISSION_DBFS:.1} dBFS (full scale)\n\
+             remove it from {}\n\
+             nothing was emitted",
             state.config_path.display()
         ),
         "max_dbfs": MAX_EMISSION_DBFS,

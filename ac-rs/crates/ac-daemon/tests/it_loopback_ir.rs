@@ -34,7 +34,7 @@
 //! `AC_LOOPBACK_LEVEL_DBFS` becomes **mandatory** and the test panics
 //! without it rather than inheriting the self-loop level. The constructor
 //! also refuses a real-port level above the rig's standing −40 dBFS limit.
-//! The product's fixed −20 dBFS maximum is an additional daemon backstop;
+//! The product's full-scale (0 dBFS) maximum is an additional daemon backstop;
 //! it does not replace the stricter per-run rig rule.
 
 use std::env;

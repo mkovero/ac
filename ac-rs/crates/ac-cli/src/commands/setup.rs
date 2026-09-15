@@ -206,11 +206,17 @@ pub fn run(cmd: &CommandKind, client: &mut AcClient) {
         .unwrap_or(20000.0);
     println!("  Range:         {r_start:.0} – {r_stop:.0} Hz");
     match ack.get("max_dbfs").and_then(|v| v.as_f64()) {
+        Some(max) if max == 0.0 => {
+            println!("  Emission max:  {max:.1} dBFS  (full scale, fixed)")
+        }
         Some(max) => println!("  Emission max:  {max:.1} dBFS  (fixed)"),
         None => println!("  Emission max:  (not reported by this daemon)"),
     }
     if let Some(retired) = srv_cfg.get("drive_max_dbfs").and_then(|v| v.as_f64()) {
-        println!("  drive_max_dbfs: {retired:.1}  (retired — remove it; it limits nothing)");
+        println!(
+            "  Retired key:   drive_max_dbfs {retired:.1}  \
+             (every emission refused until removed)"
+        );
     }
 
     // Both the temperature and the speed it implies. #391 removed the

@@ -375,7 +375,7 @@ fn calibrate_ref_dbfs_defaults_and_refuses_above_the_maximum() {
 
     // Explicit request above the maximum: refused, never clamped.
     let r = c.call(json!({
-        "cmd": "calibrate", "ref_dbfs": 0.0, "output_channel": 0, "input_channel": 0,
+        "cmd": "calibrate", "ref_dbfs": 0.1, "output_channel": 0, "input_channel": 0,
     }));
     assert_eq!(r["ok"], json!(false), "{r}");
     assert_eq!(

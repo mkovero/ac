@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use serde_json::{json, Value};
 
 use ac_core::shared::calibration::Calibration;
-use ac_core::shared::emission_level::{MAX_EMISSION_DBFS, SELF_TEST_LEVEL_DBFS};
+use ac_core::shared::emission_level::{
+    MAX_EMISSION_DBFS, SELF_TEST_LEVEL_DBFS, UNTYPED_LEVEL_MAX_DBFS,
+};
 
 use crate::audio::AudioEngine;
 use crate::handlers::mic;
@@ -19,6 +21,32 @@ use super::{
     resolve_output, resolve_ref_input, resolve_ref_output, rms_to_dbfs, send_pub, spawn_worker,
     std_dev, TestResult,
 };
+
+const LINEARITY_LEVELS_DBFS: &[f64] = &[-42.0, -36.0, -30.0, -24.0, -18.0, -12.0, -6.0];
+const THD_FLOOR_LEVELS_DBFS: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -3.0];
+const DMM_TRACKING_LEVELS_DBFS: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0, 0.0];
+
+fn untyped_levels(all: &[f64]) -> Vec<f64> {
+    all.iter()
+        .copied()
+        .filter(|&level| level <= UNTYPED_LEVEL_MAX_DBFS)
+        .collect()
+}
+
+fn skipped_level_note(skipped: usize, total: usize) -> String {
+    if skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            "  ({skipped} of {total} points not run: above \
+             {UNTYPED_LEVEL_MAX_DBFS:.1} dBFS, the limit for untyped levels)"
+        )
+    }
+}
+
+fn dmm_tracking_passes(max_err: f64, points_read: usize, points_run: usize) -> bool {
+    max_err < 2.0 && points_read == points_run
+}
 
 pub fn test_hardware(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "test_hardware");
@@ -239,18 +267,12 @@ fn hw_noise_floor(eng: &mut dyn AudioEngine, in_a: &str, in_b: &str, _sr: u32) -
 }
 
 fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let all_levels: Vec<i32> = (-42..=-5).step_by(6).collect();
-    // #459: filtered against the fixed maximum, never moved down to it.
-    let levels: Vec<i32> = all_levels
-        .iter()
-        .copied()
-        .filter(|&l| f64::from(l) <= MAX_EMISSION_DBFS)
-        .collect();
-    let skipped = all_levels.len() - levels.len();
+    let levels = untyped_levels(LINEARITY_LEVELS_DBFS);
+    let skipped = LINEARITY_LEVELS_DBFS.len() - levels.len();
     eng.reconnect_input(in_port).ok();
     let mut measured: Vec<Option<f64>> = Vec::new();
     for &level in &levels {
-        let amp = ac_core::shared::generator::dbfs_to_amplitude(level as f64);
+        let amp = ac_core::shared::generator::dbfs_to_amplitude(level);
         eng.set_tone(1000.0, amp);
         eng.flush_capture();
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -258,7 +280,7 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
         measured.push(r.map(|x| x.fundamental_dbfs));
     }
 
-    let valid: Vec<(i32, f64)> = levels
+    let valid: Vec<(f64, f64)> = levels
         .iter()
         .copied()
         .zip(measured.iter())
@@ -266,7 +288,7 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
         .collect();
 
     let monotonic = valid.windows(2).all(|w| w[0].1 < w[1].1);
-    let deltas: Vec<(i32, i32, f64)> = valid
+    let deltas: Vec<(f64, f64, f64)> = valid
         .windows(2)
         .map(|w| (w[0].0, w[1].0, w[1].1 - w[0].1))
         .collect();
@@ -286,14 +308,10 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
     let pass = monotonic && max_step_err <= 1.0;
     let step_detail = deltas
         .iter()
-        .map(|(a, b, d)| format!("{a}→{b}:{d:.2}"))
+        .map(|(a, b, d)| format!("{a:.0}→{b:.0}:{d:.2}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let skip_note = if skipped > 0 {
-        format!("  ({skipped} points above maximum not run)")
-    } else {
-        String::new()
-    };
+    let skip_note = skipped_level_note(skipped, LINEARITY_LEVELS_DBFS.len());
     TestResult::new(
         "Level linearity",
         pass,
@@ -303,13 +321,8 @@ fn hw_level_linearity(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> Test
 }
 
 fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult {
-    let all_levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -3.0];
-    let levels: Vec<f64> = all_levels
-        .iter()
-        .copied()
-        .filter(|&l| l <= MAX_EMISSION_DBFS)
-        .collect();
-    let skipped = all_levels.len() - levels.len();
+    let levels = untyped_levels(THD_FLOOR_LEVELS_DBFS);
+    let skipped = THD_FLOOR_LEVELS_DBFS.len() - levels.len();
     eng.reconnect_input(in_port).ok();
     let mut results: Vec<(f64, f64, f64)> = Vec::new();
     for &level in &levels {
@@ -328,11 +341,7 @@ fn hw_thd_floor(eng: &mut dyn AudioEngine, in_port: &str, sr: u32) -> TestResult
         .map(|(l, t, _)| format!("{l:.0}:{t:.4}%"))
         .collect::<Vec<_>>()
         .join(", ");
-    let skip_note = if skipped > 0 {
-        format!("  ({skipped} points above maximum not run)")
-    } else {
-        String::new()
-    };
+    let skip_note = skipped_level_note(skipped, THD_FLOOR_LEVELS_DBFS.len());
     TestResult::new(
         "THD floor (1 kHz)",
         best < 0.05,
@@ -485,18 +494,8 @@ fn hw_dmm_absolute(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
 }
 
 fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibration>) -> TestResult {
-    let all_levels: &[f64] = &[-40.0, -30.0, -20.0, -10.0, -6.0, -3.0, 0.0];
-    // #459: filtered against the fixed maximum. This test's own
-    // `n_pts >= 5` threshold was tuned against the unfiltered 7-point
-    // ladder; it is left as-is per spec rather than loosened to stay
-    // green against a now-3-point ladder — a real change in what this
-    // test can pass, to report, not to paper over.
-    let levels: Vec<f64> = all_levels
-        .iter()
-        .copied()
-        .filter(|&l| l <= MAX_EMISSION_DBFS)
-        .collect();
-    let skipped = all_levels.len() - levels.len();
+    let levels = untyped_levels(DMM_TRACKING_LEVELS_DBFS);
+    let skipped = DMM_TRACKING_LEVELS_DBFS.len() - levels.len();
     let mut max_err = 0.0f64;
     let mut n_pts = 0usize;
     for &level in &levels {
@@ -511,17 +510,43 @@ fn hw_dmm_tracking(eng: &mut dyn AudioEngine, host: &str, cal: Option<&Calibrati
             n_pts += 1;
         }
     }
-    let skip_note = if skipped > 0 {
-        format!("  ({skipped} points above maximum not run)")
-    } else {
-        String::new()
-    };
+    let skip_note = skipped_level_note(skipped, DMM_TRACKING_LEVELS_DBFS.len());
     TestResult::new(
         "DMM level tracking",
-        max_err < 2.0 && n_pts >= 5,
-        format!("max error {max_err:.2}% over {n_pts} points{skip_note}"),
+        dmm_tracking_passes(max_err, n_pts, levels.len()),
+        format!(
+            "max error {max_err:.2}% over {n_pts} of {} points read{skip_note}",
+            levels.len()
+        ),
         "< 2% error at all levels",
     )
+}
+
+#[cfg(test)]
+mod emission_level_tests {
+    use super::*;
+
+    #[test]
+    fn every_self_test_ladder_is_nonempty_and_within_the_untyped_bound() {
+        for all in [
+            LINEARITY_LEVELS_DBFS,
+            THD_FLOOR_LEVELS_DBFS,
+            DMM_TRACKING_LEVELS_DBFS,
+        ] {
+            let retained = untyped_levels(all);
+            assert!(!retained.is_empty());
+            assert!(retained
+                .iter()
+                .all(|&level| level <= UNTYPED_LEVEL_MAX_DBFS));
+        }
+    }
+
+    #[test]
+    fn dmm_tracking_requires_every_retained_point_to_be_read() {
+        assert!(dmm_tracking_passes(1.9, 2, 2));
+        assert!(!dmm_tracking_passes(1.9, 1, 2));
+        assert!(!dmm_tracking_passes(2.0, 2, 2));
+    }
 }
 
 fn hw_dmm_freq_response(eng: &mut dyn AudioEngine, host: &str) -> TestResult {

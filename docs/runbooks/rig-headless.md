@@ -25,5 +25,5 @@ measurements share one client (below).
 `--drive-dbfs` the session is passive and opens no output port.
 `--level-dbfs` is **mandatory** on `ir_probe`, recording an explicit level
 choice for a hardware run. The daemon refuses anything above its fixed
-−20 dBFS maximum rather than reducing it silently; the rig's stricter
+full-scale (0 dBFS) maximum rather than reducing it silently; the rig's stricter
 standing −40 dBFS rule still applies to the value you type.

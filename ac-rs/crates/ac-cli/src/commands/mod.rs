@@ -214,9 +214,9 @@ fn render_level_block(
             let analog = show_dbu
                 .then(|| dbfs_to_dbu(v, cal))
                 .flatten()
-                .map(|dbu| format!("  =  {dbu:6.2} dBu"))
+                .map(|dbu| format!("  =  {dbu:+7.2} dBu"))
                 .unwrap_or_default();
-            format!("  level      {v:.1} dBFS{analog}  ({})", origin.label())
+            format!("  level      {v:>6.1} dBFS{analog}  ({})", origin.label())
         }
         None => "  level      (not reported by this daemon)".to_string(),
     };
@@ -225,9 +225,10 @@ fn render_level_block(
             let analog = show_dbu
                 .then(|| dbfs_to_dbu(v, cal))
                 .flatten()
-                .map(|dbu| format!("  =  {dbu:6.2} dBu"))
+                .map(|dbu| format!("  =  {dbu:+7.2} dBu"))
                 .unwrap_or_default();
-            format!("  maximum    {v:.1} dBFS{analog}")
+            let marker = if v == 0.0 { "  (full scale)" } else { "" };
+            format!("  maximum    {v:>6.1} dBFS{analog}{marker}")
         }
         None => "  maximum    (not reported by this daemon)".to_string(),
     };
@@ -235,20 +236,28 @@ fn render_level_block(
 }
 
 fn render_level_range_block(
-    start_dbfs: f64,
-    stop_dbfs: f64,
+    start_dbfs: Option<f64>,
+    stop_dbfs: Option<f64>,
     origin: LevelOrigin,
     max_dbfs: Option<f64>,
     cal: Option<&serde_json::Value>,
 ) -> Vec<String> {
-    let analog = match (dbfs_to_dbu(start_dbfs, cal), dbfs_to_dbu(stop_dbfs, cal)) {
-        (Some(start), Some(stop)) => format!("  =  {start:.2} \u{2192} {stop:.2} dBu"),
-        _ => String::new(),
+    let level = match (start_dbfs, stop_dbfs) {
+        (Some(start_dbfs), Some(stop_dbfs)) => {
+            let analog = match (dbfs_to_dbu(start_dbfs, cal), dbfs_to_dbu(stop_dbfs, cal)) {
+                (Some(start), Some(stop)) => {
+                    format!("  =  {start:+7.2} \u{2192} {stop:+.2} dBu")
+                }
+                _ => String::new(),
+            };
+            format!(
+                "  level      {start_dbfs:>6.1} \u{2192} {stop_dbfs:.1} dBFS{analog}  ({})",
+                origin.label()
+            )
+        }
+        _ => "  level      (not reported by this daemon)".to_string(),
     };
-    let mut lines = vec![format!(
-        "  level      {start_dbfs:.1} \u{2192} {stop_dbfs:.1} dBFS{analog}  ({})",
-        origin.label()
-    )];
+    let mut lines = vec![level];
     lines.extend(
         render_level_block(None, origin, max_dbfs, cal, true)
             .into_iter()
@@ -281,8 +290,8 @@ pub fn print_fixed_level(level_dbfs: Option<f64>, max_dbfs: Option<f64>) {
 }
 
 pub fn print_level_range(
-    start_dbfs: f64,
-    stop_dbfs: f64,
+    start_dbfs: Option<f64>,
+    stop_dbfs: Option<f64>,
     defaulted: bool,
     max_dbfs: Option<f64>,
     cal: Option<&serde_json::Value>,
@@ -348,18 +357,18 @@ mod tests {
     #[test]
     fn scalar_default_typed_fixed_and_missing_maximum_render() {
         assert_eq!(
-            render_level_block(Some(-40.0), LevelOrigin::Default, Some(-20.0), None, false),
+            render_level_block(Some(-40.0), LevelOrigin::Default, Some(0.0), None, false),
             vec![
-                "  level      -40.0 dBFS  (default)",
-                "  maximum    -20.0 dBFS"
+                "  level       -40.0 dBFS  (default)",
+                "  maximum       0.0 dBFS  (full scale)"
             ]
         );
         assert!(
-            render_level_block(Some(-30.0), LevelOrigin::Typed, Some(-20.0), None, false)[0]
+            render_level_block(Some(-30.0), LevelOrigin::Typed, Some(0.0), None, false)[0]
                 .ends_with("(typed)")
         );
         assert!(
-            render_level_block(Some(-20.0), LevelOrigin::Fixed, Some(-20.0), None, false)[0]
+            render_level_block(Some(-30.0), LevelOrigin::Fixed, Some(0.0), None, false)[0]
                 .ends_with("(fixed)")
         );
         assert_eq!(
@@ -367,7 +376,7 @@ mod tests {
             "  maximum    (not reported by this daemon)"
         );
         assert_eq!(
-            render_level_block(None, LevelOrigin::Fixed, Some(-20.0), None, false)[0],
+            render_level_block(None, LevelOrigin::Fixed, Some(0.0), None, false)[0],
             "  level      (not reported by this daemon)"
         );
     }
@@ -375,18 +384,35 @@ mod tests {
     #[test]
     fn range_and_calibrated_scalar_render() {
         assert_eq!(
-            render_level_range_block(-40.0, -30.0, LevelOrigin::Default, Some(-20.0), None)[0],
-            "  level      -40.0 \u{2192} -30.0 dBFS  (default)"
+            render_level_range_block(
+                Some(-40.0),
+                Some(-30.0),
+                LevelOrigin::Default,
+                Some(0.0),
+                None,
+            )[0],
+            "  level       -40.0 \u{2192} -30.0 dBFS  (default)"
         );
         let cal = serde_json::json!({"vrms_at_0dbfs_out": 1.0});
-        let lines = render_level_block(
-            Some(-40.0),
-            LevelOrigin::Typed,
-            Some(-20.0),
-            Some(&cal),
-            true,
-        );
+        let lines =
+            render_level_block(Some(-40.0), LevelOrigin::Typed, Some(0.0), Some(&cal), true);
         assert!(lines[0].contains("dBu"));
-        assert!(lines[1].contains("dBu"));
+        assert!(lines[1].contains("+2.22 dBu"));
+        assert!(lines[1].ends_with("(full scale)"));
+    }
+
+    #[test]
+    fn nonzero_maximum_has_no_full_scale_marker_and_range_uses_ack_values() {
+        let max = render_level_block(Some(-40.0), LevelOrigin::Default, Some(-20.0), None, false);
+        assert!(!max[1].contains("full scale"));
+
+        let range = render_level_range_block(
+            Some(-42.0),
+            Some(-31.0),
+            LevelOrigin::Typed,
+            Some(0.0),
+            None,
+        );
+        assert!(range[0].contains("-42.0 \u{2192} -31.0"));
     }
 }

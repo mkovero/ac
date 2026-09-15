@@ -8,7 +8,7 @@
 //! deciding, so a disagreeing set of them is the silent-default class this
 //! module exists to close.
 //!
-//! Five constants, one pure check. The daemon is the single chokepoint
+//! Six constants, one pure check. The daemon is the single chokepoint
 //! that calls [`check_emission_level`] / [`check_emission_level_named`] on
 //! every request that can emit (`ac-daemon/src/handlers/mod.rs`); nothing
 //! here talks to a config, a socket, or an engine — the maximum is a build
@@ -25,28 +25,34 @@ pub const DEFAULT_LEVEL_DBFS: f64 = -40.0;
 pub const DEFAULT_RAMP_START_DBFS: f64 = -40.0;
 
 /// Default end of a level ramp. Provenance: assumed (operator-chosen,
-/// 2026-09-15 — "something like -40 to -30"). Sets the lowest maximum that
-/// still lets a bare ramp run unrefused; see [`MAX_EMISSION_DBFS`].
+/// 2026-09-15 — "something like -40 to -30"). It sits exactly at the
+/// build-time bound for levels that play without being typed.
 pub const DEFAULT_RAMP_STOP_DBFS: f64 = -30.0;
 
-/// The one global emission ceiling. Not settable — see the module doc.
+/// The one global emission ceiling: digital full scale. Not settable — see
+/// the module doc.
 /// A request whose level (or, for a ramp, whichever endpoint) is above
 /// this is refused, never clamped: refusal is the only outcome under
 /// which the typed level, the emitted level and the printed level are
 /// the same number by construction.
 ///
-/// Provenance: assumed. 10 dB above the loudest default (the ramp top),
-/// so a bare ramp — and a typed level a step or two above a default —
-/// still runs; 10 dB below the −10 dBFS backstop the operator called too
-/// loud ("−6 dBFS is way too loud default to be anywhere"). Not −10 by
-/// inheritance, and not −30, which would leave a bare ramp no headroom.
-pub const MAX_EMISSION_DBFS: f64 = -20.0;
+/// Provenance: assumed (operator ruling, 2026-09-15). The earlier −20 dBFS
+/// value tried to bound typed mistakes. The ruling moved that protection
+/// off the runtime maximum and onto [`UNTYPED_LEVEL_MAX_DBFS`]: an explicit
+/// request now plays exactly as typed up to full scale.
+pub const MAX_EMISSION_DBFS: f64 = 0.0;
+
+/// Build-time bound for every level that can play without a typed value.
+/// It is not a runtime check or wire field: defaults are resolved before the
+/// daemon can distinguish them from typed values. Provenance: assumed
+/// (operator ruling, 2026-09-15).
+pub const UNTYPED_LEVEL_MAX_DBFS: f64 = -30.0;
 
 /// Level used by the daemon's self-tests (`test_hardware`'s fixed tones,
 /// `test_dut`'s fixed-level checks) in place of the levels they used to
-/// hardcode above the maximum. Provenance: assumed — the closest, of the
-/// levels the maximum allows, to what those pass thresholds were tuned at.
-pub const SELF_TEST_LEVEL_DBFS: f64 = -20.0;
+/// hardcode above the untyped bound. Provenance: assumed — it sits at the
+/// operator-chosen untyped bound to retain as much test SNR as allowed.
+pub const SELF_TEST_LEVEL_DBFS: f64 = -30.0;
 
 /// Refuse a level above [`MAX_EMISSION_DBFS`], or one that is not finite.
 /// `Ok` echoes the value back unchanged, so a caller can chain this
@@ -72,7 +78,7 @@ pub fn check_emission_level_named(label: &str, dbfs: f64) -> Result<f64, String>
     }
     if dbfs > MAX_EMISSION_DBFS {
         return Err(format!(
-            "{prefix}level {dbfs:.1} dBFS is above the maximum {MAX_EMISSION_DBFS:.1} dBFS"
+            "{prefix}level +{dbfs:.1} dBFS is above full scale ({MAX_EMISSION_DBFS:.1} dBFS)"
         ));
     }
     Ok(dbfs)
@@ -94,14 +100,15 @@ mod tests {
 
     // ---- coupling test ----
     //
-    // Red case (spec): set `DEFAULT_RAMP_STOP_DBFS` to −10 — above the
-    // maximum — and this fails a build rather than a rig run.
+    // Red cases (spec): restore `SELF_TEST_LEVEL_DBFS` to −20, or set the
+    // ramp stop to −29; either exceeds the untyped bound.
     #[test]
-    fn defaults_ramp_and_self_test_level_are_at_or_below_the_maximum() {
-        assert!(DEFAULT_LEVEL_DBFS <= MAX_EMISSION_DBFS);
-        assert!(DEFAULT_RAMP_START_DBFS <= MAX_EMISSION_DBFS);
-        assert!(DEFAULT_RAMP_STOP_DBFS <= MAX_EMISSION_DBFS);
-        assert!(SELF_TEST_LEVEL_DBFS <= MAX_EMISSION_DBFS);
+    fn untyped_bound_sits_between_defaults_and_the_maximum() {
+        assert!(DEFAULT_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
+        assert!(DEFAULT_RAMP_START_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
+        assert!(DEFAULT_RAMP_STOP_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
+        assert!(SELF_TEST_LEVEL_DBFS <= UNTYPED_LEVEL_MAX_DBFS);
+        assert!(UNTYPED_LEVEL_MAX_DBFS <= MAX_EMISSION_DBFS);
         assert!(DEFAULT_RAMP_START_DBFS <= DEFAULT_RAMP_STOP_DBFS);
     }
 
@@ -116,9 +123,9 @@ mod tests {
 
     #[test]
     fn refuses_above_the_maximum() {
-        let err = check_emission_level(-19.9).unwrap_err();
-        assert!(err.contains("-19.9"));
-        assert!(err.contains("-20.0"));
+        let err = check_emission_level(0.1).unwrap_err();
+        assert!(err.contains("+0.1"));
+        assert!(err.contains("0.0"));
     }
 
     #[test]
@@ -129,10 +136,10 @@ mod tests {
 
     #[test]
     fn range_names_which_endpoint_failed() {
-        let err = check_emission_range(-40.0, 0.0).unwrap_err();
+        let err = check_emission_range(-40.0, 0.1).unwrap_err();
         assert!(err.starts_with("stop level"), "got {err:?}");
 
-        let err = check_emission_range(0.0, -30.0).unwrap_err();
+        let err = check_emission_range(0.1, -30.0).unwrap_err();
         assert!(err.starts_with("start level"), "got {err:?}");
     }
 

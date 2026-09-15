@@ -19,12 +19,10 @@
 //! Before #459, `set_drive` clamped a request to a *settable*
 //! `drive_max_dbfs` ceiling that defaulted to −10 dBFS — well above the
 //! fake backend's ≈ −20 dBFS idle tone, so "drive on" could be
-//! demonstrated as a clearly LOUDER peak than idle. #459's fixed
-//! maximum, `MAX_DBFS` below, is −20 dBFS — coincidentally the same
-//! level as the idle tone — so no level this daemon will ever accept can
-//! read louder than idle. The tests below demonstrate the same
-//! mechanics (dead-man, live level changes, busy-guard bypass) using a
-//! driving level clearly QUIETER than idle instead.
+//! demonstrated as a clearly LOUDER peak than idle. The fixtures below
+//! retain the quieter −35 dBFS drive chosen by PR #463: revision 3
+//! explicitly keeps existing fixture levels, and a peak below the idle
+//! tone demonstrates the same dead-man and state-transition mechanics.
 
 use std::fs;
 use std::thread;

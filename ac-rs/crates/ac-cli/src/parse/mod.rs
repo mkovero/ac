@@ -721,8 +721,9 @@ Commands:
   gpio            [log]                                               USB2GPIO status (log = stream frames)
   report          <path.json> [html|pdf]                              render MeasurementReport JSON (default html, sibling file)
 
-  levels    dBFS, dBu or Vrms; default -40 dBFS, ramps -40 → -30 dBFS
-            maximum -20 dBFS in this build — a level above it is refused, not reduced
+  levels    dBFS, dBu or Vrms — a typed level plays exactly as typed
+            maximum 0 dBFS (full scale); above it is refused, not reduced
+            default -40 dBFS, ramps -40 → -30 dBFS
 
 Deprecated aliases (still work, print a warning, no new spelling):
   sweep level | sweep frequency   -> generate level | generate frequency

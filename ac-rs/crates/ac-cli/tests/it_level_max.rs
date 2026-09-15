@@ -144,11 +144,11 @@ fn plot_ir_typed_run_prints_level_origin_and_maximum() {
         "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
     assert!(
-        stdout.contains("level      -20.0 dBFS  (typed)"),
+        stdout.contains("level       -20.0 dBFS  (typed)"),
         "typed plot_ir must identify its level:\n{stdout}"
     );
     assert!(
-        stdout.contains("maximum    -20.0 dBFS"),
+        stdout.contains("maximum       0.0 dBFS  (full scale)"),
         "plot_ir must print the daemon-reported maximum:\n{stdout}"
     );
 }
@@ -158,22 +158,25 @@ fn plot_level_default_run_prints_named_range_and_maximum() {
     let rig = Rig::start();
     let stdout = rig.run_ac(&["plot", "level", "1000hz", "3steps"]);
     assert!(
-        stdout.contains("level      -40.0 \u{2192} -30.0 dBFS  (default)"),
+        stdout.contains("level       -40.0 \u{2192} -30.0 dBFS  (default)"),
         "default ramp must print its named range:\n{stdout}"
     );
-    assert!(stdout.contains("maximum    -20.0 dBFS"), "{stdout}");
+    assert!(
+        stdout.contains("maximum       0.0 dBFS  (full scale)"),
+        "{stdout}"
+    );
 }
 
 #[test]
 fn over_maximum_run_is_refused_without_a_success_level_block() {
     let rig = Rig::start();
-    let out = rig.run_ac_raw(&["generate", "sine", "1000hz", "-19dbfs"]);
+    let out = rig.run_ac_raw(&["generate", "sine", "1000hz", "1dbfs"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(!out.status.success(), "over-maximum request succeeded");
     assert!(
-        stderr.contains("above the maximum -20.0 dBFS"),
+        stderr.contains("level +1.0 dBFS is above full scale (0.0 dBFS)"),
         "refusal must name the ceiling:\n{stderr}"
     );
     assert!(
