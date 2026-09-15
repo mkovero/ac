@@ -105,6 +105,42 @@ fn assert_plot_ir_stops_promptly(duration: f64, tail_s: f64, settle: Duration) {
     assert_eq!(stopped["stimulus"], json!("silent"), "{stopped}");
     let status = c.call(json!({"cmd":"status"}));
     assert_eq!(status["busy"], json!(false), "{status}");
+
+    // #437 codex-qa: a prompt `stop` reply plus `busy:false` also holds when
+    // `plot_ir` simply ran to completion before `stop` was ever sent — a
+    // finished worker's handle stays in the workers map until `stop` removes
+    // it, so those two assertions alone cannot distinguish "cancelled
+    // mid-run" from "already done, and `stop` just reaped it". Prove
+    // cancellation directly: drain every PUB frame already queued and assert
+    // none of them is this request's `measurement/impulse_response`,
+    // `measurement/report`, or `done` frame. A regression that reverts the
+    // handler to the non-cancellable `play_and_capture` would publish all
+    // three almost immediately (that path has no pacing sleep at all on the
+    // fake backend), so they would already be sitting on the SUB socket by
+    // the time this drain runs, well before `stop` was sent.
+    let mut drained = 0;
+    while let Some((topic, payload)) = c.recv_pub(50) {
+        drained += 1;
+        assert!(
+            drained <= 1000,
+            "runaway PUB drain while checking for a post-cancel completion frame"
+        );
+        if payload["cmd"] != json!("plot_ir") {
+            continue;
+        }
+        assert_ne!(
+            topic, "measurement/impulse_response",
+            "plot_ir published an impulse response after stop cancelled it: {payload}"
+        );
+        assert_ne!(
+            topic, "measurement/report",
+            "plot_ir published a report after stop cancelled it: {payload}"
+        );
+        assert_ne!(
+            topic, "done",
+            "plot_ir published a done frame after stop cancelled it: {payload}"
+        );
+    }
 }
 
 #[test]

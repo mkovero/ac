@@ -1233,6 +1233,13 @@ captures + analyses the loopback. Emits one `measurement/frequency_response/poin
 grid may contain at most 10000 points; the daemon validates the checked point
 count before allocating it or spawning a worker.
 
+Each point's actual capture is floored at `3.0 / freq` seconds (enough cycles
+to analyse a low frequency); since the sweep grid is non-decreasing, `start_hz`
+carries the largest such floor. The daemon also rejects the request,
+before resolving ports or spawning a worker, when `max(duration, 3.0 /
+start_hz)` is non-finite or exceeds the same 60-second ceiling — so a very low
+`start_hz` can be rejected even when `duration` itself is within range.
+
 `level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
 
 **Reply**
