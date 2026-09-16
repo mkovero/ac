@@ -226,6 +226,17 @@ qa_evidence() {
   echo $(( ${c:-0} + ${r:-0} ))
 }
 
+# newest_record <pr> <role> — body of the newest PR comment or review whose
+# first line is `<!-- agent: <role> -->`. `gh pr view --json comments` omits
+# review bodies, so both are merged. Empty when the role never posted.
+newest_record() {
+  gh_retry gh pr view "$1" -R "$AC_REPO" --json comments,reviews --jq "
+    ([.comments[] | {at: .createdAt, body: .body}]
+     + [.reviews[] | {at: .submittedAt, body: .body}])
+    | map(select(.body | startswith(\"<!-- agent: $2 -->\")))
+    | sort_by(.at) | last | .body // empty"
+}
+
 # The architect's file manifest for an issue: repo-relative paths, one per line.
 # Empty output means no manifest — the caller decides whether that is fatal.
 manifest_of() {
