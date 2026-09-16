@@ -32,8 +32,9 @@ Date (UTC): <yyyy-mm-dd>  ·  Rig: <name> (docs/rigs/<name>.md)  ·  Operator: <
 
 - Consented by / when:
 - Scope (outputs, stimulus, level, duration):
-- Ceiling and provenance (standing −40 dBFS, or a recorded exception with
-  its server-side `drive_max_dbfs`):
+- Ceiling and provenance (standing −40 dBFS or the rig's speaker ceiling,
+  or a recorded exception; enforced by the script's `--level` check — the
+  daemon has no ceiling below 0 dBFS since #459):
 
 ## Background noise
 

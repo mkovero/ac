@@ -107,13 +107,16 @@ by the helper script itself.
 ## `ac` configuration
 
 - `~/.config/ac/config.json`: `output_channel 0`, `input_channel 0`,
-  `reference_output_channel 1`, `reference_channel 1`, `drive_max_dbfs
-  -40.0`. No calibration; levels are dBFS only.
+  `reference_output_channel 1`, `reference_channel 1`, and no
+  `drive_max_dbfs` key — #459 retired it, and while it is present every
+  emitting command refuses (`preflight.sh` FAILs on it). No calibration;
+  levels are dBFS only.
 - **Ceilings (nominal dBFS): −40 standing, −50 on anything that drives the
-  speaker** (operator, 2026-09-14). The daemon's `drive_max_dbfs` is −40 and
-  cannot tell outputs apart, so the −50 speaker ceiling is enforced by
-  `scripts/rig/` (`RIG_SPEAKER_CEILING_DBFS`) and, for manual commands, by
-  whoever runs them. Emission rules: `.agents/rig.md` hard constraints.
+  speaker** (operator, 2026-09-14). The daemon has no configurable ceiling:
+  since #459 it refuses only above full scale and never clamps. Both limits
+  are enforced only by `scripts/rig/` (`RIG_DRIVE_CEILING_DBFS`,
+  `RIG_SPEAKER_CEILING_DBFS`) and, for manual commands, by whoever runs
+  them. Emission rules: `.agents/rig.md` hard constraints.
 - Level expectation (1 kHz, mic at 1 m, IN1 gain 20 dB): mic reads about
   4 dB under the drive level, ~1:1 from −54 to −40 dBFS (measured at
   48 kHz); a −60 dBFS check at 96 kHz read −63.7 dBFS.

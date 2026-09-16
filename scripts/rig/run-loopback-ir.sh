@@ -10,11 +10,13 @@
 #   assertions were derived for an electrical chain; an acoustic run can fail
 #   them for acoustic reasons, so read the record block, not the verdict.
 #
-# The test spawns its own daemon under an isolated HOME. On the real-port
-# route it writes drive_max_dbfs -40 into that config (#442), so the daemon
-# clamps above the standing ceiling. This script's --level check is a
-# convenience in front of that clamp, and the only enforcement of the lower
-# speaker ceiling (RIG_SPEAKER_CEILING_DBFS), which the daemon cannot see.
+# The test spawns its own daemon under an isolated HOME whose config carries
+# no drive_max_dbfs key (#459). On the real-port route the test refuses a
+# level above the standing -40 dBFS limit before it starts the daemon; the
+# daemon itself refuses only above full scale and never clamps. This script's
+# --level check is a convenience in front of the test's refusal, and the only
+# limit for the lower speaker ceiling (RIG_SPEAKER_CEILING_DBFS), which
+# neither the test nor the daemon can tell apart from the loopback.
 #
 # Procedure: docs/runbooks/rig-testing.md.
 

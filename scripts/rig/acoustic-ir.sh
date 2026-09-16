@@ -10,10 +10,13 @@
 # Uses a daemon spawned from the staged build (identity printed), routed with
 # `ac setup` to the rig's speaker and mic indices. A failed setup, or a
 # persisted config that does not read those indices right before `ir_probe`,
-# refuses with nothing emitted and says so in the record. That daemon's
-# config ceiling applies as well as this script's --level check, which holds
-# the profile's speaker ceiling (RIG_SPEAKER_CEILING_DBFS). The ac config's
-# channels are restored on exit.
+# refuses with nothing emitted and says so in the record. This script's
+# --level check, which holds the profile's speaker ceiling
+# (RIG_SPEAKER_CEILING_DBFS), is the only limit below 0 dBFS on this path:
+# since #459 the daemon has no configurable ceiling, refuses only above full
+# scale, never clamps, and refuses every emitting command while a retired
+# drive_max_dbfs key is in its config. The ac config's channels are restored
+# on exit.
 #
 # Procedure: docs/runbooks/rig-testing.md.
 
