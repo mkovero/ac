@@ -123,6 +123,7 @@ pub(crate) mod tests_support {
             position: None,
             interface_latency: None,
             reference_latency: None,
+            reference_stored_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points: vec![] },
                 standard: vec![],

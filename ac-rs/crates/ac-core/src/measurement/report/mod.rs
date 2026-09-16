@@ -37,7 +37,7 @@ mod ir_stats;
 mod payload;
 mod provenance;
 
-pub use ir_stats::{IrStats, IrVerdict, PRE_IMPULSE_SNR_MIN_DB};
+pub use ir_stats::{ArrivalCheck, IrStats, IrVerdict, PRE_IMPULSE_SNR_MIN_DB};
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,
     MeasurementPayload,
@@ -101,7 +101,15 @@ pub use provenance::{
 ///   reports and on any reading judged by the fixed threshold instead (no
 ///   floor could be established); a reader that finds it absent knows only
 ///   that the reading passed *some* threshold, not which.
-pub const SCHEMA_VERSION: u32 = 8;
+/// - v9: optional `reference_stored_latency: InterfaceLatency` records the τ
+///   `calibrate` has on file for the *reference* pair, resolved by the same
+///   exact-match lookup `interface_latency` uses (#359). Compared in
+///   [`IrStats::arrival_check`] against this run's same-capture
+///   `reference_latency` to catch the one-period graph-buffering shift #347
+///   documents for `calibrate` — `plot_ir` had no equivalent corroboration
+///   at all. Absent on v1-v8 reports and whenever no reference is
+///   configured, which reads as [`ArrivalCheck::Unchecked`].
+pub const SCHEMA_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -144,6 +152,19 @@ pub struct MeasurementReport {
     /// no reference leg.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_latency: Option<ReferenceLatency>,
+    /// τ `calibrate` has on file for the *reference* pair, looked up by the
+    /// same exact-match rule `interface_latency` uses (#359, schema v9).
+    /// Reuses [`InterfaceLatency`] rather than a new type: `Measured`
+    /// carries the reference pair's stored τ, `Unavailable` names why none
+    /// applies. [`IrStats::arrival_check`] compares this against
+    /// `reference_latency`'s same-capture reading to catch a graph-
+    /// buffering shift between the lifetime that stored this and the
+    /// lifetime that captured this report — the same fault #347 guards for
+    /// `calibrate`, on the path #347 doesn't cover. `None` on reports
+    /// written before v9, and whenever `plot_ir` has no reference
+    /// configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_stored_latency: Option<InterfaceLatency>,
     #[serde(deserialize_with = "deserialize_data_payloads")]
     pub data: Vec<MeasurementPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,7 +236,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 8"));
+        assert!(json.contains("\"schema_version\": 9"));
     }
 
     #[test]
@@ -239,7 +260,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 8"));
+            assert!(json.contains("\"schema_version\": 9"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }
