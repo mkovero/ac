@@ -341,6 +341,13 @@ must name the head you are reviewing. If a later push makes the rig question
 moot (the code stops depending on the unmeasured value), say so and remove the
 label, with the reason.
 
+The same applies when the issue's current architect decision says **rig check:
+none** with a reason, on an issue that carries `requires-rig`. Check that the
+reason holds against the diff you are reviewing (for example, that the error
+really can only point toward refusal), then remove the label from the issue and
+the PR, citing that section. If the reason does not hold, stay `rig-pending` and
+say why.
+
 Nothing here license approving a PR you would otherwise reject. `requires-rig`
 is for a claim unverifiable in the tree, not for one that is verifiable here
 and inconvenient to check.
@@ -366,7 +373,7 @@ them.
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
-- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, or when a push made the question moot (say why).
+- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, or when a push or the architect's `rig check: none` made the question moot (say why).
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.
