@@ -212,10 +212,14 @@ pub(super) fn arrival_source(
         return peak(PeakReason::PickOnWindowStart);
     }
     // `estimate_onset` runs the guard on every clear pick in a window the
-    // bound started, so `None` does not arise here; it is refused rather
-    // than read as a pass.
-    if *edge_guard != Some(EdgeGuard::Passed) {
-        return peak(PeakReason::EdgeFollowing);
+    // bound started, so a guard that did not run does not arise here; it
+    // is refused as unchecked rather than read as a pass.
+    match edge_guard {
+        Some(EdgeGuard::Passed) => {}
+        Some(EdgeGuard::Failed { repick }) => {
+            return peak(PeakReason::EdgeFollowing { repick: *repick });
+        }
+        None => return peak(PeakReason::EdgeFollowing { repick: None }),
     }
     if matches!(verdict, IrVerdict::Failed { .. }) {
         return peak(PeakReason::DeconvolutionFailed);
@@ -555,9 +559,13 @@ pub enum PeakReason {
     /// The pick sits on the window start, so the true onset may lie
     /// earlier.
     PickOnWindowStart,
-    /// The edge-following guard failed: the pick moved when the window
-    /// start was trimmed.
-    EdgeFollowing,
+    /// The edge-following guard failed. `repick: Some(r)`: the re-pick
+    /// with the window start moved
+    /// [`crate::measurement::sweep::EDGE_GUARD_EXTENSION_M`] earlier went
+    /// to sample `r`, so the pick follows the window edge. `repick: None`:
+    /// no re-pick ran, so the pick could not be checked. Mirrors
+    /// [`crate::measurement::sweep::EdgeGuard::Failed`].
+    EdgeFollowing { repick: Option<usize> },
     /// The deconvolution verdict is `Failed`.
     DeconvolutionFailed,
 }
@@ -1061,13 +1069,23 @@ mod tests {
                     Some(EdgeGuard::Failed { repick: Some(117) }),
                 ),
                 IrVerdict::Ok,
-                PeakReason::EdgeFollowing,
+                PeakReason::EdgeFollowing { repick: Some(117) },
+            ),
+            (
+                &enforced,
+                picked(
+                    WindowLimit::CausalBound,
+                    false,
+                    Some(EdgeGuard::Failed { repick: None }),
+                ),
+                IrVerdict::Ok,
+                PeakReason::EdgeFollowing { repick: None },
             ),
             (
                 &enforced,
                 picked(WindowLimit::CausalBound, false, None),
                 IrVerdict::Ok,
-                PeakReason::EdgeFollowing,
+                PeakReason::EdgeFollowing { repick: None },
             ),
             (
                 &enforced,
@@ -1125,12 +1143,15 @@ mod tests {
             "test setup: pick must be clear of the window start, got {}",
             stats.onset_index
         );
-        assert_eq!(
+        assert!(
+            matches!(
+                stats.arrival_source,
+                ArrivalSource::Peak {
+                    reason: PeakReason::EdgeFollowing { repick: Some(r) }
+                } if r.abs_diff(stats.onset_index) > 1
+            ),
+            "{:?}: {}",
             stats.arrival_source,
-            ArrivalSource::Peak {
-                reason: PeakReason::EdgeFollowing
-            },
-            "{}",
             stats.onset_rule
         );
         assert_eq!(stats.delay_samples, stats.peak_index as i64 - centre as i64);

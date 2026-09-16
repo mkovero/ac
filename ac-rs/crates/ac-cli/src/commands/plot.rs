@@ -272,7 +272,10 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
 /// Returns 3 lines normally (the onset's sample index with the rule's
 /// intro, window start, and the causal-bound row built from `bound`'s own
 /// fields, #460) and 4 when the pick is pinned to the window start or, per
-/// `edge_following` (#346), the edge-following guard failed. On a decline it returns the decline line, the case, and
+/// `failed_guard` (#346), the edge-following guard failed. `failed_guard`
+/// is the typed re-pick of a failed guard — `Some(Some(r))` moved to `r`,
+/// `Some(None)` no re-pick ran — and `None` when the guard passed or did
+/// not run. On a decline it returns the decline line, the case, and
 /// a `check:` line — plus the bound row when the bound itself caused it. On a decline the second line is
 /// the degenerate case named in `rule`, printed verbatim from between
 /// its parentheses, so a case added in `ac-core` later reaches the
@@ -283,7 +286,7 @@ fn short_onset_rule(
     rule: &str,
     onset_index: usize,
     bound: &ac_core::measurement::sweep::CausalBound,
-    edge_following: bool,
+    failed_guard: Option<Option<usize>>,
 ) -> Vec<String> {
     if rule.contains("picker declined") {
         let case = rule
@@ -346,10 +349,21 @@ fn short_onset_rule(
     if pinned {
         lines.push("onset may lie earlier than the window allows".to_string());
     }
-    // #346 UX: the abnormal-case row, printed only when the guard fails —
-    // a pass is already stated by `from onset` under `arrival`.
-    if edge_following {
-        lines.push("pick moved when the window start was trimmed".to_string());
+    // #346 UX revision 3: the abnormal-case row, printed only when the
+    // guard fails — a pass is already stated by `from onset` under
+    // `arrival`. The distance comes from the core constant; the extended
+    // start index is not printed, so the m → samples conversion is not
+    // repeated here.
+    let cm = ac_core::measurement::sweep::EDGE_GUARD_EXTENSION_M * 100.0;
+    match failed_guard {
+        Some(Some(repick)) => lines.push(format!(
+            "window start {cm:.0} cm earlier: pick moves to {repick} ({:+})",
+            repick as i64 - onset_index as i64
+        )),
+        Some(None) => lines.push(format!(
+            "no re-pick \u{2014} window cannot start {cm:.0} cm earlier"
+        )),
+        None => {}
     }
     lines
 }
@@ -372,8 +386,11 @@ fn arrival_source_line(source: &ac_core::measurement::report::ArrivalSource) -> 
             PeakReason::PickOnWindowStart => {
                 "from peak \u{2014} onset pick sits on the window start (below)"
             }
-            PeakReason::EdgeFollowing => {
+            PeakReason::EdgeFollowing { repick: Some(_) } => {
                 "from peak \u{2014} onset pick follows the window edge (below)"
+            }
+            PeakReason::EdgeFollowing { repick: None } => {
+                "from peak \u{2014} onset pick could not be checked (below)"
             }
             PeakReason::DeconvolutionFailed => return None,
         },
@@ -846,15 +863,17 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         // guard row is driven by the typed `arrival_source`, not by
         // parsing the rule.
         use ac_core::measurement::report::{ArrivalSource, PeakReason};
-        let edge_following = stats.arrival_source
-            == ArrivalSource::Peak {
-                reason: PeakReason::EdgeFollowing,
-            };
+        let failed_guard = match stats.arrival_source {
+            ArrivalSource::Peak {
+                reason: PeakReason::EdgeFollowing { repick },
+            } => Some(repick),
+            _ => None,
+        };
         let onset_lines = short_onset_rule(
             &stats.onset_rule,
             stats.onset_index,
             &stats.causal_bound,
-            edge_following,
+            failed_guard,
         );
         println!("{}{}", label_prefix("onset"), onset_lines[0]);
         for line in &onset_lines[1..] {
@@ -1239,7 +1258,7 @@ mod tests {
     fn short_onset_rule_surfaces_the_decline_line() {
         let rule = "onset picker declined (search window shorter than 2 samples) — index is \
                     the peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), false);
+        let lines = short_onset_rule(rule, 1479, &unbounded(), None);
         assert_eq!(
             lines,
             vec![
@@ -1257,7 +1276,7 @@ mod tests {
     fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
         let rule = "onset picker declined (a case invented by this test) — index is the peak, \
                     not an onset";
-        let lines = short_onset_rule(rule, 1479, &unbounded(), false);
+        let lines = short_onset_rule(rule, 1479, &unbounded(), None);
         assert_eq!(lines[1], "a case invented by this test".to_string());
     }
 
@@ -1267,7 +1286,7 @@ mod tests {
     fn short_onset_rule_names_the_bound_inputs_when_the_bound_caused_the_decline() {
         let rule = "onset picker declined (causal bound at or after the peak) — index is the \
                     peak, not an onset";
-        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None), false);
+        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None), None);
         assert_eq!(
             lines,
             vec![
@@ -1283,7 +1302,7 @@ mod tests {
     fn short_onset_rule_reports_the_window_start_how_clear_the_pick_is_and_the_bound() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
                     causal bound enforced";
-        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)), false);
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)), None);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(
             lines[0],
@@ -1324,7 +1343,7 @@ mod tests {
             ),
         ];
         for (missing, row) in cases {
-            let lines = short_onset_rule(rule, 519, &CausalBound::Unavailable(missing), false);
+            let lines = short_onset_rule(rule, 519, &CausalBound::Unavailable(missing), None);
             assert_eq!(lines[1], "window start 455 (search span), pick 64 clear");
             assert_eq!(lines[2], row);
             assert!(
@@ -1341,7 +1360,7 @@ mod tests {
     fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
                     causal bound enforced at sample 10, search span is the tighter limit";
-        let lines = short_onset_rule(rule, 519, &enforced(1.0, None), false);
+        let lines = short_onset_rule(rule, 519, &enforced(1.0, None), None);
         assert_eq!(
             lines[1],
             "window start 455 (search span), pick 64 clear".to_string()
@@ -1355,7 +1374,7 @@ mod tests {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
                     causal bound enforced; pick landed on the window start — the true onset \
                     may lie earlier";
-        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None), false);
+        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None), None);
         assert_eq!(
             lines,
             vec![
@@ -1367,25 +1386,41 @@ mod tests {
         );
     }
 
-    /// #346 UX frame 3: a failed edge guard adds the abnormal-case row
-    /// after the bound row; rows 1–3 are unchanged.
+    /// #346 UX revision 3, frames 3 and 4: a failed edge guard adds the
+    /// abnormal-case row after the bound row; rows 1–3 are unchanged. The
+    /// re-pick delta is always signed, in either direction.
     #[test]
     fn short_onset_rule_flags_a_pick_that_follows_the_window_edge() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 10463, \
-                    causal bound enforced; re-pick with the window start trimmed moved to \
-                    sample 10480 — the pick follows the window edge";
-        let lines = short_onset_rule(rule, 10466, &enforced(2.0, None), true);
+                    causal bound enforced; re-pick with the window start 5 cm earlier went to \
+                    sample 10471 — the pick follows the window edge";
+        let head = vec![
+            "at sample 10483  (AIC change-point pick, 10.0 ms window)".to_string(),
+            "window start 10463 (causal bound), pick 20 clear".to_string(),
+            "bound from ref latency + 2 m, c 343.0 m/s assumed".to_string(),
+        ];
+        let with_row = |row: &str| {
+            let mut v = head.clone();
+            v.push(row.to_string());
+            v
+        };
         assert_eq!(
-            lines,
-            vec![
-                "at sample 10466  (AIC change-point pick, 10.0 ms window)".to_string(),
-                "window start 10463 (causal bound), pick 3 clear".to_string(),
-                "bound from ref latency + 2 m, c 343.0 m/s assumed".to_string(),
-                "pick moved when the window start was trimmed".to_string(),
-            ]
+            short_onset_rule(rule, 10483, &enforced(2.0, None), Some(Some(10471))),
+            with_row("window start 5 cm earlier: pick moves to 10471 (-12)")
         );
-        let passed = short_onset_rule(rule, 10466, &enforced(2.0, None), false);
-        assert_eq!(passed.len(), 3, "no guard row unless the guard failed");
+        assert_eq!(
+            short_onset_rule(rule, 10483, &enforced(2.0, None), Some(Some(10486))),
+            with_row("window start 5 cm earlier: pick moves to 10486 (+3)")
+        );
+        let unchecked = "AIC change-point pick over a 10.0 ms window; window start at sample \
+                         10463, causal bound enforced; no re-pick — the window cannot start 5 cm \
+                         earlier, so the pick could not be checked";
+        assert_eq!(
+            short_onset_rule(unchecked, 10483, &enforced(2.0, None), Some(None)),
+            with_row("no re-pick — window cannot start 5 cm earlier")
+        );
+        let passed = short_onset_rule(rule, 10483, &enforced(2.0, None), None);
+        assert_eq!(passed, head, "no guard row unless the guard failed");
     }
 
     /// #346 UX: row 2 under `arrival` is exactly one of the table's
@@ -1415,8 +1450,14 @@ mod tests {
                 "from peak — onset pick sits on the window start (below)",
             ),
             (
-                peak(PeakReason::EdgeFollowing),
+                peak(PeakReason::EdgeFollowing {
+                    repick: Some(10_471),
+                }),
                 "from peak — onset pick follows the window edge (below)",
+            ),
+            (
+                peak(PeakReason::EdgeFollowing { repick: None }),
+                "from peak — onset pick could not be checked (below)",
             ),
         ];
         for (source, text) in cases {
@@ -1862,8 +1903,8 @@ mod tests {
         ];
         for rule in &rules {
             for bound in &bounds {
-                for edge_following in [false, true] {
-                    for line in short_onset_rule(rule, 262_144, bound, edge_following) {
+                for failed_guard in [None, Some(None), Some(Some(123_456))] {
+                    for line in short_onset_rule(rule, 262_144, bound, failed_guard) {
                         assert!(
                             16 + line.chars().count() <= 80,
                             "line {:?} runs to {} columns",

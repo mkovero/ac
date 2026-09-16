@@ -54,7 +54,8 @@ pub use harmonics::{
 };
 pub use onset::{
     estimate_onset, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate,
-    OnsetPick, WindowLimit, EDGE_GUARD_TOLERANCE_SAMPLES, ONSET_SEARCH_WINDOW_S,
+    OnsetPick, WindowLimit, EDGE_GUARD_EXTENSION_M, EDGE_GUARD_TOLERANCE_SAMPLES,
+    ONSET_SEARCH_WINDOW_S,
 };
 pub use peak::ir_peak;
 pub use tail_decay::{check_tail_decay, TailDecayCheck};
