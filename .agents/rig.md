@@ -206,8 +206,10 @@ check** (architect or triage).
   unchanged, including declining to conclude.
 - Stay inside the standing consent. If the check needs anything outside it,
   do not run that part: record `decline`, and say what permission is needed.
-- Write the record to `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>.md` and
-  commit it in `$AC_HOME`.
+- Write the full record to `rig-record.md` at the root of the worktree you
+  were started in. The runner files it as
+  `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>.md` and commits it; do not
+  commit it yourself.
 - Post one PR comment, first line `<!-- agent: rig -->`, that names the full
   head SHA, gives the result table, the confounds and what is not covered, and
   ends with exactly one line:
