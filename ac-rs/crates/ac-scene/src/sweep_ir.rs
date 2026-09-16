@@ -44,6 +44,10 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// measured `interface_latency`, and the round trip prints instead, with
 /// the disagreement named in the suffix.
 ///
+/// A flight time whose stored τ was not shown to belong to this capture's
+/// device enumeration (#461) — crossed, not observable, not recorded, or a
+/// pre-v10 report with no check at all — carries `latency unverified`.
+///
 /// Prefixed with the rule that produced the arrival (#346 UX revision 4):
 /// always `peak`, the only rule there is. The prefix stays although the
 /// marker always sits on the visible peak, because it is acceptance
@@ -55,8 +59,15 @@ fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String 
 /// [`arrival_marker_text`] without the rule prefix.
 fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String {
     let arrival_ms = stats.arrival_s * 1000.0;
+    // #461: `latency unverified` qualifies the number, so it comes before
+    // `ref unchecked`, which qualifies a check.
+    let latency_unverified = stats.interface_latency_unverified();
     let (value_ms, suffix) = match (stats.flight_time_s, &stats.arrival_check) {
+        (Some(ft), ArrivalCheck::Unchecked { .. }) if latency_unverified => {
+            (ft * 1000.0, " flight, latency unverified, ref unchecked")
+        }
         (Some(ft), ArrivalCheck::Unchecked { .. }) => (ft * 1000.0, " flight, ref unchecked"),
+        (Some(ft), _) if latency_unverified => (ft * 1000.0, " flight, latency unverified"),
         (Some(ft), _) => (ft * 1000.0, " flight"),
         (None, ArrivalCheck::PeriodShift(d)) => {
             let n = d
@@ -473,6 +484,7 @@ mod tests {
             period_size: None,
             output_port: "out1".into(),
             input_port: "in1".into(),
+            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
         })
     }
 
@@ -614,6 +626,7 @@ mod tests {
             period_size: Some(period),
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
+            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
@@ -662,6 +675,7 @@ mod tests {
             period_size: Some(64),
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
+            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
@@ -700,6 +714,107 @@ mod tests {
         );
     }
 
+    /// #461: a flight time over a stored τ that is not `same` enumeration
+    /// carries `latency unverified`, before `ref unchecked`. A v9 report (no
+    /// check at all) is flagged too: nobody checked it (UX revision 2).
+    #[test]
+    fn arrival_marker_flags_a_flight_time_over_an_unverified_latency() {
+        use ac_core::measurement::report::{InterfaceLatency, MeasuredLatency};
+        use ac_core::shared::calibration::EnumerationCheck;
+
+        let with_check = |check: Option<EnumerationCheck>| {
+            let mut r = gated_report_with_delayed_peak();
+            let InterfaceLatency::Measured(m) = measured_tau(0.0001) else {
+                unreachable!("measured_tau builds a measured latency")
+            };
+            r.interface_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+                enumeration: check,
+                ..m
+            }));
+            let stats = r.ir_stats().unwrap();
+            let flight_ms = stats.flight_time_s.expect("flagged, not withheld") * 1000.0;
+            (
+                SweepIrScene::from_report(&r).unwrap().arrival.text,
+                flight_ms,
+            )
+        };
+
+        let (text, ms) = with_check(Some(EnumerationCheck::Same));
+        assert_eq!(text, format!("peak {ms:.2} ms flight, ref unchecked"));
+
+        for check in [
+            Some(EnumerationCheck::Crossed {
+                boundary: "host rebooted".into(),
+                since: Some("2026-09-16T13:41:52Z".into()),
+            }),
+            Some(EnumerationCheck::NotRecorded),
+            Some(EnumerationCheck::NotObservable {
+                reason: "cpal backend has no enumeration probe".into(),
+            }),
+            None,
+        ] {
+            let (text, ms) = with_check(check.clone());
+            assert_eq!(
+                text,
+                format!("peak {ms:.2} ms flight, latency unverified, ref unchecked"),
+                "{check:?}"
+            );
+            assert!(!text.contains("rebooted"), "the boundary stays in the CLI");
+        }
+    }
+
+    /// #461: with the reference check agreeing, the flag is the only suffix.
+    #[test]
+    fn arrival_marker_flags_an_unverified_latency_when_the_check_agrees() {
+        use ac_core::measurement::report::{
+            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
+        };
+        use ac_core::shared::calibration::EnumerationCheck;
+
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+            tau_s: 0.0001,
+            measured_at: "2026-08-16T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "jack".into(),
+            sample_rate_hz: 4_000,
+            period_size: None,
+            output_port: "out1".into(),
+            input_port: "in1".into(),
+            enumeration: Some(EnumerationCheck::NotRecorded),
+        }));
+        let tau_s = 0.002;
+        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s,
+            pre_impulse_snr_db: Some(60.0),
+            pre_impulse_snr_floor_db: Some(63.0),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+        }));
+        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+            tau_s,
+            measured_at: "2026-08-15T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "fake".into(),
+            sample_rate_hz: 4_000,
+            period_size: Some(64),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+            enumeration: Some(EnumerationCheck::Same),
+        }));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.arrival_check,
+            ac_core::measurement::report::ArrivalCheck::Agree
+        );
+        let flight_ms = stats.flight_time_s.unwrap() * 1000.0;
+        assert_eq!(
+            SweepIrScene::from_report(&r).unwrap().arrival.text,
+            format!("peak {flight_ms:.2} ms flight, latency unverified")
+        );
+    }
+
     /// #359: a non-period-multiple disagreement must name itself on the
     /// round trip as `ref Δ`, distinctly from a period shift.
     #[test]
@@ -731,6 +846,7 @@ mod tests {
             period_size: Some(period),
             output_port: "ref_out".into(),
             input_port: "ref_in".into(),
+            enumeration: Some(ac_core::shared::calibration::EnumerationCheck::Same),
         }));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();

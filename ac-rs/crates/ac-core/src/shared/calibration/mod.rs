@@ -81,21 +81,34 @@
 //! measurement is out of scope for #281), so unlike the voltage/SPL pair
 //! there is no second call site to test for the same independence yet.
 //!
+//! A stored τ is also scoped to the device-enumeration epoch it was measured
+//! in (#461, [`epoch`]): on the FF400 rig τ moved by whole 16-sample steps
+//! across reboots and power cycles with every condition field matching. The
+//! epoch is compared at lookup and reported as a flag; it is not part of the
+//! exact-match key and never refuses a value.
+//!
 //! # Where each layer lives
 //!
 //! One file per layer, so "parallel, not composed" is a module boundary
 //! and not only a paragraph: [`tau`] (τ), [`mic_response`] (mic curve),
 //! and this module (voltage + SPL, the two fields read off the same raw
-//! amplitude). [`store`] owns `cal.json` for all of them.
+//! amplitude). [`epoch`] holds τ's enumeration epoch and its comparison.
+//! [`store`] owns `cal.json` for all of them.
 
+mod epoch;
 mod mic_response;
 mod store;
 mod tau;
 
+pub use epoch::{
+    DeviceEpoch, DeviceNode, EnumerationCheck, BOUNDARY_DEVICE_REENUMERATED,
+    BOUNDARY_HOST_REBOOTED, BOUNDARY_NODES_SEPARATOR,
+};
 pub use mic_response::{parse_mic_curve, MicResponse};
 pub use store::{cal_key, default_cal_path};
 pub use tau::{
-    compare_tau_readings, TauComparison, TauConditions, TauDisagreement, TauEntry, TauRefusal,
+    compare_tau_readings, ResolvedTau, TauComparison, TauConditions, TauDisagreement, TauEntry,
+    TauRefusal,
 };
 
 use serde::{Deserialize, Serialize};

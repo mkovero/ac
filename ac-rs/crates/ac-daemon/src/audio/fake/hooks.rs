@@ -1,6 +1,10 @@
 //! Opt-in, fake-only test hooks, driven by `AC_FAKE_*` environment
 //! variables. Each is read once per process and is inert when unset, so
 //! the default fake lifecycle is unchanged by their existence.
+//!
+//! One `AC_FAKE_*` hook lives outside this file: `AC_FAKE_DEVICE_EPOCH`
+//! (#461) is read by `audio::epoch`, because the device-enumeration probe is
+//! keyed by backend name and runs without a `FakeEngine`.
 
 /// Default `play_and_capture` loopback delay, unchanged from before #348's
 /// test-hook addition below.

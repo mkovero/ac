@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use ac_core::measurement::report::{ArrivalCheck, MeasurementReport, ReferenceLatency};
+use ac_core::shared::calibration::EnumerationCheck;
 
 use crate::common::{Client, Daemon};
 
@@ -65,7 +66,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(9));
+                assert_eq!(v["report"]["schema_version"], json!(10));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -283,6 +284,13 @@ fn assert_calibrated_tau_pairs_with_plot_ir(
     // The τ provenance must be archived, not just the number.
     assert!(latency["measured_at"].is_string(), "{latency}");
     assert_eq!(latency["method"], json!("farina_short_ess_v2"), "{latency}");
+    // #461: one daemon, one fake epoch — within an epoch τ resolves with no
+    // new flag.
+    assert_eq!(
+        latency["enumeration"],
+        json!({"state": "same"}),
+        "{latency}"
+    );
 
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
@@ -327,6 +335,83 @@ fn assert_calibrated_tau_pairs_with_plot_ir(
          f2={f2_hz} window_len={window_len} — too small to demonstrate \
          #351's divergence on this fixture"
     );
+}
+
+/// Run `calibrate` on out0/in0 with both voltage prompts skipped and return
+/// the stored τ.
+fn calibrate_tau(c: &Client) -> f64 {
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                          "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    done["tau_s"].as_f64().expect("tau_s")
+}
+
+/// #461 AC6 end to end: a τ stored in one device-enumeration epoch and
+/// resolved in another must not resolve as a valid match without a flag.
+///
+/// Daemon 1 (`AC_FAKE_DEVICE_EPOCH=T1`) calibrates. Daemon 2 (`T2`) reads the
+/// same `cal.json` and runs `plot_ir`: the report's `interface_latency` is
+/// still measured — the epoch flags, it never refuses — but its frozen
+/// `enumeration` is `crossed`, and `ir_stats()` flags the flight time. A
+/// third daemon back in `T1` reads `same` with no flag, so the flag is
+/// caused by the epoch and not by the daemon being a different process.
+#[test]
+fn plot_ir_flags_a_stored_tau_from_another_device_enumeration() {
+    const T1: &str = "2026-09-15T23:40:11Z";
+    const T2: &str = "2026-09-16T00:08:31Z";
+
+    let d1 = Daemon::spawn_with_env(&[("AC_FAKE_DEVICE_EPOCH", T1)]);
+    let stored_tau = calibrate_tau(&Client::new(&d1));
+    let cal_rel = std::path::Path::new(".config").join("ac").join("cal.json");
+    let cal = std::fs::read(d1.home.join(&cal_rel)).expect("read cal.json");
+
+    let resolve_in = |epoch: &str| {
+        let d = Daemon::spawn_with_env(&[("AC_FAKE_DEVICE_EPOCH", epoch)]);
+        std::fs::write(d.home.join(&cal_rel), &cal).expect("share cal.json");
+        let c = Client::new(&d);
+        let (_, report) = report_for(&c, plot_ir_request(json!({})));
+        report
+    };
+
+    let crossed = resolve_in(T2);
+    let latency = match &crossed.interface_latency {
+        Some(ac_core::measurement::report::InterfaceLatency::Measured(m)) => m.clone(),
+        other => panic!("an epoch change must flag, not refuse: {other:?}"),
+    };
+    assert!((latency.tau_s - stored_tau).abs() < 1e-12);
+    assert_eq!(
+        latency.enumeration,
+        Some(EnumerationCheck::Crossed {
+            boundary: "audio device re-enumerated; nodes: fake:device0 re-created".into(),
+            since: Some(T2.into()),
+        }),
+        "a stored τ from another epoch must not resolve as same"
+    );
+    let stats = crossed.ir_stats().expect("ir_stats");
+    assert!(stats.flight_time_s.is_some(), "flagged, not withheld");
+    assert!(
+        stats.interface_latency_unverified(),
+        "a flight time over a crossed epoch must be flagged"
+    );
+
+    let same = resolve_in(T1);
+    match &same.interface_latency {
+        Some(ac_core::measurement::report::InterfaceLatency::Measured(m)) => {
+            assert_eq!(m.enumeration, Some(EnumerationCheck::Same));
+        }
+        other => panic!("expected a measured τ, got {other:?}"),
+    }
+    assert!(!same.ir_stats().unwrap().interface_latency_unverified());
+    drop(d1);
 }
 
 #[test]

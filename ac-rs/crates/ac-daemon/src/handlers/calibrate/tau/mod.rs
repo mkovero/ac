@@ -11,8 +11,11 @@ mod measure;
 
 use serde_json::{json, Value};
 
-use ac_core::shared::calibration::{compare_tau_readings, TauComparison, TauConditions, TauEntry};
+use ac_core::shared::calibration::{
+    compare_tau_readings, DeviceEpoch, TauComparison, TauConditions, TauEntry,
+};
 
+use crate::audio::epoch::current_epoch;
 use crate::audio::make_engine;
 
 pub(crate) use measure::{
@@ -63,6 +66,12 @@ pub(super) enum TauAttempt {
         reading2_declared_frames: Option<u32>,
         /// #363: wall-clock seconds between the two captures.
         separation_s: f64,
+        /// #461: the device-enumeration epoch sampled before reading 1's
+        /// capture and after reading 2's. Unequal means a device boundary
+        /// fell inside the run, so neither reading describes one epoch.
+        /// Boxed: an epoch carries a node list; the other variants are small.
+        epoch_before: Box<DeviceEpoch>,
+        epoch_after: Box<DeviceEpoch>,
     },
     /// A lifecycle's peak sits below the SNR threshold (#368). Short-
     /// circuits the same way [`TauAttempt::Error`] does: the second
@@ -120,7 +129,16 @@ pub(super) fn measure_tau_twice(
     // needs its own `(tau_s, snr_db)` to reach `TauAttempt::Compared`
     // below, where `reading{1,2}_xruns` decides `refused_xrun` regardless
     // of what either SNR figure says.
-    let run_once = || -> anyhow::Result<(LifecycleReading, TauConditions)> {
+    //
+    // #461: `run_once(true)` samples the device-enumeration epoch after
+    // `start` and before the sweep; `run_once(false)` samples it after the
+    // sweep. Reading 1 takes the first, reading 2 the second, so the pair
+    // brackets both captures.
+    let run_once = |epoch_before_sweep: bool| -> anyhow::Result<(
+        LifecycleReading,
+        TauConditions,
+        DeviceEpoch,
+    )> {
         let mut eng = make_engine(fake, required)?;
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
@@ -131,6 +149,7 @@ pub(super) fn measure_tau_twice(
             output_port: out_port.to_string(),
             input_port: in_port.to_string(),
         };
+        let epoch_early = epoch_before_sweep.then(|| current_epoch(&conditions.backend));
         let reading = measure_tau(&mut *eng, amp);
         // #363: the clock is read here, not around the whole closure —
         // engine construction is not what the persistence question is about,
@@ -141,6 +160,7 @@ pub(super) fn measure_tau_twice(
         // change, so a read taken right after activation can predate the
         // graph settling; this one describes the graph the sweep traversed.
         let declared_frames = eng.declared_latency_frames();
+        let epoch = epoch_early.unwrap_or_else(|| current_epoch(&conditions.backend));
         eng.set_silence();
         eng.stop();
         reading.map(|(tau_s, snr_db, xruns)| {
@@ -153,6 +173,7 @@ pub(super) fn measure_tau_twice(
                     captured_at,
                 },
                 conditions,
+                epoch,
             )
         })
     };
@@ -160,7 +181,7 @@ pub(super) fn measure_tau_twice(
     // #368: a low-SNR refusal is recovered from the error by type, not by
     // matching the message — it is a distinct `tau_state`, and a reworded
     // message must not silently collapse it back into `error`.
-    let (reading1, conditions) = match run_once() {
+    let (reading1, conditions, epoch_before) = match run_once(true) {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -175,7 +196,7 @@ pub(super) fn measure_tau_twice(
             }
         }
     };
-    let (reading2, conditions2) = match run_once() {
+    let (reading2, conditions2, epoch_after) = match run_once(false) {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -210,6 +231,8 @@ pub(super) fn measure_tau_twice(
             .as_secs_f64(),
         comparison,
         pre_impulse_snr_db: reading1.snr_db.min(reading2.snr_db),
+        epoch_before: Box::new(epoch_before),
+        epoch_after: Box::new(epoch_after),
     }
 }
 
@@ -267,6 +290,10 @@ pub(super) enum TauOutcome {
         reading1_declared_frames: Option<u32>,
         reading2_declared_frames: Option<u32>,
         separation_s: f64,
+        /// #461: the device-enumeration epoch both readings ran in — equal
+        /// before and after, since a change diverts to
+        /// [`TauOutcome::RefusedEnumerationChanged`]. Stored with the entry.
+        enumeration: DeviceEpoch,
     },
     /// #369: a lifecycle crossed an xrun, so the reading is refused before
     /// its comparison is even consulted — a contaminated pair agreeing or
@@ -286,6 +313,25 @@ pub(super) enum TauOutcome {
         reading1_declared_frames: Option<u32>,
         reading2_declared_frames: Option<u32>,
         separation_s: f64,
+    },
+    /// #461: the device-enumeration epoch sampled before reading 1 differs
+    /// from the one sampled after reading 2 — an interface re-enumerated or
+    /// a driver reloaded during the run, so the two readings need not
+    /// describe one epoch and agreement between them proves nothing.
+    /// Checked directly after `refused_xrun`. Nothing is stored.
+    RefusedEnumerationChanged {
+        conditions: TauConditions,
+        reading1_s: f64,
+        reading2_s: f64,
+        reading1_xruns: u32,
+        reading2_xruns: u32,
+        reading1_declared_frames: Option<u32>,
+        reading2_declared_frames: Option<u32>,
+        separation_s: f64,
+        /// Both lifecycles cleared the SNR gate to become a `Compared`
+        /// attempt, so the pair is reported as on `disagree_*`.
+        pre_impulse_snr_db: f64,
+        snr_threshold_db: f64,
     },
     /// Both lifecycles ran and their readings disagreed. Nothing is
     /// stored; `periods` separates #347's own root cause (a
@@ -359,6 +405,7 @@ impl TauOutcome {
             Self::NotMeasuredLowSnr { .. } => "not_measured_low_snr",
             Self::Measured { .. } => "measured",
             Self::RefusedXrun { .. } => "refused_xrun",
+            Self::RefusedEnumerationChanged { .. } => "refused_enumeration_changed",
             Self::DisagreeDeclaredLatency { .. } => "disagree_declared_latency",
             Self::Disagree { periods, .. } => {
                 if periods.is_some() {
@@ -379,6 +426,7 @@ impl TauOutcome {
         match self {
             Self::Measured { conditions, .. }
             | Self::RefusedXrun { conditions, .. }
+            | Self::RefusedEnumerationChanged { conditions, .. }
             | Self::DisagreeDeclaredLatency { conditions, .. }
             | Self::Disagree { conditions, .. } => Some(conditions),
             Self::NotMeasuredLowSnr { conditions, .. } | Self::Error { conditions, .. } => {
@@ -389,7 +437,9 @@ impl TauOutcome {
 
     /// The history entry to append, or `None` when this run measured
     /// nothing storable. A lone or disagreeing reading never produces one.
-    pub(super) fn stored_entry(&self, method: &str) -> Option<TauEntry> {
+    /// `session` is the daemon session identifier stamped on the entry
+    /// (#461).
+    pub(super) fn stored_entry(&self, method: &str, session: &str) -> Option<TauEntry> {
         match self {
             Self::Measured {
                 conditions,
@@ -397,6 +447,7 @@ impl TauOutcome {
                 agreement_count,
                 reading1_declared_frames,
                 separation_s,
+                enumeration,
                 ..
             } => Some(TauEntry {
                 conditions: conditions.clone(),
@@ -409,6 +460,8 @@ impl TauOutcome {
                 // reached — so one field on disk is the whole story.
                 declared_latency_frames: *reading1_declared_frames,
                 reading_separation_s: Some(*separation_s),
+                enumeration: Some(enumeration.clone()),
+                session: Some(session.to_string()),
             }),
             _ => None,
         }
@@ -427,6 +480,10 @@ impl TauOutcome {
             Self::Measured { tau_s, .. } => json!(tau_s),
             _ => Value::Null,
         };
+        // #461: the epoch the stored entry belongs to, on `measured` only.
+        if let Self::Measured { enumeration, .. } = self {
+            frame["tau_enumeration"] = json!(enumeration);
+        }
         frame["tau_agreement_count"] = match self {
             Self::Measured {
                 agreement_count, ..
@@ -456,6 +513,11 @@ impl TauOutcome {
             pre_impulse_snr_db,
             snr_threshold_db,
             ..
+        }
+        | Self::RefusedEnumerationChanged {
+            pre_impulse_snr_db,
+            snr_threshold_db,
+            ..
         } = self
         {
             frame["tau_pre_impulse_snr_db"] = json!(pre_impulse_snr_db);
@@ -471,6 +533,13 @@ impl TauOutcome {
                 ..
             }
             | Self::RefusedXrun {
+                reading1_s,
+                reading2_s,
+                reading1_xruns,
+                reading2_xruns,
+                ..
+            }
+            | Self::RefusedEnumerationChanged {
                 reading1_s,
                 reading2_s,
                 reading1_xruns,
@@ -532,6 +601,12 @@ impl TauOutcome {
                 ..
             }
             | Self::RefusedXrun {
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                ..
+            }
+            | Self::RefusedEnumerationChanged {
                 reading1_declared_frames,
                 reading2_declared_frames,
                 separation_s,
@@ -635,6 +710,34 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_declared_frames,
             separation_s,
         },
+        // #461 precedence: directly after `refused_xrun`. A device boundary
+        // inside the run makes both the declaration check and the reading
+        // comparison meaningless — each assumes one epoch.
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_xruns,
+            reading2_xruns,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
+            pre_impulse_snr_db,
+            epoch_before,
+            epoch_after,
+            ..
+        } if epoch_before != epoch_after => TauOutcome::RefusedEnumerationChanged {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_xruns,
+            reading2_xruns,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
+            pre_impulse_snr_db,
+            snr_threshold_db: tau_snr_threshold_db(),
+        },
         // #363 precedence: after `refused_xrun` (a contaminated capture's
         // declaration is no more meaningful than its SNR) and before the
         // readings are compared — two readings agreeing while the graph
@@ -682,6 +785,8 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading1_declared_frames,
             reading2_declared_frames,
             separation_s,
+            epoch_after,
+            ..
         } => TauOutcome::Measured {
             conditions,
             tau_s: (reading1_s + reading2_s) / 2.0,
@@ -695,6 +800,7 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading1_declared_frames,
             reading2_declared_frames,
             separation_s,
+            enumeration: *epoch_after,
         },
         TauAttempt::Compared {
             conditions,
@@ -707,6 +813,7 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading1_declared_frames,
             reading2_declared_frames,
             separation_s,
+            ..
         } => TauOutcome::Disagree {
             conditions,
             reading1_s,
@@ -728,6 +835,14 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
 mod tests {
     use super::measure::TAU_SNR_THRESHOLD_DB;
     use super::*;
+
+    const TEST_SESSION: &str = "4242@2026-09-16T00:00:00Z";
+
+    /// The fake backend's default epoch — what both lifecycles see when no
+    /// device boundary falls inside the run.
+    fn test_epoch() -> Box<DeviceEpoch> {
+        Box::new(current_epoch("fake"))
+    }
 
     fn dummy_conditions() -> TauConditions {
         TauConditions {
@@ -768,7 +883,7 @@ mod tests {
         assert_eq!(outcome.state(), "not_measured_low_snr");
         assert!(outcome.conditions().is_some());
         // Refused, so nothing reaches `tau_history`.
-        assert!(outcome.stored_entry("m").is_none());
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
         let f = frame_for(&outcome);
         assert_eq!(f["tau_s"], Value::Null);
         assert_eq!(f["tau_agreement_count"], json!(0));
@@ -799,11 +914,15 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "measured");
         assert!(outcome.conditions().is_some());
 
-        let entry = outcome.stored_entry("farina_test").expect("storable");
+        let entry = outcome
+            .stored_entry("farina_test", TEST_SESSION)
+            .expect("storable");
         assert_eq!(entry.agreement_count, 2);
         assert_eq!(entry.method, "farina_test");
         assert!((entry.tau_s - 0.000_667).abs() < 1e-12);
@@ -846,8 +965,13 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
-        let tau_s = outcome.stored_entry("m").expect("measured").tau_s;
+        let tau_s = outcome
+            .stored_entry("m", TEST_SESSION)
+            .expect("measured")
+            .tau_s;
         assert!((tau_s - 0.001_000_01).abs() < 1e-9);
     }
 
@@ -870,10 +994,12 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "disagree_period_shift");
         assert!(
-            outcome.stored_entry("m").is_none(),
+            outcome.stored_entry("m", TEST_SESSION).is_none(),
             "a disagreement must never be stored"
         );
 
@@ -904,9 +1030,11 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "disagree_other");
-        assert!(outcome.stored_entry("m").is_none());
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
 
         let f = frame_for(&outcome);
         assert_eq!(f["tau_s"], Value::Null);
@@ -927,7 +1055,7 @@ mod tests {
         });
         assert_eq!(outcome.state(), "error");
         assert!(outcome.conditions().is_none());
-        assert!(outcome.stored_entry("m").is_none());
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
 
         let f = frame_for(&outcome);
         assert_eq!(f["tau_s"], Value::Null);
@@ -963,11 +1091,13 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         // Refused, never stored — the corroboration hole this closes is
         // precisely a pair that would have reached `tau_history`.
-        assert!(outcome.stored_entry("m").is_none());
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
         let f = frame_for(&outcome);
         assert_eq!(f["tau_s"], Value::Null);
         assert_eq!(f["tau_agreement_count"], json!(0));
@@ -997,6 +1127,8 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1018,6 +1150,8 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1041,6 +1175,8 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -1064,6 +1200,8 @@ mod tests {
             reading1_declared_frames: Some(244),
             reading2_declared_frames: Some(1268),
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "refused_xrun");
     }
@@ -1086,10 +1224,14 @@ mod tests {
             reading1_declared_frames: Some(244),
             reading2_declared_frames: Some(1268),
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
         assert!(
-            outcome.stored_entry("farina_short_ess_v2").is_none(),
+            outcome
+                .stored_entry("farina_short_ess_v2", TEST_SESSION)
+                .is_none(),
             "a moved declaration must store nothing"
         );
 
@@ -1127,6 +1269,8 @@ mod tests {
             reading1_declared_frames: Some(244),
             reading2_declared_frames: Some(1268),
             separation_s: 1.204,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "disagree_declared_latency");
 
@@ -1161,6 +1305,8 @@ mod tests {
             reading1_declared_frames: None,
             reading2_declared_frames: None,
             separation_s: 0.987,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "measured");
 
@@ -1171,7 +1317,7 @@ mod tests {
 
         // And the evidence reaches disk, or an archived τ cannot be judged.
         let entry = outcome
-            .stored_entry("farina_short_ess_v2")
+            .stored_entry("farina_short_ess_v2", TEST_SESSION)
             .expect("an agreeing pair stores an entry");
         assert_eq!(entry.declared_latency_frames, None);
         assert_eq!(entry.reading_separation_s, Some(0.987));
@@ -1194,7 +1340,76 @@ mod tests {
             reading1_declared_frames: Some(244),
             reading2_declared_frames: None,
             separation_s: 1.0,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
         });
         assert_eq!(outcome.state(), "measured");
+    }
+
+    /// #461: a device boundary inside the run refuses the pair even though
+    /// the readings agree — the two need not describe one epoch — and stores
+    /// nothing. Checked after `refused_xrun`, before the declaration check.
+    #[test]
+    fn tau_result_epoch_change_mid_run_refuses_even_when_readings_agree() {
+        let moved = Box::new(DeviceEpoch::NotObservable {
+            reason: "a different epoch".to_string(),
+        });
+        let attempt = |xruns: u32| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: xruns,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: Some(244),
+            reading2_declared_frames: Some(1268),
+            separation_s: 1.1,
+            epoch_before: test_epoch(),
+            epoch_after: moved.clone(),
+        };
+        let outcome = tau_result(|| attempt(0));
+        assert_eq!(outcome.state(), "refused_enumeration_changed");
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_s"], Value::Null);
+        assert_eq!(f["tau_agreement_count"], json!(0));
+        assert!(f.get("tau_enumeration").is_none(), "{f}");
+        assert_eq!(f["tau_reading1_s"].as_f64(), Some(0.001));
+        assert_eq!(f["tau_reading2_xruns"], json!(0));
+        assert_eq!(f["tau_reading1_declared_frames"], json!(244));
+        assert_eq!(f["tau_reading_separation_s"], json!(1.1));
+        assert_eq!(f["tau_pre_impulse_snr_db"].as_f64(), Some(40.0));
+        assert!(f.get("tau_error").is_none(), "{f}");
+        assert!(f.get("tau_delta_samples").is_none(), "{f}");
+
+        // Precedence: an xrun still wins.
+        assert_eq!(tau_result(|| attempt(1)).state(), "refused_xrun");
+    }
+
+    /// #461: a measured entry carries the epoch it was measured in and the
+    /// session that measured it, on disk and on the wire.
+    #[test]
+    fn tau_result_measured_stamps_the_epoch_and_session() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.0,
+            epoch_before: test_epoch(),
+            epoch_after: test_epoch(),
+        });
+        assert_eq!(outcome.state(), "measured");
+        let entry = outcome.stored_entry("m", TEST_SESSION).unwrap();
+        assert_eq!(entry.enumeration, Some(*test_epoch()));
+        assert_eq!(entry.session.as_deref(), Some(TEST_SESSION));
+        let f = frame_for(&outcome);
+        assert_eq!(f["tau_enumeration"], json!(test_epoch()), "{f}");
     }
 }

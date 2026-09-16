@@ -297,6 +297,36 @@ mod tests {
         assert!((loaded.tau_history[0].tau_s - 0.0011931).abs() < 1e-12);
     }
 
+    /// #461: the epoch and session a τ entry was measured in survive disk,
+    /// so a later session can tell which enumeration the value belongs to.
+    #[test]
+    fn tau_epoch_and_session_round_trip_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cal.json");
+
+        let epoch = super::super::epoch::fixtures::observed(
+            "boot-a",
+            &[("/dev/fw1", "2026-09-16T00:08:31.250000000Z")],
+        );
+        let mut cal = Calibration::new(0, 0);
+        let mut entry = dummy_tau_entry(dummy_conditions(), 0.0178229);
+        entry.enumeration = Some(epoch.clone());
+        entry.session = Some("4242@2026-09-16T00:10:00Z".to_string());
+        cal.tau_history.push(entry);
+        cal.tau_history
+            .push(dummy_tau_entry(dummy_conditions(), 0.0178229));
+        cal.save(Some(&path)).unwrap();
+
+        let loaded = Calibration::load(0, 0, Some(&path)).unwrap().unwrap();
+        assert_eq!(loaded.tau_history[0].enumeration, Some(epoch));
+        assert_eq!(
+            loaded.tau_history[0].session.as_deref(),
+            Some("4242@2026-09-16T00:10:00Z")
+        );
+        // An entry without an epoch stays without one: never back-filled.
+        assert_eq!(loaded.tau_history[1].enumeration, None);
+    }
+
     // ─── file-level failure modes ───────────────────────────────────────
 
     #[test]

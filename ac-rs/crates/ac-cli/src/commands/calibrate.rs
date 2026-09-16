@@ -267,6 +267,13 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
                         "          peak SNR {snr:.1} dB pre-impulse, threshold {threshold:.1} dB"
                     ));
                 }
+                // #461: which device enumeration this value belongs to — the
+                // event that makes it stale.
+                lines.extend(enumeration_of_lines(
+                    data.get("tau_enumeration"),
+                    "          ",
+                    true,
+                ));
                 lines
             }
             None => vec![format!("  {:<8}not measured", "Delay:")],
@@ -307,6 +314,15 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
             }
         }
         "refused_xrun" => render_tau_xrun_leg(data),
+        // #461: a device boundary fell inside the run. A daemon that
+        // survived the run cannot have seen a reboot, so this never says so.
+        "refused_enumeration_changed" => vec![
+            format!(
+                "  {:<8}not measured (audio device re-enumerated during run \u{2014} not stored)",
+                "Delay:"
+            ),
+            "          check: interface power and cable, then re-run".to_string(),
+        ],
         // Anything unrecognised (older daemon, or a future state this
         // client doesn't know): state the raw wire value, not an inferred
         // cause the instrument cannot verify. Also covers the retired
@@ -524,6 +540,85 @@ fn render_tau_xrun_leg(data: &serde_json::Value) -> Vec<String> {
     lines
 }
 
+/// `device enumeration …` for a measured or stored epoch (#461 UX), at
+/// `indent`. A missing, null or unreadable epoch reads `not recorded` —
+/// never as an epoch. `with_reason` appends a not-observable reason, word-
+/// wrapped at `80 − indent` (the `calibrate` result); `show` omits it.
+fn enumeration_of_lines(
+    epoch: Option<&serde_json::Value>,
+    indent: &str,
+    with_reason: bool,
+) -> Vec<String> {
+    use ac_core::shared::calibration::DeviceEpoch;
+    let parsed = epoch.and_then(|v| serde_json::from_value::<DeviceEpoch>(v.clone()).ok());
+    match parsed {
+        Some(DeviceEpoch::NotObservable { reason }) if with_reason => {
+            super::plot::indented_wrapped(
+                &format!("device enumeration not observable \u{2014} {reason}"),
+                indent,
+            )
+        }
+        Some(DeviceEpoch::NotObservable { .. }) => {
+            vec![format!("{indent}device enumeration not observable")]
+        }
+        Some(e) => match e.as_of() {
+            Some(t) => vec![format!("{indent}device enumeration of {t}")],
+            None => vec![format!("{indent}device enumeration not recorded")],
+        },
+        None => vec![format!("{indent}device enumeration not recorded")],
+    }
+}
+
+/// `show`'s live verdict on a stored entry (#461 UX), from the daemon's
+/// `current_enumeration_check`. An absent field is an older daemon and never
+/// renders as current. No `check:` line: `show` is a listing.
+fn current_enumeration_lines(check: Option<&serde_json::Value>, indent: &str) -> Vec<String> {
+    use super::plot::{indented_wrapped, nodes_lines, since_clause, split_boundary, UNVERIFIED};
+    use ac_core::shared::calibration::EnumerationCheck;
+    let Some(raw) = check else {
+        return vec![format!(
+            "{indent}{UNVERIFIED}daemon did not report the current enumeration"
+        )];
+    };
+    match serde_json::from_value::<EnumerationCheck>(raw.clone()) {
+        Ok(EnumerationCheck::Same) => {
+            vec![format!(
+                "{indent}current \u{2014} same device enumeration as now"
+            )]
+        }
+        Ok(EnumerationCheck::Crossed { boundary, since }) => {
+            let (head, nodes) = split_boundary(&boundary);
+            let mut lines = vec![format!(
+                "{indent}{UNVERIFIED}{head}{}",
+                since_clause(since.as_deref())
+            )];
+            if let Some(list) = nodes {
+                lines.extend(nodes_lines(list, indent));
+            }
+            lines
+        }
+        Ok(EnumerationCheck::NotRecorded) => vec![format!(
+            "{indent}{UNVERIFIED}entry predates enumeration tracking"
+        )],
+        Ok(EnumerationCheck::NotObservable { reason }) => {
+            let observation = reason
+                .split_once("; check: ")
+                .map_or(reason.as_str(), |(o, _)| o);
+            let mut lines = vec![format!(
+                "{indent}{UNVERIFIED}device enumeration not observable"
+            )];
+            lines.extend(indented_wrapped(observation, indent));
+            lines
+        }
+        // A state this client does not know: state the raw value rather than
+        // guess at its meaning.
+        Err(_) => vec![format!(
+            "{indent}{UNVERIFIED}enumeration state: {}",
+            raw.get("state").and_then(|v| v.as_str()).unwrap_or("?")
+        )],
+    }
+}
+
 pub fn run_show(client: &mut AcClient) {
     let ack = check_ack(
         client.send_cmd(&serde_json::json!({"cmd": "list_calibrations"}), None),
@@ -575,7 +670,8 @@ pub fn run_show(client: &mut AcClient) {
 /// "found vs not calibrated" shape. Unlike `print_tau_leg` (the live
 /// `cal_done` render), this reads `tau_history` — a possibly-multi-entry
 /// array with no active session to imply which entry is current — so it
-/// picks the newest by `measured_at` for the primary row, states the
+/// picks the newest by `measured_at` for the primary row (the entry `plot ir`
+/// resolves too, when it is in the current enumeration — #461), states the
 /// conditions and ports that entry was measured under (this command has no
 /// live session to imply them from context), and names any older entries
 /// rather than hiding them. Split from the pure [`render_tau_history_leg`]
@@ -635,6 +731,16 @@ fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
         samples_clause(tau_s, sample_rate)
     ));
     lines.push(format!("            measured {measured_at}, {age}"));
+    // #461: the stored enumeration, then today's verdict on it.
+    lines.extend(enumeration_of_lines(
+        entry.get("enumeration"),
+        "            ",
+        false,
+    ));
+    lines.extend(current_enumeration_lines(
+        entry.get("current_enumeration_check"),
+        "            ",
+    ));
     lines.push(format!(
         "            {}",
         lifetimes_clause(
@@ -961,27 +1067,34 @@ mod tests {
         let lines = render_tau_history_leg(&entry);
         // #363 split the value line: the value alone, then the evidence,
         // then the conditions and ports that were always there.
-        assert_eq!(lines.len(), 6, "got {lines:?}");
+        assert_eq!(lines.len(), 8, "got {lines:?}");
         assert_eq!(lines[0], "    Delay:  1.1931 ms   57 samples".to_string());
+        // #461: an entry stored before tracking, from a daemon that sends no
+        // live check, reads not recorded twice — never current.
+        assert_eq!(lines[2], "            device enumeration not recorded");
+        assert_eq!(
+            lines[3],
+            "            UNVERIFIED \u{2014} daemon did not report the current enumeration"
+        );
         assert!(
             lines[1].starts_with("            measured 2020-01-01T00:00:00Z, "),
             "got {:?}",
             lines[1]
         );
         assert_eq!(
-            lines[2],
+            lines[4],
             "            1 reading, nothing compared".to_string()
         );
         assert_eq!(
-            lines[3],
+            lines[5],
             "            graph declared: not recorded".to_string()
         );
         assert_eq!(
-            lines[4],
+            lines[6],
             "            jack, dev 0, 48000 Hz, period 128".to_string()
         );
         assert_eq!(
-            lines[5],
+            lines[7],
             "            system:playback_3 \u{2192} system:capture_1".to_string()
         );
     }
@@ -1019,7 +1132,7 @@ mod tests {
             "got {:?}",
             lines[1]
         );
-        assert_eq!(lines[4], "            jack, dev 0, 48000 Hz, period 256");
+        assert_eq!(lines[6], "            jack, dev 0, 48000 Hz, period 256");
         let last = lines.last().unwrap();
         assert!(
             last.contains("+1 more") && last.contains("cal.json"),
@@ -1067,10 +1180,10 @@ mod tests {
             lines[1]
         );
         assert_eq!(
-            lines[2],
+            lines[4],
             "            2 lifetimes 1.204 s apart, identical to the sample"
         );
-        assert_eq!(lines[3], "            graph declared 244 samples");
+        assert_eq!(lines[5], "            graph declared 244 samples");
         assert!(
             !lines.iter().any(|l| l.contains("corroborated")),
             "the verdict must not survive anywhere: {lines:?}"
@@ -1098,10 +1211,10 @@ mod tests {
         });
         let lines = render_tau_history_leg(&entry);
         assert_eq!(
-            lines[2],
+            lines[4],
             "            2 lifetimes, identical to the sample, separation not recorded"
         );
-        assert_eq!(lines[3], "            graph declared: not recorded");
+        assert_eq!(lines[5], "            graph declared: not recorded");
     }
 
     /// #347's requirement, preserved through #363's rewording: a pre-#347
@@ -1125,7 +1238,7 @@ mod tests {
             ]
         });
         let lines = render_tau_history_leg(&entry);
-        assert_eq!(lines[2], "            1 reading, nothing compared");
+        assert_eq!(lines[4], "            1 reading, nothing compared");
         assert!(
             !lines.iter().any(|l| l.contains("uncorroborated")),
             "got {lines:?}"
@@ -1210,7 +1323,174 @@ mod tests {
             ]
         });
         let lines = render_tau_history_leg(&entry);
-        assert_eq!(lines[4], "            cpal, dev 0, 44100 Hz, period n/a");
+        assert_eq!(lines[6], "            cpal, dev 0, 44100 Hz, period n/a");
+    }
+
+    fn history_with(
+        enumeration: serde_json::Value,
+        check: Option<serde_json::Value>,
+    ) -> Vec<String> {
+        let mut entry = serde_json::json!({
+            "conditions": {
+                "device": 0, "backend": "jack", "sample_rate": 96000,
+                "period_size": 256, "output_port": "system:playback_2",
+                "input_port": "system:capture_2"
+            },
+            "tau_s": 0.017_822_9, "measured_at": "2026-09-15T23:43:04Z",
+            "method": "farina_short_ess_v2", "agreement_count": 2,
+            "declared_latency_frames": 768, "reading_separation_s": 0.435,
+            "enumeration": enumeration, "session": "4242@2026-09-15T23:40:00Z"
+        });
+        if let Some(c) = check {
+            entry["current_enumeration_check"] = c;
+        }
+        render_tau_history_leg(&serde_json::json!({"key": "out1_in1", "tau_history": [entry]}))
+    }
+
+    fn observed_epoch() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "observed", "host_boot_id": "b", "host_booted_at": "2026-09-15T23:30:00Z",
+            "devices": [{"node": "/dev/fw1", "created_at": "2026-09-15T23:40:11.5Z"}]
+        })
+    }
+
+    /// #461 UX: `show` prints the stored enumeration under `measured`, then
+    /// the daemon's live verdict on it, for every state.
+    #[test]
+    fn render_tau_history_leg_shows_the_enumeration_and_the_live_verdict() {
+        let i = "            ";
+        let block =
+            |check: Option<serde_json::Value>| history_with(observed_epoch(), check)[2..4].to_vec();
+        assert_eq!(
+            block(Some(serde_json::json!({"state": "same"}))),
+            vec![
+                format!("{i}device enumeration of 2026-09-15T23:40:11Z"),
+                format!("{i}current \u{2014} same device enumeration as now"),
+            ]
+        );
+        assert_eq!(
+            block(Some(serde_json::json!({
+                "state": "crossed", "boundary": "host rebooted",
+                "since": "2026-09-16T13:41:52Z"
+            }))),
+            vec![
+                format!("{i}device enumeration of 2026-09-15T23:40:11Z"),
+                format!("{i}UNVERIFIED \u{2014} host rebooted at 2026-09-16T13:41:52Z"),
+            ]
+        );
+        let lines = history_with(
+            observed_epoch(),
+            Some(serde_json::json!({
+                "state": "crossed",
+                "boundary": "audio device re-enumerated; nodes: /dev/fw1 new, \
+                             /dev/snd/controlC1 re-created, /dev/fw2 gone",
+                "since": "2026-09-16T00:08:31Z"
+            })),
+        );
+        // At a 12-column indent the list fits `80 − 12 − 7` on one line.
+        assert_eq!(
+            lines[3..5].to_vec(),
+            vec![
+                format!(
+                    "{i}UNVERIFIED \u{2014} audio device re-enumerated at 2026-09-16T00:08:31Z"
+                ),
+                format!("{i}nodes: /dev/fw1 new, /dev/snd/controlC1 re-created, /dev/fw2 gone"),
+            ]
+        );
+        assert_eq!(
+            lines[5],
+            format!("{i}2 lifetimes 0.435 s apart, identical to the sample")
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("check:")),
+            "show has no check line"
+        );
+
+        let unrecorded = history_with(
+            serde_json::Value::Null,
+            Some(serde_json::json!({"state": "not_recorded"})),
+        );
+        assert_eq!(
+            unrecorded[2..4].to_vec(),
+            vec![
+                format!("{i}device enumeration not recorded"),
+                format!("{i}UNVERIFIED \u{2014} entry predates enumeration tracking"),
+            ]
+        );
+        let absent = history_with(observed_epoch(), None);
+        assert_eq!(
+            absent[3],
+            format!("{i}UNVERIFIED \u{2014} daemon did not report the current enumeration"),
+            "an absent live check must never render as current"
+        );
+        let cpal = history_with(
+            serde_json::json!({"kind": "not_observable", "reason": "cpal backend has no enumeration probe"}),
+            Some(serde_json::json!({
+                "state": "not_observable",
+                "reason": "cpal backend has no enumeration probe"
+            })),
+        );
+        assert_eq!(
+            cpal[2..5].to_vec(),
+            vec![
+                format!("{i}device enumeration not observable"),
+                format!("{i}UNVERIFIED \u{2014} device enumeration not observable"),
+                format!("{i}cpal backend has no enumeration probe"),
+            ]
+        );
+    }
+
+    /// #461 UX: the `calibrate` result names the enumeration the stored value
+    /// belongs to, and the mid-run refusal names what happened and where to
+    /// look.
+    #[test]
+    fn render_tau_leg_names_the_enumeration_and_the_mid_run_refusal() {
+        let mut measured = serde_json::json!({
+            "tau_state": "measured", "tau_s": 0.017_822_9, "tau_sample_rate": 96_000,
+            "tau_period_size": 256, "tau_agreement_count": 2,
+            "tau_reading_separation_s": 0.435,
+            "tau_pre_impulse_snr_db": 26.7, "tau_snr_threshold_db": 24.0,
+            "tau_enumeration": observed_epoch(),
+        });
+        let lines = render_tau_leg(&measured);
+        assert_eq!(
+            lines.last().unwrap(),
+            "          device enumeration of 2026-09-15T23:40:11Z"
+        );
+        measured["tau_enumeration"] = serde_json::json!({
+            "kind": "not_observable", "reason": "cpal backend has no enumeration probe"
+        });
+        // Wrapped at `80 − 10`.
+        let lines = render_tau_leg(&measured);
+        assert_eq!(
+            lines[lines.len() - 2..].to_vec(),
+            vec![
+                "          device enumeration not observable \u{2014} cpal backend has no \
+                 enumeration"
+                    .to_string(),
+                "          probe".to_string(),
+            ]
+        );
+        measured.as_object_mut().unwrap().remove("tau_enumeration");
+        assert_eq!(
+            render_tau_leg(&measured).last().unwrap(),
+            "          device enumeration not recorded"
+        );
+
+        let refused = serde_json::json!({
+            "tau_state": "refused_enumeration_changed", "tau_sample_rate": 96_000,
+            "tau_period_size": 256,
+        });
+        let lines = render_tau_leg(&refused);
+        assert_eq!(
+            lines,
+            vec![
+                "  Delay:  not measured (audio device re-enumerated during run \u{2014} not stored)"
+                    .to_string(),
+                "          check: interface power and cable, then re-run".to_string(),
+            ]
+        );
+        assert!(!lines.iter().any(|l| l.contains("rebooted")));
     }
 
     /// #363 UX tabulated every line at 80 columns or narrower. Two lines
@@ -1282,6 +1562,29 @@ mod tests {
                 "reading_separation_s": 12.345
             }]
         })));
+
+        // #461: the refusal, a wrapped not-observable reason, and the
+        // widest live verdict.
+        rendered.extend(render_tau_leg(&serde_json::json!({
+            "tau_state": "refused_enumeration_changed",
+        })));
+        let mut unobservable = live_measured.clone();
+        unobservable["tau_enumeration"] = serde_json::json!({
+            "kind": "not_observable",
+            "reason": "jack backend: /proc/sys/kernel/random/boot_id unreadable; \
+                       check: /dev and /proc readable by the daemon user"
+        });
+        rendered.extend(render_tau_leg(&unobservable));
+        rendered.extend(history_with(
+            observed_epoch(),
+            Some(serde_json::json!({
+                "state": "crossed",
+                "boundary": "audio device re-enumerated; nodes: /dev/fw1 new, \
+                             /dev/snd/controlC1 re-created, /dev/snd/controlC12 re-created, \
+                             /dev/fw2 gone",
+                "since": "2026-09-16T00:08:31Z"
+            })),
+        ));
 
         for line in rendered {
             assert!(

@@ -159,6 +159,18 @@ fn get_and_list_calibrations_carry_tau_history() {
         json!(128),
         "conditions must round-trip: {r}"
     );
+    // #461: entries stored before enumeration tracking carry a null epoch
+    // and resolve live as not_recorded — never as current. The backend
+    // named (`jack`) is probed live, so only the stored side is fixed here.
+    for entry in history {
+        assert_eq!(entry["enumeration"], json!(null), "{entry}");
+        assert_eq!(entry["session"], json!(null), "{entry}");
+        assert_eq!(
+            entry["current_enumeration_check"],
+            json!({"state": "not_recorded"}),
+            "{entry}"
+        );
+    }
 
     // get_calibration on the key with no history: empty array, not absent.
     let r = c.call(json!({"cmd": "get_calibration", "output_channel": 1, "input_channel": 1}));
@@ -190,5 +202,74 @@ fn get_and_list_calibrations_carry_tau_history() {
         without_history["tau_history"],
         json!([]),
         "list_calibrations: {without_history}"
+    );
+}
+
+/// #461: `current_enumeration_check` is computed live against the backend's
+/// epoch now. A fake entry stored in the default fake epoch reads `same`; one
+/// stored in another epoch reads `crossed` with the boundary named. The two
+/// share one daemon, so only the stored side differs.
+#[test]
+fn list_calibrations_carries_a_live_enumeration_check_per_entry() {
+    let d = Daemon::spawn();
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let conditions = json!({
+        "device": 0, "backend": "fake", "sample_rate": 48000,
+        "period_size": null, "output_port": "o", "input_port": "i"
+    });
+    let epoch = |created_at: &str| {
+        json!({
+            "kind": "observed",
+            "host_boot_id": "fake-boot",
+            "host_booted_at": "2026-01-01T00:00:00Z",
+            "devices": [{"node": "fake:device0", "created_at": created_at}]
+        })
+    };
+    let seeded = json!({
+        "out0_in0": {
+            "output_channel": 0, "input_channel": 0, "ref_freq": 1000.0,
+            "vrms_at_0dbfs_out": null, "vrms_at_0dbfs_in": null, "ref_dbfs": -20.0,
+            "tau_history": [
+                {"conditions": conditions, "tau_s": 0.001,
+                 "measured_at": "2026-09-16T10:00:00Z", "method": "m",
+                 "enumeration": epoch("2026-01-01T00:00:00Z"), "session": "1@x"},
+                {"conditions": conditions, "tau_s": 0.001,
+                 "measured_at": "2026-09-16T11:00:00Z", "method": "m",
+                 "enumeration": epoch("2026-02-01T00:00:00Z"), "session": "1@x"}
+            ]
+        }
+    });
+    fs::write(&cal_path, serde_json::to_vec_pretty(&seeded).unwrap()).expect("seed cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "list_calibrations"}));
+    assert_eq!(r["ok"], json!(true));
+    let history = r["calibrations"][0]["tau_history"]
+        .as_array()
+        .expect("tau_history array")
+        .clone();
+    assert_eq!(
+        history[0]["current_enumeration_check"],
+        json!({"state": "same"}),
+        "{r}"
+    );
+    assert_eq!(
+        history[1]["current_enumeration_check"],
+        json!({
+            "state": "crossed",
+            "boundary": "audio device re-enumerated; nodes: fake:device0 re-created",
+            "since": "2026-01-01T00:00:00Z"
+        }),
+        "{r}"
+    );
+    // The stored fields pass through untouched.
+    assert_eq!(history[1]["session"], json!("1@x"));
+    assert_eq!(history[1]["enumeration"], epoch("2026-02-01T00:00:00Z"));
+
+    let g = c.call(json!({"cmd": "get_calibration", "output_channel": 0, "input_channel": 0}));
+    assert_eq!(
+        g["tau_history"][0]["current_enumeration_check"],
+        json!({"state": "same"}),
+        "{g}"
     );
 }
