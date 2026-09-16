@@ -857,12 +857,12 @@ fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
 /// for `calibrate`, now caught on `plot_ir`'s path too (#347 covers only
 /// `calibrate`).
 ///
-/// `plot_ir`'s `cal_guard!` loads calibration keyed by `cfg.output_channel`/
-/// `cfg.input_channel` (`channels_from`'s own doc: "all four handlers key
-/// the same `cal.json` entry"), so the config here aliases the main pair
-/// onto the same channel numbers as the reference pair — the fake backend
-/// does not route by port identity, and this is the only way a `calibrate`
-/// call and `plot_ir`'s reference-pair lookup land in the same file.
+/// The measurement pair (`0`/`0`, the config default) and the reference
+/// pair (`1`/`1`, `reference_config()`) are **distinct** — the ordinary
+/// setup, and the one the QA correction on this issue's PR exists for:
+/// `plot_ir`'s reference-pair lookup must land in the reference pair's own
+/// `cal.json` entry, not the measurement pair's, because `Calibration::load`
+/// keys strictly by channel pair and the two are routinely different.
 ///
 /// Three separate engine lifecycles inside one daemon process: `calibrate`'s
 /// own two (`measure_tau_twice`, forced to agree with each other via
@@ -882,10 +882,7 @@ fn plot_ir_detects_a_period_shift_on_the_reference_pair() {
     let shifted_delay = STORED_DELAY + PERIOD as usize;
 
     let d = Daemon::spawn_with(
-        Some(json!({
-            "output_channel": 1, "input_channel": 1,
-            "reference_channel": 1, "reference_output_channel": 1,
-        })),
+        Some(reference_config()),
         &[
             ("AC_FAKE_PERIOD_SIZE_OVERRIDE", &PERIOD.to_string()),
             (
