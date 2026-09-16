@@ -355,11 +355,17 @@ fn one_shot_callback_step<'a>(
     // #460 / #467: abandon a one-shot and any queued start when the consumer
     // asks, then acknowledge. The consumer keeps its ring halves and the
     // stimulus alive until this acknowledgement, so dropping them here only
-    // decrements reference counts.
+    // decrements reference counts. The request load only needs to observe
+    // the flag eventually (`Relaxed`), but the ack store is `Release` — it
+    // must order the `*slot = None` / queue drain above it before the
+    // consumer's matching `Acquire` load lets it drop its own owners
+    // (codex-qa recheck on #467, PR #481): a bare `Relaxed` store here
+    // would let the consumer free the stimulus/ring on the RT thread if its
+    // decrement turned out to be the last one.
     if abort.load(Ordering::Relaxed) {
         *slot = None;
         while start_cons.try_pop().is_some() {}
-        abort.store(false, Ordering::Relaxed);
+        abort.store(false, Ordering::Release);
     }
     let start = if slot.is_none() {
         start_cons.try_pop()
@@ -535,13 +541,20 @@ fn wait_for_one_shot(
 /// freed on the RT thread. A bounded wait cannot itself guarantee that: if
 /// this returns `false` (codex-qa on #467), the caller must not drop those
 /// owners inline. See `defer_stale_one_shot_cleanup`.
+///
+/// The ack is observed with `Acquire`, pairing with the callback's
+/// `Release` store in `one_shot_callback_step`: a plain `Relaxed` load
+/// would let this thread (or `defer_stale_one_shot_cleanup`'s) drop its
+/// owners without the callback's preceding drops being ordered first,
+/// which is the exact last-owner-on-the-RT-thread race the deferred
+/// cleanup was added to close (codex-qa recheck on #467, PR #481).
 fn abort_one_shot(state: &SharedState) -> bool {
     state.one_shot_abort.store(true, Ordering::Relaxed);
     let ack_deadline = Instant::now() + Duration::from_millis(500);
-    while state.one_shot_abort.load(Ordering::Relaxed) && Instant::now() < ack_deadline {
+    while state.one_shot_abort.load(Ordering::Acquire) && Instant::now() < ack_deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    !state.one_shot_abort.load(Ordering::Relaxed)
+    !state.one_shot_abort.load(Ordering::Acquire)
 }
 
 /// Holds `owned` (a timed-out one-shot's stimulus clone and per-request ring
@@ -564,7 +577,10 @@ fn defer_stale_one_shot_cleanup<T: Send + 'static>(
     owned: T,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while state.one_shot_abort.load(Ordering::Relaxed) {
+        // `Acquire`, same pairing as `abort_one_shot` — orders the
+        // callback's (or `stop`'s post-deactivation) owner drops before
+        // `owned` is dropped here (codex-qa recheck on #467, PR #481).
+        while state.one_shot_abort.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(10));
         }
         drop(owned);
@@ -667,7 +683,11 @@ impl AudioEngine for JackEngine {
         // of tearing down `Process`. Synthesize the ack so the wait doesn't
         // spin forever polling a flag the callback will now never clear, and
         // join so `stop()` cannot return while that thread is still running.
-        self.state.one_shot_abort.store(false, Ordering::Relaxed);
+        // `Release` for the same pairing as the callback's own ack store,
+        // even though `_async_client`'s drop above already joins JACK's
+        // internal thread and so already orders those drops before this
+        // line on its own (codex-qa recheck on #467, PR #481).
+        self.state.one_shot_abort.store(false, Ordering::Release);
         if let Some(h) = self.one_shot_stale.take() {
             let _ = h.join();
         }
