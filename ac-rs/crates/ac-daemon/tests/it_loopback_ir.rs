@@ -670,6 +670,57 @@ fn real_port_route_refuses_a_level_above_the_rig_limit() {
     );
 }
 
+/// `ir_probe` is the headless `plot_ir` client the rig scripts record from
+/// (`scripts/rig/lib/acoustic_ir_remote.sh`). Examples' own unit tests do
+/// not run under `cargo test`, so its acknowledgement handling is compiled
+/// in here and tested against the case the record must not hide: a daemon
+/// that acknowledges a level other than the one requested.
+#[path = "../examples/ir_probe.rs"]
+#[allow(dead_code)]
+mod ir_probe;
+
+#[cfg(test)]
+mod ir_probe_ack_tests {
+    use super::ir_probe::{acknowledged_level, level_line};
+    use serde_json::json;
+
+    /// A pre-#459 daemon clamping a typed −50 to −60 acknowledges −60.
+    /// Reporting the request would record −50; the record must carry −60.
+    #[test]
+    fn clamped_acknowledgement_is_recorded_not_the_request() {
+        let requested = -50.0;
+        let ack = json!({"ok": true, "level_dbfs": -60.0});
+        let acked = acknowledged_level(&ack).expect("ack carries a level");
+        assert_eq!(acked, -60.0);
+        assert_ne!(acked, requested);
+
+        let line = level_line(requested, acked);
+        assert!(line.contains("requested -50 dBFS"), "{line}");
+        assert!(line.contains("acknowledged -60 dBFS"), "{line}");
+        assert!(line.contains("DIFFERS"), "{line}");
+    }
+
+    #[test]
+    fn matching_acknowledgement_is_not_marked() {
+        let line = level_line(-40.0, -40.0);
+        assert!(line.contains("acknowledged -40 dBFS"), "{line}");
+        assert!(!line.contains("DIFFERS"), "{line}");
+    }
+
+    /// An acknowledgement without the field, or with a non-number, must be
+    /// refused — not reported as though it echoed the request.
+    #[test]
+    fn acknowledgement_without_a_level_is_refused() {
+        for ack in [
+            json!({"ok": true}),
+            json!({"ok": true, "level_dbfs": null}),
+            json!({"ok": true, "level_dbfs": "-50"}),
+        ] {
+            assert!(acknowledged_level(&ack).is_err(), "accepted {ack}");
+        }
+    }
+}
+
 /// Plain unit tests over the round-trip-latency bound math, not `#[ignore]`d
 /// — no JACK server needed, so these run under plain `cargo test` and catch
 /// a regression to #361's failure mode without a rig.

@@ -53,7 +53,7 @@ run="$(rig_run_dir acoustic-ir)"
 echo "### acoustic IR ($RIG_NAME)"
 echo
 echo "- consent: $consent"
-echo "- stimulus: Farina sweep ${f1}–${f2} Hz, ${duration} s, $level dBFS nominal, $RIG_SPEAKER_OUT_PORT -> $RIG_MIC_IN_PORT"
+echo "- stimulus: Farina sweep ${f1}–${f2} Hz, ${duration} s, $level dBFS requested (acknowledged level: ir_probe's \`level:\` line), $RIG_SPEAKER_OUT_PORT -> $RIG_MIC_IN_PORT"
 echo "- mic position: $pos"
 echo "- build: $dest"
 echo "- artefacts on rig: $run"
