@@ -23,9 +23,26 @@ done
 # stale base while appearing to synchronize it.
 git fetch -q origin main
 
+# A developer session that stopped (a design handback) leaves $wt checked out on
+# its own issue-$n-<slug> branch (developer.md step 2), so issue-$n is no longer
+# checked out anywhere and `git worktree add $wt issue-$n` fails on the taken
+# path — #346 and #461, 2026-09-16. That branch is the handed-back work: resume
+# it in place.
+resume=""
+if [[ -d $wt ]]; then
+  cur="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ $cur == "issue-$n-"* ]]; then
+    echo "resuming $cur in $wt — an earlier attempt that stopped before a PR" >&2
+    resume="$cur"
+    continue_mode=1
+  fi
+fi
+
 # Reuse only the exact empty branch/worktree shape left by a failed preflight.
 # Anything dirty or ahead may contain a cut-off implementation and is refused.
-if git show-ref -q "refs/heads/issue-$n"; then
+if [[ -n $resume ]]; then
+  :
+elif git show-ref -q "refs/heads/issue-$n"; then
   existing="$(worktree_of_branch "issue-$n")"
   dirty=""; ahead="$(git rev-list --count "origin/main..issue-$n" 2>/dev/null || echo 0)"
   [[ -n $existing && -d $existing ]] && dirty="$(git -C "$existing" status --porcelain)"
@@ -71,7 +88,10 @@ This branch already contains uncommitted or committed work from an earlier
 developer session that ended before opening a PR. Inspect git status and the
 existing diff first. Preserve correct work, finish the remaining implementation
 and verification, then commit, push, and open the PR. Do not restart from a
-clean tree and do not discard work merely because another provider produced it."
+clean tree and do not discard work merely because another provider produced it.
+If that session stopped to hand the design back, the issue now carries a newer
+architect or UX decision: implement against the newest one, and bring the
+branch up to origin/main first if it is behind."
 else
   task="Implement issue #$n in $AC_REPO."
 fi
@@ -94,4 +114,4 @@ list.
 
 A file you need that is not on the list is a finding about the design, not a gap for you to fill. Stop, comment on the issue with the path and why it is needed, apply needs-design, and end the run. Adding it silently is the exact failure this list exists to prevent." "${run_args[@]}"
 
-echo "worktree: $wt   branch: issue-$n" >&2
+echo "worktree: $wt   branch: $(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "issue-$n")" >&2
