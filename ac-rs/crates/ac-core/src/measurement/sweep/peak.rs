@@ -35,11 +35,17 @@
 
 /// Index and magnitude of the largest-magnitude sample of a linear IR.
 ///
-/// Ties keep the earliest index; a NaN sample is never selected (`m >
-/// acc.1` is false whenever `m` is NaN, so the fold never moves onto
-/// it). `(0, 0.0)` on an empty slice — this is not a real peak, and a
-/// caller with an empty-IR case must refuse before calling this rather
-/// than let `(0, 0.0)` read as a legitimate zero-index arrival.
+/// Ties keep the earliest index. A NaN sample is never selected — not
+/// only "never overtakes the running best" but never becomes the
+/// returned index either, including a leading NaN with nothing but ties
+/// after it (`[NaN, 0.0]` returns `(1, 0.0)`, not the NaN at index 0).
+/// The fold tracks "no candidate yet" as `None` rather than seeding on
+/// `(0, 0.0)`, so a NaN can never be adopted by tying against a fake
+/// zero-magnitude seed. `(0, 0.0)` is returned only when no sample was
+/// ever a real candidate — an empty slice, or a slice that is entirely
+/// NaN; this is not a real peak, and a caller with an empty-IR case must
+/// refuse before calling this rather than let `(0, 0.0)` read as a
+/// legitimate zero-index arrival.
 ///
 /// One definition, shared by
 /// [`crate::measurement::report::MeasurementReport::ir_stats`] and
@@ -49,14 +55,19 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
     linear_ir
         .iter()
         .enumerate()
-        .fold((0usize, 0.0_f64), |acc, (i, &v)| {
+        .fold(None, |acc: Option<(usize, f64)>, (i, &v)| {
             let m = v.abs();
-            if m > acc.1 {
-                (i, m)
+            let replace = match acc {
+                Some((_, best)) => m > best,
+                None => !m.is_nan(),
+            };
+            if replace {
+                Some((i, m))
             } else {
                 acc
             }
         })
+        .unwrap_or((0, 0.0))
 }
 
 #[cfg(test)]
@@ -84,6 +95,23 @@ mod tests {
     #[test]
     fn ir_peak_is_zero_zero_on_an_empty_slice() {
         assert_eq!(ir_peak(&[]), (0, 0.0));
+    }
+
+    /// codex-qa on #479: a leading NaN tying against the old `(0, 0.0)`
+    /// seed returned index 0 — naming the NaN sample as the peak even
+    /// though NaN is documented as never selected. `ir_peak` must not
+    /// seed the fold on a fake zero-magnitude candidate.
+    #[test]
+    fn ir_peak_does_not_select_a_leading_nan_that_ties_the_seed() {
+        assert_eq!(ir_peak(&[f64::NAN, 0.0]), (1, 0.0));
+    }
+
+    /// An all-NaN slice has no real candidate at all, same as an empty
+    /// slice — `(0, 0.0)` here is the documented no-valid-sample
+    /// fallback, not a claim that index 0 is a peak.
+    #[test]
+    fn ir_peak_is_zero_zero_on_an_all_nan_slice() {
+        assert_eq!(ir_peak(&[f64::NAN, f64::NAN]), (0, 0.0));
     }
 
     /// #351 acceptance (AC6's record): the shared picker's offset from the
