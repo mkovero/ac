@@ -8,9 +8,11 @@
 #       [--window 16384] [--tau-ms <ms>] [--mic-position "<where>"]
 #
 # Uses a daemon spawned from the staged build (identity printed), routed with
-# `ac setup` to the rig's speaker and mic indices; that daemon's config
-# ceiling applies as well as this script's --level check, which holds the
-# profile's speaker ceiling (RIG_SPEAKER_CEILING_DBFS). The ac config's
+# `ac setup` to the rig's speaker and mic indices. A failed setup, or a
+# persisted config that does not read those indices right before `ir_probe`,
+# refuses with nothing emitted and says so in the record. That daemon's
+# config ceiling applies as well as this script's --level check, which holds
+# the profile's speaker ceiling (RIG_SPEAKER_CEILING_DBFS). The ac config's
 # channels are restored on exit.
 #
 # Procedure: docs/runbooks/rig-testing.md.
@@ -53,33 +55,11 @@ echo
 tau_arg=""
 [[ -n $tau ]] && tau_arg="--tau-ms $tau"
 
-remote="$(cat <<REMOTE
-set -u
+# acoustic_ir_remote.sh is a real file, not an inline heredoc, so the same
+# text that runs here also runs under acoustic_ir_remote_test.sh's stubs.
+remote="set -eu
 $REMOTE_USE_BUILD
-cd "\$DEST" && sha256sum --quiet -c SHA256SUMS || { echo "error: staged build fails its SHA256SUMS" >&2; exit 1; }
-mkdir -p "\$RUN" && cd "\$RUN"
-cfg="\$HOME/.config/ac/config.json"
-orig_out="\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["output_channel"])' "\$cfg")"
-orig_in="\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["input_channel"])' "\$cfg")"
-cleanup() {
-    ac setup output "\$orig_out" input "\$orig_in" >/dev/null 2>&1
-    pkill -x ac-daemon 2>/dev/null
-}
-trap cleanup EXIT
-ac setup output "\$SPK" input "\$MIC" >setup.log 2>&1
-echo "- daemon executable: \$(daemon_identity)"
-echo "- drive_max_dbfs in that daemon's config: \$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("drive_max_dbfs"))' "\$cfg")"
-"\$DEST/ir_probe" --level-dbfs "\$LEVEL" --duration "\$DUR" --f1 "\$F1" --f2 "\$F2" --window "\$WIN" \$TAU >run.log 2>&1
-status=\$?
-echo
-echo '\`\`\`'
-cat run.log
-echo '\`\`\`'
-echo
-echo "ir_probe exit status: \$status"
-exit \$status
-REMOTE
-)"
+$(cat "$RIG_SCRIPTS/lib/acoustic_ir_remote.sh")"
 rig_bash "DEST=$(printf %q "$dest") RUN=$(printf %q "$run") LEVEL=$(printf %q "$level") \
 DUR=$(printf %q "$duration") F1=$(printf %q "$f1") F2=$(printf %q "$f2") WIN=$(printf %q "$window") \
 TAU=$(printf %q "$tau_arg") SPK=$(printf %q "$RIG_SPEAKER_OUT_INDEX") MIC=$(printf %q "$RIG_MIC_IN_INDEX")" "$remote"
