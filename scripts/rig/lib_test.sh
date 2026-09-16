@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# lib_test.sh — regression test for require_level/speaker_ceiling. No rig
-# needed: pure arithmetic on the two coupled ceiling constants.
+# lib_test.sh — regression test for lib.sh's require_level/speaker_ceiling
+# (the two coupled ceiling constants) and resolve_rev/resolve_dest, plus the
+# three scripts that call resolve_dest, each run with ssh/scp stubbed. No rig
+# needed.
 #
 #   bash scripts/rig/lib_test.sh
 #
@@ -66,15 +68,10 @@ echo "lib.sh resolve_rev: fails closed on a missing revision"
 # finding, fifth pass). All three now call one function, lib.sh's
 # resolve_dest, instead of each inlining the split form.
 #
-# This block used to carry three hardcoded copies of that split form (one
-# per script) rather than calling resolve_dest — which meant reverting any
-# one script's actual call site back to the nested, broken form left this
-# test green, since it never read the scripts at all (PR #441 QA finding,
-# sixth pass, confirmed by live reproduction: reverting xrun-soak.sh alone
-# left all blocks passing). Calling resolve_dest directly closes that gap:
-# a regression in the function itself, or in any caller that stops using
-# it, is now the only way for preflight.sh/xrun-soak.sh/probe-outputs.sh to
-# regress, and this is that function's own test.
+# This block tests resolve_dest on its own: a regression inside the
+# function turns it red. It does not read or run any caller, so a caller
+# that drops resolve_dest for the nested form is invisible here — the next
+# block covers that.
 AC_HOME="$(mktemp -d)"
 mkdir -p "$AC_HOME/target-rig-stage"
 if (resolve_dest nonexistent-rev) >/dev/null 2>&1; then
@@ -84,3 +81,47 @@ fi
 rm -rf "$AC_HOME"
 unset AC_HOME
 echo "lib.sh resolve_dest: fails closed on a missing revision"
+
+# Each caller of resolve_dest, run for real against a revision with nothing
+# staged, with ssh/scp stubbed on PATH (PR #441 QA and codex-qa finding,
+# 35ddb7a1: the block above never touched the callers, so reverting one of
+# them to the nested `rig_dest "$(resolve_rev ...)"` form stayed green).
+# resolve_rev prints its error in both the fixed and the nested form, so the
+# test does not look for the message: it requires a nonzero exit and that no
+# remote script reached the (stub) rig after resolution. The only remote
+# script allowed is probe-outputs.sh's port-order check, which runs before
+# it resolves the revision.
+AC_HOME="$(mktemp -d)"
+export AC_HOME
+mkdir -p "$AC_HOME/target-rig-stage" "$AC_HOME/rig-hosts" "$AC_HOME/bin"
+cat >"$AC_HOME/rig-hosts/pupu.access.env" <<'ENV'
+RIG_HOST=lib-test.invalid
+RIG_USER=lib-test
+RIG_SSH_KEY=/dev/null
+ENV
+cat >"$AC_HOME/bin/ssh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    *port_order.py*) echo "port order: matches the profile" ;;
+    *"bash -c"*) echo "remote script" >>"$AC_HOME/remote.log" ;;
+esac
+exit 0
+STUB
+printf '#!/bin/sh\nexit 0\n' >"$AC_HOME/bin/scp"
+chmod +x "$AC_HOME/bin/ssh" "$AC_HOME/bin/scp"
+here="$(dirname "$0")"
+assert_caller_refuses() {  # assert_caller_refuses <script> <args...>
+    local script=$1 rc
+    shift
+    rm -f "$AC_HOME/remote.log"
+    PATH="$AC_HOME/bin:$PATH" bash "$here/$script" "$@" >/dev/null 2>&1 && rc=0 || rc=$?
+    [[ $rc != 0 ]] || { echo "FAIL: $script should fail on a missing revision"; exit 1; }
+    [[ ! -e $AC_HOME/remote.log ]] ||
+        { echo "FAIL: $script sent a remote script to the rig after its revision failed to resolve"; exit 1; }
+}
+assert_caller_refuses preflight.sh pupu nonexistent-rev
+assert_caller_refuses xrun-soak.sh pupu 10 --rev nonexistent-rev
+assert_caller_refuses probe-outputs.sh pupu --level -60 --consent "lib_test.sh, stubbed ssh" --rev nonexistent-rev
+rm -rf "$AC_HOME"
+unset AC_HOME
+echo "preflight.sh / xrun-soak.sh / probe-outputs.sh: stop before the rig on a missing revision"
