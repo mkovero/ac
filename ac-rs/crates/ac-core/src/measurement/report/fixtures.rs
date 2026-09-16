@@ -28,6 +28,8 @@ pub(super) fn sample_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::FrequencyResponse {
                 points: vec![
@@ -93,6 +95,8 @@ pub(super) fn sample_spectrum_bands_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: 3,
@@ -135,6 +139,8 @@ pub(super) fn sample_impulse_response_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::ImpulseResponse {
                 sample_rate_hz: 48_000,
@@ -186,6 +192,30 @@ pub(super) fn ir_report_with_peak(
     r
 }
 
+/// Companion to [`ir_report_with_peak`] for tests (#346) that need a
+/// hand-built `linear_ir` shape rather than a single spike over flat
+/// noise — e.g. sustained onset energy distinct from the peak.
+pub(super) fn ir_report_with_custom_ir(
+    linear_ir: Vec<f64>,
+    sample_rate_hz: u32,
+) -> MeasurementReport {
+    let mut r = sample_impulse_response_report();
+    r.data = vec![MeasurementPayload {
+        data: MeasurementData::ImpulseResponse {
+            sample_rate_hz,
+            f1_hz: 20.0,
+            f2_hz: 20_000.0,
+            duration_s: 1.0,
+            linear_ir,
+            noise_tail_start_s: None,
+            harmonics: vec![],
+        },
+        standard: Vec::new(),
+        gate: None,
+    }];
+    r
+}
+
 pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
     InterfaceLatency::Measured(MeasuredLatency {
         tau_s,
@@ -196,6 +226,37 @@ pub(super) fn measured_tau(tau_s: f64) -> InterfaceLatency {
         period_size: Some(1024),
         output_port: "out1".into(),
         input_port: "in1".into(),
+    })
+}
+
+/// Same-capture reference latency (#460) at `tau_s`, on nominal reference
+/// ports distinct from [`measured_tau`]'s capture pair.
+pub(super) fn measured_reference(tau_s: f64) -> ReferenceLatency {
+    ReferenceLatency::Measured(MeasuredReferenceLatency {
+        tau_s,
+        pre_impulse_snr_db: Some(60.0),
+        pre_impulse_snr_floor_db: Some(63.0),
+        method: "farina_same_capture_reference_v1".into(),
+        output_port: "ref_out".into(),
+        input_port: "ref_in".into(),
+    })
+}
+
+/// Stored τ for the reference pair (#359, schema v9), analogous to
+/// [`measured_tau`] but with the reference pair's own port names and a
+/// settable `period_size` — the `arrival_check` tests need both `Some` and
+/// `None` on the stored side, since a `None` period size must never let a
+/// disagreement read as a period shift.
+pub(super) fn stored_reference_tau(tau_s: f64, period_size: Option<u32>) -> InterfaceLatency {
+    InterfaceLatency::Measured(MeasuredLatency {
+        tau_s,
+        measured_at: "2026-08-15T00:00:00Z".into(),
+        method: "farina_short_ess".into(),
+        backend: "fake".into(),
+        sample_rate_hz: 48_000,
+        period_size,
+        output_port: "ref_out".into(),
+        input_port: "ref_in".into(),
     })
 }
 
@@ -221,6 +282,8 @@ pub(super) fn sample_noise_report() -> MeasurementReport {
         calibration: None,
         position: None,
         interface_latency: None,
+        reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::NoiseResult {
                 sample_rate_hz: 48_000,

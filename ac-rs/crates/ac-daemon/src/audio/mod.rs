@@ -16,6 +16,8 @@ pub mod jack_backend;
 #[cfg(feature = "cpal-audio")]
 pub mod cpal_backend;
 
+use std::sync::atomic::AtomicBool;
+
 use anyhow::{bail, Result};
 
 /// Minimal trait for audio playback + capture, matching Python's JackEngine duck-type contract.
@@ -54,6 +56,56 @@ pub trait AudioEngine: Send + 'static {
             "play_and_capture is not implemented for the {} backend",
             self.backend_name()
         )
+    }
+
+    /// Cancellable one-shot playback/capture for stimulus commands whose
+    /// worker can be stopped over CTRL. Implementations must silence output
+    /// before returning a cancellation error. The default preserves source
+    /// compatibility for non-hardware test engines; every shipped backend
+    /// overrides it.
+    fn play_and_capture_cancellable(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        _stop: &AtomicBool,
+    ) -> Result<Vec<f32>> {
+        self.play_and_capture(samples, tail_s)
+    }
+
+    /// Whether [`Self::play_and_capture_with_reference`] is implemented. A
+    /// caller checks this before emitting, so a backend that cannot capture a
+    /// reference records that as the reference's reason instead of the capture
+    /// failing — and never silently drops a configured reference (#460).
+    fn supports_reference_capture(&self) -> bool {
+        false
+    }
+
+    /// Play `samples` once on every connected output, and capture the
+    /// measurement input plus `reference_port` in the same run (#460).
+    ///
+    /// Invariants every implementation holds; each closes a failure that
+    /// would otherwise pass unnoticed:
+    /// - **(a) never padded.** Both buffers are exactly `samples.len() +
+    ///   tail` samples long, `tail` truncated from `tail_s · sample_rate` as
+    ///   in [`Self::play_and_capture_cancellable`]. A short reference is an
+    ///   error, not zero-filled.
+    /// - **(b) sample-aligned by construction.** The stimulus's first output
+    ///   sample and both captures' first samples come from the same
+    ///   process-callback period. A one-period meas/ref offset is a stable,
+    ///   repeatable, wrong τ (#347, #467).
+    /// - **(c) capacity follows the request**, not a fixed constant (#437).
+    /// - **(d) the reference port is adopted by the audio callback** before
+    ///   the capture is armed.
+    ///
+    /// Cancellation silences output before returning its error.
+    fn play_and_capture_with_reference(
+        &mut self,
+        _samples: &[f32],
+        _tail_s: f64,
+        _reference_port: &str,
+        _stop: &AtomicBool,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        anyhow::bail!("backend {} cannot capture a reference", self.backend_name())
     }
 
     /// Non-blocking drain of up to `max_samples` from the capture ring,
@@ -196,6 +248,31 @@ pub trait AudioEngine: Send + 'static {
     /// Human-readable backend name for error messages.
     fn backend_name(&self) -> &'static str {
         "unknown"
+    }
+
+    /// What the graph declares this path's round-trip latency to be, in
+    /// frames (#363).
+    ///
+    /// A *second account* of the same path, structurally different from the
+    /// measured τ: the reading is what `ac` measured, this is what the graph
+    /// asserts about itself. Its only sanctioned use is comparing two
+    /// lifecycles' declarations to each other — if the declaration moves
+    /// between two readings of one unchanged graph, the readings agreeing
+    /// proves nothing.
+    ///
+    /// **Never subtract it from a measured τ, in any unit.** It carries the
+    /// driver's own claim plus `jackd`'s user-supplied `-I`/`-O` arguments,
+    /// and neither is validated — on the rig those are `116`/`116` and were
+    /// never checked against anything.
+    ///
+    /// `None` means this backend declares nothing (the
+    /// [`Self::period_size`] precedent: *not applicable*, not *unknown*).
+    /// An implementation must also return `None` rather than `0` for an
+    /// all-zero range: a declared zero would compare unequal against a real
+    /// declaration and manufacture refusals on backends that simply never
+    /// set a range.
+    fn declared_latency_frames(&self) -> Option<u32> {
+        None
     }
 
     /// Period/buffer size in frames, if this backend can report one.

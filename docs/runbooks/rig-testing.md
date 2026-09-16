@@ -108,12 +108,13 @@ constraints). Every emitting script requires `--consent "<text>"` and prints
 it into its output, and refuses a `--level` above the rig profile's
 `RIG_DRIVE_CEILING_DBFS` — or, on any path that drives the speaker, above
 `RIG_SPEAKER_CEILING_DBFS` (pupu: −50 dBFS; a −40 dBFS sweep through its
-speaker is too loud). The speaker ceiling is script-only: the daemon's
-`drive_max_dbfs` cannot tell outputs apart. These checks are the scripts'
-own; the daemon's `drive_max_dbfs` clamp also applies to a daemon started
-from the rig's config (`plot_ir` and friends clamp since #360), and to
-`it_loopback_ir`'s own isolated-`HOME` daemon on the real-port route, which
-writes `drive_max_dbfs` at −40 dBFS since #442 — see step 7c.
+speaker is too loud). These checks are the scripts' own. Since #459 the
+daemon has no configurable ceiling: it refuses anything above its fixed
+full-scale (0 dBFS) maximum and never clamps, and it refuses every emitting
+command while a retired `drive_max_dbfs` key is present in its config. The
+rig's −40 dBFS standing limit and the speaker ceiling apply to the value you
+type; `it_loopback_ir` enforces the standing limit itself on the real-port
+route — see step 7c.
 
 ### 6. Wiring probe — EMITS, after any cable work
 
@@ -163,12 +164,13 @@ chain, sample rate, window, peak index and magnitude, floor, SNR and the
 peak's offset from window centre — the chain's round trip. It is printed
 before the assertions, so a failing run still leaves its numbers.
 
-The test spawns its daemon under an isolated `HOME`. On the real-port route
-it writes `drive_max_dbfs: -40.0` into that config itself (#442), so the
-daemon clamps any request above the standing ceiling and the record prints
-`requested → applied`. The script's `--level` check is a convenience in front
-of that clamp, and the only limit for the speaker route's lower −50 dBFS
-ceiling, which the daemon cannot tell apart from the loopback. The 60 ms
+The test spawns its daemon under an isolated `HOME` whose config carries no
+`drive_max_dbfs` key (#459). On the real-port route it refuses a level above
+the rig's standing −40 dBFS limit before it starts the daemon; the daemon
+itself refuses anything above full scale and never clamps. The script's
+`--level` check is a convenience in front of the test's refusal, and the only
+limit for the speaker route's lower −50 dBFS ceiling, which neither the test
+nor the daemon can tell apart from the loopback. The 60 ms
 round-trip bound was derived on a Babyface chain (#277); check a new chain's
 measured offset against it before reading a red result as a defect. The
 speaker route can fail the electrical-chain assertions for acoustic reasons —
@@ -206,8 +208,8 @@ the staged `transfer_probe` against a daemon started from the staged build
 loopback on pupu). It starts the session `drivable` (silent), raises drive
 with `set_drive`, feeds the 1500 ms dead-man every 250 ms and drops drive on
 every exit path; without `--drive-dbfs` it is passive and opens no output.
-It prints the applied (clamped) level — clamped only to the daemon's
-`drive_max_dbfs`, and this drives the speaker, so keeping `--drive-dbfs` at or
+It prints the level the daemon reported. The daemon refuses only a level
+above full scale, and this drives the speaker, so keeping `--drive-dbfs` at or
 below the speaker ceiling is on whoever runs it. Both probes take `--ctrl-port` /
 `--data-port`; `ac` takes `AC_CTRL_PORT` / `AC_DATA_PORT`, and `ac setup
 output <N> input <N>` retargets a running daemon.

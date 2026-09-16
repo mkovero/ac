@@ -3,6 +3,41 @@ use serde_json::Value;
 
 use crate::common::{Client, Daemon};
 
+/// #459 — `setup` carries the fixed emission maximum at the top level of
+/// its ack, beside `config` rather than inside it: `config` is the config
+/// file, and the maximum is a build constant, not a setting. This is the
+/// one place the maximum is visible without starting an emission.
+#[test]
+fn setup_ack_carries_the_fixed_emission_maximum() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(
+        r["max_dbfs"],
+        json!(ac_core::shared::emission_level::MAX_EMISSION_DBFS)
+    );
+}
+
+/// `setup` is never refused — not by the retired `drive_max_dbfs` key, and
+/// not by the emission guard (it does not emit anything). The retired key
+/// still round-trips through `config` so `ac setup` can show it, and
+/// `max_dbfs` is unaffected by its presence.
+#[test]
+fn setup_ack_is_never_refused_by_the_retired_key_and_still_reports_it() {
+    let d = Daemon::spawn_with_config(Some(json!({"drive_max_dbfs": -10.0})));
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "setup", "update": {}}));
+    assert_eq!(r["ok"], json!(true), "setup must never refuse: {r}");
+    assert_eq!(r["config"]["drive_max_dbfs"], json!(-10.0));
+    assert_eq!(
+        r["max_dbfs"],
+        json!(ac_core::shared::emission_level::MAX_EMISSION_DBFS)
+    );
+}
+
 #[test]
 fn setup_channel_clears_sticky_port() {
     // A stale sticky port in config.json — left over from a prior session,

@@ -55,7 +55,7 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
     // receive on the REP socket is guaranteed to see an empty workers map
     // and can start an `Exclusive`-group worker like `transfer_stream`.
     let mut joined: Vec<(String, crate::workers::WorkerHandle)> = Vec::new();
-    {
+    let no_workers_remain = {
         let mut workers = state.workers.lock().unwrap();
         if let Some(name) = target {
             if let Some(w) = workers.get(name) {
@@ -72,10 +72,15 @@ pub fn stop(state: &ServerState, cmd: &Value) -> Value {
                 joined.push((name, handle));
             }
         }
-    }
+        workers.is_empty()
+    };
     let stopped: Vec<String> = joined.iter().map(|(n, _)| n.clone()).collect();
     drop(joined); // runs Drop → joins the worker threads
-    json!({"ok": true, "stopped": stopped})
+    let mut reply = json!({"ok": true, "stopped": stopped});
+    if no_workers_remain {
+        reply["stimulus"] = json!("silent");
+    }
+    reply
 }
 
 pub fn devices(state: &ServerState) -> Value {
@@ -200,7 +205,18 @@ pub fn setup(state: &ServerState, cmd: &Value) -> Value {
     if let Err(e) = ac_core::config::save(&cfg, None) {
         eprintln!("setup: save failed: {e}");
     }
-    json!({"ok": true, "config": cfg_value})
+    // #459: the fixed emission maximum, at the top level (beside `config`,
+    // not inside it — `config` is the config file, and the maximum is a
+    // build constant; putting it there would make it look settable). This
+    // is the one place the maximum is visible without starting an
+    // emission — `setup` is never refused, retired key or not, so it stays
+    // reachable exactly when an operator needs to find out what the
+    // maximum is.
+    json!({
+        "ok": true,
+        "config": cfg_value,
+        "max_dbfs": ac_core::shared::emission_level::MAX_EMISSION_DBFS,
+    })
 }
 
 pub fn get_calibration(state: &ServerState, cmd: &Value) -> Value {

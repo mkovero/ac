@@ -22,19 +22,24 @@ Review-only. No fixes, no test edits, no merges, no branch pushes.
 
 ## queue
 
-Open PRs with `claude-approved` and without `codex-approved`.
+Open PRs with `claude-approved`, without `codex-approved`, `needs-work`, or
+`requires-rig`.
 
 ```bash
 gh pr list --state open \
-  --search 'label:claude-approved -label:codex-approved' \
+  --search 'label:claude-approved -label:codex-approved -label:needs-work -label:requires-rig' \
   --json number --jq '.[].number'
 ```
 
-`needs-work` does **not** exclude a PR from the queue. `claude-approved` plus
-`needs-work` means you failed it previously and Claude QA has since re-passed
-it; that is a PR to review again, not one to skip.
+`claude-approved` plus `needs-work` is the state immediately after a Codex
+failure. Exclude it so an unattended runner does not review the same rejected
+tip on every poll. The developer removes both labels when picking up the
+finding. After the revision, the runner sends the PR straight back to you in
+recheck mode (below) — it does not return through this queue. With
+`AC_CODEX_RECHECK=0` the old flow applies instead: Claude QA re-reviews the new
+tip and restores `claude-approved`, which puts the PR back in this queue.
 
-There is no queue state anywhere but GitHub. `bin/codex-qa.sh` walks this list
+There is no queue state anywhere but GitHub. `bin/review.sh --independent` walks this list
 and holds nothing.
 
 ## read order — this order is the mechanism, not a preference
@@ -47,6 +52,12 @@ and holds nothing.
    criteria you are checking against.
 4. The architect design comment, if the issue carries `design-approved`.
 5. The diff, and the tree it applies to.
+
+For steps 3–5, follow the shared bounded-reading rule: inspect changed hunks,
+named symbols, and relevant document headings first. The order establishes
+independence; it does not require dumping whole large files. If a combined tool
+result truncates, continue only with the missing source or region and do not
+reread completed ones.
 
 **Then, and only then:** the `<!-- agent: qa -->` and `<!-- agent: ux -->`
 comments on the PR and the issue.
@@ -63,24 +74,58 @@ Your own comment carries `<!-- agent: codex-qa -->` as its first line.
 
 ## pre-check — stale approval
 
-Before reviewing anything, compare the timestamp of the last commit on the
-branch against the timestamp of the QA comment that applied `claude-approved`.
+Before reviewing anything, establish that the newest `<!-- agent: qa -->`
+record explicitly names the current full PR head SHA as the reviewed tip (or as
+the endpoint of its reviewed range). Search both GitHub PR comments and review
+bodies: `gh pr view --json comments` does not include review bodies.
 
-```bash
-gh pr view N --json commits,comments,labels
-```
+The runner performs this identity check before invoking you and supplies the
+verified head SHA in the task prompt. You may confirm it, but do not replace it
+with timestamp inference. Git commit timestamps are author-controlled and can
+postdate a review that actually inspected that exact commit.
 
-**Commits postdate the approval → the label is stale. Do not review.** Post a
-short comment saying the approval predates commit `<sha>` and that a fresh
-Claude QA pass is needed, and stop. Apply no labels.
+**Newest QA record does not name the current head → the approval is stale or
+unverifiable. Do not review.** Post a short comment requesting a fresh Claude
+QA pass that names the full current SHA, and stop. Apply no labels.
 
 Reviewing past a stale label produces an independent review of a tree that
 Claude QA never approved, presented as the second half of a two-review gate.
 That is worse than no review, because the merge gate reads as satisfied.
 
 `developer.md` requires the pusher to remove `claude-approved`, and `qa.md`
-removes it at re-review. This is the third place, and it is the only one that
-catches a label that survived both.
+removes it at re-review. This identity check is the third guard and catches a
+label that survived both without rejecting a valid review because of clock
+metadata.
+
+## recheck mode
+
+`bin/review.sh --independent --recheck <base> <pr>` — invoked by `master.sh`
+after a developer revision that answers **your** failing review. `<base>` is
+the tip you failed, which Claude QA had approved. Claude QA does not review the
+revision; you are the only reviewer of `<base>..<head>`.
+
+What changes:
+- **Pre-check.** The runner verifies that the newest `<!-- agent: qa -->` record
+  and your own newest record both name `<base>`, and that `<head>` descends
+  from it. `claude-approved` is absent by design (the developer removed it).
+  The stale-approval pre-check above does not apply.
+- **Read order.** Your own review at `<base>` comes first — it is the spec for
+  this pass. The independence rule still holds for Claude QA and UX records.
+- **Scope.** Every finding in your review at `<base>` is resolved at `<head>`,
+  or it is not. Then review the delta with steps 1–4 in full, including what
+  the delta breaks outside the lines it touches. A fix that adds a new code
+  path gets the same scrutiny a first review would give it — nobody else will.
+- **Gate.** There is no Claude gate at `<head>` to inherit. Run the full
+  workspace gate (step 3's three commands) yourself, in the foreground, and
+  record the result.
+- **Record.** Name both `<base>` and `<head>` in full. The runner will not act
+  on a pass that omits either.
+- **Labels.** As in a normal pass. Never touch `claude-approved`: on your pass
+  the runner restores it, with a comment saying Claude QA approved `<base>` and
+  did not review `<base>..<head>`.
+
+`requires-rig` still blocks: the runner does not start a recheck while it is
+set.
 
 ## what you must do
 
@@ -94,6 +139,13 @@ criterion reads as `assumed`. For a `derived` or `assumed` criterion, name the
 measurement that would separate it from an equally plausible alternative — you
 inherit the assumption the same way the first reviewer did, and it is no more
 verified for having survived one review.
+
+`requires-rig` present on the PR or the issue, or the required measurement
+record absent, is not a pass. Do not apply `codex-approved`. The runner does not
+send you such a PR; if one arrives, stop and say so. A record Claude QA
+accepted (it removed the label, citing a `<!-- agent: rig -->` record at the
+current head) is evidence you check like any other: does it measure what the
+named check says, at this commit?
 
 ### step 2 — the diff
 - **correctness** — does the implementation do what the spec says?
@@ -120,7 +172,7 @@ name the field the assertion checks and confirm the fake models it.
 
 ```bash
 cargo test --workspace
-cargo clippy -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
@@ -135,7 +187,9 @@ QA comment, as required by the read-order rule.
 Run a targeted test only when it would resolve a concrete uncertainty or
 attempt to disprove one of your findings. Do not run the full workspace gate
 merely to reproduce the fresh Claude QA result. Never use test output from the
-PR body or developer comment as substitute evidence.
+PR body or developer comment as substitute evidence. Any test you do run
+goes in the foreground: the session does not resume after a backgrounded
+command (AGENTS.md → headless sessions).
 
 ### step 4 — disprove your own findings
 
@@ -254,8 +308,10 @@ it.
 - Do not merge. Merge to main is a human gate, and both approvals plus a human
   reading the timestamps is what that gate means (`AGENTS.md`).
 - Never set or clear `claude-approved`. Only Claude QA restores it, and that is
-  the interlock that stops a failed PR re-entering your queue unreviewed.
-- Never remove `requires-rig`. Human-only, after the measurement exists.
+  how a revised PR re-enters your queue. `needs-work` is the interlock that
+  keeps the rejected tip out until the developer picks it up; the developer
+  removes `claude-approved` before changing that tip.
+- Never set or remove `requires-rig`. Claude QA owns it at review; say in your comment if you think a measurement is missing.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.

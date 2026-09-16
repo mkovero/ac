@@ -1,4 +1,4 @@
-use super::{check_ack, get_cal, level_to_dbfs, print_level_clamp, print_level_clamp_range};
+use super::{check_ack, get_cal, level_to_dbfs, print_level, print_level_range};
 use crate::client::AcClient;
 use crate::io;
 use crate::parse::CommandKind;
@@ -9,14 +9,15 @@ pub fn run(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, level, ppd, bpo) = match cmd {
+    let (start, stop, level, level_defaulted, ppd, bpo) = match cmd {
         CommandKind::Plot {
             start,
             stop,
             level,
+            level_defaulted,
             ppd,
             bpo,
-        } => (*start, *stop, level, *ppd, *bpo),
+        } => (*start, *stop, level, *level_defaulted, *ppd, *bpo),
         _ => unreachable!(),
     };
 
@@ -32,10 +33,7 @@ pub fn run(
     let start_hz = start.unwrap_or(cfg.range_start_hz);
     let stop_hz = stop.unwrap_or(cfg.range_stop_hz);
 
-    println!(
-        "\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {} pts/decade  |  {level_db:.1} dBFS",
-        ppd
-    );
+    println!("\n  Plot: {start_hz:.0} \u{2192} {stop_hz:.0} Hz  {ppd} pts/decade");
     io::print_freq_header(have_cal);
 
     let mut cmd_json = serde_json::json!({
@@ -49,11 +47,13 @@ pub fn run(
         cmd_json["bpo"] = serde_json::json!(b);
     }
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot");
-    let applied_db = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(level_db);
-    print_level_clamp(level_db, applied_db);
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -68,8 +68,8 @@ pub fn run(
         launch_ui(LaunchKind::SweepFreq, cfg, None);
     }
 
-    let results = collect_sweep(client, "plot");
-    if results.is_empty() {
+    let (results, outcome) = collect_sweep(client, "plot");
+    if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
     io::print_summary(&results, "DUT", have_cal);
@@ -82,13 +82,14 @@ pub fn run_level(
     client: &mut AcClient,
     show_plot: bool,
 ) {
-    let (start, stop, freq, steps) = match cmd {
+    let (start, stop, level_defaulted, freq, steps) = match cmd {
         CommandKind::PlotLevel {
             start,
             stop,
+            level_defaulted,
             freq,
             steps,
-        } => (start, stop, *freq, *steps),
+        } => (start, stop, *level_defaulted, *freq, *steps),
         _ => unreachable!(),
     };
 
@@ -102,9 +103,7 @@ pub fn run_level(
     let start_db = level_to_dbfs(start, cal.as_ref());
     let stop_db = level_to_dbfs(stop, cal.as_ref());
 
-    println!(
-        "\n  Plot level: {start_db:.1} \u{2192} {stop_db:.1} dBFS  {freq:.0} Hz  |  {steps} steps"
-    );
+    println!("\n  Plot level: {freq:.0} Hz  |  {steps} steps");
     io::print_freq_header(have_cal);
 
     let ack = check_ack(
@@ -120,15 +119,13 @@ pub fn run_level(
         ),
         "plot_level",
     );
-    let start_applied = ack
-        .get("start_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(start_db);
-    let stop_applied = ack
-        .get("stop_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(stop_db);
-    print_level_clamp_range(start_db, stop_db, start_applied, stop_applied);
+    print_level_range(
+        ack.get("start_dbfs").and_then(|v| v.as_f64()),
+        ack.get("stop_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+    );
     if let (Some(out), Some(inp)) = (
         ack.get("out_port").and_then(|v| v.as_str()),
         ack.get("in_port").and_then(|v| v.as_str()),
@@ -140,8 +137,8 @@ pub fn run_level(
         launch_ui(LaunchKind::SweepLevel, cfg, None);
     }
 
-    let results = collect_sweep(client, "plot_level");
-    if results.is_empty() {
+    let (results, outcome) = collect_sweep(client, "plot_level");
+    if outcome != SweepOutcome::Done || results.is_empty() {
         return;
     }
     io::print_summary(&results, "DUT", have_cal);
@@ -156,26 +153,31 @@ pub fn run_level(
 /// `measurement/impulse_response` and `measurement/report` frames the
 /// daemon already publishes.
 pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcClient) {
-    let (f1, f2, duration, level, n_harmonics, window_len, tail_s) = match cmd {
-        CommandKind::PlotIr {
-            f1,
-            f2,
-            duration,
-            level,
-            n_harmonics,
-            window_len,
-            tail_s,
-        } => (
-            *f1,
-            *f2,
-            *duration,
-            level,
-            *n_harmonics,
-            *window_len,
-            *tail_s,
-        ),
-        _ => unreachable!(),
-    };
+    let (f1, f2, duration, level, level_defaulted, n_harmonics, window_len, tail_s, distance_m) =
+        match cmd {
+            CommandKind::PlotIr {
+                f1,
+                f2,
+                duration,
+                level,
+                level_defaulted,
+                n_harmonics,
+                window_len,
+                tail_s,
+                distance_m,
+            } => (
+                *f1,
+                *f2,
+                *duration,
+                level,
+                *level_defaulted,
+                *n_harmonics,
+                *window_len,
+                *tail_s,
+                *distance_m,
+            ),
+            _ => unreachable!(),
+        };
 
     let cal = get_cal(client);
     let have_cal = cal.is_some();
@@ -198,9 +200,15 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
             .map(|v| format!("{v:.2}s"))
             .unwrap_or_else(|| "default".into()),
     );
-    println!(
-        "\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {level_db:.1} dBFS  |  {duration:.1}s  |  {gate}"
-    );
+    println!("\n  IR: {f1:.0} \u{2192} {f2:.0} Hz  |  {duration:.1}s");
+    println!("  gate       {gate}");
+    // #460 UX: echo the typed distance before emission, so a token typo
+    // (`0.8m` meant as `0.8s`) is visible before the result, and state its
+    // absence rather than hide it.
+    match distance_m {
+        Some(d) => println!("  distance   {d} m"),
+        None => println!("  distance   not given"),
+    }
 
     let mut cmd_json = serde_json::json!({
         "cmd": "plot_ir",
@@ -218,15 +226,33 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     if let Some(v) = tail_s {
         cmd_json["tail_s"] = serde_json::json!(v);
     }
+    if let Some(v) = distance_m {
+        cmd_json["distance_m"] = serde_json::json!(v);
+    }
 
     let ack = check_ack(client.send_cmd(&cmd_json, None), "plot_ir");
-    let applied_db = ack
-        .get("level_dbfs")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(level_db);
-    print_level_clamp(level_db, applied_db);
-    if let Some(p) = ack.get("out_port").and_then(|v| v.as_str()) {
-        println!("  Output: {p}");
+    print_level(
+        ack.get("level_dbfs").and_then(|v| v.as_f64()),
+        level_defaulted,
+        ack.get("max_dbfs").and_then(|v| v.as_f64()),
+        cal.as_ref(),
+        true,
+    );
+    let out_port = ack.get("out_port").and_then(|v| v.as_str());
+    if let Some(p) = out_port {
+        println!("  output     {p}");
+    }
+    // #460 UX: every port the sweep leaves through or is referenced against,
+    // printed before the result, on the same label grid as `gate` and
+    // `level`. A reference output equal to the main output drives nothing
+    // extra, so it is not named twice.
+    if let Some(p) = ack.get("ref_out_port").and_then(|v| v.as_str()) {
+        if Some(p) != out_port {
+            println!("  ref out    {p}");
+        }
+    }
+    if let Some(p) = ack.get("ref_in_port").and_then(|v| v.as_str()) {
+        println!("  ref in     {p}");
     }
     println!("  Running IR measurement...\n");
 
@@ -234,6 +260,469 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_result(ir_frame.as_ref(), report_frame.as_ref(), duration, tail_s);
     print_ir_report(report_frame.as_ref(), cfg);
     print_ir_notes(report_frame.as_ref());
+}
+
+/// Derives the short terminal tag from `IrStats::onset_rule`'s full
+/// sentence (#346 AC4, revised for #378's picker). Two facts a reader
+/// needs a year later: which window the pick was made over, and whether
+/// the pick landed inside it or on its edge — a pick sitting on the
+/// window start is a stable, repeatable, possibly wrong number, and it
+/// has to be visible on the line rather than inferable from the JSON.
+///
+/// Returns 3 lines normally (intro, window start, and the causal-bound row
+/// built from `bound`'s own fields, #460) and 4 when the pick is pinned to
+/// the window start. On a decline it returns the decline line, the case, and
+/// a `check:` line — plus the bound row when the bound itself caused it. On a decline the second line is
+/// the degenerate case named in `rule`, printed verbatim from between
+/// its parentheses, so a case added in `ac-core` later reaches the
+/// terminal without a change here. Falls back to the full string
+/// verbatim if its shape ever changes underneath this, so a reader never
+/// sees nothing.
+fn short_onset_rule(
+    rule: &str,
+    onset_index: usize,
+    bound: &ac_core::measurement::sweep::CausalBound,
+) -> Vec<String> {
+    if rule.contains("picker declined") {
+        let case = rule
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(inside, _)| inside.to_string());
+        let mut lines = vec!["picker declined \u{2014} no onset estimate".to_string()];
+        let bound_caused_it = case.as_deref() == Some("causal bound at or after the peak");
+        if let Some(case) = case {
+            lines.push(case);
+        }
+        if bound_caused_it {
+            // #460: the bound's own inputs put it there, so those are what
+            // to check, not the gate.
+            lines.push(causal_bound_row(bound));
+            lines.push("check: typed distance, reference loopback routing".to_string());
+        } else {
+            lines.push("check: gate length, peak position in gate".to_string());
+        }
+        return lines;
+    }
+    let Some(start) = rule.find("window start at sample ").map(|at| {
+        rule[at + "window start at sample ".len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }) else {
+        return vec![rule.to_string()];
+    };
+    let limit = if rule.contains("search span is the tighter limit") {
+        "search span"
+    } else if rule.contains("causal bound enforced") {
+        "causal bound"
+    } else if rule.contains("no causal bound") {
+        "search span"
+    } else {
+        return vec![rule.to_string()];
+    };
+    let intro = format!(
+        "AIC change-point pick, {:.1} ms window",
+        ac_core::measurement::sweep::ONSET_SEARCH_WINDOW_S * 1000.0
+    );
+    let pinned = rule.contains("pick landed on the window start");
+    let clear = start
+        .parse::<usize>()
+        .map(|s| onset_index.saturating_sub(s))
+        .unwrap_or(0);
+    let mut lines = vec![
+        intro,
+        if pinned {
+            format!("window start {start} ({limit}), pick ON start")
+        } else {
+            format!("window start {start} ({limit}), pick {clear} clear")
+        },
+    ];
+    // #460 AC3 / UX row 3: what the bound was built from, or which input
+    // it lacked — always on the same row, so the eye finds the answer there.
+    lines.push(causal_bound_row(bound));
+    if pinned {
+        lines.push("onset may lie earlier than the window allows".to_string());
+    }
+    lines
+}
+
+/// Onset block row 3 (#460 UX), printed from the bound's own fields rather
+/// than parsed from `onset_rule`. An assumed speed of sound is said so: an
+/// unset temperature silently uses the default `c`.
+fn causal_bound_row(bound: &ac_core::measurement::sweep::CausalBound) -> String {
+    use ac_core::measurement::sweep::{CausalBound, MissingBoundInput};
+    match bound {
+        CausalBound::Enforced { inputs, .. } => {
+            let c = match inputs.temperature_c {
+                Some(t) => format!("c {:.1} m/s at {t:.1} \u{b0}C", inputs.speed_of_sound_m_s),
+                None => format!("c {:.1} m/s assumed", inputs.speed_of_sound_m_s),
+            };
+            format!("bound from ref latency + {} m, {c}", inputs.distance_m)
+        }
+        CausalBound::Unavailable(MissingBoundInput::Distance) => {
+            "no causal bound \u{2014} distance not given (token: 1m)".to_string()
+        }
+        CausalBound::Unavailable(MissingBoundInput::ReferenceLatency { .. }) => {
+            "no causal bound \u{2014} ref latency unavailable (below)".to_string()
+        }
+        CausalBound::Unavailable(MissingBoundInput::Both { .. }) => {
+            "no causal bound \u{2014} no distance, ref latency unavailable".to_string()
+        }
+    }
+}
+
+/// Left-pads `label` to the column every #359 read-out line shares with
+/// `ref latency`'s existing position: two leading spaces, then the label
+/// padded to 14 columns, so every value in this block starts at column 16.
+fn label_prefix(label: &str) -> String {
+    format!("  {label:<14}")
+}
+
+/// 16 spaces — the continuation indent every line under a labelled block
+/// uses, matching the column [`label_prefix`] leaves a value at.
+const CONT_INDENT: &str = "                ";
+
+/// Sample count formatted the way every #359/#460 latency line agrees on:
+/// an integer when within 0.01 of one (rounding noise), otherwise one
+/// decimal place.
+fn format_samples(samples: f64) -> String {
+    if (samples - samples.round()).abs() < 0.01 {
+        format!("{}", samples.round() as i64)
+    } else {
+        format!("{samples:.1}")
+    }
+}
+
+/// [`format_samples`] with an explicit sign — the `flight time` line's
+/// samples figure can be negative.
+fn format_samples_signed(samples: f64) -> String {
+    if samples < 0.0 {
+        format!("-{}", format_samples(-samples))
+    } else {
+        format!("+{}", format_samples(samples))
+    }
+}
+
+/// Milliseconds figure for `latency` / `ref latency` / `ref stored`,
+/// right-aligned to width 7 so the decimal points line up down the block
+/// (#359 UX).
+fn format_ms_aligned(ms: f64) -> String {
+    format!("{ms:>7.4}")
+}
+
+/// Word-wraps `text` onto lines of at most `width` columns. Wraps at a
+/// fixed width rather than detecting terminal width (#359 UX) — the text
+/// is re-flowed, never rephrased.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate_len = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+        if candidate_len > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A refusal reason under a labelled block: `none — <reason>`, word-wrapped
+/// at a fixed 80 columns onto indent 16 (#359 UX). Never rephrases the
+/// reason text — `TauRefusal::message()` and `ReferenceLatency`'s own
+/// reasons stay verbatim.
+fn labeled_wrapped(label: &str, reason: &str) -> Vec<String> {
+    let text = format!("none \u{2014} {reason}");
+    let wrapped = word_wrap(&text, 80 - CONT_INDENT.len());
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                format!("{}{line}", label_prefix(label))
+            } else {
+                format!("{CONT_INDENT}{line}")
+            }
+        })
+        .collect()
+}
+
+/// `measured <measured_at>, <age> before capture` (#359 UX) — the age is
+/// this *report's own* `timestamp_utc` minus `measured_at`, never the wall
+/// clock, so an archived report reads the same a year later. Falls back to
+/// `measured <measured_at>` alone when either timestamp fails to parse.
+fn measured_line(measured_at: &str, report_timestamp_utc: &str) -> String {
+    match age_before_capture(measured_at, report_timestamp_utc) {
+        Some(age) => format!("{CONT_INDENT}measured {measured_at}, {age} before capture"),
+        None => format!("{CONT_INDENT}measured {measured_at}"),
+    }
+}
+
+/// `report_timestamp_utc \u{2212} measured_at`, humanised per #359 UX's
+/// buckets: under 120 s as seconds, under 120 min as minutes, under 48 h as
+/// one-decimal hours, otherwise whole days. `None` when either timestamp
+/// fails to parse as RFC3339.
+fn age_before_capture(measured_at: &str, report_timestamp_utc: &str) -> Option<String> {
+    let measured = chrono::DateTime::parse_from_rfc3339(measured_at).ok()?;
+    let captured = chrono::DateTime::parse_from_rfc3339(report_timestamp_utc).ok()?;
+    let secs = captured
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(measured.with_timezone(&chrono::Utc))
+        .num_seconds();
+    let abs_secs = secs.unsigned_abs();
+    Some(if abs_secs < 120 {
+        format!("{secs} s")
+    } else if abs_secs < 120 * 60 {
+        format!("{} min", secs / 60)
+    } else if abs_secs < 48 * 3600 {
+        format!("{:.1} h", secs as f64 / 3600.0)
+    } else {
+        format!("{} d", secs / 86_400)
+    })
+}
+
+/// The `ref latency` read-out (#460 UX), always printed: the same-capture
+/// reference τ in `calibrate`'s `Delay:` format, or its unavailable reason
+/// with any `; check: ` part on its own `check:` line.
+fn reference_latency_lines(
+    reference: Option<&ac_core::measurement::report::ReferenceLatency>,
+    sample_rate_hz: u32,
+) -> Vec<String> {
+    use ac_core::measurement::report::ReferenceLatency;
+    let unavailable = |reason: &str| match reason.split_once("; check: ") {
+        Some((observation, places)) => vec![
+            format!("  ref latency   unavailable \u{2014} {observation}"),
+            format!("                check: {places}"),
+        ],
+        None => vec![format!("  ref latency   unavailable \u{2014} {reason}")],
+    };
+    match reference {
+        Some(ReferenceLatency::Measured(m)) => {
+            let samples = m.tau_s * sample_rate_hz as f64;
+            let snr = m
+                .pre_impulse_snr_db
+                .map(|v| format!("{v:.1} dB"))
+                .unwrap_or_else(|| "\u{221e} dB".to_string());
+            vec![format!(
+                "  ref latency   {} ms  ({} samples, SNR {snr}, same capture)",
+                format_ms_aligned(m.tau_s * 1000.0),
+                format_samples(samples),
+            )]
+        }
+        Some(ReferenceLatency::Unavailable { reason }) => unavailable(reason),
+        None => unavailable("not recorded (report predates schema v7)"),
+    }
+}
+
+/// `latency` line (#359 UX): the τ subtracted from the arrival to produce
+/// `flight time`, plus its measured-date line. Always printed, mirroring
+/// `ref latency`'s own always-printed rule.
+fn interface_latency_lines(
+    latency: Option<&ac_core::measurement::report::InterfaceLatency>,
+    schema_version: u32,
+    sample_rate_hz: u32,
+    report_timestamp_utc: &str,
+) -> Vec<String> {
+    use ac_core::measurement::report::InterfaceLatency;
+    match latency {
+        Some(InterfaceLatency::Measured(m)) => {
+            let samples = m.tau_s * sample_rate_hz as f64;
+            vec![
+                format!(
+                    "{}{} ms  ({} samples, stored)",
+                    label_prefix("latency"),
+                    format_ms_aligned(m.tau_s * 1000.0),
+                    format_samples(samples),
+                ),
+                measured_line(&m.measured_at, report_timestamp_utc),
+            ]
+        }
+        Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("latency", reason),
+        None => {
+            let text = if schema_version < 5 {
+                "not recorded (report predates schema v5)"
+            } else {
+                "not recorded"
+            };
+            vec![format!("{}{text}", label_prefix("latency"))]
+        }
+    }
+}
+
+/// `ref stored` line (#359 UX): the τ `calibrate` has on file for the
+/// *reference* pair — the second input to `ref \u{394}`, shown next to the
+/// first (`ref latency`).
+fn reference_stored_latency_lines(
+    stored: Option<&ac_core::measurement::report::InterfaceLatency>,
+    schema_version: u32,
+    sample_rate_hz: u32,
+    report_timestamp_utc: &str,
+) -> Vec<String> {
+    use ac_core::measurement::report::InterfaceLatency;
+    match stored {
+        Some(InterfaceLatency::Measured(m)) => {
+            let samples = m.tau_s * sample_rate_hz as f64;
+            vec![
+                format!(
+                    "{}{} ms  ({} samples, stored)",
+                    label_prefix("ref stored"),
+                    format_ms_aligned(m.tau_s * 1000.0),
+                    format_samples(samples),
+                ),
+                measured_line(&m.measured_at, report_timestamp_utc),
+            ]
+        }
+        Some(InterfaceLatency::Unavailable { reason }) => labeled_wrapped("ref stored", reason),
+        None => {
+            let text = if schema_version < 9 {
+                "not recorded (report predates schema v9)"
+            } else {
+                "not looked up \u{2014} no reference configured"
+            };
+            vec![format!("{}{text}", label_prefix("ref stored"))]
+        }
+    }
+}
+
+/// The four-line disagreement block (#359 UX), built from
+/// [`ac_core::shared::calibration::TauDisagreement`]'s own fields rather
+/// than its `message()` (~170 columns, one line) — the same split
+/// `calibrate`'s own disagreement read-out makes. #347's phrases are
+/// reused verbatim so the two faults are recognisably the same fault
+/// (AC2/AC3).
+fn disagreement_lines(d: &ac_core::shared::calibration::TauDisagreement) -> Vec<String> {
+    let delta_ms = d.delta_samples as f64 / d.sample_rate as f64 * 1000.0;
+    let mut lines = vec![format!(
+        "{}{:+} samples = {:+.4} ms at {} Hz",
+        label_prefix("ref \u{394}"),
+        d.delta_samples,
+        delta_ms,
+        d.sample_rate,
+    )];
+    match d.periods {
+        Some(n) => {
+            let period = d.period_size.unwrap_or_default();
+            lines.push(format!(
+                "{CONT_INDENT}exactly {} period{} of {period} samples",
+                n.unsigned_abs(),
+                if n.unsigned_abs() == 1 { "" } else { "s" },
+            ));
+            lines.push(format!(
+                "{CONT_INDENT}a graph-buffering shift, not hardware drift"
+            ));
+        }
+        None => {
+            let period_note = match d.period_size {
+                Some(p) => format!("period {p} samples"),
+                None => "period not reported by this backend".to_string(),
+            };
+            lines.push(format!(
+                "{CONT_INDENT}not a period multiple ({period_note})"
+            ));
+        }
+    }
+    lines.push(format!(
+        "{CONT_INDENT}stored {:.3} samples \u{2192} this capture {:.3} samples",
+        d.reading1_s * d.sample_rate as f64,
+        d.reading2_s * d.sample_rate as f64,
+    ));
+    lines.push(format!(
+        "{CONT_INDENT}check: {}",
+        if d.periods.is_some() {
+            "re-run plot ir, then ac calibrate on both pairs"
+        } else {
+            "interface clock, device reconnects since measured"
+        }
+    ));
+    lines
+}
+
+/// `ref \u{394}` block (#359 UX): the arrival-check evidence, printed as a
+/// number, never a verdict (#363's own rule — `0 samples` is evidence,
+/// `agree` would be a verdict). `stored_period_size` comes from
+/// `report.reference_stored_latency` directly, since
+/// [`ac_core::measurement::report::ArrivalCheck::Agree`] itself carries no
+/// reading to name a period from.
+fn arrival_check_lines(
+    check: &ac_core::measurement::report::ArrivalCheck,
+    stored_period_size: Option<u32>,
+) -> Vec<String> {
+    use ac_core::measurement::report::ArrivalCheck;
+    match check {
+        ArrivalCheck::Agree => {
+            let period_note = match stored_period_size {
+                Some(p) => format!("one period = {p}"),
+                None => "period not reported by this backend".to_string(),
+            };
+            vec![format!(
+                "{}0 samples  (same capture \u{2212} stored, {period_note})",
+                label_prefix("ref \u{394}")
+            )]
+        }
+        ArrivalCheck::Unchecked { .. } => vec![format!(
+            "{}not checked \u{2014} needs ref latency and ref stored (above)",
+            label_prefix("ref \u{394}")
+        )],
+        ArrivalCheck::PeriodShift(d) | ArrivalCheck::Mismatch(d) => disagreement_lines(d),
+    }
+}
+
+/// `flight time` line (#359 UX), directly under `arrival`. `Some` prints
+/// the τ-corrected figure; `None` distinguishes a withheld correction (a
+/// detected `ref \u{394}` disagreement — the numbers exist, the check
+/// declined to combine them) from one that was never possible (no stored
+/// latency for this capture pair at all). `Some` alongside
+/// `ArrivalCheck::Unchecked` (case D — a flight time exists, but the
+/// same-capture corroboration never ran) gets a second, 16-space-indented
+/// continuation line naming that (codex-qa on PR #477): otherwise an
+/// unverified flight time prints identically to a checked one.
+fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
+    use ac_core::measurement::report::ArrivalCheck;
+    match (stats.flight_time_s, &stats.arrival_check) {
+        (Some(ft), ArrivalCheck::Unchecked { .. }) => {
+            let samples = ft * stats.sample_rate_hz as f64;
+            vec![
+                format!(
+                    "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
+                    label_prefix("flight time"),
+                    format_samples_signed(samples),
+                    ft * 1000.0,
+                ),
+                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
+            ]
+        }
+        (Some(ft), _) => {
+            let samples = ft * stats.sample_rate_hz as f64;
+            vec![format!(
+                "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
+                label_prefix("flight time"),
+                format_samples_signed(samples),
+                ft * 1000.0,
+            )]
+        }
+        (None, ArrivalCheck::PeriodShift(_)) => vec![format!(
+            "{}withheld \u{2014} ref \u{394} is a period shift (below)",
+            label_prefix("flight time")
+        )],
+        (None, ArrivalCheck::Mismatch(_)) => vec![format!(
+            "{}withheld \u{2014} ref \u{394} is not zero (below)",
+            label_prefix("flight time")
+        )],
+        (None, _) => vec![format!(
+            "{}not shown \u{2014} no stored latency for this pair (below)",
+            label_prefix("flight time")
+        )],
+    }
 }
 
 /// The read-out: arrival (samples and ms, re gate centre), peak,
@@ -276,6 +765,13 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
             stats.arrival_s * 1000.0,
             stats.sample_rate_hz,
         );
+        // #359: the one τ subtraction this report can offer, gated by
+        // `arrival_check` — sits directly under `arrival` so the two
+        // primary values stack. Never printed on a failed deconvolution
+        // (#376's rule that a failed capture prints no arrival).
+        for line in flight_time_line(&stats) {
+            println!("{line}");
+        }
     }
     println!(
         "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
@@ -285,6 +781,63 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     );
     if matches!(stats.verdict, IrVerdict::Failed { .. }) {
         println!("                diagnostic only \u{2014} not a valid arrival");
+    } else {
+        // `arrival` is the peak's offset (#378 contingency, AC6 rig run
+        // 2026-09-15); the onset is printed under the peak it is measured
+        // against, as a diagnostic. #346 AC4's requirement still holds for
+        // it: the rule that produced the onset reaches the terminal, not
+        // only the JSON. Printed as a short derived tag rather than
+        // `onset_rule` verbatim (the full sentence runs past 80 columns at
+        // this indent); the untruncated rule still rides the persisted
+        // JSON via `IrStats::onset_rule`.
+        let onset_lines =
+            short_onset_rule(&stats.onset_rule, stats.onset_index, &stats.causal_bound);
+        println!("                onset: {}", onset_lines[0]);
+        let continuation_indent = " ".repeat("                onset: ".len());
+        for line in &onset_lines[1..] {
+            println!("{continuation_indent}{line}");
+        }
+        // #378: the onset-to-peak distance is the quantity AC6 found moving
+        // with position (492.5 samples at 1.000 m, 627.6 at 2.000 m on the
+        // rig). Printed in one place so an operator who moves the mic sees
+        // it move, and labelled so it cannot be read as the arrival.
+        if stats.onset_index < stats.peak_index {
+            println!(
+                "                diagnostic \u{2014} onset {} samples before peak, not the arrival",
+                stats.peak_index - stats.onset_index,
+            );
+        }
+    }
+    // #359 UX: the latency block — `latency`, `ref latency`, `ref stored`,
+    // `ref Δ` — replaces the single `ref latency` line in its previous
+    // position. All four print unconditionally, on a failed deconvolution
+    // too: the reference leg is its own reading and says something about
+    // this lifetime even when the IR itself failed.
+    for line in interface_latency_lines(
+        report.interface_latency.as_ref(),
+        report.schema_version,
+        stats.sample_rate_hz,
+        &report.timestamp_utc,
+    ) {
+        println!("{line}");
+    }
+    for line in reference_latency_lines(report.reference_latency.as_ref(), stats.sample_rate_hz) {
+        println!("{line}");
+    }
+    for line in reference_stored_latency_lines(
+        report.reference_stored_latency.as_ref(),
+        report.schema_version,
+        stats.sample_rate_hz,
+        &report.timestamp_utc,
+    ) {
+        println!("{line}");
+    }
+    let stored_period_size = match report.reference_stored_latency.as_ref() {
+        Some(ac_core::measurement::report::InterfaceLatency::Measured(m)) => m.period_size,
+        _ => None,
+    };
+    for line in arrival_check_lines(&stats.arrival_check, stored_period_size) {
+        println!("{line}");
     }
     if stats.pre_impulse_snr_db.is_finite() {
         if matches!(stats.verdict, IrVerdict::Failed { .. }) {
@@ -415,11 +968,34 @@ fn print_ir_notes(report_frame: Option<&serde_json::Value>) {
     }
 }
 
-fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value> {
+/// Whether a sweep reached its terminal `done` frame. Anything else — a
+/// terminal `error` (analyzer failure, #428) or a timeout — leaves
+/// `results` holding only a prefix that must never be treated as a
+/// complete artifact: no summary printed, no CSV written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepOutcome {
+    Done,
+    Failed,
+}
+
+fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> (Vec<serde_json::Value>, SweepOutcome) {
+    collect_sweep_frames(|| client.recv_data(300_000), cmd_name)
+}
+
+/// Core of `collect_sweep`, generic over the frame source so the
+/// atomic-failure gating (a terminal `error` must never leave `outcome ==
+/// Done`, however many `measurement/frequency_response/point` frames
+/// preceded it) can be unit-tested without a real `AcClient`/socket —
+/// see `tests::error_after_points_is_failed_not_done` below (#428 QA).
+fn collect_sweep_frames(
+    mut next_frame: impl FnMut() -> Option<(String, serde_json::Value)>,
+    cmd_name: &str,
+) -> (Vec<serde_json::Value>, SweepOutcome) {
     let mut results = Vec::new();
+    let mut outcome = SweepOutcome::Failed;
 
     loop {
-        let frame = match client.recv_data(300_000) {
+        let frame = match next_frame() {
             Some(f) => f,
             None => {
                 eprintln!("\n  error: timeout waiting for {cmd_name} data");
@@ -441,17 +1017,27 @@ fn collect_sweep(client: &mut AcClient, cmd_name: &str) -> Vec<serde_json::Value
                     println!("\n  !! {xruns} xrun(s) during {cmd_name}");
                 }
             }
+            outcome = SweepOutcome::Done;
             break;
         } else if topic == "error" {
             let msg = data
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("error");
-            eprintln!("\n  !! {msg}");
+            let partial = match (
+                data.get("requested_points").and_then(|v| v.as_u64()),
+                data.get("completed_points").and_then(|v| v.as_u64()),
+            ) {
+                (Some(requested), Some(completed)) => {
+                    format!(" ({completed} of {requested} points completed; no report written)")
+                }
+                _ => String::new(),
+            };
+            eprintln!("\n  !! {msg}{partial}");
             break;
         }
     }
-    results
+    (results, outcome)
 }
 
 fn save_results(results: &[serde_json::Value], label: &str, cfg: &ac_core::config::Config) {
@@ -489,5 +1075,801 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
     let chs: Vec<u32> = channels.map(|s| s.to_vec()).unwrap_or_default();
     if let Err(e) = super::monitor_tui::run(cfg, &chs) {
         eprintln!("  monitor: tui error: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        arrival_check_lines, collect_sweep_frames, flight_time_line, interface_latency_lines,
+        label_prefix, reference_latency_lines, reference_stored_latency_lines, short_onset_rule,
+        SweepOutcome, CONT_INDENT,
+    };
+    use ac_core::measurement::report::{
+        ArrivalCheck, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
+        MeasuredReferenceLatency, ReferenceLatency,
+    };
+    use ac_core::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
+    use ac_core::shared::calibration::TauDisagreement;
+    use std::collections::VecDeque;
+
+    fn point(freq_hz: f64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "measurement/frequency_response/point",
+            "freq_hz": freq_hz,
+        })
+    }
+
+    /// PR #451 QA finding (#428): a terminal `error` after some points had
+    /// already streamed must report `SweepOutcome::Failed` and only the
+    /// completed prefix — `run`/`run_level` gate `print_summary`/
+    /// `save_results` on `outcome == Done`, so this is what makes the
+    /// atomic-failure guarantee reach the CLI's own summary/CSV output,
+    /// not just the daemon's wire frames.
+    #[test]
+    fn error_after_points_is_failed_not_done() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            ("data".to_string(), point(100.0)),
+            ("data".to_string(), point(200.0)),
+            (
+                "error".to_string(),
+                serde_json::json!({
+                    "cmd": "plot",
+                    "message": "capture at 1000 Hz has 48 samples; minimum is 256",
+                    "requested_points": 5,
+                    "completed_points": 2,
+                }),
+            ),
+            // Must never be reached: a real daemon does not publish a
+            // point or `done` after a terminal `error`, and the loop must
+            // not either.
+            ("done".to_string(), serde_json::json!({"xruns": 0})),
+        ]);
+
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+
+        assert_eq!(outcome, SweepOutcome::Failed);
+        assert_eq!(
+            results.len(),
+            2,
+            "only the pre-failure points should be retained: {results:?}"
+        );
+    }
+
+    #[test]
+    fn done_after_points_is_done() {
+        let mut frames: VecDeque<(String, serde_json::Value)> = VecDeque::from([
+            ("data".to_string(), point(100.0)),
+            ("data".to_string(), point(200.0)),
+            ("done".to_string(), serde_json::json!({"xruns": 0})),
+        ]);
+
+        let (results, outcome) = collect_sweep_frames(|| frames.pop_front(), "plot");
+
+        assert_eq!(outcome, SweepOutcome::Done);
+        assert_eq!(results.len(), 2);
+    }
+
+    fn unbounded() -> CausalBound {
+        CausalBound::Unavailable(MissingBoundInput::Both {
+            reference_reason: "no reference configured (ac setup reference)".into(),
+        })
+    }
+
+    fn enforced(distance_m: f64, temperature_c: Option<f64>) -> CausalBound {
+        CausalBound::Enforced {
+            index: 1305,
+            inputs: BoundInputs {
+                reference_tau_s: 0.017_822_9,
+                distance_m,
+                speed_of_sound_m_s: ac_core::shared::conversions::speed_of_sound_from_config(
+                    temperature_c,
+                ),
+                temperature_c,
+            },
+        }
+    }
+
+    /// QA (PR #377), carried into #378: `short_onset_rule`'s decline
+    /// branch had no test naming its output — a typo in the
+    /// `.contains("picker declined")` match here, or in the string it
+    /// matches against in `ac_core::measurement::sweep::estimate_onset`,
+    /// would fall through to the window-clause branch instead, silently
+    /// dropping the operator-facing warning at the terminal.
+    #[test]
+    fn short_onset_rule_surfaces_the_decline_line() {
+        let rule = "onset picker declined (search window shorter than 2 samples) — index is \
+                    the peak, not an onset";
+        let lines = short_onset_rule(rule, 1479, &unbounded());
+        assert_eq!(
+            lines,
+            vec![
+                "picker declined — no onset estimate".to_string(),
+                "search window shorter than 2 samples".to_string(),
+                "check: gate length, peak position in gate".to_string(),
+            ]
+        );
+    }
+
+    /// A degenerate case added in `ac-core` later must reach the terminal
+    /// without a change here: the parenthetical is printed verbatim, not
+    /// matched against a list.
+    #[test]
+    fn short_onset_rule_prints_an_unknown_decline_case_verbatim() {
+        let rule = "onset picker declined (a case invented by this test) — index is the peak, \
+                    not an onset";
+        let lines = short_onset_rule(rule, 1479, &unbounded());
+        assert_eq!(lines[1], "a case invented by this test".to_string());
+    }
+
+    /// #460 UX frame 5: a bound at or after the peak names the bound's inputs
+    /// and says to check them, not the gate.
+    #[test]
+    fn short_onset_rule_names_the_bound_inputs_when_the_bound_caused_the_decline() {
+        let rule = "onset picker declined (causal bound at or after the peak) — index is the \
+                    peak, not an onset";
+        let lines = short_onset_rule(rule, 1479, &enforced(3.0, None));
+        assert_eq!(
+            lines,
+            vec![
+                "picker declined — no onset estimate".to_string(),
+                "causal bound at or after the peak".to_string(),
+                "bound from ref latency + 3 m, c 343.0 m/s assumed".to_string(),
+                "check: typed distance, reference loopback routing".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn short_onset_rule_reports_the_window_start_how_clear_the_pick_is_and_the_bound() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced";
+        let lines = short_onset_rule(rule, 1369, &enforced(1.0, Some(21.5)));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "AIC change-point pick, 10.0 ms window");
+        assert_eq!(lines[1], "window start 1305 (causal bound), pick 64 clear");
+        assert!(
+            lines[2].starts_with("bound from ref latency + 1 m, c ")
+                && lines[2].ends_with(" m/s at 21.5 °C"),
+            "{:?}",
+            lines[2]
+        );
+    }
+
+    /// #460 AC3 / UX: the old `(search span, no geometry known)` named
+    /// neither input. The window line now says only which limit set it, and
+    /// row 3 names what was missing.
+    #[test]
+    fn short_onset_rule_names_the_missing_input_when_no_bound_applies() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
+                    no causal bound (distance not given)";
+        let cases = [
+            (
+                MissingBoundInput::Distance,
+                "no causal bound — distance not given (token: 1m)",
+            ),
+            (
+                MissingBoundInput::ReferenceLatency {
+                    reason: "no reference configured (ac setup reference)".into(),
+                },
+                "no causal bound — ref latency unavailable (below)",
+            ),
+            (
+                MissingBoundInput::Both {
+                    reference_reason: "no reference configured (ac setup reference)".into(),
+                },
+                "no causal bound — no distance, ref latency unavailable",
+            ),
+        ];
+        for (missing, row) in cases {
+            let lines = short_onset_rule(rule, 519, &CausalBound::Unavailable(missing));
+            assert_eq!(lines[1], "window start 455 (search span), pick 64 clear");
+            assert_eq!(lines[2], row);
+            assert!(
+                !lines.iter().any(|l| l.contains("no geometry known")),
+                "pre-#460 clause survives: {lines:?}"
+            );
+        }
+    }
+
+    /// A causal bound that did not set the window start must not read as
+    /// though it did — the operator's question is which limit the pick is
+    /// pinned against.
+    #[test]
+    fn short_onset_rule_names_the_search_span_when_the_bound_does_not_bind() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 455, \
+                    causal bound enforced at sample 10, search span is the tighter limit";
+        let lines = short_onset_rule(rule, 519, &enforced(1.0, None));
+        assert_eq!(
+            lines[1],
+            "window start 455 (search span), pick 64 clear".to_string()
+        );
+    }
+
+    /// The abnormal case keeps the extra line (#460 UX frame 6): rows 1–3
+    /// as normal, the pinned warning on row 4.
+    #[test]
+    fn short_onset_rule_flags_a_pick_pinned_to_the_window_start() {
+        let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 1305, \
+                    causal bound enforced; pick landed on the window start — the true onset \
+                    may lie earlier";
+        let lines = short_onset_rule(rule, 1305, &enforced(1.0, None));
+        assert_eq!(
+            lines,
+            vec![
+                "AIC change-point pick, 10.0 ms window".to_string(),
+                "window start 1305 (causal bound), pick ON start".to_string(),
+                "bound from ref latency + 1 m, c 343.0 m/s assumed".to_string(),
+                "onset may lie earlier than the window allows".to_string(),
+            ]
+        );
+    }
+
+    /// #460 UX: the `ref latency` line in `calibrate`'s `Delay:` format, and
+    /// unavailable reasons with their `check:` part on its own line.
+    #[test]
+    fn reference_latency_lines_print_the_measured_tau_or_the_reason() {
+        let measured = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 1711.0 / 96_000.0,
+            pre_impulse_snr_db: Some(61.8),
+            pre_impulse_snr_floor_db: Some(64.5),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "system:playback_2".into(),
+            input_port: "system:capture_2".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&measured), 96_000),
+            vec!["  ref latency   17.8229 ms  (1711 samples, SNR 61.8 dB, same capture)"]
+        );
+
+        let silent_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 20.0 / 48_000.0,
+            pre_impulse_snr_db: None,
+            pre_impulse_snr_floor_db: None,
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "fake:playback_1".into(),
+            input_port: "fake:capture_1".into(),
+        });
+        assert_eq!(
+            reference_latency_lines(Some(&silent_floor), 48_000),
+            vec!["  ref latency    0.4167 ms  (20 samples, SNR ∞ dB, same capture)"]
+        );
+
+        let refused = ReferenceLatency::Unavailable {
+            reason:
+                "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain"
+                    .into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&refused), 96_000),
+            vec![
+                "  ref latency   unavailable — peak SNR 9.3 dB, need 24.0 dB",
+                "                check: reference loopback cable, ref input gain",
+            ]
+        );
+
+        let none_configured = ReferenceLatency::Unavailable {
+            reason: "no reference configured (ac setup reference)".into(),
+        };
+        assert_eq!(
+            reference_latency_lines(Some(&none_configured), 96_000),
+            vec!["  ref latency   unavailable — no reference configured (ac setup reference)"]
+        );
+        assert_eq!(reference_latency_lines(None, 96_000).len(), 1);
+    }
+
+    fn measured_tau(tau_s: f64, period_size: Option<u32>) -> InterfaceLatency {
+        InterfaceLatency::Measured(MeasuredLatency {
+            tau_s,
+            measured_at: "2026-09-15T09:10:40Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "fake".into(),
+            sample_rate_hz: 96_000,
+            period_size,
+            output_port: "system:playback_0".into(),
+            input_port: "system:capture_0".into(),
+        })
+    }
+
+    /// #359: the `latency` line — the value `flight time` subtracts — plus
+    /// its measured-date line, and the schema-version-dependent wording
+    /// when it was never recorded at all.
+    #[test]
+    fn interface_latency_lines_print_the_measured_tau_or_the_reason() {
+        let measured = measured_tau(1711.4 / 96_000.0, Some(1024));
+        let lines = interface_latency_lines(Some(&measured), 9, 96_000, "2026-09-16T11:30:40Z");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with(&label_prefix("latency")),
+            "{:?}",
+            lines[0]
+        );
+        assert!(lines[0].contains("ms"), "{:?}", lines[0]);
+        assert!(
+            lines[0].contains("1711.4 samples, stored"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(
+            lines[1],
+            format!("{CONT_INDENT}measured 2026-09-15T09:10:40Z, 26.3 h before capture")
+        );
+
+        let refused = InterfaceLatency::Unavailable {
+            reason: "no calibration stored for this channel pair".into(),
+        };
+        let lines = interface_latency_lines(Some(&refused), 9, 96_000, "2026-09-16T11:30:40Z");
+        assert_eq!(
+            lines,
+            vec![format!(
+                "{}none \u{2014} no calibration stored for this channel pair",
+                label_prefix("latency")
+            )]
+        );
+
+        assert_eq!(
+            interface_latency_lines(None, 4, 48_000, "2026-09-16T11:30:40Z"),
+            vec![format!(
+                "{}not recorded (report predates schema v5)",
+                label_prefix("latency")
+            )]
+        );
+        assert_eq!(
+            interface_latency_lines(None, 9, 48_000, "2026-09-16T11:30:40Z"),
+            vec![format!("{}not recorded", label_prefix("latency"))]
+        );
+    }
+
+    /// #359: the `ref stored` line mirrors `latency`, but for the
+    /// reference pair, and its own schema-version threshold (v9, not v5).
+    #[test]
+    fn reference_stored_latency_lines_print_the_measured_tau_or_the_reason() {
+        let measured = measured_tau(57.0 / 96_000.0, Some(64));
+        let lines =
+            reference_stored_latency_lines(Some(&measured), 9, 96_000, "2026-09-16T11:30:40Z");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with(&label_prefix("ref stored")),
+            "{:?}",
+            lines[0]
+        );
+
+        assert_eq!(
+            reference_stored_latency_lines(None, 8, 96_000, "2026-09-16T11:30:40Z"),
+            vec![format!(
+                "{}not recorded (report predates schema v9)",
+                label_prefix("ref stored")
+            )]
+        );
+        assert_eq!(
+            reference_stored_latency_lines(None, 9, 96_000, "2026-09-16T11:30:40Z"),
+            vec![format!(
+                "{}not looked up \u{2014} no reference configured",
+                label_prefix("ref stored")
+            )]
+        );
+    }
+
+    /// #359 AC2/AC4: the `ref Δ` block on a detected period shift uses
+    /// #347's own phrases verbatim, so the two faults are recognisably the
+    /// same fault.
+    #[test]
+    fn arrival_check_lines_name_a_period_shift_with_347s_own_wording() {
+        let d = TauDisagreement {
+            reading1_s: 1711.0 / 96_000.0,
+            reading2_s: 2735.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        let lines = arrival_check_lines(&ArrivalCheck::PeriodShift(d), Some(1024));
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].contains("+1024 samples"), "{:?}", lines[0]);
+        assert!(
+            lines[1].contains("exactly 1 period of 1024 samples"),
+            "{:?}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("a graph-buffering shift, not hardware drift"),
+            "{:?}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains("stored 1711.000 samples \u{2192} this capture 2735.000 samples"),
+            "{:?}",
+            lines[3]
+        );
+        assert!(lines[4].contains("check:"), "{:?}", lines[4]);
+    }
+
+    /// #359 AC3, tested against the rejected implementation: a mismatch
+    /// must never print any of the period-shift phrases.
+    #[test]
+    fn arrival_check_lines_a_mismatch_never_reads_as_a_period_shift() {
+        let d = TauDisagreement {
+            reading1_s: 1711.0 / 96_000.0,
+            reading2_s: 1727.0 / 96_000.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        let lines = arrival_check_lines(&ArrivalCheck::Mismatch(d), Some(1024));
+        assert_eq!(lines.len(), 4);
+        assert!(lines[1].contains("not a period multiple"), "{:?}", lines[1]);
+        for line in &lines {
+            assert!(!line.contains("period shift"), "{line:?}");
+            assert!(!line.contains("graph-buffering"), "{line:?}");
+        }
+    }
+
+    /// #363's own rule, applied here: the evidence prints as a number, not
+    /// a verdict — `agree` never appears.
+    #[test]
+    fn arrival_check_lines_agree_prints_zero_samples_not_a_verdict() {
+        let lines = arrival_check_lines(&ArrivalCheck::Agree, Some(64));
+        assert_eq!(
+            lines,
+            vec![format!(
+                "{}0 samples  (same capture \u{2212} stored, one period = 64)",
+                label_prefix("ref \u{394}")
+            )]
+        );
+        assert!(!lines[0].to_lowercase().contains("agree"));
+    }
+
+    /// The architect's own fixed line: the CLI never restates `Unchecked`'s
+    /// `reason` — it is already on the `latency`/`ref stored` lines above.
+    #[test]
+    fn arrival_check_lines_unchecked_prints_the_fixed_line() {
+        let lines = arrival_check_lines(
+            &ArrivalCheck::Unchecked {
+                reason: "no same-capture reference in this report".into(),
+            },
+            None,
+        );
+        assert_eq!(
+            lines,
+            vec![format!(
+                "{}not checked \u{2014} needs ref latency and ref stored (above)",
+                label_prefix("ref \u{394}")
+            )]
+        );
+    }
+
+    /// #359 QA (PR #477): `flight_time_line` is the value the arrival check
+    /// exists to gate — the CLI's headline new read-out — but shipped with
+    /// no test naming any of its four branches. Each arm here is the one
+    /// that fails if the match reorders or the wording drifts from what
+    /// `flight_time_line` actually prints.
+    fn stats_with(flight_time_s: Option<f64>, arrival_check: ArrivalCheck) -> IrStats {
+        IrStats {
+            sample_rate_hz: 96_000,
+            window_len: 1024,
+            peak_index: 600,
+            peak_magnitude: 0.5,
+            onset_index: 590,
+            onset_rule: String::new(),
+            causal_bound: unbounded(),
+            delay_samples: 88,
+            arrival_s: 88.0 / 96_000.0,
+            arrival_check,
+            flight_time_s,
+            pre_impulse_snr_db: 40.0,
+            gate_window_s: 0.01,
+            gate_f_low_hz: 100.0,
+            gate_window_kind: "tukey".into(),
+            verdict: IrVerdict::Ok,
+        }
+    }
+
+    #[test]
+    fn flight_time_line_names_every_branch_the_ux_spec_requires() {
+        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
+        let lines = flight_time_line(&agree);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("samples"), "{lines:?}");
+        assert!(
+            !lines[0].contains("withheld") && !lines[0].contains("not shown"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines[0],
+            format!(
+                "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
+                label_prefix("flight time")
+            )
+        );
+
+        let shift_d = TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 1024.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        assert_eq!(
+            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(shift_d))),
+            vec![format!(
+                "{}withheld \u{2014} ref \u{394} is a period shift (below)",
+                label_prefix("flight time")
+            )]
+        );
+
+        let mismatch_d = TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 16.0 / 96_000.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        assert_eq!(
+            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(mismatch_d))),
+            vec![format!(
+                "{}withheld \u{2014} ref \u{394} is not zero (below)",
+                label_prefix("flight time")
+            )]
+        );
+
+        assert_eq!(
+            flight_time_line(&stats_with(
+                None,
+                ArrivalCheck::Unchecked {
+                    reason: "no same-capture reference in this report".into(),
+                }
+            )),
+            vec![format!(
+                "{}not shown \u{2014} no stored latency for this pair (below)",
+                label_prefix("flight time")
+            )]
+        );
+    }
+
+    /// codex-qa on PR #477: a `Some` flight time alongside
+    /// `ArrivalCheck::Unchecked` (case D — a flight time was computed, but
+    /// the same-capture corroboration never ran, e.g. this pair's `ref
+    /// stored` misses on exact conditions) printed identically to a checked
+    /// value. The UX comment's field justification for
+    /// `reference check not run — see ref Δ` is explicit: "The architect's
+    /// `Unchecked` still passes a flight time through. This line keeps that
+    /// value from reading as checked." Asserts the continuation line is
+    /// present, 16-space indented, and that the checked (`Agree`) case does
+    /// not carry it.
+    #[test]
+    fn flight_time_line_qualifies_an_unchecked_value_as_not_verified() {
+        let unchecked = stats_with(
+            Some(88.0 / 96_000.0),
+            ArrivalCheck::Unchecked {
+                reason: "no same-capture reference in this report".into(),
+            },
+        );
+        assert_eq!(
+            flight_time_line(&unchecked),
+            vec![
+                format!(
+                    "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
+                    label_prefix("flight time")
+                ),
+                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
+            ]
+        );
+
+        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
+        assert_eq!(
+            flight_time_line(&agree).len(),
+            1,
+            "a checked flight time must not carry the unchecked qualifier"
+        );
+    }
+
+    /// Every line the onset block and the `ref latency` read-out can emit must
+    /// fit 80 columns at the indents `print_ir_report` uses — at a 6-digit
+    /// sample index, the widest distance and temperature the #460 UX pass
+    /// measured, every decline case, and every reference reason.
+    #[test]
+    fn onset_and_reference_lines_fit_eighty_columns() {
+        let mut rules = vec![
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             causal bound enforced; pick landed on the window start — the true onset may \
+             lie earlier"
+                .to_string(),
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             causal bound enforced at sample 9, search span is the tighter limit"
+                .to_string(),
+            "AIC change-point pick over a 10.0 ms window; window start at sample 262144, \
+             no causal bound (no distance, reference latency unavailable)"
+                .to_string(),
+        ];
+        // Every decline case `estimate_onset` can name, so a new one that
+        // does not fit is caught here rather than at a rig terminal.
+        for case in [
+            "search window shorter than 2 samples",
+            "zero variance in the search window",
+            "peak at sample 0",
+            "nothing in the search window above the pre-impulse floor",
+            "no change point earlier than the peak in the window",
+            "causal bound at or after the peak",
+        ] {
+            rules.push(format!(
+                "onset picker declined ({case}) — index is the peak, not an onset"
+            ));
+        }
+        let bounds = [
+            enforced(12.25, Some(-10.5)),
+            enforced(12.25, None),
+            CausalBound::Unavailable(MissingBoundInput::Distance),
+            CausalBound::Unavailable(MissingBoundInput::ReferenceLatency {
+                reason: String::new(),
+            }),
+            unbounded(),
+        ];
+        for rule in &rules {
+            for bound in &bounds {
+                for (i, line) in short_onset_rule(rule, 262_144, bound).iter().enumerate() {
+                    let indent = if i == 0 { 16 + "onset: ".len() } else { 23 };
+                    assert!(
+                        indent + line.chars().count() <= 80,
+                        "line {:?} runs to {} columns",
+                        line,
+                        indent + line.chars().count()
+                    );
+                }
+            }
+        }
+
+        let long_tau = ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: 0.123_456_7,
+            pre_impulse_snr_db: Some(104.3),
+            pre_impulse_snr_floor_db: Some(107.0),
+            method: String::new(),
+            output_port: String::new(),
+            input_port: String::new(),
+        });
+        let mut references = vec![long_tau];
+        for reason in [
+            "no reference configured (ac setup reference)",
+            "backend cpal cannot capture a reference",
+            "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain",
+            "peak at reference window edge; check: reference loopback routing, capture tail",
+            "xrun during capture; check: JACK period size, system load",
+            "tail 0.08 s, reference window needs 0.10 s; check: lengthen the tail token (e.g. 0.8s)",
+        ] {
+            references.push(ReferenceLatency::Unavailable {
+                reason: reason.to_string(),
+            });
+        }
+        for reference in &references {
+            for line in reference_latency_lines(Some(reference), 192_000) {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
+            }
+        }
+
+        // #359: `latency` / `ref stored` must wrap a long `TauRefusal`
+        // message (one that lists every differing field) at 80 columns
+        // rather than running off the edge.
+        let long_refusal = InterfaceLatency::Unavailable {
+            reason: "no \u{3c4} entry for these exact conditions; nearest stored entry \
+                     (measured 2026-09-15T09:10:40Z) differs in device (requested 1, stored 0), \
+                     backend (requested jack, stored fake), sample_rate (requested 96000 Hz, \
+                     stored 48000 Hz), period_size (requested 1024, stored n/a), output_port \
+                     (requested system:playback_4, stored system:playback_3), input_port \
+                     (requested system:capture_4, stored system:capture_3)"
+                .to_string(),
+        };
+        for line in interface_latency_lines(Some(&long_refusal), 9, 96_000, "2026-09-16T11:30:40Z")
+        {
+            assert!(
+                line.chars().count() <= 80,
+                "line {:?} runs to {} columns",
+                line,
+                line.chars().count()
+            );
+        }
+        for line in
+            reference_stored_latency_lines(Some(&long_refusal), 9, 96_000, "2026-09-16T11:30:40Z")
+        {
+            assert!(
+                line.chars().count() <= 80,
+                "line {:?} runs to {} columns",
+                line,
+                line.chars().count()
+            );
+        }
+
+        // #359: the `ref Δ` block at the widest figures the UX pass
+        // measured (six-digit sample counts).
+        let period_shift = TauDisagreement {
+            reading1_s: 171_100.0 / 96_000.0,
+            reading2_s: 273_500.0 / 96_000.0,
+            delta_samples: 102_400,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(100),
+        };
+        let mismatch = TauDisagreement {
+            reading1_s: 171_100.0 / 96_000.0,
+            reading2_s: 172_700.0 / 96_000.0,
+            delta_samples: 1_600,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        for check in [
+            ArrivalCheck::PeriodShift(period_shift),
+            ArrivalCheck::Mismatch(mismatch),
+            ArrivalCheck::Agree,
+            ArrivalCheck::Unchecked {
+                reason: String::new(),
+            },
+        ] {
+            for line in arrival_check_lines(&check, Some(1024)) {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
+            }
+        }
+
+        // #359 QA (PR #477): `flight_time_line` joins this width-fit test
+        // too, per the UX comment's own instruction — widest `Some` case
+        // is a 96 kHz five-digit sample count, plus both withheld cases.
+        let wide_shift = TauDisagreement {
+            reading1_s: 17_110.0 / 96_000.0,
+            reading2_s: 18_134.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        let wide_mismatch = TauDisagreement {
+            reading1_s: 17_110.0 / 96_000.0,
+            reading2_s: 17_126.0 / 96_000.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        let flight_time_cases = [
+            flight_time_line(&stats_with(Some(65_535.0 / 96_000.0), ArrivalCheck::Agree)),
+            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(wide_shift))),
+            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(wide_mismatch))),
+            flight_time_line(&stats_with(
+                None,
+                ArrivalCheck::Unchecked {
+                    reason: String::new(),
+                },
+            )),
+            // codex-qa on PR #477: the `Some` + `Unchecked` continuation
+            // line (`reference check not run — see ref Δ`) joins this
+            // width-fit test too, at the same 96 kHz five-digit sample
+            // count as the `Agree` case above.
+            flight_time_line(&stats_with(
+                Some(65_535.0 / 96_000.0),
+                ArrivalCheck::Unchecked {
+                    reason: String::new(),
+                },
+            )),
+        ];
+        for lines in flight_time_cases {
+            for line in lines {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
+            }
+        }
     }
 }

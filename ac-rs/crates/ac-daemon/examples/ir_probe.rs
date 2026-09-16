@@ -15,11 +15,13 @@
 //! ir_probe --level-dbfs -30 --duration 2.0 --f2 16000 --window 16384
 //! ```
 //!
-//! `--level-dbfs` is required, so the record names the level requested.
-//! `plot_ir` also clamps it to the running daemon's `drive_max_dbfs` (#360).
+//! `--level-dbfs` is required. The daemon refuses a value above its fixed
+//! emission maximum; the explicit value here still records the operator's
+//! deliberate choice for this hardware run.
 
 use std::time::{Duration, Instant};
 
+use ac_core::measurement::sweep::{estimate_onset, CausalBound, MissingBoundInput};
 use serde_json::{json, Value};
 
 struct Args {
@@ -83,8 +85,7 @@ fn parse_args() -> Args {
     }
     assert!(
         a.level_dbfs.is_finite(),
-        "--level-dbfs is required: name the level for the record (the daemon \
-         still clamps it to its drive_max_dbfs)"
+        "--level-dbfs is required for an explicit hardware-run level"
     );
     a
 }
@@ -217,27 +218,31 @@ fn main() {
         }
     );
 
-    // Onset, not peak. On a multi-way loudspeaker the largest sample in a
-    // band-limited deconvolution is not the arrival: LF and crossover group
-    // delay pull the maximum later than the wavefront that actually left the
-    // baffle first. Distance wants the onset. Report where the IR first
-    // crosses a few fractions of the peak, searching backward from the peak
-    // so a later reflection cannot be mistaken for the start.
-    println!("--- onset ---");
-    for frac in [0.5_f64, 0.25, 0.1, 0.05] {
-        let thresh = frac * peak_abs;
-        let mut onset = peak_idx;
-        while onset > 0 && ir[onset - 1].abs() >= thresh {
-            onset -= 1;
-        }
-        let o = onset as i64 - centre as i64;
-        println!(
-            "  {:>4.0}% of peak: index {onset}, offset {o:+} samples = {:+.4} ms  ({} before peak)",
-            frac * 100.0,
-            o as f64 * 1000.0 / sr,
-            peak_idx - onset
-        );
-    }
+    // Onset, not peak (#346). On a multi-way loudspeaker the largest sample
+    // in a band-limited deconvolution is not the arrival: LF and crossover
+    // group delay pull the maximum later than the wavefront that actually
+    // left the baffle first. Distance wants the onset. Shared with
+    // `MeasurementReport::ir_stats` (`ac_core::measurement::sweep::
+    // estimate_onset`) rather than a third independent backward-scan — no
+    // known geometry here, so no causal bound is enforced.
+    println!("--- onset (#346, #378) ---");
+    let floor_rms = {
+        let mean_sq = ir[..far_end].iter().map(|v| v * v).sum::<f64>() / far_end as f64;
+        mean_sq.sqrt()
+    };
+    // The probe takes no geometry and captures no reference leg (#460).
+    let no_bound = CausalBound::Unavailable(MissingBoundInput::Both {
+        reference_reason: "ir_probe captures no reference".to_string(),
+    });
+    let onset = estimate_onset(&ir, peak_idx, sr as u32, floor_rms, &no_bound);
+    let o = onset.index as i64 - centre as i64;
+    println!(
+        "  onset:         index {}, offset {o:+} samples = {:+.4} ms  ({} before peak)",
+        onset.index,
+        o as f64 * 1000.0 / sr,
+        peak_idx.saturating_sub(onset.index)
+    );
+    println!("  rule:          {}", onset.rule);
 
     if let Some(tau) = a.tau_ms {
         println!("--- against τ ---");

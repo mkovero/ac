@@ -38,7 +38,11 @@ mod stimulus;
 use anyhow::Result;
 use std::time::Duration;
 
-use self::hooks::{next_loopback_delay_samples, next_xruns_delta, period_size_override};
+use self::hooks::{
+    next_capture_block_xruns_delta, next_declared_latency_frames, next_loopback_delay_samples,
+    next_xruns_delta, period_size_override, ref_delay_samples, ref_gain, tau_gain_override,
+    tau_noise_amplitude_override,
+};
 use self::ring_mode::{FakeRings, RingDrain};
 use self::stimulus::{Stimulus, StimulusGen, Synth};
 use super::AudioEngine;
@@ -194,6 +198,12 @@ impl AudioEngine for FakeEngine {
         period_size_override()
     }
 
+    /// #363: `None` unless a test drives the hook, so the fake declares
+    /// nothing by default and every existing τ test is unchanged.
+    fn declared_latency_frames(&self) -> Option<u32> {
+        next_declared_latency_frames()
+    }
+
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
         self.gen.set(Stimulus::Tones(vec![(freq_hz, amplitude)]));
     }
@@ -218,14 +228,31 @@ impl AudioEngine for FakeEngine {
         self.gen.set_correlated_pair(gain, delay_samples);
     }
 
+    /// #368 codex-qa finding on PR #384: `AC_FAKE_TAU_GAIN_OVERRIDE` models
+    /// the loopback cable's own gain, and `calibrate`'s step-2 captured
+    /// level (read through this path via `capture_rms`) is that same cable
+    /// — so the override has to reach it, not just `play_and_capture`'s τ
+    /// ESS. Before this it was applied only there, so a test driving an
+    /// off-unity gain through this hook could never actually see step 2
+    /// report the off-unity `captured_dbfs`/`loopback` it claimed to
+    /// exercise. Unset (`1.0`) multiplies by 1.0, i.e. unchanged.
     fn capture_block(&mut self, duration: f64) -> Result<Vec<f32>> {
         let n = self.samples_in(duration);
         if let Some(out) = self.ring_capture(n, duration, RingDrain::Block) {
             return Ok(out?.into_iter().next().unwrap_or_default());
         }
+        // Opt-in xrun injection (#428) — see
+        // `hooks::next_capture_block_xruns_delta`'s doc. Inert (adds 0)
+        // unless `AC_FAKE_CAPTURE_BLOCK_XRUNS_OVERRIDE` is set.
+        self.xruns += next_capture_block_xruns_delta();
         std::thread::sleep(Duration::from_secs_f64(duration));
         let port = self.input_port.clone();
-        Ok(self.synth().block(port.as_deref(), duration, 0))
+        let gain = tau_gain_override();
+        let mut block = self.synth().block(port.as_deref(), duration, 0);
+        for v in block.iter_mut() {
+            *v *= gain;
+        }
+        Ok(block)
     }
 
     /// Non-clearing drain. In ring mode this is the *contiguous* control arm:
@@ -247,17 +274,106 @@ impl AudioEngine for FakeEngine {
     /// peaks at the expected offset.
     fn play_and_capture(&mut self, samples: &[f32], tail_s: f64) -> Result<Vec<f32>> {
         let delay_samples = next_loopback_delay_samples();
+        let gain = tau_gain_override();
+        let noise_amp = tau_noise_amplitude_override();
         self.xruns += next_xruns_delta();
         let tail = (tail_s * self.sample_rate as f64).round() as usize;
         let total = samples.len() + tail;
         let mut out = vec![0.0f32; total];
+        if noise_amp > 0.0 {
+            // Deterministic LCG (same constants as `Stimulus::Noise`),
+            // seeded from the delay so distinct fake sessions get distinct
+            // dither rather than sharing one repeated sequence.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ (delay_samples as u64);
+            for v in out.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                *v = (noise_amp as f64 * u) as f32;
+            }
+        }
         for (i, &s) in samples.iter().enumerate() {
             let j = i + delay_samples;
             if j < total {
-                out[j] = s;
+                out[j] += s * gain;
             }
         }
         Ok(out)
+    }
+
+    fn play_and_capture_cancellable(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<f32>> {
+        let out = self.play_and_capture(samples, tail_s)?;
+        // The on-demand fake backend has no hardware clock. Pace this path
+        // in 10 ms chunks so protocol tests exercise cancellation during
+        // both stimulus and tail rather than completing instantaneously.
+        let chunk = (self.sample_rate as usize / 100).max(1);
+        for _ in (0..out.len()).step_by(chunk) {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                self.set_silence();
+                anyhow::bail!("play_and_capture cancelled");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(out)
+    }
+
+    fn supports_reference_capture(&self) -> bool {
+        true
+    }
+
+    /// Measurement leg: [`Self::play_and_capture`], with its delay, gain,
+    /// noise and xrun hooks. Reference leg: the same stimulus delayed by its
+    /// **own** hook ([`hooks::ref_delay_samples`], default 20, not the
+    /// measurement leg's 32), scaled by [`hooks::ref_gain`], with the noise
+    /// override's dither on a different seed. Both are exactly
+    /// `samples.len() + tail` long (invariant a); both come from one call, so
+    /// they are aligned by construction (invariant b). Paced and cancellable
+    /// like `play_and_capture_cancellable`. The fake does not route by port,
+    /// so `reference_port` only has to be present.
+    fn play_and_capture_with_reference(
+        &mut self,
+        samples: &[f32],
+        tail_s: f64,
+        _reference_port: &str,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let meas = self.play_and_capture(samples, tail_s)?;
+        let total = meas.len();
+        let delay = ref_delay_samples();
+        let gain = ref_gain();
+        let noise_amp = tau_noise_amplitude_override();
+        let mut reference = vec![0.0f32; total];
+        if noise_amp > 0.0 {
+            let mut state: u64 = 0xD1B5_4A32_D192_ED03 ^ (delay as u64);
+            for v in reference.iter_mut() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let u = ((state >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                *v = (noise_amp as f64 * u) as f32;
+            }
+        }
+        for (i, &s) in samples.iter().enumerate() {
+            let j = i + delay;
+            if j < total {
+                reference[j] += s * gain;
+            }
+        }
+        let chunk = (self.sample_rate as usize / 100).max(1);
+        for _ in (0..total).step_by(chunk) {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                self.set_silence();
+                anyhow::bail!("play_and_capture cancelled");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok((meas, reference))
     }
 
     fn capture_stereo(&mut self, duration: f64) -> Result<(Vec<f32>, Vec<f32>)> {

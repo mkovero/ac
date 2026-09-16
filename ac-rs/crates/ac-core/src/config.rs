@@ -10,14 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::constants::DBU_REF_EXACT;
 
-/// Ceiling for stimulus drive level, in dBFS (§4.3). Clamped
-/// server-side on every `set_drive`; the client clamps too, but this is
-/// the authoritative one. −10 dBFS by default: loud enough for a usable
-/// H1 estimate, quiet enough that a mis-typed level does not damage a
-/// PA system or the operator's hearing.
-fn default_drive_max_dbfs() -> f64 {
-    -10.0
-}
 fn default_dbu_ref() -> f64 {
     DBU_REF_EXACT
 }
@@ -89,10 +81,24 @@ pub struct Config {
     #[serde(default = "default_dbu_ref")]
     pub dbu_ref_vrms: f64,
 
-    /// Stimulus drive ceiling in dBFS. `serde` default fills it for
-    /// config files written before this field existed.
-    #[serde(default = "default_drive_max_dbfs")]
-    pub drive_max_dbfs: f64,
+    /// **Retired** (#459). This key no longer sets a limit — the emission
+    /// ceiling is [`crate::shared::emission_level::MAX_EMISSION_DBFS`], a
+    /// fixed build constant, not a setting (operator, 2026-09-15: "less
+    /// configurable / settable limits and more singular global ones").
+    ///
+    /// Kept as an `Option` under its original JSON key so a config file
+    /// that still has it round-trips instead of the key silently
+    /// vanishing on the next save — the #225 defect class applies to a
+    /// config that quietly *stops doing anything* just as much as to one
+    /// that does the wrong thing. While this is `Some`, every daemon
+    /// handler that can emit refuses and names the key
+    /// (`ac-daemon/src/handlers/mod.rs`); `ac setup` shows it too.
+    #[serde(
+        rename = "drive_max_dbfs",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retired_drive_max_dbfs: Option<f64>,
 
     pub dmm_host: Option<String>,
 
@@ -180,7 +186,7 @@ impl Default for Config {
             reference_output_channel: None,
             reference_output_port: None,
             dbu_ref_vrms: DBU_REF_EXACT,
-            drive_max_dbfs: default_drive_max_dbfs(),
+            retired_drive_max_dbfs: None,
             dmm_host: None,
             range_start_hz: 20.0,
             range_stop_hz: 20_000.0,

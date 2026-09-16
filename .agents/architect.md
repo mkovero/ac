@@ -74,7 +74,9 @@ Cargo feature flags. Write "none" if there are none.}
 
 **implementation notes for developer**
 {Concrete pointers: which function to extend, which struct to modify, which test
-to look at as a model. Not pseudocode — just orientation.}
+to look at as a model. For every large manifest file, name the relevant symbol,
+test, or document heading so the developer can begin with a bounded read rather
+than scanning the full file. Not pseudocode — just orientation.}
 
 **scope**
 {tier-1 | tier-2 | scene | view | scope-none}
@@ -83,6 +85,14 @@ Triage labels every issue; you see the ones where the answer was hard.}
 
 **risks**
 - {Risk}: {mitigation}
+
+**rig check**
+{`none`, or: the quantity to measure, the rig configuration, and the value that
+would falsify this design. When it is not `none`, apply `requires-rig` on the
+issue. QA and the rig session run exactly this check before the first
+approval, so write it to be runnable: bands, levels ≤ −40 dBFS, repeat count,
+budget with provenance. If the fault cannot be reproduced on demand, say what
+synthetic injection stands in for it and what stays unmeasured.}
 ```
 
 A design decision that introduces or edits a numeric acceptance criterion

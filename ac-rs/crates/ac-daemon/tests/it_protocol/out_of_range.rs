@@ -1,5 +1,6 @@
 use serde_json::json;
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 use crate::common::{Client, Daemon};
 
@@ -142,6 +143,168 @@ fn in_range_channels_are_unaffected() {
     let r = c.call(json!({"cmd":"generate","freq_hz":1000.0,"level_dbfs":-40.0,"channels":[2]}));
     assert_eq!(r["ok"], json!(true), "in-range generate must work: {r}");
     c.call(json!({"cmd":"stop"}));
+}
+
+#[test]
+fn named_stop_does_not_claim_silence_while_output_remains() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    let generate = c.call(json!({
+        "cmd": "generate",
+        "freq_hz": 1000.0,
+        "level_dbfs": -40.0,
+    }));
+    assert_eq!(generate["ok"], json!(true), "generate rejected: {generate}");
+    let monitor = c.call(json!({
+        "cmd": "monitor_spectrum",
+        "interval": 0.2,
+        "fft_n": 8192,
+    }));
+    assert_eq!(monitor["ok"], json!(true), "monitor rejected: {monitor}");
+
+    let stopped_monitor = c.call(json!({"cmd": "stop", "name": "monitor_spectrum"}));
+    assert_eq!(
+        stopped_monitor["stopped"],
+        json!(["monitor_spectrum"]),
+        "{stopped_monitor}"
+    );
+    assert!(
+        stopped_monitor.get("stimulus").is_none(),
+        "generate still drives output, so silence must not be attested: {stopped_monitor}"
+    );
+
+    let stopped_generate = c.call(json!({"cmd": "stop", "name": "generate"}));
+    assert_eq!(stopped_generate["stopped"], json!(["generate"]));
+    assert_eq!(stopped_generate["stimulus"], json!("silent"));
+}
+
+fn assert_budget_rejection(c: &Client<'_>, request: Value, field: &str) {
+    let reply = c.call(request);
+    assert_eq!(reply["ok"], json!(false), "request must fail: {reply}");
+    let error = reply["error"].as_str().unwrap_or_default();
+    assert!(error.contains(field), "error must name {field}: {error:?}");
+    assert!(
+        error.contains("not started") && error.contains("stimulus  silent"),
+        "rejection must confirm no audio was emitted: {error:?}"
+    );
+    let status = c.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "worker spawned: {status}");
+}
+
+#[test]
+fn plot_family_rejects_resource_budgets_before_spawn() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":100.0, "stop_hz":1000.0, "ppd":10001}),
+        "point",
+    );
+    assert_budget_rejection(&c, json!({"cmd":"plot", "duration":60.001}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot_level", "steps":10001}), "steps");
+    assert_budget_rejection(&c, json!({"cmd":"plot_level", "duration":0.0}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot_ir", "tail_s":60.001}), "tail_s");
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot_ir", "n_harmonics":33}),
+        "n_harmonics",
+    );
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot_ir", "window_len":1048577}),
+        "window_len",
+    );
+    assert_budget_rejection(&c, json!({"cmd":"plot_ir", "duration":"NaN"}), "duration");
+    assert_budget_rejection(&c, json!({"cmd":"plot", "ppd":u64::MAX}), "point");
+    // #437 codex-qa: `plot`'s worker floors each point's capture at
+    // `3.0 / freq`, which the request-level `duration` bound alone does
+    // not cover — a low enough `start_hz` (the smallest point on the
+    // non-decreasing log grid) must be rejected before spawn even though
+    // `duration` itself is within budget.
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":0.001, "stop_hz":0.001, "ppd":1}),
+        "start_hz",
+    );
+    // The codex-qa repro itself: unrejected, this request used to reach
+    // the worker and panic converting the resulting `3.0 / freq` seconds
+    // (well past `Duration`'s representable range) into a `Duration`.
+    assert_budget_rejection(
+        &c,
+        json!({"cmd":"plot", "start_hz":1e-300, "stop_hz":1e-300, "ppd":1, "duration":60.0}),
+        "start_hz",
+    );
+}
+
+/// #428: a tiny `duration` (0.001 s) makes `plot`'s per-point capture length
+/// `max(duration, 3.0 / freq)`, which falls under `analyze`'s 256-sample
+/// minimum for any point above 562.5 Hz at the fake backend's 48 kHz rate
+/// (`3.0 / 562.5 * 48_000 == 256`). A sweep that fails partway through
+/// must not archive the successful prefix as a complete measurement: it
+/// must terminate on `error`, carrying how much of the request actually
+/// completed, and never reach `done` or `measurement/report` for this run.
+///
+/// Not `duration: 0`: the request budget rejects it before spawn (#437;
+/// ZMQ.md documents `duration` as greater than 0). 0.001 s is below every
+/// point's `3.0 / freq` floor, so the per-point lengths — and the failure —
+/// are the same as with 0.
+#[test]
+fn plot_tiny_duration_fails_atomically_instead_of_archiving_partial_sweep() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let r = c.call(json!({
+        "cmd":        "plot",
+        "start_hz":   100.0,
+        "stop_hz":    2000.0,
+        "level_dbfs": -20.0,
+        "ppd":        5,
+        "duration":   0.001,
+    }));
+    assert_eq!(r["ok"], json!(true), "plot ack: {r}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut error_frame: Option<Value> = None;
+    while Instant::now() < deadline && error_frame.is_none() {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "error" => error_frame = Some(v),
+            Some((t, _)) if t == "done" => {
+                panic!("a sweep that failed partway through must not reach done")
+            }
+            Some((_, v)) if v["type"] == json!("measurement/report") => panic!(
+                "a sweep that failed partway through must not archive a measurement/report: {v}"
+            ),
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let err = error_frame.expect("plot never published a terminal error");
+    assert_eq!(err["cmd"], json!("plot"), "frame: {err}");
+    let message = err["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("256"),
+        "error message should name the analyzer's 256-sample minimum, got: {message:?}"
+    );
+    let requested = err["requested_points"]
+        .as_u64()
+        .expect("requested_points missing");
+    let completed = err["completed_points"]
+        .as_u64()
+        .expect("completed_points missing");
+    assert!(
+        completed < requested,
+        "completed_points ({completed}) should be less than requested_points \
+         ({requested}) — some points at/below 562.5 Hz must have succeeded \
+         before the failure: {err}"
+    );
+    assert!(
+        completed > 0,
+        "the low-frequency prefix should have completed: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

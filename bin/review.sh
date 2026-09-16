@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # review.sh <pr> [--full] [--since <sha>] [--fg]
+# review.sh --independent [--daemon|<pr>...]
+# review.sh --independent --recheck <base-sha> <pr>
+#
+# --recheck: Codex re-reviews a codex-finding revision without a Claude QA pass
+# in between. <base-sha> is the tip Claude QA approved and Codex failed. The
+# runner (master.sh) restores claude-approved only if this pass approves.
+# Exit 3: head does not descend from <base-sha> — the delta is not a delta,
+# the caller must fall back to full Claude QA.
 #
 # QA role. No Edit/Write against the tree — a reviewer that can fix what it
 # finds will fix it, and the finding never reaches you as a finding.
@@ -12,6 +20,133 @@
 # is the right way to fail: toward more scrutiny, not less.
 
 source "$(dirname "$0")/common.sh"
+
+# Independent review slot.  This used to live in codex-qa.sh; keeping it here
+# makes the review interface one command while preserving the separate label
+# and model gate.
+independent_review() {
+  local -a prs=()
+  local recheck_base=""
+  if [[ ${1:-} == --recheck ]]; then
+    recheck_base="${2:-}"; shift 2 || true
+    [[ $recheck_base =~ ^[0-9a-f]{40}$ && $# -eq 1 ]] \
+      || { echo "usage: review.sh --independent --recheck <full-base-sha> <pr>" >&2; return 2; }
+  fi
+  if (($#)); then
+    local p
+    for p in "$@"; do
+      [[ $p =~ ^[0-9]+$ ]] || { echo "usage: review.sh --independent [<pr>...]" >&2; return 2; }
+      prs+=("$p")
+    done
+  else
+    mapfile -t prs < <(gh_retry gh pr list -R "$AC_REPO" --state open --label claude-approved \
+      --limit 100 --json number,labels --jq '.[] | select(all(.labels[]?; .name != "codex-approved" and .name != "needs-work" and .name != "requires-rig")) | .number')
+  fi
+  ((${#prs[@]})) || { echo "<codex/qa> No PRs require independent QA."; return 0; }
+
+  local pr head wt labels qa_record
+  for pr in "${prs[@]}"; do
+    labels="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json labels --jq '.labels[].name')"
+    has_label() { printf '%s\n' "$labels" | grep -qx "$1"; }
+    head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
+    qa_record="$(newest_record "$pr" qa)"
+    if [[ -n $recheck_base ]]; then
+      # A recheck is asked for by name, so a label that rules it out is an
+      # error, not a queue skip: the caller must not read silence as a verdict.
+      local l
+      for l in codex-approved needs-work requires-rig claude-approved; do
+        has_label "$l" && { echo "<codex/qa> PR #$pr: recheck refused, $l is set." >&2; return 1; }
+      done
+      [[ $head != "$recheck_base" ]] \
+        || { echo "<codex/qa> PR #$pr: head is still $recheck_base — nothing to recheck." >&2; return 1; }
+      if [[ $qa_record != *"$recheck_base"* ]]; then
+        echo "<codex/qa> PR #$pr: newest Claude QA record does not name base $recheck_base." >&2
+        return 1
+      fi
+      if [[ "$(newest_record "$pr" codex-qa)" != *"$recheck_base"* ]]; then
+        echo "<codex/qa> PR #$pr: newest Codex QA record does not name base $recheck_base." >&2
+        return 1
+      fi
+    else
+      has_label claude-approved || { echo "<codex/qa> Skipping PR #$pr: claude-approved absent."; continue; }
+      has_label codex-approved && continue
+      has_label needs-work && continue
+      has_label requires-rig && continue
+      if [[ $qa_record != *"$head"* ]]; then
+        echo "<codex/qa> PR #$pr: newest Claude QA record does not name current tip $head." >&2
+        echo "<codex/qa> A fresh Claude QA pass with explicit SHA evidence is required." >&2
+        return 1
+      fi
+    fi
+    wt="$WT_BASE/codex-pr-$pr"
+    [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
+    require_space "$wt"; mkdir -p "$WT_BASE" "$AC_TARGET"
+    git fetch -q origin "pull/$pr/head"
+    [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
+    if [[ -n $recheck_base ]] && ! git merge-base --is-ancestor "$recheck_base" "$head" 2>/dev/null; then
+      echo "<codex/qa> PR #$pr: $head does not descend from $recheck_base — full Claude QA needed." >&2
+      return 3
+    fi
+    git worktree add --detach "$wt" "$head" >/dev/null
+    link_support "$wt"
+    local rc=0
+    local task
+    if [[ -n $recheck_base ]]; then
+      task="Recheck PR #$pr in $AC_REPO as the independent Codex QA worker, in
+recheck mode (codex-qa.md → recheck mode).
+
+You failed this PR at $recheck_base. The developer revised it; the tip is now
+$head. Claude QA approved $recheck_base and has NOT reviewed $recheck_base..$head.
+The runner verified that the newest <!-- agent: qa --> record names
+$recheck_base, that your newest <!-- agent: codex-qa --> record names
+$recheck_base, and that $head descends from it.
+
+Read your own review at $recheck_base first: every finding in it is resolved
+at $head, or it is not. Then review the delta $recheck_base..$head in full, as
+your role spec's steps 1-4 describe, including anything the delta breaks
+outside the lines it touches. There is no Claude gate at this tip to inherit:
+run cargo test --workspace, cargo clippy --workspace --all-targets -- -D
+warnings and cargo fmt --check yourself, in the foreground, from ac-rs/.
+
+Your comment names both $recheck_base and $head in full. On pass add
+codex-approved and remove needs-work; on blocking defects add needs-work and
+remove codex-approved. Never touch claude-approved — the runner restores it
+only after your pass — nor in-review, requires-rig, or agent labels. Re-check
+the PR HEAD before applying the final decision; if it changed, do not approve."
+    else
+      task="Review PR #$pr in $AC_REPO as the independent Codex QA worker.
+
+The runner combined GitHub PR comments and reviews and verified that the newest
+<!-- agent: qa --> record explicitly covers current tip $head. Treat that SHA
+identity as the fresh-Claude-approval pre-check. Do not compare commit and
+comment timestamps; commit timestamps are author-controlled and are not
+workflow chronology.
+
+Inspect the linked issue, decisions, complete diff, checks, tests, and relevant
+history. On pass add codex-approved and remove needs-work; on blocking defects
+add needs-work and remove codex-approved. Never touch claude-approved,
+in-review, requires-rig, or agent labels. Re-check the PR HEAD before applying
+the final decision; if it changed, do not approve."
+    fi
+    ( cd "$wt" && AC_TAG="pr-$pr" run codex-qa "$task" --read ) || rc=$?
+    git worktree remove --force "$wt" || true
+    ((rc == 0)) || return "$rc"
+    echo "<codex/qa> Done. Review posted for PR #$pr."
+  done
+}
+
+if [[ ${1:-} == --independent ]]; then
+  shift
+  if [[ ${1:-} == --daemon ]]; then
+    shift; (($# == 0)) || { echo "usage: review.sh --independent --daemon" >&2; exit 2; }
+    poll="${CODEX_QA_POLL_SECONDS:-300}"
+    [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "CODEX_QA_POLL_SECONDS must be positive" >&2; exit 2; }
+    while true; do independent_review || echo "<codex/qa> pass failed; retrying in ${poll}s" >&2; sleep "$poll"; done
+  fi
+  independent_review "$@"
+  exit $?
+fi
+
 n="${1:?usage: review.sh <pr> [--full] [--since <sha>] [--fg]}"; shift || true
 
 mode=auto since=""
@@ -58,7 +193,7 @@ Read your own earlier review comment on the PR first — the one marked 'agent: 
 
 Scope of this pass:
 - Re-run the full mechanical gate against the new tip regardless of how small
-  the delta looks: cargo test --workspace, cargo clippy -- -D warnings,
+  the delta looks: cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings,
   cargo fmt --check. Not the delta's crate — the workspace. Two changes that
   each pass alone can break in combination, and that is precisely what a
   narrowed pass would miss.
@@ -71,11 +206,20 @@ Scope of this pass:
 - The delta may break something outside itself. Where it plausibly does, say
   where you looked.
 
-State at the top of your comment which commit range you reviewed.
+State at the top of your comment which commit range you reviewed, including
+the full $head_sha SHA as the range endpoint.
 
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 else
   prompt="Review PR #$n in $AC_REPO.
+
+This is an explicit full review. Even if this commit already has an earlier QA
+comment, this invocation is a new review pass: governing specs, issue decisions,
+or human evidence may have changed without a code push. Apply the current QA
+spec, post a new superseding QA comment, and update labels to its verdict. Do
+not decline to post merely because the PR tip is unchanged.
+
+State the full current head SHA $head_sha at the top of the review comment.
 
 Standards PDFs are NOT in this checkout — they are licence-restricted and gitignored. They are at $AC_STDDOCS. Each PDF has a .txt sibling extracted with pdftotext -layout: Grep that to find the clause, then Read the PDF at that region only. Do not page through a PDF looking for a clause. Extraction is lossy for equations, figures and some tables — where the clause turns on one of those, open the PDF itself. A citation you did not verify against the primary text is not a verified citation; if a document you need is genuinely missing from that directory, say which one rather than carrying the gap forward silently."
 fi

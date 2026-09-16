@@ -111,6 +111,58 @@ pub struct MeasuredLatency {
     pub input_port: String,
 }
 
+/// Round-trip latency of the **reference** loopback pair, measured from a
+/// reference leg captured in the same `plot_ir` run as the IR it sits
+/// beside (#460).
+///
+/// Not [`InterfaceLatency`]. That field is τ for the capture's *own* port
+/// pair, resolved from calibration by exact match (#281), and a reader
+/// subtracts it from the arrival. This one is τ of a *different* pair, the
+/// reference loopback, and must not be subtracted from the arrival as though
+/// it were the capture pair's own: τ is per channel pair. Its only consumer
+/// is the onset search's causal bound, which needs τ from the same client
+/// lifetime and stream epoch as the IR, because a stored τ re-picks by a
+/// multiple of the FireWire SYT interval on every device enumeration (#461).
+/// There is no `measured_at`: the value belongs to this capture.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReferenceLatency {
+    Measured(MeasuredReferenceLatency),
+    /// `reason` names what to check, never a cause, written as
+    /// `<observation>` or `<observation>; check: <places>` (#460 UX).
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// A reference-leg reading that passed the same single-reading gates
+/// `calibrate`'s τ applies: pre-impulse SNR, window-edge margin, no xrun.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MeasuredReferenceLatency {
+    pub tau_s: f64,
+    /// Pre-impulse SNR of the reference leg's deconvolved peak, in dB.
+    /// `None` when the pre-impulse region measured true silence: the SNR is
+    /// infinite, which JSON cannot carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_impulse_snr_db: Option<f64>,
+    /// The noiseless floor this reading was judged against (#471, schema v8),
+    /// from [`crate::measurement::sweep::pre_impulse_snr_floor_db`] for this
+    /// run's sweep at this reading's own peak index.
+    ///
+    /// Carried because the threshold is no longer a constant in the source:
+    /// without it, "SNR 28.6 dB" cannot be re-judged a year later, since
+    /// whether that passed depends on the sweep it was measured under. `None`
+    /// on v7 reports, and on a reading judged by the fixed threshold because
+    /// no floor could be established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_impulse_snr_floor_db: Option<f64>,
+    /// How τ was read, e.g. `"farina_same_capture_reference_v1"`.
+    pub method: String,
+    /// The reference pair's ports: not the capture's own pair.
+    pub output_port: String,
+    pub input_port: String,
+}
+
 /// Environment + geometry captured with a report (#280): the knowable
 /// subset of ISO 3382-1 §9.2 / 3382-2 §9.2 a daemon can record on its
 /// own or via free-form operator entry — no room-acoustic parameter,

@@ -41,16 +41,16 @@ fn calibrate_prompt_reply_cycle() {
 
 #[test]
 fn calibrate_scales_user_reading_to_zero_dbfs() {
-    // Reference tone plays at `ref_dbfs` (default -10 dBFS), so a Vrms
-    // reading taken there is `1 / dbfs_to_amplitude(ref_dbfs)` smaller
-    // than the Vrms at 0 dBFS. The handler MUST apply that scaling
-    // before saving — otherwise a user who calibrates at -10 dBFS and
-    // reads 2.095 V would get `0 dBu = 2.095 V` from `ac generate`,
-    // ~10 dB hotter than what they asked for.
+    // Reference tone plays at `ref_dbfs`, so a Vrms reading taken there
+    // is `1 / dbfs_to_amplitude(ref_dbfs)` smaller than the Vrms at
+    // 0 dBFS. The handler MUST apply that scaling before saving —
+    // otherwise a user who calibrates at -20 dBFS and reads 2.095 V
+    // would get `0 dBu = 2.095 V` from `ac generate`, ~20 dB hotter than
+    // what they asked for.
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                            "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -72,8 +72,8 @@ fn calibrate_scales_user_reading_to_zero_dbfs() {
 
     let done = expect_cal_done(&c);
 
-    // ref_dbfs = -10 → out_scale = 10^(10/20) ≈ 3.16228.
-    let expected_out = user_out_vrms * 10f64.powf(10.0 / 20.0);
+    // ref_dbfs = -20 → out_scale = 10^(20/20) = 10.
+    let expected_out = user_out_vrms * 10f64.powf(20.0 / 20.0);
     let saved_out = done["vrms_at_0dbfs_out"].as_f64().expect("out");
     assert!(
         (saved_out - expected_out).abs() < 1e-6,
@@ -125,7 +125,7 @@ fn calibrate_skipped_prompts_preserve_stored_voltage_cal() {
     // Run at a *different* ref_dbfs than the seeded entry records, so a
     // handler that rewrites `ref_dbfs` on a no-measurement run is caught
     // too — the stored level tag must keep describing the stored readings.
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -174,7 +174,7 @@ fn calibrate_clear_erases_only_the_leg_it_names() {
     let cal_path = seed_voltage_cal(&d, 2.345_67, 1.234_56, -20.0);
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -205,7 +205,7 @@ fn calibrate_clear_erases_only_the_leg_it_names() {
          got {stored_in} for a {in_reading} V reading"
     );
     // A measurement happened, so the level tag follows this run.
-    assert_eq!(after["ref_dbfs"], json!(-10.0));
+    assert_eq!(after["ref_dbfs"], json!(-20.0));
 }
 
 /// #279 criterion 3: `absent` has two origins, not one. A skip on a leg
@@ -218,7 +218,7 @@ fn calibrate_skip_on_uncalibrated_leg_reports_absent() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -247,7 +247,7 @@ fn calibrate_cancel_at_second_prompt_saves_nothing() {
     let before = read_cal_entry(&cal_path);
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -292,7 +292,7 @@ fn calibrate_cancel_at_first_prompt_saves_nothing() {
     let before = read_cal_entry(&cal_path);
     let c = Client::new(&d);
 
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
 
@@ -327,69 +327,60 @@ fn calibrate_cancel_at_first_prompt_saves_nothing() {
     );
 }
 
-/// `calibrate` clamps its `ref_dbfs` to `drive_max_dbfs`, and an omitted
-/// `ref_dbfs` defaults to the ceiling rather than a hardcoded -10.0.
+/// `calibrate`'s `ref_dbfs` (#459): an omitted value defaults to the one
+/// named default every emitting command shares, not a hardcoded -10.0 and
+/// not "whatever the ceiling is" (#360's shape, retired along with the
+/// settable ceiling itself). An explicit value above the fixed maximum is
+/// refused, never clamped.
 ///
 /// `cal_prompt` step 2's `captured_dbfs` is a genuine round trip through
 /// the fake engine — `capture_rms` reads back whatever `eng.set_tone` was
 /// actually given, via the same capture path `analyze_mono` and `plot`
 /// use — not a re-statement of the request. A sine's RMS sits ~3.01 dB
-/// below its peak amplitude, so a tone actually played at the ceiling
-/// reads back at `ceiling - 3.01`, not at the ~-3.0 dBFS a full-scale,
+/// below its peak amplitude, so a tone actually played at the default
+/// reads back at `default - 3.01`, not at the ~-3.0 dBFS a full-scale,
 /// unclamped 0 dBFS request would produce — the two are far enough apart
-/// that a clamp that silently didn't apply cannot pass this by accident.
+/// that a default that silently didn't apply cannot pass this by accident.
 #[test]
-fn calibrate_default_and_explicit_ref_dbfs_are_clamped_to_the_ceiling() {
-    const CEILING_DBFS: f64 = -25.0;
+fn calibrate_ref_dbfs_defaults_and_refuses_above_the_maximum() {
+    use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
     const PEAK_TO_RMS_DB: f64 = 3.0103; // 20·log10(√2)
-    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+    let d = Daemon::spawn();
     let c = Client::new(&d);
 
-    // No `ref_dbfs` at all: must default to the session ceiling, not the
-    // historical hardcoded -10.0 (#360 acceptance criterion 2).
+    // No `ref_dbfs` at all: must default to `DEFAULT_LEVEL_DBFS`.
     let r = c.call(json!({"cmd": "calibrate", "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true), "{r}");
     assert_eq!(
         r["ref_dbfs"],
-        json!(CEILING_DBFS),
-        "an omitted ref_dbfs must default to drive_max_dbfs: {r}"
+        json!(DEFAULT_LEVEL_DBFS),
+        "an omitted ref_dbfs must default to DEFAULT_LEVEL_DBFS: {r}"
     );
 
     let step1 = expect_prompt(&c, 1);
-    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
+    assert_eq!(step1["ref_dbfs"], json!(DEFAULT_LEVEL_DBFS));
     reply_vrms(&c, None);
 
     let step2 = expect_prompt(&c, 2);
     let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
-    let expected = CEILING_DBFS - PEAK_TO_RMS_DB;
+    let expected = DEFAULT_LEVEL_DBFS - PEAK_TO_RMS_DB;
     assert!(
         (captured_dbfs - expected).abs() < 1.5,
         "captured {captured_dbfs} dBFS does not match a tone actually played at the \
-         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — the default was not clamped \
-         before the tone was set"
+         {DEFAULT_LEVEL_DBFS} dBFS default (expected ~{expected}) — the default level \
+         was not what reached the engine"
     );
     reply_vrms(&c, None);
     let _ = c.wait_for_topic("cal_done", Duration::from_secs(5));
 
-    // Explicit request above the ceiling: also clamped, defense in depth.
+    // Explicit request above the maximum: refused, never clamped.
     let r = c.call(json!({
-        "cmd": "calibrate", "ref_dbfs": 0.0, "output_channel": 0, "input_channel": 0,
+        "cmd": "calibrate", "ref_dbfs": 0.1, "output_channel": 0, "input_channel": 0,
     }));
-    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["ok"], json!(false), "{r}");
     assert_eq!(
-        r["ref_dbfs"],
-        json!(CEILING_DBFS),
-        "an explicit ref_dbfs above the ceiling must be clamped: {r}"
-    );
-    let step1 = expect_prompt(&c, 1);
-    assert_eq!(step1["ref_dbfs"], json!(CEILING_DBFS));
-    reply_vrms(&c, None);
-    let step2 = expect_prompt(&c, 2);
-    let captured_dbfs = step2["captured_dbfs"].as_f64().expect("captured_dbfs");
-    assert!(
-        (captured_dbfs - expected).abs() < 1.5,
-        "captured {captured_dbfs} dBFS does not match a tone actually played at the \
-         {CEILING_DBFS} dBFS ceiling (expected ~{expected}) — an explicit request above \
-         the ceiling reached the engine unclamped"
+        r["max_dbfs"],
+        json!(MAX_EMISSION_DBFS),
+        "a refused calibrate must still name the maximum: {r}"
     );
 }

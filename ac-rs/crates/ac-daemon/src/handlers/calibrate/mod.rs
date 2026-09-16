@@ -14,11 +14,12 @@ use serde_json::{json, Value};
 
 use ac_core::config::Config;
 use ac_core::shared::calibration::Calibration;
+use ac_core::shared::emission_level::{DEFAULT_LEVEL_DBFS, MAX_EMISSION_DBFS};
 
 use crate::server::ServerState;
 
 use super::{
-    apply_drive_ceiling, busy_guard, capture_rms, cfg_guard, make_engine_for_state, read_dmm_vrms,
+    busy_guard, capture_rms, cfg_guard, emission_guard, make_engine_for_state, read_dmm_vrms,
     resolve_input, resolve_output_by_channel, rms_to_dbfs, send_pub, spawn_worker, wait_cal_reply,
     CalReply,
 };
@@ -31,6 +32,12 @@ pub use mic_curve::{calibrate_mic_curve, set_mic_correction_enabled};
 pub use spl::calibrate_spl;
 
 use tau::{measure_tau_twice, tau_result, TAU_METHOD};
+// #460: `plot_ir`'s same-capture reference leg is judged by the same
+// single-reading gates as `calibrate`'s τ.
+pub(crate) use tau::{
+    analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
+    TauLegReading,
+};
 
 /// Channel pair a calibration command addresses: explicit fields win, the
 /// session config supplies the rest. Spelled once because all four
@@ -137,19 +144,20 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
     cfg_guard!(state);
     let cfg = state.cfg.lock().unwrap().clone();
     let (out_ch, in_ch) = channels_from(cmd, &cfg);
-    // #360: an omitted `ref_dbfs` becomes "whatever this session's ceiling
-    // is", not a second hardcoded number (-10.0) that has to be kept in
-    // sync with `drive_max_dbfs`'s own default by convention. An
-    // explicitly-passed value is then clamped the same way — defense in
-    // depth, and the single binding every downstream quantity (amp,
-    // ref_amp, out_scale, in_scale, cal.ref_dbfs) derives from, so the
-    // calibration stays internally consistent (measured-and-scaled-at-the-
-    // same-level).
+    // #459: an omitted `ref_dbfs` takes the one named default
+    // (`DEFAULT_LEVEL_DBFS`), same as every other emitting command — not
+    // "whatever the ceiling is" (#360's shape, which tied the default to a
+    // settable config value). An explicitly-passed value above the fixed
+    // maximum is refused, not clamped — the single binding every
+    // downstream quantity (amp, ref_amp, out_scale, in_scale, cal.ref_dbfs)
+    // derives from, so the calibration stays internally consistent
+    // (measured-and-scaled-at-the-same-level) and is never silently
+    // measured at a level lower than the one recorded.
     let ref_dbfs = cmd
         .get("ref_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(cfg.drive_max_dbfs);
-    let ref_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, ref_dbfs);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
+    let ref_dbfs = emission_guard!(state, &cfg, ref_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let fake = state.fake_audio;
@@ -283,7 +291,7 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         }
 
         // Fallback conditions for the `cal_done` wire frame when τ isn't
-        // measured this run (no-loopback, or a lifecycle error before any
+        // measured this run (low SNR, or a lifecycle error before any
         // conditions were captured) — ZMQ.md requires `tau_sample_rate` /
         // `tau_period_size` present regardless of `tau_state`.
         let fallback_sample_rate = eng.sample_rate();
@@ -292,18 +300,20 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         eng.set_silence();
         eng.stop();
 
-        // τ (interface latency, #281/#347) — not prompt-driven, so it
-        // piggybacks on the loopback state established above rather than
-        // adding a third interactive step. Measured whenever a loopback was
-        // detected this run, regardless of whether either voltage prompt
-        // was answered or skipped — the cheap-refresh path (#279: both
-        // prompts skipped) still refreshes τ. #347: a single reading is not
+        // τ (interface latency, #281/#347) — not prompt-driven, so it does
+        // not add a third interactive step. Always attempted regardless of
+        // the loopback state step 2 established (#368: τ used to be gated
+        // on that captured-level proxy; it is now gated on its own
+        // deconvolved peak's SNR instead, inside `measure_tau` itself) and
+        // regardless of whether either voltage prompt was answered or
+        // skipped — the cheap-refresh path (#279: both prompts skipped)
+        // still refreshes τ. #347: a single reading is not
         // a measurement of τ on this stack, so this now runs two
         // independent client lifecycles (`measure_tau_twice`), decoupled
         // from the voltage-cal `eng` above (already stopped) — see that
         // function's doc for why the lifecycle boundary matters.
         let ref_amp = ac_core::shared::generator::dbfs_to_amplitude(ref_dbfs);
-        let tau_outcome = tau_result(is_loopback, || {
+        let tau_outcome = tau_result(|| {
             measure_tau_twice(
                 fake,
                 cfg.backend.as_deref(),
@@ -367,7 +377,12 @@ pub fn calibrate(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("calibrate".to_string(), worker);
     }
-    json!({"ok": true, "ref_dbfs": ref_dbfs, "backend": backend})
+    json!({
+        "ok": true,
+        "ref_dbfs": ref_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    })
 }
 
 pub fn cal_reply(state: &ServerState, cmd: &Value) -> Value {

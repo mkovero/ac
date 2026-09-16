@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::time::Duration;
 use std::time::Instant;
 
+use ac_core::measurement::report::{ArrivalCheck, MeasurementReport, ReferenceLatency};
+
 use crate::common::{Client, Daemon};
 
 #[test]
@@ -18,7 +20,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 3,
@@ -63,7 +65,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(6));
+                assert_eq!(v["report"]["schema_version"], json!(9));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -79,61 +81,78 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
     assert!(got_report, "never saw measurement/report frame");
 }
 
-// ---------------------------------------------------------------------
-// Drive ceiling (#360) — plot_ir and calibrate previously emitted an
-// unclamped level; both are commands whose whole point is to put a
-// stimulus on a physical output, and `drive_max_dbfs` governed neither.
-// ---------------------------------------------------------------------
-
-/// `plot_ir` clamps its requested level to `drive_max_dbfs`.
-///
-/// The deconvolved IR itself cannot be used as the observable here: the
-/// handler deliberately re-scales the recovered impulse response by
-/// `1/amp` (`plot.rs`, "so the reported IR has unity peak for an identity
-/// loopback regardless of `level_dbfs`"), and the fake backend's
-/// `play_and_capture` is a noiseless echo of exactly what was played — so
-/// on this backend the published IR is invariant to level by construction,
-/// clamped or not, and asserting on it would prove nothing.
-///
-/// `report.stimulus.level_dbfs` is emitted from inside the worker, after
-/// the capture, from the same binding that scaled the actually-played
-/// sweep (`let amp = dbfs_to_amplitude(level_dbfs)`) — a different
-/// computation from the synchronous CTRL reply, so this does not just
-/// re-check the same echo twice under two names.
-#[test]
-fn plot_ir_clamps_level_to_drive_max_dbfs() {
-    const CEILING_DBFS: f64 = -35.0;
-    let d = Daemon::spawn_with_config(Some(json!({ "drive_max_dbfs": CEILING_DBFS })));
+fn assert_plot_ir_stops_promptly(duration: f64, tail_s: f64, settle: Duration) {
+    let d = Daemon::spawn();
     let c = Client::new(&d);
-
-    let r = c.call(json!({
-        "cmd": "plot_ir",
-        "f1_hz": 200.0,
-        "f2_hz": 8_000.0,
-        "duration": 0.5,
-        "level_dbfs": 12.0,
-        "tail_s": 0.1,
-        "window_len": 1024,
-        "n_harmonics": 3,
+    let reply = c.call(json!({
+        "cmd":"plot_ir",
+        "f1_hz":200.0,
+        "f2_hz":8000.0,
+        "duration":duration,
+        "tail_s":tail_s,
+        "window_len":1024,
+        "n_harmonics":3
     }));
-    assert_eq!(r["ok"], json!(true), "{r}");
-    assert_eq!(
-        r["level_dbfs"],
-        json!(CEILING_DBFS),
-        "sync reply must echo the applied (clamped) level, not the request: {r}"
-    );
+    assert_eq!(reply["ok"], json!(true), "plot_ir rejected: {reply}");
 
-    let v = c
-        .wait_for_topic("measurement/report", Duration::from_secs(15))
-        .expect("measurement/report frame");
-    let applied = v["report"]["stimulus"]["level_dbfs"]
-        .as_f64()
-        .expect("stimulus.level_dbfs");
+    std::thread::sleep(settle);
+    let started = Instant::now();
+    let stopped = c.call(json!({"cmd":"stop", "name":"plot_ir"}));
     assert!(
-        (applied - CEILING_DBFS).abs() < 1e-9,
-        "report recorded level {applied}, requested 12.0 dBFS against a {CEILING_DBFS} \
-         ceiling — plot_ir emitted the raw request instead of the clamped level"
+        started.elapsed() < Duration::from_secs(1),
+        "stop blocked for {:?}: {stopped}",
+        started.elapsed()
     );
+    assert_eq!(stopped["stopped"], json!(["plot_ir"]), "{stopped}");
+    assert_eq!(stopped["stimulus"], json!("silent"), "{stopped}");
+    let status = c.call(json!({"cmd":"status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
+
+    // #437 codex-qa: a prompt `stop` reply plus `busy:false` also holds when
+    // `plot_ir` simply ran to completion before `stop` was ever sent — a
+    // finished worker's handle stays in the workers map until `stop` removes
+    // it, so those two assertions alone cannot distinguish "cancelled
+    // mid-run" from "already done, and `stop` just reaped it". Prove
+    // cancellation directly: drain every PUB frame already queued and assert
+    // none of them is this request's `measurement/impulse_response`,
+    // `measurement/report`, or `done` frame. A regression that reverts the
+    // handler to the non-cancellable `play_and_capture` would publish all
+    // three almost immediately (that path has no pacing sleep at all on the
+    // fake backend), so they would already be sitting on the SUB socket by
+    // the time this drain runs, well before `stop` was sent.
+    let mut drained = 0;
+    while let Some((topic, payload)) = c.recv_pub(50) {
+        drained += 1;
+        assert!(
+            drained <= 1000,
+            "runaway PUB drain while checking for a post-cancel completion frame"
+        );
+        if payload["cmd"] != json!("plot_ir") {
+            continue;
+        }
+        assert_ne!(
+            topic, "measurement/impulse_response",
+            "plot_ir published an impulse response after stop cancelled it: {payload}"
+        );
+        assert_ne!(
+            topic, "measurement/report",
+            "plot_ir published a report after stop cancelled it: {payload}"
+        );
+        assert_ne!(
+            topic, "done",
+            "plot_ir published a done frame after stop cancelled it: {payload}"
+        );
+    }
+}
+
+#[test]
+fn plot_ir_stop_cancels_during_stimulus() {
+    assert_plot_ir_stops_promptly(5.0, 0.1, Duration::from_millis(200));
+}
+
+#[test]
+fn plot_ir_stop_cancels_during_tail() {
+    assert_plot_ir_stops_promptly(0.1, 5.0, Duration::from_millis(300));
 }
 
 /// #283: `plot_ir` resolves τ by *exact* match on `TauConditions`, and
@@ -152,7 +171,7 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // 1. Measure τ. Both voltage prompts skipped — τ is keyed on
     //    loopback detection, not on either reply (see
     //    `calibrate_cheap_refresh_still_measures_tau`).
-    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -10.0,
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
                           "output_channel": 0, "input_channel": 0}));
     assert_eq!(r["ok"], json!(true));
     for step in 1..=2 {
@@ -172,7 +191,7 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 3,
@@ -202,13 +221,31 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // fake loopback), the τ-corrected flight time must land near zero —
     // the fake backend has no acoustic path. A τ that failed to subtract
     // would read ~0.67 ms instead (32 samples at 48 kHz).
+    //
+    // `measure_tau` locates τ via `argmax|h|`, and under #378's
+    // contingency (AC6 rig run, 2026-09-15) `ir_stats().arrival_s` is
+    // peak-derived again, so both halves share one rule and cancel on
+    // this fixture. The onset-vs-argmax phantom #351 tracked (-2.458 ms,
+    // 118 samples of bandlimited pre-ring before the peak) no longer
+    // reaches the arrival.
+    //
+    // Pinned tight around this fixture's known, computable answer (QA on
+    // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
+    // exact value could hide unrelated regression) rather than left as an
+    // open-ended bound — this fixture is deterministic (fake backend,
+    // fixed 200 Hz–8 kHz / 1024-sample window), so its exact phantom
+    // flight time is a known quantity, not measurement noise. Value moved
+    // -0.310 → -2.458 ms under #378, and to 0 under its contingency.
+    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = 0.0;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     let stats = report.ir_stats().expect("ir_stats");
     let flight_ms = (stats.arrival_s - used_tau) * 1000.0;
     assert!(
-        flight_ms.abs() < 0.15,
-        "fake loopback has no acoustic path, got {flight_ms} ms"
+        (flight_ms - EXPECTED_PHANTOM_FLIGHT_MS).abs() < 0.03,
+        "fake loopback has no acoustic path; τ and arrival are both \
+         peak-derived, so the flight time must be {EXPECTED_PHANTOM_FLIGHT_MS} ms \
+         ± 0.03, got {flight_ms} ms"
     );
 }
 
@@ -232,7 +269,7 @@ fn plot_ir_reports_the_gate_lengths_it_actually_used() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 4096,
         "n_harmonics": 5,
@@ -322,7 +359,7 @@ fn plot_ir_records_the_gate_it_used_not_the_one_requested() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.3,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 4096,
         "n_harmonics": 3,
@@ -394,7 +431,7 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
         "f1_hz": 200.0,
         "f2_hz": 8_000.0,
         "duration": 0.5,
-        "level_dbfs": -6.0,
+        "level_dbfs": -20.0,
         "tail_s": 0.1,
         "window_len": 1024,
         "n_harmonics": 1,
@@ -457,6 +494,479 @@ fn plot_ir_emits_a_gated_frequency_response_payload() {
     assert!(
         (noise_tail - 0.5).abs() < 1e-9,
         "noise_tail_start_s should equal the sweep duration (0.5s): {noise_tail}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Causal bound inputs (#460): a per-capture distance and a same-capture
+// reference leg.
+// ---------------------------------------------------------------------------
+
+/// The fake reference leg's default delay (`DEFAULT_REF_DELAY_SAMPLES` in
+/// `audio/fake/hooks.rs`) and the measurement leg's (32), at 48 kHz.
+const FAKE_REF_DELAY_SAMPLES: usize = 20;
+const FAKE_MEAS_DELAY_SAMPLES: usize = 32;
+const FAKE_SR: f64 = 48_000.0;
+
+/// A reference loopback pair on the fake backend: capture 1, playback 1.
+fn reference_config() -> Value {
+    json!({ "reference_channel": 1, "reference_output_channel": 1 })
+}
+
+/// `plot_ir` at a 4096-sample window (the IR's pre-impulse SNR clears #376's
+/// floor on the fake) with a 0.2 s tail (holds the 0.1 s reference window),
+/// plus `extra` fields.
+fn plot_ir_request(extra: Value) -> Value {
+    let mut req = json!({
+        "cmd": "plot_ir",
+        "f1_hz": 200.0,
+        "f2_hz": 8_000.0,
+        "duration": 0.5,
+        "level_dbfs": -6.0,
+        "tail_s": 0.2,
+        "window_len": 4096,
+        "n_harmonics": 3,
+    });
+    if let (Some(r), Some(e)) = (req.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            r.insert(k.clone(), v.clone());
+        }
+    }
+    req
+}
+
+fn report_for(c: &Client, req: Value) -> (Value, MeasurementReport) {
+    let reply = c.call(req);
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let v = c
+        .wait_for_topic("measurement/report", Duration::from_secs(15))
+        .expect("measurement/report frame");
+    let report = serde_json::from_value(v["report"].clone()).expect("decode report");
+    (reply, report)
+}
+
+/// #460 AC1 + AC4, through the producer: a supplied distance reaches
+/// `report.position.distance_m`, the same-capture reference is measured, and
+/// `ir_stats()`'s causal bound is built from exactly those two. The expected
+/// bound index is computed here from the fake's reference delay and `c`; so
+/// is the index a bound built by mistake from the measurement leg would give,
+/// which must differ. Two distances, one either side of the peak, so both
+/// outcomes — bound enforced and the at-or-after-peak decline — are reached,
+/// and which one each distance gives is computed rather than assumed.
+#[test]
+fn plot_ir_builds_the_causal_bound_from_distance_and_same_capture_reference() {
+    let mut outcomes = Vec::new();
+    for distance_m in [0.05_f64, 0.5] {
+        let d = Daemon::spawn_with_config(Some(reference_config()));
+        let c = Client::new(&d);
+        let (reply, report) = report_for(&c, plot_ir_request(json!({ "distance_m": distance_m })));
+        assert_eq!(reply["ref_in_port"], json!("fake:capture_1"), "{reply}");
+        assert_eq!(reply["ref_out_port"], json!("fake:playback_1"), "{reply}");
+
+        let position = report.position.as_ref().expect("position recorded");
+        assert_eq!(position.distance_m, Some(distance_m));
+
+        let reference = match report.reference_latency.as_ref() {
+            Some(ReferenceLatency::Measured(m)) => m.clone(),
+            other => panic!("reference not measured: {other:?}"),
+        };
+        let expected_tau_s = FAKE_REF_DELAY_SAMPLES as f64 / FAKE_SR;
+        assert!(
+            (reference.tau_s - expected_tau_s).abs() < 1e-12,
+            "reference τ {} vs the fake reference leg's {expected_tau_s}",
+            reference.tau_s
+        );
+        assert_eq!(reference.method, "farina_same_capture_reference_v1");
+        assert_eq!(reference.input_port, "fake:capture_1");
+        assert_eq!(reference.output_port, "fake:playback_1");
+
+        let stats = report.ir_stats().expect("ir_stats");
+        let centre = stats.window_len / 2;
+        let c_m_s = ac_core::shared::conversions::speed_of_sound_from_config(None);
+        let expected_bound =
+            (centre as f64 + (expected_tau_s + distance_m / c_m_s) * FAKE_SR).round() as usize;
+        let measurement_leg_bound = (centre as f64
+            + (FAKE_MEAS_DELAY_SAMPLES as f64 / FAKE_SR + distance_m / c_m_s) * FAKE_SR)
+            .round() as usize;
+        assert_ne!(
+            expected_bound, measurement_leg_bound,
+            "test setup: the two legs must give different bounds"
+        );
+        assert_eq!(
+            stats.causal_bound.min_admissible_index(),
+            Some(expected_bound),
+            "distance {distance_m}: {:?}",
+            stats.causal_bound
+        );
+        if expected_bound < stats.peak_index {
+            assert!(
+                stats.onset_rule.contains("causal bound enforced"),
+                "distance {distance_m}: {}",
+                stats.onset_rule
+            );
+            assert!(stats.onset_index >= expected_bound);
+            outcomes.push("enforced");
+        } else {
+            assert!(
+                stats
+                    .onset_rule
+                    .contains("causal bound at or after the peak"),
+                "distance {distance_m}: {}",
+                stats.onset_rule
+            );
+            outcomes.push("declined");
+        }
+    }
+    assert_eq!(
+        outcomes,
+        vec!["enforced", "declined"],
+        "test setup: the two distances must reach both outcomes"
+    );
+}
+
+/// #460 AC3 through the producer: a distance with no reference configured
+/// records the reference as unavailable, with the reason the read-out prints,
+/// and the bound names the reference latency as the missing input.
+#[test]
+fn plot_ir_with_a_distance_but_no_reference_names_the_reference_as_missing() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    let (reply, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 1.0 })));
+    assert!(reply.get("ref_in_port").is_none(), "{reply}");
+    assert_eq!(
+        report.position.as_ref().and_then(|p| p.distance_m),
+        Some(1.0)
+    );
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(reason, "no reference configured (ac setup reference)")
+        }
+        other => panic!("expected an unavailable reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+    assert!(
+        stats
+            .onset_rule
+            .contains("no causal bound (reference latency unavailable)"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// #460 AC3: a measured reference with no distance names the distance.
+#[test]
+fn plot_ir_with_a_reference_but_no_distance_names_the_distance_as_missing() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({})));
+    assert_eq!(report.position.as_ref().and_then(|p| p.distance_m), None);
+    assert!(
+        matches!(
+            report.reference_latency,
+            Some(ReferenceLatency::Measured(_))
+        ),
+        "{:?}",
+        report.reference_latency
+    );
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(
+        stats
+            .onset_rule
+            .contains("no causal bound (distance not given)"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// A reference leg that fails `calibrate`'s SNR gate is recorded as
+/// unavailable with an observation and a `check:` part, and no bound is built
+/// from it. `AC_FAKE_REF_GAIN=0` leaves only the noise override's dither on
+/// the reference leg.
+#[test]
+fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[
+            ("AC_FAKE_REF_GAIN", "0"),
+            ("AC_FAKE_TAU_NOISE_AMPLITUDE_OVERRIDE", "0.001"),
+        ],
+    );
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert!(reason.starts_with("peak SNR "), "{reason}");
+            assert!(
+                reason.contains("; check: reference loopback cable, ref input gain"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected an SNR-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+    assert!(
+        stats.onset_rule.contains("reference latency unavailable"),
+        "{}",
+        stats.onset_rule
+    );
+}
+
+/// #471: a good reference leg at `plot ir`'s **default** sweep must measure.
+/// Before the derived floor it was refused — the default 20–20000 Hz band
+/// floors at ~17 dB against a fixed 24 dB gate, so a mathematically perfect
+/// loopback could not pass. Omits `f1_hz`/`f2_hz`/`duration` so the daemon's
+/// own defaults apply; that is the whole point of the test.
+#[test]
+fn plot_ir_measures_the_reference_at_the_default_sweep() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let (_, report) = report_for(
+        &c,
+        json!({
+            "cmd": "plot_ir",
+            "level_dbfs": -6.0,
+            "tail_s": 0.3,
+            "window_len": 4096,
+            "n_harmonics": 3,
+            "distance_m": 0.05,
+        }),
+    );
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Measured(m)) => {
+            assert!(
+                (m.tau_s - FAKE_REF_DELAY_SAMPLES as f64 / FAKE_SR).abs() < 1e-12,
+                "reference τ {} is not the fake reference leg's delay",
+                m.tau_s
+            );
+        }
+        other => panic!("default sweep must measure the reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(
+        stats.causal_bound.min_admissible_index().is_some(),
+        "a measured reference and a distance must still build the bound: {:?}",
+        stats.causal_bound
+    );
+}
+
+/// A capture tail too short to hold the reference window is recorded as
+/// unavailable with the tail reason, not silently retried and not folded
+/// into "no reference configured" — the operator supplied one.
+///
+/// This branch was unreachable before #460: `calibrate` measures τ with a
+/// fixed `TAU_TAIL_S` that `tau_tail_s_clears_tau_min_half_window_s_with_margin`
+/// pins clear of the window. `plot_ir`'s `tail_s` is operator-controlled
+/// (budget 0–60 s), so #460 makes it reachable and this is what it produces.
+/// The reference window is `2 × TAU_MIN_HALF_WINDOW_S` = 0.10 s.
+#[test]
+fn plot_ir_reports_a_short_tail_reference_as_unavailable() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let mut req = plot_ir_request(json!({ "distance_m": 0.05 }));
+    req["tail_s"] = json!(0.05);
+    let (_, report) = report_for(&c, req);
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "tail 0.05 s, reference window needs 0.10 s; \
+                 check: lengthen the tail token (e.g. 0.8s)"
+            );
+        }
+        other => panic!("expected a tail-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// An xrun across the capture refuses the reference reading outright,
+/// whatever its SNR — the precedence `analyse_tau_leg` inherits from
+/// #368/#369. A reading taken across a discontinuity is a stable,
+/// repeatable, wrong τ, which is exactly what the bound must not be built
+/// from.
+#[test]
+fn plot_ir_reports_an_xrun_during_capture_as_unavailable() {
+    let d = Daemon::spawn_with(Some(reference_config()), &[("AC_FAKE_XRUNS_OVERRIDE", "1")]);
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "xrun during capture; check: JACK period size, system load"
+            );
+        }
+        other => panic!("expected an xrun-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// A reference peak inside the edge margin of its own window is refused,
+/// not reported — a peak that close to the edge is indistinguishable from
+/// one pinned by an arrival outside the window entirely (#340 AC4), and a
+/// window edge imitates a latency.
+///
+/// The delay is derived, not guessed. At the fake's 48 kHz:
+/// `half = ceil(0.05 × 48000) = 2400`, `window_len = 4800`, and
+/// `check_peak_within_window` refuses when the peak sits within
+/// `round(0.10 × half) = 240` of either edge. The reference peak lands at
+/// `half + delay`, so refusal needs `half + delay ≥ 4800 - 1 - 240`, i.e.
+/// `delay ≥ 2159`. 2200 clears that by 41 samples and still fits the
+/// capture.
+#[test]
+fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
+    let half = (0.05 * FAKE_SR).ceil() as usize;
+    let window_len = 2 * half;
+    let margin = (0.10 * half as f64).round() as usize;
+    let delay: usize = 2200;
+    assert!(
+        half + delay >= window_len - 1 - margin,
+        "test setup: delay {delay} does not reach the edge margin"
+    );
+    assert!(
+        half + delay < window_len,
+        "test setup: delay {delay} puts the peak outside the window"
+    );
+
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[("AC_FAKE_REF_DELAY_SAMPLES", &delay.to_string())],
+    );
+    let c = Client::new(&d);
+    let (_, report) = report_for(&c, plot_ir_request(json!({ "distance_m": 0.05 })));
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Unavailable { reason }) => {
+            assert_eq!(
+                reason,
+                "peak at reference window edge; \
+                 check: reference loopback routing, capture tail"
+            );
+        }
+        other => panic!("expected an edge-refused reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// #359: a same-capture reference reading exactly one JACK period apart
+/// from the τ `calibrate` has on file for that pair is reported as a
+/// graph-buffering shift, naming the period — the same fault #347 guards
+/// for `calibrate`, now caught on `plot_ir`'s path too (#347 covers only
+/// `calibrate`).
+///
+/// The measurement pair (`0`/`0`, the config default) and the reference
+/// pair (`1`/`1`, `reference_config()`) are **distinct** — the ordinary
+/// setup, and the one the QA correction on this issue's PR exists for:
+/// `plot_ir`'s reference-pair lookup must land in the reference pair's own
+/// `cal.json` entry, not the measurement pair's, because `Calibration::load`
+/// keys strictly by channel pair and the two are routinely different.
+///
+/// Three separate engine lifecycles inside one daemon process: `calibrate`'s
+/// own two (`measure_tau_twice`, forced to agree with each other via
+/// `AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE`), then `plot_ir`'s. The reference
+/// leg's own hook (`AC_FAKE_REF_DELAY_SAMPLES`) is independent of the
+/// general loopback delay `calibrate` measured with, so it is set one
+/// period later than what `calibrate` stored — the period-shift fault is a
+/// property of separately-lifecycled engines, not of separate daemon
+/// processes (#347's own "per client" framing), so one process suffices.
+#[test]
+fn plot_ir_detects_a_period_shift_on_the_reference_pair() {
+    const PERIOD: u32 = 64;
+    // `ref_delay_samples()`'s own default (`FAKE_REF_DELAY_SAMPLES` above) —
+    // forcing `calibrate`'s stored τ to land here means "one period later"
+    // is exactly `FAKE_REF_DELAY_SAMPLES + PERIOD` below.
+    const STORED_DELAY: usize = FAKE_REF_DELAY_SAMPLES;
+    let shifted_delay = STORED_DELAY + PERIOD as usize;
+
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[
+            ("AC_FAKE_PERIOD_SIZE_OVERRIDE", &PERIOD.to_string()),
+            (
+                "AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE",
+                &format!("{STORED_DELAY},{STORED_DELAY}"),
+            ),
+            ("AC_FAKE_REF_DELAY_SAMPLES", &shifted_delay.to_string()),
+        ],
+    );
+    let c = Client::new(&d);
+
+    // 1. Store a τ for the pair `cal_guard!` will load on step 2 —
+    //    `calibrate`'s two independent engine lifecycles, forced to agree
+    //    at `STORED_DELAY` samples by the override above.
+    let r = c.call(json!({
+        "cmd": "calibrate", "ref_dbfs": -20.0,
+        "output_channel": 1, "input_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+
+    // 2. A third, later engine lifecycle — `plot_ir`'s own capture — reads
+    //    the reference leg `PERIOD` samples later than what step 1 stored.
+    let (_, report) = report_for(&c, plot_ir_request(json!({})));
+
+    let stats = report.ir_stats().expect("ir_stats");
+    match stats.arrival_check {
+        ArrivalCheck::PeriodShift(disagreement) => {
+            assert_eq!(disagreement.period_size, Some(PERIOD));
+            assert_eq!(disagreement.periods, Some(1));
+        }
+        other => panic!("expected a period shift, got {other:?}"),
+    }
+}
+
+/// A reference that is configured but does not resolve is refused before
+/// any audio, not silently run single-ended (#225).
+#[test]
+fn plot_ir_refuses_an_unresolvable_reference_before_any_audio() {
+    let d = Daemon::spawn_with_config(Some(json!({ "reference_channel": 99 })));
+    let c = Client::new(&d);
+    let r = c.call(plot_ir_request(json!({})));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains("99"),
+        "{r}"
+    );
+    assert!(
+        c.wait_for_topic("measurement/report", Duration::from_millis(1500))
+            .is_none(),
+        "a refused request must not produce a report"
+    );
+    let status = c.call(json!({"cmd": "status"}));
+    assert_eq!(status["busy"], json!(false), "{status}");
+}
+
+/// `distance_m` budget: anything but a finite, positive number is refused
+/// before port resolution, with the stimulus stated silent.
+#[test]
+fn plot_ir_refuses_an_unusable_distance_before_any_audio() {
+    let d = Daemon::spawn();
+    let c = Client::new(&d);
+    for bad in [json!(0.0), json!(-1.0), json!("1m")] {
+        let r = c.call(plot_ir_request(json!({ "distance_m": bad })));
+        assert_eq!(r["ok"], json!(false), "{bad}: {r}");
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("distance_m must be finite and > 0 m"),
+            "{bad}: {err}"
+        );
+        assert!(err.contains("stimulus  silent"), "{bad}: {err}");
+    }
+    assert!(
+        c.wait_for_topic("measurement/report", Duration::from_millis(1000))
+            .is_none(),
+        "a refused request must not produce a report"
     );
 }
 

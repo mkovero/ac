@@ -6,13 +6,23 @@
 //! The fake backend's capture is derived from its own stimulus
 //! (`audio/fake.rs::make_samples_for`), so changing what the engine
 //! drives changes what the session captures. A published
-//! `meas_peak_dbfs` moving from the idle ≈ −20 dBFS (the fake default
-//! 0.1-amplitude tone) to ≈ −10 dBFS (a `set_drive` at the −10 ceiling)
+//! `meas_peak_dbfs` moving between the idle ≈ −20 dBFS (the fake default
+//! 0.1-amplitude tone) and the quieter `DRIVE_DBFS` a `set_drive` applies
 //! is therefore direct evidence that the worker acted on the drive
 //! state — not a proxy for it. `set_silence` on the fake backend
 //! restores that default tone rather than true digital silence, which
 //! is why the assertions below are "returned to the idle level", not
 //! "went to −inf".
+//!
+//! # Why the driving level is quieter than idle, not louder (#459)
+//!
+//! Before #459, `set_drive` clamped a request to a *settable*
+//! `drive_max_dbfs` ceiling that defaulted to −10 dBFS — well above the
+//! fake backend's ≈ −20 dBFS idle tone, so "drive on" could be
+//! demonstrated as a clearly LOUDER peak than idle. The fixtures below
+//! retain the quieter −35 dBFS drive chosen by PR #463: revision 3
+//! explicitly keeps existing fixture levels, and a peak below the idle
+//! tone demonstrates the same dead-man and state-transition mechanics.
 
 use std::fs;
 use std::thread;
@@ -25,10 +35,15 @@ mod common;
 
 use common::{Client, Daemon};
 
-/// The default `drive_max_dbfs` ceiling (`ac_core::config`).
-const CEILING_DBFS: f64 = -10.0;
+/// The fixed emission maximum (`ac_core::shared::emission_level`), not a
+/// config value — nothing above this is ever accepted, by any client.
+const MAX_DBFS: f64 = ac_core::shared::emission_level::MAX_EMISSION_DBFS;
 /// Idle fake stimulus is a 0.1-amplitude tone ⇒ 20·log10(0.1) ≈ −20 dBFS.
 const IDLE_PEAK_DBFS: f64 = -20.0;
+/// A driving level clearly below both `MAX_DBFS` and `IDLE_PEAK_DBFS`,
+/// used wherever a test needs a peak distinguishable from idle — see the
+/// module doc for why "distinguishable" now means quieter, not louder.
+const DRIVE_DBFS: f64 = -35.0;
 
 fn start_transfer(c: &Client) -> Value {
     c.call(json!({
@@ -88,30 +103,38 @@ fn set_drive_requires_on_and_a_finite_level() {
     assert_eq!(r["ok"], json!(false), "{r}");
 }
 
+/// #459: a level above the fixed maximum is refused, never clamped — the
+/// echo is always exactly what was requested, because a refused request
+/// changes nothing. `on: false` is the one exception: it is never
+/// checked, so a client silencing a session is never the one request
+/// that could itself be rejected.
 #[test]
-fn server_clamps_to_the_ceiling_and_echoes_the_applied_level() {
+fn set_drive_on_refuses_above_the_maximum_and_passes_through_at_or_below_it() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     assert_eq!(start_transfer(&c)["ok"], json!(true));
 
-    // Request −3 dBFS against the −10 ceiling. A clamp is SUCCESS, not a
-    // partial failure — and the echo is the applied value, so the client
-    // can see what actually happened.
-    let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": -3.0}));
+    // Above the maximum: refused, and `max_dbfs` rides the refusal.
+    let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": MAX_DBFS + 6.0}));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(r["max_dbfs"], json!(MAX_DBFS), "{r}");
+
+    // At or below the maximum: passes through unchanged.
+    let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": MAX_DBFS}));
     assert_eq!(r["ok"], json!(true), "{r}");
     assert_eq!(r["on"], json!(true));
-    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS));
+    assert_eq!(r["level_dbfs"], json!(MAX_DBFS));
 
-    // Below the ceiling passes through untouched.
     let r = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": -25.0}));
     assert_eq!(r["level_dbfs"], json!(-25.0), "{r}");
 
-    // The clamp applies on `off` too — the level survives a stop/start
-    // cycle without a round trip to read it back.
-    let r = c.call(json!({"cmd": "set_drive", "on": false, "level_dbfs": 6.0}));
+    // `on: false` is never checked — an operator silencing a session must
+    // never be the one request a bad level could leave refused, and drive
+    // stuck on.
+    let r = c.call(json!({"cmd": "set_drive", "on": false, "level_dbfs": MAX_DBFS + 6.0}));
     assert_eq!(r["ok"], json!(true), "{r}");
     assert_eq!(r["on"], json!(false));
-    assert_eq!(r["level_dbfs"], json!(CEILING_DBFS));
+    assert_eq!(r["level_dbfs"], json!(MAX_DBFS + 6.0));
 }
 
 // ---------------------------------------------------------------------
@@ -256,27 +279,29 @@ fn peaks_are_raw_and_do_not_follow_a_voltage_calibration() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn drive_on_raises_the_captured_level_and_off_returns_it_within_one_frame() {
+fn drive_on_lowers_the_captured_level_and_off_returns_it_within_one_frame() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     assert_eq!(start_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
-    // On at the ceiling: amplitude 10^(−10/20) ≈ 0.316 ⇒ ≈ −10 dBFS.
+    // On at `DRIVE_DBFS`: amplitude 10^(DRIVE_DBFS/20) ⇒ a peak well
+    // below the idle tone (see the module doc for why quieter, not
+    // louder, demonstrates the same mechanics under #459's maximum).
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
     let driving =
         peak(&c.frame_after(Duration::from_millis(900)), "meas_peak_dbfs").expect("driving peak");
     assert!(
-        (driving - CEILING_DBFS).abs() < 2.0,
-        "driving peak {driving} not near {CEILING_DBFS} dBFS"
+        (driving - DRIVE_DBFS).abs() < 2.0,
+        "driving peak {driving} not near {DRIVE_DBFS} dBFS"
     );
 
     // Off: back to the idle stimulus level.
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": false, "level_dbfs": CEILING_DBFS}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": false, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
     let stopped =
@@ -294,12 +319,13 @@ fn level_changes_take_effect_without_restarting_the_session() {
     assert_eq!(start_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
-    c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": -30.0}));
+    c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": -50.0}));
     let quiet =
         peak(&c.frame_after(Duration::from_millis(900)), "meas_peak_dbfs").expect("quiet peak");
 
-    // Keep driving, just louder — no stop, no session restart.
-    c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}));
+    // Keep driving, just louder — no stop, no session restart. Still at
+    // or below the maximum.
+    c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": MAX_DBFS}));
     let loud =
         peak(&c.frame_after(Duration::from_millis(900)), "meas_peak_dbfs").expect("loud peak");
 
@@ -321,15 +347,12 @@ fn dead_man_drops_drive_after_keepalive_silence_but_keeps_the_session() {
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
     let driving =
         peak(&c.frame_after(Duration::from_millis(900)), "meas_peak_dbfs").expect("driving peak");
-    assert!(
-        (driving - CEILING_DBFS).abs() < 2.0,
-        "not driving: {driving}"
-    );
+    assert!((driving - DRIVE_DBFS).abs() < 2.0, "not driving: {driving}");
 
     // No CTRL traffic at all for 1.6 s — the timeout must be evaluated
     // on the worker's own poll, not on message arrival.
@@ -361,7 +384,7 @@ fn drive_survives_up_to_the_dead_man_window() {
     let _ = c.frame_after(Duration::from_millis(1_200));
 
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
 
@@ -371,7 +394,7 @@ fn drive_survives_up_to_the_dead_man_window() {
     let still = peak(&c.frame_after(Duration::from_millis(200)), "meas_peak_dbfs")
         .expect("peak before the window");
     assert!(
-        (still - CEILING_DBFS).abs() < 2.0,
+        (still - DRIVE_DBFS).abs() < 2.0,
         "drive dropped early ({still} dBFS at 1.2 s) — dead-man window too short"
     );
 }
@@ -385,7 +408,7 @@ fn idempotent_resends_hold_drive_past_the_dead_man_window() {
     assert_eq!(start_transfer(&c)["ok"], json!(true));
     let _ = c.frame_after(Duration::from_millis(1_200));
 
-    let msg = json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS});
+    let msg = json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS});
     c.call(msg.clone());
 
     // Byte-identical resends across a window well past 1.5 s.
@@ -393,13 +416,13 @@ fn idempotent_resends_hold_drive_past_the_dead_man_window() {
         thread::sleep(Duration::from_millis(250));
         let r = c.call(msg.clone());
         assert_eq!(r["ok"], json!(true), "resend refused: {r}");
-        assert_eq!(r["level_dbfs"], json!(CEILING_DBFS));
+        assert_eq!(r["level_dbfs"], json!(DRIVE_DBFS));
     }
 
     let still = peak(&c.frame_after(Duration::from_millis(300)), "meas_peak_dbfs")
         .expect("peak while resending");
     assert!(
-        (still - CEILING_DBFS).abs() < 2.0,
+        (still - DRIVE_DBFS).abs() < 2.0,
         "resends did not hold drive: {still} dBFS"
     );
 }
@@ -414,7 +437,7 @@ fn legacy_launch_time_drive_is_not_killed_by_the_dead_man() {
     let r = c.call(json!({
         "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
         "weighting": "Z", "integration": "fast",
-        "drive": true, "level_dbfs": CEILING_DBFS,
+        "drive": true, "level_dbfs": DRIVE_DBFS,
     }));
     assert_eq!(r["ok"], json!(true), "{r}");
 
@@ -424,41 +447,31 @@ fn legacy_launch_time_drive_is_not_killed_by_the_dead_man() {
     let p = peak(&c.frame_after(Duration::from_millis(600)), "meas_peak_dbfs")
         .expect("peak on a launch-driven session");
     assert!(
-        (p - CEILING_DBFS).abs() < 2.0,
+        (p - DRIVE_DBFS).abs() < 2.0,
         "legacy launch-time drive was silenced by the dead-man: {p} dBFS"
     );
 }
 
-/// #360's second, independent unclamped path: `transfer_stream`'s own
-/// `level_dbfs` seed when launched with legacy `drive: true`. This never
-/// goes through `set_drive`'s clamp unless the client calls `set_drive`
-/// again later, so it needs its own above-ceiling assertion —
-/// `legacy_launch_time_drive_is_not_killed_by_the_dead_man` above requests
-/// exactly `CEILING_DBFS`, which cannot distinguish clamped from unclamped
-/// code.
+/// #459: `transfer_stream`'s own `level_dbfs` seed, used when launched
+/// with legacy `drive: true` (or `drivable: true`), goes through the
+/// same refusal chokepoint as `set_drive` — a level above the maximum
+/// refuses the whole launch rather than silently landing on a lower one.
+/// This needs its own test because
+/// `legacy_launch_time_drive_is_not_killed_by_the_dead_man` above
+/// requests a level already within range, which cannot distinguish a
+/// checked seed from an unchecked one.
 #[test]
-fn legacy_launch_time_drive_clamps_level_to_the_ceiling() {
+fn legacy_launch_time_drive_refuses_above_the_maximum() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
-    let requested = CEILING_DBFS + 6.0;
+    let requested = MAX_DBFS + 6.0;
     let r = c.call(json!({
         "cmd": "transfer_stream", "meas_channel": 0, "ref_channel": 1,
         "weighting": "Z", "integration": "fast",
         "drive": true, "level_dbfs": requested,
     }));
-    assert_eq!(r["ok"], json!(true), "{r}");
-
-    let f = c.frame_after(Duration::from_millis(900));
-    assert_eq!(drive_state(&f)["on"], json!(true));
-    let applied = drive_state(&f)["level_dbfs"]
-        .as_f64()
-        .expect("level_dbfs while launch-time driving");
-    assert!(
-        (applied - CEILING_DBFS).abs() < 1e-9,
-        "launch-time drive:true reached the engine at {applied} dBFS, requested \
-         {requested} against a {CEILING_DBFS} ceiling — transfer_stream's self-driving \
-         seed is unclamped"
-    );
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(r["max_dbfs"], json!(MAX_DBFS), "{r}");
 }
 
 // ---------------------------------------------------------------------
@@ -466,17 +479,22 @@ fn legacy_launch_time_drive_clamps_level_to_the_ceiling() {
 //
 // The indicator #228 builds needs to know whether the daemon is emitting.
 // A client's own last `set_drive` is not that: the dead-man can silence a
-// drive the client still believes is up, and the clamp can lower a level
-// the client still believes it set. These assert the published state
-// follows the engine, not the request.
+// drive the client still believes is up, and a refused request must leave
+// the engine's state exactly where it was — neither is visible from the
+// client's own request. These assert the published state follows the
+// engine, not the request.
 // ---------------------------------------------------------------------
 
 fn drive_state(frame: &Value) -> &Value {
     &frame["drive"]
 }
 
+/// #459: a refused `set_drive` must leave the engine's state untouched —
+/// there is no more "applied (clamped) level" to report, because a level
+/// above the maximum never reaches the engine at all. The frame after a
+/// refusal must still show whatever was true before it.
 #[test]
-fn frames_report_the_applied_drive_level_not_the_requested_one() {
+fn frames_report_the_applied_drive_level_unaffected_by_a_refused_request() {
     let d = Daemon::spawn();
     let c = Client::new(&d);
     let r = c.call(json!({
@@ -499,23 +517,41 @@ fn frames_report_the_applied_drive_level_not_the_requested_one() {
          that never drives"
     );
 
-    // Ask for 6 dB above the ceiling. The frame must carry what the engine
-    // was given, not what the client asked for — a drive clamped to
-    // something inaudible is a real measurement with a bad SNR, and an
-    // indicator reading the request would call it healthy.
-    let requested = CEILING_DBFS + 6.0;
+    // Turn drive on for real, within range.
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": requested}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
     let driving = c.frame_after(Duration::from_millis(900));
     assert_eq!(drive_state(&driving)["on"], json!(true));
-    let applied = drive_state(&driving)["level_dbfs"]
-        .as_f64()
-        .expect("level_dbfs while driving");
-    assert!(
-        (applied - CEILING_DBFS).abs() < 1e-9,
-        "frame must report the applied (clamped) level {CEILING_DBFS}, got {applied}"
+    assert_eq!(
+        drive_state(&driving)["level_dbfs"].as_f64(),
+        Some(DRIVE_DBFS)
+    );
+
+    // Refresh the keepalive after waiting for the observation above. The
+    // next frame wait is deliberately long enough for a stable sample, and
+    // two such waits would otherwise cross the 1.5 s dead-man boundary.
+    assert_eq!(
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
+        json!(true)
+    );
+
+    // Ask for 6 dB above the maximum — refused. The engine's state (and
+    // therefore the published frame) must be exactly what it was before
+    // this request: still on, still at DRIVE_DBFS, never the refused
+    // number.
+    let requested = MAX_DBFS + 6.0;
+    let refused = c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": requested}));
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+
+    let after = c.frame_after(Duration::from_millis(900));
+    assert_eq!(drive_state(&after)["on"], json!(true));
+    assert_eq!(
+        drive_state(&after)["level_dbfs"].as_f64(),
+        Some(DRIVE_DBFS),
+        "a refused set_drive must leave the previously-applied level in place, \
+         never report the refused request"
     );
 }
 
@@ -531,7 +567,7 @@ fn the_published_drive_state_follows_the_dead_man_not_the_last_request() {
     let _ = c.frame_after(Duration::from_millis(900));
 
     assert_eq!(
-        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": CEILING_DBFS}))["ok"],
+        c.call(json!({"cmd": "set_drive", "on": true, "level_dbfs": DRIVE_DBFS}))["ok"],
         json!(true)
     );
     assert_eq!(

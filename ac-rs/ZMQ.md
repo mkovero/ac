@@ -111,7 +111,7 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 6`); the
+configured. Schema is versioned (currently `schema_version: 9`); the
 capture backend is archived at report top level. Example payload:
 
 ```json
@@ -119,7 +119,7 @@ capture backend is archived at report top level. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 6,
+    "schema_version": 9,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -773,11 +773,15 @@ a clean slate (e.g. issuing `transfer_stream` immediately after
 
 **Reply**
 ```json
-{ "ok": true, "stopped": ["<worker-name>", ...] }
+{ "ok": true, "stopped": ["<worker-name>", ...], "stimulus": "silent" }
 ```
 
 `stopped` lists the workers that were actually joined during this call —
-empty if no matching worker was running.
+empty if no matching worker was running. `stimulus: "silent"` is present only
+when no workers remain after the selected handles have joined; cancellable
+stimulus workers have silenced their backend before the reply is constructed.
+It is omitted from a named-stop reply when another worker remains because that
+worker may still be driving output.
 
 **DATA** — after stop, the worker emits a terminal frame:
 ```json
@@ -889,9 +893,13 @@ vice versa.
 ```json
 {
   "ok":     true,
+  "max_dbfs": 0.0,
   "config": { /* full config dict, all keys */ }
 }
 ```
+
+`max_dbfs` is the fixed build maximum, not a config setting. A retired
+`drive_max_dbfs` key remains inside `config` until the operator removes it.
 
 ---
 
@@ -937,7 +945,9 @@ Look up a stored calibration entry.
       "tau_s":       <float>,
       "measured_at": "<RFC3339>",
       "method":      "<string>",
-      "agreement_count": <int>   // #347: readings that corroborated this entry, always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a corroborated one
+      "agreement_count": <int>,  // #347: readings that agreed, from separate client lifecycles — agreement over the interval in `reading_separation_s`, not corroboration; see #363. Always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a two-lifecycle one
+      "declared_latency_frames": <int> | null,  // #363: what the graph declared this path to be while the entry was measured. Not a τ and never subtracted from one — it carries jackd's unvalidated -I/-O. null on entries written before #363 *and* on backends that declare nothing; on disk those are indistinguishable
+      "reading_separation_s": <float> | null    // #363: wall-clock seconds between the two lifecycles' captures — the number that says what the agreement is worth, since the failure it guards persists over seconds. null on entries written before #363
     }
   ]   // always present, [] when no τ has ever been measured for this key
 }
@@ -999,19 +1009,15 @@ its CLI parent noun moved.
 }
 ```
 
-`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
-ceiling (#360) — each point on the ramp individually, not just the
-endpoints, so a range whose top end exceeds the ceiling flattens there
-rather than running unclamped.
+The defaults are −40 and −30 dBFS. Either endpoint above full scale (0 dBFS)
+is refused before worker spawn; no point is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-jack-port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
-`start_dbfs`/`stop_dbfs` in the reply are the *applied* endpoints — what
-was requested clamped to the ceiling — same convention as `set_drive`'s
-`level_dbfs` echo.
+The reply echoes the requested endpoints unchanged.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1043,15 +1049,15 @@ is a deprecated alias). Wire `cmd` unchanged — same reasoning as
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-jack-port>", "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
-`level_dbfs` in the reply is the applied value after the clamp — same
-convention as `set_drive`.
+`level_dbfs` in the reply equals the accepted request.
 
 **DATA**
 ```json
@@ -1085,7 +1091,11 @@ guessed beforehand (`ac_core::measurement::sweep::check_tail_decay`).
 
 Fake, JACK, and CPAL backends all implement the required
 `play_and_capture` engine path (`jack_backend.rs`, `cpal_backend.rs`) —
-only the default trait impl bails.
+only the default trait impl bails. Capturing a same-capture reference leg
+(#460, `play_and_capture_with_reference`) is implemented by the fake and JACK
+backends; on CPAL `plot_ir` runs single-input and records
+`reference_latency: unavailable` naming the backend, never silently dropping
+a configured reference.
 
 **Request**
 ```json
@@ -1094,16 +1104,28 @@ only the default trait impl bails.
   "f1_hz":        <float>,   // default 20
   "f2_hz":        <float>,   // default 20000 (must be < sr/2)
   "duration":     <float>,   // seconds, default 1.0
-  "level_dbfs":   <float>,   // default -6
+  "level_dbfs":   <float>,   // default -40
   "tail_s":       <float>,   // extra capture beyond sweep end, default 0.5
   "n_harmonics":  <int>,     // default 5
-  "window_len":   <int>      // requested IR gate length in samples, default 4096
+  "window_len":   <int>,     // requested IR gate length in samples, default 4096
+  "distance_m":   <float>    // optional, metres source to receiver; feeds only the
+                             // onset search's causal bound (#460)
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
-before #360 this was the one command besides `calibrate` that emitted
-whatever was asked for with nothing bounding it.
+Request budgets are enforced before port resolution or worker spawn:
+
+- `duration`: greater than 0 and at most 60 seconds
+- `tail_s`: from 0 through 60 seconds
+- `n_harmonics`: from 1 through 32
+- `window_len`: from 1 through 1048576 samples
+- `distance_m`: finite and greater than 0 metres; absent means no distance
+
+An out-of-budget request returns `ok: false`, confirms that the stimulus is
+silent, and emits no audio. `stop` cancels both the sweep and tail portions of
+an accepted `plot_ir` request.
+
+`level_dbfs` above full scale (0 dBFS) is refused before worker spawn.
 
 `window_len` is a request, not a guarantee. Gates for adjacent harmonic
 orders must not overlap, so each order's gate is clamped down to the
@@ -1115,11 +1137,50 @@ also stated in the report `notes`.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<resolved-output-port>", "level_dbfs": <float>, "max_dbfs": 0.0,
+  "ref_in_port": "<reference-capture-port>",    // only when a reference is configured
+  "ref_out_port": "<reference-playback-port>",  // only when a reference is configured
+  "warnings": ["<#225 migration warning>"] }    // only when it applies
 ```
 
-`level_dbfs` in the reply is the applied (clamped) level, and the report's
-`stimulus.level_dbfs` field (below) is the same applied value.
+`level_dbfs` in the reply equals the accepted request, and the report's
+`stimulus.level_dbfs` field is the same value.
+
+**Reference leg (#460).** `plot_ir` takes a same-capture reference from the
+config keys `transfer_stream` and `test_dut` already use: `reference_channel` /
+`reference_port` for capture, `reference_output_channel` /
+`reference_output_port` for playback. With `reference_output_channel` unset the
+reference is driven from the main output (the sweep drives no second port);
+with it set to a different port, **the sweep also leaves through that port** at
+the same accepted level, which is why the reply names it. A reference that is
+configured but does not resolve (out-of-range channel, or a sticky port with no
+channel to gate it) returns `ok: false` before any audio, rather than running
+single-ended. No reference configured is a legitimate state: the report records
+`reference_latency: unavailable` and no causal bound is built.
+
+**Arrival check (#359, schema v9).** `report.reference_stored_latency` is the
+τ `calibrate` has on file for the *reference* pair, looked up by the same
+exact-match rule `interface_latency` uses — never measured by `plot_ir`
+itself. `MeasurementReport::ir_stats().arrival_check` compares it against
+this run's same-capture `reference_latency`: agreement, a disagreement that
+is an exact multiple of the period (a graph-buffering shift — the same fault
+`calibrate`'s own two-reading τ guard exists for, #347 — now caught on the
+one path that had no equivalent corroboration at all), a disagreement that
+isn't (a different fault), or not checked (no reference, no stored τ for the
+reference pair, or a reference reading that failed its own gates). Gates the
+one τ subtraction the report can offer: `IrStats::flight_time_s` is withheld
+on either disagreement, even though `interface_latency` is measured, and
+produced normally when the check is `agree` or `unchecked`.
+
+What this cannot catch: it proves this capture's lifetime matches the
+lifetime the **reference** pair was last calibrated in, not the lifetime the
+**capture** pair's own stored τ came from — if those two pairs were
+calibrated in different lifetimes, a shift between those two is invisible to
+this check. It also cannot see a shift that was already present when the
+reference pair itself was calibrated: `calibrate` would have stored the
+shifted value, this run's same-capture reading agrees with it, and the check
+reports `agree`. Absent on reports written before v9, and whenever `plot_ir`
+has no reference configured.
 
 **DATA**
 ```json
@@ -1131,7 +1192,7 @@ also stated in the report `notes`.
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 6, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 9, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }
@@ -1190,6 +1251,48 @@ A reader must not subtract τ from the arrival when `state` is
 `unavailable`: the arrival still contains the uncorrected interface
 latency, which at 48 kHz is routinely tens of samples of phantom path.
 
+`reference_latency` (schema v7, #460) is τ of the **reference loopback pair**,
+read from the reference leg captured in this same run under `calibrate`'s
+window-edge and xrun gates. Its **SNR gate is not `calibrate`'s**: from schema
+v8 the reference leg is judged against its own stimulus's noiseless
+deconvolution floor, less 3 dB (#471). That statistic is a property of the
+sweep — it ranges ~17 dB at 20–20000 Hz to ~35 dB at 500–4000 Hz, and does not
+move with capture noise — so a fixed threshold refused a correct loopback at
+`plot ir`'s own default sweep. It describes
+a *different* port pair from `interface_latency`: a reader must never subtract
+it from the arrival as though it were the capture pair's own τ — τ is per
+channel pair. Its only consumer is the onset search's causal bound
+(`IrStats::causal_bound`), which needs a τ from the same client lifetime and
+stream epoch as the IR, because a stored τ re-picks by a multiple of the
+FireWire SYT interval on every device enumeration (#461). Tagged union on
+`state`:
+
+```json
+{ "state": "measured", "tau_s": 0.017822917, "pre_impulse_snr_db": 61.8,
+  "pre_impulse_snr_floor_db": 64.5,
+  "method": "farina_same_capture_reference_v1",
+  "output_port": "system:playback_2", "input_port": "system:capture_2" }
+
+{ "state": "unavailable", "reason": "peak SNR 9.3 dB, need 24.0 dB; check: reference loopback cable, ref input gain" }
+```
+
+`pre_impulse_snr_db` is omitted when the pre-impulse region measured true
+silence (an infinite SNR, which JSON cannot carry). `pre_impulse_snr_floor_db`
+(v8) is the derived floor the reading was judged against, so an archived
+reading stays re-judgeable once the threshold is no longer a constant; it is
+absent on v7 reports and on a reading that fell back to the fixed 24 dB gate
+because no floor could be established. The `unavailable` reason keeps its exact
+shape — only the `need` figure now varies per run. `reason` names what was
+observed and, after `; check: `, where to look — never a cause. `plot_ir`
+always records the field, so `unavailable` with `no reference configured (ac
+setup reference)` is what no reference looks like; reports written before v7
+lack it, which readers treat as no reference.
+
+`report.position.distance_m` is the request's `distance_m`, recorded when
+supplied. It is an **input** to the causal bound, converted to seconds inside
+`ir_stats`, never a read-out: no ms → m figure returns (#391). From v7,
+`position` may be present carrying only `distance_m`.
+
 When `cfg.report_dir` is configured the daemon also writes the pair
 `<ISO8601>-plot_ir.json` and `<ISO8601>-plot_ir.csv` there (colons
 replaced with `-`), so the result survives the run without the client
@@ -1214,14 +1317,26 @@ captures + analyses the loopback. Emits one `measurement/frequency_response/poin
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+`duration` must be greater than 0 and at most 60 seconds. The derived sweep
+grid may contain at most 10000 points; the daemon validates the checked point
+count before allocating it or spawning a worker.
+
+Each point's actual capture is floored at `3.0 / freq` seconds (enough cycles
+to analyse a low frequency); since the sweep grid is non-decreasing, `start_hz`
+carries the largest such floor. The daemon also rejects the request,
+before resolving ports or spawning a worker, when `max(duration, 3.0 /
+start_hz)` is non-finite or exceeds the same 60-second ceiling — so a very low
+`start_hz` can be rejected even when `duration` itself is within range.
+
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float> }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
-`level_dbfs` in the reply is the applied value; each
+`level_dbfs` in the reply equals the accepted request; each
 `measurement/frequency_response/point` frame's `drive_db` (below) is the
 same applied value.
 
@@ -1230,11 +1345,29 @@ same applied value.
 // topic: data  (measurement/frequency_response/point frame, see Shared types)
 ```
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot", "n_points": <int>, "xruns": <int> }
 ```
+
+`xruns` is the session delta — `AudioEngine::xruns()` sampled once at
+engine creation and once at sweep completion, then subtracted
+(wrapping-safe) — not a sum of that per-point cumulative reading (#428).
+
+**DATA** — terminal, analyzer failure (#428):
+```json
+// topic: error
+{ "cmd": "plot", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
+```
+
+An analyzer failure at any point aborts the sweep atomically: the engine
+stops, this `error` is published, and none of `measurement/frequency_
+response/complete`, `measurement/report`, the report file, or `done`
+follow — a failed sweep never archives its completed prefix as a
+successful measurement. `requested_points` is the full sweep's point
+count; `completed_points` is how many points had already published a
+`measurement/frequency_response/point` frame before the failure.
 
 ---
 
@@ -1255,25 +1388,37 @@ at each level step. Emits one `measurement/frequency_response/point` frame per l
 }
 ```
 
-`start_dbfs`/`stop_dbfs` are clamped to the config's `drive_max_dbfs`
-ceiling (#360), each computed step individually — a range whose top end
-exceeds the ceiling flattens there rather than running unclamped.
+`duration` must be greater than 0 and at most 60 seconds. `steps` must be from
+1 through 10000. Both are validated before worker spawn.
+
+The defaults are −40 and −30 dBFS. Either endpoint above full scale
+(0 dBFS) is refused before worker spawn; no step is clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float> }
+{ "ok": true, "out_port": "<port>", "in_port": "<port>", "start_dbfs": <float>, "stop_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `start_dbfs`/`stop_dbfs` in the reply are the applied endpoints.
 
 **DATA** — one per level step (measurement/frequency_response/point frame, `"cmd": "plot_level"`,
-includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the applied,
-post-clamp level for that step).
+includes `"freq_hz"` and `"drive_db"` fields — `drive_db` is the accepted
+level for that step).
 
-**DATA** — terminal:
+**DATA** — terminal, success:
 ```json
 // topic: done
 { "cmd": "plot_level", "n_points": <int>, "xruns": <int> }
+```
+
+`xruns` is the session delta, same accounting as `plot`'s (#428).
+
+**DATA** — terminal, analyzer failure (#428): same shape and same
+atomic-failure guarantee as `plot`'s, above, with `"cmd": "plot_level"`
+and `requested_points` the level-step count (`steps`).
+```json
+// topic: error
+{ "cmd": "plot_level", "message": "<analyzer error>", "requested_points": <int>, "completed_points": <int> }
 ```
 
 ---
@@ -1421,14 +1566,15 @@ Plays a continuous sine tone until stopped.
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
-`level_dbfs` in the reply is the applied value.
+`level_dbfs` in the reply equals the accepted request.
 
 On port error: `{ "ok": false, "error": "port error: ..." }`.
 
@@ -1453,11 +1599,12 @@ Plays continuous pink noise until stopped.
 }
 ```
 
-`level_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360).
+The default is −40 dBFS. A value above full scale (0 dBFS) is refused,
+never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float> }
+{ "ok": true, "out_ports": ["<port>", ...], "level_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
 `level_dbfs` in the reply is the applied value.
@@ -1479,23 +1626,20 @@ asking the client to enter DMM readings; client responds with `cal_reply`.
 ```json
 {
   "cmd":            "calibrate",
-  "ref_dbfs":       <float>,   // optional, default: the session's drive_max_dbfs
+  "ref_dbfs":       <float>,   // optional, default -40
   "output_channel": <int>,     // optional, defaults to config
   "input_channel":  <int>      // optional, defaults to config
 }
 ```
 
-`ref_dbfs` is clamped to the config's `drive_max_dbfs` ceiling (#360) —
-an omitted value now defaults to that same ceiling rather than a
-hardcoded -10.0, so it can never itself sit above the config it is
-supposed to respect.
+`ref_dbfs` above full scale (0 dBFS) is refused, never clamped.
 
 **Reply**
 ```json
-{ "ok": true, "ref_dbfs": <float> }
+{ "ok": true, "ref_dbfs": <float>, "max_dbfs": 0.0 }
 ```
 
-`ref_dbfs` in the reply is the applied (clamped, or defaulted) value.
+`ref_dbfs` in the reply is the accepted (or defaulted) value.
 
 **DATA — `cal_prompt`** (step 1: output voltage at the DAC, while a
 1 kHz tone is playing at `ref_dbfs`):
@@ -1551,19 +1695,25 @@ reading either.
   "vrms_at_0dbfs_in":     <float> | null,  // post-scale, projected to 0 dBFS
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
-  "tau_state":            "measured" | "not_measured_no_loopback" | "error"
-                           | "disagree_period_shift" | "disagree_other" | "refused_xrun",
+  "tau_state":            "measured" | "not_measured_low_snr" | "error"
+                           | "disagree_period_shift" | "disagree_other" | "refused_xrun"
+                           | "disagree_declared_latency",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
-  "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
+  "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2. Agreement over `tau_reading_separation_s`, not corroboration — see #363 and the state table below
   "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
   "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
   "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
+  "tau_reading1_declared_frames": <int> | null,  // #363: what the graph declared this path to be while reading 1 ran — present alongside tau_reading1_s. null means the backend declares nothing (not applicable, not unknown); the field being *absent* means a daemon older than #363
+  "tau_reading2_declared_frames": <int> | null,  // #363: ditto for reading 2
+  "tau_reading_separation_s": <float>,     // #363: wall-clock seconds between the two lifecycles' captures — present whenever both lifecycles ran
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
-  "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
+  "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", "disagree_other", or "disagree_declared_latency"
+  "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, absent on error
+  "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
   "input_port":           "<port>",        // #370: resolved server-side, e.g. "system:capture_2" — not the client's copy of the request
   "output_port":          "<port>"         // ditto, e.g. "system:playback_5"
@@ -1587,34 +1737,63 @@ not only what this run measured, and the `*_state` word says which:
 | `unchanged` | the prompt was skipped; the previously stored value stands |
 | `absent` | the field holds no value — never set, or just cleared |
 
-**τ (interface latency, #281/#347)** is not prompt-driven — it piggybacks
-on the loopback state `cal_prompt` step 2 already established, so there is
-no third interactive step and no `unchanged` state (skipping a voltage
+**τ (interface latency, #281/#347)** is not prompt-driven — it is not a
+third interactive step and has no `unchanged` state (skipping a voltage
 prompt does not affect it). #347: a single reading is not a measurement of
 τ on this stack — round-trip latency for a fixed path can vary by exactly
 one period between client lifetimes, invisible within any one lifetime
 (stable to 0.001 frames). `calibrate` therefore always runs τ as **two**
 independent client lifecycles (fresh `start`/`stop` each) and compares
-them before storing anything:
+them before storing anything.
+
+**#368**: τ used to run only when `cal_prompt` step 2's `loopback` flag
+was `true` — a captured-level proxy for "is this cable patched" that a
+loopback 3 dB hot or 4 dB low both failed even though both carried a real,
+measurable arrival, and that a loud but uncorrelated interferer could
+still pass. τ is now attempted unconditionally; the gate lives inside the
+measurement itself, on the deconvolved peak's own pre-impulse SNR, which
+is the quantity that actually distinguishes "patched" from "not patched."
+`cal_prompt` step 2's own `loopback` flag is unchanged and keeps gating
+only whether the DMM prompt pre-fills the output reading — a separate,
+still-unity-keyed decision.
 
 | `tau_state` | meaning |
 |-------------|---------|
-| `measured` | loopback detected this run; two independent readings agreed to the whole sample and their average was appended to `tau_history` |
-| `not_measured_no_loopback` | loopback not detected this run — nothing to measure τ against |
-| `error` | loopback was detected but a lifecycle's own measurement failed (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
+| `measured` | two independent readings agreed to the whole sample and their average was appended to `tau_history` |
+| `not_measured_low_snr` | a lifecycle's deconvolved peak was below `tau_snr_threshold_db` pre-impulse SNR — not distinguishable from noise, so nothing was measured |
+| `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
-| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Nothing is stored. |
+| `disagree_declared_latency` | the two lifecycles' `tau_reading{1,2}_declared_frames` differed (#363) — the graph's own account of the path moved between two readings of an unchanged graph, so the readings agreeing proves nothing. Compared as exact integer frames, no tolerance: these are counts the graph asserts, not measurements. Checked *after* `refused_xrun` and *before* the readings are compared. Nothing is stored. **This does not detect the failure #363 documents** — a shift the graph never declares stays invisible, and no reachable rig currently reproduces it; what this state catches is the subset that announces itself. |
+| `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran
 under (present regardless of `tau_state`, including `error`), so a
-`not_measured_no_loopback` or `error` result is still legible against
+`not_measured_low_snr` or `error` result is still legible against
 `cal.json` history without a second round trip. `tau_period_size: null`
 does not mean unknown — see `AudioEngine::period_size` in
 `ac-daemon/src/audio/mod.rs`: some backends cannot report a period size
 at all, which is a documented backend limitation, distinct from a period
 size that simply wasn't queried (and means `disagree_period_shift` can
 never fire on that backend — any disagreement there is `disagree_other`).
+
+`tau_pre_impulse_snr_db` / `tau_snr_threshold_db` (#368) are present on
+every state where at least one lifecycle reached deconvolution
+(`measured`, `not_measured_low_snr`, `disagree_*`), absent on `error`
+(which can fail before a peak was ever located), and **also absent on
+`refused_xrun`** (#369): an xrun-crossed lifecycle's SNR gate never runs
+(see the `refused_xrun` row above), so there is no SNR figure to report —
+the state name itself names the cause, and no number is offered that
+could be misread as a scored noise floor. On `measured` and `disagree_*`,
+the SNR reported is the worse (lower) of the two lifecycles' — both
+necessarily cleared the threshold, since a lifecycle that didn't, and
+carried no xrun, would have produced `not_measured_low_snr` instead, and
+a lifecycle that did carry one would have diverted the whole run to
+`refused_xrun` before either `measured` or `disagree_*` could be reached
+— so this is a diagnostic figure alongside the result rather than a
+second gate. `tau_snr_threshold_db` is a derived constant (see
+`ac-daemon/src/handlers/calibrate/tau/measure.rs`'s `TAU_SNR_THRESHOLD_DB` doc
+comment for its provenance), not measured on this exact sweep.
 
 On either disagreement state, `tau_reading1_s` / `tau_reading2_s` are the
 raw seconds values from the two lifecycles, shown verbatim rather than
@@ -1920,8 +2099,8 @@ every other observable looking correct.
   "drive":        <bool>,    // optional, default false — if true, daemon plays pink noise on the output
   "drivable":     <bool>,    // optional, default false — connect output ports at launch but stay
                              //   silent until `set_drive`. Implied by drive=true.
-  "level_dbfs":   <float>,   // only meaningful when drive=true, default -10; clamped to
-                             //   drive_max_dbfs (#360) before it seeds the drive state
+  "level_dbfs":   <float>,   // meaningful when drive or drivable=true; default -40;
+                             //   refused above full scale (0 dBFS)
 
   // Either the multi-pair form …
   "pairs":        [[<meas0>, <ref0>], [<meas1>, <ref1>], ...],
@@ -1960,7 +2139,8 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   "meas_port":    "<capture-port>",
   "ref_port":     "<capture-port>",
   "meas_channel": <int>,
-  "ref_channel":  <int>
+  "ref_channel":  <int>,
+  "max_dbfs":     0.0
 }
 ```
 
@@ -2211,8 +2391,8 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
   },
   "drive": {                             // observed stimulus state (#228)
     "on":         <bool>,                // what is applied to the engine on this
-                                          // tick, after the dead-man and clamp
-    "level_dbfs": <float> | null,        // applied (clamped) level; null while off
+                                          // tick, after the dead-man
+    "level_dbfs": <float> | null,        // accepted level; null while off
     "drivable":   <bool>                 // session opened output ports at launch
   }
 }
@@ -2220,13 +2400,11 @@ reply `{"ok": false, "error": "..."}` before the worker spawns.
 
 **`drive` is observed, not commanded.** It is built from the values applied
 to the engine on that tick — after the `set_drive` dead-man (1.5 s) has
-expired a stale drive, and after the clamp to `drive_max_dbfs`. A client that
+expired a stale drive. A client that
 rendered its own last `set_drive` instead would show the drive live while the
 daemon had already silenced it, or show the requested level while a lower one
 was being emitted. `level_dbfs` is `null` while off so there is no stale
-number to misread, and carries the applied value while on — a drive clamped
-to something inaudible is a real measurement with a bad SNR, which is neither
-"on" nor "off" as a fault.
+number to misread, and carries the accepted value while on.
 
 `drivable` is `false` for a fully passive session (external-DUT workflow, no
 output ports opened). `drivable: true, on: false` is a session that could
@@ -2411,20 +2589,14 @@ Every message doubles as the keepalive (below), so every message is a
 full state assertion rather than a delta against server-remembered
 state.
 
-**Reply** — echoes the **applied** state:
+**Reply** — echoes the accepted state:
 ```json
-{ "ok": true, "on": true, "level_dbfs": -10.0 }
+{ "ok": true, "on": true, "level_dbfs": -20.0, "max_dbfs": 0.0 }
 ```
 
-`level_dbfs` in the reply is what was applied after the server-side
-clamp to `drive_max_dbfs` (config, default `-10.0`), which may differ
-from what was requested. **A clamp is success, not a partial failure**:
-a stimulus command that errors instead of applying a safe level is a
-worse failure in the field than one that quietly applies the ceiling.
-There is no `clamped` flag — the client knows what it asked for, and a
-second field that must agree with the first is a second thing to keep
-consistent. The client is expected to clamp too; this one is
-authoritative.
+When `on` is true, a level above full scale (0 dBFS) is refused and the drive state is
+unchanged. When `on` is false, the level is not checked so silencing can never
+be refused. Successful replies echo the request exactly.
 
 A missing `on`, or a missing or non-finite `level_dbfs`, is a request
 error (`{"ok": false, "error": ...}`) rather than something to coerce —
@@ -2647,10 +2819,8 @@ Discovers routing: which playback ports carry an analog signal, and which
 capture ports are looped back to them. Spawns a worker and reports on
 DATA; the CTRL reply only confirms the launch.
 
-**The worker emits a 1 kHz tone at −10 dBFS**, on one playback port at a
-time, with every other output disconnected. Nothing else on the wire
-announces this, so a caller driving unattended hardware is responsible
-for the level at the far end.
+**The worker emits a 1 kHz tone at −30 dBFS**, on one playback port at a
+time, with every other output disconnected.
 
 The output scan needs a DMM (`dmm_host` in config). Without one it is
 skipped entirely and **every** playback port is treated as analog for the
@@ -2666,7 +2836,7 @@ No arguments.
 
 **Reply**
 ```json
-{ "ok": true, "n_playback": <int>, "n_capture": <int> }
+{ "ok": true, "n_playback": <int>, "n_capture": <int>, "level_dbfs": -30.0, "max_dbfs": 0.0 }
 ```
 
 **DATA frames.** Every frame carries `"cmd": "probe"` and a `"phase"`:
@@ -2682,7 +2852,8 @@ No arguments.
 `vrms` is `<float> | null` — null when the DMM read failed, which is not
 the same as a measured zero. `analog` is `vrms > 10 mVrms`.
 
-`loopback` is emitted **only** for a pair measuring above −30 dBFS, so a
+`loopback` is emitted **only** for a pair measuring above 20 dB below the
+probe tone (−50 dBFS in this build), so a
 pair that never appears means no loopback was detected, not that a frame
 was dropped. `level_dbfs` is rounded to one decimal.
 
@@ -2759,6 +2930,7 @@ terminal frame.
   "ref_out_port": "<port>",
   "in_port":      "<port>",
   "ref_port":     "<port>",
+  "max_dbfs":     0.0,
   "warnings":     ["<string>", ...]   // optional — see `warnings` above
 }
 ```
@@ -2813,7 +2985,8 @@ Requires a reference channel, and refuses with the same error as
 ```
 
 `compare` optional, default `false`. `level_dbfs` optional, default
-`-20.0` — it sets the drive for the gain and frequency-response tests.
+`-40.0` — it sets the drive for the gain and frequency-response tests and
+is refused above full scale (0 dBFS).
 
 **Reply** — same shape as `test_hardware`:
 ```json
@@ -2823,6 +2996,8 @@ Requires a reference channel, and refuses with the same error as
   "ref_out_port": "<port>",
   "in_port":      "<port>",
   "ref_port":     "<port>",
+  "level_dbfs":   <float>,
+  "max_dbfs":     0.0,
   "warnings":     ["<string>", ...]   // optional
 }
 ```
@@ -2933,6 +3108,8 @@ When the guard fires:
 // topic: error
 { "cmd": "<name>", "message": "<exception string>" }
 ```
+`plot`/`plot_level` add `requested_points`/`completed_points` to this
+shape on an analyzer failure (#428) — see their sections above.
 
 ### Unparseable config.json (#370)
 ```json

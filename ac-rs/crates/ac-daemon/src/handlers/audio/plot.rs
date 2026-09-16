@@ -11,8 +11,9 @@ use serde_json::{json, Value};
 use ac_core::measurement::filterbank::Filterbank;
 use ac_core::measurement::report::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, IntegrationParams,
-    InterfaceLatency, MeasuredLatency, MeasurementData, MeasurementMethod, MeasurementPayload,
-    MeasurementReport, PositionSnapshot, ProcessingChain, StimulusParams, SCHEMA_VERSION,
+    InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, MeasurementData,
+    MeasurementMethod, MeasurementPayload, MeasurementReport, PositionSnapshot, ProcessingChain,
+    ReferenceLatency, StimulusParams, SCHEMA_VERSION,
 };
 use ac_core::measurement::sweep::{
     check_tail_decay, citation as sweep_citation, deconvolve_full, extract_irs, farina_citation,
@@ -21,14 +22,172 @@ use ac_core::measurement::sweep::{
 };
 use ac_core::measurement::thd;
 use ac_core::shared::calibration::{Calibration, TauConditions};
+use ac_core::shared::emission_level::{
+    DEFAULT_LEVEL_DBFS, DEFAULT_RAMP_START_DBFS, DEFAULT_RAMP_STOP_DBFS, MAX_EMISSION_DBFS,
+};
 
 use crate::server::ServerState;
 
 use super::super::{
-    apply_drive_ceiling, busy_guard, cal_guard, cfg_guard, make_engine_for_state, resolve_input,
-    resolve_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
+    busy_guard, cal_guard, cfg_guard, emission_guard, emission_range_guard,
+    load_calibration_or_refuse, make_engine_for_state, ref_output_migration_warning, resolve_input,
+    resolve_output, resolve_ref_input, resolve_ref_output, send_pub, snapshot_from_cal,
+    spawn_worker, sweep_point_frame, Tier1Ctx, MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES,
+    MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
+};
+use crate::handlers::calibrate::{
+    analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
+    TauLegReading,
 };
 use crate::handlers::mic;
+
+/// Method tag on a same-capture reference reading (#460).
+const REFERENCE_LATENCY_METHOD: &str = "farina_same_capture_reference_v1";
+
+/// The reference leg of one `plot_ir` capture, before analysis (#460).
+enum ReferenceLeg {
+    Captured(Vec<f32>),
+    Unavailable(String),
+}
+
+/// τ of the reference pair from its captured leg (#460). `xruns` is handled by
+/// the caller before this runs, so the SNR gate is never skipped here.
+///
+/// Window-edge and tail gates are `calibrate`'s. The **SNR gate is not**: this
+/// leg carries whatever sweep the operator asked `plot ir` for, and that
+/// statistic is a property of the sweep rather than of the capture's noise, so
+/// it is judged against its own stimulus's noiseless floor (#471). The fixed
+/// 24 dB constant refused a mathematically perfect loopback at the command's
+/// own default band.
+fn reference_latency_from_leg(
+    reference: &[f32],
+    params: &SweepParams,
+    tail_s: f64,
+    output_port: &str,
+    input_port: &str,
+) -> ReferenceLatency {
+    let gate = SnrGate::DerivedFloor {
+        margin_db: ref_snr_margin_db(),
+    };
+    match analyse_tau_leg(reference, params, tail_s, 0, gate) {
+        Ok(TauLegReading {
+            tau_s,
+            snr_db,
+            snr_floor_db,
+        }) => ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s,
+            // Infinite over a true-silent pre-impulse region, which JSON
+            // cannot carry; recorded as absent rather than as a number.
+            pre_impulse_snr_db: snr_db.is_finite().then_some(snr_db),
+            // Carried out of the analysis rather than recomputed: the floor is
+            // a full deconvolution (#471).
+            pre_impulse_snr_floor_db: snr_floor_db,
+            method: REFERENCE_LATENCY_METHOD.to_string(),
+            output_port: output_port.to_string(),
+            input_port: input_port.to_string(),
+        }),
+        Err(e) => ReferenceLatency::Unavailable {
+            reason: reference_unavailable_reason(&e),
+        },
+    }
+}
+
+/// Operator-facing reason for a refused reference reading (#460 UX): the
+/// observation, then `; check:` and the places to look. Never a cause.
+fn reference_unavailable_reason(e: &anyhow::Error) -> String {
+    if let Some(r) = e.downcast_ref::<LowSnrRefusal>() {
+        format!(
+            "peak SNR {:.1} dB, need {:.1} dB; check: reference loopback cable, ref input gain",
+            r.snr_db, r.threshold_db
+        )
+    } else if e.downcast_ref::<EdgeRefusal>().is_some() {
+        "peak at reference window edge; check: reference loopback routing, capture tail".to_string()
+    } else if let Some(t) = e.downcast_ref::<TailTooShort>() {
+        format!(
+            "tail {:.2} s, reference window needs {:.2} s; check: lengthen the tail token (e.g. 0.8s)",
+            t.tail_s, t.needed_s
+        )
+    } else {
+        format!("reference analysis failed: {e}")
+    }
+}
+
+fn request_error(cmd: &str, message: impl std::fmt::Display) -> Value {
+    json!({
+        "ok": false,
+        "error": format!("{cmd} not started — {message}\n         stimulus  silent"),
+    })
+}
+
+fn point_budget_error(cmd: &str, count: usize) -> Value {
+    json!({
+        "ok": false,
+        "error": format!(
+            "{cmd} not started — request expands to {count} points\n         maximum  {MAX_SWEEP_POINTS} points\n         stimulus  silent"
+        ),
+    })
+}
+
+fn bounded_duration(
+    request: &Value,
+    field: &str,
+    default: f64,
+    zero_allowed: bool,
+    cmd: &str,
+) -> Result<f64, Value> {
+    let Some(raw) = request.get(field) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_f64() else {
+        return Err(request_error(
+            cmd,
+            format!("{field} must be a finite number"),
+        ));
+    };
+    if !value.is_finite() || value < 0.0 || (!zero_allowed && value == 0.0) {
+        let lower = if zero_allowed {
+            "at least 0"
+        } else {
+            "greater than 0"
+        };
+        return Err(request_error(
+            cmd,
+            format!("{field} must be finite and {lower} seconds"),
+        ));
+    }
+    if value > MAX_STIMULUS_DURATION_S {
+        return Err(request_error(
+            cmd,
+            format!("{field} {value:.3} s exceeds {MAX_STIMULUS_DURATION_S:.3} s maximum"),
+        ));
+    }
+    Ok(value)
+}
+
+fn bounded_usize(
+    request: &Value,
+    field: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+    cmd: &str,
+) -> Result<usize, Value> {
+    let Some(raw) = request.get(field) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_u64() else {
+        return Err(request_error(cmd, format!("{field} must be an integer")));
+    };
+    let value = usize::try_from(value)
+        .map_err(|_| request_error(cmd, format!("{field} overflows usize")))?;
+    if !(min..=max).contains(&value) {
+        return Err(request_error(
+            cmd,
+            format!("{field} {value} is outside {min}–{max}"),
+        ));
+    }
+    Ok(value)
+}
 
 pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     busy_guard!(state, "plot");
@@ -41,15 +200,47 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-10.0);
-    let ppd = cmd.get("ppd").and_then(Value::as_u64).unwrap_or(10) as usize;
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
+    let ppd = match bounded_usize(cmd, "ppd", 10, 1, usize::MAX, "plot") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n_points = match super::super::checked_log_freq_point_count(start_hz, stop_hz, ppd) {
+        Ok(n) if n <= MAX_SWEEP_POINTS => n,
+        Ok(n) => return point_budget_error("plot", n),
+        Err(e) => return request_error("plot", e),
+    };
+    // #437 codex-qa: the worker floors each point's capture at `3.0 /
+    // freq` so low frequencies get enough cycles to analyse — but the log
+    // grid is non-decreasing (`checked_log_freq_point_count` above already
+    // refused `stop < start`), so `start_hz` is always the smallest point
+    // and therefore the largest `3.0 / freq` floor. Reject here, before
+    // ports are resolved or the worker spawned, whenever that floor alone
+    // would blow the same ceiling `duration` is already bounded by —
+    // otherwise a tiny `start_hz` bypasses the duration budget entirely
+    // and can hand the backend a non-finite `Duration`.
+    let max_point_duration = f64::max(duration, 3.0 / start_hz);
+    if !max_point_duration.is_finite() || max_point_duration > MAX_STIMULUS_DURATION_S {
+        // Scientific notation: `start_hz` near the low end of this check
+        // (e.g. the codex-qa repro's `1e-300`) makes `3.0 / start_hz` a
+        // several-hundred-digit decimal in fixed-point form.
+        return request_error(
+            "plot",
+            format!(
+                "start_hz {start_hz:e} forces a per-point duration of {max_point_duration:e} s (max(duration, 3/start_hz)), exceeding {MAX_STIMULUS_DURATION_S:.3} s maximum"
+            ),
+        );
+    }
     let bpo = cmd.get("bpo").and_then(Value::as_u64).map(|v| v as usize);
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `plot` puts a stimulus on a physical output, so it is clamped
-    // to the session ceiling here — the same discipline `set_drive` has
-    // always had.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `plot` puts a stimulus on a physical output, so a level above
+    // the fixed maximum is refused here — before ports are resolved or the
+    // worker spawned — rather than quietly lowered to it.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -68,6 +259,12 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let backend = eng.backend_name();
+    // Baseline taken right at engine creation (#428): the terminal xruns
+    // count is the wrapping-safe delta against this snapshot, not a sum of
+    // repeated cumulative reads — `AudioEngine::xruns()` already counts
+    // since start, so summing it once per point double- (then triple-,
+    // quadruple-...) counts every xrun that happened before the last point.
+    let xruns_start = eng.xruns();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
@@ -88,6 +285,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
         let freqs = super::super::log_freq_points(start_hz, stop_hz, ppd);
+        debug_assert!(freqs.len() <= n_points);
         let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
 
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
@@ -101,7 +299,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         let sr = eng.sample_rate();
 
         let mut n = 0usize;
-        let mut xruns = 0u32;
         let mut points: Vec<FrequencyResponsePoint> = Vec::with_capacity(freqs.len());
         let mut concat_capture: Vec<f32> = Vec::new();
         for freq in &freqs {
@@ -122,7 +319,6 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     return;
                 }
             };
-            xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, *freq, 10) {
                 Ok(mut r) => {
@@ -170,7 +366,27 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
-                Err(e) => eprintln!("plot: analyze error at {freq}Hz: {e}"),
+                Err(e) => {
+                    // Atomic failure exit (#428): an analyzer failure must
+                    // not archive the successful prefix as a complete sweep.
+                    // Stop the engine and publish the terminal error before
+                    // any of `frequency_response/complete`, `measurement/
+                    // report`, the report file, or `done` — none of those
+                    // run past this `return`.
+                    eng.set_silence();
+                    eng.stop();
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({
+                            "cmd": "plot",
+                            "message": format!("{e}"),
+                            "requested_points": freqs.len(),
+                            "completed_points": n,
+                        }),
+                    );
+                    return;
+                }
             }
             if bpo.is_some() {
                 concat_capture.extend_from_slice(&samples);
@@ -178,6 +394,11 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         }
         eng.set_silence();
         eng.stop();
+
+        // Session xrun delta (#428): a single wrapping-safe subtraction
+        // against the baseline taken at engine creation, not a sum of
+        // repeated cumulative reads.
+        let xruns = eng.xruns().wrapping_sub(xruns_start);
 
         let timestamp = ac_core::shared::time::now_utc_iso8601();
         // Snapshot the processing-chain state at report-build time so a
@@ -219,6 +440,8 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             // A stepped-sine sweep records no arrival, so there is
             // nothing here for a τ to correct (#283).
             interface_latency: None,
+            reference_latency: None,
+            reference_stored_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -299,6 +522,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
         "out_port": out_port_reply,
         "in_port": in_port_reply,
         "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
     })
 }
@@ -310,12 +534,26 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     let start_dbfs = cmd
         .get("start_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-40.0);
-    let stop_dbfs = cmd.get("stop_dbfs").and_then(Value::as_f64).unwrap_or(0.0);
-    let steps = cmd.get("steps").and_then(Value::as_u64).unwrap_or(26) as usize;
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+        .unwrap_or(DEFAULT_RAMP_START_DBFS);
+    let stop_dbfs = cmd
+        .get("stop_dbfs")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_RAMP_STOP_DBFS);
+    let steps = match bounded_usize(cmd, "steps", 26, 1, MAX_SWEEP_POINTS, "plot_level") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_level") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let cfg = state.cfg.lock().unwrap().clone();
-    let ceiling = cfg.drive_max_dbfs;
+    // #459: both endpoints are checked up front — a ramp whose top end
+    // exceeds the maximum is refused outright, never flattened at the
+    // ceiling. Since a linear ramp never exceeds its larger endpoint, this
+    // bounds every point on it; the per-point clamp that used to live in
+    // the worker loop below is gone.
+    let (start_dbfs, stop_dbfs) = emission_range_guard!(state, &cfg, start_dbfs, stop_dbfs);
 
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
@@ -327,11 +565,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
     };
     let out_port_reply = out_port.clone();
     let in_port_reply = in_port.clone();
-    // Applied endpoints echoed on the sync reply — see `sweep_level`'s
-    // identical reasoning (#360): monotone under a `min` clamp, so this is
-    // exactly the range the sweep's levels actually cover.
-    let start_dbfs_applied = apply_drive_ceiling(ceiling, start_dbfs);
-    let stop_dbfs_applied = apply_drive_ceiling(ceiling, stop_dbfs);
 
     let pub_tx = state.pub_tx.clone();
     let out_ch = cfg.output_channel;
@@ -346,13 +579,15 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         Err(e) => return json!({"ok": false, "error": e}),
     };
     let backend = eng.backend_name();
+    // Baseline taken right at engine creation (#428) — see `plot`'s
+    // identical comment.
+    let xruns_start = eng.xruns();
     let worker = spawn_worker(state, "plot_level", move |stop| {
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
         let spl_offset = cal.as_ref().and_then(Calibration::spl_offset_db);
-        // Raw request shape — each computed level is clamped individually
-        // below (#360), not the endpoints here, so a range whose top end
-        // exceeds the ceiling flattens there rather than shifting the
-        // whole shape.
+        // #459: both endpoints already passed `emission_range_guard!` above
+        // and a linear ramp never exceeds its larger endpoint, so every
+        // point here is already within the maximum — no per-point check.
         let levels = super::super::linspace(start_dbfs, stop_dbfs, steps);
 
         if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
@@ -366,15 +601,10 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         let sr = eng.sample_rate();
 
         let mut n = 0usize;
-        let mut xruns = 0u32;
-        for &level_req in &levels {
+        for &level_dbfs in &levels {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            // Applied value (#360) — the frame below carries this, not the
-            // raw request, so `drive_db` on the wire always matches what
-            // reached the engine.
-            let level_dbfs = apply_drive_ceiling(ceiling, level_req);
             let amplitude = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs);
             eng.set_tone(freq_hz, amplitude);
             let _ = eng.capture_block(0.1);
@@ -389,7 +619,6 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     return;
                 }
             };
-            xruns += eng.xruns();
 
             match ac_core::measurement::thd::analyze(&samples, sr, freq_hz, 10) {
                 Ok(mut r) => {
@@ -423,11 +652,29 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
                     send_pub(&pub_tx, "data", &frame);
                     n += 1;
                 }
-                Err(e) => eprintln!("plot_level: analyze error at {level_dbfs}dBFS: {e}"),
+                Err(e) => {
+                    // Atomic failure exit (#428) — see `plot`'s identical
+                    // comment: no `done` past this point for this sweep.
+                    eng.set_silence();
+                    eng.stop();
+                    send_pub(
+                        &pub_tx,
+                        "error",
+                        &json!({
+                            "cmd": "plot_level",
+                            "message": format!("{e}"),
+                            "requested_points": levels.len(),
+                            "completed_points": n,
+                        }),
+                    );
+                    return;
+                }
             }
         }
         eng.set_silence();
         eng.stop();
+        // Session xrun delta (#428) — see `plot`'s identical comment.
+        let xruns = eng.xruns().wrapping_sub(xruns_start);
         send_pub(
             &pub_tx,
             "done",
@@ -443,8 +690,9 @@ pub fn plot_level(state: &ServerState, cmd: &Value) -> Value {
         "ok": true,
         "out_port": out_port_reply,
         "in_port": in_port_reply,
-        "start_dbfs": start_dbfs_applied,
-        "stop_dbfs": stop_dbfs_applied,
+        "start_dbfs": start_dbfs,
+        "stop_dbfs": stop_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
         "backend": backend,
     })
 }
@@ -525,6 +773,8 @@ fn emit_spectrum_bands(
         position,
         // Band levels carry no arrival for a τ to correct (#283).
         interface_latency: None,
+        reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -601,8 +851,8 @@ fn resolve_tau(cal: Option<&Calibration>, cond: &TauConditions) -> InterfaceLate
 /// Renamed from `sweep_ir` by #282 (CLI moved to `ac plot ir`): the wire
 /// `cmd` now follows its new `plot` family, matching `plot`/`plot_level`.
 ///
-/// Generates an ESS at `level_dbfs` (clamped to `drive_max_dbfs`, #360),
-/// plays it out via the audio engine,
+/// Generates an ESS at `level_dbfs` (refused above the fixed emission
+/// maximum, #459), plays it out via the audio engine,
 /// synchronously captures `duration + tail_s` of the measurement input,
 /// deconvolves via the normalized inverse filter, gates the linear IR and
 /// the first few pre-impulse harmonic IRs, and emits them as a
@@ -619,13 +869,22 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     cfg_guard!(state);
     let f1_hz = cmd.get("f1_hz").and_then(Value::as_f64).unwrap_or(20.0);
     let f2_hz = cmd.get("f2_hz").and_then(Value::as_f64).unwrap_or(20_000.0);
-    let duration = cmd.get("duration").and_then(Value::as_f64).unwrap_or(1.0);
+    let duration = match bounded_duration(cmd, "duration", 1.0, false, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let level_dbfs = cmd
         .get("level_dbfs")
         .and_then(Value::as_f64)
-        .unwrap_or(-6.0);
-    let tail_s = cmd.get("tail_s").and_then(Value::as_f64).unwrap_or(0.5);
-    let n_harmonics = cmd.get("n_harmonics").and_then(Value::as_u64).unwrap_or(5) as usize;
+        .unwrap_or(DEFAULT_LEVEL_DBFS);
+    let tail_s = match bounded_duration(cmd, "tail_s", 0.5, true, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let n_harmonics = match bounded_usize(cmd, "n_harmonics", 5, 1, MAX_IR_HARMONICS, "plot_ir") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     // 4096 is a request, not a promise: `extract_irs` clamps each order's
     // gate down to the spacing of its own nearest neighbour, so the linear
     // IR keeps the full 4096 (its neighbour, order 2, sits ~4816 samples
@@ -633,17 +892,33 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     // 1999 / 1551 / 1551. Those lengths are not silent — they ride out in
     // the `measurement/impulse_response` envelope and, when any order was
     // shortened, in the report notes. See issue #278.
-    let window_len = cmd
-        .get("window_len")
-        .and_then(Value::as_u64)
-        .unwrap_or(4096) as usize;
+    let window_len =
+        match bounded_usize(cmd, "window_len", 4096, 1, MAX_IR_WINDOW_SAMPLES, "plot_ir") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+    // #460: operator-entered source-to-receiver distance for the onset
+    // search's causal bound. Checked before port resolution, like the other
+    // budgets, so an unusable value is refused with no audio.
+    let distance_m = match cmd.get("distance_m") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_f64() {
+            Some(d) if d.is_finite() && d > 0.0 => Some(d),
+            _ => {
+                return request_error(
+                    "plot_ir",
+                    format!("distance_m must be finite and > 0 m, got {v}"),
+                )
+            }
+        },
+    };
 
     let cfg = state.cfg.lock().unwrap().clone();
-    // #360: `plot_ir` had no clamp at all — the module doc on
-    // `tests/it_loopback_ir.rs` documented this gap outright. Every other
-    // field derived from `level_dbfs` below (the report's `StimulusParams`,
-    // the actual played amplitude) now derives from the applied value.
-    let level_dbfs = apply_drive_ceiling(cfg.drive_max_dbfs, level_dbfs);
+    // #459: `plot_ir` had no ceiling check at all before #360, and #360's
+    // clamp let it emit a flat-topped level nobody asked for. Refused here
+    // instead, before a worker or a port is touched.
+    let level_dbfs = emission_guard!(state, &cfg, level_dbfs);
     let out_port = match resolve_output(&cfg, state) {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
@@ -652,10 +927,57 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    // #460: same-capture reference leg, from the config keys transfer_stream
+    // and test_dut already use. Not configured is a legitimate state (no
+    // bound, reason recorded). Configured but unresolvable is refused before
+    // any audio rather than silently run single-ended (#225).
+    let ref_in_port = match resolve_ref_input(&cfg, state) {
+        Ok(p) => p,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let ref_out_port = match &ref_in_port {
+        Some(_) => match resolve_ref_output(&cfg, state) {
+            Ok(p) => Some(p),
+            Err(e) => return json!({"ok": false, "error": e}),
+        },
+        None => None,
+    };
+    let ref_warning = ref_in_port
+        .as_ref()
+        .and_then(|_| ref_output_migration_warning(&cfg));
+    let ref_in_port_reply = ref_in_port.clone();
+    let ref_out_port_reply = ref_out_port.clone();
     let out_port_reply = out_port.clone();
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
+    // #359 QA correction: the reference pair's stored τ lives in its own
+    // `cal.json` entry — `Calibration::load` keys strictly by channel pair
+    // (`shared/calibration/store.rs`), and the reference pair is routinely
+    // a *different* pair from the measurement pair (`cfg.output_channel`/
+    // `cfg.input_channel`). Looking the reference τ up in `cal` — the
+    // measurement pair's calibration — finds nothing whenever the two
+    // pairs differ, which silently downgrades every ordinary reference
+    // setup to `Unchecked` instead of the corroboration this issue exists
+    // to add. Loaded only when a reference is configured; unreadable fails
+    // closed the same way the measurement pair's own calibration does.
+    let ref_cal = if ref_in_port.is_some() {
+        let ref_out_ch = cfg.reference_output_channel.unwrap_or(out_ch);
+        let ref_in_ch = cfg
+            .reference_channel
+            .expect("ref_in_port is Some only when cfg.reference_channel is Some");
+        match load_calibration_or_refuse(
+            ref_out_ch,
+            ref_in_ch,
+            "measurement",
+            Some("reference pair"),
+        ) {
+            Ok(cal) => cal,
+            Err(msg) => return json!({"ok": false, "error": msg}),
+        }
+    } else {
+        None
+    };
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
     let device = cfg.device;
@@ -670,7 +992,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     };
     let backend = eng.backend_name();
 
-    let worker = spawn_worker(state, "plot_ir", move |_stop| {
+    let worker = spawn_worker(state, "plot_ir", move |stop| {
         // Calibration snapshot. The linear IR itself is never mic-curve
         // corrected — arrival estimation and gating (`extract_irs`,
         // `gated_frequency_response` below) run on the raw, uncorrected
@@ -681,7 +1003,13 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         // gate is anchored to.
         let mic_curve_opt = cal.as_ref().and_then(|c| c.mic_response.clone());
 
-        if let Err(e) = eng.start(&[out_port], Some(&in_port)) {
+        // #460: with a separate reference output the stimulus also leaves
+        // there, to drive the reference loopback. Equal ports are driven once.
+        let mut output_ports = vec![out_port.clone()];
+        if let Some(p) = ref_out_port.as_ref().filter(|p| **p != out_port) {
+            output_ports.push(p.clone());
+        }
+        if let Err(e) = eng.start(&output_ports, Some(&in_port)) {
             send_pub(
                 &pub_tx,
                 "error",
@@ -709,6 +1037,28 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             },
         ));
 
+        // #359: τ `calibrate` has on file for the *reference* pair, looked
+        // up the same way — never measured here, `plot_ir` must not
+        // silently re-run calibration. Only when a reference is configured;
+        // `IrStats::arrival_check` reads `None` as "not checked", not as a
+        // disagreement. Looked up in `ref_cal` — the reference pair's own
+        // calibration entry, distinct from `cal` above whenever the
+        // reference pair differs from the measurement pair (the ordinary
+        // case): `cal`'s entry never contains the reference pair's τ.
+        let reference_stored_latency = ref_in_port.as_deref().map(|ref_in| {
+            resolve_tau(
+                ref_cal.as_ref(),
+                &TauConditions {
+                    device,
+                    backend: eng.backend_name().to_string(),
+                    sample_rate: sr,
+                    period_size: eng.period_size(),
+                    output_port: ref_out_port.clone().unwrap_or_else(|| out_port.clone()),
+                    input_port: ref_in.to_string(),
+                },
+            )
+        });
+
         let params = SweepParams {
             f1_hz,
             f2_hz,
@@ -729,8 +1079,34 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let amp = ac_core::shared::generator::dbfs_to_amplitude(level_dbfs) as f32;
         let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
 
-        let captured = match eng.play_and_capture(&scaled, tail_s) {
+        let xruns_before = eng.xruns();
+        let (capture, reference_leg) = match ref_in_port.as_deref() {
+            Some(ref_port) if eng.supports_reference_capture() => {
+                match eng.play_and_capture_with_reference(&scaled, tail_s, ref_port, &stop) {
+                    Ok((meas, reference)) => (Ok(meas), ReferenceLeg::Captured(reference)),
+                    Err(e) => (Err(e), ReferenceLeg::Unavailable(String::new())),
+                }
+            }
+            Some(_) => (
+                eng.play_and_capture_cancellable(&scaled, tail_s, &stop),
+                ReferenceLeg::Unavailable(format!(
+                    "backend {} cannot capture a reference",
+                    eng.backend_name()
+                )),
+            ),
+            None => (
+                eng.play_and_capture_cancellable(&scaled, tail_s, &stop),
+                ReferenceLeg::Unavailable(
+                    "no reference configured (ac setup reference)".to_string(),
+                ),
+            ),
+        };
+        let capture_xruns = eng.xruns().saturating_sub(xruns_before);
+        eng.set_silence();
+        eng.stop();
+        let captured = match capture {
             Ok(c) => c,
+            Err(_) if stop.load(Ordering::Relaxed) => return,
             Err(e) => {
                 send_pub(
                     &pub_tx,
@@ -902,11 +1278,32 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             }),
         };
 
-        let timestamp = ac_core::shared::time::now_utc_iso8601();
-        let position = temperature_c.map(|t| PositionSnapshot {
-            temperature_c: Some(t),
-            ..Default::default()
+        // #460: τ of the reference pair, read from the reference leg of this
+        // same capture with `calibrate`'s single-reading gates (SNR, window
+        // edge, xrun). It feeds only the onset search's causal bound.
+        let reference_latency = Some(match reference_leg {
+            ReferenceLeg::Unavailable(reason) => ReferenceLatency::Unavailable { reason },
+            ReferenceLeg::Captured(_) if capture_xruns > 0 => ReferenceLatency::Unavailable {
+                reason: "xrun during capture; check: JACK period size, system load".to_string(),
+            },
+            ReferenceLeg::Captured(reference) => reference_latency_from_leg(
+                &reference,
+                &params,
+                tail_s,
+                ref_out_port.as_deref().unwrap_or_default(),
+                ref_in_port.as_deref().unwrap_or_default(),
+            ),
         });
+
+        let timestamp = ac_core::shared::time::now_utc_iso8601();
+        // #460: `position` also carries the operator-entered distance, so it
+        // is present when either value is.
+        let position =
+            (temperature_c.is_some() || distance_m.is_some()).then(|| PositionSnapshot {
+                temperature_c,
+                distance_m,
+                ..Default::default()
+            });
         let report = MeasurementReport {
             schema_version: SCHEMA_VERSION,
             ac_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -932,6 +1329,8 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             calibration: snapshot_from_cal(cal.as_ref()),
             position,
             interface_latency,
+            reference_latency,
+            reference_stored_latency,
             data: vec![
                 MeasurementPayload {
                     data,
@@ -1009,5 +1408,76 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
         let mut workers = state.workers.lock().unwrap();
         workers.insert("plot_ir".to_string(), worker);
     }
-    json!({"ok": true, "out_port": out_port_reply, "level_dbfs": level_dbfs, "backend": backend})
+    let mut reply = json!({
+        "ok": true,
+        "out_port": out_port_reply,
+        "level_dbfs": level_dbfs,
+        "max_dbfs": MAX_EMISSION_DBFS,
+        "backend": backend,
+    });
+    // #460: every port the sweep leaves through or is referenced against,
+    // named before any result (UX: "Also driven" / "Ref input").
+    if let Some(p) = ref_in_port_reply {
+        reply["ref_in_port"] = json!(p);
+    }
+    if let Some(p) = ref_out_port_reply {
+        reply["ref_out_port"] = json!(p);
+    }
+    if let Some(w) = ref_warning {
+        reply["warnings"] = json!([w]);
+    }
+    reply
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+
+    #[test]
+    fn documented_duration_boundaries_are_accepted() {
+        assert_eq!(
+            bounded_duration(
+                &json!({"duration": MAX_STIMULUS_DURATION_S}),
+                "duration",
+                1.0,
+                false,
+                "plot_ir"
+            ),
+            Ok(MAX_STIMULUS_DURATION_S)
+        );
+        assert_eq!(
+            bounded_duration(&json!({"tail_s": 0.0}), "tail_s", 0.5, true, "plot_ir"),
+            Ok(0.0)
+        );
+    }
+
+    #[test]
+    fn documented_integer_boundaries_are_accepted() {
+        assert_eq!(
+            bounded_usize(
+                &json!({"n_harmonics": MAX_IR_HARMONICS}),
+                "n_harmonics",
+                5,
+                1,
+                MAX_IR_HARMONICS,
+                "plot_ir"
+            ),
+            Ok(MAX_IR_HARMONICS)
+        );
+        assert_eq!(
+            bounded_usize(
+                &json!({"window_len": MAX_IR_WINDOW_SAMPLES}),
+                "window_len",
+                4096,
+                1,
+                MAX_IR_WINDOW_SAMPLES,
+                "plot_ir"
+            ),
+            Ok(MAX_IR_WINDOW_SAMPLES)
+        );
+        assert_eq!(
+            super::super::super::checked_log_freq_point_count(100.0, 1000.0, 10_000),
+            Ok(MAX_SWEEP_POINTS)
+        );
+    }
 }

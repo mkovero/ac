@@ -84,6 +84,7 @@ ac-core/src/
 
   shared/                  # Tier 0 — used by both tiers
     mod.rs
+    emission_level.rs      # named stimulus defaults + fixed global maximum
     calibration/           # one file per layer — they never compose
       mod.rs               #   the entry + the voltage/SPL derivations
       tau.rs               #   interface latency: conditions, history, #347

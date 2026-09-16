@@ -32,12 +32,16 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
 ```bash
 cargo test --workspace       # THE gate — see below
 cargo test -p {crate}        # per crate, NOT sufficient to approve
-cargo clippy -- -D warnings  # zero warnings expected
+cargo clippy --workspace --all-targets -- -D warnings  # zero warnings expected
 cargo fmt --check
 ```
 
 `--workspace` not `-p`. Two branches each passing `-p` can still break in
 combination.
+
+Run each in the foreground, one call each. Never background the gate and wait:
+the session does not resume, and the review is lost (AGENTS.md → headless
+sessions).
 
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
@@ -68,8 +72,7 @@ memory, no redefinition here):
   `AGENTS.md` states for an agent asserting a mechanism, applied here to a
   reviewer inheriting one.
 
-A flagged `derived`/`assumed` criterion withholds `in-review` — apply
-`needs-work` — unless one of:
+A flagged `derived`/`assumed` criterion needs one of:
 - the gap is closed with evidence in the PR (a measurement, a rig run, a
   cited derivation the review comment can point to directly), or
 - a human has already posted an explicit comment on the issue accepting the
@@ -77,9 +80,24 @@ A flagged `derived`/`assumed` criterion withholds `in-review` — apply
   gates: merge is human-only because agent review is not independent, and
   neither is an agent's acceptance of another agent's assumption).
 
-This blocks only the flagged criterion. A `measured` criterion failing spec
-coverage is a correctness issue, reported in that section below, not folded
-into this one.
+Route an unresolved gap by what can close it:
+
+- Evidence the developer can add in the tree or derive from already-known
+  quantities → `request-changes` and `needs-work`. Name the missing artifact or
+  derivation. This is developer work.
+- Evidence only a physical rig can produce, while the implementation correctly
+  enforces the specified value → `rig-pending` and `requires-rig`, as specified
+  in the dedicated section below. So is any PR whose **issue** carries
+  `requires-rig`: read the issue's labels, not only the PR's. Do **not** apply `needs-work`: sending this to a
+  developer cannot produce the measurement and creates a dev→QA loop with no
+  possible source change.
+- The implementation does not enforce the specified value correctly →
+  `request-changes` and `needs-work`, independently of provenance. This is a
+  code defect, not an evidence gap.
+
+In every case, flag the unresolved criterion in the spec-coverage table. A
+`measured` criterion failing spec coverage is a correctness issue, reported in
+that section below, not folded into this one.
 
 ### step 2 — review the diff
 
@@ -93,6 +111,12 @@ file opens, and both are cheap:
   one level out.
 
 Both are leads, not findings. The checklist below runs in full either way.
+
+Open changed hunks and their enclosing symbols first. Do not read an entire
+large file merely because it appears in the diff or manifest; expand outward
+only to answer a concrete caller, invariant, or compatibility question. If a
+batched tool result truncates, continue from the missing region without
+replaying regions already returned.
 
 Check:
 - **correctness** — implementation do what spec says?
@@ -143,6 +167,8 @@ Post PR review in this structure:
 ```
 <!-- agent: qa -->
 
+## qa — PR #N at <full current head SHA>
+
 ### spec coverage
 | criterion | provenance | covered | notes |
 |---|---|---|---|
@@ -171,7 +197,7 @@ Post PR review in this structure:
 {Any files touched outside spec scope. If none: "none."}
 
 ### verdict
-{approve | request-changes | request-changes: design}
+{approve | rig-pending | request-changes | request-changes: design}
 {One sentence justification.}
 
 ### sent back to
@@ -186,12 +212,16 @@ would falsify the claim. See step 5.}
 
 ### step 5 — apply label
 - Approving → apply `claude-approved`, leave `in-review` in place
+- Rig pending → apply `requires-rig` to the PR, remove `claude-approved` and
+  `needs-work`, and leave `in-review` in place. The runner then runs the rig
+  session at this commit and sends the PR back to you for a full pass with the
+  record.
 - Requesting changes → apply `needs-work`, remove `in-review`. Do **not** apply
   `claude-approved`; the pairing of `claude-approved` with a request-changes
   verdict is what tells a reader the finding came from Codex, so never produce
   it here.
-- Correctness turn on a physical measurement you cannot make from the tree →
-  apply `requires-rig` **in addition to** whichever of the above applies
+- Correctness turns on a physical measurement you cannot make from the tree →
+  use the `rig-pending` verdict above, not an approval or request-changes
 - The defect is in the **design**, not the implementation → apply `needs-work`
   as above, and additionally apply `needs-design` **on the issue** (or
   `needs-ux` on the issue, where the thing that is wrong is what the operator
@@ -200,6 +230,13 @@ would falsify the claim. See step 5.}
 
 `claude-approved` is not a merge signal. It puts the PR in the Codex queue merge needs a human. You never set or clear `codex-approved` — if you disagree with a Codex
 finding, say so in your review comment and leave the label alone.
+
+An explicit full re-review at the same commit is a new review pass when the
+governing agent spec, issue decision, or human evidence changed after the old
+verdict. Re-evaluate under the current inputs, post a superseding review
+comment, and update labels to the new verdict. "No new commit" is not a reason
+to preserve a verdict whose governing rule changed; the commit is the subject
+of review, not the only review input.
 
 ### sending it back to architect or ux — the design is wrong, not the code
 
@@ -243,7 +280,7 @@ these. Use it when you can state what the *spec* got wrong.
 ### loopback IR testing
 see docs/runbooks/rig-testing.md (7b without hardware, 7c through a rig)
 
-### `requires-rig` — you set it, only a human clear it
+### `requires-rig` — you set it, and you clear it on a passing record
 
 Some claims cannot be settled by reading code or running the workspace suite.
 They need the rig. When a PR's correctness rest on one of those, apply
@@ -262,22 +299,41 @@ Apply it when the PR change or depend on:
 - timing that depend on real device or driver behaviour rather than the test
   clock
 
-Verdict and `requires-rig` are separate axes. A PR can be `approve` +
-`requires-rig`: the code is right as far as the tree can show, and one
-measurement remain before it should land. Say that plainly in the
-justification — do not downgrade to `request-changes` to express it, because
-that send the PR back to a developer who cannot take the measurement either.
+`requires-rig` is a pre-approval state. The code may be right as far as the
+tree can show, but QA has not established the acceptance criterion until the
+measurement exists. Use `rig-pending`; do not apply `claude-approved` and do
+not downgrade to `request-changes`, because that sends the PR back to a
+developer who cannot take the measurement either.
+This includes an unresolved `derived`/`assumed` acceptance criterion when the
+implementation correctly enforces the specified value and only physical rig
+evidence can validate that value. Step 1 routes that case here explicitly.
 
-Where the measurement is one the rig role would take, say which block of
-`$AC_HOME/rig-verify-queue.md` it belong to, or that it needs a new one. The
-rig role produce the measurement record; you do not run the session and you do
-not act on a result that does not exist yet.
+Name the check in *rig verification required* so it can run unattended. If
+the issue's triage spec or architect comment already names one (**rig check**),
+use it and say so; add to it only what this diff makes necessary. Levels stay
+at or below −40 dBFS (standing consent, `AGENTS.md`).
 
-**You never remove `requires-rig`.** Only a human does, after the measurement
-exist. A re-review on a later push leave the label in place — a new commit does
-not retire a measurement that was never made. If a later push makes the rig
-question moot (the code stop depending on the unmeasured value), say so in the
-comment and let the human clear it.
+The rig role produces the measurement record; you do not run the session. The
+runner (`bin/rig.sh`) runs it at the commit you reviewed and posts a
+`<!-- agent: rig -->` comment naming that commit and a **rig verdict**:
+`pass`, `fail` or `decline`. Your next pass is a full pass at the same commit,
+with the record as evidence:
+
+- **record at the current head, verdict `pass`, and it closes the named
+  falsification test** → remove `requires-rig` from the PR **and** the issue,
+  say which record settled it and what it does not cover, and continue to your
+  normal verdict. Approve only if everything else holds.
+- **verdict `fail`, and the record shows the code is wrong** →
+  `request-changes`, `needs-work`, record cited as evidence. Leave
+  `requires-rig`: the fix needs measuring too.
+- **verdict `decline`, a record that does not close the named test, or no
+  record at the current head** → stay `rig-pending` and leave the label. Say
+  what is unresolved. That is a human's call, like any unmeasurable criterion.
+
+A later push voids a rig record the same way it voids an approval: the record
+must name the head you are reviewing. If a later push makes the rig question
+moot (the code stops depending on the unmeasured value), say so and remove the
+label, with the reason.
 
 Nothing here license approving a PR you would otherwise reject. `requires-rig`
 is for a claim unverifiable in the tree, not for one that is verifiable here
@@ -288,7 +344,7 @@ This rule is load-bearing: merge to main is human-only precisely because agent
 review is not independent (see `AGENTS.md` human gates), so this is the one
 mechanism stopping an approved-then-amended PR from reaching that human merge
 unreviewed. **Any commit pushed after approval revert PR to `needs-work`, remove
-`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
+`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
 
 Removing `claude-approved` is part of the rule, not bookkeeping after it. The
 label is what puts a PR in the Codex queue and what a human reads at the merge
@@ -304,7 +360,7 @@ them.
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
-- No remove `requires-rig`. Human-only, after the measurement exist.
+- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, or when a push made the question moot (say why).
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.

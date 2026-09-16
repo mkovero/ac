@@ -55,6 +55,12 @@ struct Rig {
 
 impl Rig {
     fn start() -> Self {
+        Self::start_with(serde_json::json!({}))
+    }
+
+    /// [`Self::start`] with extra config keys merged in (#460: a reference
+    /// pair for the same-capture reference leg).
+    fn start_with(extra_config: serde_json::Value) -> Self {
         let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
         let (ctrl, data) = (base, base + 1);
         let home = std::env::temp_dir().join(format!("ac-cli-it-{}-{base}", std::process::id()));
@@ -65,12 +71,17 @@ impl Rig {
 
         // `report_dir` is the whole point of two acceptance criteria, so
         // it is configured rather than left to the default.
+        let mut config = serde_json::json!({
+            "report_dir": report_dir.to_str().unwrap(),
+        });
+        if let (Some(c), Some(e)) = (config.as_object_mut(), extra_config.as_object()) {
+            for (k, v) in e {
+                c.insert(k.clone(), v.clone());
+            }
+        }
         fs::write(
             cfg_dir.join("config.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "report_dir": report_dir.to_str().unwrap(),
-            }))
-            .unwrap(),
+            serde_json::to_vec_pretty(&config).unwrap(),
         )
         .expect("seed config.json");
 
@@ -182,6 +193,48 @@ fn printed_arrival_samples(stdout: &str) -> i64 {
         .unwrap_or_else(|_| panic!("arrival value not an integer: {field:?}"))
 }
 
+/// Metre figures printed in `stdout`: a number immediately followed by the
+/// word `m` (`m`, `m,` or `m)`), so `c 343.0 m/s` is not one. #391 removed
+/// every distance read-out derived from a time; since #460 the only metre
+/// figure allowed is the distance the operator typed, echoed back.
+fn metre_figures(stdout: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in stdout.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            let number = w.trim_start_matches('(');
+            let unit = words.get(i + 1).copied().unwrap_or_default();
+            if number.parse::<f64>().is_ok() && matches!(unit, "m" | "m," | "m)") {
+                found.push(number.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The #391 guard must still go red if a distance read-out derived from a
+/// time comes back, whatever it is phrased as: tested against the rejected
+/// pre-#391 read-out, and against the #460 lines it has to admit.
+#[test]
+fn metre_figure_guard_catches_a_derived_distance_and_admits_the_typed_one() {
+    assert_eq!(
+        metre_figures("  distance      1.199 m  (c = 343.2 m/s)"),
+        vec!["1.199".to_string()],
+        "the pre-#391 distance read-out must be caught"
+    );
+    assert!(metre_figures("  distance      not given").is_empty());
+    assert!(metre_figures(
+        "                       no causal bound — distance not given (token: 1m)"
+    )
+    .is_empty());
+    assert_eq!(
+        metre_figures(
+            "                       bound from ref latency + 0.05 m, c 343.0 m/s assumed"
+        ),
+        vec!["0.05".to_string()]
+    );
+}
+
 /// #424: backend provenance must survive in the archived files themselves,
 /// independently of the transient ZMQ envelope that announced each report.
 #[test]
@@ -190,7 +243,7 @@ fn persisted_plot_artifacts_identify_the_live_backend() {
 
     let _ = rig.run_ac(&["plot", "200hz", "400hz", "-20dbfs", "1ppd", "3bpo"]);
     let _ = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
     let dir = rig.report_dir();
@@ -241,19 +294,30 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     // 18.0 dB threshold #376 added) — 4096 samples clears it with
     // margin (~27 dB) so this fixture still exercises the passing path.
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "4096win", "0.1s",
     ]);
 
-    // ── printed arrival matches the fake backend's known delay ────────
-    // The gate re-centres the linear IR on the sweep endpoint, so a
-    // 32-sample loopback shows up as a +32-sample offset from centre.
-    // Tolerance is for finite-window deconvolution, not for the constant:
-    // a regression that lost the delay entirely would read 0.
+    // ── printed arrival is the peak's offset (#378 contingency) ───────
+    // The gate re-centres the linear IR on the sweep endpoint, so the
+    // fake backend's 32-sample loopback shows up as the peak's offset
+    // from centre, and that is what `arrival` prints. #378's AC6 rig run
+    // (2026-09-15) triggered the contingency fixed in its design: the
+    // onset estimate's 1 m → 2 m increment missed `transfer_stream`'s by
+    // 143.75 samples, the peak's by 8.62, so the arrival reverted to the
+    // peak and the onset is printed as a diagnostic below it.
     let arrival = printed_arrival_samples(&stdout);
-    assert!(
-        (arrival - FAKE_LOOPBACK_DELAY_SAMPLES).abs() <= 8,
-        "printed arrival {arrival} samples, expected ~{FAKE_LOOPBACK_DELAY_SAMPLES} \
-         (fake loopback delay):\n{stdout}"
+    assert_eq!(
+        arrival, FAKE_LOOPBACK_DELAY_SAMPLES,
+        "printed arrival should be the fake loopback's peak offset:\n{stdout}"
+    );
+    // The rejected implementation, computed rather than assumed: on this
+    // fixture the onset picker lands 118 samples before the peak (inside
+    // the 200 Hz-limited deconvolution's leading skirt, no causal bound),
+    // so an arrival still wired to the onset would print -86, not 32.
+    assert_ne!(
+        arrival,
+        FAKE_LOOPBACK_DELAY_SAMPLES - 118,
+        "arrival must not be the onset-derived value:\n{stdout}"
     );
 
     // ── the rest of the printed summary ───────────────────────────────
@@ -263,11 +327,54 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
             "printed summary missing {want:?}:\n{stdout}"
         );
     }
-    // #391: no distance figure prints at all — the ms → m conversion it
-    // came from is gone, and milliseconds are what's asserted above.
+    // #346 AC4 / #378: the onset rule must still reach the terminal, and
+    // the onset-to-peak distance is printed under the peak labelled as a
+    // diagnostic — it must not read as the arrival now that it is not one.
     assert!(
-        !stdout.contains("distance "),
-        "distance must not print — the ms \u{2192} m conversion was removed:\n{stdout}"
+        stdout.contains("onset: AIC change-point pick, 10.0 ms window"),
+        "printed summary missing the onset rule line (AC4):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(search span), pick"),
+        "printed summary missing the window-start clause (AC4):\n{stdout}"
+    );
+    // #460 AC3: no bound applies on this rig (no reference, no distance),
+    // and row 3 names both missing inputs. The pre-#460 clause named neither.
+    assert!(
+        stdout.contains("no causal bound \u{2014} no distance, ref latency unavailable"),
+        "onset row 3 must name the missing inputs (#460 AC3):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("no geometry known"),
+        "the pre-#460 clause must not survive:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("  distance   not given"),
+        "the header must state that no distance was given (#460):\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  ref latency   unavailable \u{2014} no reference configured (ac setup reference)"
+        ),
+        "the ref latency line is always printed (#460):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("diagnostic \u{2014} onset 118 samples before peak, not the arrival"),
+        "onset-to-peak distance must print as a diagnostic (#378):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("onset-derived"),
+        "no line may still claim the arrival is onset-derived:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("median floor"),
+        "the pre-#378 rule's text must not survive anywhere:\n{stdout}"
+    );
+    // #391: no metre figure prints at all when no distance was typed — the
+    // ms → m conversion it came from is gone. See `metre_figures`.
+    assert!(
+        metre_figures(&stdout).is_empty(),
+        "no metre figure may print — the ms \u{2192} m conversion was removed:\n{stdout}"
     );
     // ISO 18233 §B.5: the reader must be told the tail is an artefact.
     assert!(
@@ -336,7 +443,7 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
 fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
     let rig = Rig::start();
     let stdout = rig.run_ac(&[
-        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "1024win", "0.1s",
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-20dbfs", "3harm", "1024win", "0.1s",
     ]);
 
     assert!(
@@ -354,8 +461,8 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         "arrival must not print on a failed verdict:\n{stdout}"
     );
     assert!(
-        !stdout.contains("distance "),
-        "distance must not print on a failed verdict:\n{stdout}"
+        metre_figures(&stdout).is_empty(),
+        "no metre figure may print on a failed verdict:\n{stdout}"
     );
     assert!(
         stdout.contains("diagnostic only"),
@@ -380,5 +487,37 @@ fn plot_ir_reports_low_pre_impulse_snr_as_a_failed_deconvolution() {
         ),
         "persisted report's own ir_stats() must agree with the printed verdict: {:?}",
         stats.verdict
+    );
+}
+
+/// #460 UX frame 1 through the real binary: a typed distance and a configured
+/// reference pair print the header lines, onset row 3 built from the bound's
+/// own inputs, and the `ref latency` line. The #391 guard admits exactly the
+/// typed distance and nothing derived.
+#[test]
+fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
+    let rig = Rig::start_with(serde_json::json!({
+        "reference_channel": 1,
+        "reference_output_channel": 2,
+    }));
+    let stdout = rig.run_ac(&[
+        "plot", "ir", "200hz", "8000hz", "0.5s", "-6dbfs", "3harm", "4096win", "0.2s", "0.05m",
+    ]);
+    for want in [
+        "  distance   0.05 m",
+        "  output     fake:playback_0",
+        "  ref out    fake:playback_2",
+        "  ref in     fake:capture_1",
+        "(causal bound), pick",
+        "bound from ref latency + 0.05 m, c 343.0 m/s assumed",
+        "  ref latency    0.4167 ms  (20 samples, SNR",
+        "same capture)",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
+    }
+    let figures = metre_figures(&stdout);
+    assert!(
+        !figures.is_empty() && figures.iter().all(|f| f == "0.05"),
+        "only the typed distance may print as a metre figure, got {figures:?}:\n{stdout}"
     );
 }

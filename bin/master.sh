@@ -22,6 +22,24 @@
 #   AC_DESIGN_PASSES=2   max architect passes per issue per run (default 2)
 #   AC_UX_PASSES=2       max ux passes per issue per run (default 2)
 #   AC_NO_TRIAGE=1       never triage; an unrouted issue is nothing to do
+#   AC_PROVIDER=codex    use Codex for ordinary roles except the model-bound
+#                        QA gates (default: claude)
+#   AC_DEVELOPER_PROVIDER=codex
+#                        override one role; likewise TRIAGE, ARCHITECT, and UX.
+#                        Per-role settings win over AC_PROVIDER. QA remains
+#                        model-bound until its two approval labels are migrated.
+#   AC_CODEX_RECHECK=0   after a Codex fail and a revision, run full Claude QA
+#                        and then Codex again (old flow). Default 1: send the
+#                        revision straight back to Codex for a recheck of the
+#                        delta; Claude QA is not re-run, and its approval of the
+#                        failed tip is carried forward only if Codex passes.
+#   AC_RIG_AUTO=0        stop at rig-pending for a human instead of running
+#                        bin/rig.sh. Default 1: when requires-rig is on the PR
+#                        or its issue, run the rig session at the reviewed
+#                        commit, then a full same-commit QA pass with the record.
+#   AC_WAIT_MERGE=1      wait at an epic child until its human merge, then
+#                        continue with the next child (default: stop and return)
+#   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
 #
 # Verify label names first — a wrong one makes this do nothing while looking
 # like it worked:  gh label list -R mkovero/ac
@@ -31,12 +49,14 @@ BIN="$(cd "$(dirname "$0")" && pwd)"
 ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
 STEPS="${AC_STEPS:-8}"
+RECHECK="${AC_CODEX_RECHECK:-1}"
+RIG_AUTO="${AC_RIG_AUTO:-1}"
 DESIGN_PASSES="${AC_DESIGN_PASSES:-2}"
 UX_PASSES="${AC_UX_PASSES:-2}"
 
-# dev→qa rounds, counted per ISSUE rather than per qa_loop() call. A design
-# handback re-enters qa_loop, and a counter local to it would reset there —
-# turning ROUNDS from a bound into a suggestion.
+# dev→qa rounds are reset at the start of each issue and after an authoritative
+# design/UX handback. DESIGN_PASSES, UX_PASSES, and STEPS independently bound
+# cross-role loops.
 qa_round=0
 
 fg=""; ids=()
@@ -74,6 +94,22 @@ stale_branch() {
 # does. Require positive evidence that QA spoke. qa_evidence() is in common.sh.
 qa_comments() { qa_evidence "$1"; }
 
+codex_gate() {
+  local pr="$1" pls
+  echo "  PR #$pr: independent Codex QA"
+  "$BIN/review.sh" --independent "$pr" || return 1
+  pls="$(pr_labels "$pr")" || return 1
+  if has needs-work "$pls"; then
+    echo "  PR #$pr: Codex QA requested changes"
+    return 2
+  fi
+  if ! has codex-approved "$pls"; then
+    echo "  PR #$pr: Codex QA posted no approval — stopping"
+    return 1
+  fi
+  echo "  PR #$pr: independent Codex QA approved"
+}
+
 # Has anything routed this issue? Any one of these labels means triage,
 # architect, ux or you already decided where it goes. blocked, needs-discussion
 # and needs-clarification are not listed: drive() returns on them earlier, so
@@ -103,6 +139,43 @@ triage_evidence() {
 # that may already carry an approval of the design it replaced.
 qa_loop() {
   local n="$1" pr="$2" force="${3:-}" ls ils before after head mark ev pre post
+  # codex_base: the tip Claude QA approved and Codex then failed. While set,
+  # a revision goes back to Codex alone (AC_CODEX_RECHECK). Kept on disk so a
+  # rerun after a stop still knows which delta Claude has not seen.
+  local cbfile="$AC_LOG_DIR/codex-base-pr-$pr.sha" codex_base=""
+  [[ $RECHECK == 1 && -f $cbfile ]] && codex_base="$(cat "$cbfile")"
+  # rig_step: requires-rig is on the PR or its issue and tree QA is done at
+  # $head. Run the rig session once per commit. 0 → a record is posted, do a
+  # full QA pass with it. 1 → stop here, STATE set.
+  local rmark="$AC_LOG_DIR/rig-pr-$pr.sha"
+  rig_step() {
+    local rrc=0
+    if [[ $RIG_AUTO != 1 ]]; then
+      echo "  #$n PR #$pr: REQUIRES RIG (AC_RIG_AUTO=0) — run: bin/rig.sh $pr"
+      STATE=needs-rig; return 1
+    fi
+    if [[ -f $rmark && "$(cat "$rmark")" == "$head" ]]; then
+      echo "  #$n PR #$pr: rig already ran at ${head:0:8} and requires-rig is still set — yours"
+      echo "     read the agent:rig record and the QA pass after it: a fail or"
+      echo "     decline, or a check the record did not close."
+      STATE=needs-rig; return 1
+    fi
+    echo "  #$n PR #$pr: rig session at ${head:0:8}"
+    "$BIN/rig.sh" "$pr" $fg || rrc=$?
+    case $rrc in
+      0) mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$head" > "$rmark"
+         echo "  #$n PR #$pr: rig record posted — full QA at the same commit"
+         return 0 ;;
+      3) echo "  #$n PR #$pr: rig busy (lock held) — rerun later: bin/rig.sh --status" ;;
+      4) echo "  #$n PR #$pr: rig not configured here (scripts or access missing)" ;;
+      *) echo "  #$n PR #$pr: rig session posted no usable record — read its log" ;;
+    esac
+    STATE=needs-rig; return 1
+  }
+  codex_failed_at() {
+    [[ $RECHECK == 1 ]] || return 0
+    codex_base="$1"; mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$1" > "$cbfile"
+  }
   # Not every exit path sets STATE, and drive() re-enters this function after a
   # handback. A STATE left over from the previous entry would read as a second
   # handback and loop until the step limit — which looks like cycling labels
@@ -137,29 +210,92 @@ qa_loop() {
         echo "     two agents failing to converge is signal. read the reviews."
         return 0
       fi
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: carries requires-rig — revising the code does not"
-        echo "     retire the measurement; the label stays for you to clear."
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: carries requires-rig — the rig session runs after"
+        echo "     the next tree QA pass, at the revised commit."
       fi
       echo "  #$n PR #$pr: revising (round $qa_round)"
       pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — not starting a revise"; return 1; }
-      "$BIN/revise.sh" "$pr" $fg || { echo "  #$n: revise failed"; return 1; }
+      # A run that stopped between the Codex fail and the revise, or one from
+      # before this flow existed, has no base on disk. claude-approved paired
+      # with needs-work is the Codex-fail state (qa.md step 5); confirm it from
+      # both records rather than from the labels alone.
+      if [[ $RECHECK == 1 && -z $codex_base ]] && has claude-approved "$ls" \
+          && [[ "$(newest_record "$pr" codex-qa)" == *"$pre"* \
+             && "$(newest_record "$pr" qa)" == *"$pre"* ]]; then
+        codex_failed_at "$pre"
+      fi
+      cpre=""$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" \
+        || { echo "  #$n: cannot count PR comments — not starting a revise"; return 1; }
+      local revise_rc=0 retry_head
+      AC_REVISE_MODE="${codex_base:+codex}" "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+      if (( revise_rc != 0 && revise_rc != 130 && revise_rc != 143 )); then
+        retry_head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" || return 1
+        if [[ $retry_head == "$pre" ]]; then
+          echo "  #$n: revision worker exited before pushing — retrying once in the preserved worktree"
+          revise_rc=0
+          AC_REVISE_MODE="${codex_base:+codex}" "$BIN/revise.sh" "$pr" $fg || revise_rc=$?
+        fi
+      fi
+      (( revise_rc == 0 )) || { echo "  #$n: revise failed"; return 1; }
       post="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — check the PR by hand"; return 1; }
 
-      # A revise that pushed nothing is the developer saying the block is not
-      # code-fixable. Clearing needs-work here would be this script overruling
-      # that on the developer's behalf — and worse, the reviewed-SHA cache below
-      # would then see a tip qa has already reviewed with a comment on it and
-      # report "raised nothing", which is how a request-changes verdict turns
-      # into "yours to merge". Leave the label. Stop.
+      # A revise that pushed nothing is a design/ux handback (label on the
+      # issue, handled first below) or one of two different facts:
+      #  - the developer posted a PR comment: it is saying the block is not
+      #    code-fixable (a rig measurement, an assumed criterion, a design call);
+      #  - no push AND no comment: the session did not finish — a crash, a turn
+      #    limit, or a headless session that backgrounded its gate and ended its
+      #    turn waiting (AGENTS.md → headless sessions). revise.sh still exits 0
+      #    then, so the retry above never fires. That is not a decline, and the
+      #    fix may be sitting uncommitted in the worktree.
+      # Either way, clearing needs-work here would be this script overruling
+      # the verdict — and the reviewed-SHA cache below would then see a tip qa
+      # has already reviewed with a comment on it and report "raised nothing",
+      # which is how a request-changes verdict turns into "yours to merge".
+      # Leave the label. Stop.
       if [[ $pre == "$post" ]]; then
+        ils="$(labels "$n")" || { echo "  #$n: cannot read issue labels — stopping"; return 1; }
+        if has needs-design "$ils"; then
+          echo "  #$n PR #$pr: developer handed back to architect (needs-design)"
+          echo "     the PR stays unchanged; architect must amend the design/manifest"
+          STATE=needs-design; return 0
+        fi
+        if has needs-ux "$ils"; then
+          echo "  #$n PR #$pr: developer handed back to ux (needs-ux)"
+          echo "     the PR stays unchanged; ux must resolve the output decision"
+          STATE=needs-ux; return 0
+        fi
+        local cpost branch dirty
+        cpost="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json comments --jq '.comments | length')" || cpost=""
         echo "  #$n PR #$pr: revise pushed nothing — tip is still $post"
-        echo "     needs-work stays. re-reviewing an identical tip cannot change"
-        echo "     the verdict, so the block is one only you can clear: a rig"
-        echo "     measurement, acceptance of an assumed criterion, a design call."
-        echo "     read the developer's PR comment for which."
+        if [[ -n $cpost ]] && (( cpost > cpre )); then
+          echo "     the developer commented: needs-work stays. re-reviewing an"
+          echo "     identical tip cannot change the verdict, so the block is one"
+          echo "     only you can clear: a rig measurement, acceptance of an assumed"
+          echo "     criterion, a design call. read the developer's PR comment for which."
+        else
+          branch="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefName --jq .headRefName 2>/dev/null)" || branch=""
+          dirty=""
+          [[ -n $branch && -d $WT_BASE/$branch ]] \
+            && dirty="$(git -C "$WT_BASE/$branch" status --porcelain --untracked-files=no 2>/dev/null | wc -l)"
+          if [[ -z $cpost ]]; then
+            echo "     cannot count PR comments — either the developer declined (read"
+            echo "     its PR comment) or the session did not finish (below)."
+          else
+            echo "     and posted no PR comment: the developer session did not finish."
+            echo "     this is NOT a decline — likely a crash, a turn limit, or a"
+            echo "     headless session that backgrounded its gate and ended its turn."
+          fi
+          if [[ -n $dirty ]] && (( dirty > 0 )); then
+            echo "     $WT_BASE/$branch has $dirty uncommitted tracked file(s) — the"
+            echo "     fix may be written but not committed. inspect before re-running."
+          fi
+          echo "     needs-work stays. session log:"
+          echo "       ls -t ${AC_LOG_DIR}/*developer-pr-$pr-rev*.jsonl | head -1"
+        fi
         STATE=needs-human; return 0
       fi
 
@@ -168,27 +304,86 @@ qa_loop() {
       ls="$(pr_labels "$pr")"
     fi
 
+    # Codex recheck: the revision answers a Codex finding on a tip Claude QA
+    # approved. Codex reviews base..head and runs the workspace gate itself;
+    # Claude QA is not re-run. Only a Codex pass that names both SHAs lets the
+    # runner carry claude-approved forward — the label then means "Claude
+    # approved base, and the only commits since answer Codex and passed Codex".
+    if [[ -n $codex_base ]] && ! has needs-work "$ls" && ! has claude-approved "$ls"; then
+      head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
+        || { echo "  #$n: cannot read the tip — stopping"; return 1; }
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        # A rig gate under a Codex recheck: Codex cannot approve past it, and
+        # the rig record needs a Claude pass to be accepted. Full QA instead.
+        echo "  #$n PR #$pr: requires-rig under a Codex recheck — full Claude QA path"
+        codex_base=""; rm -f "$cbfile"; force=full
+      fi
+      if [[ -n $codex_base && $head != "$codex_base" ]]; then
+        echo "  #$n PR #$pr: Codex recheck of ${codex_base:0:8}..${head:0:8} (Claude QA not re-run)"
+        local rrc=0 crec
+        "$BIN/review.sh" --independent --recheck "$codex_base" "$pr" || rrc=$?
+        if (( rrc == 3 )); then
+          echo "  #$n PR #$pr: tip no longer descends from the approved base — full Claude QA"
+          codex_base=""; rm -f "$cbfile"; force=full
+        elif (( rrc != 0 )); then
+          echo "  #$n PR #$pr: Codex recheck failed to run"; return 1
+        else
+          ls="$(pr_labels "$pr")" || return 1
+          if has needs-work "$ls"; then
+            echo "  #$n PR #$pr: Codex recheck requested changes"
+            continue
+          fi
+          crec="$(newest_record "$pr" codex-qa)"
+          if ! has codex-approved "$ls" || [[ $crec != *"$head"* || $crec != *"$codex_base"* ]]; then
+            echo "  #$n PR #$pr: Codex recheck posted no approval naming both tips — stopping"
+            STATE=needs-human; return 0
+          fi
+          [[ "$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" == "$head" ]] \
+            || { echo "  #$n PR #$pr: tip moved during the recheck — stopping"; return 1; }
+          gh_retry gh pr edit "$pr" -R "$AC_REPO" --add-label claude-approved >/dev/null \
+            || { echo "  #$n PR #$pr: could not restore claude-approved — do it by hand"; return 1; }
+          gh_retry gh pr comment "$pr" -R "$AC_REPO" --body "<!-- agent: runner -->
+claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`; the commits since answer a Codex finding and passed a Codex recheck (AC_CODEX_RECHECK). Claude QA has not reviewed \`$codex_base..$head\`." >/dev/null || true
+          rm -f "$cbfile"
+          echo "  #$n PR #$pr: Codex recheck approved — claude-approved carried forward from ${codex_base:0:8}"
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge; return 0
+        fi
+      fi
+    fi
+
     head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)"
     mark="$AC_LOG_DIR/reviewed-pr-$pr.sha"
 
-    # Already reviewed at this exact tip and qa raised nothing: that is a pass.
+    # Already reviewed at this exact tip. requires-rig is a pre-approval stop;
+    # after a human clears it, absence of claude-approved forces a full same-tip
+    # QA pass so the measurement record becomes part of the approval evidence.
     # Unless force is set — then the tip is unchanged but the design under it
     # is not, and the cached approval is an approval of a superseded spec.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: qa reviewed $head — approved, but REQUIRES RIG"
-        echo "     a measurement is outstanding. the label is human-clear only:"
-        echo "     read the review's 'rig verification required' field, run the"
-        echo "     session, then: gh pr edit $pr -R $AC_REPO --remove-label requires-rig"
-        STATE=needs-rig; return 0
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: tree QA complete — requires-rig"
+        rig_step || return 0
+        force=full; continue
       fi
-      echo "  #$n PR #$pr: qa reviewed $head and raised nothing — yours to merge"
-      STATE=awaiting-merge; return 0
+      if has claude-approved "$ls"; then
+        if ! has codex-approved "$ls"; then
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
+          ls="$(pr_labels "$pr")"
+        fi
+        if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge; return 0
+        fi
+      fi
+      echo "  #$n PR #$pr: no approval at a reviewed commit — full QA pass"
+      force=full
     fi
 
-    echo "  #$n PR #$pr: qa review${force:+ (full — design changed since the last pass)}"
+    echo "  #$n PR #$pr: qa review${force:+ (full pass)}"
     before="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
+    codex_base=""; rm -f "$cbfile"   # Claude sees the whole delta again
     "$BIN/review.sh" "$pr" ${force:+--full} $fg || { echo "  #$n: review failed"; return 1; }
     force=""   # one forced pass; later rounds go back to reviewing the delta
     after="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — review may have succeeded, check the PR"; return 1; }
@@ -216,13 +411,25 @@ qa_loop() {
     fi
 
     if ! has needs-work "$ls"; then
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: approved, but REQUIRES RIG — measurement outstanding"
-        echo "     see the review's 'rig verification required' field."
-        STATE=needs-rig
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: tree QA complete — requires-rig"
+        rig_step || return 0
+        force=full; continue
+      elif has claude-approved "$ls"; then
+        if ! has codex-approved "$ls"; then
+          codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }
+          ls="$(pr_labels "$pr")"
+        fi
+        if has codex-approved "$ls" && ! has needs-work "$ls"; then
+          echo "  #$n PR #$pr: both QA gates passed — yours to merge"
+          STATE=awaiting-merge
+        else
+          echo "  #$n PR #$pr: independent QA did not approve — stopping"
+          STATE=needs-human
+        fi
       else
-        echo "  #$n PR #$pr: qa reviewed and raised nothing — yours to merge"
-        STATE=awaiting-merge
+        echo "  #$n PR #$pr: qa posted no approval or routed finding — stopping"
+        STATE=needs-human
       fi
       return 0
     fi
@@ -235,7 +442,7 @@ qa_loop() {
 }
 
 drive() {
-  local n="$1" step=0 ls pr tc st force=""
+  local n="$1" step=0 ls pr tc st force="" continue_arg="" mf=""
   local ran_design=0 ran_ux=0 ran_triage=0
   local design_passes=0 ux_passes=0
   qa_round=0
@@ -271,8 +478,26 @@ drive() {
       fi
       # Spec comment but no routing label: triage stopped mid-way, or a label
       # was removed by hand. Either way the next step is a decision, not a run.
-      echo "  #$n: triage spec present but no routing label — yours to set"
-      STATE=needs-human; return 0
+      # If a real implementation branch already contains work, however, an
+      # architect handback may have removed needs-design without restoring the
+      # ready label. Preserve the work and treat the existing branch as an
+      # implicit continuation; do not invent a fresh implementation.
+      if stale_branch "$n"; then
+        local unlabeled_wt="$WT_BASE/issue-$n" unlabeled_dirty=0 unlabeled_ahead=0
+        [[ -d $unlabeled_wt ]] && unlabeled_dirty="$(git -C "$unlabeled_wt" status --porcelain | wc -l)"
+        unlabeled_ahead="$(git rev-list --count "origin/main..issue-$n" 2>/dev/null || echo 0)"
+        if (( unlabeled_dirty > 0 || unlabeled_ahead > 0 )); then
+          echo "  #$n: routing label missing but existing implementation work is present — continuing"
+          ls+=$'\nready-to-implement'
+          continue_arg=--continue
+        else
+          echo "  #$n: triage spec present but no routing label — yours to set"
+          STATE=needs-human; return 0
+        fi
+      else
+        echo "  #$n: triage spec present but no routing label — yours to set"
+        STATE=needs-human; return 0
+      fi
     fi
 
     # ux step 6 runs first: it clears needs-ux but defers ready-to-implement to
@@ -288,6 +513,7 @@ drive() {
       fi
       ran_ux=1; (( ++ux_passes )); echo "  #$n: ux (pass $ux_passes)"
       "$BIN/ux.sh" "$n" $fg || { echo "  #$n: ux failed"; return 1; }
+      qa_round=0
       continue
     fi
 
@@ -302,6 +528,7 @@ drive() {
       fi
       ran_design=1; (( ++design_passes )); echo "  #$n: architect (pass $design_passes)"
       "$BIN/design.sh" "$n" $fg || { echo "  #$n: design failed"; return 1; }
+      qa_round=0
       continue
     fi
 
@@ -331,23 +558,53 @@ drive() {
         # Work is present. Deleting here throws away a whole run.
         echo "     it has work: ${dirty:-0} uncommitted file(s), $ahead commit(s) ahead of main."
         echo "     an earlier run was probably cut off. do NOT delete it. resume:"
-        echo "       jq -r 'select(.type==\"system\") | .session_id // empty' \\"
-        echo "         ${AC_LOG_DIR}/*developer-issue-$n.jsonl | head -1"
-        echo "       cd $wt && claude --resume <id>"
+        echo "       continuing in the same worktree with the currently selected provider"
+        continue_arg=--continue
       else
-        echo "     it is empty — no commits, nothing uncommitted. safe to clear:"
-        echo "       git worktree remove --force $wt; git branch -D issue-$n"
+        echo "     it is empty — reusing it for this implementation attempt."
       fi
-      return 0
     fi
 
     has ready-to-implement "$ls" \
       || { echo "  #$n: no PR, not ready-to-implement — nothing to do"; return 0; }
 
-    echo "  #$n: implementing"
-    "$BIN/implement.sh" "$n" $fg || { echo "  #$n: implement failed"; return 1; }
+    # Every developer invocation needs a hard file boundary. Issues triaged
+    # straight to ready-to-implement have no architect comment, so create that
+    # boundary before opening a worktree instead of asking dev to implement
+    # from triage's non-exhaustive "files likely affected" list.
+    mf="$(manifest_of "$n")" \
+      || { echo "  #$n: cannot read architect manifest — stopping"; return 1; }
+    if [[ -z $mf ]]; then
+      echo "  #$n: no architect manifest — running design preflight"
+      "$BIN/design.sh" "$n" $fg || { echo "  #$n: design preflight failed"; return 1; }
+      continue
+    fi
+
+    echo "  #$n: implementing${continue_arg:+ (continuation)}"
+    "$BIN/implement.sh" "$n" $continue_arg $fg || { echo "  #$n: implement failed"; return 1; }
     pr="$(pr_for "$n")"
-    [[ -n $pr ]] || { echo "  #$n: no PR opened — check the session log"; return 1; }
+    if [[ -z $pr ]]; then
+      # A developer may discover an out-of-manifest dependency and correctly
+      # hand the issue back to design without committing or opening a PR. Read
+      # the issue labels before calling that a failed implementation; the next
+      # loop must drive the design gate against the preserved worktree.
+      ls="$(labels "$n")" || { echo "  #$n: cannot read post-implementation labels"; return 1; }
+      if has needs-design "$ls"; then
+        echo "  #$n: implementation handed back to architect — routing design"
+        continue
+      fi
+      if has needs-ux "$ls"; then
+        echo "  #$n: implementation handed back to UX — routing design"
+        continue
+      fi
+      if has blocked "$ls" || has needs-discussion "$ls"; then
+        echo "  #$n: implementation stopped on a human/design gate"
+        STATE=needs-human
+        return 0
+      fi
+      echo "  #$n: no PR opened — check the session log"
+      return 1
+    fi
     echo "  #$n: opened PR #$pr"
     st=0; qa_loop "$n" "$pr" || st=$?
     (( st == 0 )) || return "$st"
@@ -398,8 +655,35 @@ is_epic() {
   [[ -n "$(children "$1")" ]]
 }
 
+wait_for_merge() {
+  local child="$1" pr="$2" state pr_state merged_at mergeable merge_status
+  local poll="${AC_MERGE_POLL_SECONDS:-60}"
+  [[ $poll =~ ^[1-9][0-9]*$ ]] || { echo "  invalid AC_MERGE_POLL_SECONDS: $poll" >&2; return 2; }
+  [[ -n $pr ]] || { echo "  cannot identify the open PR for #$child" >&2; return 1; }
+  while true; do
+    state="$(gh_retry gh issue view "$child" -R "$AC_REPO" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
+    [[ $state == CLOSED ]] && { echo "  #$child merged; continuing epic"; return 0; }
+    pr_state="$(gh_retry gh pr view "$pr" -R "$AC_REPO" \
+      --json mergedAt,mergeable,mergeStateStatus \
+      --jq '[.mergedAt // "-", .mergeable // "UNKNOWN", .mergeStateStatus // "UNKNOWN"] | join("|")' \
+      2>/dev/null || true)"
+    IFS='|' read -r merged_at mergeable merge_status <<< "$pr_state"
+    if [[ -n $merged_at && $merged_at != - ]]; then
+      echo "  #$child PR merged; continuing epic"
+      return 0
+    fi
+    if [[ $mergeable == CONFLICTING || $merge_status == DIRTY ]]; then
+      echo "  #$child PR #$pr has merge conflicts with main — integrating"
+      "$BIN/integrate.sh" "$pr" $fg || return 3
+      return 4
+    fi
+    echo "  #$child awaiting your merge — checking again in ${poll}s"
+    sleep "$poll"
+  done
+}
+
 drive_epic() {
-  local e="$1" kids c st
+  local e="$1" kids c st wait_rc
   mapfile -t kids < <(children "$e")
   (( ${#kids[@]} )) || { echo "  #$e: no sub-issues or task-list refs found"; return 0; }
   echo "  #$e: epic with ${#kids[@]} children — $(printf '#%s ' "${kids[@]}")"
@@ -427,15 +711,38 @@ drive_epic() {
     case "$STATE" in
       awaiting-merge)
         echo
-        echo "  #$c is ready for your merge. Stopping here."
+        echo "  #$c is ready for your merge."
         echo "  Later children branch from main and would not see #$c's work."
-        echo "  Merge it, then rerun: master.sh $e"
-        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+        if [[ -n ${AC_WAIT_MERGE:-} ]]; then
+          while true; do
+            wait_rc=0
+            wait_for_merge "$c" "$(pr_for "$c" || true)" || wait_rc=$?
+            if (( wait_rc == 4 )); then
+              echo "  #$c: integration pushed — rerunning both QA gates"
+              STATE=""
+              drive "$c" || { echo "  #$c: post-integration QA aborted"; return 1; }
+              [[ $STATE == awaiting-merge ]] || {
+                echo "  #$c stopped after integration in state: ${STATE:-unknown}"
+                return 0
+              }
+              continue
+            fi
+            (( wait_rc == 0 )) || return 0
+            break
+          done
+        else
+          echo "  Merge it, then rerun: master.sh $e"
+          [[ -n ${KEEP_GOING:-} ]] || return 0
+        fi ;;
       needs-rig)
         echo "  #$c needs a rig measurement — stopping epic."
         [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
       needs-human|blocked)
         echo "  #$c needs you — stopping epic."
+        [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
+      *)
+        echo "  #$c did not reach a terminal workflow state — stopping epic."
+        echo "  Inspect its labels and session log before continuing."
         [[ -n ${KEEP_GOING:-} ]] || return 0 ;;
     esac
   done
