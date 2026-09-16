@@ -681,31 +681,47 @@ fn arrival_check_lines(
 /// the τ-corrected figure; `None` distinguishes a withheld correction (a
 /// detected `ref \u{394}` disagreement — the numbers exist, the check
 /// declined to combine them) from one that was never possible (no stored
-/// latency for this capture pair at all).
-fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> String {
+/// latency for this capture pair at all). `Some` alongside
+/// `ArrivalCheck::Unchecked` (case D — a flight time exists, but the
+/// same-capture corroboration never ran) gets a second, 16-space-indented
+/// continuation line naming that (codex-qa on PR #477): otherwise an
+/// unverified flight time prints identically to a checked one.
+fn flight_time_line(stats: &ac_core::measurement::report::IrStats) -> Vec<String> {
     use ac_core::measurement::report::ArrivalCheck;
     match (stats.flight_time_s, &stats.arrival_check) {
+        (Some(ft), ArrivalCheck::Unchecked { .. }) => {
+            let samples = ft * stats.sample_rate_hz as f64;
+            vec![
+                format!(
+                    "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
+                    label_prefix("flight time"),
+                    format_samples_signed(samples),
+                    ft * 1000.0,
+                ),
+                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
+            ]
+        }
         (Some(ft), _) => {
             let samples = ft * stats.sample_rate_hz as f64;
-            format!(
+            vec![format!(
                 "{}{} samples  ({:+.3} ms, arrival \u{2212} latency)",
                 label_prefix("flight time"),
                 format_samples_signed(samples),
                 ft * 1000.0,
-            )
+            )]
         }
-        (None, ArrivalCheck::PeriodShift(_)) => format!(
+        (None, ArrivalCheck::PeriodShift(_)) => vec![format!(
             "{}withheld \u{2014} ref \u{394} is a period shift (below)",
             label_prefix("flight time")
-        ),
-        (None, ArrivalCheck::Mismatch(_)) => format!(
+        )],
+        (None, ArrivalCheck::Mismatch(_)) => vec![format!(
             "{}withheld \u{2014} ref \u{394} is not zero (below)",
             label_prefix("flight time")
-        ),
-        (None, _) => format!(
+        )],
+        (None, _) => vec![format!(
             "{}not shown \u{2014} no stored latency for this pair (below)",
             label_prefix("flight time")
-        ),
+        )],
     }
 }
 
@@ -753,7 +769,9 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         // `arrival_check` — sits directly under `arrival` so the two
         // primary values stack. Never printed on a failed deconvolution
         // (#376's rule that a failed capture prints no arrival).
-        println!("{}", flight_time_line(&stats));
+        for line in flight_time_line(&stats) {
+            println!("{line}");
+        }
     }
     println!(
         "  peak          {:.4} FS  ({:+.2} dB re unity)  at sample {}",
@@ -1550,14 +1568,15 @@ mod tests {
     #[test]
     fn flight_time_line_names_every_branch_the_ux_spec_requires() {
         let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
-        let line = flight_time_line(&agree);
-        assert!(line.contains("samples"), "{line:?}");
+        let lines = flight_time_line(&agree);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("samples"), "{lines:?}");
         assert!(
-            !line.contains("withheld") && !line.contains("not shown"),
-            "{line:?}"
+            !lines[0].contains("withheld") && !lines[0].contains("not shown"),
+            "{lines:?}"
         );
         assert_eq!(
-            line,
+            lines[0],
             format!(
                 "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
                 label_prefix("flight time")
@@ -1574,10 +1593,10 @@ mod tests {
         };
         assert_eq!(
             flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(shift_d))),
-            format!(
+            vec![format!(
                 "{}withheld \u{2014} ref \u{394} is a period shift (below)",
                 label_prefix("flight time")
-            )
+            )]
         );
 
         let mismatch_d = TauDisagreement {
@@ -1590,10 +1609,10 @@ mod tests {
         };
         assert_eq!(
             flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(mismatch_d))),
-            format!(
+            vec![format!(
                 "{}withheld \u{2014} ref \u{394} is not zero (below)",
                 label_prefix("flight time")
-            )
+            )]
         );
 
         assert_eq!(
@@ -1603,10 +1622,47 @@ mod tests {
                     reason: "no same-capture reference in this report".into(),
                 }
             )),
-            format!(
+            vec![format!(
                 "{}not shown \u{2014} no stored latency for this pair (below)",
                 label_prefix("flight time")
-            )
+            )]
+        );
+    }
+
+    /// codex-qa on PR #477: a `Some` flight time alongside
+    /// `ArrivalCheck::Unchecked` (case D — a flight time was computed, but
+    /// the same-capture corroboration never ran, e.g. this pair's `ref
+    /// stored` misses on exact conditions) printed identically to a checked
+    /// value. The UX comment's field justification for
+    /// `reference check not run — see ref Δ` is explicit: "The architect's
+    /// `Unchecked` still passes a flight time through. This line keeps that
+    /// value from reading as checked." Asserts the continuation line is
+    /// present, 16-space indented, and that the checked (`Agree`) case does
+    /// not carry it.
+    #[test]
+    fn flight_time_line_qualifies_an_unchecked_value_as_not_verified() {
+        let unchecked = stats_with(
+            Some(88.0 / 96_000.0),
+            ArrivalCheck::Unchecked {
+                reason: "no same-capture reference in this report".into(),
+            },
+        );
+        assert_eq!(
+            flight_time_line(&unchecked),
+            vec![
+                format!(
+                    "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
+                    label_prefix("flight time")
+                ),
+                format!("{CONT_INDENT}reference check not run \u{2014} see ref \u{394}"),
+            ]
+        );
+
+        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
+        assert_eq!(
+            flight_time_line(&agree).len(),
+            1,
+            "a checked flight time must not carry the unchecked qualifier"
         );
     }
 
@@ -1794,14 +1850,26 @@ mod tests {
                     reason: String::new(),
                 },
             )),
+            // codex-qa on PR #477: the `Some` + `Unchecked` continuation
+            // line (`reference check not run — see ref Δ`) joins this
+            // width-fit test too, at the same 96 kHz five-digit sample
+            // count as the `Agree` case above.
+            flight_time_line(&stats_with(
+                Some(65_535.0 / 96_000.0),
+                ArrivalCheck::Unchecked {
+                    reason: String::new(),
+                },
+            )),
         ];
-        for line in flight_time_cases {
-            assert!(
-                line.chars().count() <= 80,
-                "line {:?} runs to {} columns",
-                line,
-                line.chars().count()
-            );
+        for lines in flight_time_cases {
+            for line in lines {
+                assert!(
+                    line.chars().count() <= 80,
+                    "line {:?} runs to {} columns",
+                    line,
+                    line.chars().count()
+                );
+            }
         }
     }
 }
