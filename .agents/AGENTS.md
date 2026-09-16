@@ -93,8 +93,21 @@ pipeline or manual — may emit without asking per run, within these limits:
 - bounded commands only (`plot ir`, `calibrate`, the `scripts/rig/` wrappers),
   never a stimulus that runs until stopped.
 
-Still asked for every time: host reboots, driver reloads, cable or mic moves,
-clock changes, raising a ceiling, anything that needs someone in the room.
+**Host reboots and audio-driver reloads** (operator, 2026-09-16: *"reboot
+and driver reload are ok for rig checks"*) are also within the standing
+consent, when a named rig check needs them. That covers `systemctl reboot` of
+the rig host, and `snd_fireface` unload/reload with `jack-ac` stopped. After
+each one, before any capture:
+- make JACK reachable again (restart `jack-ac` if clients cannot connect);
+- restore the interface baseline with the rig profile's toggle writes;
+- confirm the baseline by emission, not by readback (`probe-outputs.sh` at
+  −60 dBFS).
+
+Record each event in the rig record with its time.
+
+Still asked for every time: **interface power cycles** (nobody is in the room
+to do them), cable or mic moves, clock changes, raising a ceiling, and anything
+else that needs someone in the room.
 
 **One session at a time.** Every rig session holds the rig lock for its
 duration: `bin/rig.sh --lock "<who, what>"` before the first command that
