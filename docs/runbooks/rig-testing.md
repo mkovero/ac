@@ -190,9 +190,21 @@ scripts/rig/acoustic-ir.sh pupu --level -50 --consent "…" --mic-position "1 m 
 `ac plot ir` runs the measurement and prints nothing (epic #276), so the
 script drives `plot_ir` through the staged `ir_probe`, routed with `ac setup`
 to the rig's speaker and mic, and reports peak index, magnitude, pre-impulse
-floor, SNR, offset from window centre and onset. `--tau-ms` subtracts a known
-interface round trip so the arrival compares with a `transfer_stream` delay.
-The IR peak is not the arrival on a multi-way speaker; use the onset.
+floor, SNR, offset from window centre and onset.
+
+`--tau-ms` changes only the `peak arrival` line: it prints the peak offset
+minus τ. That difference means something only when τ is itself a peak pick
+for the same channel pair (a loopback τ is a different pair; see
+`docs/rigs/pupu.md`). The onset line is printed with nothing subtracted, and
+`ir_probe` never subtracts τ from it.
+
+On a multi-way speaker the IR peak is not the arrival; the onset is the
+better arrival estimate. Do not difference that onset by hand against
+`--tau-ms`, a stored `calibrate` τ, or a loopback peak such as pupu's
+17.99 ms. An onset pairs only with a τ picked by the same onset rule from the
+same capture's reference leg (#460), and `ir_probe` captures no reference leg.
+Onsets do not cancel across sweep bands the way peaks do. The pairing rule is
+in `ac-core/src/measurement/sweep/peak.rs` (#479).
 
 #### 7e. Transfer function, headless — EMITS when driven
 

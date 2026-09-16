@@ -7,6 +7,10 @@
 #       [--rev <rev>|latest] [--duration 2.0] [--f1 50] [--f2 16000]
 #       [--window 16384] [--tau-ms <ms>] [--mic-position "<where>"]
 #
+# --tau-ms is subtracted from the peak line only, and is meaningful only as a
+# peak-picked τ for the same channel pair. Never subtract it, or any stored or
+# loopback τ, from the onset line (pairing rule, ac-core sweep/peak.rs, #479).
+#
 # Uses a daemon spawned from the staged build (identity printed), routed with
 # `ac setup` to the rig's speaker and mic indices. A failed setup, or a
 # persisted config that does not read those indices right before `ir_probe`,
