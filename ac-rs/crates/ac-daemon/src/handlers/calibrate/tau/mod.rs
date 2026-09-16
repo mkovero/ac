@@ -57,6 +57,12 @@ pub(super) enum TauAttempt {
         /// `TauOutcome`s this field survives into — still only ever see a
         /// value that genuinely cleared the threshold.
         pre_impulse_snr_db: f64,
+        /// #363: what the graph declared this path to be during each
+        /// lifecycle. `None` when the backend declares nothing.
+        reading1_declared_frames: Option<u32>,
+        reading2_declared_frames: Option<u32>,
+        /// #363: wall-clock seconds between the two captures.
+        separation_s: f64,
     },
     /// A lifecycle's peak sits below the SNR threshold (#368). Short-
     /// circuits the same way [`TauAttempt::Error`] does: the second
@@ -71,6 +77,22 @@ pub(super) enum TauAttempt {
         conditions: Option<TauConditions>,
         message: String,
     },
+}
+
+/// One lifecycle's τ result and the evidence about the lifecycle it came
+/// from (#363). Replaces a bare tuple: four parallel values threaded through
+/// two closures is where a mix-up between reading 1 and reading 2 hides.
+struct LifecycleReading {
+    tau_s: f64,
+    snr_db: f64,
+    xruns: u32,
+    /// What the graph declared while this lifecycle ran; `None` when the
+    /// backend declares nothing.
+    declared_frames: Option<u32>,
+    /// When this lifecycle's capture finished. The two of these give the
+    /// separation — the quantity that says whether the agreement is worth
+    /// anything against a state that persists over seconds.
+    captured_at: std::time::Instant,
 }
 
 /// Run `measure_tau` twice, each inside its own fresh engine lifecycle —
@@ -89,7 +111,7 @@ pub(super) fn measure_tau_twice(
     in_port: &str,
     amp: f64,
 ) -> TauAttempt {
-    // ((tau_s, snr_db), conditions, xruns) — `measure_tau` scopes the xrun
+    // Each lifecycle yields a `LifecycleReading` — `measure_tau` scopes the xrun
     // count to its own `play_and_capture` I/O call (#369 architect note:
     // the only I/O call its body makes, so this already excludes `start`'s
     // JACK client registration) and, per the #368/#369 merge precedence
@@ -98,7 +120,7 @@ pub(super) fn measure_tau_twice(
     // needs its own `(tau_s, snr_db)` to reach `TauAttempt::Compared`
     // below, where `reading{1,2}_xruns` decides `refused_xrun` regardless
     // of what either SNR figure says.
-    let run_once = || -> anyhow::Result<((f64, f64), TauConditions, u32)> {
+    let run_once = || -> anyhow::Result<(LifecycleReading, TauConditions)> {
         let mut eng = make_engine(fake, required)?;
         eng.start(std::slice::from_ref(&out_port.to_string()), Some(in_port))?;
         let conditions = TauConditions {
@@ -110,15 +132,35 @@ pub(super) fn measure_tau_twice(
             input_port: in_port.to_string(),
         };
         let reading = measure_tau(&mut *eng, amp);
+        // #363: the clock is read here, not around the whole closure —
+        // engine construction is not what the persistence question is about,
+        // and the separation must describe the gap between the two captures.
+        let captured_at = std::time::Instant::now();
+        // #363: read the declaration after the sweep and before `stop`. JACK
+        // recomputes port latency ranges asynchronously when connections
+        // change, so a read taken right after activation can predate the
+        // graph settling; this one describes the graph the sweep traversed.
+        let declared_frames = eng.declared_latency_frames();
         eng.set_silence();
         eng.stop();
-        reading.map(|(offset_s, snr_db, xruns)| ((offset_s, snr_db), conditions, xruns))
+        reading.map(|(tau_s, snr_db, xruns)| {
+            (
+                LifecycleReading {
+                    tau_s,
+                    snr_db,
+                    xruns,
+                    declared_frames,
+                    captured_at,
+                },
+                conditions,
+            )
+        })
     };
 
     // #368: a low-SNR refusal is recovered from the error by type, not by
     // matching the message — it is a distinct `tau_state`, and a reworded
     // message must not silently collapse it back into `error`.
-    let ((reading1_s, snr1_db), conditions, reading1_xruns) = match run_once() {
+    let (reading1, conditions) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -133,7 +175,7 @@ pub(super) fn measure_tau_twice(
             }
         }
     };
-    let ((reading2_s, snr2_db), conditions2, reading2_xruns) = match run_once() {
+    let (reading2, conditions2) = match run_once() {
         Ok(r) => r,
         Err(e) => {
             return match e.downcast_ref::<LowSnrRefusal>() {
@@ -149,25 +191,31 @@ pub(super) fn measure_tau_twice(
         }
     };
     let comparison = compare_tau_readings(
-        reading1_s,
-        reading2_s,
+        reading1.tau_s,
+        reading2.tau_s,
         conditions2.sample_rate,
         conditions2.period_size,
     );
     TauAttempt::Compared {
         conditions: conditions2,
-        reading1_s,
-        reading2_s,
-        reading1_xruns,
-        reading2_xruns,
+        reading1_s: reading1.tau_s,
+        reading2_s: reading2.tau_s,
+        reading1_xruns: reading1.xruns,
+        reading2_xruns: reading2.xruns,
+        reading1_declared_frames: reading1.declared_frames,
+        reading2_declared_frames: reading2.declared_frames,
+        separation_s: reading2
+            .captured_at
+            .duration_since(reading1.captured_at)
+            .as_secs_f64(),
         comparison,
-        pre_impulse_snr_db: snr1_db.min(snr2_db),
+        pre_impulse_snr_db: reading1.snr_db.min(reading2.snr_db),
     }
 }
 
 /// Everything `calibrate` reports about this run's τ attempt — feeds both
 /// the `cal_done` wire frame ([`TauOutcome::write_frame`]) and, on a
-/// corroborated result, the [`TauEntry`] appended to `tau_history`
+/// measured result, the [`TauEntry`] appended to `tau_history`
 /// ([`TauOutcome::stored_entry`]).
 ///
 /// One reading is never a storable outcome (#347), and that is the whole
@@ -211,6 +259,14 @@ pub(super) enum TauOutcome {
         /// the frame writer inventing a zero of its own.
         reading1_xruns: u32,
         reading2_xruns: u32,
+        /// #363: the two lifecycles' declared latencies — equal here, since
+        /// an inequality diverts to
+        /// [`TauOutcome::DisagreeDeclaredLatency`] — and how far apart the
+        /// captures were. The separation is what a reader judges the
+        /// agreement against; the agreement alone cannot say.
+        reading1_declared_frames: Option<u32>,
+        reading2_declared_frames: Option<u32>,
+        separation_s: f64,
     },
     /// #369: a lifecycle crossed an xrun, so the reading is refused before
     /// its comparison is even consulted — a contaminated pair agreeing or
@@ -224,6 +280,12 @@ pub(super) enum TauOutcome {
         reading2_s: f64,
         reading1_xruns: u32,
         reading2_xruns: u32,
+        /// #363: carried so the wire's presence rule ("alongside
+        /// `tau_reading{1,2}_s`") holds on every state that ran both
+        /// lifecycles, without the frame writer inventing values.
+        reading1_declared_frames: Option<u32>,
+        reading2_declared_frames: Option<u32>,
+        separation_s: f64,
     },
     /// Both lifecycles ran and their readings disagreed. Nothing is
     /// stored; `periods` separates #347's own root cause (a
@@ -243,6 +305,27 @@ pub(super) enum TauOutcome {
         delta_samples: i64,
         periods: Option<i64>,
         message: String,
+        /// #363: as on [`TauOutcome::Measured`].
+        reading1_declared_frames: Option<u32>,
+        reading2_declared_frames: Option<u32>,
+        separation_s: f64,
+    },
+    /// #363: the graph's own account of the path moved between the two
+    /// lifecycles. The readings are reported even when they agree — that is
+    /// the entire point of the state: agreement between two readings taken
+    /// while the graph described itself differently proves nothing.
+    ///
+    /// **This does not detect the failure #363 documents.** A shift the graph
+    /// never declares stays invisible here; what this catches is the subset
+    /// that announces itself. Nothing is stored.
+    DisagreeDeclaredLatency {
+        conditions: TauConditions,
+        reading1_s: f64,
+        reading2_s: f64,
+        reading1_declared_frames: u32,
+        reading2_declared_frames: u32,
+        separation_s: f64,
+        message: String,
     },
     /// A lifecycle failed before a comparison was possible. `conditions`
     /// is `Some` only when the first lifecycle got far enough to report
@@ -260,6 +343,7 @@ impl TauOutcome {
             Self::NotMeasuredLowSnr { .. } => "not_measured_low_snr",
             Self::Measured { .. } => "measured",
             Self::RefusedXrun { .. } => "refused_xrun",
+            Self::DisagreeDeclaredLatency { .. } => "disagree_declared_latency",
             Self::Disagree { periods, .. } => {
                 if periods.is_some() {
                     "disagree_period_shift"
@@ -279,6 +363,7 @@ impl TauOutcome {
         match self {
             Self::Measured { conditions, .. }
             | Self::RefusedXrun { conditions, .. }
+            | Self::DisagreeDeclaredLatency { conditions, .. }
             | Self::Disagree { conditions, .. } => Some(conditions),
             Self::NotMeasuredLowSnr { conditions, .. } | Self::Error { conditions, .. } => {
                 conditions.as_ref()
@@ -294,6 +379,8 @@ impl TauOutcome {
                 conditions,
                 tau_s,
                 agreement_count,
+                reading1_declared_frames,
+                separation_s,
                 ..
             } => Some(TauEntry {
                 conditions: conditions.clone(),
@@ -301,6 +388,11 @@ impl TauOutcome {
                 measured_at: ac_core::shared::time::now_utc_iso8601(),
                 method: method.to_string(),
                 agreement_count: *agreement_count,
+                // Both lifecycles declared the same value — an inequality
+                // diverts to `DisagreeDeclaredLatency` before this is
+                // reached — so one field on disk is the whole story.
+                declared_latency_frames: *reading1_declared_frames,
+                reading_separation_s: Some(*separation_s),
             }),
             _ => None,
         }
@@ -389,9 +481,69 @@ impl TauOutcome {
                 }
                 frame["tau_error"] = json!(message);
             }
+            Self::DisagreeDeclaredLatency {
+                reading1_s,
+                reading2_s,
+                message,
+                ..
+            } => {
+                frame["tau_reading1_s"] = json!(reading1_s);
+                frame["tau_reading2_s"] = json!(reading2_s);
+                frame["tau_error"] = json!(message);
+            }
             Self::Error { message, .. } => {
                 frame["tau_error"] = json!(message);
             }
+        }
+        // #363: present on every state that ran both lifecycles, alongside
+        // `tau_reading{1,2}_s`. `null` means the backend declares nothing —
+        // the `period_size` precedent, *not applicable* rather than unknown —
+        // while the key being absent means a daemon older than #363.
+        let evidence = match self {
+            Self::Measured {
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                ..
+            }
+            | Self::RefusedXrun {
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                ..
+            }
+            | Self::Disagree {
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                ..
+            } => Some((
+                *reading1_declared_frames,
+                *reading2_declared_frames,
+                *separation_s,
+            )),
+            Self::DisagreeDeclaredLatency {
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                ..
+            } => Some((
+                Some(*reading1_declared_frames),
+                Some(*reading2_declared_frames),
+                *separation_s,
+            )),
+            Self::NotMeasuredLowSnr { .. } | Self::Error { .. } => None,
+        };
+        if let Some((d1, d2, separation_s)) = evidence {
+            frame["tau_reading1_declared_frames"] = match d1 {
+                Some(v) => json!(v),
+                None => Value::Null,
+            };
+            frame["tau_reading2_declared_frames"] = match d2 {
+                Some(v) => json!(v),
+                None => Value::Null,
+            };
+            frame["tau_reading_separation_s"] = json!(separation_s);
         }
     }
 }
@@ -444,6 +596,9 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_s,
             reading1_xruns,
             reading2_xruns,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
             ..
         } if reading1_xruns > 0 || reading2_xruns > 0 => TauOutcome::RefusedXrun {
             conditions,
@@ -451,6 +606,38 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_s,
             reading1_xruns,
             reading2_xruns,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
+        },
+        // #363 precedence: after `refused_xrun` (a contaminated capture's
+        // declaration is no more meaningful than its SNR) and before the
+        // readings are compared — two readings agreeing while the graph
+        // described itself differently is exactly the agreement this issue
+        // shows is worthless. Compared as exact integer frames: these are
+        // counts the graph asserts, not measurements, so a tolerance would
+        // invent precision the quantity does not have.
+        TauAttempt::Compared {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_declared_frames: Some(d1),
+            reading2_declared_frames: Some(d2),
+            separation_s,
+            ..
+        } if d1 != d2 => TauOutcome::DisagreeDeclaredLatency {
+            conditions,
+            reading1_s,
+            reading2_s,
+            reading1_declared_frames: d1,
+            reading2_declared_frames: d2,
+            separation_s,
+            message: format!(
+                "\u{3c4} graph-declared path latency moved between the two lifecycles \
+                 ({d1} frames \u{2192} {d2} frames) \u{2014} the readings agreeing says \
+                 nothing while the graph's own account of the path changed, so no value \
+                 is stored"
+            ),
         },
         TauAttempt::Compared {
             conditions,
@@ -460,6 +647,9 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_xruns,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
         } => TauOutcome::Measured {
             conditions,
             tau_s: (reading1_s + reading2_s) / 2.0,
@@ -470,6 +660,9 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             snr_threshold_db: tau_snr_threshold_db(),
             reading1_xruns,
             reading2_xruns,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
         },
         TauAttempt::Compared {
             conditions,
@@ -479,6 +672,9 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading2_xruns,
             comparison: TauComparison::Disagree(d),
             pre_impulse_snr_db,
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
         } => TauOutcome::Disagree {
             conditions,
             reading1_s,
@@ -490,6 +686,9 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             delta_samples: d.delta_samples,
             periods: d.periods,
             message: d.message(),
+            reading1_declared_frames,
+            reading2_declared_frames,
+            separation_s,
         },
     }
 }
@@ -565,6 +764,9 @@ mod tests {
             reading2_xruns: 0,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "measured");
         assert!(outcome.conditions().is_some());
@@ -609,6 +811,9 @@ mod tests {
             reading2_xruns: 0,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         let tau_s = outcome.stored_entry("m").expect("measured").tau_s;
         assert!((tau_s - 0.001_000_01).abs() < 1e-9);
@@ -630,6 +835,9 @@ mod tests {
             reading2_xruns: 0,
             comparison,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "disagree_period_shift");
         assert!(
@@ -661,6 +869,9 @@ mod tests {
             reading2_xruns: 0,
             comparison,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "disagree_other");
         assert!(outcome.stored_entry("m").is_none());
@@ -717,6 +928,9 @@ mod tests {
             reading2_xruns: 1,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         // Refused, never stored — the corroboration hole this closes is
@@ -748,6 +962,9 @@ mod tests {
             reading2_xruns: 0,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -766,6 +983,9 @@ mod tests {
             reading2_xruns: 1,
             comparison: TauComparison::Agree,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
@@ -786,9 +1006,126 @@ mod tests {
             reading2_xruns: 0,
             comparison,
             pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.204,
         });
         assert_eq!(outcome.state(), "refused_xrun");
         let f = frame_for(&outcome);
         assert!(f.get("tau_delta_samples").is_none(), "{f}");
+    }
+    /// #363 precedence: an xrun-crossed lifecycle is refused before the
+    /// declaration is consulted, exactly as it is refused before the
+    /// comparison. A contaminated capture's declared latency is no more
+    /// meaningful than its SNR, and reporting the moved declaration would
+    /// name a layer the xrun already explains.
+    #[test]
+    fn tau_result_xrun_takes_priority_over_a_moved_declaration() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: 1,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: Some(244),
+            reading2_declared_frames: Some(1268),
+            separation_s: 1.204,
+        });
+        assert_eq!(outcome.state(), "refused_xrun");
+    }
+
+    /// The whole point of #363's state: the readings agree to the sample and
+    /// the run is still refused, because the graph described the path
+    /// differently while they were taken. Agreement under a moved
+    /// declaration is the agreement 42 of 97 rig runs reported over a τ one
+    /// period short.
+    #[test]
+    fn tau_result_moved_declaration_refuses_even_when_the_readings_agree() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.004_416_7,
+            reading2_s: 0.004_416_7,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 41.2,
+            reading1_declared_frames: Some(244),
+            reading2_declared_frames: Some(1268),
+            separation_s: 1.204,
+        });
+        assert_eq!(outcome.state(), "disagree_declared_latency");
+        assert!(
+            outcome.stored_entry("farina_short_ess_v2").is_none(),
+            "a moved declaration must store nothing"
+        );
+
+        let frame = frame_for(&outcome);
+        assert_eq!(frame["tau_s"], Value::Null);
+        assert_eq!(frame["tau_agreement_count"], json!(0));
+        assert_eq!(frame["tau_reading1_declared_frames"], json!(244));
+        assert_eq!(frame["tau_reading2_declared_frames"], json!(1268));
+        assert_eq!(frame["tau_reading_separation_s"], json!(1.204));
+        // The readings are reported even though they matched — a reader of a
+        // refusal needs to see what was thrown away.
+        assert!(frame["tau_reading1_s"].as_f64().is_some());
+        assert!(frame["tau_reading2_s"].as_f64().is_some());
+        let err = frame["tau_error"].as_str().unwrap_or_default();
+        assert!(err.contains("244") && err.contains("1268"), "got {err:?}");
+    }
+
+    /// A backend that declares nothing must never look like two backends
+    /// declaring the same thing, and must never trip the guard. `null` on
+    /// the wire is *not applicable*, the `period_size` precedent — the key
+    /// being absent is what means a daemon older than #363.
+    #[test]
+    fn tau_result_undeclared_latency_never_fires_the_guard() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 0.987,
+        });
+        assert_eq!(outcome.state(), "measured");
+
+        let frame = frame_for(&outcome);
+        assert_eq!(frame["tau_reading1_declared_frames"], Value::Null);
+        assert_eq!(frame["tau_reading2_declared_frames"], Value::Null);
+        assert_eq!(frame["tau_reading_separation_s"], json!(0.987));
+
+        // And the evidence reaches disk, or an archived τ cannot be judged.
+        let entry = outcome
+            .stored_entry("farina_short_ess_v2")
+            .expect("an agreeing pair stores an entry");
+        assert_eq!(entry.declared_latency_frames, None);
+        assert_eq!(entry.reading_separation_s, Some(0.987));
+    }
+
+    /// One lifecycle declaring and the other not is not a disagreement the
+    /// instrument can assert — it is one account, not two. Refusing there
+    /// would fire on any backend whose first read happened before the graph
+    /// settled.
+    #[test]
+    fn tau_result_one_sided_declaration_does_not_refuse() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: Some(244),
+            reading2_declared_frames: None,
+            separation_s: 1.0,
+        });
+        assert_eq!(outcome.state(), "measured");
     }
 }

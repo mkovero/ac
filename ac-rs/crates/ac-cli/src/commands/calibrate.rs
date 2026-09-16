@@ -237,23 +237,43 @@ fn render_tau_leg(data: &serde_json::Value) -> Vec<String> {
     match state {
         "measured" => match data.get("tau_s").and_then(|v| v.as_f64()) {
             Some(tau_s) => {
-                let n = data
-                    .get("tau_agreement_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let agree = if n > 0 {
-                    format!("{n} readings agree, ")
-                } else {
-                    String::new()
-                };
-                vec![format!(
-                    "  {:<8}{:.4} ms   (measured, {agree}{conditions})",
+                // #363: the value alone on its line, the evidence beneath it.
+                // `corroborated` / `N readings agree` are gone: they compress
+                // evidence into a verdict the instrument cannot reach — 42 of
+                // 97 rig runs printed that verdict over a τ one period short.
+                let mut lines = vec![format!(
+                    "  {:<8}{:.4} ms   {}   (measured, {conditions})",
                     "Delay:",
-                    tau_s * 1000.0
-                )]
+                    tau_s * 1000.0,
+                    samples_clause(tau_s, sample_rate),
+                )];
+                lines.push(format!(
+                    "          {}",
+                    lifetimes_clause(
+                        data.get("tau_agreement_count").and_then(|v| v.as_u64()),
+                        data.get("tau_reading_separation_s")
+                            .and_then(|v| v.as_f64()),
+                        true,
+                    )
+                ));
+                if let Some(line) = declared_clause(data, true) {
+                    lines.push(format!("          {line}"));
+                }
+                if let (Some(snr), Some(threshold)) = (
+                    data.get("tau_pre_impulse_snr_db").and_then(|v| v.as_f64()),
+                    data.get("tau_snr_threshold_db").and_then(|v| v.as_f64()),
+                ) {
+                    lines.push(format!(
+                        "          peak SNR {snr:.1} dB pre-impulse, threshold {threshold:.1} dB"
+                    ));
+                }
+                lines
             }
             None => vec![format!("  {:<8}not measured", "Delay:")],
         },
+        // #363: the graph's own account of the path moved between the two
+        // lifecycles, so agreement between the readings proves nothing.
+        "disagree_declared_latency" => render_tau_declared_latency_leg(data, sample_rate),
         "error" => {
             // A real measurement failure with a loopback present — state
             // the observed cause, unlike the no-loopback case below where
@@ -328,9 +348,135 @@ fn render_tau_disagreement_leg(
         let r1_samples = r1 * sr as f64;
         let r2_samples = r2 * sr as f64;
         let delta_ms = delta as f64 / sr as f64 * 1000.0;
+        // #363: split — one line was 88 columns — and the pair gains the noun
+        // `readings`, now that a *declared* pair can appear in the same block.
         lines.push(format!(
-            "          {r1_samples:.3} samples \u{2192} {r2_samples:.3} samples  \
-             (\u{394} {delta} samples = {delta_ms:.4} ms at {sr} Hz)"
+            "          readings {r1_samples:.3} samples \u{2192} {r2_samples:.3} samples"
+        ));
+        lines.push(format!(
+            "          \u{394} {delta} samples = {delta_ms:.4} ms at {sr} Hz"
+        ));
+    }
+    // #363: how far apart the lifecycles were, and what the graph declared —
+    // a recurrence that names its own layer instead of costing a session.
+    if let Some(separation_s) = data
+        .get("tau_reading_separation_s")
+        .and_then(|v| v.as_f64())
+    {
+        lines.push(format!(
+            "          {}",
+            lifetimes_clause(Some(2), Some(separation_s), false)
+        ));
+    }
+    if let Some(line) = declared_clause(data, true) {
+        lines.push(format!("          {line}"));
+    }
+    lines
+}
+
+/// τ in whole samples beside the millisecond figure (#363). The failure class
+/// this issue documents is an exact multiple of the period, and the period is
+/// printed one clause away in samples — in milliseconds the check needs
+/// mental arithmetic, in samples it is a division.
+fn samples_clause(tau_s: f64, sample_rate: Option<u64>) -> String {
+    match sample_rate {
+        Some(sr) => format!("{} samples", (tau_s * sr as f64).round() as i64),
+        None => String::new(),
+    }
+}
+
+/// How many lifecycles produced the value and how far apart they were (#363).
+///
+/// The separation is the quantity this issue is about: a graph-buffering
+/// state that persists over seconds defeats a 1.2 s separation, and printing
+/// it lets a reader make that judgement instead of being handed a verdict.
+/// `with_resolution` adds the match resolution, which belongs only where a
+/// comparison concluded the readings matched.
+fn lifetimes_clause(
+    count: Option<u64>,
+    separation_s: Option<f64>,
+    with_resolution: bool,
+) -> String {
+    let n = count.unwrap_or(0);
+    if n < 2 {
+        return "1 reading, nothing compared".to_string();
+    }
+    let resolution = if with_resolution {
+        ", identical to the sample"
+    } else {
+        ""
+    };
+    match separation_s {
+        Some(s) => format!("{n} lifetimes {s:.3} s apart{resolution}"),
+        None if with_resolution => {
+            format!("{n} lifetimes{resolution}, separation not recorded")
+        }
+        None => format!("{n} lifetimes, separation not recorded"),
+    }
+}
+
+/// What the graph declared about the path (#363), in samples and never in
+/// milliseconds: one word per unit, and keeping it out of ms makes
+/// subtracting it from a τ unnatural rather than inviting. That subtraction
+/// must never appear — the figure carries `jackd`'s unvalidated `-I`/`-O`.
+///
+/// `None` (omit the line entirely) when the daemon predates #363 and sent no
+/// field at all; a present-but-`null` field means the backend declares
+/// nothing, which is stated.
+fn declared_clause(data: &serde_json::Value, live: bool) -> Option<String> {
+    let field = data.get("tau_reading1_declared_frames")?;
+    let both = if live { " (both lifetimes)" } else { "" };
+    match field.as_u64() {
+        Some(frames) => Some(format!("graph declared {frames} samples{both}")),
+        None => Some("graph declared: not reported by this backend".to_string()),
+    }
+}
+
+/// Render #363's `disagree_declared_latency`: the graph described the path
+/// differently across the two lifecycles.
+///
+/// The readings print *even though they match*, and they print second. A
+/// reader seeing a refusal wants to know what was thrown away, and two
+/// identical readings beneath a moved declaration is the fastest statement of
+/// why agreement was not enough.
+fn render_tau_declared_latency_leg(
+    data: &serde_json::Value,
+    sample_rate: Option<u64>,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  {:<8}not measured (graph latency moved between lifetimes \u{2014} not stored)",
+        "Delay:"
+    )];
+    if let (Some(d1), Some(d2)) = (
+        data.get("tau_reading1_declared_frames")
+            .and_then(|v| v.as_u64()),
+        data.get("tau_reading2_declared_frames")
+            .and_then(|v| v.as_u64()),
+    ) {
+        let delta = d2 as i64 - d1 as i64;
+        lines.push(format!(
+            "          graph declared {d1} samples \u{2192} {d2} samples  \
+             (\u{394} {delta} samples)"
+        ));
+    }
+    if let (Some(sr), Some(r1), Some(r2)) = (
+        sample_rate,
+        data.get("tau_reading1_s").and_then(|v| v.as_f64()),
+        data.get("tau_reading2_s").and_then(|v| v.as_f64()),
+    ) {
+        lines.push(format!(
+            "          readings {:.3} samples \u{2192} {:.3} samples",
+            r1 * sr as f64,
+            r2 * sr as f64
+        ));
+    }
+    if let Some(separation_s) = data
+        .get("tau_reading_separation_s")
+        .and_then(|v| v.as_f64())
+    {
+        lines.push(format!(
+            "          {}",
+            lifetimes_clause(Some(2), Some(separation_s), false)
         ));
     }
     lines
@@ -474,15 +620,39 @@ fn render_tau_history_leg(c: &serde_json::Value) -> Vec<String> {
         .get("agreement_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let corroboration = if agreement_count >= 2 {
-        format!(", corroborated \u{d7}{agreement_count}")
-    } else {
-        ", uncorroborated \u{2014} single reading".to_string()
-    };
+    // #363: `corroborated ×N` is gone — a conclusion the 97-run evidence
+    // disproves, and the count is structurally invariant so it carried no
+    // information. What replaces it is the evidence: how many lifecycles, how
+    // far apart, and what the graph declared. The timestamp moves onto its
+    // own line, which also fixes a line that was 84 columns.
+    let sample_rate = entry
+        .get("conditions")
+        .and_then(|c| c.get("sample_rate"))
+        .and_then(|v| v.as_u64());
     lines.push(format!(
-        "    Delay:  {:.4} ms   (measured {measured_at}, {age}{corroboration})",
-        tau_s * 1000.0
+        "    Delay:  {:.4} ms   {}",
+        tau_s * 1000.0,
+        samples_clause(tau_s, sample_rate)
     ));
+    lines.push(format!("            measured {measured_at}, {age}"));
+    lines.push(format!(
+        "            {}",
+        lifetimes_clause(
+            Some(agreement_count),
+            entry.get("reading_separation_s").and_then(|v| v.as_f64()),
+            true,
+        )
+    ));
+    // On disk `None` cannot tell a pre-#363 entry from a non-declaring
+    // backend, so the text asserts neither.
+    let declared = match entry
+        .get("declared_latency_frames")
+        .and_then(|v| v.as_u64())
+    {
+        Some(frames) => format!("graph declared {frames} samples"),
+        None => "graph declared: not recorded".to_string(),
+    };
+    lines.push(format!("            {declared}"));
 
     if let Some(cond) = entry.get("conditions") {
         let device = cond.get("device").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -789,18 +959,29 @@ mod tests {
             ]
         });
         let lines = render_tau_history_leg(&entry);
-        assert_eq!(lines.len(), 3, "got {lines:?}");
+        // #363 split the value line: the value alone, then the evidence,
+        // then the conditions and ports that were always there.
+        assert_eq!(lines.len(), 6, "got {lines:?}");
+        assert_eq!(lines[0], "    Delay:  1.1931 ms   57 samples".to_string());
         assert!(
-            lines[0].starts_with("    Delay:  1.1931 ms   (measured 2020-01-01T00:00:00Z, "),
+            lines[1].starts_with("            measured 2020-01-01T00:00:00Z, "),
             "got {:?}",
-            lines[0]
-        );
-        assert_eq!(
-            lines[1],
-            "            jack, dev 0, 48000 Hz, period 128".to_string()
+            lines[1]
         );
         assert_eq!(
             lines[2],
+            "            1 reading, nothing compared".to_string()
+        );
+        assert_eq!(
+            lines[3],
+            "            graph declared: not recorded".to_string()
+        );
+        assert_eq!(
+            lines[4],
+            "            jack, dev 0, 48000 Hz, period 128".to_string()
+        );
+        assert_eq!(
+            lines[5],
             "            system:playback_3 \u{2192} system:capture_1".to_string()
         );
     }
@@ -830,12 +1011,15 @@ mod tests {
         });
         let lines = render_tau_history_leg(&entry);
         // Newest (2024) entry's value must be the one shown, not the older.
+        assert!(lines[0].contains("2.0000 ms"), "got {:?}", lines[0]);
+        // #363 moved the timestamp onto its own line, so the identity check
+        // for "which entry was picked" moves with it.
         assert!(
-            lines[0].contains("2.0000 ms") && lines[0].contains("2024-06-15T12:00:00Z"),
+            lines[1].contains("2024-06-15T12:00:00Z"),
             "got {:?}",
-            lines[0]
+            lines[1]
         );
-        assert_eq!(lines[1], "            jack, dev 0, 48000 Hz, period 256");
+        assert_eq!(lines[4], "            jack, dev 0, 48000 Hz, period 256");
         let last = lines.last().unwrap();
         assert!(
             last.contains("+1 more") && last.contains("cal.json"),
@@ -843,10 +1027,14 @@ mod tests {
         );
     }
 
-    // ─── run_show τ corroboration rendering — issue #347 ────────────────
+    // ─── run_show τ evidence rendering — issues #347, #363 ──────────────
 
+    /// #363: the stored entry states its *evidence* — how many lifecycles,
+    /// how far apart, what the graph declared — never the verdict
+    /// `corroborated`. 42 of 97 rig runs printed that verdict over a τ one
+    /// period short, so the word claims more than the instrument can reach.
     #[test]
-    fn render_tau_history_leg_corroborated_names_the_agreement_count() {
+    fn render_tau_history_leg_states_the_evidence_not_a_verdict() {
         let entry = serde_json::json!({
             "key": "out0_in0",
             "tau_history": [
@@ -858,22 +1046,70 @@ mod tests {
                     "tau_s": 0.0011931,
                     "measured_at": "2024-06-15T12:00:00Z",
                     "method": "farina_short_ess",
-                    "agreement_count": 2
+                    "agreement_count": 2,
+                    "declared_latency_frames": 244,
+                    "reading_separation_s": 1.204
                 }
             ]
         });
         let lines = render_tau_history_leg(&entry);
         assert!(
-            lines[0].contains("corroborated \u{d7}2"),
-            "got {:?}",
+            lines[0].starts_with("    Delay:  1.1931 ms   57 samples"),
+            "value line carries ms and samples, nothing else: {:?}",
             lines[0]
+        );
+        // The age is computed against the real clock, so only its shape can
+        // be pinned — a literal here would rot on a calendar boundary.
+        assert!(
+            lines[1].starts_with("            measured 2024-06-15T12:00:00Z, ")
+                && lines[1].ends_with(" ago"),
+            "got {:?}",
+            lines[1]
+        );
+        assert_eq!(
+            lines[2],
+            "            2 lifetimes 1.204 s apart, identical to the sample"
+        );
+        assert_eq!(lines[3], "            graph declared 244 samples");
+        assert!(
+            !lines.iter().any(|l| l.contains("corroborated")),
+            "the verdict must not survive anywhere: {lines:?}"
         );
     }
 
+    /// The separation is the number #363 is about, so an entry written
+    /// before it existed must say so rather than look like a fresh one.
     #[test]
-    fn render_tau_history_leg_missing_agreement_count_reads_as_uncorroborated() {
-        // Pre-#347 entry: no `agreement_count` field at all. It must not be
-        // indistinguishable from a freshly-corroborated one.
+    fn render_tau_history_leg_names_a_missing_separation_as_not_recorded() {
+        let entry = serde_json::json!({
+            "key": "out0_in0",
+            "tau_history": [
+                {
+                    "conditions": {
+                        "device": 0, "backend": "jack", "sample_rate": 48000,
+                        "period_size": 128, "output_port": "a", "input_port": "b"
+                    },
+                    "tau_s": 0.0011931,
+                    "measured_at": "2026-08-30T11:02:44Z",
+                    "method": "farina_short_ess_v2",
+                    "agreement_count": 2
+                }
+            ]
+        });
+        let lines = render_tau_history_leg(&entry);
+        assert_eq!(
+            lines[2],
+            "            2 lifetimes, identical to the sample, separation not recorded"
+        );
+        assert_eq!(lines[3], "            graph declared: not recorded");
+    }
+
+    /// #347's requirement, preserved through #363's rewording: a pre-#347
+    /// entry must never read like a two-lifecycle one. The distinction is
+    /// now carried by what is *missing*, named as missing, rather than by an
+    /// adjective the instrument cannot support.
+    #[test]
+    fn render_tau_history_leg_missing_agreement_count_reads_as_one_reading() {
         let entry = serde_json::json!({
             "key": "out0_in0",
             "tau_history": [
@@ -889,10 +1125,10 @@ mod tests {
             ]
         });
         let lines = render_tau_history_leg(&entry);
+        assert_eq!(lines[2], "            1 reading, nothing compared");
         assert!(
-            lines[0].contains("uncorroborated \u{2014} single reading"),
-            "got {:?}",
-            lines[0]
+            !lines.iter().any(|l| l.contains("uncorroborated")),
+            "got {lines:?}"
         );
     }
 
@@ -974,6 +1210,85 @@ mod tests {
             ]
         });
         let lines = render_tau_history_leg(&entry);
-        assert_eq!(lines[1], "            cpal, dev 0, 44100 Hz, period n/a");
+        assert_eq!(lines[4], "            cpal, dev 0, 44100 Hz, period n/a");
+    }
+
+    /// #363 UX tabulated every line at 80 columns or narrower. Two lines
+    /// overflowed before the split — the stored entry at 84 and the
+    /// period-shift evidence at 88 — so the claim needs a test rather than a
+    /// table: worst realistic content, every state that renders τ evidence.
+    #[test]
+    fn tau_render_lines_fit_eighty_columns() {
+        let mut rendered: Vec<String> = Vec::new();
+
+        let live_measured = serde_json::json!({
+            "tau_state": "measured",
+            "tau_s": 0.017_822_9,
+            "tau_sample_rate": 192_000,
+            "tau_period_size": 2048,
+            "tau_agreement_count": 2,
+            "tau_reading_separation_s": 12.345,
+            "tau_reading1_declared_frames": 12288,
+            "tau_reading2_declared_frames": 12288,
+            "tau_pre_impulse_snr_db": 41.2,
+            "tau_snr_threshold_db": 24.0,
+        });
+        rendered.extend(render_tau_leg(&live_measured));
+
+        // The same run on a backend that declares nothing — the longer of
+        // the two declaration clauses.
+        let mut undeclared = live_measured.clone();
+        undeclared["tau_reading1_declared_frames"] = serde_json::Value::Null;
+        undeclared["tau_reading2_declared_frames"] = serde_json::Value::Null;
+        rendered.extend(render_tau_leg(&undeclared));
+
+        rendered.extend(render_tau_leg(&serde_json::json!({
+            "tau_state": "disagree_declared_latency",
+            "tau_sample_rate": 192_000,
+            "tau_period_size": 2048,
+            "tau_reading1_s": 0.064,
+            "tau_reading2_s": 0.064,
+            "tau_reading1_declared_frames": 12288,
+            "tau_reading2_declared_frames": 1268,
+            "tau_reading_separation_s": 12.345,
+        })));
+
+        rendered.extend(render_tau_leg(&serde_json::json!({
+            "tau_state": "disagree_period_shift",
+            "tau_sample_rate": 96_000,
+            "tau_period_size": 1024,
+            "tau_reading1_s": 0.033_083_3,
+            "tau_reading2_s": 0.043_750_0,
+            "tau_delta_samples": 1024,
+            "tau_periods": 1,
+            "tau_reading_separation_s": 1.187,
+            "tau_reading1_declared_frames": 1268,
+            "tau_reading2_declared_frames": 1268,
+        })));
+
+        rendered.extend(render_tau_history_leg(&serde_json::json!({
+            "key": "out1_in4",
+            "tau_history": [{
+                "conditions": {
+                    "device": 12, "backend": "coreaudio", "sample_rate": 192_000,
+                    "period_size": 2048,
+                    "output_port": "system:playback_2", "input_port": "system:capture_4"
+                },
+                "tau_s": 0.017_822_9,
+                "measured_at": "2026-09-14T22:31:08Z",
+                "method": "farina_short_ess_v2",
+                "agreement_count": 2,
+                "declared_latency_frames": 12288,
+                "reading_separation_s": 12.345
+            }]
+        })));
+
+        for line in rendered {
+            assert!(
+                line.chars().count() <= 80,
+                "line runs to {} columns: {line:?}",
+                line.chars().count()
+            );
+        }
     }
 }

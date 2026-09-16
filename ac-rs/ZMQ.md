@@ -945,7 +945,9 @@ Look up a stored calibration entry.
       "tau_s":       <float>,
       "measured_at": "<RFC3339>",
       "method":      "<string>",
-      "agreement_count": <int>   // #347: readings that corroborated this entry, always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a corroborated one
+      "agreement_count": <int>,  // #347: readings that agreed, from separate client lifecycles — agreement over the interval in `reading_separation_s`, not corroboration; see #363. Always >= 2; 0 on any entry written before #347 (`#[serde(default)]`) — never indistinguishable from a two-lifecycle one
+      "declared_latency_frames": <int> | null,  // #363: what the graph declared this path to be while the entry was measured. Not a τ and never subtracted from one — it carries jackd's unvalidated -I/-O. null on entries written before #363 *and* on backends that declare nothing; on disk those are indistinguishable
+      "reading_separation_s": <float> | null    // #363: wall-clock seconds between the two lifecycles' captures — the number that says what the agreement is worth, since the failure it guards persists over seconds. null on entries written before #363
     }
   ]   // always present, [] when no τ has ever been measured for this key
 }
@@ -1670,15 +1672,19 @@ reading either.
   "out_state":            "measured" | "unchanged" | "absent",
   "in_state":             "measured" | "unchanged" | "absent",
   "tau_state":            "measured" | "not_measured_low_snr" | "error"
-                           | "disagree_period_shift" | "disagree_other" | "refused_xrun",
+                           | "disagree_period_shift" | "disagree_other" | "refused_xrun"
+                           | "disagree_declared_latency",
   "tau_s":                <float> | null,  // interface round-trip delay, seconds; only non-null when tau_state == "measured"
   "tau_sample_rate":      <int>,           // condition τ was measured/attempted under
   "tau_period_size":      <int> | null,    // ditto; null on backends that can't report one (not "unknown")
-  "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2
+  "tau_agreement_count":  <int>,           // #347: readings that agreed; 0 unless tau_state == "measured", where it is always 2. Agreement over `tau_reading_separation_s`, not corroboration — see #363 and the state table below
   "tau_reading1_s":       <float>,         // #347: first lifecycle's raw reading — present whenever both lifecycles ran (measured / disagree_* / refused_xrun)
   "tau_reading2_s":       <float>,         // #347: second lifecycle's raw reading — ditto
   "tau_reading1_xruns":   <int>,           // #369: xruns crossed during reading 1's own lifecycle — present alongside tau_reading1_s, always a concrete count (0 included), never bare null
   "tau_reading2_xruns":   <int>,           // #369: ditto for reading 2 — present alongside tau_reading2_s
+  "tau_reading1_declared_frames": <int> | null,  // #363: what the graph declared this path to be while reading 1 ran — present alongside tau_reading1_s. null means the backend declares nothing (not applicable, not unknown); the field being *absent* means a daemon older than #363
+  "tau_reading2_declared_frames": <int> | null,  // #363: ditto for reading 2
+  "tau_reading_separation_s": <float>,     // #363: wall-clock seconds between the two lifecycles' captures — present whenever both lifecycles ran
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
   "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
@@ -1734,6 +1740,7 @@ still-unity-keyed decision.
 | `error` | a lifecycle's own measurement failed for a reason other than low SNR (`tau_error` names why, including which reading); the voltage-cal legs above are unaffected |
 | `disagree_period_shift` | the two readings disagreed by an exact multiple of `tau_period_size` samples — a graph-buffering shift (software), not hardware drift. Nothing is stored. |
 | `disagree_other` | the two readings disagreed, but not by a period multiple — a different fault class. Nothing is stored. |
+| `disagree_declared_latency` | the two lifecycles' `tau_reading{1,2}_declared_frames` differed (#363) — the graph's own account of the path moved between two readings of an unchanged graph, so the readings agreeing proves nothing. Compared as exact integer frames, no tolerance: these are counts the graph asserts, not measurements. Checked *after* `refused_xrun` and *before* the readings are compared. Nothing is stored. **This does not detect the failure #363 documents** — a shift the graph never declares stays invisible, and no reachable rig currently reproduces it; what this state catches is the subset that announces itself. |
 | `refused_xrun` | either lifecycle's own `AudioEngine::xruns()` delta was nonzero (#369) — checked *before* the two readings are compared, so this fires even when they would otherwise have agreed, closing the corroboration hole a doubly-corrupted agreeing pair would leave in the `measured` path. Also takes precedence over `not_measured_low_snr` (#368/#369 merge decision): a lifecycle that crosses an xrun skips its own SNR gate entirely, so a capture an xrun corrupted is never reported as merely low-SNR — a contaminated capture's SNR figure is not a meaningful "no arrival" reading. Nothing is stored. |
 
 `tau_sample_rate` / `tau_period_size` are the conditions the attempt ran

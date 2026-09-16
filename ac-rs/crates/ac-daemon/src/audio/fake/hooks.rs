@@ -58,6 +58,41 @@ pub(super) fn period_size_override() -> Option<u32> {
     })
 }
 
+/// Opt-in, fake-only test hook (#363): lets a test drive the two
+/// `measure_tau_twice` lifecycles across *different* declared graph
+/// latencies, which is the only way `tau_result`'s
+/// `disagree_declared_latency` path can go red under `--fake-audio` — the
+/// fake declares nothing by default, and no reachable rig reproduces the
+/// sticky one-period state this guard exists for (see #363's 2026-08-23 and
+/// 2026-09-16 records).
+///
+/// `AC_FAKE_DECLARED_LATENCY_FRAMES_OVERRIDE`: comma-separated frame-count
+/// list, one value consumed per `declared_latency_frames` call in this
+/// process (0-based: the first call gets the first value); a call past the
+/// end of the list yields `None`. Unset ⇒ every call yields `None`, i.e. the
+/// fake declares nothing, byte-identical to before #363. `measure_tau_twice`
+/// makes exactly one such call per lifecycle, so a two-value list is one
+/// value per reading.
+static DECLARED_LATENCY_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn declared_latency_override_list() -> &'static [u32] {
+    static LIST: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("AC_FAKE_DECLARED_LATENCY_FRAMES_OVERRIDE")
+            .ok()
+            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Next declared latency, consuming one slot of the override list (see
+/// [`DECLARED_LATENCY_CALL_COUNT`] doc above).
+pub(super) fn next_declared_latency_frames() -> Option<u32> {
+    let call_idx = DECLARED_LATENCY_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    declared_latency_override_list().get(call_idx).copied()
+}
+
 /// Opt-in, fake-only test hooks (#368): let an external integration test
 /// simulate a low/no-SNR capture — the muted-route rig case #368's AC3
 /// needs reachable under `--fake-audio`, which by default always returns a

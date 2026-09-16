@@ -57,6 +57,32 @@ pub struct TauEntry {
     /// is no longer a storable outcome — corroborated entries store `>= 2`.
     #[serde(default)]
     pub agreement_count: u32,
+    /// What the graph declared its own path latency to be, in frames, while
+    /// this entry was measured (#363). The second, structurally different
+    /// account of the same path: the readings are what `ac` measured, this is
+    /// what the graph asserted about itself.
+    ///
+    /// **Not a τ, and never subtracted from one.** It carries the driver's
+    /// claim plus `jackd`'s user-supplied `-I`/`-O` arguments, neither of
+    /// which is validated. `None` on an entry written before this field
+    /// existed *and* on a backend that declares nothing — on disk those two
+    /// are indistinguishable, so a reader must not infer a backend
+    /// limitation from its absence (the wire can tell them apart; see
+    /// ZMQ.md's null-versus-absent rule).
+    #[serde(default)]
+    pub declared_latency_frames: Option<u32>,
+    /// Wall-clock seconds between the two lifecycles' captures (#363).
+    ///
+    /// This is the number that says what the agreement is worth. The failure
+    /// this field exists for is a graph-buffering state that persists over
+    /// *seconds*: two readings about a second apart land in the same state
+    /// and agree, which is why 42 of 97 rig runs stored a value one period
+    /// short while reporting that two readings agreed. A reader compares this
+    /// against how long the state is believed to persist; the instrument
+    /// cannot do that comparison for them. `None` on entries written before
+    /// this field existed.
+    #[serde(default)]
+    pub reading_separation_s: Option<f64>,
 }
 
 /// Why an exact-match τ lookup missed. Names the delta to the nearest
@@ -332,6 +358,8 @@ pub(super) mod fixtures {
             measured_at: "2026-01-01T00:00:00Z".to_string(),
             method: "farina_short_ess".to_string(),
             agreement_count: 2,
+            declared_latency_frames: None,
+            reading_separation_s: None,
         }
     }
 }

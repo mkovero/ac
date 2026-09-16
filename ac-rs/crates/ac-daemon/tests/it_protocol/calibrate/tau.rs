@@ -324,6 +324,121 @@ fn calibrate_measures_tau_on_hot_off_unity_fake_loopback() {
     assert!(done["tau_s"].as_f64().is_some(), "frame: {done}");
 }
 
+/// #363: the graph's own declared path latency moved between the two
+/// lifecycles, so the run is refused even though the two readings agree to
+/// the sample. That combination — agreeing readings, moved declaration — is
+/// the whole reason the state exists: #363 measured 42 of 97 rig runs storing
+/// a value one period short while reporting that two readings agreed.
+///
+/// Drives it through the real `measure_tau_twice`, with equal delays so the
+/// comparison would have said `Agree`, and a two-value declaration hook so
+/// the two lifecycles declare different frame counts.
+#[test]
+fn calibrate_refuses_when_the_declared_latency_moves_between_lifecycles() {
+    let d = Daemon::spawn_with_env(&[
+        ("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "32,32"),
+        ("AC_FAKE_DECLARED_LATENCY_FRAMES_OVERRIDE", "244,1268"),
+        ("AC_FAKE_PERIOD_SIZE_OVERRIDE", "1024"),
+    ]);
+    let cal_path = d.home.join(".config").join("ac").join("cal.json");
+    let c = Client::new(&d);
+
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    for step in 1..=2 {
+        expect_prompt(&c, step);
+        reply_vrms(&c, None);
+    }
+    let done = expect_cal_done(&c);
+
+    assert_eq!(
+        done["tau_state"],
+        json!("disagree_declared_latency"),
+        "frame: {done}"
+    );
+    assert_eq!(
+        done["tau_reading1_declared_frames"],
+        json!(244),
+        "frame: {done}"
+    );
+    assert_eq!(
+        done["tau_reading2_declared_frames"],
+        json!(1268),
+        "frame: {done}"
+    );
+    assert_eq!(
+        done["tau_s"],
+        json!(null),
+        "a moved declaration must not report a τ: {done}"
+    );
+    assert_eq!(done["tau_agreement_count"], json!(0), "frame: {done}");
+    // The readings are reported even though they agree — that is the point.
+    assert!(done["tau_reading1_s"].as_f64().is_some(), "frame: {done}");
+    assert!(done["tau_reading2_s"].as_f64().is_some(), "frame: {done}");
+    assert_eq!(
+        done["tau_reading1_s"], done["tau_reading2_s"],
+        "test setup: the readings must agree, or this proves nothing: {done}"
+    );
+    assert!(
+        done["tau_reading_separation_s"]
+            .as_f64()
+            .is_some_and(|s| s > 0.0),
+        "frame: {done}"
+    );
+    assert!(
+        done["tau_error"]
+            .as_str()
+            .is_some_and(|m| m.contains("244") && m.contains("1268")),
+        "frame: {done}"
+    );
+
+    let after = read_cal_entry(&cal_path);
+    assert!(
+        after.get("tau_history").is_none()
+            || after["tau_history"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+        "a moved declaration must not append to tau_history: {after}"
+    );
+}
+
+/// #363: the fake declares nothing by default, so a healthy two-lifecycle run
+/// must report the declaration as `null` — *not applicable* — and still
+/// measure. Guards the null-versus-absent rule from the daemon side: a
+/// backend that declares nothing must never look like two backends declaring
+/// the same thing.
+#[test]
+fn calibrate_measures_with_null_declared_latency_when_the_backend_declares_nothing() {
+    let d = Daemon::spawn_with_env(&[("AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE", "32,32")]);
+    let c = Client::new(&d);
+    let r = c.call(json!({"cmd": "calibrate", "ref_dbfs": -20.0,
+                           "output_channel": 0, "input_channel": 0}));
+    assert_eq!(r["ok"], json!(true));
+    for step in 1..=2 {
+        expect_prompt(&c, step);
+        reply_vrms(&c, None);
+    }
+    let done = expect_cal_done(&c);
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+    assert_eq!(
+        done["tau_reading1_declared_frames"],
+        json!(null),
+        "frame: {done}"
+    );
+    assert_eq!(
+        done["tau_reading2_declared_frames"],
+        json!(null),
+        "frame: {done}"
+    );
+    assert!(
+        done["tau_reading_separation_s"]
+            .as_f64()
+            .is_some_and(|s| s > 0.0),
+        "a measured run records how far apart its lifecycles were: {done}"
+    );
+}
+
 /// QA #348 test-coverage gap: every other disagreement test drives
 /// `compare_tau_readings` or `tau_result` as a pure function, never
 /// `measure_tau_twice` itself — the function that actually spins up two
