@@ -4,7 +4,7 @@
 //! `ac-scene`'s sweep-IR panel cannot disagree about a capture.
 
 use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
-use crate::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
+use crate::measurement::sweep::{ir_peak, BoundInputs, CausalBound, MissingBoundInput};
 use crate::shared::calibration::{compare_tau_readings, TauComparison, TauDisagreement};
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
@@ -253,22 +253,6 @@ pub(super) fn causal_bound(
             CausalBound::Unavailable(MissingBoundInput::Both { reference_reason })
         }
     }
-}
-
-/// Index and magnitude of the largest-magnitude sample of a linear IR.
-/// Ties keep the earliest index.
-pub(super) fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
-    linear_ir
-        .iter()
-        .enumerate()
-        .fold((0usize, 0.0_f64), |acc, (i, &v)| {
-            let m = v.abs();
-            if m > acc.1 {
-                (i, m)
-            } else {
-                acc
-            }
-        })
 }
 
 /// Pre-impulse noise floor region: everything strictly before the peak,

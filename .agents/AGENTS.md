@@ -155,10 +155,9 @@ Pipeline roles run non-interactively (`bin/*.sh` → `claude -p` or `codex exec`
 The session has **no later turn**: when your reply ends, the process exits. Nothing
 wakes it for a finished background command.
 
-- **Never background a command whose result you need.** Gate commands
-  (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`)
-  run in the foreground, one call each, with the tool timeout raised to its
-  maximum. A fresh target dir makes each one take minutes — still foreground.
+- **Never background a command whose result you need.** The workspace gate
+  (`$AC_GATE`, see below) and any targeted test run in the foreground, with the
+  tool timeout raised to its maximum.
 - **Deliverable before the turn ends.** The review comment, the push, the PR
   comment, the labels — whatever your role produces must already exist when you
   stop. "Waiting for the background run" is the end of the session, with
@@ -170,6 +169,36 @@ Concrete bad output, 2026-09-15, PR #437 — three rounds lost:
 - qa: *"Holding here — clippy compiling full workspace in a fresh isolated target dir … Will resume automatically once it finishes."* → no review.
 - developer: *"Standing by for the `cargo test --workspace` background run to finish before posting the PR comment."* → fix written, never committed or pushed.
 - qa: *"Waiting on background gate run — will continue the review once notified."* → no review.
+
+## workspace gate — every role that builds
+
+The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo test --workspace`. Run it only as
+`$AC_GATE` (`bin/gate.sh` in the main checkout), from inside your worktree:
+
+- It runs all three once per commit tree and records the result under
+  `$AC_GATE_DIR`. Any later call for the same tree — yours, the runner's,
+  another role's — prints the record without running cargo. Calling it again
+  is free; running the three commands by hand is not.
+- Output: PASS/FAIL per step, the failing lines of a red step, and the path of
+  each full log. Exit 0 all pass, 1 any failed, 2 refused.
+- It refuses an uncommitted tree (exit 2): the record names a commit. Commit
+  locally first; push only after a pass.
+- Need more than it printed? Read the log at the printed path. Need one test?
+  `cargo test -p <crate> <test name>`. **Never re-run the workspace gate to
+  see output** — and never pipe a gate command through `tail`, which replaces
+  its exit status with tail's. Truncate-then-rerun was the largest single cost
+  in the 2026-09 transcripts: qa averaged two full `cargo test --workspace`
+  runs per session, the second identical to the first.
+- The record is execution evidence, not a review. A reviewer still reads every
+  new or changed test.
+
+**Target dirs.** The runner pins `CARGO_TARGET_DIR` to a per-worktree
+directory (`$AC_HOME/target/wt/<worktree>`), seeded warm. Never set
+`CARGO_TARGET_DIR` or `--target-dir` yourself, and never create a
+`target-<something>` directory. A target dir shared across worktrees does go
+false-fresh (cargo trusts mtimes and runs another worktree's code); the
+per-worktree dir is the fix, and a private cold one costs minutes per pass.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

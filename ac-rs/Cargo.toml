@@ -8,3 +8,12 @@ resolver = "2"
 inherits = "release"
 debug = "line-tables-only"
 strip = false
+
+# ac-core's DSP (sweep generation, deconvolution, loudness gating) runs ~10x
+# slower unoptimised, and its unit tests are the bulk of the workspace test
+# time: `cargo test -p ac-core --lib` takes 34 s at opt-level 0 and 3.3 s at 2
+# (2026-09-16), for ~11 s more compile. Optimising only the registry
+# dependencies changed nothing — the time is in ac-core itself. Applies to
+# every dev build, so tests, the gate, and `cargo run` share one artifact set.
+[profile.dev.package.ac-core]
+opt-level = 2

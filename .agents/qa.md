@@ -29,24 +29,30 @@ Thorough reviewer, domain knowledge in audio measurement. Numerical correctness 
   with triage after the review, not by skipping the check during it.
 
 ### build and test
-```bash
-cargo test --workspace       # THE gate — see below
-cargo test -p {crate}        # per crate, NOT sufficient to approve
-cargo clippy --workspace --all-targets -- -D warnings  # zero warnings expected
-cargo fmt --check
-```
+The runner has already run the workspace gate (`cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`) at the head you review, through `$AC_GATE`. Its
+record is in your task prompt; `$AC_GATE` prints it again at no cost
+(AGENTS.md → workspace gate).
 
-`--workspace` not `-p`. Two branches each passing `-p` can still break in
-combination.
+- Check the record names the head SHA you review (or says it reused a record
+  with the identical tree). Anything else → run `$AC_GATE` yourself.
+- Do **not** run the three workspace commands by hand. That record is the gate;
+  a second run of the same tree is the cost this replaced.
+- A red step: read its log at the printed path. Do not re-run to see output.
+- `cargo test -p {crate} <name>` for a targeted test that resolves a concrete
+  question — per crate is never sufficient to approve; the workspace record is.
+  Two branches each passing `-p` can still break in combination.
 
-Run each in the foreground, one call each. Never background the gate and wait:
-the session does not resume, and the review is lost (AGENTS.md → headless
+Any command you do run goes in the foreground. Never background and wait: the
+session does not resume, and the review is lost (AGENTS.md → headless
 sessions).
 
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
 log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
-`target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
+`log/`) — never `/tmp`. Build targets are pinned per worktree (AGENTS.md →
+workspace gate); never create your own. `/tmp` here is tmpfs sized for the OS, not
 for a cargo build; a scratch worktree parked there once ran root out of space
 at 99% usage and killed a linker mid-link. Whoever creates a scratch worktree
 removes it when the task ends (`git worktree remove`), not the next session
@@ -344,7 +350,7 @@ This rule is load-bearing: merge to main is human-only precisely because agent
 review is not independent (see `AGENTS.md` human gates), so this is the one
 mechanism stopping an approved-then-amended PR from reaching that human merge
 unreviewed. **Any commit pushed after approval revert PR to `needs-work`, remove
-`claude-approved`, and require fresh gate pass** — re-run full check (`cargo test`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`) against new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
+`claude-approved`, and require fresh gate pass** — a `$AC_GATE` record for the new tip, re-review delta before label return to `in-review`. Hold even when post-approval commit "look harmless" (fmt reflow, comment, doc tweak): gate cannot distinguish whitespace change from logic change by trust, only by running, and highest-consequence PRs (drive-path, wire protocol) are exactly where ungated post-approval commit do most damage. 
 
 Removing `claude-approved` is part of the rule, not bookkeeping after it. The
 label is what puts a PR in the Codex queue and what a human reads at the merge

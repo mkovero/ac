@@ -6,6 +6,14 @@ cd ac-rs && cargo test --workspace # ~900 tests, 14 #[ignore]'d
 pytest tests/ -q                  # black-box ZMQ protocol tests (spawns Rust daemon)
 ```
 
+The pipeline's gate is `bin/gate.sh` (fmt, clippy, tests; cached per commit
+tree — see `.agents/AGENTS.md` → workspace gate). It runs the tests under
+`cargo nextest run --workspace` plus `cargo test --doc --workspace` when
+cargo-nextest is installed (`curl -LsSf https://get.nexte.st/latest/linux |
+tar zxf - -C ~/.cargo/bin`): same tests, one process each, roughly half the wall
+time. `ac-rs/.config/nextest.toml` serialises the `ac-cli` integration
+binaries, whose per-binary port cursors collide across processes.
+
 **Counts in this file are an order of magnitude, not a figure to check
 against** — they rot silently. Run the command. `--workspace` matters: two
 branches that each pass `cargo test -p <crate>` can still break the build
