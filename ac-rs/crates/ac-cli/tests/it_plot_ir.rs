@@ -12,10 +12,12 @@
 //! point both processes at the same private port pair, so the test cannot
 //! silently pass by talking to a developer's real daemon on 5556.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,6 +53,8 @@ struct Rig {
     home: PathBuf,
     ctrl: u16,
     data: u16,
+    /// Held until the daemon is gone: `Drop for Rig` runs before fields drop.
+    _ports: support::PortLease,
 }
 
 impl Rig {
@@ -61,8 +65,8 @@ impl Rig {
     /// [`Self::start`] with extra config keys merged in (#460: a reference
     /// pair for the same-capture reference leg).
     fn start_with(extra_config: serde_json::Value) -> Self {
-        let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-        let (ctrl, data) = (base, base + 1);
+        let ports = support::lease(&PORT_CURSOR);
+        let (ctrl, data, base) = (ports.ctrl, ports.data, ports.ctrl);
         let home = std::env::temp_dir().join(format!("ac-cli-it-{}-{base}", std::process::id()));
         let cfg_dir = home.join(".config").join("ac");
         fs::create_dir_all(&cfg_dir).expect("create scratch config dir");
@@ -105,6 +109,7 @@ impl Rig {
             home,
             ctrl,
             data,
+            _ports: ports,
         };
         rig.wait_until_up();
         rig
