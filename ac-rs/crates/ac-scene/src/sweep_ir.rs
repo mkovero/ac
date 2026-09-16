@@ -623,6 +623,123 @@ mod tests {
         assert!(!scene.arrival.text.contains("flight"));
     }
 
+    /// #359: the ordinary agree case must read plain "flight", not silently
+    /// pick up a suffix meant for a different state.
+    #[test]
+    fn arrival_marker_names_flight_when_the_check_agrees() {
+        use ac_core::measurement::report::{
+            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
+        };
+
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
+        let sr = 4_000u32;
+        let tau_s = 0.002;
+        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s,
+            pre_impulse_snr_db: Some(60.0),
+            pre_impulse_snr_floor_db: Some(63.0),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+        }));
+        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+            tau_s, // identical -> Agree
+            measured_at: "2026-08-15T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "fake".into(),
+            sample_rate_hz: sr,
+            period_size: Some(64),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+        }));
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.arrival_check,
+            ac_core::measurement::report::ArrivalCheck::Agree
+        );
+        let flight_ms = stats
+            .flight_time_s
+            .expect("Agree must produce a flight time")
+            * 1000.0;
+        assert_eq!(scene.arrival.text, format!("{flight_ms:.2} ms flight"));
+    }
+
+    /// #359: a flight time computed alongside `Unchecked` must say so — the
+    /// same operator-misreading risk Codex's round-2 finding fixed for the
+    /// CLI, unaddressed here.
+    #[test]
+    fn arrival_marker_names_flight_ref_unchecked_when_the_check_never_ran() {
+        let mut r = gated_report_with_delayed_peak();
+        r.interface_latency = Some(measured_tau(0.0001));
+        // No reference at all configured -> Unchecked, flight_time_s still Some.
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(
+            stats.arrival_check,
+            ac_core::measurement::report::ArrivalCheck::Unchecked { .. }
+        ));
+        let flight_ms = stats
+            .flight_time_s
+            .expect("Unchecked must still produce a flight time")
+            * 1000.0;
+        assert_eq!(
+            scene.arrival.text,
+            format!("{flight_ms:.2} ms flight, ref unchecked")
+        );
+    }
+
+    /// #359: a non-period-multiple disagreement must name itself on the
+    /// round trip as `ref Δ`, distinctly from a period shift.
+    #[test]
+    fn arrival_marker_names_a_mismatch_not_a_period_shift() {
+        use ac_core::measurement::report::{
+            InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
+        };
+
+        let mut r = gated_report_with_delayed_peak();
+        let sr = 4_000u32;
+        let period = 64u32;
+        let stored_tau_s = 0.002;
+        // one sample off an exact period -> Mismatch, not PeriodShift
+        let same_capture_tau_s = stored_tau_s + (period as f64 + 1.0) / sr as f64;
+        r.reference_latency = Some(ReferenceLatency::Measured(MeasuredReferenceLatency {
+            tau_s: same_capture_tau_s,
+            pre_impulse_snr_db: Some(60.0),
+            pre_impulse_snr_floor_db: Some(63.0),
+            method: "farina_same_capture_reference_v1".into(),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+        }));
+        r.reference_stored_latency = Some(InterfaceLatency::Measured(MeasuredLatency {
+            tau_s: stored_tau_s,
+            measured_at: "2026-08-15T00:00:00Z".into(),
+            method: "farina_short_ess".into(),
+            backend: "fake".into(),
+            sample_rate_hz: sr,
+            period_size: Some(period),
+            output_port: "ref_out".into(),
+            input_port: "ref_in".into(),
+        }));
+        let scene = SweepIrScene::from_report(&r).unwrap();
+        let stats = r.ir_stats().unwrap();
+        use ac_core::measurement::report::ArrivalCheck;
+        let d = match &stats.arrival_check {
+            ArrivalCheck::Mismatch(d) => d,
+            other => panic!("expected Mismatch, got {other:?}"),
+        };
+        assert_eq!(
+            scene.arrival.text,
+            format!(
+                "{:.2} ms round trip, ref \u{394} {:+} samples",
+                stats.arrival_s * 1000.0,
+                d.delta_samples,
+            )
+        );
+        assert!(!scene.arrival.text.contains("flight"));
+    }
+
     #[test]
     fn header_gate_span_reads_the_recorded_gate_start_not_half_the_window() {
         // An asymmetric gate — `gate_length_s` is not `-2 * gate_start_s`
