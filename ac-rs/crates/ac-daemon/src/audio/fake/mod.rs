@@ -39,8 +39,8 @@ use anyhow::Result;
 use std::time::Duration;
 
 use self::hooks::{
-    next_capture_block_xruns_delta, next_loopback_delay_samples, next_xruns_delta,
-    period_size_override, ref_delay_samples, ref_gain, tau_gain_override,
+    next_capture_block_xruns_delta, next_declared_latency_frames, next_loopback_delay_samples,
+    next_xruns_delta, period_size_override, ref_delay_samples, ref_gain, tau_gain_override,
     tau_noise_amplitude_override,
 };
 use self::ring_mode::{FakeRings, RingDrain};
@@ -196,6 +196,12 @@ impl AudioEngine for FakeEngine {
 
     fn period_size(&self) -> Option<u32> {
         period_size_override()
+    }
+
+    /// #363: `None` unless a test drives the hook, so the fake declares
+    /// nothing by default and every existing τ test is unchanged.
+    fn declared_latency_frames(&self) -> Option<u32> {
+        next_declared_latency_frames()
     }
 
     fn set_tone(&mut self, freq_hz: f64, amplitude: f64) {
