@@ -126,7 +126,7 @@ issue="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json closingIssuesReferences 
          --jq '.closingIssuesReferences[0].number // empty')"
 rev="${head:0:12}"
 
-token="$(lock_take "pipeline rig.sh PR #$pr @ $rev ($(hostname) pid $$)")" || exit $?
+token="$(lock_take "pipeline rig.sh PR #$pr @ $rev ($(uname -n) pid $$)")" || exit $?
 wt="$WT_BASE/rig-pr-$pr"
 cleanup() {
   cd "$ROOT" || true
@@ -151,6 +151,13 @@ echo "rig: shipping $rev to $RIG" >&2
 
 before="$(newest_record "$pr" rig)"
 cd "$wt"
+# The session writes its record inside its own worktree, the one directory it
+# can write to; the runner files it below. No --add-dir: under --fg, run()
+# puts extra args right before the prompt, and --add-dir is variadic — it
+# swallowed the prompt and the session never started (#489, 2026-09-16).
+record_in="$wt/rig-record.md"
+record_out="$AC_SESSION_DIR/$(date +%F)-rig-pr-$pr-$rev.md"
+rm -f "$record_in"
 AC_TAG="rig-pr-$pr" run rig "Pipeline mode (rig.md → pipeline mode) for PR #$pr in $AC_REPO.
 
 - head: $head
@@ -170,9 +177,24 @@ ceilings, bounded commands only. No reboots, driver reloads or physical
 changes; if the check needs one, record decline and name the permission.
 
 Headless: run every command in the foreground, with a timeout. Write the
-record to $AC_SESSION_DIR/$(date +%F)-rig-pr-$pr-$rev.md, commit it in
-\$AC_HOME ($AC_HOME), and post the PR comment exactly as rig.md specifies,
-ending with the rig verdict line." --add-dir "$AC_HOME" "$@" || true
+full record to $record_in (the runner files it under \$AC_HOME/session and
+commits it; do not commit it here), and post the PR comment exactly as rig.md
+specifies, ending with the rig verdict line." "$@" || true
+
+if [[ -s $record_in ]]; then
+  mkdir -p "$AC_SESSION_DIR"
+  cp "$record_in" "$record_out"
+  if git -C "$AC_HOME" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$AC_HOME" add "$record_out" || true
+    if ! git -C "$AC_HOME" diff --cached --quiet -- "$record_out"; then
+      git -C "$AC_HOME" commit -q -m "rig: PR #$pr at $rev (pipeline)" -- "$record_out" \
+        || echo "rig: could not commit $record_out in \$AC_HOME" >&2
+    fi
+  fi
+  echo "rig: record filed at $record_out" >&2
+else
+  echo "rig: session wrote no record file at $record_in" >&2
+fi
 
 after="$(newest_record "$pr" rig)"
 if [[ -z $after || $after == "$before" || $after != *"$head"* ]]; then
