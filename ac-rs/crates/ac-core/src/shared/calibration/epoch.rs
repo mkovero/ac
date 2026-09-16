@@ -78,6 +78,21 @@ impl DeviceEpoch {
                 .map(to_whole_seconds),
         }
     }
+
+    /// Whether two samples describe one device enumeration. Two observed
+    /// samples are compared exactly as [`EnumerationCheck::of`] compares
+    /// them — boot id, then the node map — so the reported boot time alone
+    /// never separates them. Any other pair must be identical: a probe that
+    /// became (un)observable, or whose reason changed, is not shown to be
+    /// the same enumeration.
+    pub fn same_enumeration(&self, other: &DeviceEpoch) -> bool {
+        match (self, other) {
+            (DeviceEpoch::Observed { .. }, DeviceEpoch::Observed { .. }) => {
+                EnumerationCheck::of(Some(self), other).is_same()
+            }
+            _ => self == other,
+        }
+    }
 }
 
 /// How a stored τ's epoch relates to the current one. Frozen into a report

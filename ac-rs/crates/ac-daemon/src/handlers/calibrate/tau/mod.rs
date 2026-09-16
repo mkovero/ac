@@ -67,8 +67,9 @@ pub(super) enum TauAttempt {
         /// #363: wall-clock seconds between the two captures.
         separation_s: f64,
         /// #461: the device-enumeration epoch sampled before reading 1's
-        /// capture and after reading 2's. Unequal means a device boundary
-        /// fell inside the run, so neither reading describes one epoch.
+        /// capture and after reading 2's. Not the same enumeration (per
+        /// [`DeviceEpoch::same_enumeration`]) means a device boundary fell
+        /// inside the run, so neither reading describes one epoch.
         /// Boxed: an epoch carries a node list; the other variants are small.
         epoch_before: Box<DeviceEpoch>,
         epoch_after: Box<DeviceEpoch>,
@@ -726,18 +727,20 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             epoch_before,
             epoch_after,
             ..
-        } if epoch_before != epoch_after => TauOutcome::RefusedEnumerationChanged {
-            conditions,
-            reading1_s,
-            reading2_s,
-            reading1_xruns,
-            reading2_xruns,
-            reading1_declared_frames,
-            reading2_declared_frames,
-            separation_s,
-            pre_impulse_snr_db,
-            snr_threshold_db: tau_snr_threshold_db(),
-        },
+        } if !epoch_before.same_enumeration(&epoch_after) => {
+            TauOutcome::RefusedEnumerationChanged {
+                conditions,
+                reading1_s,
+                reading2_s,
+                reading1_xruns,
+                reading2_xruns,
+                reading1_declared_frames,
+                reading2_declared_frames,
+                separation_s,
+                pre_impulse_snr_db,
+                snr_threshold_db: tau_snr_threshold_db(),
+            }
+        }
         // #363 precedence: after `refused_xrun` (a contaminated capture's
         // declaration is no more meaningful than its SNR) and before the
         // readings are compared — two readings agreeing while the graph
@@ -835,6 +838,7 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
 mod tests {
     use super::measure::TAU_SNR_THRESHOLD_DB;
     use super::*;
+    use ac_core::shared::calibration::DeviceNode;
 
     const TEST_SESSION: &str = "4242@2026-09-16T00:00:00Z";
 
@@ -1385,6 +1389,64 @@ mod tests {
 
         // Precedence: an xrun still wins.
         assert_eq!(tau_result(|| attempt(1)).state(), "refused_xrun");
+    }
+
+    fn jack_epoch(booted_at: &str, fw1_created_at: &str) -> Box<DeviceEpoch> {
+        Box::new(DeviceEpoch::Observed {
+            host_boot_id: "boot-a".into(),
+            host_booted_at: booted_at.into(),
+            devices: vec![DeviceNode {
+                node: "/dev/fw1".into(),
+                created_at: fw1_created_at.into(),
+            }],
+        })
+    }
+
+    fn agreeing_attempt(before: Box<DeviceEpoch>, after: Box<DeviceEpoch>) -> TauAttempt {
+        TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.001,
+            reading2_s: 0.001,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 40.0,
+            reading1_declared_frames: None,
+            reading2_declared_frames: None,
+            separation_s: 1.0,
+            epoch_before: before,
+            epoch_after: after,
+        }
+    }
+
+    /// #461: the mid-run guard must compare what `EnumerationCheck::of`
+    /// compares. Same boot id and same node set, only the reported boot
+    /// time differs: no device boundary was observed, so nothing may be
+    /// refused as "audio device re-enumerated during run". The derived
+    /// `PartialEq` — the rejected guard — does separate these two samples.
+    #[test]
+    fn tau_result_boot_time_text_alone_is_not_an_enumeration_change() {
+        let node_t = "2026-09-16T00:08:31.250000000Z";
+        let before = jack_epoch("2026-09-16T13:41:52Z", node_t);
+        let after = jack_epoch("2026-09-16T13:41:53Z", node_t);
+        assert_ne!(before, after, "fixture must differ under derived PartialEq");
+        let outcome = tau_result(|| agreeing_attempt(before.clone(), after.clone()));
+        assert_eq!(outcome.state(), "measured");
+    }
+
+    /// #461: the case the state exists for — a node re-created inside the
+    /// run, same boot — refuses and stores nothing.
+    #[test]
+    fn tau_result_node_re_created_mid_run_refuses() {
+        let boot = "2026-09-16T13:41:52Z";
+        let outcome = tau_result(|| {
+            agreeing_attempt(
+                jack_epoch(boot, "2026-09-16T00:08:31.1Z"),
+                jack_epoch(boot, "2026-09-16T14:02:10.9Z"),
+            )
+        });
+        assert_eq!(outcome.state(), "refused_enumeration_changed");
+        assert!(outcome.stored_entry("m", TEST_SESSION).is_none());
     }
 
     /// #461: a measured entry carries the epoch it was measured in and the

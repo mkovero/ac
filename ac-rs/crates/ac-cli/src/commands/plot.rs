@@ -2165,16 +2165,6 @@ mod tests {
         );
     }
 
-    /// codex-qa on PR #477: a `Some` flight time alongside
-    /// `ArrivalCheck::Unchecked` (case D — a flight time was computed, but
-    /// the same-capture corroboration never ran, e.g. this pair's `ref
-    /// stored` misses on exact conditions) printed identically to a checked
-    /// value. The UX comment's field justification for
-    /// `reference check not run — see ref Δ` is explicit: "The architect's
-    /// `Unchecked` still passes a flight time through. This line keeps that
-    /// value from reading as checked." Asserts the continuation line is
-    /// present, 16-space indented, and that the checked (`Agree`) case does
-    /// not carry it.
     /// #461 UX: a flight time over a non-`same` stored τ carries
     /// `latency UNVERIFIED — see latency (below)` directly under the value,
     /// above the reference-check line. A v9 report (no check) is flagged.
@@ -2228,6 +2218,16 @@ mod tests {
         assert_eq!(flight_time_line(&withheld).len(), 1);
     }
 
+    /// codex-qa on PR #477: a `Some` flight time alongside
+    /// `ArrivalCheck::Unchecked` (case D — a flight time was computed, but
+    /// the same-capture corroboration never ran, e.g. this pair's `ref
+    /// stored` misses on exact conditions) printed identically to a checked
+    /// value. The UX comment's field justification for
+    /// `reference check not run — see ref Δ` is explicit: "The architect's
+    /// `Unchecked` still passes a flight time through. This line keeps that
+    /// value from reading as checked." Asserts the continuation line is
+    /// present, 16-space indented, and that the checked (`Agree`) case does
+    /// not carry it.
     #[test]
     fn flight_time_line_qualifies_an_unchecked_value_as_not_verified() {
         let unchecked = stats_with(
