@@ -5,7 +5,9 @@
 #   scripts/rig/xrun-soak.sh <rig> [seconds] [--rev <rev>|latest|installed]
 #
 # An idle JACK shows no xruns; a load is the point. Does not restart or
-# reconfigure JACK. Exit 1 if any xrun.
+# reconfigure JACK. Exit 1 if any xrun, and exit 1 unless the load was held:
+# `ac monitor` ended by the timeout after the full N seconds, with the daemon
+# and its JACK ports present at the mid-run checkpoint.
 #
 # Procedure: docs/runbooks/rig-testing.md.
 
@@ -34,29 +36,9 @@ echo "### xrun soak ($RIG_NAME, ${secs} s, capture-only ac monitor on $RIG_ANALO
 echo
 echo "- build: ${dest:-installed /usr/local/bin}"
 
-remote="$(cat <<REMOTE
-set -u
+# xrun_soak_remote.sh is a real file, not an inline heredoc, so the same
+# text that runs here also runs under xrun_soak_remote_test.sh's stubs.
+remote="set -eu
 $REMOTE_USE_BUILD
-trap 'ac stop >/dev/null 2>&1; pkill -x ac-daemon 2>/dev/null' EXIT
-ts="\$(mktemp)"
-t0=\$(date +%s)
-( sleep \$((SECS / 2))
-  echo "- mid-run: daemon \$(daemon_identity), \$(jack_lsp | grep -c '^ac-daemon') ac-daemon JACK ports" >"\$ts.mid" ) &
-script -qc "timeout \$SECS ac monitor 0-\$((NCAP - 1)) --tui" "\$ts" >/dev/null 2>&1
-ac stop >/dev/null 2>&1
-wait
-if jlog=\$(journalctl --since "@\$t0" --no-pager 2>&1); then
-    log=\$(grep -ciE 'jackd.*xrun' <<<"\$jlog")
-else
-    log=unreadable
-fi
-daemon=\$(tr -d '\033' <"\$ts" | grep -o 'xruns=[0-9]*' | tail -1)
-cat "\$ts.mid"
-echo "- JACK: \$(jack_samplerate) Hz, \$(jack_bufsize) frames, jackd: \$(pgrep -ax jackd | cut -d' ' -f2-)"
-echo "- jackd xrun log lines: \$log"
-echo "- daemon-side counter: \${daemon:-not captured}"
-rm -f "\$ts" "\$ts.mid"
-[[ \$log == 0 && \${daemon#xruns=} == 0 ]]
-REMOTE
-)"
+$(cat "$RIG_SCRIPTS/lib/xrun_soak_remote.sh")"
 rig_bash "DEST=$(printf %q "$dest") SECS=$(printf %q "$secs") NCAP=$(printf %q "$RIG_ANALOG_CAPTURES")" "$remote"
