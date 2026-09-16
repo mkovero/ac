@@ -36,11 +36,74 @@ WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$AC_HOME/session}"
 
-# One shared target dir, not one per branch. Per-branch was warm across runs on
-# the same issue, but cost several GB each and left orphans behind every merge.
-# Cargo locks the dir, so genuinely parallel dispatch serialises at the build
-# step — which is the right trade when parallel runs are rare.
+# One target dir per worktree: $AC_TARGET/wt/<name> for $AC_HOME/wt/<name>.
+# Under target/ on purpose — $AC_HOME is a git repo whose .gitignore already
+# excludes target/ and log/; a new top-level directory would not be.
+#
+# A target dir shared across worktrees is not merely slow, it is wrong. Cargo
+# decides freshness from mtimes, so a worktree whose files are older than the
+# last build from ANOTHER worktree reports `Fresh` and runs that other tree's
+# code (reproduced on cargo 1.95, 2026-09-16: worktree b printed a's output).
+# Claude sessions knew this from operator memory and made their own
+# target-qa-<n> dirs, cold, every pass — 50 of 141 qa runs. Codex sessions did
+# not, and built into the shared dir.
+#
+# A new one is seeded by reflink copy (btrfs: ~2 s for 18 GB) from the newest
+# existing target, with the workspace crates' fingerprints removed: registry
+# dependencies stay warm, every workspace crate rebuilds from this worktree.
+# $AC_TARGET/debug, the old shared build, is still read as a seed.
 AC_TARGET="${AC_TARGET:-$AC_HOME/target}"
+AC_TARGETS="${AC_TARGETS:-$AC_TARGET/wt}"
+
+# bin/gate.sh records, one directory per tree+toolchain. Logs, so under log/.
+export AC_GATE_DIR="${AC_GATE_DIR:-$AC_HOME/log/gate}"
+export AC_GATE="$ROOT/bin/gate.sh"
+
+target_for() { printf '%s/%s\n' "$AC_TARGETS" "$(basename "$1")"; }
+
+# Strip the workspace crates' fingerprints so cargo rebuilds them from <wt>.
+unfingerprint() {
+  local wt="$1" t="$2" names n
+  names="$(cargo metadata --no-deps --format-version 1 \
+             --manifest-path "$wt/ac-rs/Cargo.toml" 2>/dev/null \
+           | jq -r '.packages[].name' 2>/dev/null)" || true
+  [[ -n $names ]] || names="ac-core ac-daemon ac-cli ac-scene ac-view"
+  for n in $names; do rm -rf "$t/debug/.fingerprint/$n-"*; done
+}
+
+# prepare_target <worktree> — create (seeding if possible) and print its target.
+prepare_target() {
+  local wt="$1" t seed="" cand names n
+  t="$(target_for "$wt")"
+  # A target is only trusted for the worktree path that stamped it. Anything
+  # else — a name reused by another path, a dir made by hand — loses its
+  # workspace fingerprints before first use here.
+  if [[ -d $t/debug && $(cat "$t/.worktree" 2>/dev/null) != "$wt" ]]; then
+    unfingerprint "$wt" "$t"
+    printf '%s\n' "$wt" > "$t/.worktree"
+  fi
+  if [[ ! -d $t/debug ]]; then
+    mkdir -p "$t"
+    # Newest candidate that no cargo is building into right now: a copy taken
+    # mid-write could carry a torn dependency artifact with a valid fingerprint.
+    for cand in $(ls -dt "$AC_TARGETS"/*/debug "$AC_TARGET/debug" 2>/dev/null); do
+      [[ $cand == "$t/debug" ]] && continue
+      if [[ -e $cand/.cargo-lock ]] && ! flock -n "$cand/.cargo-lock" true 2>/dev/null; then
+        continue
+      fi
+      seed="$cand"; break
+    done
+    if [[ -n $seed ]] && cp -a --reflink=always "$seed" "$t/" 2>/dev/null; then
+      unfingerprint "$wt" "$t"
+      echo "target: seeded $t from $seed" >&2
+    else
+      rm -rf "$t/debug"
+      echo "target: cold $t (no reflink seed)" >&2
+    fi
+    printf '%s\n' "$wt" > "$t/.worktree"
+  fi
+  printf '%s\n' "$t"
+}
 
 # gh through a retry. GitHub 5xx and rate-limit responses are transient and
 # common enough to break a long run; a real error (404, auth, bad argument) is
@@ -192,11 +255,14 @@ link_support() {
   # Needs `/.cargo/` in the repo .gitignore — root-anchored, so the tracked
   # ac-rs/.cargo is unaffected. Without that a developer session doing
   # `git add -A` will commit it.
-  local cfg="$wt/.cargo/config.toml"
-  if [[ ! -e $cfg ]]; then
+  #
+  # Rewritten when it is ours: worktrees made before per-worktree targets point
+  # at the shared dir.
+  local cfg="$wt/.cargo/config.toml" marker='# written by bin/common.sh'
+  if [[ ! -e $cfg ]] || head -1 "$cfg" | grep -q "^$marker"; then
     mkdir -p "$wt/.cargo"
-    printf '# written by bin/common.sh — not tracked, see /.gitignore\n[build]\ntarget-dir = "%s"\n' \
-      "$AC_TARGET" > "$cfg"
+    printf '%s — not tracked, see /.gitignore\n[build]\ntarget-dir = "%s"\n' \
+      "$marker" "$(prepare_target "$wt")" > "$cfg"
   fi
   return 0
 }
@@ -355,7 +421,10 @@ run() {
   local provider model
   provider="$(provider_for "$role")" || return
   model="$(model_for "$role" "$provider")"
-  local -a codex_write_dirs=(--add-dir "$AC_TARGET")
+  local target
+  target="$(prepare_target "$(git rev-parse --show-toplevel)")"
+  mkdir -p "$AC_GATE_DIR"
+  local -a codex_write_dirs=(--add-dir "$target" --add-dir "$AC_GATE_DIR")
 
   # Codex's workspace-write sandbox leaves git metadata read-only. A worktree's
   # git dir lives under the main repo's .git, outside -C, and --add-dir of .git
@@ -444,8 +513,7 @@ $prompt"
     return
   fi
 
-  export CARGO_TARGET_DIR="$AC_TARGET"
-  mkdir -p "$CARGO_TARGET_DIR"
+  export CARGO_TARGET_DIR="$target"
 
   local tag="${AC_TAG:-$$}" stamp status=0
   mkdir -p "$AC_LOG_DIR" "$AC_SESSION_DIR"
