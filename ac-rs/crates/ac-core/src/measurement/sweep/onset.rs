@@ -13,10 +13,12 @@
 ///
 /// Reported, not used as the arrival: `MeasurementReport::ir_stats`
 /// derives `delay_samples` / `arrival_s` from the magnitude peak and
-/// carries this beside it as a diagnostic. #378's contingency, triggered
-/// by its AC6 rig run (pupu, 2026-09-15): between 1.000 m and 2.000 m
-/// the onset's increment missed `transfer_stream`'s by 143.75 samples
-/// while the peak's missed by 8.62.
+/// carries this beside it as a diagnostic, bounded or not. #378's
+/// contingency, triggered by its AC6 rig run (pupu, 2026-09-15): between
+/// 1.000 m and 2.000 m the unbounded onset's increment missed
+/// `transfer_stream`'s by 143.75 samples while the peak's missed by 8.62.
+/// The bounded onset's pre-registered rig check (#346, pupu, 2026-09-16)
+/// refused to conclude, and the operator kept the peak.
 ///
 /// Pairing rule (#351): an onset-derived arrival may only be differenced
 /// against a τ picked by the *same* onset rule from the *same* capture's
@@ -30,7 +32,94 @@
 pub struct OnsetEstimate {
     pub index: usize,
     pub rule: String,
+    /// What produced `index`, as a typed value: a caller decides from
+    /// this, never by parsing `rule` (#346 architect revision 2).
+    pub pick: OnsetPick,
 }
+
+/// How an [`OnsetEstimate`] came about.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnsetPick {
+    /// The picker declined; `index` is the peak, not an onset. `rule`
+    /// names the case.
+    Declined,
+    /// The picker ran over `[window_start, peak]`.
+    Picked {
+        window_start: usize,
+        /// Which limit set `window_start`.
+        limit: WindowLimit,
+        /// The pick is `window_start` itself — no split beat the null
+        /// model, so the true onset may lie earlier.
+        pinned: bool,
+        /// The edge-following check on a clear pick in a window the
+        /// causal bound started. `None` when it did not run: the bound did
+        /// not set the window start (`limit` is `SearchSpan`), or the pick
+        /// is pinned.
+        edge_guard: Option<EdgeGuard>,
+    },
+}
+
+/// Which limit set the onset search window's start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowLimit {
+    /// The enforced causal bound: it is at or after the span start.
+    CausalBound,
+    /// [`ONSET_SEARCH_WINDOW_S`] back from the peak — either no bound was
+    /// enforced, or the bound lies earlier than the span start.
+    SearchSpan,
+}
+
+/// Outcome of the edge-following check (#346 architect revision 3).
+///
+/// With the causal bound setting the window start, the search window can
+/// be short (40 samples at 2 m on the rig), and on such a window the pick
+/// can follow the window start rather than the IR: moving the bound
+/// earlier moves the pick earlier, and the pick sits between the bound and
+/// the peak. The check re-picks over `[window_start − m, peak]`, where `m`
+/// is [`EDGE_GUARD_EXTENSION_M`] of flight at the capture's rate and the
+/// bound's own speed of sound. A pick the IR set does not move when the
+/// window starts 5 cm earlier; a pick the window edge set does.
+///
+/// The check extends rather than trims the window: on a noise-free
+/// deconvolution the samples before the onset are band-limited skirt, not
+/// stationary noise, so cutting them changes the leading segment's
+/// variance and moves a correct pick (the rejected revision-2 guard,
+/// tested against in `peak.rs`).
+///
+/// Known limits. The check refuses some correct picks, and a pick that
+/// follows the bound on a noisy capture can still pass. A pick that passes
+/// lies in `[bound, peak)`, so its error is bounded on both sides: it is never later than the peak, and it is
+/// earlier than the true onset by at most the bound's own error. The bound
+/// comes from a taped distance, so that earlier error is at most the tape
+/// uncertainty (≤ 5 cm); every other known error points late.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeGuard {
+    /// The re-pick is within [`EDGE_GUARD_TOLERANCE_SAMPLES`] of the pick.
+    Passed,
+    /// The check failed closed. `repick: Some(r)`: the re-pick over the
+    /// window started [`EDGE_GUARD_EXTENSION_M`] earlier moved to `r` —
+    /// the pick follows the window edge, so the bound rather than the IR
+    /// set the answer. `repick: None`: no re-pick ran, because the window
+    /// could not start that much earlier (the window start is closer to
+    /// sample 0 than the margin, or the margin is 0 samples), or the
+    /// extended window had no variance to pick from.
+    Failed { repick: Option<usize> },
+}
+
+/// How much earlier, in metres of flight, the edge-following check starts
+/// its re-pick window (#346 architect revision 3). Provenance: derived —
+/// the ±5 cm hand-tape error, the dominant uncertainty in the causal
+/// bound's distance input. Converted to samples as
+/// `round(EDGE_GUARD_EXTENSION_M / c × sample_rate)` with the enforced
+/// bound's own speed of sound (14 samples at 96 kHz and 343 m/s). A
+/// distance rather than a sample count because what it stands in for is a
+/// tape error.
+pub const EDGE_GUARD_EXTENSION_M: f64 = 0.05;
+
+/// How far, in samples, the edge-following re-pick may move before
+/// [`EdgeGuard::Failed`]. Allows for tie resolution between neighbouring
+/// splits — provenance: assumed (#346 architect revision 2).
+pub const EDGE_GUARD_TOLERANCE_SAMPLES: usize = 1;
 
 /// The earliest sample an onset may occupy, or why no such limit applies
 /// (#460). The onset search's lower window edge when enforced.
@@ -216,8 +305,14 @@ fn segment_variance(prefix_sum: &[f64], prefix_sq: &[f64], from: usize, to: usiz
 ///   is close to homogeneous and no split is much better than any
 ///   other. The null model's AIC penalty catches the exactly-tied case
 ///   and reports the window start (flagged in `rule`), but a near-tie
-///   still resolves to some index. Nothing here can recover an onset
-///   that geometry says is inadmissible.
+///   still resolves to some index, and on a short bounded window that
+///   index can follow the window start. Under an enforced bound the
+///   [`EdgeGuard`] re-picks with the window start moved
+///   [`EDGE_GUARD_EXTENSION_M`] earlier and reports [`EdgeGuard::Failed`]
+///   (also named in `rule`) when that index moves, so a caller can refuse
+///   it. The reported index stays the pick, never a sample below the
+///   bound. Nothing here can recover an onset that geometry says is
+///   inadmissible.
 pub fn estimate_onset(
     ir: &[f64],
     peak_index: usize,
@@ -228,6 +323,7 @@ pub fn estimate_onset(
     let declined = |reason: &str| OnsetEstimate {
         index: peak_index.min(ir.len().saturating_sub(1)),
         rule: format!("onset picker declined ({reason}) — index is the peak, not an onset"),
+        pick: OnsetPick::Declined,
     };
     if ir.is_empty() {
         return OnsetEstimate {
@@ -235,6 +331,7 @@ pub fn estimate_onset(
             rule: "onset picker declined (search window shorter than 2 samples) — index is \
                    the peak, not an onset"
                 .to_string(),
+            pick: OnsetPick::Declined,
         };
     }
     let end = peak_index.min(ir.len() - 1);
@@ -274,6 +371,107 @@ pub fn estimate_onset(
         return declined("nothing in the search window above the pre-impulse floor");
     }
 
+    let Some(best_k) = aic_change_point(window) else {
+        return declined("zero variance in the search window");
+    };
+    let onset = window_start + best_k;
+    if onset >= end {
+        return declined("no change point earlier than the peak in the window");
+    }
+
+    let window_ms = ONSET_SEARCH_WINDOW_S * 1000.0;
+    let binding = if bound.is_some_and(|b| b >= span_start) {
+        WindowLimit::CausalBound
+    } else {
+        WindowLimit::SearchSpan
+    };
+    let limit = match causal_bound {
+        // Which limit actually set the window start is the operator's
+        // next question when a pick sits on it, so the clause names the
+        // binding one rather than only whether geometry was known.
+        CausalBound::Enforced { .. } if binding == WindowLimit::CausalBound => {
+            "causal bound enforced".to_string()
+        }
+        CausalBound::Enforced { index: b, .. } => {
+            format!("causal bound enforced at sample {b}, search span is the tighter limit")
+        }
+        // Names the missing input (#460 AC3): "geometry not known" named
+        // neither input, so it told the operator nothing they could fix.
+        CausalBound::Unavailable(missing) => format!("no causal bound ({})", missing.clause()),
+    };
+    let mut rule = format!(
+        "AIC change-point pick over a {window_ms:.1} ms window; window start at sample \
+         {window_start}, {limit}"
+    );
+    let pinned = onset == window_start;
+    if pinned {
+        rule.push_str("; pick landed on the window start — the true onset may lie earlier");
+    }
+    // Bounded path only — a window the bound started. The unbounded
+    // pick's behaviour and rule text stay exactly as #378 left them; a bound earlier than the span leaves a full-length
+    // window, which is not the short-window case this checks for.
+    //
+    // The extended window reaches below the causal bound on purpose: a
+    // re-pick that lands there has moved, so the guard fails. `index`
+    // stays the pick either way.
+    let edge_guard = (binding == WindowLimit::CausalBound && !pinned).then(|| {
+        let margin = match causal_bound {
+            CausalBound::Enforced { inputs, .. } => {
+                edge_guard_margin_samples(inputs.speed_of_sound_m_s, sample_rate_hz)
+            }
+            CausalBound::Unavailable(_) => 0,
+        };
+        let extended_start = match window_start.checked_sub(margin) {
+            Some(s) if margin > 0 => s,
+            _ => return EdgeGuard::Failed { repick: None },
+        };
+        let repick = aic_change_point(&ir[extended_start..=end]).map(|k| extended_start + k);
+        match repick {
+            Some(r) if r.abs_diff(onset) <= EDGE_GUARD_TOLERANCE_SAMPLES => EdgeGuard::Passed,
+            repick => EdgeGuard::Failed { repick },
+        }
+    });
+    if let Some(EdgeGuard::Failed { repick }) = edge_guard {
+        let cm = EDGE_GUARD_EXTENSION_M * 100.0;
+        match repick {
+            Some(r) => rule.push_str(&format!(
+                "; re-pick with the window start {cm:.0} cm earlier went to sample {r} — the \
+                 pick follows the window edge"
+            )),
+            None => rule.push_str(&format!(
+                "; no re-pick — the window cannot start {cm:.0} cm earlier, so the pick could \
+                 not be checked"
+            )),
+        }
+    }
+    OnsetEstimate {
+        index: onset,
+        rule,
+        pick: OnsetPick::Picked {
+            window_start,
+            limit: binding,
+            pinned,
+            edge_guard,
+        },
+    }
+}
+
+/// [`EDGE_GUARD_EXTENSION_M`] as a sample count at `sample_rate_hz`, using
+/// the enforced bound's `speed_of_sound_m_s`. `0` when the conversion has
+/// no finite, positive result, which the guard treats as "cannot extend".
+fn edge_guard_margin_samples(speed_of_sound_m_s: f64, sample_rate_hz: u32) -> usize {
+    let m = (EDGE_GUARD_EXTENSION_M / speed_of_sound_m_s * sample_rate_hz as f64).round();
+    if m.is_finite() && m > 0.0 {
+        m as usize
+    } else {
+        0
+    }
+}
+
+/// The AIC change point of `window`, as the count of samples in its
+/// leading segment: `0` when no split beats the null model by Akaike's
+/// penalty. `None` when the window has no finite, nonzero variance.
+pub(super) fn aic_change_point(window: &[f64]) -> Option<usize> {
     let n = window.len();
     let mut prefix_sum = vec![0.0_f64; n + 1];
     let mut prefix_sq = vec![0.0_f64; n + 1];
@@ -283,7 +481,7 @@ pub fn estimate_onset(
     }
     let total_var = segment_variance(&prefix_sum, &prefix_sq, 0, n);
     if total_var <= 0.0 || !total_var.is_finite() {
-        return declined("zero variance in the search window");
+        return None;
     }
     // A segment that is exactly constant would otherwise give ln(0).
     // The guard is a fraction of the window's own variance, not an
@@ -333,38 +531,11 @@ pub fn estimate_onset(
     // is its own start, flagged as such in `rule`.
     const SPLIT_MODEL_EXTRA_PARAMETERS: f64 = 2.0;
     const AIC_PENALTY: f64 = 2.0 * SPLIT_MODEL_EXTRA_PARAMETERS;
-    let onset = if best_aic + AIC_PENALTY < null_aic {
-        window_start + best_k
+    Some(if best_aic + AIC_PENALTY < null_aic {
+        best_k
     } else {
-        window_start
-    };
-    if onset >= end {
-        return declined("no change point earlier than the peak in the window");
-    }
-
-    let window_ms = ONSET_SEARCH_WINDOW_S * 1000.0;
-    let limit = match causal_bound {
-        // Which limit actually set the window start is the operator's
-        // next question when a pick sits on it, so the clause names the
-        // binding one rather than only whether geometry was known.
-        CausalBound::Enforced { index: b, .. } if *b >= span_start => {
-            "causal bound enforced".to_string()
-        }
-        CausalBound::Enforced { index: b, .. } => {
-            format!("causal bound enforced at sample {b}, search span is the tighter limit")
-        }
-        // Names the missing input (#460 AC3): "geometry not known" named
-        // neither input, so it told the operator nothing they could fix.
-        CausalBound::Unavailable(missing) => format!("no causal bound ({})", missing.clause()),
-    };
-    let mut rule = format!(
-        "AIC change-point pick over a {window_ms:.1} ms window; window start at sample \
-         {window_start}, {limit}"
-    );
-    if onset == window_start {
-        rule.push_str("; pick landed on the window start — the true onset may lie earlier");
-    }
-    OnsetEstimate { index: onset, rule }
+        0
+    })
 }
 
 #[cfg(test)]
@@ -379,7 +550,8 @@ mod tests {
     }
 
     /// A bound enforced at `index`. The inputs are nominal:
-    /// `estimate_onset` reads only the index.
+    /// `estimate_onset` reads the index and, for the edge guard's margin,
+    /// the speed of sound (14 samples at 96 kHz).
     fn bounded(index: usize) -> CausalBound {
         CausalBound::Enforced {
             index,
@@ -481,12 +653,15 @@ mod tests {
         );
     }
 
-    /// #346 acceptance criterion 3, restated for #378's window: a
-    /// bandlimited pre-ring sits below the sample pure flight time
-    /// allows, with the real wavefront above it. An unbounded search
-    /// lands on the pre-ring (computed here directly, per "test against
-    /// the rejected implementation"); supplying the causal bound as the
-    /// search window's lower limit puts the non-causal candidate outside
+    /// #378's window against the unbounded AIC pick: a bandlimited
+    /// pre-ring sits below the sample pure flight time allows, with the
+    /// real wavefront above it. The pre-ring here peaks at 2 % of the peak,
+    /// so a 10 %-of-peak threshold is causal on this fixture; #346 AC3's
+    /// threshold comparison is
+    /// `bounded_onset_is_causal_where_a_ten_percent_threshold_is_not`.
+    /// An unbounded search lands on the pre-ring (computed here directly,
+    /// per "test against the rejected implementation"); supplying the
+    /// causal bound as the search window's lower limit puts the non-causal candidate outside
     /// the picker's reach entirely rather than clamping it after the
     /// fact, which is what changed under #378.
     #[test]
@@ -520,6 +695,48 @@ mod tests {
         );
         assert_ne!(bounded.index, unbounded.index);
         assert!(bounded.rule.contains("causal bound enforced"));
+    }
+
+    /// #346 acceptance criterion 3, against the rejected rule it names: a
+    /// band-limited pre-ring above 10 % of the peak, entirely before the
+    /// sample pure flight time allows. The 10 %-of-peak threshold is
+    /// computed inline (it is not an estimator this crate returns) and
+    /// asserted non-causal as test setup, so a fixture on which the
+    /// threshold happens to be causal fails here instead of passing.
+    #[test]
+    fn bounded_onset_is_causal_where_a_ten_percent_threshold_is_not() {
+        let sigma_n = 1e-4;
+        let peak_index = 300usize;
+        let bound = 280usize; // earliest sample pure flight time allows
+        let wavefront = 285usize;
+        let mut ir = onset_noise(512, sigma_n, 0xABCD_EF01);
+        for (i, v) in ir.iter_mut().enumerate() {
+            if (245..bound).contains(&i) {
+                *v += 0.15 * ((i - 245) as f64 * 0.7).sin();
+            } else if (wavefront..peak_index).contains(&i) {
+                *v += 0.3 * (i - wavefront + 1) as f64 / 16.0;
+            }
+        }
+        ir[peak_index] = 1.0;
+
+        let threshold = 0.1 * ir[peak_index].abs();
+        let naive = ir
+            .iter()
+            .position(|v| v.abs() > threshold)
+            .expect("test setup: something crosses 10 % of peak");
+        assert!(
+            naive < bound,
+            "test setup: the 10 % crossing must be non-causal, got {naive}"
+        );
+
+        let est = estimate_onset(&ir, peak_index, 48_000, sigma_n, &bounded(bound));
+        assert!(
+            est.index >= bound,
+            "bounded onset went non-causal: {}",
+            est.index
+        );
+        assert_ne!(est.index, naive);
+        assert_ne!(est.index, peak_index, "must not fall back to argmax|h|");
     }
 
     /// #346 acceptance criterion 4: the rule string must say whether a
@@ -945,5 +1162,201 @@ mod tests {
             "pinned pick not flagged: {}",
             est.rule
         );
+        // A pinned pick already has its own onset standing, and the edge
+        // guard does not run on it: a pick on the window start is already flagged.
+        assert_eq!(
+            est.pick,
+            OnsetPick::Picked {
+                window_start: bound,
+                limit: WindowLimit::CausalBound,
+                pinned: true,
+                edge_guard: None,
+            }
+        );
+    }
+
+    /// The pick the guard is not applied to, computed inline from the same
+    /// AIC core: `window_start + k` over `[window_start, peak]`.
+    fn unguarded_pick(ir: &[f64], window_start: usize, peak_index: usize) -> usize {
+        window_start + aic_change_point(&ir[window_start..=peak_index]).unwrap()
+    }
+
+    /// #346 architect revision 3, edge-following guard, firing direction.
+    /// The bound sits inside the wavefront's rise, after the true onset, so
+    /// the window holds no pre-onset noise — the homogeneous case the
+    /// picker's doc names. Starting the window 5 cm earlier moves the
+    /// re-pick. Tested against the rejected implementation: the
+    /// unguarded bounded pick is computed inline and is clear of the window
+    /// start under a binding bound, i.e. it passes every other onset
+    /// condition and *would* have stood as `Unscored`.
+    #[test]
+    fn edge_guard_fires_when_the_window_starts_after_the_true_onset() {
+        let sigma_n = 1e-4;
+        let (ir, onset_true, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
+        let bound = onset_true + 50;
+
+        let unguarded = unguarded_pick(&ir, bound, peak_index);
+        assert!(
+            unguarded > bound && unguarded < peak_index,
+            "test setup: the unguarded pick must be clear of the window start, got {unguarded}"
+        );
+
+        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(bound));
+        assert_eq!(
+            est.index, unguarded,
+            "the guard reports, it does not move the pick"
+        );
+        match est.pick {
+            OnsetPick::Picked {
+                window_start,
+                limit,
+                pinned,
+                edge_guard,
+            } => {
+                assert_eq!(window_start, bound);
+                assert_eq!(limit, WindowLimit::CausalBound);
+                assert!(!pinned);
+                match edge_guard {
+                    Some(EdgeGuard::Failed { repick: Some(r) }) => assert!(
+                        r.abs_diff(unguarded) > EDGE_GUARD_TOLERANCE_SAMPLES,
+                        "a failed guard must name a re-pick that moved: {r} vs {unguarded}"
+                    ),
+                    other => panic!("guard must fire on a homogeneous window, got {other:?}"),
+                }
+            }
+            OnsetPick::Declined => panic!("picker declined: {}", est.rule),
+        }
+        assert!(
+            est.rule.contains("the pick follows the window edge"),
+            "rule must say the pick follows the window edge: {}",
+            est.rule
+        );
+    }
+
+    /// Edge-following guard, non-firing direction: a clean change point
+    /// with pre-onset noise inside the bounded window does not move when
+    /// the window starts 5 cm (14 samples at 96 kHz) earlier, adding more
+    /// of that noise to the leading segment.
+    #[test]
+    fn edge_guard_passes_a_clean_step_with_pre_onset_noise() {
+        let sigma_n = 1e-4;
+        let floor = sigma_n;
+        let onset_true = 400usize;
+        let peak_index = 440usize;
+        let bound = 380usize;
+        let mut ir = onset_noise(1024, sigma_n, 0x5151_2020);
+        for v in ir.iter_mut().take(peak_index).skip(onset_true) {
+            *v += 0.3;
+        }
+        ir[peak_index] = 1.0;
+
+        let est = estimate_onset(&ir, peak_index, 96_000, floor, &bounded(bound));
+        assert_eq!(est.index, onset_true);
+        assert_eq!(
+            est.pick,
+            OnsetPick::Picked {
+                window_start: bound,
+                limit: WindowLimit::CausalBound,
+                pinned: false,
+                edge_guard: Some(EdgeGuard::Passed),
+            }
+        );
+        assert!(!est.rule.contains("window edge"), "{}", est.rule);
+    }
+
+    /// The guard fails closed, with no re-pick, when the window cannot
+    /// start 5 cm earlier: here the bound sits 10 samples into the IR and
+    /// the margin is 14. The fixture is the passing clean step above,
+    /// shifted so its bound is that close to sample 0 — the same pick
+    /// that passes there is refused here, because nothing checked it.
+    #[test]
+    fn edge_guard_fails_closed_when_the_window_cannot_be_extended() {
+        let sigma_n = 1e-4;
+        let onset_true = 30usize;
+        let peak_index = 70usize;
+        let bound = 10usize;
+        assert!(bound < edge_guard_margin_samples(343.0, 96_000));
+        let mut ir = onset_noise(1024, sigma_n, 0x5151_2020);
+        for v in ir.iter_mut().take(peak_index).skip(onset_true) {
+            *v += 0.3;
+        }
+        ir[peak_index] = 1.0;
+
+        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(bound));
+        assert_eq!(est.index, onset_true);
+        assert_eq!(
+            est.pick,
+            OnsetPick::Picked {
+                window_start: bound,
+                limit: WindowLimit::CausalBound,
+                pinned: false,
+                edge_guard: Some(EdgeGuard::Failed { repick: None }),
+            }
+        );
+        assert!(
+            est.rule
+                .contains("no re-pick — the window cannot start 5 cm earlier"),
+            "{}",
+            est.rule
+        );
+        assert!(!est.rule.contains("window edge"), "{}", est.rule);
+    }
+
+    /// The margin is the 5 cm tape error at the bound's own speed of
+    /// sound, not a fixed sample count.
+    #[test]
+    fn edge_guard_margin_is_five_cm_at_the_bounds_speed_of_sound() {
+        assert_eq!(edge_guard_margin_samples(343.0, 96_000), 14);
+        assert_eq!(edge_guard_margin_samples(343.0, 48_000), 7);
+        assert_eq!(edge_guard_margin_samples(200.0, 96_000), 24);
+        assert_eq!(edge_guard_margin_samples(343.0, 0), 0);
+        assert_eq!(edge_guard_margin_samples(0.0, 96_000), 0);
+    }
+
+    /// The guard is bounded-path only: an unbounded pick carries no guard
+    /// verdict, and its rule text is what #378 left.
+    #[test]
+    fn edge_guard_does_not_run_without_a_causal_bound() {
+        let sigma_n = 1e-4;
+        let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
+        let est = estimate_onset(&ir, peak_index, 96_000, sigma_n, &unbounded());
+        match est.pick {
+            OnsetPick::Picked {
+                limit, edge_guard, ..
+            } => {
+                assert_eq!(limit, WindowLimit::SearchSpan);
+                assert_eq!(edge_guard, None);
+            }
+            OnsetPick::Declined => panic!("picker declined: {}", est.rule),
+        }
+        assert!(!est.rule.contains("window edge"), "{}", est.rule);
+    }
+
+    /// The binding-limit value is typed, and agrees with the rule text the
+    /// CLI already prints: a bound earlier than the span start is enforced
+    /// but does not set the window.
+    #[test]
+    fn onset_pick_reports_which_limit_set_the_window() {
+        let sigma_n = 1e-4;
+        let (ir, _, peak_index) = drr_fixture(1.0, sigma_n, 0.05);
+        let loose = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(10));
+        assert!(matches!(
+            loose.pick,
+            OnsetPick::Picked {
+                limit: WindowLimit::SearchSpan,
+                ..
+            }
+        ));
+        assert!(loose.rule.contains("search span is the tighter limit"));
+        let tight = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(1500));
+        assert!(matches!(
+            tight.pick,
+            OnsetPick::Picked {
+                limit: WindowLimit::CausalBound,
+                ..
+            }
+        ));
+        let declined = estimate_onset(&ir, peak_index, 96_000, sigma_n, &bounded(peak_index));
+        assert_eq!(declined.pick, OnsetPick::Declined);
     }
 }

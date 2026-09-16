@@ -43,7 +43,17 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// not a disagreement; on `PeriodShift`/`Mismatch` it is `None` even with a
 /// measured `interface_latency`, and the round trip prints instead, with
 /// the disagreement named in the suffix.
+///
+/// Prefixed with the rule that produced the arrival (#346 UX revision 4):
+/// always `peak`, the only rule there is. The prefix stays although the
+/// marker always sits on the visible peak, because it is acceptance
+/// criterion 4's tag on a screenshot.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
+    format!("peak {}", arrival_marker_value(stats))
+}
+
+/// [`arrival_marker_text`] without the rule prefix.
+fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String {
     let arrival_ms = stats.arrival_s * 1000.0;
     let (value_ms, suffix) = match (stats.flight_time_s, &stats.arrival_check) {
         (Some(ft), ArrivalCheck::Unchecked { .. }) => (ft * 1000.0, " flight, ref unchecked"),
@@ -543,7 +553,7 @@ mod tests {
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        let want = format!("{:.2} ms round trip", stats.arrival_s * 1000.0);
+        let want = format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0);
         assert_eq!(scene.arrival.text, want);
     }
 
@@ -560,7 +570,7 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(
             scene.arrival.text,
-            format!("{:.2} ms round trip", stats.arrival_s * 1000.0),
+            format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0),
             "no measured \u{3c4} on this report — arrival text must be the raw round trip: {}",
             scene.arrival.text
         );
@@ -614,7 +624,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "{:.2} ms round trip, 1-period shift",
+                "peak {:.2} ms round trip, 1-period shift",
                 stats.arrival_s * 1000.0
             ),
             "a period shift must name itself on the round trip, not read as flight: {}",
@@ -663,7 +673,7 @@ mod tests {
             .flight_time_s
             .expect("Agree must produce a flight time")
             * 1000.0;
-        assert_eq!(scene.arrival.text, format!("{flight_ms:.2} ms flight"));
+        assert_eq!(scene.arrival.text, format!("peak {flight_ms:.2} ms flight"));
     }
 
     /// #359: a flight time computed alongside `Unchecked` must say so — the
@@ -686,7 +696,7 @@ mod tests {
             * 1000.0;
         assert_eq!(
             scene.arrival.text,
-            format!("{flight_ms:.2} ms flight, ref unchecked")
+            format!("peak {flight_ms:.2} ms flight, ref unchecked")
         );
     }
 
@@ -732,12 +742,32 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "{:.2} ms round trip, ref \u{394} {:+} samples",
+                "peak {:.2} ms round trip, ref \u{394} {:+} samples",
                 stats.arrival_s * 1000.0,
                 d.delta_samples,
             )
         );
         assert!(!scene.arrival.text.contains("flight"));
+    }
+
+    /// #346 UX revision 4: the marker names the rule that produced the
+    /// arrival, `peak`, on every onset standing — including `Unscored`,
+    /// where the rejected revision printed `onset`.
+    #[test]
+    fn arrival_marker_names_the_rule_that_produced_the_arrival() {
+        use ac_core::measurement::report::{ArrivalSource, OnsetStanding};
+        let r = gated_report_with_delayed_peak();
+        let mut stats = r.ir_stats().unwrap();
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        let value = arrival_marker_value(&stats);
+        for standing in [OnsetStanding::NoCausalBound, OnsetStanding::Unscored] {
+            stats.onset_standing = standing;
+            assert_eq!(
+                arrival_marker_text(&stats),
+                format!("peak {value}"),
+                "{standing:?}"
+            );
+        }
     }
 
     #[test]

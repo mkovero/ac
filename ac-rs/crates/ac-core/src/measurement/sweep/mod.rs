@@ -53,7 +53,8 @@ pub use harmonics::{
     extract_irs, pre_impulse_region_len, pre_impulse_snr_db, DeconvolvedIrs, HarmonicIr,
 };
 pub use onset::{
-    estimate_onset, BoundInputs, CausalBound, MissingBoundInput, OnsetEstimate,
+    estimate_onset, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate,
+    OnsetPick, WindowLimit, EDGE_GUARD_EXTENSION_M, EDGE_GUARD_TOLERANCE_SAMPLES,
     ONSET_SEARCH_WINDOW_S,
 };
 pub use peak::ir_peak;

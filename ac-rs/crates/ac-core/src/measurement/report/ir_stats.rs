@@ -4,7 +4,10 @@
 //! `ac-scene`'s sweep-IR panel cannot disagree about a capture.
 
 use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
-use crate::measurement::sweep::{ir_peak, BoundInputs, CausalBound, MissingBoundInput};
+use crate::measurement::sweep::{
+    ir_peak, BoundInputs, CausalBound, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick,
+    WindowLimit,
+};
 use crate::shared::calibration::{compare_tau_readings, TauComparison, TauDisagreement};
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
@@ -40,14 +43,15 @@ impl MeasurementReport {
     /// when no payload carries an impulse response, or its linear IR is
     /// empty (see issue #283).
     ///
-    /// Arrival (`delay_samples`/`arrival_s`) is derived from the IR's
-    /// magnitude peak. An onset estimate
-    /// ([`crate::measurement::sweep::estimate_onset`]) is computed and
-    /// carried beside it as a diagnostic, not used as the arrival — #378's
-    /// contingency, see [`IrStats::onset_index`]. When this report carries
-    /// both a measured interface latency and a recorded
-    /// `position.distance_m`, the onset estimate is bound to reject any
-    /// candidate earlier than pure flight time allows.
+    /// Arrival (`delay_samples`/`arrival_s`) is always the IR's magnitude
+    /// peak ([`IrStats::arrival_source`] is [`ArrivalSource::Peak`]). The
+    /// onset estimate ([`crate::measurement::sweep::estimate_onset`]) is
+    /// carried beside it as a diagnostic, with its standing in
+    /// [`IrStats::onset_standing`]; it does not affect any number (#346
+    /// architect revision 4, operator decision 2026-09-16).
+    /// When this report carries both a measured same-capture reference
+    /// latency and a recorded `position.distance_m`, the onset estimate is
+    /// bound to reject any candidate earlier than pure flight time allows.
     pub fn ir_stats(&self) -> Option<IrStats> {
         let (payload, sample_rate_hz, linear_ir) =
             self.data.iter().find_map(|p| match &p.data {
@@ -104,22 +108,20 @@ impl MeasurementReport {
             onset_floor,
             &causal_bound,
         );
+        let verdict = ir_verdict(peak_magnitude, pre_region, pre_impulse_snr_db);
+        let onset_standing = onset_standing(&causal_bound, &onset, &verdict);
         let onset_index = onset.index;
         let onset_rule = onset.rule;
 
-        // The peak's offset from the window centre is the arrival; the
-        // onset above is reported beside it as a diagnostic only. #378's
-        // contingency, triggered by its AC6 rig run (pupu, 2026-09-15): on
-        // a 1.000 m → 2.000 m move the onset's increment missed
-        // `transfer_stream`'s by 143.75 samples (19.5 se) while the peak's
-        // missed by 8.62 — the onset-to-peak distance itself moved 135
-        // samples between positions. #346's absolute-arrival claim stays
-        // open rather than being answered by the worse estimator.
+        // The arrival is the magnitude peak, unconditionally (#346 architect
+        // revision 4). The bounded onset's pre-registered rig check refused
+        // to conclude (pupu, 2026-09-16, 0/12 captures passed the edge
+        // guard), and the operator accepted the peak with its tag.
+        let arrival_source = ArrivalSource::Peak;
         let delay_samples = peak_index as i64 - centre as i64;
         let arrival_s = delay_samples as f64 / *sample_rate_hz as f64;
         let (gate_window_s, gate_f_low_hz, gate_window_kind) =
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
-        let verdict = ir_verdict(peak_magnitude, pre_region, pre_impulse_snr_db);
 
         // #359: the τ subtraction this report can offer — gated by
         // `arrival_check`. `interface_latency` must be a measured τ for
@@ -146,6 +148,8 @@ impl MeasurementReport {
             onset_index,
             onset_rule,
             causal_bound,
+            arrival_source,
+            onset_standing,
             delay_samples,
             arrival_s,
             arrival_check,
@@ -157,6 +161,61 @@ impl MeasurementReport {
             verdict,
         })
     }
+}
+
+/// The onset diagnostic's standing (#346 architect revision 4): a verdict
+/// on the onset pick, not a gate on the arrival, which is always the peak.
+/// The conditions are checked in this order; the first that fails is the
+/// named standing, and [`OnsetStanding::Unscored`] means all held:
+///
+/// 1. the causal bound is enforced;
+/// 2. the bound set the search window's start (it is not earlier than the
+///    search span);
+/// 3. the picker did not decline;
+/// 4. the pick is not on the window start;
+/// 5. the edge-following guard passed;
+/// 6. the deconvolution verdict is not `Failed`.
+///
+/// Reads only values `ir_stats` already computed, never `onset.rule`.
+pub(super) fn onset_standing(
+    causal_bound: &CausalBound,
+    onset: &OnsetEstimate,
+    verdict: &IrVerdict,
+) -> OnsetStanding {
+    if !matches!(causal_bound, CausalBound::Enforced { .. }) {
+        return OnsetStanding::NoCausalBound;
+    }
+    let OnsetPick::Picked {
+        limit,
+        pinned,
+        edge_guard,
+        ..
+    } = &onset.pick
+    else {
+        // A bound at or after the peak is a decline, not a non-binding
+        // bound: the bound was the limit, and it left nothing to search.
+        return OnsetStanding::PickerDeclined;
+    };
+    if *limit != WindowLimit::CausalBound {
+        return OnsetStanding::BoundNotBinding;
+    }
+    if *pinned {
+        return OnsetStanding::PickOnWindowStart;
+    }
+    // `estimate_onset` runs the guard on every clear pick in a window the
+    // bound started, so a guard that did not run does not arise here; it
+    // is refused as unchecked rather than read as a pass.
+    match edge_guard {
+        Some(EdgeGuard::Passed) => {}
+        Some(EdgeGuard::Failed { repick }) => {
+            return OnsetStanding::EdgeFollowing { repick: *repick };
+        }
+        None => return OnsetStanding::EdgeFollowing { repick: None },
+    }
+    if matches!(verdict, IrVerdict::Failed { .. }) {
+        return OnsetStanding::DeconvolutionFailed;
+    }
+    OnsetStanding::Unscored
 }
 
 /// Corroborate `report`'s same-capture reference τ ([`ReferenceLatency`])
@@ -372,19 +431,20 @@ pub struct IrStats {
     /// Length of the gated linear IR, in samples.
     pub window_len: usize,
     /// Index of the peak-magnitude sample within the gated IR, and what
-    /// `delay_samples` / `arrival_s` are derived from. On a multi-way
-    /// loudspeaker this sits a group-delay offset past the wavefront, so
-    /// the absolute arrival carries that offset (#346, still open); the
-    /// onset that was meant to remove it did worse on the rig — see
-    /// [`Self::onset_index`].
+    /// `delay_samples` / `arrival_s` are derived from. On a
+    /// multi-way loudspeaker this sits a group-delay offset past the
+    /// wavefront, so a peak-derived absolute arrival carries that offset
+    /// (#346).
     pub peak_index: usize,
     /// `|linear_ir[peak_index]|`.
     pub peak_magnitude: f64,
     /// Index of the estimated onset within the gated IR — see
-    /// [`crate::measurement::sweep::estimate_onset`]. A diagnostic, **not**
-    /// the arrival: #378's contingency, triggered by its AC6 rig run
-    /// (pupu, 2026-09-15), where the onset's 1.000 m → 2.000 m increment
-    /// missed `transfer_stream`'s by 143.75 samples and the peak's by 8.62.
+    /// [`crate::measurement::sweep::estimate_onset`]. A diagnostic, never
+    /// the arrival: #378's AC6 rig run (pupu, 2026-09-15) found the
+    /// unbounded onset's 1.000 m → 2.000 m increment missing
+    /// `transfer_stream`'s by 143.75 samples, against the peak's 8.62, and
+    /// the bounded onset's pre-registered rig check (pupu, 2026-09-16)
+    /// refused to conclude. [`Self::onset_standing`] states its standing.
     pub onset_index: usize,
     /// The rule that produced `onset_index`, from
     /// [`crate::measurement::sweep::OnsetEstimate::rule`] — states
@@ -396,9 +456,16 @@ pub struct IrStats {
     /// lacked (#460). Carries the bound's inputs so a read-out prints them
     /// rather than re-deriving them; `min_admissible_index()` is the index.
     pub causal_bound: CausalBound,
-    /// `peak_index - window_len / 2` — signed offset of the magnitude
-    /// peak from the gate centre, in samples. Positive means the response
-    /// arrived after the zero-delay reference position.
+    /// Which rule produced `delay_samples` / `arrival_s` (#346 acceptance
+    /// criterion 4). Always [`ArrivalSource::Peak`].
+    pub arrival_source: ArrivalSource,
+    /// The onset diagnostic's standing: the first of `onset_standing`'s
+    /// conditions that failed, or [`OnsetStanding::Unscored`] when all
+    /// held. It does not affect any number on this struct.
+    pub onset_standing: OnsetStanding,
+    /// Signed offset of the arrival — `peak_index` — from the gate centre
+    /// (`window_len / 2`), in samples. Positive means the response arrived after the
+    /// zero-delay reference position.
     pub delay_samples: i64,
     /// `delay_samples / sample_rate_hz` — arrival time relative to the
     /// gate's zero-delay reference. This is **not** acoustic path delay:
@@ -413,7 +480,8 @@ pub struct IrStats {
     /// to catch.
     pub arrival_check: ArrivalCheck,
     /// `arrival_s − interface_latency.tau_s` — the one τ subtraction this
-    /// report can offer. `Some` only when `interface_latency` is a measured
+    /// report can offer: a peak arrival minus a peak-picked τ.
+    /// `Some` only when `interface_latency` is a measured
     /// τ for *this* capture pair **and** `arrival_check` is not a
     /// disagreement; `None` on `PeriodShift`/`Mismatch` even though
     /// `interface_latency` is measured, and `None` whenever no τ was
@@ -454,6 +522,48 @@ pub struct IrStats {
 pub enum IrVerdict {
     Ok,
     Failed { reason: String },
+}
+
+/// Which rule produced an [`IrStats`] arrival (#346 acceptance criterion 4).
+/// An enum so the tag is typed. A second variant needs a design decision
+/// backed by a scored rig check (#346 architect revision 3, operator
+/// decision 2026-09-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrivalSource {
+    /// The magnitude peak (argmax |h|).
+    Peak,
+}
+
+/// The standing of an [`IrStats`] onset diagnostic — one variant per
+/// condition, in the order they are checked, plus [`Self::Unscored`] when
+/// every condition held. None of them affects the arrival.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnsetStanding {
+    /// No causal bound was enforced; [`IrStats::causal_bound`] names the
+    /// missing input.
+    NoCausalBound,
+    /// A bound was enforced but the search span, not the bound, set the
+    /// window start.
+    BoundNotBinding,
+    /// The onset picker declined; [`IrStats::onset_rule`] names the case.
+    PickerDeclined,
+    /// The pick sits on the window start, so the true onset may lie
+    /// earlier.
+    PickOnWindowStart,
+    /// The edge-following guard failed. `repick: Some(r)`: the re-pick
+    /// with the window start moved
+    /// [`crate::measurement::sweep::EDGE_GUARD_EXTENSION_M`] earlier went
+    /// to sample `r`, so the pick follows the window edge. `repick: None`:
+    /// no re-pick ran, so the pick could not be checked. Mirrors
+    /// [`crate::measurement::sweep::EdgeGuard::Failed`].
+    EdgeFollowing { repick: Option<usize> },
+    /// The deconvolution verdict is `Failed`.
+    DeconvolutionFailed,
+    /// Every condition held: bounded, binding, clear of the window start,
+    /// guard passed, verdict not `Failed`. No rig score authorises this
+    /// pick as an arrival: the pre-registered run (pupu, 2026-09-16)
+    /// refused to conclude, and the operator declined a new estimator.
+    Unscored,
 }
 
 /// Outcome of corroborating this capture's same-capture reference τ against
@@ -729,9 +839,10 @@ mod tests {
 
     // ─── interface latency (τ), archived alongside the arrival ─────────
 
-    /// #378 contingency (AC6 rig run, 2026-09-15): `delay_samples` /
-    /// `arrival_s` are peak-derived, and the onset is still computed and
-    /// carried as a diagnostic. Tested against the rejected wiring — a
+    /// #378 contingency (AC6 rig run, 2026-09-15), kept by #346 for the
+    /// unbounded case: with no causal bound `delay_samples` / `arrival_s`
+    /// are peak-derived, and the onset is still computed and carried as a
+    /// diagnostic. Tested against the rejected wiring — a
     /// synthetic multi-way-like IR where sustained onset energy sits well
     /// before the peak, so an arrival still taken from the onset would
     /// differ from the peak-derived value asserted here.
@@ -774,6 +885,287 @@ mod tests {
         assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
         assert!((stats.arrival_s - (peak_true as f64 - centre as f64) / 48_000.0).abs() < 1e-12);
         assert!(stats.onset_rule.contains("no causal bound"));
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.onset_standing, OnsetStanding::NoCausalBound);
+    }
+
+    /// Noise in ±1e-4, from a fixed hash so the fixture is reproducible.
+    fn hashed_noise(window_len: usize) -> Vec<f64> {
+        (0..window_len)
+            .map(|i| {
+                let mut s = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                s ^= s >> 29;
+                ((s >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 2e-4
+            })
+            .collect()
+    }
+
+    /// #346 acceptance criterion 2, tested against the rejected
+    /// implementation: a multi-way-like IR — sustained energy from the
+    /// wavefront to a peak 20 samples later, as on pupu at 2 m — with a
+    /// measured same-capture reference and a distance whose causal bound
+    /// sits 20 samples before the wavefront, so every onset condition holds
+    /// and the pick is the wavefront. The rejected implementation — the
+    /// promotion withdrawn by #346 architect revision 4 — is that bounded
+    /// onset as the arrival. It is computed inline and must not be what
+    /// `ir_stats` reports; the peak is.
+    #[test]
+    fn ir_stats_keeps_the_peak_arrival_over_an_unscored_onset() {
+        let window_len = 1024;
+        let sr = 96_000u32;
+        let centre = window_len / 2;
+        let peak_true = centre + 200;
+        let wavefront = peak_true - 20;
+        let bound_index = wavefront - 20;
+        let mut ir = hashed_noise(window_len);
+        for v in ir.iter_mut().take(peak_true).skip(wavefront) {
+            *v += 0.3;
+        }
+        ir[peak_true] = 1.0;
+
+        let (argmax, _) = crate::measurement::sweep::ir_peak(&ir);
+        assert_eq!(argmax, peak_true, "test setup");
+
+        let mut r = ir_report_with_custom_ir(ir.clone(), sr);
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some((bound_index - centre) as f64 / sr as f64 * c),
+            ..Default::default()
+        });
+        r.reference_latency = Some(measured_reference(0.0));
+
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.verdict, IrVerdict::Ok, "test setup");
+        assert_eq!(
+            stats.causal_bound.min_admissible_index(),
+            Some(bound_index),
+            "test setup"
+        );
+        assert_eq!(stats.onset_standing, OnsetStanding::Unscored, "test setup");
+
+        // The rejected implementation: the bounded onset as the arrival.
+        let rejected = crate::measurement::sweep::estimate_onset(
+            &ir,
+            argmax,
+            sr,
+            onset_floor(pre_impulse_region(&ir, argmax)),
+            &stats.causal_bound,
+        );
+        assert_eq!(rejected.index, wavefront, "test setup");
+        assert_eq!(stats.onset_index, wavefront, "test setup");
+        assert_ne!(wavefront, peak_true, "test setup");
+
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.delay_samples, peak_true as i64 - centre as i64);
+        assert_ne!(
+            stats.delay_samples,
+            rejected.index as i64 - centre as i64,
+            "the arrival must not be the bounded onset — #346 architect revision 4"
+        );
+        assert!((stats.arrival_s - stats.delay_samples as f64 / sr as f64).abs() < 1e-15);
+    }
+
+    /// #346: flight time is the peak arrival minus the stored peak-picked
+    /// τ, as on main, even when every onset condition holds. The
+    /// onset-derived value is computed inline and must differ.
+    #[test]
+    fn ir_stats_flight_time_subtracts_tau_from_the_peak_over_an_unscored_onset() {
+        let window_len = 1024;
+        let sr = 96_000u32;
+        let centre = window_len / 2;
+        let peak_true = centre + 200;
+        let wavefront = peak_true - 20;
+        let bound_index = wavefront - 20;
+        let mut ir = hashed_noise(window_len);
+        for v in ir.iter_mut().take(peak_true).skip(wavefront) {
+            *v += 0.3;
+        }
+        ir[peak_true] = 1.0;
+        let mut r = ir_report_with_custom_ir(ir, sr);
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some((bound_index - centre) as f64 / sr as f64 * c),
+            ..Default::default()
+        });
+        r.reference_latency = Some(measured_reference(0.0));
+        let tau_s = 30.0 / sr as f64;
+        r.interface_latency = Some(measured_tau(tau_s));
+
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.onset_standing, OnsetStanding::Unscored, "test setup");
+        assert_eq!(stats.onset_index, wavefront, "test setup");
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        let ft = stats.flight_time_s.expect("flight time");
+        let peak_ft = (peak_true as f64 - centre as f64) / sr as f64 - tau_s;
+        let onset_ft = (wavefront as f64 - centre as f64) / sr as f64 - tau_s;
+        assert!((ft - peak_ft).abs() < 1e-15, "{ft} vs {peak_ft}");
+        assert!(
+            (ft - onset_ft).abs() > 1e-6,
+            "flight time must not come from the onset"
+        );
+    }
+
+    /// Each onset condition, failed alone, names itself — in the order
+    /// `onset_standing` checks them — and all holding is `Unscored`.
+    #[test]
+    fn onset_standing_names_the_first_failed_condition() {
+        use crate::measurement::sweep::{
+            BoundInputs, EdgeGuard, MissingBoundInput, OnsetEstimate, OnsetPick, WindowLimit,
+        };
+        let enforced = CausalBound::Enforced {
+            index: 100,
+            inputs: BoundInputs {
+                reference_tau_s: 0.0,
+                distance_m: 1.0,
+                speed_of_sound_m_s: 343.0,
+                temperature_c: None,
+            },
+        };
+        let unbounded = CausalBound::Unavailable(MissingBoundInput::Distance);
+        let picked = |limit, pinned, edge_guard| OnsetEstimate {
+            index: 110,
+            rule: String::new(),
+            pick: OnsetPick::Picked {
+                window_start: 100,
+                limit,
+                pinned,
+                edge_guard,
+            },
+        };
+        let good = picked(WindowLimit::CausalBound, false, Some(EdgeGuard::Passed));
+        let declined = OnsetEstimate {
+            index: 120,
+            rule: String::new(),
+            pick: OnsetPick::Declined,
+        };
+        let failed = IrVerdict::Failed {
+            reason: "pre-impulse SNR below threshold".into(),
+        };
+        assert_eq!(
+            onset_standing(&enforced, &good, &IrVerdict::Ok),
+            OnsetStanding::Unscored
+        );
+        let cases = [
+            (
+                &unbounded,
+                good.clone(),
+                IrVerdict::Ok,
+                OnsetStanding::NoCausalBound,
+            ),
+            (
+                &enforced,
+                picked(WindowLimit::SearchSpan, false, Some(EdgeGuard::Passed)),
+                IrVerdict::Ok,
+                OnsetStanding::BoundNotBinding,
+            ),
+            (
+                &enforced,
+                declined,
+                IrVerdict::Ok,
+                OnsetStanding::PickerDeclined,
+            ),
+            (
+                &enforced,
+                picked(WindowLimit::CausalBound, true, None),
+                IrVerdict::Ok,
+                OnsetStanding::PickOnWindowStart,
+            ),
+            (
+                &enforced,
+                picked(
+                    WindowLimit::CausalBound,
+                    false,
+                    Some(EdgeGuard::Failed { repick: Some(117) }),
+                ),
+                IrVerdict::Ok,
+                OnsetStanding::EdgeFollowing { repick: Some(117) },
+            ),
+            (
+                &enforced,
+                picked(
+                    WindowLimit::CausalBound,
+                    false,
+                    Some(EdgeGuard::Failed { repick: None }),
+                ),
+                IrVerdict::Ok,
+                OnsetStanding::EdgeFollowing { repick: None },
+            ),
+            (
+                &enforced,
+                picked(WindowLimit::CausalBound, false, None),
+                IrVerdict::Ok,
+                OnsetStanding::EdgeFollowing { repick: None },
+            ),
+            (
+                &enforced,
+                good.clone(),
+                failed,
+                OnsetStanding::DeconvolutionFailed,
+            ),
+        ];
+        for (bound, onset, verdict, standing) in cases {
+            assert_eq!(
+                onset_standing(bound, &onset, &verdict),
+                standing,
+                "{standing:?}"
+            );
+        }
+    }
+
+    /// End to end through `ir_stats`: a bound inside the wavefront's rise
+    /// leaves a homogeneous window, the edge guard fires, and the onset
+    /// standing names it — the bound, not the IR, set that pick. The
+    /// arrival is the peak regardless.
+    #[test]
+    fn ir_stats_keeps_the_peak_when_the_pick_follows_the_window_edge() {
+        let window_len = 1024;
+        let sr = 96_000u32;
+        let centre = window_len / 2;
+        let peak_true = centre + 300;
+        let onset_true = peak_true - 110;
+        let bound_index = onset_true + 50;
+        let mut ir = hashed_noise(window_len);
+        let rise = (peak_true - onset_true) as f64;
+        for (i, v) in ir.iter_mut().enumerate() {
+            if (onset_true..=peak_true).contains(&i) {
+                let x = (i - onset_true) as f64 / rise;
+                *v += x * x;
+            }
+        }
+        let mut r = ir_report_with_custom_ir(ir, sr);
+        let c = crate::shared::conversions::speed_of_sound_from_config(Some(20.0));
+        r.position = Some(PositionSnapshot {
+            temperature_c: Some(20.0),
+            distance_m: Some((bound_index - centre) as f64 / sr as f64 * c),
+            ..Default::default()
+        });
+        r.reference_latency = Some(measured_reference(0.0));
+
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(
+            stats.causal_bound.min_admissible_index(),
+            Some(bound_index),
+            "test setup"
+        );
+        assert!(
+            stats.onset_index > bound_index,
+            "test setup: pick must be clear of the window start, got {}",
+            stats.onset_index
+        );
+        assert!(
+            matches!(
+                stats.onset_standing,
+                OnsetStanding::EdgeFollowing { repick: Some(r) }
+                    if r.abs_diff(stats.onset_index) > 1
+            ),
+            "{:?}: {}",
+            stats.onset_standing,
+            stats.onset_rule
+        );
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
+        assert_eq!(stats.delay_samples, stats.peak_index as i64 - centre as i64);
     }
 
     /// #346 / #460: when a report carries both a same-capture reference latency and
