@@ -284,7 +284,7 @@ these. Use it when you can state what the *spec* got wrong.
 
 
 ### loopback IR testing
-see docs/runbooks/loopback-ir.md
+see docs/runbooks/rig-testing.md (7b without hardware, 7c through a rig)
 
 ### `requires-rig` — you set it, and you clear it on a passing record
 

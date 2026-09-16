@@ -53,9 +53,9 @@ cargo build --release
 Toolchain is pinned to Rust 1.95.0 via `rust-toolchain.toml`.
 
 `ac monitor` and `ac transfer` launch `ac-view`, which must be on `$PATH`
-or in the same directory as `ac`. Note that `install.sh` currently
-installs only `ac` and `ac-daemon` — install `ac-view` alongside them if
-you want the GUI outside a dev tree.
+or in the same directory as `ac`. `ac-rs/install.sh` builds for the host
+CPU and installs `ac`, `ac-daemon` and `ac-view` into `/usr/local/bin`. To
+put a build on a test rig instead, see `docs/runbooks/rig-testing.md`.
 
 ## Audio backend
 

@@ -90,6 +90,30 @@ fn parse_args() -> Args {
     a
 }
 
+/// The level the daemon says it applied, read from the `plot_ir`
+/// acknowledgement. The request alone is not the record: a daemon from
+/// before #459 clamps a typed level through `drive_max_dbfs` and
+/// acknowledges the clamped value. An acknowledgement without a finite
+/// `level_dbfs` is refused rather than reported as if it echoed the request.
+pub(crate) fn acknowledged_level(ack: &Value) -> Result<f64, String> {
+    match ack.get("level_dbfs").and_then(Value::as_f64) {
+        Some(v) if v.is_finite() => Ok(v),
+        _ => Err(format!(
+            "plot_ir acknowledgement carries no finite level_dbfs: {ack}"
+        )),
+    }
+}
+
+/// Record line carrying both levels, marked when they disagree.
+pub(crate) fn level_line(requested: f64, acknowledged: f64) -> String {
+    let mark = if acknowledged == requested {
+        ""
+    } else {
+        "  ← DIFFERS from the request"
+    };
+    format!("level:         requested {requested} dBFS, acknowledged {acknowledged} dBFS{mark}")
+}
+
 fn main() {
     let a = parse_args();
     let ctx = zmq::Context::new();
@@ -125,7 +149,11 @@ fn main() {
     if ack["ok"] != json!(true) {
         panic!("plot_ir rejected: {ack}");
     }
-    eprintln!("plot_ir accepted at {} dBFS, waiting…", a.level_dbfs);
+    let acked_dbfs = acknowledged_level(&ack).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!(
+        "plot_ir accepted: requested {} dBFS, acknowledged {acked_dbfs} dBFS, waiting…",
+        a.level_dbfs
+    );
 
     let deadline = Instant::now() + Duration::from_secs(a.timeout_s);
     let frame = loop {
@@ -186,9 +214,10 @@ fn main() {
     println!("--- ir_probe record ---");
     println!("sample_rate:   {sr} Hz");
     println!(
-        "sweep:         {} Hz – {} Hz, {} s, {} dBFS, {} harm, {} tail",
-        a.f1, a.f2, a.duration, a.level_dbfs, a.n_harmonics, a.tail_s
+        "sweep:         {} Hz – {} Hz, {} s, {} dBFS acknowledged, {} harm, {} tail",
+        a.f1, a.f2, a.duration, acked_dbfs, a.n_harmonics, a.tail_s
     );
+    println!("{}", level_line(a.level_dbfs, acked_dbfs));
     println!(
         "window:        requested {}, ir len {}{}",
         a.window_len,

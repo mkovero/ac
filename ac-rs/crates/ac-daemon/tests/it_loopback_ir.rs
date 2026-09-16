@@ -6,8 +6,8 @@
 //! pre-impulse floor.
 //!
 //! This test is `#[ignore]`'d so it does not run as part of `cargo test`.
-//! It needs a live JACK server. See `ARCHITECTURE.md` → "Testing strategy"
-//! → "Loopback IR runbook" for invocation.
+//! It needs a live JACK server. See `docs/runbooks/rig-testing.md` (7b, and
+//! 7c for real hardware) for invocation.
 //!
 //! The internal loopback works because both the daemon's output and input
 //! ports are registered under the same JACK client (`ac-daemon`). Setting
@@ -22,12 +22,13 @@
 //! hardware, set both of these to real JACK port names:
 //!
 //! ```text
-//! AC_LOOPBACK_OUT="Babyface Pro Pro:playback_2"   # daemon's out connects here
-//! AC_LOOPBACK_IN="Babyface Pro Pro:capture_4"     # daemon's in connects here
+//! AC_LOOPBACK_OUT="system:playback_2"   # daemon's out connects here (pupu: AN2)
+//! AC_LOOPBACK_IN="system:capture_2"     # daemon's in connects here (pupu: IN2)
 //! ```
 //!
-//! Unset, both default to the self-loop, so the `jackd -d dummy` runbook in
-//! `ARCHITECTURE.md` is unchanged.
+//! Unset, both default to the self-loop, so the `jackd -d dummy` route is
+//! unchanged. On a rig, `scripts/rig/run-loopback-ir.sh` sets all three from
+//! the rig profile.
 //!
 //! Setting them puts a stimulus on physical outputs, which is behind the
 //! rig's standing drive-level policy. So when `AC_LOOPBACK_OUT` is set,
@@ -80,7 +81,7 @@ const RIG_DRIVE_CEILING_DBFS: f64 = -40.0;
 /// being placed by `MAX_ROUND_TRIP_S`, and a peak pinned at that edge —
 /// exactly what a too-short window produces — passes the position check
 /// as if it were a plausible round trip. 2.0 s (the reference rig's own
-/// runbook duration, ARCHITECTURE.md's "Loopback IR runbook") fixes this,
+/// runbook duration, `docs/runbooks/rig-testing.md`) fixes this,
 /// but the two runnable sample rates hit different limits and so land at
 /// different margins: at 48 kHz the harmonic gap is still the smaller
 /// number (11536 samples), giving a half-window of ~120 ms — 2.00×
@@ -94,7 +95,7 @@ const DEFAULT_DURATION_S: f64 = 2.0;
 
 /// Maximum acceptable round-trip latency, in seconds. #277 measured
 /// 43.75 ms on the reference rig (Babyface Pro leg, 96 kHz, 2.0 s sweep —
-/// ARCHITECTURE.md's "Loopback IR runbook"). This is that figure with
+/// `docs/runbooks/rig-testing.md`). This is that figure with
 /// ~37% headroom for rig-to-rig jitter, not a bound fitted to one run.
 /// If a chain ever needs more than this, the number moves and this
 /// comment's citation moves with it — it must never grow silently.
@@ -456,7 +457,7 @@ impl Client {
 }
 
 #[test]
-#[ignore = "needs a live JACK server — see ARCHITECTURE.md"]
+#[ignore = "needs a live JACK server — see docs/runbooks/rig-testing.md"]
 fn loopback_ir_recovers_sharp_peak() {
     let routing = Routing::from_env();
     let chain = routing.describe();
@@ -669,6 +670,57 @@ fn real_port_route_refuses_a_level_above_the_rig_limit() {
     );
 }
 
+/// `ir_probe` is the headless `plot_ir` client the rig scripts record from
+/// (`scripts/rig/lib/acoustic_ir_remote.sh`). Examples' own unit tests do
+/// not run under `cargo test`, so its acknowledgement handling is compiled
+/// in here and tested against the case the record must not hide: a daemon
+/// that acknowledges a level other than the one requested.
+#[path = "../examples/ir_probe.rs"]
+#[allow(dead_code)]
+mod ir_probe;
+
+#[cfg(test)]
+mod ir_probe_ack_tests {
+    use super::ir_probe::{acknowledged_level, level_line};
+    use serde_json::json;
+
+    /// A pre-#459 daemon clamping a typed −50 to −60 acknowledges −60.
+    /// Reporting the request would record −50; the record must carry −60.
+    #[test]
+    fn clamped_acknowledgement_is_recorded_not_the_request() {
+        let requested = -50.0;
+        let ack = json!({"ok": true, "level_dbfs": -60.0});
+        let acked = acknowledged_level(&ack).expect("ack carries a level");
+        assert_eq!(acked, -60.0);
+        assert_ne!(acked, requested);
+
+        let line = level_line(requested, acked);
+        assert!(line.contains("requested -50 dBFS"), "{line}");
+        assert!(line.contains("acknowledged -60 dBFS"), "{line}");
+        assert!(line.contains("DIFFERS"), "{line}");
+    }
+
+    #[test]
+    fn matching_acknowledgement_is_not_marked() {
+        let line = level_line(-40.0, -40.0);
+        assert!(line.contains("acknowledged -40 dBFS"), "{line}");
+        assert!(!line.contains("DIFFERS"), "{line}");
+    }
+
+    /// An acknowledgement without the field, or with a non-number, must be
+    /// refused — not reported as though it echoed the request.
+    #[test]
+    fn acknowledgement_without_a_level_is_refused() {
+        for ack in [
+            json!({"ok": true}),
+            json!({"ok": true, "level_dbfs": null}),
+            json!({"ok": true, "level_dbfs": "-50"}),
+        ] {
+            assert!(acknowledged_level(&ack).is_err(), "accepted {ack}");
+        }
+    }
+}
+
 /// Plain unit tests over the round-trip-latency bound math, not `#[ignore]`d
 /// — no JACK server needed, so these run under plain `cargo test` and catch
 /// a regression to #361's failure mode without a rig.
@@ -741,7 +793,7 @@ mod round_trip_bound_tests {
     /// `DEFAULT_DURATION_S` must genuinely bind `MAX_ROUND_TRIP_S` at the
     /// sample rates this repo can actually exercise the loopback test at:
     /// `jackd -d dummy` self-loop configs (48 kHz) and the rig's own
-    /// Babyface Pro leg (96 kHz — ARCHITECTURE.md's "Loopback IR runbook").
+    /// Babyface Pro leg (96 kHz — `docs/runbooks/rig-testing.md`).
     /// Regression guard for #361's acceptance criterion: `hi_bound` must
     /// not saturate at any configuration that actually runs.
     #[test]
