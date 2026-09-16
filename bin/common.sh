@@ -36,7 +36,9 @@ WT_BASE="${AC_WT_BASE:-$AC_HOME/wt}"
 AC_LOG_DIR="${AC_LOG_DIR:-$AC_HOME/log}"
 AC_SESSION_DIR="${AC_SESSION_DIR:-$AC_HOME/session}"
 
-# One target dir per worktree, under $AC_TARGETS/<worktree name>.
+# One target dir per worktree: $AC_TARGET/wt/<name> for $AC_HOME/wt/<name>.
+# Under target/ on purpose — $AC_HOME is a git repo whose .gitignore already
+# excludes target/ and log/; a new top-level directory would not be.
 #
 # A target dir shared across worktrees is not merely slow, it is wrong. Cargo
 # decides freshness from mtimes, so a worktree whose files are older than the
@@ -49,20 +51,37 @@ AC_SESSION_DIR="${AC_SESSION_DIR:-$AC_HOME/session}"
 # A new one is seeded by reflink copy (btrfs: ~2 s for 18 GB) from the newest
 # existing target, with the workspace crates' fingerprints removed: registry
 # dependencies stay warm, every workspace crate rebuilds from this worktree.
-# AC_TARGET is the old shared dir, still read as a seed of last resort.
+# $AC_TARGET/debug, the old shared build, is still read as a seed.
 AC_TARGET="${AC_TARGET:-$AC_HOME/target}"
-AC_TARGETS="${AC_TARGETS:-$AC_HOME/targets}"
+AC_TARGETS="${AC_TARGETS:-$AC_TARGET/wt}"
 
-# bin/gate.sh records, one directory per tree+toolchain.
-export AC_GATE_DIR="${AC_GATE_DIR:-$AC_HOME/gate}"
+# bin/gate.sh records, one directory per tree+toolchain. Logs, so under log/.
+export AC_GATE_DIR="${AC_GATE_DIR:-$AC_HOME/log/gate}"
 export AC_GATE="$ROOT/bin/gate.sh"
 
 target_for() { printf '%s/%s\n' "$AC_TARGETS" "$(basename "$1")"; }
+
+# Strip the workspace crates' fingerprints so cargo rebuilds them from <wt>.
+unfingerprint() {
+  local wt="$1" t="$2" names n
+  names="$(cargo metadata --no-deps --format-version 1 \
+             --manifest-path "$wt/ac-rs/Cargo.toml" 2>/dev/null \
+           | jq -r '.packages[].name' 2>/dev/null)" || true
+  [[ -n $names ]] || names="ac-core ac-daemon ac-cli ac-scene ac-view"
+  for n in $names; do rm -rf "$t/debug/.fingerprint/$n-"*; done
+}
 
 # prepare_target <worktree> — create (seeding if possible) and print its target.
 prepare_target() {
   local wt="$1" t seed="" cand names n
   t="$(target_for "$wt")"
+  # A target is only trusted for the worktree path that stamped it. Anything
+  # else — a name reused by another path, a dir made by hand — loses its
+  # workspace fingerprints before first use here.
+  if [[ -d $t/debug && $(cat "$t/.worktree" 2>/dev/null) != "$wt" ]]; then
+    unfingerprint "$wt" "$t"
+    printf '%s\n' "$wt" > "$t/.worktree"
+  fi
   if [[ ! -d $t/debug ]]; then
     mkdir -p "$t"
     # Newest candidate that no cargo is building into right now: a copy taken
@@ -75,16 +94,13 @@ prepare_target() {
       seed="$cand"; break
     done
     if [[ -n $seed ]] && cp -a --reflink=always "$seed" "$t/" 2>/dev/null; then
-      names="$(cargo metadata --no-deps --format-version 1 \
-                 --manifest-path "$wt/ac-rs/Cargo.toml" 2>/dev/null \
-               | jq -r '.packages[].name' 2>/dev/null)"
-      [[ -n $names ]] || names="ac-core ac-daemon ac-cli ac-scene ac-view"
-      for n in $names; do rm -rf "$t/debug/.fingerprint/$n-"*; done
+      unfingerprint "$wt" "$t"
       echo "target: seeded $t from $seed" >&2
     else
       rm -rf "$t/debug"
       echo "target: cold $t (no reflink seed)" >&2
     fi
+    printf '%s\n' "$wt" > "$t/.worktree"
   fi
   printf '%s\n' "$t"
 }

@@ -69,8 +69,8 @@ act "git worktree prune"
 
 echo
 echo "== per-worktree target dirs"
-# One per worktree name (common.sh → prepare_target). Orphaned once no
-# worktree of that name exists; a new one is reflink-seeded, so removing an
+# $AC_TARGET/wt/<name>, one per worktree (common.sh → prepare_target).
+# Orphaned once no worktree of that name exists; a new one is reflink-seeded, so removing an
 # orphan costs nothing later.
 mapfile -t LIVE < <(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | xargs -rn1 basename)
 found=0
@@ -89,9 +89,9 @@ done
 
 echo
 echo "== old shared target dir"
-if [[ -d $AC_TARGET ]]; then
-  echo "  $(size "$AC_TARGET")  $AC_TARGET"
-  echo "  (no longer built into; only a seed of last resort — remove by hand once $AC_TARGETS has a warm target)"
+if [[ -d $AC_TARGET/debug ]]; then
+  echo "  $(size "$AC_TARGET/debug")  $AC_TARGET/debug"
+  echo "  (debug/ is no longer built into, only read as a seed — remove it by hand once $AC_TARGETS has a warm target)"
 else
   echo "  (none)"
 fi
@@ -117,7 +117,7 @@ found=0
 for d in "$AC_HOME"/target/*/; do
   [[ -d $d ]] || continue
   b="$(basename "$d")"
-  [[ $b == debug || $b == release || $b == tmp || $b == .rustc_info.json ]] && continue
+  [[ $b == debug || $b == release || $b == tmp || $b == wt || $b == .rustc_info.json ]] && continue
   if [[ -d "$d/debug" || -d "$d/tmp" ]]; then
     found=1
     echo "  GONE $(size "$d")  $b (old per-branch layout)"

@@ -194,7 +194,7 @@ The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
   new or changed test.
 
 **Target dirs.** The runner pins `CARGO_TARGET_DIR` to a per-worktree
-directory (`$AC_HOME/targets/<worktree>`), seeded warm. Never set
+directory (`$AC_HOME/target/wt/<worktree>`), seeded warm. Never set
 `CARGO_TARGET_DIR` or `--target-dir` yourself, and never create a
 `target-<something>` directory. A target dir shared across worktrees does go
 false-fresh (cargo trusts mtimes and runs another worktree's code); the
