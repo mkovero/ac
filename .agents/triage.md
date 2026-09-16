@@ -96,6 +96,10 @@ comment under **rig check**: the quantity, the configuration, and the value
 that would falsify the claim. A label without a named check gives the rig
 session nothing to run.
 
+You may apply `requires-rig`. You never remove it, even when your spec concludes
+that no rig run is needed: say so under **rig check** and leave the label for
+QA or a human.
+
 Then exactly one scope label, on every issue — you are the only role that sees
 all of them, and QA's standards check keys off this:
 `tier-1`, `tier-2` (`ac-core/visualize/`), `scene`, `view`, or `scope-none`

@@ -59,7 +59,7 @@ Always human-only:
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
-| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. Cleared by qa on a passing rig record, otherwise by a human |
+| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. **Removed only** by qa (on a passing rig record, or as moot per a design's `rig check: none` or a later push) or by a human; triage, architect, developer and rig never remove it |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |

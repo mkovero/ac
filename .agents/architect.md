@@ -92,7 +92,11 @@ would falsify this design. When it is not `none`, apply `requires-rig` on the
 issue. QA and the rig session run exactly this check before the first
 approval, so write it to be runnable: bands, levels ≤ −40 dBFS, repeat count,
 budget with provenance. If the fault cannot be reproduced on demand, say what
-synthetic injection stands in for it and what stays unmeasured.}
+synthetic injection stands in for it and what stays unmeasured.
+When it is `none` on an issue that already carries `requires-rig`, give the
+reason (for example: the error can only point toward refusal, or the design no
+longer depends on the unmeasured value) and **leave the label**. QA clears it
+as moot on the PR, citing this section.}
 ```
 
 A design decision that introduces or edits a numeric acceptance criterion
@@ -108,6 +112,12 @@ the architect.
 - Your decision turn out to change what a user see -> needs-ux, do not apply `ready-to-implement`
 - Recommendation clear + complete → remove `needs-design`, if your decision turn out to change what a user see add `needs-ux`, 
 if not apply `ready-to-implement`
+- `requires-rig` → you may apply it (see **rig check**). **You never remove it**,
+  even when your decision makes the rig question moot: say so under
+  **rig check** and leave the label for QA (`qa.md`) or a human
+  (`AGENTS.md` → human gates). On #350 (2026-09-16) the architect removed it
+  together with `needs-design`. The reasoning held, but the gate is the point:
+  the reviewer who clears it is not the author who argued it away.
 
 ### 5. re-entry — `needs-design` arrived from qa or developer
 
