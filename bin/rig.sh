@@ -173,8 +173,14 @@ The check to run is the 'rig verification required' field of the newest
 <!-- agent: qa --> record on the PR, together with the issue's 'rig check'
 (architect or triage comment). Run exactly that. Emit only inside the standing
 consent in AGENTS.md: typed levels at or below -40 dBFS and the profile's lower
-ceilings, bounded commands only. No reboots, driver reloads or physical
-changes; if the check needs one, record decline and name the permission.
+ceilings, bounded commands only. Host reboots and snd_fireface reloads are
+within that consent when the check needs them: afterwards make JACK reachable
+(restart jack-ac if clients cannot connect), restore the FF400 baseline with
+the toggle writes in docs/rigs/$RIG.md, and confirm it by probe-outputs.sh at
+-60 dBFS before any capture; record each event with its time. The rig lock
+lives on disk and survives a reboot; the login banner does not. No interface
+power cycles and no physical changes (nobody is in the room): if the check
+needs one, record decline for that part and name the permission.
 
 Headless: run every command in the foreground, with a timeout. Write the
 full record to $record_in (the runner files it under \$AC_HOME/session and

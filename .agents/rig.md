@@ -81,9 +81,10 @@ survived contact with a rig and what didn't:
 ### step 2 — emission consent
 No drive/emission proceeds without consent: the operator's **standing
 consent** (`AGENTS.md` → rig sessions: typed levels ≤ −40 dBFS, bounded
-commands, profile ceilings still apply), or explicit per-run consent for
-anything outside it (reboots, driver reloads, cable or mic moves, a higher
-level). Consent is needed before this session's first stimulus command — `set_drive on`,
+commands, profile ceilings still apply; host reboots and driver reloads when a
+named check needs them, with the baseline restored and probed after each), or
+explicit per-run consent for anything outside it (interface power cycles,
+cable or mic moves, clock changes, a higher level). Consent is needed before this session's first stimulus command — `set_drive on`,
 `plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`, `sweep_level`,
 `sweep_frequency`, `calibrate`, `transfer_stream` with drive, `probe`,
 `test_hardware` and `test_dut` all put a signal on a physical output. Do not
