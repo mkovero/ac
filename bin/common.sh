@@ -119,11 +119,19 @@ gh_retry() {
   local tries="${AC_GH_RETRIES:-5}" i=1 rc err out
   err="$(mktemp)"
   while :; do
-    if out="$(command "$@" 2>"$err")"; then
+    # rc must come from the command itself. `if cmd; then …; fi; rc=$?` reads
+    # the if's status, which is 0 when no branch ran — every failure then
+    # returned 0 with empty output, and every `|| { …stopping; }` guard on a
+    # gh_retry call was dead (an outage on 2026-09-16 read a PR head as "").
+    rc=0
+    out="$(command "$@" 2>"$err")" || rc=$?
+    if (( rc == 0 )); then
       rm -f "$err"; printf '%s' "$out"; return 0
     fi
-    rc=$?
-    if ! grep -qEi 'HTTP (5[0-9]{2}|429)|timed? ?out|temporarily|no server is currently|connection reset|unexpected EOF|EOF occurred|TLS handshake' "$err"; then
+    # Transient: server-side trouble, and the local network being down.
+    # "could not resolve host" is DNS; GraphQL's "Could not resolve to a
+    # PullRequest" is a real error and must not match.
+    if ! grep -qEi 'HTTP (5[0-9]{2}|429)|timed? ?out|temporarily|no server is currently|connection reset|unexpected EOF|EOF occurred|TLS handshake|network is unreachable|error connecting to|could not resolve host|connection refused|no route to host|dial tcp' "$err"; then
       cat "$err" >&2; rm -f "$err"; return "$rc"      # real error — do not retry
     fi
     if (( i >= tries )); then
