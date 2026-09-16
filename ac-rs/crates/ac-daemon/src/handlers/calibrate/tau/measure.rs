@@ -399,15 +399,27 @@ fn check_peak_within_window(
 /// Reuses the Farina machinery from `ac_core::measurement::sweep` exactly
 /// as `plot_ir` does — see `handlers/audio/plot.rs` for the longer-form
 /// version of the same technique.
+/// `calibrate`'s own τ stimulus, as one definition.
+///
+/// Extracted from [`measure_tau`] because #471 made the *shape* of this sweep
+/// load-bearing outside the measurement itself: [`REF_SNR_MARGIN_DB`]'s
+/// provenance is that this stimulus's noiseless floor, less that margin,
+/// reproduces [`TAU_SNR_THRESHOLD_DB`]. A test asserts that, and it has to
+/// judge the sweep the daemon actually plays — a second copy of the
+/// expression here would keep passing after someone edited the first.
+fn tau_sweep_params(sample_rate: u32) -> SweepParams {
+    SweepParams {
+        f1_hz: TAU_F1_HZ,
+        // Nyquist-limited, capped at the top of the audio band.
+        f2_hz: (sample_rate as f64 * 0.45).min(20_000.0),
+        duration_s: TAU_DURATION_S,
+        sample_rate,
+    }
+}
+
 pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<(f64, f64, u32)> {
     let sr = eng.sample_rate();
-    let f2_hz = (sr as f64 * 0.45).min(20_000.0);
-    let params = SweepParams {
-        f1_hz: TAU_F1_HZ,
-        f2_hz,
-        duration_s: TAU_DURATION_S,
-        sample_rate: sr,
-    };
+    let params = tau_sweep_params(sr);
     let sweep = log_sweep(&params)?;
     let amp = amp as f32;
     let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
@@ -647,6 +659,40 @@ mod tests {
                 "{bad:?} is not a usable window and must fall back, not be coerced"
             );
         }
+    }
+
+    /// Coupled-constants guard (QA, PR #473). [`REF_SNR_MARGIN_DB`]'s
+    /// provenance is a *relationship*: `calibrate`'s own ESS floors at
+    /// ≈26.8 dB, and 26.8 − 3 ≈ the shipped [`TAU_SNR_THRESHOLD_DB`] of 24.0,
+    /// which is the evidence that deriving the reference leg's threshold
+    /// generalises rather than inventing a new policy. Nothing enforced that
+    /// relationship: either constant could move alone and silently falsify the
+    /// doc comment on the other.
+    ///
+    /// Judges the sweep [`measure_tau`] actually plays, via
+    /// [`tau_sweep_params`], so an edit to calibrate's stimulus fails here too
+    /// — that is the coupling, and a second copy of the expression would hide
+    /// exactly the change worth catching.
+    #[test]
+    fn ref_snr_margin_reproduces_calibrates_shipped_threshold() {
+        let sr = 96_000;
+        let params = tau_sweep_params(sr);
+        let half = (tau_half_window_s() * sr as f64).ceil() as usize;
+        let window_len = 2 * half;
+        // Any interior peak serves; the floor varies only across the ~27→30 dB
+        // range #471 characterised, well inside the 1 dB bar below.
+        let peak = half + 1711;
+        let floor =
+            ac_core::measurement::sweep::pre_impulse_snr_floor_db(&params, window_len, peak)
+                .expect("calibrate's own ESS must have a floor");
+        let derived_equivalent = floor - REF_SNR_MARGIN_DB;
+        assert!(
+            (derived_equivalent - TAU_SNR_THRESHOLD_DB).abs() < 1.0,
+            "REF_SNR_MARGIN_DB no longer reproduces TAU_SNR_THRESHOLD_DB against calibrate's own \
+             stimulus: floor {floor:.1} - margin {REF_SNR_MARGIN_DB} = {derived_equivalent:.1}, \
+             shipped constant is {TAU_SNR_THRESHOLD_DB}. If that is intentional, update whichever \
+             doc comment still claims the other"
+        );
     }
 
     /// #368: `check_peak_snr` mirrors `check_peak_within_window`'s shape —
