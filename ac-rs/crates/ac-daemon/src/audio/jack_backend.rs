@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::Thread;
+use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -183,6 +183,12 @@ pub struct JackEngine {
     /// #467 generalised it to the plain path too). `None` between `stop()`
     /// and the next `start()`.
     one_shot_prod: Option<HeapProd<OneShotStart>>,
+    /// Set when a one-shot's abort timed out without an ack (codex-qa on
+    /// #467): the handle owns that one-shot's stimulus/ring halves until the
+    /// callback's ack actually arrives. Joined at the start of the next
+    /// `play_and_capture*` call and at `stop()`, so nothing frees those
+    /// owners early or leaks the thread.
+    one_shot_stale: Option<JoinHandle<()>>,
 }
 
 impl JackEngine {
@@ -209,6 +215,7 @@ impl JackEngine {
             ref_ports: Vec::new(),
             ref_add_prod: None,
             one_shot_prod: None,
+            one_shot_stale: None,
         }
     }
 }
@@ -519,15 +526,49 @@ fn wait_for_one_shot(
 }
 
 /// Asks the RT callback to drop the running one-shot (and any queued start),
-/// and waits for its acknowledgement. The caller must keep the stimulus and
-/// its ring halves alive until this returns — the callback only decrements
-/// reference counts; nothing is freed on the RT thread.
-fn abort_one_shot(state: &SharedState) {
+/// and waits up to 500 ms for its acknowledgement (the callback clears the
+/// flag once it has dropped its side). Returns whether the ack arrived in
+/// time.
+///
+/// The caller must keep the stimulus and its ring halves alive until the ack
+/// arrives — the callback only decrements reference counts; nothing may be
+/// freed on the RT thread. A bounded wait cannot itself guarantee that: if
+/// this returns `false` (codex-qa on #467), the caller must not drop those
+/// owners inline. See `defer_stale_one_shot_cleanup`.
+fn abort_one_shot(state: &SharedState) -> bool {
     state.one_shot_abort.store(true, Ordering::Relaxed);
     let ack_deadline = Instant::now() + Duration::from_millis(500);
     while state.one_shot_abort.load(Ordering::Relaxed) && Instant::now() < ack_deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
+    !state.one_shot_abort.load(Ordering::Relaxed)
+}
+
+/// Holds `owned` (a timed-out one-shot's stimulus clone and per-request ring
+/// consumer half(s)) past `abort_one_shot`'s own 500 ms bound, until the RT
+/// callback's acknowledgement actually arrives, then drops it.
+///
+/// Without this, a caller that gave up waiting on the ack would drop `owned`
+/// immediately; if the callback resumes later and finally acts on the abort,
+/// its drop of the matching producer/`Arc` clone can become the *last*
+/// owner, running the allocator on the RT thread (codex-qa on #467, PR
+/// #481). Spawning this instead defers that last-owner race onto a thread
+/// that isn't RT.
+///
+/// `one_shot_stale` on `JackEngine` holds the handle so the next one-shot
+/// call joins it before touching `one_shot_abort` again — otherwise that
+/// call's own reset-to-`false` would look like this stale abort's
+/// acknowledgement and free `owned` early.
+fn defer_stale_one_shot_cleanup<T: Send + 'static>(
+    state: Arc<SharedState>,
+    owned: T,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while state.one_shot_abort.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(owned);
+    })
 }
 
 impl AudioEngine for JackEngine {
@@ -619,6 +660,17 @@ impl AudioEngine for JackEngine {
 
     fn stop(&mut self) {
         self._async_client = None;
+        // Dropping the async client above deactivates the JACK client
+        // synchronously — the RT callback cannot run again after this line.
+        // Whatever `one_shot_stale` is still waiting to see acknowledged has
+        // therefore already been dropped safely, off the RT thread, as part
+        // of tearing down `Process`. Synthesize the ack so the wait doesn't
+        // spin forever polling a flag the callback will now never clear, and
+        // join so `stop()` cannot return while that thread is still running.
+        self.state.one_shot_abort.store(false, Ordering::Relaxed);
+        if let Some(h) = self.one_shot_stale.take() {
+            let _ = h.join();
+        }
         self.rings.teardown();
         self.ref_ports.clear();
         self.ref_add_prod = None;
@@ -658,6 +710,13 @@ impl AudioEngine for JackEngine {
         if samples.is_empty() {
             anyhow::bail!("play_and_capture: empty stimulus");
         }
+        // A prior call's abort may still be waiting for the callback's ack
+        // (codex-qa on #467): join it before this call touches
+        // `one_shot_abort` again, or this call's own reset-to-`false` would
+        // look like that stale abort's ack and free its owners early.
+        if let Some(h) = self.one_shot_stale.take() {
+            let _ = h.join();
+        }
         let sr = self.sample_rate as f64;
         let tail_n = (tail_s.max(0.0) * sr) as usize;
         let capture_len = samples.len() + tail_n;
@@ -696,9 +755,20 @@ impl AudioEngine for JackEngine {
             || format!("{} of {capture_len} samples", meas_cons.occupied_len()),
         );
         if let Err(e) = wait {
-            abort_one_shot(&self.state);
+            if abort_one_shot(&self.state) {
+                drop(stimulus);
+            } else {
+                // No ack within the bound: the callback may still resume and
+                // drop its side later. Keep ours alive until then instead of
+                // freeing on this thread now (codex-qa on #467) — freeing
+                // here doesn't race anything, but freeing *there* later,
+                // after we've already dropped ours, would.
+                self.one_shot_stale = Some(defer_stale_one_shot_cleanup(
+                    self.state.clone(),
+                    (stimulus, meas_cons),
+                ));
+            }
             self.state.silence.store(true, Ordering::Relaxed);
-            drop(stimulus);
             // The shared ring filled during the aborted one-shot; without
             // this the next `capture_block` would count the partial
             // stimulus as a `discarded_samples` splice (see
@@ -738,6 +808,11 @@ impl AudioEngine for JackEngine {
         }
         if self._async_client.is_none() {
             anyhow::bail!("play_and_capture_with_reference before start()");
+        }
+        // See the matching join in `play_and_capture_cancellable`: a prior
+        // call's abort may still be waiting for its ack (codex-qa on #467).
+        if let Some(h) = self.one_shot_stale.take() {
+            let _ = h.join();
         }
         self.add_ref_input(reference_port)?;
         let ref_index = self
@@ -797,10 +872,18 @@ impl AudioEngine for JackEngine {
         if let Err(e) = wait {
             // Ask the callback to drop the one-shot, and hold the ring halves
             // and stimulus until it acknowledges, so nothing is freed on the
-            // RT thread.
-            abort_one_shot(&self.state);
+            // RT thread. If the ack doesn't arrive within the bound, defer
+            // ownership instead of dropping here (codex-qa on #467): see
+            // `defer_stale_one_shot_cleanup`.
+            if abort_one_shot(&self.state) {
+                drop(stimulus);
+            } else {
+                self.one_shot_stale = Some(defer_stale_one_shot_cleanup(
+                    self.state.clone(),
+                    (stimulus, meas_cons, ref_cons),
+                ));
+            }
             self.state.silence.store(true, Ordering::Relaxed);
-            drop(stimulus);
             // #467: the shared ring filled during the one-shot; without this
             // the next `capture_block` would count it as a
             // `discarded_samples` splice (`rings.rs::clear_meas_uncounted`).
@@ -1297,10 +1380,100 @@ mod tests {
         }
     }
 
+    /// #467 codex-qa: `fixed_one_shot_aligns_at_every_arming_point_for_every_rig_period`
+    /// drives `one_shot_period` directly with a hand-built `Option<OneShotStart>`
+    /// that the test itself decides which period to hand over — it never
+    /// calls `one_shot_callback_step`, the function `process()` actually
+    /// calls, so a regression in *its* queue pop/dispatch (as opposed to
+    /// `one_shot_period`'s own fill logic) would not fail that test. This
+    /// pushes a real `OneShotStart` through a real `HeapRb` and drives
+    /// `one_shot_callback_step` itself, once with the push landing strictly
+    /// before the period's step call (must be popped that period) and once
+    /// strictly after it (must be popped the next period instead) — the
+    /// timing question `one_shot_callback_step` exists to answer.
+    #[test]
+    fn callback_step_pops_a_queued_start_at_the_next_period_after_it_is_pushed() {
+        const DELAY: usize = 37;
+        for period in [256usize, 1024] {
+            let stimulus: Vec<f32> = (1..=(period as i32 / 4)).map(|v| v as f32).collect();
+            let capture_len = stimulus.len() + 2 * period;
+            for push_period in 0..3usize {
+                for push_after_call in [false, true] {
+                    let arm_at = if push_after_call {
+                        push_period + 1
+                    } else {
+                        push_period
+                    };
+                    let total_periods = arm_at + capture_len / period + 4;
+                    let out_stream = predicted_out(&stimulus, period, arm_at, total_periods);
+                    let in_stream = delayed(&out_stream, DELAY);
+
+                    let (meas_prod, mut meas_cons) = HeapRb::<f32>::new(capture_len).split();
+                    let (mut start_prod, mut start_cons) = HeapRb::<OneShotStart>::new(2).split();
+                    let mut pending = Some(OneShotStart {
+                        stimulus: Arc::new(stimulus.clone()),
+                        capture_len,
+                        meas: meas_prod,
+                        reference: None,
+                    });
+                    let mut slot: Option<OneShot> = None;
+                    let abort = AtomicBool::new(false);
+
+                    for p in 0..total_periods {
+                        if p == push_period && !push_after_call {
+                            start_prod
+                                .try_push(pending.take().unwrap())
+                                .ok()
+                                .expect("queue has room");
+                        }
+                        let mut out = vec![0.0f32; period];
+                        let meas_in = &in_stream[p * period..(p + 1) * period];
+                        one_shot_callback_step(
+                            &mut slot,
+                            &mut start_cons,
+                            &abort,
+                            &mut out,
+                            meas_in,
+                            |_| None,
+                        );
+                        assert_eq!(
+                            out,
+                            out_stream[p * period..(p + 1) * period],
+                            "period={period} push_period={push_period} \
+                             push_after_call={push_after_call} p={p}: output mismatch"
+                        );
+                        if p == push_period && push_after_call {
+                            start_prod
+                                .try_push(pending.take().unwrap())
+                                .ok()
+                                .expect("queue has room");
+                        }
+                    }
+                    assert!(pending.is_none(), "start was never pushed");
+                    assert!(
+                        slot.is_none(),
+                        "period={period} push_period={push_period} \
+                         push_after_call={push_after_call}: one-shot not released"
+                    );
+
+                    let mut meas = vec![0.0f32; capture_len];
+                    let got = meas_cons.pop_slice(&mut meas);
+                    assert_eq!(
+                        got, capture_len,
+                        "period={period} push_period={push_period} push_after_call={push_after_call}"
+                    );
+                    assert!(meas[..DELAY].iter().all(|&v| v == 0.0));
+                    assert_eq!(&meas[DELAY..DELAY + stimulus.len()], &stimulus[..]);
+                }
+            }
+        }
+    }
+
     /// Where, in program order, the rejected clear-then-enable pair of
     /// consumer-side statements can land relative to the callback's two
     /// checkpoints: flag read at the top of a period, input push at the
     /// bottom.
+    #[derive(Debug, Clone, Copy)]
     enum ArmPoint {
         BeforeFlagRead,
         BetweenFlagReadAndPush,
@@ -1309,24 +1482,34 @@ mod tests {
 
     /// Rebuilds the rejected clear-then-enable implementation at a given
     /// `period` and sub-period `delay` (see `delayed` above for why it must
-    /// not be a multiple of `period`), with the two consumer statements
-    /// landing at `when` during `event_period`. Returns the index of the
-    /// first stimulus sample (`1.0`) in the captured ring.
+    /// not be a multiple of `period`), with `clear_at` (`ring.clear()`) and
+    /// `enable_at` (`active = true`) placed *independently* during
+    /// `event_period` — the rejected code always executed `ring.clear()`
+    /// immediately before `active = true`, so `clear_at` must not come later
+    /// than `enable_at` in the checkpoint ordering (callers enforce this),
+    /// but the two still don't have to land at the *same* point relative to
+    /// the callback's checkpoints, and the single co-located `when` this
+    /// took before could not represent, e.g., clear before the flag read
+    /// with enable landing only after it (#467 codex-qa). Returns the index
+    /// of the first stimulus sample (`1.0`) in the captured ring.
     fn clear_then_enable_first_stimulus_index(
         stimulus: &[f32],
         period: usize,
         delay: usize,
         total_periods: usize,
         event_period: usize,
-        when: &ArmPoint,
+        clear_at: ArmPoint,
+        enable_at: ArmPoint,
     ) -> usize {
         let mut history: Vec<f32> = Vec::with_capacity(total_periods * period);
         let mut ring: Vec<f32> = Vec::new();
         let mut active = false;
         let mut pos = 0usize;
         for p in 0..total_periods {
-            if p == event_period && matches!(when, ArmPoint::BeforeFlagRead) {
+            if p == event_period && matches!(clear_at, ArmPoint::BeforeFlagRead) {
                 ring.clear();
+            }
+            if p == event_period && matches!(enable_at, ArmPoint::BeforeFlagRead) {
                 active = true;
             }
             let checked_active = active; // callback top: flag read
@@ -1336,8 +1519,10 @@ mod tests {
                 pos = np;
             }
             history.extend_from_slice(&out);
-            if p == event_period && matches!(when, ArmPoint::BetweenFlagReadAndPush) {
+            if p == event_period && matches!(clear_at, ArmPoint::BetweenFlagReadAndPush) {
                 ring.clear();
+            }
+            if p == event_period && matches!(enable_at, ArmPoint::BetweenFlagReadAndPush) {
                 active = true;
             }
             // callback bottom: push this period's (delayed) input. `history`
@@ -1350,8 +1535,10 @@ mod tests {
                 let g = base + j;
                 ring.push(if g >= delay { history[g - delay] } else { 0.0 });
             }
-            if p == event_period && matches!(when, ArmPoint::AfterPush) {
+            if p == event_period && matches!(clear_at, ArmPoint::AfterPush) {
                 ring.clear();
+            }
+            if p == event_period && matches!(enable_at, ArmPoint::AfterPush) {
                 active = true;
             }
         }
@@ -1361,53 +1548,67 @@ mod tests {
     }
 
     /// Generalises `clear_then_enable_puts_the_stimulus_one_period_late_when_it_races_the_callback`
-    /// to both rig period sizes and a sub-period loopback delay (#467
-    /// triage AC2/AC3): the race (statements between the flag read and the
-    /// push) must shift the stimulus by exactly one period; arming before
-    /// the flag read or after the push — the race window not entered either
-    /// side — must not shift it at all.
+    /// to both rig period sizes, a sub-period loopback delay, and every
+    /// ordered pair of independent clear/enable positions the rejected
+    /// code's fixed statement order (`ring.clear()` then `active = true`)
+    /// permits — `clear_at` at or before `enable_at` in checkpoint order
+    /// (#467 triage AC2/AC3; codex-qa on the co-located version of this
+    /// test). A pair shifts the stimulus by exactly one period iff the ring
+    /// was already cleared at or before the push (`clear_at` is
+    /// `BeforeFlagRead` or `BetweenFlagReadAndPush`) *and* the flag read
+    /// still observed the old, disabled value (`enable_at` is
+    /// `BetweenFlagReadAndPush` or `AfterPush`) — clearing after the push
+    /// discards that period's wrong push along with everything else, and
+    /// enabling before the flag read means the flag read was never stale.
+    /// Every other pair must not shift it at all.
     #[test]
     fn clear_then_enable_puts_the_stimulus_one_period_late_at_every_rig_period() {
+        use ArmPoint::{AfterPush, BeforeFlagRead, BetweenFlagReadAndPush};
         const DELAY: usize = 37;
         const EVENT_PERIOD: usize = 2;
+        const POINTS: [ArmPoint; 3] = [BeforeFlagRead, BetweenFlagReadAndPush, AfterPush];
         for period in [256usize, 1024] {
             let stimulus: Vec<f32> = (1..=(period as i32 / 4)).map(|v| v as f32).collect();
             let total_periods = EVENT_PERIOD + stimulus.len() / period + 6;
-            let before = clear_then_enable_first_stimulus_index(
+            // Clean baseline: both statements at the intended arm point,
+            // with no window between flag-read and push for either to fall
+            // into.
+            let baseline = clear_then_enable_first_stimulus_index(
                 &stimulus,
                 period,
                 DELAY,
                 total_periods,
                 EVENT_PERIOD,
-                &ArmPoint::BeforeFlagRead,
+                AfterPush,
+                AfterPush,
             );
-            let raced = clear_then_enable_first_stimulus_index(
-                &stimulus,
-                period,
-                DELAY,
-                total_periods,
-                EVENT_PERIOD,
-                &ArmPoint::BetweenFlagReadAndPush,
-            );
-            let after = clear_then_enable_first_stimulus_index(
-                &stimulus,
-                period,
-                DELAY,
-                total_periods,
-                EVENT_PERIOD,
-                &ArmPoint::AfterPush,
-            );
-            assert_eq!(
-                before, after,
-                "period={period}: arming before the flag read must not shift the stimulus \
-                 (before {before}, after {after})"
-            );
-            assert_eq!(
-                raced,
-                after + period,
-                "period={period}: the race must shift the stimulus by exactly one period \
-                 (after {after}, raced {raced})"
-            );
+            for (clear_i, clear_at) in POINTS.into_iter().enumerate() {
+                for (enable_i, enable_at) in POINTS.into_iter().enumerate() {
+                    // Enable-before-clear would mean `active = true` runs
+                    // ahead of `ring.clear()` in program order, which the
+                    // rejected code never does.
+                    if clear_i > enable_i {
+                        continue;
+                    }
+                    let idx = clear_then_enable_first_stimulus_index(
+                        &stimulus,
+                        period,
+                        DELAY,
+                        total_periods,
+                        EVENT_PERIOD,
+                        clear_at,
+                        enable_at,
+                    );
+                    let races =
+                        !matches!(clear_at, AfterPush) && !matches!(enable_at, BeforeFlagRead);
+                    let expected = if races { baseline + period } else { baseline };
+                    assert_eq!(
+                        idx, expected,
+                        "period={period} clear_at={clear_at:?} enable_at={enable_at:?}: \
+                         expected {expected} (races={races}, baseline={baseline}), got {idx}"
+                    );
+                }
+            }
         }
     }
 
