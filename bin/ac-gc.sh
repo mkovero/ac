@@ -50,8 +50,12 @@ for wt in "${WTS[@]}"; do
 
   state=""
   if [[ -n $br ]]; then
+    # An unreadable state must not fall through to STALE: that branch deletes.
     state="$(gh_retry gh pr list -R "$AC_REPO" --state all --head "$br" \
-             --json state --jq '.[0].state // empty' 2>/dev/null)"
+             --json state --jq '.[0].state // empty' 2>/dev/null)" || {
+      echo "  SKIP $(size "$wt")  $wt  [$br] cannot read PR state"
+      continue
+    }
   fi
 
   case "$state" in

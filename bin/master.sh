@@ -312,6 +312,9 @@ qa_loop() {
     if [[ -n $codex_base ]] && ! has needs-work "$ls" && ! has claude-approved "$ls"; then
       head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — stopping"; return 1; }
+      # Every later check in this block compares against $head; an empty one
+      # makes "the record names the head" always true.
+      [[ $head =~ ^[0-9a-f]{40}$ ]] || { echo "  #$n: tip read as '$head' — stopping"; return 1; }
       if has requires-rig "$ls" || has requires-rig "$ils"; then
         # A rig gate under a Codex recheck: Codex cannot approve past it, and
         # the rig record needs a Claude pass to be accepted. Full QA instead.
