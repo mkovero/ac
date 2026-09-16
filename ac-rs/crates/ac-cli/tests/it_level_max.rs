@@ -7,10 +7,12 @@
 //! restructuring a file this PR does not otherwise touch, and duplicating
 //! ~60 lines of scratch-daemon plumbing is cheaper than that restructure.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,12 +40,14 @@ struct Rig {
     home: PathBuf,
     ctrl: u16,
     data: u16,
+    /// Held until the daemon is gone: `Drop for Rig` runs before fields drop.
+    _ports: support::PortLease,
 }
 
 impl Rig {
     fn start() -> Self {
-        let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-        let (ctrl, data) = (base, base + 1);
+        let ports = support::lease(&PORT_CURSOR);
+        let (ctrl, data, base) = (ports.ctrl, ports.data, ports.ctrl);
         let home =
             std::env::temp_dir().join(format!("ac-cli-level-it-{}-{base}", std::process::id()));
         let cfg_dir = home.join(".config").join("ac");
@@ -71,6 +75,7 @@ impl Rig {
             home,
             ctrl,
             data,
+            _ports: ports,
         };
         rig.wait_until_up();
         rig

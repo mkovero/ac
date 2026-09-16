@@ -7,10 +7,12 @@
 //! alone cannot tell whether the CLI actually refused, or refused but sent
 //! `quit` first anyway.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,12 +50,14 @@ struct ForeignDaemon {
     home: PathBuf,
     ctrl_port: u16,
     data_port: u16,
+    /// Held until the daemon is gone: `Drop for ForeignDaemon` runs first.
+    _ports: support::PortLease,
 }
 
 impl ForeignDaemon {
     fn spawn() -> Self {
-        let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-        let (ctrl_port, data_port) = (base, base + 1);
+        let ports = support::lease(&PORT_CURSOR);
+        let (ctrl_port, data_port) = (ports.ctrl, ports.data);
         let home = scratch_home("foreign");
 
         let child = Command::new(sibling_binary("ac-daemon"))
@@ -76,6 +80,7 @@ impl ForeignDaemon {
             home,
             ctrl_port,
             data_port,
+            _ports: ports,
         };
         d.wait_until_up();
         d
@@ -197,8 +202,9 @@ fn ac_refuses_and_never_quits_a_daemon_under_a_different_home() {
 /// interface aliasing required).
 #[test]
 fn ac_proceeds_against_a_remote_host_with_a_different_home() {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    let (ctrl_port, data_port) = (base, base + 1);
+    // Declared before the daemon, so it is released after the daemon is killed.
+    let ports = support::lease(&PORT_CURSOR);
+    let (ctrl_port, data_port) = (ports.ctrl, ports.data);
     let remote_home = scratch_home("remote");
 
     let mut child = Command::new(sibling_binary("ac-daemon"))
@@ -280,8 +286,9 @@ fn ac_proceeds_against_a_remote_host_with_a_different_home() {
 /// Regression guard for the "no output when HOME matches" half of the ux spec.
 #[test]
 fn ac_stays_silent_and_proceeds_when_home_matches() {
-    let base = PORT_CURSOR.fetch_add(2, Ordering::Relaxed);
-    let (ctrl_port, data_port) = (base, base + 1);
+    // Declared before the daemon, so it is released after the daemon is killed.
+    let ports = support::lease(&PORT_CURSOR);
+    let (ctrl_port, data_port) = (ports.ctrl, ports.data);
     let home = scratch_home("matching");
 
     let child = Command::new(sibling_binary("ac-daemon"))
