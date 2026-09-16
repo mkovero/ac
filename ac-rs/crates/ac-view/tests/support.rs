@@ -5,6 +5,11 @@
 //! assumed), so the binary is located via the workspace's shared
 //! `target/` directory instead, matching whichever profile this test
 //! binary itself was built with.
+//!
+//! Spawn identity rules (#486) match `ac-cli/tests/support/mod.rs` and
+//! `ac-daemon/tests/common/mod.rs`, which cannot share this file: OS ports,
+//! a pid check, a HOME check, a bounded retry that kills the loser. Keep the
+//! three in step.
 
 #![allow(dead_code)]
 
@@ -16,6 +21,8 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use serde_json::Value;
 
 static HOME_CURSOR: AtomicU32 = AtomicU32::new(0);
 
@@ -83,6 +90,68 @@ fn ac_daemon_bin() -> PathBuf {
     candidate
 }
 
+/// How many port pairs [`DaemonProcess::spawn_at_home`] tries before it
+/// panics. Provenance: assumed — the same value as `ac-daemon`'s and
+/// `ac-cli`'s `SPAWN_ATTEMPTS`.
+const SPAWN_ATTEMPTS: usize = 5;
+
+/// How long one attempt waits for a `status` reply. Provenance: assumed —
+/// the value `ac-cli`'s and `ac-daemon`'s harnesses use. A deadline, not a
+/// delay: it only lengthens the failure path.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait until `ctrl` is answered by `child` itself, running under `home`.
+///
+/// Retryable (`Err`): the child exited first, the reply's `pid` is not the
+/// child's, the reply's `home` is not `home` (plain string comparison, as in
+/// `ac-cli/src/spawn.rs`), or nothing answered before [`READY_TIMEOUT`]. A
+/// reply with no `pid` or `home` panics.
+fn await_own_daemon(child: &mut Child, ctrl: u16, home: &str) -> Result<(), String> {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let ctx = zmq::Context::new();
+    loop {
+        if Instant::now() > deadline {
+            return Err(format!(
+                "no status reply on ctrl {ctrl} within {READY_TIMEOUT:?}"
+            ));
+        }
+        if let Ok(Some(st)) = child.try_wait() {
+            return Err(format!("daemon exited before serving ({st})"));
+        }
+        thread::sleep(Duration::from_millis(50));
+        let s = ctx.socket(zmq::REQ).unwrap();
+        s.set_linger(0).ok();
+        s.set_rcvtimeo(300).ok();
+        s.set_sndtimeo(300).ok();
+        if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
+            continue;
+        }
+        if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
+            continue;
+        }
+        let Ok(bytes) = s.recv_bytes(0) else { continue };
+        let reply: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let pid = reply["pid"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("status carried no pid: {reply}"));
+        let their_home = reply["home"]
+            .as_str()
+            .unwrap_or_else(|| panic!("status carried no home: {reply}"));
+        if pid != u64::from(child.id()) {
+            return Err(format!(
+                "ctrl {ctrl} answered by pid {pid}, not our {}",
+                child.id()
+            ));
+        }
+        if their_home != home {
+            return Err(format!(
+                "ctrl {ctrl} answered with HOME {their_home}, not our {home}"
+            ));
+        }
+        return Ok(());
+    }
+}
+
 pub struct DaemonProcess {
     child: Child,
     pub ctrl_port: u16,
@@ -96,48 +165,45 @@ impl DaemonProcess {
     }
 
     pub fn spawn_at_home(home: PathBuf) -> Self {
-        let (ctrl, data) = alloc_ports();
-        let child = Command::new(ac_daemon_bin())
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .spawn()
-            .expect("spawn ac-daemon");
+        let home_str = home.to_str().expect("scratch HOME is UTF-8").to_string();
+        let mut last = String::new();
+        for attempt in 0..SPAWN_ATTEMPTS {
+            let (ctrl, data) = alloc_ports();
+            let mut child = Command::new(ac_daemon_bin())
+                .env("HOME", &home)
+                .args([
+                    "--fake-audio",
+                    "--local",
+                    "--ctrl-port",
+                    &ctrl.to_string(),
+                    "--data-port",
+                    &data.to_string(),
+                ])
+                .spawn()
+                .expect("spawn ac-daemon");
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let ctx = zmq::Context::new();
-        loop {
-            if Instant::now() > deadline {
-                panic!("daemon never came up");
-            }
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
+            match await_own_daemon(&mut child, ctrl, &home_str) {
+                Ok(()) => {
+                    return Self {
+                        child,
+                        ctrl_port: ctrl,
+                        data_port: data,
+                        home,
+                    }
+                }
+                Err(why) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!(
+                        "spawn_at_home: dropped ports ctrl {ctrl} / data {data} \
+                         (attempt {}/{SPAWN_ATTEMPTS}): {why}",
+                        attempt + 1
+                    );
+                    last = why;
+                }
             }
         }
-
-        Self {
-            child,
-            ctrl_port: ctrl,
-            data_port: data,
-            home,
-        }
+        panic!("daemon never came up after {SPAWN_ATTEMPTS} attempts: {last}");
     }
 }
 
