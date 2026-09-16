@@ -326,6 +326,22 @@ pub(super) enum TauOutcome {
         reading2_declared_frames: u32,
         separation_s: f64,
         message: String,
+        /// #368, via QA on PR #476: this is a `disagree_*` state that
+        /// reached deconvolution — both readings cleared the SNR gate to
+        /// become a `Compared` attempt at all — so ZMQ.md requires the SNR
+        /// pair present. Dropping it would silence the one diagnostic that
+        /// says whether the refused sweep was otherwise clean, on the state
+        /// built precisely so a recurrence names its own layer.
+        pre_impulse_snr_db: f64,
+        snr_threshold_db: f64,
+        /// #369, via QA on PR #476: always 0 here — the xrun-first guard in
+        /// [`tau_result`] returns [`TauOutcome::RefusedXrun`] for any nonzero
+        /// count before this arm can match. Carried rather than written as a
+        /// literal at the frame writer, for the reason
+        /// [`TauOutcome::Measured`]'s own fields are: the presence rule holds
+        /// without the writer inventing a zero of its own.
+        reading1_xruns: u32,
+        reading2_xruns: u32,
     },
     /// A lifecycle failed before a comparison was possible. `conditions`
     /// is `Some` only when the first lifecycle got far enough to report
@@ -435,6 +451,11 @@ impl TauOutcome {
             pre_impulse_snr_db,
             snr_threshold_db,
             ..
+        }
+        | Self::DisagreeDeclaredLatency {
+            pre_impulse_snr_db,
+            snr_threshold_db,
+            ..
         } = self
         {
             frame["tau_pre_impulse_snr_db"] = json!(pre_impulse_snr_db);
@@ -484,11 +505,15 @@ impl TauOutcome {
             Self::DisagreeDeclaredLatency {
                 reading1_s,
                 reading2_s,
+                reading1_xruns,
+                reading2_xruns,
                 message,
                 ..
             } => {
                 frame["tau_reading1_s"] = json!(reading1_s);
                 frame["tau_reading2_s"] = json!(reading2_s);
+                frame["tau_reading1_xruns"] = json!(reading1_xruns);
+                frame["tau_reading2_xruns"] = json!(reading2_xruns);
                 frame["tau_error"] = json!(message);
             }
             Self::Error { message, .. } => {
@@ -621,9 +646,12 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             conditions,
             reading1_s,
             reading2_s,
+            reading1_xruns,
+            reading2_xruns,
             reading1_declared_frames: Some(d1),
             reading2_declared_frames: Some(d2),
             separation_s,
+            pre_impulse_snr_db,
             ..
         } if d1 != d2 => TauOutcome::DisagreeDeclaredLatency {
             conditions,
@@ -632,6 +660,10 @@ pub(super) fn tau_result(attempt: impl FnOnce() -> TauAttempt) -> TauOutcome {
             reading1_declared_frames: d1,
             reading2_declared_frames: d2,
             separation_s,
+            pre_impulse_snr_db,
+            snr_threshold_db: tau_snr_threshold_db(),
+            reading1_xruns,
+            reading2_xruns,
             message: format!(
                 "\u{3c4} graph-declared path latency moved between the two lifecycles \
                  ({d1} frames \u{2192} {d2} frames) \u{2014} the readings agreeing says \
@@ -1073,6 +1105,43 @@ mod tests {
         assert!(frame["tau_reading2_s"].as_f64().is_some());
         let err = frame["tau_error"].as_str().unwrap_or_default();
         assert!(err.contains("244") && err.contains("1268"), "got {err:?}");
+    }
+
+    /// ZMQ.md's own invariants, which the first cut of this state broke (QA,
+    /// PR #476): `tau_reading{1,2}_xruns` are present exactly alongside
+    /// `tau_reading{1,2}_s`, always a concrete integer including 0, and the
+    /// SNR pair is present on every state that reached deconvolution —
+    /// `measured`, `not_measured_low_snr`, `disagree_*`. This is a
+    /// `disagree_*` state that reached deconvolution, and must not be the one
+    /// exception a client reads as a pre-#369 daemon.
+    #[test]
+    fn tau_result_moved_declaration_still_reports_xruns_and_snr() {
+        let outcome = tau_result(|| TauAttempt::Compared {
+            conditions: dummy_conditions(),
+            reading1_s: 0.004_416_7,
+            reading2_s: 0.004_416_7,
+            reading1_xruns: 0,
+            reading2_xruns: 0,
+            comparison: TauComparison::Agree,
+            pre_impulse_snr_db: 41.2,
+            reading1_declared_frames: Some(244),
+            reading2_declared_frames: Some(1268),
+            separation_s: 1.204,
+        });
+        assert_eq!(outcome.state(), "disagree_declared_latency");
+
+        let frame = frame_for(&outcome);
+        assert_eq!(frame["tau_reading1_xruns"], json!(0), "{frame}");
+        assert_eq!(frame["tau_reading2_xruns"], json!(0), "{frame}");
+        assert_eq!(
+            frame["tau_pre_impulse_snr_db"].as_f64(),
+            Some(41.2),
+            "{frame}"
+        );
+        assert!(
+            frame["tau_snr_threshold_db"].as_f64().is_some(),
+            "the threshold the peak was judged against: {frame}"
+        );
     }
 
     /// A backend that declares nothing must never look like two backends

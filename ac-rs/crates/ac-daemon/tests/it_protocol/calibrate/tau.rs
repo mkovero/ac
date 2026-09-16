@@ -380,6 +380,20 @@ fn calibrate_refuses_when_the_declared_latency_moves_between_lifecycles() {
         done["tau_reading1_s"], done["tau_reading2_s"],
         "test setup: the readings must agree, or this proves nothing: {done}"
     );
+    // ZMQ.md's presence rules for a `disagree_*` state that reached
+    // deconvolution (QA, PR #476): the xrun pair is a concrete integer
+    // including 0, never an absent key a client reads as a pre-#369 daemon,
+    // and the SNR pair says whether the refused sweep was otherwise clean.
+    assert_eq!(done["tau_reading1_xruns"], json!(0), "frame: {done}");
+    assert_eq!(done["tau_reading2_xruns"], json!(0), "frame: {done}");
+    assert!(
+        done["tau_pre_impulse_snr_db"].as_f64().is_some(),
+        "frame: {done}"
+    );
+    assert!(
+        done["tau_snr_threshold_db"].as_f64().is_some(),
+        "frame: {done}"
+    );
     assert!(
         done["tau_reading_separation_s"]
             .as_f64()

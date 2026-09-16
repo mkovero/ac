@@ -1687,7 +1687,7 @@ reading either.
   "tau_reading_separation_s": <float>,     // #363: wall-clock seconds between the two lifecycles' captures — present whenever both lifecycles ran
   "tau_delta_samples":    <int>,           // #347: round((reading2 - reading1) * sample_rate) — present only on disagree_*
   "tau_periods":          <int>,           // #347: signed period count — present only on tau_state == "disagree_period_shift"
-  "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", or "disagree_other"
+  "tau_error":            "<message>",     // present when tau_state is "error", "disagree_period_shift", "disagree_other", or "disagree_declared_latency"
   "tau_pre_impulse_snr_db": <float>,       // #368: the (worse-of-two, when both ran) peak's pre-impulse SNR — present on measured / not_measured_low_snr / disagree_*, absent on error
   "tau_snr_threshold_db":   <float>,       // #368: the threshold that SNR was judged against — present alongside tau_pre_impulse_snr_db
   "error":                "<message>",     // only present on partial failure (voltage-cal save)
