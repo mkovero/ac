@@ -31,9 +31,17 @@ link_support "$wt"
 
 if git merge --no-edit origin/main; then
   echo "<runner/integration> PR #$n merged current main without conflicts"
-  ( cd ac-rs && cargo test --workspace )
-  ( cd ac-rs && cargo clippy --workspace --all-targets -- -D warnings )
-  ( cd ac-rs && cargo fmt --check )
+  # The gate, not bare cargo. Bare cargo here ran without CARGO_TARGET_DIR:
+  # cargo built into the target link_support pins in .cargo/config.toml, while
+  # ac-view's tests look for ac-daemon via the env var only, so two of them
+  # failed "ac-daemon binary not found" on a clean merge (#441, 2026-09-16).
+  # gate.sh exports the prepared target, runs nextest with the port serial
+  # groups, queues behind other gates, and records the tree — the QA pass on
+  # the pushed merge then reuses that record instead of building again.
+  "$AC_GATE" "$wt" || {
+    echo "PR #$n: gate red on the clean merge; preserving $wt" >&2
+    exit 1
+  }
 else
   echo "<runner/integration> PR #$n requires developer conflict resolution"
   AC_TAG="pr-$n-integrate" run developer "Integrate current origin/main into PR #$n in $AC_REPO.
