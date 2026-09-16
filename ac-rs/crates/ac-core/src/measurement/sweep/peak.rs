@@ -24,14 +24,26 @@
 //! existed). See this file's band-invariance test, which measures both
 //! claims on a real Farina deconvolution rather than asserting them.
 //!
-//! Pairing rule, so a later change does not reopen this: an onset-derived
-//! arrival may only be differenced against a τ picked by the *same*
-//! onset rule from the *same* capture's reference leg (#460) — never
-//! against a stored `calibrate` τ, which was measured under a different
-//! sweep and cannot be guaranteed to share the onset's skirt width. A
-//! [`ir_peak`] result may always be differenced against another
-//! [`ir_peak`] result, from any capture, because the band-invariance
-//! above is what makes that pairing cancel.
+//! Pairing rule, so a later change does not reopen this (#351, amended
+//! by #346):
+//!
+//! - A [`ir_peak`] result may always be differenced against another
+//!   [`ir_peak`] result, from any capture, because the band-invariance
+//!   above is what makes that pairing cancel.
+//! - A **bounded** onset arrival (one whose search window started at an
+//!   enforced causal bound) may be differenced against a peak-picked τ,
+//!   including a stored `calibrate` τ. On an electrical path the peak is
+//!   the delay whatever the band; the bounded onset's band dependence is
+//!   pinned to at most one sample by this file's two-way bias test.
+//! - An **unbounded** onset is never differenced against anything. It is
+//!   never an arrival, so nothing reaches `flight_time_s` from it.
+//!
+//! #351's original rule — an onset arrival only against a τ picked by the
+//! same onset rule from the same capture's reference leg (#460), never
+//! against a stored τ — was withdrawn: on an electrical loopback the
+//! unbounded pick lands in the band-limited skirt, 358 samples before the
+//! peak (#378 AC6 record), so that pairing would have differenced the
+//! acoustic onset against a picker artefact.
 
 /// Index and magnitude of the largest-magnitude sample of a linear IR.
 ///
@@ -74,8 +86,8 @@ pub fn ir_peak(linear_ir: &[f64]) -> (usize, f64) {
 mod tests {
     use super::*;
     use crate::measurement::sweep::{
-        deconvolve_full, estimate_onset, extract_irs, inverse_sweep, log_sweep, CausalBound,
-        MissingBoundInput, SweepParams,
+        deconvolve_full, estimate_onset, extract_irs, inverse_sweep, log_sweep, BoundInputs,
+        CausalBound, MissingBoundInput, OnsetPick, SweepParams, WindowLimit,
     };
 
     #[test]
@@ -202,5 +214,136 @@ mod tests {
             peak_index as i64 - centre as i64,
             onset.index as i64 - centre as i64,
         )
+    }
+
+    /// #346 architect revision 2: the precondition for the amended pairing
+    /// rule. A two-way DUT — a smaller full-band component at `t0` plus a
+    /// larger low-passed one at `t0 + G` — whose magnitude peak lands late,
+    /// captured at both of the band-invariance test's sweep bands, with the
+    /// causal bound one hand-tape error (5 cm) before `t0`.
+    ///
+    /// (i) Against the rejected rule: in both bands the bounded onset is
+    /// closer to `t0` than the peak is.
+    /// (ii) The bounded onset's offset differs between the two bands by at
+    /// most one sample — the same integer-rounding budget as #351's
+    /// hardware budget. If this fails, the pairing amendment in this
+    /// module's doc is invalid and `flight_time_s` must be withheld for
+    /// onset arrivals instead: report it back, do not loosen it.
+    #[test]
+    fn bounded_onset_on_a_two_way_dut_beats_the_peak_and_is_band_invariant() {
+        let sr = 48_000u32;
+        let window_len = 2_048usize;
+        let p_a = SweepParams {
+            f1_hz: 100.0,
+            f2_hz: 20_000.0,
+            duration_s: 0.2,
+            sample_rate: sr,
+        };
+        let p_b = SweepParams {
+            f1_hz: 200.0,
+            f2_hz: 8_000.0,
+            duration_s: 0.5,
+            sample_rate: sr,
+        };
+
+        let a = two_way_bounded(&p_a, window_len);
+        let b = two_way_bounded(&p_b, window_len);
+        for (name, r) in [("A", &a), ("B", &b)] {
+            assert!(
+                r.peak - TWO_WAY_T0 >= 10,
+                "test setup, config {name}: the peak must land at least 10 samples \
+                 after t0, got {}",
+                r.peak - TWO_WAY_T0
+            );
+            assert!(
+                (r.onset - TWO_WAY_T0).abs() < (r.peak - TWO_WAY_T0).abs(),
+                "config {name}: bounded onset {} must be closer to t0 {TWO_WAY_T0} than \
+                 the peak {}",
+                r.onset,
+                r.peak
+            );
+            assert!(
+                r.bound_binds,
+                "config {name}: the bound must set the window start"
+            );
+        }
+        assert!(
+            (a.onset - b.onset).abs() <= 1,
+            "bounded onset offset moved {} samples between bands (A {}, B {}) — the \
+             #346 pairing amendment does not hold; withhold flight_time_s for onset \
+             arrivals instead",
+            (a.onset - b.onset).abs(),
+            a.onset,
+            b.onset
+        );
+    }
+
+    /// `t0` of [`two_way_bounded`]'s full-band component, as an offset
+    /// from the gate centre.
+    const TWO_WAY_T0: i64 = 1_000;
+
+    struct TwoWay {
+        peak: i64,
+        onset: i64,
+        bound_binds: bool,
+    }
+
+    /// Capture a two-way DUT at `params`: `0.3·x(n − t0)` plus
+    /// `LP(x)(n − t0 − G)`, where `LP` is a 9-tap boxcar (linear phase, 4
+    /// samples of its own delay) and `G = 8`, then run the bounded onset
+    /// picker with the bound 5 cm of flight before `t0`. Offsets are signed
+    /// sample counts from the gate centre.
+    fn two_way_bounded(params: &SweepParams, window_len: usize) -> TwoWay {
+        const LOW_GAIN: f32 = 1.0;
+        const HIGH_GAIN: f32 = 0.3;
+        const G: usize = 8;
+        const TAPS: usize = 9;
+        let t0 = TWO_WAY_T0 as usize;
+        let x = log_sweep(params).unwrap();
+        let lp: Vec<f32> = (0..x.len())
+            .map(|n| {
+                let from = n.saturating_sub(TAPS - 1);
+                x[from..=n].iter().sum::<f32>() / TAPS as f32
+            })
+            .collect();
+        let mut y = vec![0.0_f32; x.len() + t0 + G + TAPS];
+        for (n, &v) in x.iter().enumerate() {
+            y[n + t0] += HIGH_GAIN * v;
+        }
+        // The boxcar above is causal, so its own 4-sample delay is already
+        // in `lp`; the low component's total delay is t0 + G + 4.
+        for (n, &v) in lp.iter().enumerate() {
+            y[n + t0 + G] += LOW_GAIN * v;
+        }
+        let xi = inverse_sweep(params).unwrap();
+        let full = deconvolve_full(&y, &xi);
+        let irs = extract_irs(&full, params, 1, window_len).unwrap();
+        let (peak_index, _) = ir_peak(&irs.linear);
+        let centre = window_len / 2;
+
+        // ±5 cm hand tape at c = 343 m/s — 14.0 samples at 96 kHz, scaled
+        // to this fixture's rate (#346 architect revision 2).
+        let tape_samples = (0.05 / 343.0 * params.sample_rate as f64).round() as usize;
+        let bound = CausalBound::Enforced {
+            index: centre + t0 - tape_samples,
+            inputs: BoundInputs {
+                reference_tau_s: 0.0,
+                distance_m: 1.0,
+                speed_of_sound_m_s: 343.0,
+                temperature_c: None,
+            },
+        };
+        let onset = estimate_onset(&irs.linear, peak_index, params.sample_rate, 1e-9, &bound);
+        TwoWay {
+            peak: peak_index as i64 - centre as i64,
+            onset: onset.index as i64 - centre as i64,
+            bound_binds: matches!(
+                onset.pick,
+                OnsetPick::Picked {
+                    limit: WindowLimit::CausalBound,
+                    ..
+                }
+            ),
+        }
     }
 }

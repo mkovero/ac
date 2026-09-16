@@ -24,7 +24,8 @@
 //! forward verbatim; this module is where they become plain data.
 
 use ac_core::measurement::report::{
-    ArrivalCheck, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, ArrivalSource, IrVerdict, MeasurementData, MeasurementReport,
+    PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -43,7 +44,20 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// not a disagreement; on `PeriodShift`/`Mismatch` it is `None` even with a
 /// measured `interface_latency`, and the round trip prints instead, with
 /// the disagreement named in the suffix.
+///
+/// Prefixed with the rule that produced the arrival (#346 UX): `onset` or
+/// `peak`, always one of the two, so a marker that sits off the visible
+/// peak says what it marks.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
+    let rule = match stats.arrival_source {
+        ArrivalSource::Onset => "onset",
+        ArrivalSource::Peak { .. } => "peak",
+    };
+    format!("{rule} {}", arrival_marker_value(stats))
+}
+
+/// [`arrival_marker_text`] without the rule prefix.
+fn arrival_marker_value(stats: &ac_core::measurement::report::IrStats) -> String {
     let arrival_ms = stats.arrival_s * 1000.0;
     let (value_ms, suffix) = match (stats.flight_time_s, &stats.arrival_check) {
         (Some(ft), ArrivalCheck::Unchecked { .. }) => (ft * 1000.0, " flight, ref unchecked"),
@@ -543,7 +557,7 @@ mod tests {
         let r = gated_report(Some(locked_gate()));
         let scene = SweepIrScene::from_report(&r).unwrap();
         let stats = r.ir_stats().unwrap();
-        let want = format!("{:.2} ms round trip", stats.arrival_s * 1000.0);
+        let want = format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0);
         assert_eq!(scene.arrival.text, want);
     }
 
@@ -560,7 +574,7 @@ mod tests {
         let stats = r.ir_stats().unwrap();
         assert_eq!(
             scene.arrival.text,
-            format!("{:.2} ms round trip", stats.arrival_s * 1000.0),
+            format!("peak {:.2} ms round trip", stats.arrival_s * 1000.0),
             "no measured \u{3c4} on this report — arrival text must be the raw round trip: {}",
             scene.arrival.text
         );
@@ -614,7 +628,7 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "{:.2} ms round trip, 1-period shift",
+                "peak {:.2} ms round trip, 1-period shift",
                 stats.arrival_s * 1000.0
             ),
             "a period shift must name itself on the round trip, not read as flight: {}",
@@ -663,7 +677,7 @@ mod tests {
             .flight_time_s
             .expect("Agree must produce a flight time")
             * 1000.0;
-        assert_eq!(scene.arrival.text, format!("{flight_ms:.2} ms flight"));
+        assert_eq!(scene.arrival.text, format!("peak {flight_ms:.2} ms flight"));
     }
 
     /// #359: a flight time computed alongside `Unchecked` must say so — the
@@ -686,7 +700,7 @@ mod tests {
             * 1000.0;
         assert_eq!(
             scene.arrival.text,
-            format!("{flight_ms:.2} ms flight, ref unchecked")
+            format!("peak {flight_ms:.2} ms flight, ref unchecked")
         );
     }
 
@@ -732,12 +746,28 @@ mod tests {
         assert_eq!(
             scene.arrival.text,
             format!(
-                "{:.2} ms round trip, ref \u{394} {:+} samples",
+                "peak {:.2} ms round trip, ref \u{394} {:+} samples",
                 stats.arrival_s * 1000.0,
                 d.delta_samples,
             )
         );
         assert!(!scene.arrival.text.contains("flight"));
+    }
+
+    /// #346 UX: the marker names the rule that produced the arrival — both
+    /// words, never only `onset` — and only the prefix changes.
+    #[test]
+    fn arrival_marker_names_the_rule_that_produced_the_arrival() {
+        use ac_core::measurement::report::PeakReason;
+        let r = gated_report_with_delayed_peak();
+        let mut stats = r.ir_stats().unwrap();
+        let value = arrival_marker_value(&stats);
+        stats.arrival_source = ArrivalSource::Peak {
+            reason: PeakReason::NoCausalBound,
+        };
+        assert_eq!(arrival_marker_text(&stats), format!("peak {value}"));
+        stats.arrival_source = ArrivalSource::Onset;
+        assert_eq!(arrival_marker_text(&stats), format!("onset {value}"));
     }
 
     #[test]
