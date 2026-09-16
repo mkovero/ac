@@ -105,6 +105,18 @@ if [[ -f $rec/result && -z $force ]]; then
   if report "$rec"; then exit 0; else exit 1; fi
 fi
 
+# One gate at a time on this machine. Two concurrent gates each take every
+# core, and the daemon integration tests have reply timeouts: on 2026-09-16 a
+# gate that overlapped another worktree's failed 16 ac-daemon/ac-view tests
+# with `CTRL recv: Resource temporarily unavailable`, on a tree whose tests
+# pass alone. Queueing costs minutes; a false red costs a revision round.
+# Taken after the per-tree lock and the cache check, so a replay never waits.
+exec 8>"$AC_GATE_DIR/.machine.lock"
+if ! flock -n 8; then
+  echo "gate: another gate is running on this machine — queued behind it" >&2
+  flock 8
+fi
+
 tmp="$(mktemp -d "$AC_GATE_DIR/.run-XXXXXX")"
 declare -A rc secs
 step() {
