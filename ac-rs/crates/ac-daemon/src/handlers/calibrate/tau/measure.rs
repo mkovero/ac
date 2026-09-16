@@ -82,8 +82,8 @@ const TAU_MIN_HALF_WINDOW_S: f64 = 0.05;
 /// only; pinned by the synthetic `tau_*` edge tests in `mod tests`): an
 /// arrival ~80–90 samples past the edge does not pin, `ir_peak` picks a
 /// skirt peak ≈1.5–2.3 ms *inside* the edge, and the SNR gate refuses it by
-/// only ≈1.2–1.6 dB. Below ≈0.046 the margin stops covering that skirt and
-/// the gate becomes the only net.
+/// as little as ≈1.2 dB (1.6 dB in the noiseless test). Below ≈0.046 the
+/// margin stops covering that skirt and the gate becomes the only net.
 ///
 /// Still unmeasured: hardware with capture noise approaching the stimulus
 /// level, which an electrical loopback does not reach without deliberate
@@ -792,11 +792,16 @@ mod tests {
     /// #350: an arrival just past the window edge (10 samples, ≈0.1 ms at
     /// 96 kHz) pins the peak at the last sample, and the *edge check* is the
     /// only thing that refuses it — the pinned peak's gate SNR still clears
-    /// [`TAU_SNR_THRESHOLD_DB`]. Fails if the checks are reordered, the `<=`
-    /// in `check_peak_within_window` is weakened, or calibrate's stimulus
-    /// changes so the gate fires first. Synthetic, per the architect
-    /// decision on #350; the indices depend on `extract_irs`'s rectangular
-    /// gate and on `ir_peak`.
+    /// [`TAU_SNR_THRESHOLD_DB`]. Fails if the edge check is removed or
+    /// bypassed, if the peak stops pinning at the last sample, if
+    /// calibrate's stimulus changes so the pinned peak's gate SNR drops
+    /// under the threshold, or if the `<=` in `check_peak_within_window` is
+    /// weakened to `<` — the last only through the margin-0 assertions,
+    /// since at the shipped margin `<` and `<=` both refuse a pinned peak.
+    /// It cannot catch a reorder of the two checks: the gate passes here, so
+    /// either order yields an `EdgeRefusal`. The skirt test below catches
+    /// that. Synthetic, per the architect decision on #350; the indices
+    /// depend on `extract_irs`'s rectangular gate and on `ir_peak`.
     #[test]
     fn tau_arrival_just_past_the_edge_is_refused_by_the_edge_check_alone() {
         let (params, half, window_len) = synthetic_tau_window(96_000);
@@ -821,6 +826,17 @@ mod tests {
             .downcast_ref::<EdgeRefusal>()
             .unwrap_or_else(|| panic!("expected an EdgeRefusal, got: {err}"));
         assert_eq!(refusal.peak_idx, window_len - 1);
+
+        // The pinned peak sits at dist 0 from the edge. At the shipped
+        // margin `<` and `<=` both refuse that; only margin 0 separates them.
+        assert!(
+            check_peak_within_window(window_len - 1, window_len, 0.0).is_err(),
+            "with the margin at 0, only the `<=` edge test refuses a pinned peak (#350)"
+        );
+        assert!(
+            check_peak_within_window(0, window_len, 0.0).is_err(),
+            "with the margin at 0, only the `<=` edge test refuses a peak pinned at the start (#350)"
+        );
     }
 
     /// #350: an arrival a little further past the edge (85 samples) does not
@@ -829,7 +845,9 @@ mod tests {
     /// catch it: the SNR gate (primary, and only by a dB or two) and the
     /// shipped edge margin. This test records both, and computes the
     /// rejected alternative — a 2 % margin — to show that shrinking
-    /// [`TAU_EDGE_MARGIN_FRAC`] removes the second net. Synthetic, per the
+    /// [`TAU_EDGE_MARGIN_FRAC`] removes the second net. It also fails if
+    /// `analyse_tau_leg` runs the edge check before the SNR gate: that order
+    /// returns an `EdgeRefusal` here, not a `LowSnrRefusal`. Synthetic, per the
     /// architect decision on #350; if the skirt moves out of the asserted
     /// band, `extract_irs`'s gate or `ir_peak` changed and the margin's
     /// provenance note needs re-deriving.
@@ -869,10 +887,87 @@ mod tests {
         );
     }
 
+    /// #350, QA follow-up: the ≈0.046 floor in [`TAU_EDGE_MARGIN_FRAC`]'s
+    /// provenance is a claim about the *deepest* skirt peak, so it is pinned
+    /// by a maximum over a seeded-noise sweep, not by the one noiseless
+    /// index above. Arrivals 80–92 samples past the edge, white noise off
+    /// and at −80 / −60 / −40 / −30 dBFS RMS against the 0.03 stimulus, five
+    /// seeds each. Every skirt peak (not pinned) must sit no deeper than
+    /// `round(0.046 · half)` samples inside the edge, and every peak in the
+    /// sweep must fail the SNR gate. The rejected alternative — "the skirt
+    /// can land deeper than the floor" — is what the first assertion
+    /// measures; it fails if it becomes true. Noise at −20 dBFS is left
+    /// out: there a skirt peak can land ~290 samples in, past the floor, but
+    /// at a gate SNR ≈10 dB under the threshold, so the floor's argument
+    /// (the gate clears it by a dB or two) does not apply there.
+    /// Synthetic, 96 kHz only.
+    #[test]
+    fn tau_skirt_peak_never_lands_deeper_than_the_margin_floor() {
+        const MARGIN_FLOOR_FRAC: f64 = 0.046;
+        let (params, half, window_len) = synthetic_tau_window(96_000);
+        let floor = (MARGIN_FLOOR_FRAC * half as f64).round() as usize;
+        let shipped_margin = (TAU_EDGE_MARGIN_FRAC * half as f64).round() as usize;
+        assert!(
+            floor < shipped_margin,
+            "the shipped margin must stay above the ≈0.046 floor (#350)"
+        );
+
+        let mut deepest = 0usize;
+        for past_edge in 80..=92usize {
+            let base = synthetic_tau_capture(&params, half + past_edge);
+            let noise_levels: [Option<f64>; 5] =
+                [None, Some(-80.0), Some(-60.0), Some(-40.0), Some(-30.0)];
+            for noise_dbfs in noise_levels {
+                let seeds = if noise_dbfs.is_some() {
+                    1..=5u64
+                } else {
+                    1..=1u64
+                };
+                for seed in seeds {
+                    let mut cap = base.clone();
+                    if let Some(dbfs) = noise_dbfs {
+                        // Uniform white noise scaled to the stated RMS,
+                        // from a seeded xorshift so the sweep is
+                        // deterministic.
+                        let peak = 10f64.powf(dbfs / 20.0) * 3f64.sqrt();
+                        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                        for x in cap.iter_mut() {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            let u = (state >> 11) as f64 / (1u64 << 53) as f64;
+                            *x += ((2.0 * u - 1.0) * peak) as f32;
+                        }
+                    }
+                    let (peak, snr_db) = synthetic_tau_peak(&cap, &params, window_len);
+                    let dist_from_end = window_len - 1 - peak;
+                    assert!(
+                        dist_from_end <= floor,
+                        "arrival {past_edge} past the edge, noise {noise_dbfs:?} dBFS, seed \
+                         {seed}: skirt peak {dist_from_end} samples inside the edge, deeper \
+                         than the {floor}-sample (0.046) floor TAU_EDGE_MARGIN_FRAC's \
+                         provenance cites — re-derive it (#350)"
+                    );
+                    assert!(
+                        snr_db < TAU_SNR_THRESHOLD_DB,
+                        "arrival {past_edge} past the edge, noise {noise_dbfs:?} dBFS, seed \
+                         {seed}: gate SNR {snr_db:.2} dB clears {TAU_SNR_THRESHOLD_DB} dB"
+                    );
+                    deepest = deepest.max(dist_from_end);
+                }
+            }
+        }
+        assert!(
+            deepest > 0,
+            "no skirt peak in the sweep — every arrival pinned, so the floor went untested"
+        );
+    }
+
     /// #350, cost side: an arrival 100 samples *inside* the edge is located
     /// exactly, and still refused because it sits within the margin. These
     /// are correct values given up for the second net above — at 96 kHz the
-    /// margin moves the ceiling from 50.01 to 44.99 ms.
+    /// margin moves the ceiling from ≈50 ms to 44.98 ms (4318 samples; the
+    /// rig record rounds these to 50.01 → 44.99 ms).
     #[test]
     fn tau_arrival_inside_the_margin_is_located_exactly_and_refused() {
         let (params, half, window_len) = synthetic_tau_window(96_000);
