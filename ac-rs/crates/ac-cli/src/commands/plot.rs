@@ -262,17 +262,24 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
-/// The typed re-pick of a failed edge-following guard, in the shape
-/// [`short_onset_rule`] takes: `Some(repick)` only when the arrival stayed
-/// on the peak because the guard failed (#346), `None` for every other
-/// source — the guard passed, did not run, or an earlier condition failed.
-fn failed_guard(source: &ac_core::measurement::report::ArrivalSource) -> Option<Option<usize>> {
-    use ac_core::measurement::report::{ArrivalSource, PeakReason};
-    match *source {
-        ArrivalSource::Peak {
-            reason: PeakReason::EdgeFollowing { repick },
-        } => Some(repick),
-        _ => None,
+/// The edge guard's outcome, in the shape [`short_onset_rule`] takes, read
+/// from the typed onset standing (#346 UX revision 4): `Unscored` (every
+/// condition held) is a passed guard, `EdgeFollowing` carries its typed
+/// re-pick, and every other standing is `None` — the guard did not run, or
+/// another row already states the standing.
+fn guard_outcome(
+    standing: &ac_core::measurement::report::OnsetStanding,
+) -> Option<ac_core::measurement::sweep::EdgeGuard> {
+    use ac_core::measurement::report::OnsetStanding;
+    use ac_core::measurement::sweep::EdgeGuard;
+    match *standing {
+        OnsetStanding::Unscored => Some(EdgeGuard::Passed),
+        OnsetStanding::EdgeFollowing { repick } => Some(EdgeGuard::Failed { repick }),
+        OnsetStanding::NoCausalBound
+        | OnsetStanding::BoundNotBinding
+        | OnsetStanding::PickerDeclined
+        | OnsetStanding::PickOnWindowStart
+        | OnsetStanding::DeconvolutionFailed => None,
     }
 }
 
@@ -286,10 +293,10 @@ fn failed_guard(source: &ac_core::measurement::report::ArrivalSource) -> Option<
 /// Returns 3 lines normally (the onset's sample index with the rule's
 /// intro, window start, and the causal-bound row built from `bound`'s own
 /// fields, #460) and 4 when the pick is pinned to the window start or, per
-/// `failed_guard` (#346), the edge-following guard failed. `failed_guard`
-/// is the typed re-pick of a failed guard — `Some(Some(r))` moved to `r`,
-/// `Some(None)` no re-pick ran — and `None` when the guard passed or did
-/// not run. On a decline it returns the decline line, the case, and
+/// `guard` (#346), the edge guard ran. `guard` is the guard's typed
+/// outcome — `Passed`, `Failed { repick: Some(r) }` moved to `r`,
+/// `Failed { repick: None }` no re-pick ran — and `None` when no guard row
+/// prints. On a decline it returns the decline line, the case, and
 /// a `check:` line — plus the bound row when the bound itself caused it. On a decline the second line is
 /// the degenerate case named in `rule`, printed verbatim from between
 /// its parentheses, so a case added in `ac-core` later reaches the
@@ -300,7 +307,7 @@ fn short_onset_rule(
     rule: &str,
     onset_index: usize,
     bound: &ac_core::measurement::sweep::CausalBound,
-    failed_guard: Option<Option<usize>>,
+    guard: Option<ac_core::measurement::sweep::EdgeGuard>,
 ) -> Vec<String> {
     if rule.contains("picker declined") {
         let case = rule
@@ -363,18 +370,31 @@ fn short_onset_rule(
     if pinned {
         lines.push("onset may lie earlier than the window allows".to_string());
     }
-    // #346 UX revision 3: the abnormal-case row, printed only when the
-    // guard fails — a pass is already stated by `from onset` under
-    // `arrival`. The distance comes from the core constant; the extended
-    // start index is not printed, so the m → samples conversion is not
-    // repeated here.
+    // #346 UX revision 4: the guard row, printed whenever the guard ran, so
+    // a pass is not silent. The distance and the tolerance come from the
+    // core constants; the extended start index is not printed, so the
+    // m → samples conversion is not repeated here.
+    use ac_core::measurement::sweep::{EdgeGuard, EDGE_GUARD_TOLERANCE_SAMPLES};
     let cm = ac_core::measurement::sweep::EDGE_GUARD_EXTENSION_M * 100.0;
-    match failed_guard {
-        Some(Some(repick)) => lines.push(format!(
+    match guard {
+        Some(EdgeGuard::Passed) => {
+            let unit = if EDGE_GUARD_TOLERANCE_SAMPLES == 1 {
+                "sample"
+            } else {
+                "samples"
+            };
+            lines.push(format!(
+                "window start {cm:.0} cm earlier: pick moves \u{2264} \
+                 {EDGE_GUARD_TOLERANCE_SAMPLES} {unit}"
+            ));
+        }
+        Some(EdgeGuard::Failed {
+            repick: Some(repick),
+        }) => lines.push(format!(
             "window start {cm:.0} cm earlier: pick moves to {repick} ({:+})",
             repick as i64 - onset_index as i64
         )),
-        Some(None) => lines.push(format!(
+        Some(EdgeGuard::Failed { repick: None }) => lines.push(format!(
             "no re-pick \u{2014} window cannot start {cm:.0} cm earlier"
         )),
         None => {}
@@ -382,50 +402,29 @@ fn short_onset_rule(
     lines
 }
 
-/// Row 2 under `arrival` (#346 UX): which rule produced the arrival and,
-/// for a peak, the one condition that kept the onset out. `None` for a
-/// failed deconvolution, which prints no arrival to qualify (#376).
-fn arrival_source_line(source: &ac_core::measurement::report::ArrivalSource) -> Option<String> {
-    use ac_core::measurement::report::{ArrivalSource, PeakReason};
+/// Row 2 under `arrival` (#346 UX revision 4): the rule that produced the
+/// arrival. One string: the arrival is always the magnitude peak. Takes the
+/// source so a second [`ArrivalSource`] variant fails to compile here
+/// rather than printing this text silently.
+///
+/// [`ArrivalSource`]: ac_core::measurement::report::ArrivalSource
+fn arrival_source_line(source: &ac_core::measurement::report::ArrivalSource) -> String {
+    use ac_core::measurement::report::ArrivalSource;
     let text = match source {
-        ArrivalSource::Onset => "from onset, causal bound enforced (below)",
-        ArrivalSource::Peak { reason } => match reason {
-            PeakReason::NoCausalBound => {
-                "from peak \u{2014} onset search had no causal bound (below)"
-            }
-            PeakReason::BoundNotBinding => {
-                "from peak \u{2014} search span, not the bound, set the window"
-            }
-            PeakReason::PickerDeclined => "from peak \u{2014} onset picker declined (below)",
-            PeakReason::PickOnWindowStart => {
-                "from peak \u{2014} onset pick sits on the window start (below)"
-            }
-            PeakReason::EdgeFollowing { repick: Some(_) } => {
-                "from peak \u{2014} onset pick follows the window edge (below)"
-            }
-            PeakReason::EdgeFollowing { repick: None } => {
-                "from peak \u{2014} onset pick could not be checked (below)"
-            }
-            PeakReason::DeconvolutionFailed => return None,
-        },
+        ArrivalSource::Peak => "from peak (largest magnitude sample)",
     };
-    Some(format!("{CONT_INDENT}{text}"))
+    format!("{CONT_INDENT}{text}")
 }
 
-/// The onset block's last row (#346 UX): the onset-to-peak gap, and
-/// `, not the arrival` unless the onset is the arrival. `None` when the
-/// onset is not before the peak — a declined picker reports the peak.
+/// The onset block's last row (#346 UX revision 4): the onset-to-peak gap,
+/// always qualified `, not the arrival`. `None` when the onset is not
+/// before the peak — a declined picker reports the peak.
 fn onset_gap_line(stats: &ac_core::measurement::report::IrStats) -> Option<String> {
-    use ac_core::measurement::report::ArrivalSource;
     if stats.onset_index >= stats.peak_index {
         return None;
     }
-    let qualifier = match stats.arrival_source {
-        ArrivalSource::Onset => "",
-        ArrivalSource::Peak { .. } => ", not the arrival",
-    };
     Some(format!(
-        "{CONT_INDENT}{} samples before peak{qualifier}",
+        "{CONT_INDENT}{} samples before peak, not the arrival",
         stats.peak_index - stats.onset_index
     ))
 }
@@ -849,9 +848,7 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
             stats.sample_rate_hz,
         );
         // #346: the rule that produced the arrival, on the row under it.
-        if let Some(line) = arrival_source_line(&stats.arrival_source) {
-            println!("{line}");
-        }
+        println!("{}", arrival_source_line(&stats.arrival_source));
         // #359: the one τ subtraction this report can offer, gated by
         // `arrival_check` — sits directly under `arrival` so the two
         // primary values stack. Never printed on a failed deconvolution
@@ -869,18 +866,18 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
     if matches!(stats.verdict, IrVerdict::Failed { .. }) {
         println!("                diagnostic only \u{2014} not a valid arrival");
     } else {
-        // #346 UX: the onset is its own labelled block — it can be the
-        // arrival, so it ranks with `peak` rather than beneath it. The
+        // #346 UX: the onset is its own labelled block, a diagnostic
+        // beside `peak`. The
         // rule that produced it reaches the terminal as a short derived tag
         // (the full sentence runs past 80 columns); the untruncated rule
         // still rides the persisted JSON via `IrStats::onset_rule`. The
-        // guard row is driven by the typed `arrival_source`, not by
+        // guard row is driven by the typed `onset_standing`, not by
         // parsing the rule.
         let onset_lines = short_onset_rule(
             &stats.onset_rule,
             stats.onset_index,
             &stats.causal_bound,
-            failed_guard(&stats.arrival_source),
+            guard_outcome(&stats.onset_standing),
         );
         println!("{}{}", label_prefix("onset"), onset_lines[0]);
         for line in &onset_lines[1..] {
@@ -1166,16 +1163,16 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, arrival_source_line, collect_sweep_frames, failed_guard,
-        flight_time_line, interface_latency_lines, label_prefix, onset_gap_line,
+        arrival_check_lines, arrival_source_line, collect_sweep_frames, flight_time_line,
+        guard_outcome, interface_latency_lines, label_prefix, onset_gap_line,
         reference_latency_lines, reference_stored_latency_lines, short_onset_rule, SweepOutcome,
         CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
-        MeasuredReferenceLatency, PeakReason, ReferenceLatency,
+        MeasuredReferenceLatency, OnsetStanding, ReferenceLatency,
     };
-    use ac_core::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
+    use ac_core::measurement::sweep::{BoundInputs, CausalBound, EdgeGuard, MissingBoundInput};
     use ac_core::shared::calibration::TauDisagreement;
     use std::collections::VecDeque;
 
@@ -1394,38 +1391,44 @@ mod tests {
         );
     }
 
-    /// #346 UX revision 3, frames 3 and 4: a failed edge guard adds the
-    /// abnormal-case row after the bound row; rows 1–3 are unchanged. The
-    /// re-pick delta is always signed, in either direction.
     /// #346: `print_ir_report` feeds `short_onset_rule` through
-    /// `failed_guard`. Only an edge-following refusal may carry a guard row;
-    /// every other arrival source must map to `None`, and both typed
-    /// re-pick shapes must reach the row unchanged.
+    /// `guard_outcome`. `Unscored` is a passed guard, both typed re-pick
+    /// shapes of `EdgeFollowing` reach the row unchanged, and every other
+    /// standing maps to `None`.
     #[test]
-    fn failed_guard_carries_the_typed_repick_only_for_edge_following() {
-        let peak = |reason| ArrivalSource::Peak { reason };
-        assert_eq!(failed_guard(&ArrivalSource::Onset), None);
-        for reason in [
-            PeakReason::NoCausalBound,
-            PeakReason::BoundNotBinding,
-            PeakReason::PickerDeclined,
-            PeakReason::PickOnWindowStart,
-            PeakReason::DeconvolutionFailed,
+    fn guard_outcome_maps_every_onset_standing() {
+        assert_eq!(
+            guard_outcome(&OnsetStanding::Unscored),
+            Some(EdgeGuard::Passed)
+        );
+        for standing in [
+            OnsetStanding::NoCausalBound,
+            OnsetStanding::BoundNotBinding,
+            OnsetStanding::PickerDeclined,
+            OnsetStanding::PickOnWindowStart,
+            OnsetStanding::DeconvolutionFailed,
         ] {
-            assert_eq!(failed_guard(&peak(reason)), None, "{reason:?}");
+            assert_eq!(guard_outcome(&standing), None, "{standing:?}");
         }
         assert_eq!(
-            failed_guard(&peak(PeakReason::EdgeFollowing {
+            guard_outcome(&OnsetStanding::EdgeFollowing {
                 repick: Some(10_471)
-            })),
-            Some(Some(10_471))
+            }),
+            Some(EdgeGuard::Failed {
+                repick: Some(10_471)
+            })
         );
         assert_eq!(
-            failed_guard(&peak(PeakReason::EdgeFollowing { repick: None })),
-            Some(None)
+            guard_outcome(&OnsetStanding::EdgeFollowing { repick: None }),
+            Some(EdgeGuard::Failed { repick: None })
         );
     }
 
+    /// #346 UX revisions 3 and 4, frames 1 to 3: the guard row follows the
+    /// bound row whenever the guard ran — a pass states the tolerance it was
+    /// held to, a failure the re-pick; rows 1–3 are unchanged. The re-pick
+    /// delta is always signed, in either direction. No row when the guard
+    /// did not run.
     #[test]
     fn short_onset_rule_flags_a_pick_that_follows_the_window_edge() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 10463, \
@@ -1441,94 +1444,82 @@ mod tests {
             v.push(row.to_string());
             v
         };
+        let failed = |repick| Some(EdgeGuard::Failed { repick });
         assert_eq!(
-            short_onset_rule(rule, 10483, &enforced(2.0, None), Some(Some(10471))),
+            short_onset_rule(rule, 10483, &enforced(2.0, None), failed(Some(10471))),
             with_row("window start 5 cm earlier: pick moves to 10471 (-12)")
         );
         assert_eq!(
-            short_onset_rule(rule, 10483, &enforced(2.0, None), Some(Some(10486))),
+            short_onset_rule(rule, 10483, &enforced(2.0, None), failed(Some(10486))),
             with_row("window start 5 cm earlier: pick moves to 10486 (+3)")
         );
         let unchecked = "AIC change-point pick over a 10.0 ms window; window start at sample \
                          10463, causal bound enforced; no re-pick — the window cannot start 5 cm \
                          earlier, so the pick could not be checked";
         assert_eq!(
-            short_onset_rule(unchecked, 10483, &enforced(2.0, None), Some(None)),
+            short_onset_rule(unchecked, 10483, &enforced(2.0, None), failed(None)),
             with_row("no re-pick — window cannot start 5 cm earlier")
         );
-        let passed = short_onset_rule(rule, 10483, &enforced(2.0, None), None);
-        assert_eq!(passed, head, "no guard row unless the guard failed");
-    }
-
-    /// #346 UX: row 2 under `arrival` is exactly one of the table's
-    /// strings, and a failed deconvolution gets none.
-    #[test]
-    fn arrival_source_line_names_the_rule_and_the_blocking_condition() {
-        let peak = |reason| ArrivalSource::Peak { reason };
-        let cases = [
-            (
-                ArrivalSource::Onset,
-                "from onset, causal bound enforced (below)",
-            ),
-            (
-                peak(PeakReason::NoCausalBound),
-                "from peak — onset search had no causal bound (below)",
-            ),
-            (
-                peak(PeakReason::BoundNotBinding),
-                "from peak — search span, not the bound, set the window",
-            ),
-            (
-                peak(PeakReason::PickerDeclined),
-                "from peak — onset picker declined (below)",
-            ),
-            (
-                peak(PeakReason::PickOnWindowStart),
-                "from peak — onset pick sits on the window start (below)",
-            ),
-            (
-                peak(PeakReason::EdgeFollowing {
-                    repick: Some(10_471),
-                }),
-                "from peak — onset pick follows the window edge (below)",
-            ),
-            (
-                peak(PeakReason::EdgeFollowing { repick: None }),
-                "from peak — onset pick could not be checked (below)",
-            ),
-        ];
-        for (source, text) in cases {
-            let line = arrival_source_line(&source).expect("a row");
-            assert_eq!(line, format!("{CONT_INDENT}{text}"));
-            assert!(line.chars().count() <= 80, "{line:?}");
-        }
-        assert_eq!(
-            arrival_source_line(&peak(PeakReason::DeconvolutionFailed)),
-            None
+        let passed_rule = "AIC change-point pick over a 10.0 ms window; window start at sample \
+                           10463, causal bound enforced";
+        let passed = short_onset_rule(
+            passed_rule,
+            10483,
+            &enforced(2.0, None),
+            Some(EdgeGuard::Passed),
         );
+        assert_eq!(
+            passed,
+            with_row("window start 5 cm earlier: pick moves ≤ 1 sample"),
+            "a passed guard is stated, not silent"
+        );
+        let not_run = short_onset_rule(passed_rule, 10483, &enforced(2.0, None), None);
+        assert_eq!(not_run, head, "no guard row when the guard did not run");
     }
 
-    /// #346 UX: the gap row says `not the arrival` only when that is true,
-    /// and is absent when the onset is not before the peak.
+    /// #346 UX revision 4: row 2 under `arrival` is one fixed string. Tested
+    /// against the rejected text: it names no onset and points nowhere
+    /// `(below)`, because no per-capture condition decides the arrival.
     #[test]
-    fn onset_gap_line_qualifies_only_a_non_arrival_onset() {
+    fn arrival_source_line_names_the_peak_rule() {
+        let line = arrival_source_line(&ArrivalSource::Peak);
+        assert_eq!(
+            line,
+            format!("{CONT_INDENT}from peak (largest magnitude sample)")
+        );
+        assert!(!line.contains("onset"), "{line:?}");
+        assert!(!line.contains("(below)"), "{line:?}");
+        assert!(line.chars().count() <= 80, "{line:?}");
+    }
+
+    /// #346 UX revision 4: the gap row says `not the arrival` on every
+    /// onset standing, and is absent when the onset is not before the peak.
+    #[test]
+    fn onset_gap_line_always_says_not_the_arrival() {
         let mut stats = stats_with(None, ArrivalCheck::Agree);
         stats.peak_index = 10_503;
         stats.onset_index = 10_483;
-        stats.arrival_source = ArrivalSource::Onset;
-        assert_eq!(
-            onset_gap_line(&stats),
-            Some(format!("{CONT_INDENT}20 samples before peak"))
-        );
-        stats.arrival_source = ArrivalSource::Peak {
-            reason: PeakReason::NoCausalBound,
-        };
-        assert_eq!(
-            onset_gap_line(&stats),
-            Some(format!(
-                "{CONT_INDENT}20 samples before peak, not the arrival"
-            ))
-        );
+        for standing in [
+            OnsetStanding::Unscored,
+            OnsetStanding::NoCausalBound,
+            OnsetStanding::BoundNotBinding,
+            OnsetStanding::PickerDeclined,
+            OnsetStanding::PickOnWindowStart,
+            OnsetStanding::EdgeFollowing {
+                repick: Some(10_474),
+            },
+            OnsetStanding::EdgeFollowing { repick: None },
+            OnsetStanding::DeconvolutionFailed,
+        ] {
+            stats.onset_standing = standing;
+            assert_eq!(
+                onset_gap_line(&stats),
+                Some(format!(
+                    "{CONT_INDENT}20 samples before peak, not the arrival"
+                )),
+                "{standing:?}"
+            );
+        }
         stats.onset_index = stats.peak_index;
         assert_eq!(onset_gap_line(&stats), None);
     }
@@ -1781,9 +1772,8 @@ mod tests {
             onset_index: 590,
             onset_rule: String::new(),
             causal_bound: unbounded(),
-            arrival_source: ArrivalSource::Peak {
-                reason: PeakReason::NoCausalBound,
-            },
+            arrival_source: ArrivalSource::Peak,
+            onset_standing: OnsetStanding::NoCausalBound,
             delay_samples: 88,
             arrival_s: 88.0 / 96_000.0,
             arrival_check,
@@ -1940,8 +1930,15 @@ mod tests {
         ];
         for rule in &rules {
             for bound in &bounds {
-                for failed_guard in [None, Some(None), Some(Some(123_456))] {
-                    for line in short_onset_rule(rule, 262_144, bound, failed_guard) {
+                for guard in [
+                    None,
+                    Some(EdgeGuard::Passed),
+                    Some(EdgeGuard::Failed { repick: None }),
+                    Some(EdgeGuard::Failed {
+                        repick: Some(123_456),
+                    }),
+                ] {
+                    for line in short_onset_rule(rule, 262_144, bound, guard) {
                         assert!(
                             16 + line.chars().count() <= 80,
                             "line {:?} runs to {} columns",

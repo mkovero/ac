@@ -38,7 +38,7 @@ mod payload;
 mod provenance;
 
 pub use ir_stats::{
-    ArrivalCheck, ArrivalSource, IrStats, IrVerdict, PeakReason, PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, ArrivalSource, IrStats, IrVerdict, OnsetStanding, PRE_IMPULSE_SNR_MIN_DB,
 };
 pub use payload::{
     FrequencyResponsePoint, GateParams, GatedFrequencyResponsePoint, MeasurementData,

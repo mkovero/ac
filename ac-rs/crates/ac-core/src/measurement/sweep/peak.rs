@@ -1,16 +1,13 @@
 //! Which sample is "the arrival" for a deconvolved impulse response —
 //! shared by every caller that has to difference two arrivals (#351).
 //!
-//! Every peak-picked arrival — the IR's peak in
-//! [`crate::measurement::report::MeasurementReport::ir_stats`] and
-//! calibrate's τ leg (`analyse_tau_leg` in `ac-daemon`) — calls
+//! Both halves of `ir_arrival_distance()`'s `arrival_s − τ_s` — the IR's
+//! own peak ([`crate::measurement::report::MeasurementReport::ir_stats`])
+//! and calibrate's τ leg (`analyse_tau_leg` in `ac-daemon`) — call
 //! [`ir_peak`] rather than each picking their own maximum, so the two
-//! cannot drift onto different tie-break or NaN rules the way they had
-//! before #351 (one kept the earliest index on a tie and skipped NaN, the
-//! other kept the latest and panicked on NaN). Since #346 the IR half of
-//! `ir_arrival_distance()`'s `arrival_s − τ_s` is not always that peak:
-//! `ir_stats` may promote the bounded onset instead, under the pairing
-//! rule below.
+//! halves cannot drift onto different tie-break or NaN rules the way they
+//! had before this issue (one kept the earliest index on a tie and
+//! skipped NaN, the other kept the latest and panicked on NaN).
 //!
 //! Why the pairing cancels across different sweep bands: a Farina ESS
 //! deconvolution of a pure delay is an approximately linear-phase
@@ -27,26 +24,14 @@
 //! existed). See this file's band-invariance test, which measures both
 //! claims on a real Farina deconvolution rather than asserting them.
 //!
-//! Pairing rule, so a later change does not reopen this (#351, amended
-//! by #346):
-//!
-//! - A [`ir_peak`] result may always be differenced against another
-//!   [`ir_peak`] result, from any capture, because the band-invariance
-//!   above is what makes that pairing cancel.
-//! - A **bounded** onset arrival (one whose search window started at an
-//!   enforced causal bound) may be differenced against a peak-picked τ,
-//!   including a stored `calibrate` τ. On an electrical path the peak is
-//!   the delay whatever the band; the bounded onset's band dependence is
-//!   pinned to at most one sample by this file's two-way bias test.
-//! - An **unbounded** onset is never differenced against anything. It is
-//!   never an arrival, so nothing reaches `flight_time_s` from it.
-//!
-//! #351's original rule — an onset arrival only against a τ picked by the
-//! same onset rule from the same capture's reference leg (#460), never
-//! against a stored τ — was withdrawn: on an electrical loopback the
-//! unbounded pick lands in the band-limited skirt, 358 samples before the
-//! peak (#378 AC6 record), so that pairing would have differenced the
-//! acoustic onset against a picker artefact.
+//! Pairing rule, so a later change does not reopen this: an onset-derived
+//! arrival may only be differenced against a τ picked by the *same*
+//! onset rule from the *same* capture's reference leg (#460) — never
+//! against a stored `calibrate` τ, which was measured under a different
+//! sweep and cannot be guaranteed to share the onset's skirt width. A
+//! [`ir_peak`] result may always be differenced against another
+//! [`ir_peak`] result, from any capture, because the band-invariance
+//! above is what makes that pairing cancel.
 
 /// Index and magnitude of the largest-magnitude sample of a linear IR.
 ///
@@ -221,8 +206,8 @@ mod tests {
         )
     }
 
-    /// #346 architect revisions 2 and 3: the precondition for the amended
-    /// pairing rule. A two-way DUT — a smaller full-band component at `t0`
+    /// #346 architect revisions 2 to 4: estimator and guard properties of
+    /// the bounded onset. A two-way DUT — a smaller full-band component at `t0`
     /// plus a larger low-passed one at `t0 + G` — whose magnitude peak
     /// lands late, captured at both of the band-invariance test's sweep
     /// bands, with the causal bound one hand-tape error (5 cm) before `t0`.
@@ -231,13 +216,14 @@ mod tests {
     /// closer to `t0` than the peak is.
     /// (ii) The bounded onset's offset differs between the two bands by at
     /// most one sample — the same integer-rounding budget as #351's
-    /// hardware budget. If this fails, the pairing amendment in this
-    /// module's doc is invalid and `flight_time_s` must be withheld for
-    /// onset arrivals instead: report it back, do not loosen it.
+    /// hardware budget. Any future design that differences an onset
+    /// against a peak-picked τ would need this; no such pairing is licensed
+    /// today (this module's pairing rule). If it fails, report it back, do
+    /// not loosen it.
     /// (iii) The edge guard passes band A's pick. Band B is deliberately
     /// not asserted: its pick is right (`t0 + 1`) but the re-pick over the
     /// window started 5 cm earlier lands at `t0 − 1`, a 2-sample move, so
-    /// the guard refuses it and the arrival falls back to the peak. That is
+    /// the guard refuses it and the onset standing is `EdgeFollowing`. That is
     /// a known false refusal (architect revision 3 probe), not a reason to
     /// widen [`crate::measurement::sweep::EDGE_GUARD_TOLERANCE_SAMPLES`]:
     /// a tolerance of 2 also passes a 12-samples-late pick.
@@ -267,8 +253,7 @@ mod tests {
         assert!(
             (a.onset - b.onset).abs() <= 1,
             "bounded onset offset moved {} samples between bands (A {}, B {}) — the \
-             #346 pairing amendment does not hold; withhold flight_time_s for onset \
-             arrivals instead",
+             bounded onset is not band-invariant to one sample",
             (a.onset - b.onset).abs(),
             a.onset,
             b.onset
@@ -286,8 +271,8 @@ mod tests {
     /// `t0 − 14` (5 cm). The unguarded bounded pick lands well after `t0`,
     /// between the bound and the peak — the pattern of the rig's 2 m
     /// capture (bound +0, onset +20, peak +40). It is clear of the window
-    /// start and would pass every other promotion condition, so without
-    /// the guard it would become the arrival.
+    /// start and would pass every other onset condition, so without the
+    /// guard its standing would be `Unscored`.
     #[test]
     fn edge_guard_fires_on_a_rig_like_two_way_edge_follower() {
         let r = two_way_bounded(&band_a(96_000), &TWO_WAY_RIG_LIKE);

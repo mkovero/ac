@@ -11,28 +11,23 @@
 /// that produced it, so a persisted onset can be told apart from a bare
 /// peak read a year later (#346, acceptance criterion 4).
 ///
-/// Promoted to the arrival only under the conditions
-/// `MeasurementReport::ir_stats` checks (#346 architect revision 2): an
-/// enforced causal bound that set the window start, a pick clear of that
-/// start, and a passing [`EdgeGuard`]. Everywhere else it is carried
-/// beside the peak-derived arrival as a diagnostic. The unbounded pick is
-/// never promoted: #378's AC6 rig run (pupu, 2026-09-15) scored it, and
-/// between 1.000 m and 2.000 m its increment missed `transfer_stream`'s by
-/// 143.75 samples while the peak's missed by 8.62.
+/// Reported, not used as the arrival: `MeasurementReport::ir_stats`
+/// derives `delay_samples` / `arrival_s` from the magnitude peak and
+/// carries this beside it as a diagnostic, bounded or not. #378's
+/// contingency, triggered by its AC6 rig run (pupu, 2026-09-15): between
+/// 1.000 m and 2.000 m the unbounded onset's increment missed
+/// `transfer_stream`'s by 143.75 samples while the peak's missed by 8.62.
+/// The bounded onset's pre-registered rig check (#346, pupu, 2026-09-16)
+/// refused to conclude, and the operator kept the peak.
 ///
-/// Pairing rule (#351, amended by #346): a **bounded** onset arrival may
-/// be differenced against a τ picked by [`crate::measurement::sweep::ir_peak`],
-/// including a stored `calibrate` τ. On an electrical path the peak is the
-/// delay whatever the sweep band (the band-invariance test in `peak.rs`),
-/// and the bounded onset's own band dependence is pinned to at most one
-/// sample by the two-way bias test beside it. An **unbounded** onset is
-/// never differenced against anything: it is never an arrival, so nothing
-/// reaches `flight_time_s` from it. #351's original rule — onset arrival
-/// only against a τ picked by the same onset rule on the same capture's
-/// reference leg — was withdrawn because on an electrical loopback the
-/// unbounded pick lands in the band-limited skirt, 358 samples before the
-/// peak (#378 AC6 record), so it would have differenced the acoustic onset
-/// against a picker artefact.
+/// Pairing rule (#351): an onset-derived arrival may only be differenced
+/// against a τ picked by the *same* onset rule from the *same* capture's
+/// reference leg (#460) — never against a stored `calibrate` τ. A stored
+/// τ is measured under a different sweep, so nothing guarantees its
+/// bandlimited skirt matches this onset's; [`crate::measurement::sweep::ir_peak`]
+/// is the one picker whose result may be differenced against another
+/// `ir_peak` result from any capture — see that function's module doc for
+/// why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnsetEstimate {
     pub index: usize,
@@ -91,10 +86,9 @@ pub enum WindowLimit {
 /// variance and moves a correct pick (the rejected revision-2 guard,
 /// tested against in `peak.rs`).
 ///
-/// Known limits. The check refuses some correct picks (the arrival falls
-/// back to the peak), and a pick that follows the bound on a noisy capture
-/// can still pass. A promoted pick lies in `[bound, peak)`, so its error
-/// is bounded on both sides: it is never later than the peak, and it is
+/// Known limits. The check refuses some correct picks, and a pick that
+/// follows the bound on a noisy capture can still pass. A pick that passes
+/// lies in `[bound, peak)`, so its error is bounded on both sides: it is never later than the peak, and it is
 /// earlier than the true onset by at most the bound's own error. The bound
 /// comes from a taped distance, so that earlier error is at most the tape
 /// uncertainty (≤ 5 cm); every other known error points late.
@@ -413,9 +407,8 @@ pub fn estimate_onset(
     if pinned {
         rule.push_str("; pick landed on the window start — the true onset may lie earlier");
     }
-    // Bounded path only — a window the bound started. The unbounded pick
-    // is never promoted, so its behaviour and rule text stay exactly as
-    // #378 left them; a bound earlier than the span leaves a full-length
+    // Bounded path only — a window the bound started. The unbounded
+    // pick's behaviour and rule text stay exactly as #378 left them; a bound earlier than the span leaves a full-length
     // window, which is not the short-window case this checks for.
     //
     // The extended window reaches below the causal bound on purpose: a
@@ -1169,8 +1162,8 @@ mod tests {
             "pinned pick not flagged: {}",
             est.rule
         );
-        // A pinned pick is not a promotable onset, and the edge guard does
-        // not run on it: a pick on the window start is already flagged.
+        // A pinned pick already has its own onset standing, and the edge
+        // guard does not run on it: a pick on the window start is already flagged.
         assert_eq!(
             est.pick,
             OnsetPick::Picked {
@@ -1194,8 +1187,8 @@ mod tests {
     /// picker's doc names. Starting the window 5 cm earlier moves the
     /// re-pick. Tested against the rejected implementation: the
     /// unguarded bounded pick is computed inline and is clear of the window
-    /// start under a binding bound, i.e. it passes every other promotion
-    /// condition and *would* have become the arrival.
+    /// start under a binding bound, i.e. it passes every other onset
+    /// condition and *would* have stood as `Unscored`.
     #[test]
     fn edge_guard_fires_when_the_window_starts_after_the_true_onset() {
         let sigma_n = 1e-4;

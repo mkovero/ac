@@ -334,20 +334,20 @@ fn plot_ir_prints_the_arrival_and_persists_json_and_csv() {
     }
     // #346 AC4 / #378: the onset rule must still reach the terminal in
     // its own labelled block, and the onset-to-peak distance must not read
-    // as the arrival: this run has no distance, so the arrival stays on
-    // the peak and row 2 under `arrival` says why.
+    // as the arrival. Row 2 under `arrival` names the peak rule; this run
+    // has no distance, and row 3 of the onset block says so.
     assert!(
         stdout.contains("onset         at sample ")
             && stdout.contains("(AIC change-point pick, 10.0 ms window)"),
         "printed summary missing the onset rule line (AC4):\n{stdout}"
     );
     assert!(
-        stdout.contains("from peak \u{2014} onset search had no causal bound (below)"),
-        "arrival row 2 must name the peak and why (#346 AC4):\n{stdout}"
+        stdout.contains("from peak (largest magnitude sample)"),
+        "arrival row 2 must name the peak rule (#346 AC4):\n{stdout}"
     );
     assert!(
-        !stdout.contains("window start 5 cm earlier"),
-        "no edge-guard row may print without a causal bound:\n{stdout}"
+        !stdout.contains("5 cm earlier"),
+        "no edge-guard row, pass or fail, may print without a causal bound:\n{stdout}"
     );
     assert!(
         stdout.contains("(search span), pick"),

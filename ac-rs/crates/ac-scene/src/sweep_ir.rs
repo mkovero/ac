@@ -24,8 +24,7 @@
 //! forward verbatim; this module is where they become plain data.
 
 use ac_core::measurement::report::{
-    ArrivalCheck, ArrivalSource, IrVerdict, MeasurementData, MeasurementReport,
-    PRE_IMPULSE_SNR_MIN_DB,
+    ArrivalCheck, IrVerdict, MeasurementData, MeasurementReport, PRE_IMPULSE_SNR_MIN_DB,
 };
 
 use crate::ir::ArrivalMarker;
@@ -45,15 +44,12 @@ use crate::ticks::{time_axis, time_to_x, Axis};
 /// measured `interface_latency`, and the round trip prints instead, with
 /// the disagreement named in the suffix.
 ///
-/// Prefixed with the rule that produced the arrival (#346 UX): `onset` or
-/// `peak`, always one of the two, so a marker that sits off the visible
-/// peak says what it marks.
+/// Prefixed with the rule that produced the arrival (#346 UX revision 4):
+/// always `peak`, the only rule there is. The prefix stays although the
+/// marker always sits on the visible peak, because it is acceptance
+/// criterion 4's tag on a screenshot.
 fn arrival_marker_text(stats: &ac_core::measurement::report::IrStats) -> String {
-    let rule = match stats.arrival_source {
-        ArrivalSource::Onset => "onset",
-        ArrivalSource::Peak { .. } => "peak",
-    };
-    format!("{rule} {}", arrival_marker_value(stats))
+    format!("peak {}", arrival_marker_value(stats))
 }
 
 /// [`arrival_marker_text`] without the rule prefix.
@@ -754,20 +750,24 @@ mod tests {
         assert!(!scene.arrival.text.contains("flight"));
     }
 
-    /// #346 UX: the marker names the rule that produced the arrival — both
-    /// words, never only `onset` — and only the prefix changes.
+    /// #346 UX revision 4: the marker names the rule that produced the
+    /// arrival, `peak`, on every onset standing — including `Unscored`,
+    /// where the rejected revision printed `onset`.
     #[test]
     fn arrival_marker_names_the_rule_that_produced_the_arrival() {
-        use ac_core::measurement::report::PeakReason;
+        use ac_core::measurement::report::{ArrivalSource, OnsetStanding};
         let r = gated_report_with_delayed_peak();
         let mut stats = r.ir_stats().unwrap();
+        assert_eq!(stats.arrival_source, ArrivalSource::Peak);
         let value = arrival_marker_value(&stats);
-        stats.arrival_source = ArrivalSource::Peak {
-            reason: PeakReason::NoCausalBound,
-        };
-        assert_eq!(arrival_marker_text(&stats), format!("peak {value}"));
-        stats.arrival_source = ArrivalSource::Onset;
-        assert_eq!(arrival_marker_text(&stats), format!("onset {value}"));
+        for standing in [OnsetStanding::NoCausalBound, OnsetStanding::Unscored] {
+            stats.onset_standing = standing;
+            assert_eq!(
+                arrival_marker_text(&stats),
+                format!("peak {value}"),
+                "{standing:?}"
+            );
+        }
     }
 
     #[test]
