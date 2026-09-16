@@ -349,7 +349,7 @@ run() {
   if [[ -z $turns ]]; then
     case "$role" in
       developer)          turns=160 ;;  # implementation across crates is long
-      qa|codex-qa|architect|audit) turns=120 ;;
+      qa|codex-qa|architect|audit|rig) turns=120 ;;  # rig: preflight, probe, runs, record
       *)                  turns=80  ;;
     esac
   fi

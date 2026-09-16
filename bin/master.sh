@@ -33,6 +33,10 @@
 #                        revision straight back to Codex for a recheck of the
 #                        delta; Claude QA is not re-run, and its approval of the
 #                        failed tip is carried forward only if Codex passes.
+#   AC_RIG_AUTO=0        stop at rig-pending for a human instead of running
+#                        bin/rig.sh. Default 1: when requires-rig is on the PR
+#                        or its issue, run the rig session at the reviewed
+#                        commit, then a full same-commit QA pass with the record.
 #   AC_WAIT_MERGE=1      wait at an epic child until its human merge, then
 #                        continue with the next child (default: stop and return)
 #   AC_MERGE_POLL_SECONDS=60  polling interval for AC_WAIT_MERGE
@@ -46,6 +50,7 @@ ROUNDS="${AC_ROUNDS:-3}"
 STATE=""          # outcome of the last drive(), read by the epic runner
 STEPS="${AC_STEPS:-8}"
 RECHECK="${AC_CODEX_RECHECK:-1}"
+RIG_AUTO="${AC_RIG_AUTO:-1}"
 DESIGN_PASSES="${AC_DESIGN_PASSES:-2}"
 UX_PASSES="${AC_UX_PASSES:-2}"
 
@@ -139,6 +144,34 @@ qa_loop() {
   # rerun after a stop still knows which delta Claude has not seen.
   local cbfile="$AC_LOG_DIR/codex-base-pr-$pr.sha" codex_base=""
   [[ $RECHECK == 1 && -f $cbfile ]] && codex_base="$(cat "$cbfile")"
+  # rig_step: requires-rig is on the PR or its issue and tree QA is done at
+  # $head. Run the rig session once per commit. 0 → a record is posted, do a
+  # full QA pass with it. 1 → stop here, STATE set.
+  local rmark="$AC_LOG_DIR/rig-pr-$pr.sha"
+  rig_step() {
+    local rrc=0
+    if [[ $RIG_AUTO != 1 ]]; then
+      echo "  #$n PR #$pr: REQUIRES RIG (AC_RIG_AUTO=0) — run: bin/rig.sh $pr"
+      STATE=needs-rig; return 1
+    fi
+    if [[ -f $rmark && "$(cat "$rmark")" == "$head" ]]; then
+      echo "  #$n PR #$pr: rig already ran at ${head:0:8} and requires-rig is still set — yours"
+      echo "     read the agent:rig record and the QA pass after it: a fail or"
+      echo "     decline, or a check the record did not close."
+      STATE=needs-rig; return 1
+    fi
+    echo "  #$n PR #$pr: rig session at ${head:0:8}"
+    "$BIN/rig.sh" "$pr" $fg || rrc=$?
+    case $rrc in
+      0) mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$head" > "$rmark"
+         echo "  #$n PR #$pr: rig record posted — full QA at the same commit"
+         return 0 ;;
+      3) echo "  #$n PR #$pr: rig busy (lock held) — rerun later: bin/rig.sh --status" ;;
+      4) echo "  #$n PR #$pr: rig not configured here (scripts or access missing)" ;;
+      *) echo "  #$n PR #$pr: rig session posted no usable record — read its log" ;;
+    esac
+    STATE=needs-rig; return 1
+  }
   codex_failed_at() {
     [[ $RECHECK == 1 ]] || return 0
     codex_base="$1"; mkdir -p "$AC_LOG_DIR"; printf '%s\n' "$1" > "$cbfile"
@@ -177,9 +210,9 @@ qa_loop() {
         echo "     two agents failing to converge is signal. read the reviews."
         return 0
       fi
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: carries requires-rig — revising the code does not"
-        echo "     retire the measurement; the label stays for you to clear."
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: carries requires-rig — the rig session runs after"
+        echo "     the next tree QA pass, at the revised commit."
       fi
       echo "  #$n PR #$pr: revising (round $qa_round)"
       pre="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
@@ -279,13 +312,13 @@ qa_loop() {
     if [[ -n $codex_base ]] && ! has needs-work "$ls" && ! has claude-approved "$ls"; then
       head="$(gh_retry gh pr view "$pr" -R "$AC_REPO" --json headRefOid --jq .headRefOid)" \
         || { echo "  #$n: cannot read the tip — stopping"; return 1; }
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: REQUIRES RIG — Codex cannot approve past it."
-        echo "     run the session, clear the label, rerun; the recheck of"
-        echo "     $codex_base..$head is still pending."
-        STATE=needs-rig; return 0
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        # A rig gate under a Codex recheck: Codex cannot approve past it, and
+        # the rig record needs a Claude pass to be accepted. Full QA instead.
+        echo "  #$n PR #$pr: requires-rig under a Codex recheck — full Claude QA path"
+        codex_base=""; rm -f "$cbfile"; force=full
       fi
-      if [[ $head != "$codex_base" ]]; then
+      if [[ -n $codex_base && $head != "$codex_base" ]]; then
         echo "  #$n PR #$pr: Codex recheck of ${codex_base:0:8}..${head:0:8} (Claude QA not re-run)"
         local rrc=0 crec
         "$BIN/review.sh" --independent --recheck "$codex_base" "$pr" || rrc=$?
@@ -329,12 +362,10 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
     # is not, and the cached approval is an approval of a superseded spec.
     ev="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     if [[ -z $force && -f $mark && "$(cat "$mark")" == "$head" ]] && (( ev > 0 )); then
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: tree QA complete — REQUIRES RIG before approval"
-        echo "     a measurement is outstanding. the label is human-clear only:"
-        echo "     read the review's 'rig verification required' field, run the"
-        echo "     session, then: gh pr edit $pr -R $AC_REPO --remove-label requires-rig"
-        STATE=needs-rig; return 0
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: tree QA complete — requires-rig"
+        rig_step || return 0
+        force=full; continue
       fi
       if has claude-approved "$ls"; then
         if ! has codex-approved "$ls"; then
@@ -346,11 +377,11 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
           STATE=awaiting-merge; return 0
         fi
       fi
-      echo "  #$n PR #$pr: rig gate cleared — full QA must incorporate its evidence"
+      echo "  #$n PR #$pr: no approval at a reviewed commit — full QA pass"
       force=full
     fi
 
-    echo "  #$n PR #$pr: qa review${force:+ (full — design changed since the last pass)}"
+    echo "  #$n PR #$pr: qa review${force:+ (full pass)}"
     before="$(qa_evidence "$pr")" || { echo "  #$n: cannot count qa output — stopping"; return 1; }
     codex_base=""; rm -f "$cbfile"   # Claude sees the whole delta again
     "$BIN/review.sh" "$pr" ${force:+--full} $fg || { echo "  #$n: review failed"; return 1; }
@@ -380,10 +411,10 @@ claude-approved carried forward to \`$head\`: Claude QA approved \`$codex_base\`
     fi
 
     if ! has needs-work "$ls"; then
-      if has requires-rig "$ls"; then
-        echo "  #$n PR #$pr: tree QA complete — REQUIRES RIG before approval"
-        echo "     see the review's 'rig verification required' field."
-        STATE=needs-rig
+      if has requires-rig "$ls" || has requires-rig "$ils"; then
+        echo "  #$n PR #$pr: tree QA complete — requires-rig"
+        rig_step || return 0
+        force=full; continue
       elif has claude-approved "$ls"; then
         if ! has codex-approved "$ls"; then
           codex_gate "$pr" || { rc=$?; (( rc == 2 )) && { codex_failed_at "$head"; continue; }; return "$rc"; }

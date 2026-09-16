@@ -89,6 +89,13 @@ Then routing label:
 - Needs architect review → `needs-design`
 - Else → `ready-to-implement`
 
+Then `requires-rig`, when an acceptance criterion can only be settled on real
+hardware (a measured latency, a real converter's response, a tolerance tagged
+`derived`/`assumed` that the change will act on). Name the check in the spec
+comment under **rig check**: the quantity, the configuration, and the value
+that would falsify the claim. A label without a named check gives the rig
+session nothing to run.
+
 Then exactly one scope label, on every issue — you are the only role that sees
 all of them, and QA's standards check keys off this:
 `tier-1`, `tier-2` (`ac-core/visualize/`), `scene`, `view`, or `scope-none`

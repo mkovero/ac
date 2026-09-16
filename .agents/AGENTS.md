@@ -12,7 +12,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved`; or a runner recheck after a Codex-finding revision |
-| `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | manual invocation |
+| `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | `bin/rig.sh <pr>` when QA's tree pass is rig-pending; or manual invocation |
 
 ## routing logic
 
@@ -22,6 +22,9 @@ new issue
        ├─ needs-design → architect → ready-to-implement
        ├─ needs-ux     → ux        → ready-to-implement
        └─ ready-to-implement → developer → PR → qa → codex-qa → human merge
+                                                    │
+                                   requires-rig on PR or issue:
+                                   qa (tree, rig-pending) → rig → qa (same commit, with the record)
 
 ambiguous issue
   └─ triage applies needs-clarification → wait for reporter
@@ -37,7 +40,7 @@ Always human-only:
 - Merging PRs to main 
 - Deleting branches
 - Changing agent spec files
-- Removing `requires-rig` — an agent cannot take the measurement, so it cannot retire the requirement for one
+- Removing `requires-rig` without a rig record that settles the named check. QA removes it on a record whose verdict is `pass` and that closes the named falsification test (`qa.md`). A record that fails or declines to conclude leaves the label for a human.
 
 ## label schema
 
@@ -56,7 +59,7 @@ Always human-only:
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
-| `requires-rig` | qa | correctness rests on a measurement only the rig can make — blocks both approval labels; human clears it after the measurement exists |
+| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. Cleared by qa on a passing rig record, otherwise by a human |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
@@ -74,9 +77,30 @@ pass the runner restores `claude-approved` and comments that Claude QA
 approved the base commit and did not review the delta. `AC_CODEX_RECHECK=0`
 turns this off.
 
-Neither approval label may be applied while `requires-rig` is present. Tree QA
-defines the measurement and stops at the rig gate; after the measurement is
-recorded and a human clears `requires-rig`, QA runs again at the same commit.
+Neither approval label may be applied while `requires-rig` is present, on the
+PR or on the issue it closes. Tree QA names the measurement and stops at the
+rig gate. The runner then runs the rig role against that commit
+(`bin/rig.sh`), and QA runs again at the same commit with the record: a
+passing record lets QA clear the label and approve; anything else stops for a
+human.
+
+### rig sessions: standing consent and the lock
+
+**Standing emission consent** (operator, 2026-09-16): an agent rig session —
+pipeline or manual — may emit without asking per run, within these limits:
+- every emitting request carries a typed level **≤ −40 dBFS**, and the rig
+  profile's own lower ceilings still apply (pupu: −50 dBFS on the speaker);
+- bounded commands only (`plot ir`, `calibrate`, the `scripts/rig/` wrappers),
+  never a stimulus that runs until stopped.
+
+Still asked for every time: host reboots, driver reloads, cable or mic moves,
+clock changes, raising a ceiling, anything that needs someone in the room.
+
+**One session at a time.** Every rig session holds the rig lock for its
+duration: `bin/rig.sh --lock "<who, what>"` before the first command that
+touches the rig, `bin/rig.sh --unlock <token>` after. The pipeline takes it
+itself. A held lock shows in the rig's login banner. A lock past its lease is
+broken by the next taker, with a note.
 
 **Whoever applies `blocked` names the exact condition that lifts it**, in the
 comment that applies it: *"#180 merged → remove `blocked`"*. #181 and #182 are

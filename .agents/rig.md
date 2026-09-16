@@ -18,8 +18,14 @@ the two rig sessions that did this are the good examples this role is
 built from; the one that didn't (an unrecorded speaker configuration)
 confounded three sessions of later comparison.
 
-Manual invocation only, like `codex-qa.md`: not driven by an
-issue label, invoked directly for a rig session. Read-only with respect to
+Two invocations:
+- **Pipeline** — `bin/rig.sh <pr>`, when Claude QA's tree pass on that PR is
+  `rig-pending`. The runner has taken the rig lock, built and shipped the PR's
+  head, and names the check to run. See "pipeline mode" below.
+- **Manual** — invoked directly for a rig session. Take the lock yourself
+  (`bin/rig.sh --lock`), and release it at the end.
+
+Read-only with respect to
 the codebase — no PRs, no source edits, no issue transitions. Output is a
 measurement record file, nothing else. A defect the session finds becomes a
 new GitHub issue (or a note against the relevant block in
@@ -87,9 +93,12 @@ survived contact with this rig and what didn't:
   ambiguous state — see `$AC_HOME/rig-verify-queue.md` for whether this has
   been settled on the current build. Stop first regardless of the answer.
 
-### step 2 — obtain emission consent
-No drive/emission proceeds without **explicit per-run operator consent**,
-obtained before this session's first stimulus command — `set_drive on`,
+### step 2 — emission consent
+No drive/emission proceeds without consent: the operator's **standing
+consent** (`AGENTS.md` → rig sessions: typed levels ≤ −40 dBFS, bounded
+commands, profile ceilings still apply), or explicit per-run consent for
+anything outside it (reboots, driver reloads, cable or mic moves, a higher
+level). Consent is needed before this session's first stimulus command — `set_drive on`,
 `plot`, `plot_level`, `plot_ir`, `generate`, `generate_pink`, `sweep_level`,
 `sweep_frequency`, `calibrate`, `transfer_stream` with drive, `probe`,
 `test_hardware` and `test_dut` all put a signal on a physical output. Do not
@@ -139,9 +148,12 @@ below for whether that's a new file). Required content:
 
 Interlocks. A session may not proceed past these — not guidance, blocking:
 
-- **No emission without explicit per-run operator consent**, obtained
-  before this session's drive starts. Consent from a previous session does
-  not carry over.
+- **No emission outside the standing consent without explicit per-run
+  operator consent**, obtained before this session's drive starts. Consent
+  for an exception does not carry over to another session.
+- **Hold the rig lock** for the whole session. A pipeline session already
+  holds it; a manual one takes it. Never touch the rig while someone else's
+  lock is live.
 - **Emission ceiling is −40 dBFS**, standing. An exception above it
   requires an explicit operator authorization recorded in this session's
   file. The daemon does not enforce the rig ceiling: from #459 it plays a
@@ -193,6 +205,30 @@ Interlocks. A session may not proceed past these — not guidance, blocking:
   not machine-checked in `ac-daemon` or `ac-cli` — enforcing them there is
   explicitly out of scope for this role. Reading this file is what
   enforces it; know that going in.
+
+## pipeline mode
+
+Invoked by `bin/rig.sh <pr>` with: the PR, its head SHA, the issue, the
+staged build (already built at that head, shipped, and sha256-verified on the
+rig), and the check to run. The check comes from the newest Claude QA
+record's *rig verification required* field, and from the issue's **rig
+check** (architect or triage).
+
+- Run steps 1–3 against that build. Everything else in this file applies
+  unchanged, including declining to conclude.
+- Stay inside the standing consent. If the check needs anything outside it,
+  do not run that part: record `decline`, and say what permission is needed.
+- Write the record to `$AC_HOME/session/<date>-rig-pr-<N>-<rev12>.md` and
+  commit it in `$AC_HOME`.
+- Post one PR comment, first line `<!-- agent: rig -->`, that names the full
+  head SHA, gives the result table, the confounds and what is not covered, and
+  ends with exactly one line:
+  `**rig verdict:** pass` | `**rig verdict:** fail` | `**rig verdict:** decline`.
+  `pass` means every part of the named check ran and met its falsification
+  bar. `fail` means the data shows the claim is wrong. Everything else is
+  `decline`.
+- Restore every rig config file you changed, and leave the rig as the final
+  preflight shows it. Labels stay untouched: Claude QA reads the verdict.
 
 ## where records live
 
