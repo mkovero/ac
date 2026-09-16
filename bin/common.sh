@@ -312,8 +312,7 @@ model_for() {
   value="${!key:-${AC_MODEL:-}}"
   if [[ -z $value ]]; then
     case "$provider:$role" in
-      claude:architect|claude:ux|claude:triage) value="${AC_CLAUDE_MODEL:-opus}" ;;
-      claude:*) value="${AC_CLAUDE_MODEL:-sonnet}" ;;
+      claude:*) value="${AC_CLAUDE_MODEL:-opus}" ;;
       codex:*) value="${AC_CODEX_MODEL:-}" ;;
     esac
   fi
