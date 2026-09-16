@@ -102,7 +102,10 @@ echo "held load, no xruns: exit 0"
 
 expect_fail "monitor exits 1 early" "ended with status 1, not by the" fail up
 expect_fail "monitor exits 0 early" "ended with status 0, not by the" quit up
-expect_fail "timeout 124 before SECS" "soak lasted 0 s, less than the requested 2 s" hold up lie
+# Elapsed time is whole seconds around a ~0.5 s run, so it reads 0 or 1
+# depending on the second boundary; match only the part that cannot vary and
+# that no other check prints.
+expect_fail "timeout 124 before SECS" "less than the requested 2 s" hold up lie
 expect_fail "no daemon at checkpoint" "no ac-daemon or no ac-daemon JACK ports" hold down
 expect_fail "held load with xruns" "daemon-side counter: xruns=3" xrun up
 
