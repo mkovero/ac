@@ -111,7 +111,7 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 8`); the
+configured. Schema is versioned (currently `schema_version: 9`); the
 capture backend is archived at report top level. Example payload:
 
 ```json
@@ -119,7 +119,7 @@ capture backend is archived at report top level. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 8,
+    "schema_version": 9,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -1158,6 +1158,30 @@ channel to gate it) returns `ok: false` before any audio, rather than running
 single-ended. No reference configured is a legitimate state: the report records
 `reference_latency: unavailable` and no causal bound is built.
 
+**Arrival check (#359, schema v9).** `report.reference_stored_latency` is the
+τ `calibrate` has on file for the *reference* pair, looked up by the same
+exact-match rule `interface_latency` uses — never measured by `plot_ir`
+itself. `MeasurementReport::ir_stats().arrival_check` compares it against
+this run's same-capture `reference_latency`: agreement, a disagreement that
+is an exact multiple of the period (a graph-buffering shift — the same fault
+`calibrate`'s own two-reading τ guard exists for, #347 — now caught on the
+one path that had no equivalent corroboration at all), a disagreement that
+isn't (a different fault), or not checked (no reference, no stored τ for the
+reference pair, or a reference reading that failed its own gates). Gates the
+one τ subtraction the report can offer: `IrStats::flight_time_s` is withheld
+on either disagreement, even though `interface_latency` is measured, and
+produced normally when the check is `agree` or `unchecked`.
+
+What this cannot catch: it proves this capture's lifetime matches the
+lifetime the **reference** pair was last calibrated in, not the lifetime the
+**capture** pair's own stored τ came from — if those two pairs were
+calibrated in different lifetimes, a shift between those two is invisible to
+this check. It also cannot see a shift that was already present when the
+reference pair itself was calibrated: `calibrate` would have stored the
+shifted value, this run's same-capture reading agrees with it, and the check
+reports `agree`. Absent on reports written before v9, and whenever `plot_ir`
+has no reference configured.
+
 **DATA**
 ```json
 // topic: measurement/impulse_response
@@ -1168,7 +1192,7 @@ single-ended. No reference configured is a legitimate state: the report records
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 8, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 9, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, "reference_stored_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }

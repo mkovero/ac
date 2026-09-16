@@ -440,6 +440,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             // nothing here for a τ to correct (#283).
             interface_latency: None,
             reference_latency: None,
+            reference_stored_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -772,6 +773,7 @@ fn emit_spectrum_bands(
         // Band levels carry no arrival for a τ to correct (#283).
         interface_latency: None,
         reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -1006,6 +1008,25 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 input_port: tau_in_port,
             },
         ));
+
+        // #359: τ `calibrate` has on file for the *reference* pair, looked
+        // up the same way — never measured here, `plot_ir` must not
+        // silently re-run calibration. Only when a reference is configured;
+        // `IrStats::arrival_check` reads `None` as "not checked", not as a
+        // disagreement.
+        let reference_stored_latency = ref_in_port.as_deref().map(|ref_in| {
+            resolve_tau(
+                cal.as_ref(),
+                &TauConditions {
+                    device,
+                    backend: eng.backend_name().to_string(),
+                    sample_rate: sr,
+                    period_size: eng.period_size(),
+                    output_port: ref_out_port.clone().unwrap_or_else(|| out_port.clone()),
+                    input_port: ref_in.to_string(),
+                },
+            )
+        });
 
         let params = SweepParams {
             f1_hz,
@@ -1278,6 +1299,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             position,
             interface_latency,
             reference_latency,
+            reference_stored_latency,
             data: vec![
                 MeasurementPayload {
                     data,
