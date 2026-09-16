@@ -1063,12 +1063,13 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, collect_sweep_frames, interface_latency_lines, label_prefix,
-        reference_latency_lines, reference_stored_latency_lines, short_onset_rule, SweepOutcome,
-        CONT_INDENT,
+        arrival_check_lines, collect_sweep_frames, flight_time_line, interface_latency_lines,
+        label_prefix, reference_latency_lines, reference_stored_latency_lines, short_onset_rule,
+        SweepOutcome, CONT_INDENT,
     };
     use ac_core::measurement::report::{
-        ArrivalCheck, InterfaceLatency, MeasuredLatency, MeasuredReferenceLatency, ReferenceLatency,
+        ArrivalCheck, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
+        MeasuredReferenceLatency, ReferenceLatency,
     };
     use ac_core::measurement::sweep::{BoundInputs, CausalBound, MissingBoundInput};
     use ac_core::shared::calibration::TauDisagreement;
@@ -1520,6 +1521,95 @@ mod tests {
         );
     }
 
+    /// #359 QA (PR #477): `flight_time_line` is the value the arrival check
+    /// exists to gate — the CLI's headline new read-out — but shipped with
+    /// no test naming any of its four branches. Each arm here is the one
+    /// that fails if the match reorders or the wording drifts from what
+    /// `flight_time_line` actually prints.
+    fn stats_with(flight_time_s: Option<f64>, arrival_check: ArrivalCheck) -> IrStats {
+        IrStats {
+            sample_rate_hz: 96_000,
+            window_len: 1024,
+            peak_index: 600,
+            peak_magnitude: 0.5,
+            onset_index: 590,
+            onset_rule: String::new(),
+            causal_bound: unbounded(),
+            delay_samples: 88,
+            arrival_s: 88.0 / 96_000.0,
+            arrival_check,
+            flight_time_s,
+            pre_impulse_snr_db: 40.0,
+            gate_window_s: 0.01,
+            gate_f_low_hz: 100.0,
+            gate_window_kind: "tukey".into(),
+            verdict: IrVerdict::Ok,
+        }
+    }
+
+    #[test]
+    fn flight_time_line_names_every_branch_the_ux_spec_requires() {
+        let agree = stats_with(Some(88.0 / 96_000.0), ArrivalCheck::Agree);
+        let line = flight_time_line(&agree);
+        assert!(line.contains("samples"), "{line:?}");
+        assert!(
+            !line.contains("withheld") && !line.contains("not shown"),
+            "{line:?}"
+        );
+        assert_eq!(
+            line,
+            format!(
+                "{}+88 samples  (+0.917 ms, arrival \u{2212} latency)",
+                label_prefix("flight time")
+            )
+        );
+
+        let shift_d = TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 1024.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        assert_eq!(
+            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(shift_d))),
+            format!(
+                "{}withheld \u{2014} ref \u{394} is a period shift (below)",
+                label_prefix("flight time")
+            )
+        );
+
+        let mismatch_d = TauDisagreement {
+            reading1_s: 0.0,
+            reading2_s: 16.0 / 96_000.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        assert_eq!(
+            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(mismatch_d))),
+            format!(
+                "{}withheld \u{2014} ref \u{394} is not zero (below)",
+                label_prefix("flight time")
+            )
+        );
+
+        assert_eq!(
+            flight_time_line(&stats_with(
+                None,
+                ArrivalCheck::Unchecked {
+                    reason: "no same-capture reference in this report".into(),
+                }
+            )),
+            format!(
+                "{}not shown \u{2014} no stored latency for this pair (below)",
+                label_prefix("flight time")
+            )
+        );
+    }
+
     /// Every line the onset block and the `ref latency` read-out can emit must
     /// fit 80 columns at the indents `print_ir_report` uses — at a 6-digit
     /// sample index, the widest distance and temperature the #460 UX pass
@@ -1673,6 +1763,45 @@ mod tests {
                     line.chars().count()
                 );
             }
+        }
+
+        // #359 QA (PR #477): `flight_time_line` joins this width-fit test
+        // too, per the UX comment's own instruction — widest `Some` case
+        // is a 96 kHz five-digit sample count, plus both withheld cases.
+        let wide_shift = TauDisagreement {
+            reading1_s: 17_110.0 / 96_000.0,
+            reading2_s: 18_134.0 / 96_000.0,
+            delta_samples: 1024,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: Some(1),
+        };
+        let wide_mismatch = TauDisagreement {
+            reading1_s: 17_110.0 / 96_000.0,
+            reading2_s: 17_126.0 / 96_000.0,
+            delta_samples: 16,
+            sample_rate: 96_000,
+            period_size: Some(1024),
+            periods: None,
+        };
+        let flight_time_cases = [
+            flight_time_line(&stats_with(Some(65_535.0 / 96_000.0), ArrivalCheck::Agree)),
+            flight_time_line(&stats_with(None, ArrivalCheck::PeriodShift(wide_shift))),
+            flight_time_line(&stats_with(None, ArrivalCheck::Mismatch(wide_mismatch))),
+            flight_time_line(&stats_with(
+                None,
+                ArrivalCheck::Unchecked {
+                    reason: String::new(),
+                },
+            )),
+        ];
+        for line in flight_time_cases {
+            assert!(
+                line.chars().count() <= 80,
+                "line {:?} runs to {} columns",
+                line,
+                line.chars().count()
+            );
         }
     }
 }
