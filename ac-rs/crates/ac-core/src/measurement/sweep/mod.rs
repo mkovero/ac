@@ -43,6 +43,7 @@ mod floor;
 mod gated;
 mod harmonics;
 mod onset;
+mod peak;
 mod tail_decay;
 
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
@@ -55,6 +56,7 @@ pub use onset::{
     estimate_onset, BoundInputs, CausalBound, MissingBoundInput, OnsetEstimate,
     ONSET_SEARCH_WINDOW_S,
 };
+pub use peak::ir_peak;
 pub use tail_decay::{check_tail_decay, TailDecayCheck};
 
 /// Parameters for a Farina log sweep.

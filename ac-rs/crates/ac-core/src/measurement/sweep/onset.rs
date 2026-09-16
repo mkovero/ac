@@ -17,6 +17,15 @@
 /// by its AC6 rig run (pupu, 2026-09-15): between 1.000 m and 2.000 m
 /// the onset's increment missed `transfer_stream`'s by 143.75 samples
 /// while the peak's missed by 8.62.
+///
+/// Pairing rule (#351): an onset-derived arrival may only be differenced
+/// against a τ picked by the *same* onset rule from the *same* capture's
+/// reference leg (#460) — never against a stored `calibrate` τ. A stored
+/// τ is measured under a different sweep, so nothing guarantees its
+/// bandlimited skirt matches this onset's; [`crate::measurement::sweep::ir_peak`]
+/// is the one picker whose result may be differenced against another
+/// `ir_peak` result from any capture — see that function's module doc for
+/// why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnsetEstimate {
     pub index: usize,

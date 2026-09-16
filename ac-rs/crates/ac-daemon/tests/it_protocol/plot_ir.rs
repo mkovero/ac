@@ -163,8 +163,48 @@ fn plot_ir_stop_cancels_during_tail() {
 /// every `plot_ir` reporting "distance unavailable" forever, with no
 /// error anywhere. The failure is silent by construction, so it needs an
 /// explicit check that the round trip lands.
+///
+/// #351: `calibrate`'s τ and the IR's own arrival are now both derived
+/// from [`ac_core::measurement::sweep::ir_peak`] — one shared picker,
+/// called from `analyse_tau_leg` and from `MeasurementReport::ir_stats`
+/// — rather than two separate maxima that could drift onto different
+/// tie-break/NaN rules and, worse, different estimator families (an
+/// onset-derived arrival against a peak-derived τ) the way they briefly
+/// could under #346/#378. The pairing is checked in whole samples, not a
+/// millisecond or metre bound (#391): the fake loopback delay is an
+/// integer, and a linear-phase peak lands on that integer sample in both
+/// captures.
+///
+/// Two configurations run this same check ([`assert_calibrated_tau_pairs_with_plot_ir`]),
+/// differing in both sweep band and window (#351 triage AC3), so the
+/// pairing is shown to hold generally rather than only at the one band
+/// this issue happened to be found with.
 #[test]
 fn plot_ir_resolves_the_tau_that_calibrate_stored() {
+    assert_calibrated_tau_pairs_with_plot_ir(200.0, 8_000.0, 0.5, 1024, 3);
+}
+
+/// #351 triage AC3, second configuration: a different band and window
+/// from the first. `n_harmonics: 1` means there is no neighbouring
+/// harmonic order to clamp the linear IR's gate (see `analyse_tau_leg`'s
+/// doc comment on why `n_harmonics == 1` matters the same way for τ's own
+/// sweep), so `window_len_used` for the linear IR must equal the request
+/// unclamped in this configuration too.
+#[test]
+fn plot_ir_resolves_the_tau_that_calibrate_stored_on_a_second_band_and_window() {
+    assert_calibrated_tau_pairs_with_plot_ir(50.0, 20_000.0, 0.5, 4096, 1);
+}
+
+/// Shared body for the two tests above: measure τ via `calibrate`, run
+/// `plot_ir` with the given sweep, and check that τ and the IR's own
+/// arrival still pair off exactly (#351).
+fn assert_calibrated_tau_pairs_with_plot_ir(
+    f1_hz: f64,
+    f2_hz: f64,
+    duration_s: f64,
+    window_len: u64,
+    n_harmonics: u64,
+) {
     let d = Daemon::spawn();
     let c = Client::new(&d);
 
@@ -188,18 +228,45 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     // 2. Run an IR capture under the same conditions.
     let r = c.call(json!({
         "cmd":"plot_ir",
-        "f1_hz": 200.0,
-        "f2_hz": 8_000.0,
-        "duration": 0.5,
+        "f1_hz": f1_hz,
+        "f2_hz": f2_hz,
+        "duration": duration_s,
         "level_dbfs": -20.0,
         "tail_s": 0.1,
-        "window_len": 1024,
-        "n_harmonics": 3,
+        "window_len": window_len,
+        "n_harmonics": n_harmonics,
     }));
     assert_eq!(r["ok"], json!(true));
-    let v = c
-        .wait_for_topic("measurement/report", Duration::from_secs(15))
-        .expect("measurement/report frame");
+
+    let mut ir_window_used: Option<u64> = None;
+    let mut report_v: Option<Value> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && (ir_window_used.is_none() || report_v.is_none()) {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        match c.recv_pub(remaining.max(1)) {
+            Some((t, v)) if t == "measurement/impulse_response" => {
+                ir_window_used = v["window_len_used"][0].as_u64();
+            }
+            Some((t, v)) if t == "measurement/report" => report_v = Some(v),
+            // A stray `done` frame from the earlier `calibrate` call can
+            // still be sitting on the socket here — `wait_for_topic` above
+            // only guarantees it consumed up to `cal_done`, not every frame
+            // calibrate ever published. Discard anything else and keep
+            // waiting for plot_ir's own two frames rather than treating an
+            // unrelated `done` as this command's.
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let ir_window_used = ir_window_used.expect("measurement/impulse_response frame");
+    let v = report_v.expect("measurement/report frame");
+    assert_eq!(
+        ir_window_used, window_len,
+        "linear IR gate must not be clamped in this fixture — n_harmonics \
+         {n_harmonics} leaves no neighbouring order to clamp against"
+    );
 
     let latency = &v["report"]["interface_latency"];
     assert_eq!(
@@ -217,35 +284,48 @@ fn plot_ir_resolves_the_tau_that_calibrate_stored() {
     assert!(latency["measured_at"].is_string(), "{latency}");
     assert_eq!(latency["method"], json!("farina_short_ess_v2"), "{latency}");
 
-    // With a τ this close to the arrival (both are the same 32-sample
-    // fake loopback), the τ-corrected flight time must land near zero —
-    // the fake backend has no acoustic path. A τ that failed to subtract
-    // would read ~0.67 ms instead (32 samples at 48 kHz).
-    //
-    // `measure_tau` locates τ via `argmax|h|`, and under #378's
-    // contingency (AC6 rig run, 2026-09-15) `ir_stats().arrival_s` is
-    // peak-derived again, so both halves share one rule and cancel on
-    // this fixture. The onset-vs-argmax phantom #351 tracked (-2.458 ms,
-    // 118 samples of bandlimited pre-ring before the peak) no longer
-    // reaches the arrival.
-    //
-    // Pinned tight around this fixture's known, computable answer (QA on
-    // #352: a bare `< 0.15` gate over a fake-backend fixture with a known
-    // exact value could hide unrelated regression) rather than left as an
-    // open-ended bound — this fixture is deterministic (fake backend,
-    // fixed 200 Hz–8 kHz / 1024-sample window), so its exact phantom
-    // flight time is a known quantity, not measurement noise. Value moved
-    // -0.310 → -2.458 ms under #378, and to 0 under its contingency.
-    const EXPECTED_PHANTOM_FLIGHT_MS: f64 = 0.0;
     let report: ac_core::measurement::report::MeasurementReport =
         serde_json::from_value(v["report"].clone()).expect("decode report");
     let stats = report.ir_stats().expect("ir_stats");
-    let flight_ms = (stats.arrival_s - used_tau) * 1000.0;
+
+    // #351: τ and the IR's arrival both come from
+    // `ac_core::measurement::sweep::ir_peak` now, so on the fake
+    // backend's integer-sample loopback delay they must agree to the
+    // exact sample.
+    //
+    // Budget: 0 samples on the fake — derived, not assumed. The fake
+    // loopback delay is an integer (`DEFAULT_LOOPBACK_DELAY_SAMPLES`,
+    // `ac-daemon/src/audio/fake/hooks.rs`) and a linear-phase peak lands
+    // on that integer in both captures, whatever their sweep band or
+    // window — see `sweep::peak`'s module doc and its band-invariance
+    // test for why. On real hardware the budget is ±1 sample instead:
+    // each half is rounded to the nearest sample independently, so a
+    // fractional true delay can split by at most one.
+    let tau_samples = (used_tau * stats.sample_rate_hz as f64).round() as i64;
+    assert_eq!(
+        stats.delay_samples, tau_samples,
+        "peak-derived τ ({tau_samples} samples) and peak-derived arrival \
+         ({} samples) must agree exactly on the fake loopback",
+        stats.delay_samples
+    );
+
+    // #351 triage AC5, tested against the rejected pairing: if the
+    // arrival were ever taken from the onset instead of the peak while τ
+    // stayed peak-derived, this is the residual that would leak into
+    // `ir_arrival_distance()`. Computed here, not asserted as a fixed
+    // value (it moved -0.310 → -2.458 ms across #346/#378 and is a
+    // diagnostic's bias, not a contract) — only that it clears even the
+    // ±1-sample real-hardware budget above, so a future regression that
+    // reinstates that mismatch fails here rather than only in a rig
+    // session.
+    let centre = (stats.window_len / 2) as i64;
+    let rejected_residual = stats.onset_index as i64 - centre - tau_samples;
     assert!(
-        (flight_ms - EXPECTED_PHANTOM_FLIGHT_MS).abs() < 0.03,
-        "fake loopback has no acoustic path; τ and arrival are both \
-         peak-derived, so the flight time must be {EXPECTED_PHANTOM_FLIGHT_MS} ms \
-         ± 0.03, got {flight_ms} ms"
+        rejected_residual.abs() >= 2,
+        "rejected pairing (onset-derived arrival minus peak-derived τ) \
+         residual is only {rejected_residual} samples on f1={f1_hz} \
+         f2={f2_hz} window_len={window_len} — too small to demonstrate \
+         #351's divergence on this fixture"
     );
 }
 

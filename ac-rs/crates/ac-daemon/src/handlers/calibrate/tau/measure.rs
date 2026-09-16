@@ -9,7 +9,8 @@
 //! the parent module.
 
 use ac_core::measurement::sweep::{
-    deconvolve_full, extract_irs, inverse_sweep, log_sweep, pre_impulse_snr_db, SweepParams,
+    deconvolve_full, extract_irs, inverse_sweep, ir_peak, log_sweep, pre_impulse_snr_db,
+    SweepParams,
 };
 
 use crate::audio::AudioEngine;
@@ -443,6 +444,14 @@ pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result
 /// definition of what a τ reading is, not two that can drift. Refusals are
 /// typed ([`LowSnrRefusal`], [`EdgeRefusal`], [`TailTooShort`]) so each caller
 /// can phrase its own reason without matching message text.
+///
+/// The peak itself comes from [`ac_core::measurement::sweep::ir_peak`]
+/// (#351) — the same picker `MeasurementReport::ir_stats` uses for an IR's
+/// arrival, rather than a separate inline maximum. Before #351 this used a
+/// `max_by` that kept the *latest* index on a tie and panicked on NaN,
+/// while `ir_stats`'s picker kept the earliest and skipped NaN; the two
+/// halves of `ir_arrival_distance()`'s subtraction now share one rule
+/// structurally, not by coincidence of how each was written.
 pub(crate) fn analyse_tau_leg(
     captured: &[f32],
     params: &SweepParams,
@@ -465,13 +474,13 @@ pub(crate) fn analyse_tau_leg(
     let half = (half_window_s * sr as f64).ceil() as usize;
     let window_len = 2 * half;
     let irs = extract_irs(&full, params, 1, window_len)?;
-    let (peak_idx, peak_val) = irs
-        .linear
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (i, *v))
-        .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
-        .ok_or_else(|| anyhow::anyhow!("empty IR from τ sweep"))?;
+    if irs.linear.is_empty() {
+        // `ir_peak` returns `(0, 0.0)` on an empty slice, which would
+        // otherwise read as a legitimate zero-index peak (#351) — refuse
+        // explicitly before it can become a τ.
+        return Err(anyhow::anyhow!("empty IR from τ sweep"));
+    }
+    let (peak_idx, peak_val) = ir_peak(&irs.linear);
     let snr_db = pre_impulse_snr_db(&irs.linear, peak_idx);
     #[cfg(feature = "tau-window-override")]
     tau_probe_log(
