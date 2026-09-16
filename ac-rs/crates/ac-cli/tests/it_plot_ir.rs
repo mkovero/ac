@@ -510,7 +510,7 @@ fn plot_ir_prints_the_bound_inputs_the_reference_and_its_ports() {
         "  ref in     fake:capture_1",
         "(causal bound), pick",
         "bound from ref latency + 0.05 m, c 343.0 m/s assumed",
-        "  ref latency   0.4167 ms  (20 samples, SNR",
+        "  ref latency    0.4167 ms  (20 samples, SNR",
         "same capture)",
     ] {
         assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");

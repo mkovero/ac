@@ -80,7 +80,7 @@ independent_review() {
     fi
     wt="$WT_BASE/codex-pr-$pr"
     [[ ! -e $wt ]] || { echo "review worktree already exists: $wt" >&2; return 1; }
-    require_space "$wt"; mkdir -p "$WT_BASE" "$AC_TARGET"
+    require_space "$wt"; mkdir -p "$WT_BASE"
     git fetch -q origin "pull/$pr/head"
     [[ $(git rev-parse FETCH_HEAD) == "$head" ]] || { echo "PR #$pr changed while preparing review" >&2; return 1; }
     if [[ -n $recheck_base ]] && ! git merge-base --is-ancestor "$recheck_base" "$head" 2>/dev/null; then
@@ -104,9 +104,8 @@ $recheck_base, and that $head descends from it.
 Read your own review at $recheck_base first: every finding in it is resolved
 at $head, or it is not. Then review the delta $recheck_base..$head in full, as
 your role spec's steps 1-4 describe, including anything the delta breaks
-outside the lines it touches. There is no Claude gate at this tip to inherit:
-run cargo test --workspace, cargo clippy --workspace --all-targets -- -D
-warnings and cargo fmt --check yourself, in the foreground, from ac-rs/.
+outside the lines it touches. The runner ran the workspace gate at $head
+(record below); do not re-run it.
 
 Your comment names both $recheck_base and $head in full. On pass add
 codex-approved and remove needs-work; on blocking defects add needs-work and
@@ -128,8 +127,23 @@ add needs-work and remove codex-approved. Never touch claude-approved,
 in-review, requires-rig, or agent labels. Re-check the PR HEAD before applying
 the final decision; if it changed, do not approve."
     fi
-    ( cd "$wt" && AC_TAG="pr-$pr" run codex-qa "$task" --read ) || rc=$?
+    local gate_rc=0 gate_out
+    gate_out="$(cd "$wt" && "$AC_GATE" 2>&1)" || gate_rc=$?
+    printf '%s\n' "$gate_out" >&2
+    task="$task
+
+Workspace gate for $head (bin/gate.sh, exit $gate_rc — already run by the
+runner; codex-qa.md → gate):
+
+$gate_out"
+    if (( gate_rc < 2 )); then
+      ( cd "$wt" && AC_TAG="pr-$pr" run codex-qa "$task" --read ) || rc=$?
+    else
+      echo "<codex/qa> PR #$pr: gate refused in $wt" >&2; rc=1
+    fi
     git worktree remove --force "$wt" || true
+    # The worktree is per-pass; so is its target. Seeding makes the next one cheap.
+    rm -rf "$(target_for "$wt")"
     ((rc == 0)) || return "$rc"
     echo "<codex/qa> Done. Review posted for PR #$pr."
   done
@@ -192,11 +206,9 @@ You already reviewed this PR at commit $since. New commits since then: $since..$
 Read your own earlier review comment on the PR first — the one marked 'agent: qa'.
 
 Scope of this pass:
-- Re-run the full mechanical gate against the new tip regardless of how small
-  the delta looks: cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings,
-  cargo fmt --check. Not the delta's crate — the workspace. Two changes that
-  each pass alone can break in combination, and that is precisely what a
-  narrowed pass would miss.
+- The full workspace gate against the new tip is already run — see the gate
+  record below. Not the delta's crate — the workspace: two changes that each
+  pass alone can break in combination. Do not re-run it.
 - Read the delta $since..$head_sha, not the whole diff. Do not re-litigate
   parts you already accepted.
 - For each point you raised in your earlier review: is it addressed? Say so
@@ -245,6 +257,19 @@ echo "review worktree: $wt  [review-pr-$n @ $branch]" >&2
 
 link_support "$wt"
 
+# The gate runs here, outside the session: once per tree, cached, no tool
+# timeout. QA reads the record instead of re-running cargo (qa.md → build and
+# test). A red gate is still reviewed — the findings belong in the comment.
+gate_rc=0
+gate_out="$("$AC_GATE" "$wt" 2>&1)" || gate_rc=$?
+printf '%s\n' "$gate_out" >&2
+(( gate_rc < 2 )) || { echo "gate refused at $wt — not starting a review" >&2; exit 1; }
+prompt="$prompt
+
+Workspace gate for $head_sha (bin/gate.sh, exit $gate_rc — already run; do not
+re-run fmt/clippy/test for the workspace; \$AC_GATE prints this record again):
+
+$gate_out"
 
 before="$(qa_comments)" || { echo "cannot reach github — not starting a review" >&2; exit 1; }
 AC_TAG="pr-$n${since:+-delta}" run qa "$prompt" --read "${rest[@]+"${rest[@]}"}"

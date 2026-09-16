@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::time::Duration;
 use std::time::Instant;
 
-use ac_core::measurement::report::{MeasurementReport, ReferenceLatency};
+use ac_core::measurement::report::{ArrivalCheck, MeasurementReport, ReferenceLatency};
 
 use crate::common::{Client, Daemon};
 
@@ -65,7 +65,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(8));
+                assert_eq!(v["report"]["schema_version"], json!(9));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -929,6 +929,81 @@ fn plot_ir_reports_a_reference_peak_at_the_window_edge_as_unavailable() {
     }
     let stats = report.ir_stats().expect("ir_stats");
     assert_eq!(stats.causal_bound.min_admissible_index(), None);
+}
+
+/// #359: a same-capture reference reading exactly one JACK period apart
+/// from the τ `calibrate` has on file for that pair is reported as a
+/// graph-buffering shift, naming the period — the same fault #347 guards
+/// for `calibrate`, now caught on `plot_ir`'s path too (#347 covers only
+/// `calibrate`).
+///
+/// The measurement pair (`0`/`0`, the config default) and the reference
+/// pair (`1`/`1`, `reference_config()`) are **distinct** — the ordinary
+/// setup, and the one the QA correction on this issue's PR exists for:
+/// `plot_ir`'s reference-pair lookup must land in the reference pair's own
+/// `cal.json` entry, not the measurement pair's, because `Calibration::load`
+/// keys strictly by channel pair and the two are routinely different.
+///
+/// Three separate engine lifecycles inside one daemon process: `calibrate`'s
+/// own two (`measure_tau_twice`, forced to agree with each other via
+/// `AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE`), then `plot_ir`'s. The reference
+/// leg's own hook (`AC_FAKE_REF_DELAY_SAMPLES`) is independent of the
+/// general loopback delay `calibrate` measured with, so it is set one
+/// period later than what `calibrate` stored — the period-shift fault is a
+/// property of separately-lifecycled engines, not of separate daemon
+/// processes (#347's own "per client" framing), so one process suffices.
+#[test]
+fn plot_ir_detects_a_period_shift_on_the_reference_pair() {
+    const PERIOD: u32 = 64;
+    // `ref_delay_samples()`'s own default (`FAKE_REF_DELAY_SAMPLES` above) —
+    // forcing `calibrate`'s stored τ to land here means "one period later"
+    // is exactly `FAKE_REF_DELAY_SAMPLES + PERIOD` below.
+    const STORED_DELAY: usize = FAKE_REF_DELAY_SAMPLES;
+    let shifted_delay = STORED_DELAY + PERIOD as usize;
+
+    let d = Daemon::spawn_with(
+        Some(reference_config()),
+        &[
+            ("AC_FAKE_PERIOD_SIZE_OVERRIDE", &PERIOD.to_string()),
+            (
+                "AC_FAKE_TAU_DELAY_SAMPLES_OVERRIDE",
+                &format!("{STORED_DELAY},{STORED_DELAY}"),
+            ),
+            ("AC_FAKE_REF_DELAY_SAMPLES", &shifted_delay.to_string()),
+        ],
+    );
+    let c = Client::new(&d);
+
+    // 1. Store a τ for the pair `cal_guard!` will load on step 2 —
+    //    `calibrate`'s two independent engine lifecycles, forced to agree
+    //    at `STORED_DELAY` samples by the override above.
+    let r = c.call(json!({
+        "cmd": "calibrate", "ref_dbfs": -20.0,
+        "output_channel": 1, "input_channel": 1,
+    }));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    for step in 1..=2 {
+        c.wait_for_topic("cal_prompt", Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("step {step} prompt"));
+        let _ = c.call(json!({"cmd": "cal_reply", "vrms": null}));
+    }
+    let done = c
+        .wait_for_topic("cal_done", Duration::from_secs(5))
+        .expect("cal_done frame");
+    assert_eq!(done["tau_state"], json!("measured"), "frame: {done}");
+
+    // 2. A third, later engine lifecycle — `plot_ir`'s own capture — reads
+    //    the reference leg `PERIOD` samples later than what step 1 stored.
+    let (_, report) = report_for(&c, plot_ir_request(json!({})));
+
+    let stats = report.ir_stats().expect("ir_stats");
+    match stats.arrival_check {
+        ArrivalCheck::PeriodShift(disagreement) => {
+            assert_eq!(disagreement.period_size, Some(PERIOD));
+            assert_eq!(disagreement.periods, Some(1));
+        }
+        other => panic!("expected a period shift, got {other:?}"),
+    }
 }
 
 /// A reference that is configured but does not resolve is refused before

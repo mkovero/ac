@@ -12,7 +12,7 @@ Agent specs for `ac` repo. Each file define role, inputs, outputs, hard constrai
 | `.agents/developer.md` | implementation — one issue per invocation | issue labeled `ready-to-implement` |
 | `.agents/qa.md` | PR review — spec coverage, correctness, tests, standards | PR opened |
 | `.agents/codex-qa.md` | independent second review, run under Codex | PR is `claude-approved` and not `codex-approved`; or a runner recheck after a Codex-finding revision |
-| `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | manual invocation |
+| `.agents/rig.md` | hardware-in-the-loop verification — measurement record, interlocks | `bin/rig.sh <pr>` when QA's tree pass is rig-pending; or manual invocation |
 
 ## routing logic
 
@@ -22,6 +22,9 @@ new issue
        ├─ needs-design → architect → ready-to-implement
        ├─ needs-ux     → ux        → ready-to-implement
        └─ ready-to-implement → developer → PR → qa → codex-qa → human merge
+                                                    │
+                                   requires-rig on PR or issue:
+                                   qa (tree, rig-pending) → rig → qa (same commit, with the record)
 
 ambiguous issue
   └─ triage applies needs-clarification → wait for reporter
@@ -37,7 +40,7 @@ Always human-only:
 - Merging PRs to main 
 - Deleting branches
 - Changing agent spec files
-- Removing `requires-rig` — an agent cannot take the measurement, so it cannot retire the requirement for one
+- Removing `requires-rig` without a rig record that settles the named check. QA removes it on a record whose verdict is `pass` and that closes the named falsification test (`qa.md`). A record that fails or declines to conclude leaves the label for a human.
 
 ## label schema
 
@@ -56,7 +59,7 @@ Always human-only:
 | `blocked` | any agent | this issue waits on something else — see below |
 | `blocks-others` | any agent | other work waits on **this** issue |
 | `epic` | triage | contains sub-issues |
-| `requires-rig` | qa | correctness rests on a measurement only the rig can make — blocks both approval labels; human clears it after the measurement exists |
+| `requires-rig` | triage or architect (on the issue, when a criterion is physical), qa (at review), rig (on an issue it files) | correctness rests on a measurement only the rig can make — blocks both approval labels. Whoever sets it names the measurement: quantity, configuration, falsifying value. Cleared by qa on a passing rig record, otherwise by a human |
 | `agent:triage` | triage | audit trail |
 | `agent:architect` | architect | audit trail |
 | `agent:dev` | developer | audit trail |
@@ -74,9 +77,30 @@ pass the runner restores `claude-approved` and comments that Claude QA
 approved the base commit and did not review the delta. `AC_CODEX_RECHECK=0`
 turns this off.
 
-Neither approval label may be applied while `requires-rig` is present. Tree QA
-defines the measurement and stops at the rig gate; after the measurement is
-recorded and a human clears `requires-rig`, QA runs again at the same commit.
+Neither approval label may be applied while `requires-rig` is present, on the
+PR or on the issue it closes. Tree QA names the measurement and stops at the
+rig gate. The runner then runs the rig role against that commit
+(`bin/rig.sh`), and QA runs again at the same commit with the record: a
+passing record lets QA clear the label and approve; anything else stops for a
+human.
+
+### rig sessions: standing consent and the lock
+
+**Standing emission consent** (operator, 2026-09-16): an agent rig session —
+pipeline or manual — may emit without asking per run, within these limits:
+- every emitting request carries a typed level **≤ −40 dBFS**, and the rig
+  profile's own lower ceilings still apply (pupu: −50 dBFS on the speaker);
+- bounded commands only (`plot ir`, `calibrate`, the `scripts/rig/` wrappers),
+  never a stimulus that runs until stopped.
+
+Still asked for every time: host reboots, driver reloads, cable or mic moves,
+clock changes, raising a ceiling, anything that needs someone in the room.
+
+**One session at a time.** Every rig session holds the rig lock for its
+duration: `bin/rig.sh --lock "<who, what>"` before the first command that
+touches the rig, `bin/rig.sh --unlock <token>` after. The pipeline takes it
+itself. A held lock shows in the rig's login banner. A lock past its lease is
+broken by the next taker, with a note.
 
 **Whoever applies `blocked` names the exact condition that lifts it**, in the
 comment that applies it: *"#180 merged → remove `blocked`"*. #181 and #182 are
@@ -131,10 +155,9 @@ Pipeline roles run non-interactively (`bin/*.sh` → `claude -p` or `codex exec`
 The session has **no later turn**: when your reply ends, the process exits. Nothing
 wakes it for a finished background command.
 
-- **Never background a command whose result you need.** Gate commands
-  (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`)
-  run in the foreground, one call each, with the tool timeout raised to its
-  maximum. A fresh target dir makes each one take minutes — still foreground.
+- **Never background a command whose result you need.** The workspace gate
+  (`$AC_GATE`, see below) and any targeted test run in the foreground, with the
+  tool timeout raised to its maximum.
 - **Deliverable before the turn ends.** The review comment, the push, the PR
   comment, the labels — whatever your role produces must already exist when you
   stop. "Waiting for the background run" is the end of the session, with
@@ -146,6 +169,36 @@ Concrete bad output, 2026-09-15, PR #437 — three rounds lost:
 - qa: *"Holding here — clippy compiling full workspace in a fresh isolated target dir … Will resume automatically once it finishes."* → no review.
 - developer: *"Standing by for the `cargo test --workspace` background run to finish before posting the PR comment."* → fix written, never committed or pushed.
 - qa: *"Waiting on background gate run — will continue the review once notified."* → no review.
+
+## workspace gate — every role that builds
+
+The workspace gate is `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo test --workspace`. Run it only as
+`$AC_GATE` (`bin/gate.sh` in the main checkout), from inside your worktree:
+
+- It runs all three once per commit tree and records the result under
+  `$AC_GATE_DIR`. Any later call for the same tree — yours, the runner's,
+  another role's — prints the record without running cargo. Calling it again
+  is free; running the three commands by hand is not.
+- Output: PASS/FAIL per step, the failing lines of a red step, and the path of
+  each full log. Exit 0 all pass, 1 any failed, 2 refused.
+- It refuses an uncommitted tree (exit 2): the record names a commit. Commit
+  locally first; push only after a pass.
+- Need more than it printed? Read the log at the printed path. Need one test?
+  `cargo test -p <crate> <test name>`. **Never re-run the workspace gate to
+  see output** — and never pipe a gate command through `tail`, which replaces
+  its exit status with tail's. Truncate-then-rerun was the largest single cost
+  in the 2026-09 transcripts: qa averaged two full `cargo test --workspace`
+  runs per session, the second identical to the first.
+- The record is execution evidence, not a review. A reviewer still reads every
+  new or changed test.
+
+**Target dirs.** The runner pins `CARGO_TARGET_DIR` to a per-worktree
+directory (`$AC_HOME/target/wt/<worktree>`), seeded warm. Never set
+`CARGO_TARGET_DIR` or `--target-dir` yourself, and never create a
+`target-<something>` directory. A target dir shared across worktrees does go
+false-fresh (cargo trusts mtimes and runs another worktree's code); the
+per-worktree dir is the fix, and a private cold one costs minutes per pass.
 
 ## updating specs
 Agent specs are code. Change via PR like anything else. Spec make bad output → fix live in spec: tighten constraints, or add concrete example of bad behavior to relevant section.

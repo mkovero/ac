@@ -29,10 +29,11 @@ use ac_core::shared::emission_level::{
 use crate::server::ServerState;
 
 use super::super::{
-    busy_guard, cal_guard, cfg_guard, emission_guard, emission_range_guard, make_engine_for_state,
-    ref_output_migration_warning, resolve_input, resolve_output, resolve_ref_input,
-    resolve_ref_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
-    MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
+    busy_guard, cal_guard, cfg_guard, emission_guard, emission_range_guard,
+    load_calibration_or_refuse, make_engine_for_state, ref_output_migration_warning, resolve_input,
+    resolve_output, resolve_ref_input, resolve_ref_output, send_pub, snapshot_from_cal,
+    spawn_worker, sweep_point_frame, Tier1Ctx, MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES,
+    MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
 };
 use crate::handlers::calibrate::{
     analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
@@ -440,6 +441,7 @@ pub fn plot(state: &ServerState, cmd: &Value) -> Value {
             // nothing here for a τ to correct (#283).
             interface_latency: None,
             reference_latency: None,
+            reference_stored_latency: None,
             data: vec![MeasurementPayload {
                 data: MeasurementData::FrequencyResponse { points },
                 standard: vec![thd::citation()],
@@ -772,6 +774,7 @@ fn emit_spectrum_bands(
         // Band levels carry no arrival for a τ to correct (#283).
         interface_latency: None,
         reference_latency: None,
+        reference_stored_latency: None,
         data: vec![MeasurementPayload {
             data: MeasurementData::SpectrumBands {
                 bpo: bpo as u32,
@@ -948,6 +951,33 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
     let out_ch = cfg.output_channel;
     let in_ch = cfg.input_channel;
     let cal = cal_guard!(out_ch, in_ch);
+    // #359 QA correction: the reference pair's stored τ lives in its own
+    // `cal.json` entry — `Calibration::load` keys strictly by channel pair
+    // (`shared/calibration/store.rs`), and the reference pair is routinely
+    // a *different* pair from the measurement pair (`cfg.output_channel`/
+    // `cfg.input_channel`). Looking the reference τ up in `cal` — the
+    // measurement pair's calibration — finds nothing whenever the two
+    // pairs differ, which silently downgrades every ordinary reference
+    // setup to `Unchecked` instead of the corroboration this issue exists
+    // to add. Loaded only when a reference is configured; unreadable fails
+    // closed the same way the measurement pair's own calibration does.
+    let ref_cal = if ref_in_port.is_some() {
+        let ref_out_ch = cfg.reference_output_channel.unwrap_or(out_ch);
+        let ref_in_ch = cfg
+            .reference_channel
+            .expect("ref_in_port is Some only when cfg.reference_channel is Some");
+        match load_calibration_or_refuse(
+            ref_out_ch,
+            ref_in_ch,
+            "measurement",
+            Some("reference pair"),
+        ) {
+            Ok(cal) => cal,
+            Err(msg) => return json!({"ok": false, "error": msg}),
+        }
+    } else {
+        None
+    };
     let report_dir = cfg.report_dir.clone();
     let temperature_c = cfg.temperature_c;
     let device = cfg.device;
@@ -1006,6 +1036,28 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
                 input_port: tau_in_port,
             },
         ));
+
+        // #359: τ `calibrate` has on file for the *reference* pair, looked
+        // up the same way — never measured here, `plot_ir` must not
+        // silently re-run calibration. Only when a reference is configured;
+        // `IrStats::arrival_check` reads `None` as "not checked", not as a
+        // disagreement. Looked up in `ref_cal` — the reference pair's own
+        // calibration entry, distinct from `cal` above whenever the
+        // reference pair differs from the measurement pair (the ordinary
+        // case): `cal`'s entry never contains the reference pair's τ.
+        let reference_stored_latency = ref_in_port.as_deref().map(|ref_in| {
+            resolve_tau(
+                ref_cal.as_ref(),
+                &TauConditions {
+                    device,
+                    backend: eng.backend_name().to_string(),
+                    sample_rate: sr,
+                    period_size: eng.period_size(),
+                    output_port: ref_out_port.clone().unwrap_or_else(|| out_port.clone()),
+                    input_port: ref_in.to_string(),
+                },
+            )
+        });
 
         let params = SweepParams {
             f1_hz,
@@ -1278,6 +1330,7 @@ pub fn plot_ir(state: &ServerState, cmd: &Value) -> Value {
             position,
             interface_latency,
             reference_latency,
+            reference_stored_latency,
             data: vec![
                 MeasurementPayload {
                     data,

@@ -1,0 +1,26 @@
+# cargo-nextest settings, used by bin/gate.sh.
+#
+# nextest runs every test in its own process. The ac-cli integration binaries
+# hand out daemon ports from a per-binary atomic cursor (26_400, 26_500,
+# 26_800 + 2n), which is unique only inside one process: under nextest every
+# test in a binary starts from the same base, and concurrent tests collide on
+# the port ("daemon ... belongs to a different HOME"). Run each of those
+# binaries one test at a time; the three cursors are disjoint, so the binaries
+# may still run alongside each other and everything else.
+
+[test-groups]
+ac-cli-it-plot-ir = { max-threads = 1 }
+ac-cli-it-level-max = { max-threads = 1 }
+ac-cli-it-ensure-server = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(ac-cli) & binary(it_plot_ir)"
+test-group = "ac-cli-it-plot-ir"
+
+[[profile.default.overrides]]
+filter = "package(ac-cli) & binary(it_level_max)"
+test-group = "ac-cli-it-level-max"
+
+[[profile.default.overrides]]
+filter = "package(ac-cli) & binary(it_ensure_server)"
+test-group = "ac-cli-it-ensure-server"

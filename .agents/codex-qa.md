@@ -115,9 +115,9 @@ What changes:
   or it is not. Then review the delta with steps 1–4 in full, including what
   the delta breaks outside the lines it touches. A fix that adds a new code
   path gets the same scrutiny a first review would give it — nobody else will.
-- **Gate.** There is no Claude gate at `<head>` to inherit. Run the full
-  workspace gate (step 3's three commands) yourself, in the foreground, and
-  record the result.
+- **Gate.** The runner ran `$AC_GATE` at `<head>`; its record is in your
+  task. Check it names `<head>` (or an identical tree) and use it. Do not run
+  the three workspace commands yourself.
 - **Record.** Name both `<base>` and `<head>` in full. The runner will not act
   on a pass that omits either.
 - **Labels.** As in a normal pass. Never touch `claude-approved`: on your pass
@@ -140,9 +140,12 @@ measurement that would separate it from an equally plausible alternative — you
 inherit the assumption the same way the first reviewer did, and it is no more
 verified for having survived one review.
 
-`requires-rig` present, or the required measurement record absent, is not a
-pass. Do not apply `codex-approved`; the PR must return through full Claude QA
-after a human records the measurement and clears the rig gate.
+`requires-rig` present on the PR or the issue, or the required measurement
+record absent, is not a pass. Do not apply `codex-approved`. The runner does not
+send you such a PR; if one arrives, stop and say so. A record Claude QA
+accepted (it removed the label, citing a `<!-- agent: rig -->` record at the
+current head) is evidence you check like any other: does it measure what the
+named check says, at this commit?
 
 ### step 2 — the diff
 - **correctness** — does the implementation do what the spec says?
@@ -164,18 +167,13 @@ would it fail if that defect were present? A strong assertion on an
 unreachable path reports coverage it does not have. A test resting on a fake:
 name the field the assertion checks and confirm the fake models it.
 
-**Do not routinely rerun the full workspace gate.** A fresh
-`claude-approved` label attests that Claude QA ran:
-
-```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --check
-```
-
-The stale-approval pre-check above must first establish that the approval
-covers the current tip. Once it does, inherit that gate result instead of
-repeating the same commands against the same commit.
+**Do not rerun the full workspace gate.** The runner ran `$AC_GATE`
+(`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`) at the current tip before starting you; its record
+is in your task prompt, and `$AC_GATE` prints it again at no cost (AGENTS.md
+→ workspace gate). Check that it names the tip you review, or reports reuse
+of an identical tree. A red record is a blocking finding: read its log at the
+printed path.
 
 This reuses only execution evidence, not Claude QA's reasoning. Independently
 inspect every new or changed test and form findings before reading the Claude
@@ -183,7 +181,7 @@ QA comment, as required by the read-order rule.
 
 Run a targeted test only when it would resolve a concrete uncertainty or
 attempt to disprove one of your findings. Do not run the full workspace gate
-merely to reproduce the fresh Claude QA result. Never use test output from the
+merely to reproduce the recorded result. Never use test output from the
 PR body or developer comment as substitute evidence. Any test you do run
 goes in the foreground: the session does not resume after a backgrounded
 command (AGENTS.md → headless sessions).
@@ -228,7 +226,7 @@ clean pass rather than writing "none"}
 - **recommendation:** {smallest change that fixes it}
 
 ### gate
-Claude QA workspace gate: inherited at current tip `<sha>`
+Workspace gate: `$AC_GATE` record at `<sha>` — {PASS | FAIL: step}
 Codex targeted tests: {commands and results, or "not needed"}
 
 ### unaddressed open questions
@@ -290,10 +288,9 @@ rather than by an exclusion rule that could drift. Network is open in
 the build needs them.
 
 The worktree remains writable so Codex can run a targeted test when needed.
-Do not treat writable access as a requirement to repeat Claude QA's full
-workspace gate. The only reusable gate evidence is a fresh
-`claude-approved` label covering the current tip; PR-body and developer
-output remain insufficient.
+Do not treat writable access as a requirement to repeat the full workspace
+gate. The only reusable gate evidence is a `$AC_GATE` record for the current
+tip's tree; PR-body and developer output remain insufficient.
 
 Remove the worktree when the review ends (`git worktree remove`). Whoever
 creates a scratch worktree removes it, not the next session that trips over
@@ -308,7 +305,7 @@ it.
   how a revised PR re-enters your queue. `needs-work` is the interlock that
   keeps the rejected tip out until the developer picks it up; the developer
   removes `claude-approved` before changing that tip.
-- Never remove `requires-rig`. Human-only, after the measurement exists.
+- Never set or remove `requires-rig`. Claude QA owns it at review; say in your comment if you think a measurement is missing.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.

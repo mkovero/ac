@@ -3,8 +3,9 @@
 //! (#376). Computed once here so `ac-cli`'s text read-out and
 //! `ac-scene`'s sweep-IR panel cannot disagree about a capture.
 
-use super::{GateParams, MeasurementData, MeasurementReport, ReferenceLatency};
+use super::{GateParams, InterfaceLatency, MeasurementData, MeasurementReport, ReferenceLatency};
 use crate::measurement::sweep::{ir_peak, BoundInputs, CausalBound, MissingBoundInput};
+use crate::shared::calibration::{compare_tau_readings, TauComparison, TauDisagreement};
 
 /// Minimum pre-impulse SNR, in dB, below which a deconvolution is
 /// reported as failed rather than as a result (#376). Below this floor
@@ -89,6 +90,13 @@ impl MeasurementReport {
         // rather than measured with this IR.
         let causal_bound = causal_bound(self, centre, *sample_rate_hz);
 
+        // #359: corroborate this capture's same-capture reference τ against
+        // what `calibrate` has on file for that pair, before any flight
+        // time is derived from it. A single `plot_ir` capture is one
+        // client lifetime; the check gates the only arrival subtraction
+        // this report performs.
+        let arrival_check = arrival_check(self, *sample_rate_hz);
+
         let onset = crate::measurement::sweep::estimate_onset(
             linear_ir,
             peak_index,
@@ -113,6 +121,23 @@ impl MeasurementReport {
             resolve_gate(payload.gate.as_ref(), window_len, *sample_rate_hz);
         let verdict = ir_verdict(peak_magnitude, pre_region, pre_impulse_snr_db);
 
+        // #359: the τ subtraction this report can offer — gated by
+        // `arrival_check`. `interface_latency` must be a measured τ for
+        // *this* capture pair, and the reference-pair check must not have
+        // found a disagreement: on `PeriodShift`/`Mismatch` the stored τ is
+        // shown to be from a different lifetime state than this capture, so
+        // subtracting it would reproduce the exact silently-wrong number
+        // this issue exists to stop. Under `Unchecked` the flight time is
+        // still produced — the check simply could not run — never withheld
+        // for a reason it does not have.
+        let flight_time_s = match (&self.interface_latency, &arrival_check) {
+            (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Agree)
+            | (Some(InterfaceLatency::Measured(m)), ArrivalCheck::Unchecked { .. }) => {
+                Some(arrival_s - m.tau_s)
+            }
+            _ => None,
+        };
+
         Some(IrStats {
             sample_rate_hz: *sample_rate_hz,
             window_len,
@@ -123,12 +148,62 @@ impl MeasurementReport {
             causal_bound,
             delay_samples,
             arrival_s,
+            arrival_check,
+            flight_time_s,
             pre_impulse_snr_db,
             gate_window_s,
             gate_f_low_hz,
             gate_window_kind,
             verdict,
         })
+    }
+}
+
+/// Corroborate `report`'s same-capture reference τ ([`ReferenceLatency`])
+/// against the τ `calibrate` has on file for that same reference pair
+/// ([`MeasurementReport::reference_stored_latency`], #359).
+///
+/// A single `plot_ir` capture is one client lifetime, and a graph-buffering
+/// shift of exactly one period is invisible within one lifetime (#347). The
+/// reference leg is read in the same lifetime as the IR itself (#460), so
+/// comparing it against an independently-lifecycled stored reading is the
+/// same "measure a difference within a single client" remedy #347 uses for
+/// `calibrate` — reused via [`compare_tau_readings`] rather than
+/// reimplemented, so the wording is recognisably the same fault (AC2/AC3).
+///
+/// Any input other than two measured readings is [`ArrivalCheck::Unchecked`],
+/// naming what is missing. This never reads the *capture's own*
+/// `interface_latency`: that is a different pair's τ (#461), and unrelated
+/// to whether the reference pair's lifetime matches this one.
+pub(super) fn arrival_check(report: &MeasurementReport, sample_rate_hz: u32) -> ArrivalCheck {
+    let same_capture = match &report.reference_latency {
+        Some(ReferenceLatency::Measured(r)) => Ok(r.tau_s),
+        Some(ReferenceLatency::Unavailable { reason }) => Err(reason.clone()),
+        None => Err("no same-capture reference in this report".to_string()),
+    };
+    let stored = match &report.reference_stored_latency {
+        Some(InterfaceLatency::Measured(m)) => Ok((m.tau_s, m.period_size)),
+        Some(InterfaceLatency::Unavailable { reason }) => Err(reason.clone()),
+        None => Err(
+            "no stored latency for the reference pair (report predates schema v9, or no \
+             reference configured)"
+                .to_string(),
+        ),
+    };
+    match (same_capture, stored) {
+        (Ok(same_capture_tau_s), Ok((stored_tau_s, period_size))) => {
+            match compare_tau_readings(
+                stored_tau_s,
+                same_capture_tau_s,
+                sample_rate_hz,
+                period_size,
+            ) {
+                TauComparison::Agree => ArrivalCheck::Agree,
+                TauComparison::Disagree(d) if d.periods.is_some() => ArrivalCheck::PeriodShift(d),
+                TauComparison::Disagree(d) => ArrivalCheck::Mismatch(d),
+            }
+        }
+        (Err(reason), _) | (_, Err(reason)) => ArrivalCheck::Unchecked { reason },
     }
 }
 
@@ -330,6 +405,22 @@ pub struct IrStats {
     /// it still contains any uncorrected interface latency, which is why
     /// it must not be converted to a distance without a calibrated τ.
     pub arrival_s: f64,
+    /// Corroboration of this capture's same-capture reference τ against the
+    /// stored τ `calibrate` has on file for that pair (#359). Gates
+    /// [`Self::flight_time_s`]: a disagreement means the stored value is
+    /// from a lifetime whose graph state does not match this capture's, and
+    /// subtracting it would silently reproduce the fault this check exists
+    /// to catch.
+    pub arrival_check: ArrivalCheck,
+    /// `arrival_s − interface_latency.tau_s` — the one τ subtraction this
+    /// report can offer. `Some` only when `interface_latency` is a measured
+    /// τ for *this* capture pair **and** `arrival_check` is not a
+    /// disagreement; `None` on `PeriodShift`/`Mismatch` even though
+    /// `interface_latency` is measured, and `None` whenever no τ was
+    /// resolved for this capture pair at all. Still `Some` under
+    /// `ArrivalCheck::Unchecked` — the check did not run, which is not a
+    /// reason to withhold a value it never disputed.
+    pub flight_time_s: Option<f64>,
     /// `20·log10(peak_magnitude / rms(pre-impulse region))`. `+inf` when
     /// no pre-impulse energy was measurable at all (silent floor).
     pub pre_impulse_snr_db: f64,
@@ -363,6 +454,30 @@ pub struct IrStats {
 pub enum IrVerdict {
     Ok,
     Failed { reason: String },
+}
+
+/// Outcome of corroborating this capture's same-capture reference τ against
+/// the stored τ `calibrate` has on file for that pair (#359). Never a bare
+/// "corroborated" — #363's vocabulary rule applies here too: state the
+/// evidence, not the verdict. `PeriodShift` and `Mismatch` both carry the
+/// [`TauDisagreement`] that produced them, split on whether the delta is an
+/// exact multiple of the period — the same distinction #347 draws for
+/// `calibrate`'s own τ readings, via the same comparator
+/// ([`compare_tau_readings`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrivalCheck {
+    /// The two readings match to the whole sample.
+    Agree,
+    /// Disagree by an exact multiple of the period — a graph-buffering
+    /// shift, not hardware drift (#347's own finding, reused verbatim).
+    PeriodShift(TauDisagreement),
+    /// Disagree by an amount that is not a period multiple — a different
+    /// fault (e.g. the #461 SYT re-pick), not this issue's failure mode.
+    Mismatch(TauDisagreement),
+    /// Not checked: `reason` names what is missing — no same-capture
+    /// reference, a reference reading that failed its own gates, or no
+    /// stored τ for the reference pair.
+    Unchecked { reason: String },
 }
 
 #[cfg(test)]
@@ -1042,5 +1157,163 @@ mod tests {
                  reaches the validity gate"
             );
         }
+    }
+
+    // ─── #359: arrival_check / flight_time_s ─────────────────────────────
+
+    /// Moved down from `ac-scene::sweep_ir` (#359): the τ subtraction
+    /// itself now lives here, gated by `arrival_check`, so `ac-cli` and
+    /// `ac-scene` both read one already-checked number rather than each
+    /// re-deriving it. No same-capture reference at all reads `Unchecked`
+    /// (nothing to check against, not a dispute) — the flight time is
+    /// still produced from the capture's own `interface_latency`.
+    #[test]
+    fn ir_stats_flight_time_is_tau_corrected_when_interface_latency_is_measured() {
+        let sr = 4_000u32;
+        let window_len = 1024;
+        let centre = window_len / 2;
+        // delay_samples = 1 -> arrival_s = 0.25 ms at 4 kHz.
+        let mut r = ir_report_with_peak(window_len, centre + 1, 1.0, 0.0, sr);
+        r.interface_latency = Some(measured_tau(0.0001)); // 0.1 ms
+        let stats = r.ir_stats().unwrap();
+        assert!(
+            matches!(stats.arrival_check, ArrivalCheck::Unchecked { .. }),
+            "no reference at all must read Unchecked, not a disagreement: {:?}",
+            stats.arrival_check
+        );
+        let flight_ms = stats
+            .flight_time_s
+            .expect("Unchecked must still produce a flight time")
+            * 1000.0;
+        assert!(
+            (flight_ms - 0.15).abs() < 1e-9,
+            "expected 0.25ms - 0.1ms = 0.15ms, got {flight_ms}"
+        );
+    }
+
+    /// #359 AC4: a same-capture reference reading exactly one period ahead
+    /// of the stored reference τ is reported as a graph-buffering shift,
+    /// naming the period — #347's own wording, reused via
+    /// [`compare_tau_readings`] rather than reimplemented (AC2).
+    #[test]
+    fn arrival_check_detects_an_exact_period_shift_and_names_the_period() {
+        let sr = 48_000u32;
+        let period = 1024u32;
+        let stored_tau_s = 0.0119;
+        let same_capture_tau_s = stored_tau_s + period as f64 / sr as f64;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.reference_latency = Some(measured_reference(same_capture_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(period)));
+        let stats = r.ir_stats().unwrap();
+        match &stats.arrival_check {
+            ArrivalCheck::PeriodShift(d) => {
+                assert_eq!(d.periods, Some(1));
+                assert!(d.message().contains("1024 samples"), "{}", d.message());
+            }
+            other => panic!("expected PeriodShift, got {other:?}"),
+        }
+    }
+
+    /// #359 AC3, tested against the rejected implementation: a delta one
+    /// sample off an exact period must never read as a period shift — a
+    /// test that only checked "a difference" would pass on this input too.
+    #[test]
+    fn arrival_check_a_near_period_delta_is_mismatch_not_period_shift() {
+        let sr = 48_000u32;
+        let period = 1024u32;
+        let stored_tau_s = 0.0119;
+        let same_capture_tau_s = stored_tau_s + (period as f64 + 1.0) / sr as f64;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.reference_latency = Some(measured_reference(same_capture_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(period)));
+        let stats = r.ir_stats().unwrap();
+        match &stats.arrival_check {
+            ArrivalCheck::Mismatch(d) => {
+                assert_eq!(d.periods, None);
+                assert_eq!(d.delta_samples, period as i64 + 1);
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    /// A sub-sample difference is ordinary rounding noise, not a fault —
+    /// [`compare_tau_readings`]'s whole-sample agreement rule, inherited
+    /// from #347 unchanged.
+    #[test]
+    fn arrival_check_a_fractional_sample_difference_is_noise_not_a_fault() {
+        let sr = 48_000u32;
+        let stored_tau_s = 0.0119;
+        let same_capture_tau_s = stored_tau_s + 0.3 / sr as f64;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.reference_latency = Some(measured_reference(same_capture_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(1024)));
+        let stats = r.ir_stats().unwrap();
+        assert_eq!(stats.arrival_check, ArrivalCheck::Agree);
+    }
+
+    /// A backend that cannot report a period size must never let a delta
+    /// that happens to equal 1024 samples read as a period shift — there is
+    /// no period on file to have been a multiple of.
+    #[test]
+    fn arrival_check_an_unknown_period_size_never_reads_as_a_period_shift() {
+        let sr = 48_000u32;
+        let stored_tau_s = 0.0119;
+        let same_capture_tau_s = stored_tau_s + 1024.0 / sr as f64;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.reference_latency = Some(measured_reference(same_capture_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, None));
+        let stats = r.ir_stats().unwrap();
+        match &stats.arrival_check {
+            ArrivalCheck::Mismatch(d) => assert_eq!(d.periods, None),
+            other => panic!("expected Mismatch (unknown period size), got {other:?}"),
+        }
+    }
+
+    /// The test that fails if the gate is removed (#359): a detected period
+    /// shift must withhold the flight time even though `interface_latency`
+    /// is measured for this capture pair — the stored reference τ is shown
+    /// to be from a different lifetime state, and subtracting it would
+    /// reproduce this issue's own failure shape.
+    #[test]
+    fn arrival_check_period_shift_withholds_the_flight_time() {
+        let sr = 48_000u32;
+        let period = 1024u32;
+        let stored_tau_s = 0.0119;
+        let same_capture_tau_s = stored_tau_s + period as f64 / sr as f64;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.interface_latency = Some(measured_tau(0.001));
+        r.reference_latency = Some(measured_reference(same_capture_tau_s));
+        r.reference_stored_latency = Some(stored_reference_tau(stored_tau_s, Some(period)));
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(stats.arrival_check, ArrivalCheck::PeriodShift(_)));
+        assert_eq!(
+            stats.flight_time_s, None,
+            "a period shift must withhold the flight time even though \
+             interface_latency is measured"
+        );
+    }
+
+    /// A v8 report (written before this field existed) reads `Unchecked` —
+    /// not a fault, just nothing to compare — and the flight time still
+    /// follows `interface_latency` alone, unaffected by a check that never
+    /// ran.
+    #[test]
+    fn arrival_check_a_pre_v9_report_is_unchecked_but_flight_time_still_follows_interface_latency()
+    {
+        let sr = 48_000u32;
+        let mut r = ir_report_with_peak(1024, 600, 1.0, 0.0, sr);
+        r.interface_latency = Some(measured_tau(0.001));
+        r.reference_latency = Some(measured_reference(0.002));
+        r.reference_stored_latency = None; // v8 shape: field absent
+        let stats = r.ir_stats().unwrap();
+        assert!(matches!(
+            stats.arrival_check,
+            ArrivalCheck::Unchecked { .. }
+        ));
+        assert_eq!(
+            stats.flight_time_s,
+            Some(stats.arrival_s - 0.001),
+            "Unchecked must not withhold a flight time it never disputed"
+        );
     }
 }

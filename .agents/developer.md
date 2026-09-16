@@ -11,8 +11,8 @@ Careful, scope-disciplined. No refactor unless asked. No improve unless asked. M
 ### build
 ```bash
 cargo build                  # full workspace build
-cargo clippy --workspace --all-targets -- -D warnings  # must be clean before PR
-cargo fmt --check            # must pass (do not reformat unrelated code)
+cargo test -p <crate> <name> # while iterating
+$AC_GATE                     # the workspace gate: fmt --check, clippy, test — must pass before push
 ```
 
 ### module map
@@ -27,7 +27,8 @@ Five crates in `ac-rs/`. `ac-rs/CLAUDE.md` is authoritative.
 ## scratch space
 Work in the worktree you were given. Any further checkout, build target, or
 log you need goes under `$AC_HOME` (default `~/src/ac-wt`, with `wt/`,
-`target/`, `log/`) — never `/tmp`. `/tmp` here is tmpfs sized for the OS, not
+`log/`) — never `/tmp`. Build targets are already pinned per worktree
+(AGENTS.md → workspace gate); do not make your own. `/tmp` here is tmpfs sized for the OS, not
 for a cargo build.
 
 ## inputs you will receive
@@ -69,20 +70,23 @@ Broken or unclear thing outside issue scope:
 - Reference that issue number in PR body under "related"
 
 ### step 4 — verify
+Commit locally, then:
+
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -20   # must be zero new warnings
-cargo fmt --check                        # must pass
+$AC_GATE    # fmt --check, clippy -D warnings, cargo test --workspace — all must pass
 ```
 
-Pipe through `tail` rather than reading the whole output: a green run's body is
-noise, and a red one puts its failures at the end. Never re-run a command
-merely to see output you truncated — the failing test name is enough to re-run
-that one test. Any local wrapper that compacts command output is fine to use if
-you have one.
+It refuses an uncommitted tree, prints a compact PASS/FAIL summary with the
+failing lines and log paths, and caches the result for the commit's tree — QA
+and Codex QA reuse it rather than running cargo again (AGENTS.md → workspace
+gate). Never re-run it or the raw commands to see more output: read the log
+path. The failing test name is enough to re-run that one test with
+`cargo test -p <crate> <name>`.
 
-Check fails → fix before opening PR. No PRs with failing tests.
+Gate fails → fix, commit, run it again. No push with a red gate. Unpushed
+fixup commits may be squashed before the first push; after a push, add commits.
 
-Run these in the foreground, one call each. A backgrounded gate ends the
+Run it in the foreground, one call. A backgrounded gate ends the
 session before commit, push, or PR comment happen — the work sits uncommitted in
 the worktree (AGENTS.md → headless sessions).
 
@@ -102,7 +106,7 @@ closes #{N}
 
 ### test output
 ```
-{cargo test summary — pass/fail counts and any relevant output}
+{the $AC_GATE summary lines for the pushed tip}
 ```
 
 ### ZMQ schema changed
@@ -163,8 +167,8 @@ another epic child merged. This is not a new feature pass.
 3. Preserve both already-reviewed intents. If they cannot coexist without a
    new design decision, abort the merge, apply `needs-design` on the issue, and
    stop without pushing.
-4. Resolve all conflicts, run the full workspace verification gate, commit the
-   merge, and push `HEAD` to the existing PR branch. Do not open another PR.
+4. Resolve all conflicts, commit the merge, run `$AC_GATE` on it, and push
+   `HEAD` to the existing PR branch only on a pass. Do not open another PR.
 
 Any integration push invalidates both commit-bound approvals. The runner
 removes `claude-approved` and `codex-approved` after confirming the remote head
