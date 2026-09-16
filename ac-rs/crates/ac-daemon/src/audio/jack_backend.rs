@@ -860,6 +860,30 @@ impl AudioEngine for JackEngine {
             .map(|ac| ac.as_client().buffer_size())
     }
 
+    /// Sum of this client's own ports' declared latency ranges (#363).
+    ///
+    /// Read back by name from the live client, the same way the client's own
+    /// name is recovered at `start` — the port objects themselves moved into
+    /// `Process` when the callback was activated. The `max` of each range is
+    /// taken: JACK reports a range because a port's latency can differ per
+    /// path through the graph, and the larger bound is the conservative
+    /// account of what the signal traversed.
+    ///
+    /// An all-zero total reads as `None`, not as a declared zero. jackd
+    /// reports `(0, 0)` for ports whose latency nothing has set, and treating
+    /// that as a declaration would make two lifecycles "disagree" the moment
+    /// one of them happened to be read before the graph settled.
+    fn declared_latency_frames(&self) -> Option<u32> {
+        let client = self._async_client.as_ref()?.as_client();
+        let name = client.name().to_string();
+        let out = client.port_by_name(&format!("{name}:out"))?;
+        let inp = client.port_by_name(&format!("{name}:in"))?;
+        let (_, out_max) = out.get_latency_range(jack::LatencyType::Playback);
+        let (_, in_max) = inp.get_latency_range(jack::LatencyType::Capture);
+        let total = out_max.saturating_add(in_max);
+        (total != 0).then_some(total)
+    }
+
     fn playback_ports(&self) -> Vec<String> {
         // IS_INPUT | IS_PHYSICAL — JACK's `IS_INPUT` flag is "audio
         // flows INTO this port", so without `IS_PHYSICAL` the query

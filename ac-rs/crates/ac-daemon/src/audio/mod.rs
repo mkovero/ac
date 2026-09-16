@@ -250,6 +250,31 @@ pub trait AudioEngine: Send + 'static {
         "unknown"
     }
 
+    /// What the graph declares this path's round-trip latency to be, in
+    /// frames (#363).
+    ///
+    /// A *second account* of the same path, structurally different from the
+    /// measured τ: the reading is what `ac` measured, this is what the graph
+    /// asserts about itself. Its only sanctioned use is comparing two
+    /// lifecycles' declarations to each other — if the declaration moves
+    /// between two readings of one unchanged graph, the readings agreeing
+    /// proves nothing.
+    ///
+    /// **Never subtract it from a measured τ, in any unit.** It carries the
+    /// driver's own claim plus `jackd`'s user-supplied `-I`/`-O` arguments,
+    /// and neither is validated — on the rig those are `116`/`116` and were
+    /// never checked against anything.
+    ///
+    /// `None` means this backend declares nothing (the
+    /// [`Self::period_size`] precedent: *not applicable*, not *unknown*).
+    /// An implementation must also return `None` rather than `0` for an
+    /// all-zero range: a declared zero would compare unequal against a real
+    /// declaration and manufacture refusals on backends that simply never
+    /// set a range.
+    fn declared_latency_frames(&self) -> Option<u32> {
+        None
+    }
+
     /// Period/buffer size in frames, if this backend can report one.
     ///
     /// `None` means "not applicable to this backend" (documented that way,
