@@ -1,13 +1,16 @@
 //! Which sample is "the arrival" for a deconvolved impulse response —
 //! shared by every caller that has to difference two arrivals (#351).
 //!
-//! Both halves of `ir_arrival_distance()`'s `arrival_s − τ_s` — the IR's
-//! own peak ([`crate::measurement::report::MeasurementReport::ir_stats`])
-//! and calibrate's τ leg (`analyse_tau_leg` in `ac-daemon`) — call
+//! Every peak-picked arrival — the IR's peak in
+//! [`crate::measurement::report::MeasurementReport::ir_stats`] and
+//! calibrate's τ leg (`analyse_tau_leg` in `ac-daemon`) — calls
 //! [`ir_peak`] rather than each picking their own maximum, so the two
-//! halves cannot drift onto different tie-break or NaN rules the way they
-//! had before this issue (one kept the earliest index on a tie and
-//! skipped NaN, the other kept the latest and panicked on NaN).
+//! cannot drift onto different tie-break or NaN rules the way they had
+//! before #351 (one kept the earliest index on a tie and skipped NaN, the
+//! other kept the latest and panicked on NaN). Since #346 the IR half of
+//! `ir_arrival_distance()`'s `arrival_s − τ_s` is not always that peak:
+//! `ir_stats` may promote the bounded onset instead, under the pairing
+//! rule below.
 //!
 //! Why the pairing cancels across different sweep bands: a Farina ESS
 //! deconvolution of a pure delay is an approximately linear-phase

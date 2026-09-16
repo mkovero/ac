@@ -262,6 +262,20 @@ pub fn run_ir(cmd: &CommandKind, cfg: &ac_core::config::Config, client: &mut AcC
     print_ir_notes(report_frame.as_ref());
 }
 
+/// The typed re-pick of a failed edge-following guard, in the shape
+/// [`short_onset_rule`] takes: `Some(repick)` only when the arrival stayed
+/// on the peak because the guard failed (#346), `None` for every other
+/// source — the guard passed, did not run, or an earlier condition failed.
+fn failed_guard(source: &ac_core::measurement::report::ArrivalSource) -> Option<Option<usize>> {
+    use ac_core::measurement::report::{ArrivalSource, PeakReason};
+    match *source {
+        ArrivalSource::Peak {
+            reason: PeakReason::EdgeFollowing { repick },
+        } => Some(repick),
+        _ => None,
+    }
+}
+
 /// Derives the short terminal tag from `IrStats::onset_rule`'s full
 /// sentence (#346 AC4, revised for #378's picker). Two facts a reader
 /// needs a year later: which window the pick was made over, and whether
@@ -862,18 +876,11 @@ fn print_ir_report(report_frame: Option<&serde_json::Value>, cfg: &ac_core::conf
         // still rides the persisted JSON via `IrStats::onset_rule`. The
         // guard row is driven by the typed `arrival_source`, not by
         // parsing the rule.
-        use ac_core::measurement::report::{ArrivalSource, PeakReason};
-        let failed_guard = match stats.arrival_source {
-            ArrivalSource::Peak {
-                reason: PeakReason::EdgeFollowing { repick },
-            } => Some(repick),
-            _ => None,
-        };
         let onset_lines = short_onset_rule(
             &stats.onset_rule,
             stats.onset_index,
             &stats.causal_bound,
-            failed_guard,
+            failed_guard(&stats.arrival_source),
         );
         println!("{}{}", label_prefix("onset"), onset_lines[0]);
         for line in &onset_lines[1..] {
@@ -1159,9 +1166,10 @@ fn run_tui_fallback(cfg: &ac_core::config::Config, channels: Option<&[u32]>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        arrival_check_lines, arrival_source_line, collect_sweep_frames, flight_time_line,
-        interface_latency_lines, label_prefix, onset_gap_line, reference_latency_lines,
-        reference_stored_latency_lines, short_onset_rule, SweepOutcome, CONT_INDENT,
+        arrival_check_lines, arrival_source_line, collect_sweep_frames, failed_guard,
+        flight_time_line, interface_latency_lines, label_prefix, onset_gap_line,
+        reference_latency_lines, reference_stored_latency_lines, short_onset_rule, SweepOutcome,
+        CONT_INDENT,
     };
     use ac_core::measurement::report::{
         ArrivalCheck, ArrivalSource, InterfaceLatency, IrStats, IrVerdict, MeasuredLatency,
@@ -1389,6 +1397,35 @@ mod tests {
     /// #346 UX revision 3, frames 3 and 4: a failed edge guard adds the
     /// abnormal-case row after the bound row; rows 1–3 are unchanged. The
     /// re-pick delta is always signed, in either direction.
+    /// #346: `print_ir_report` feeds `short_onset_rule` through
+    /// `failed_guard`. Only an edge-following refusal may carry a guard row;
+    /// every other arrival source must map to `None`, and both typed
+    /// re-pick shapes must reach the row unchanged.
+    #[test]
+    fn failed_guard_carries_the_typed_repick_only_for_edge_following() {
+        let peak = |reason| ArrivalSource::Peak { reason };
+        assert_eq!(failed_guard(&ArrivalSource::Onset), None);
+        for reason in [
+            PeakReason::NoCausalBound,
+            PeakReason::BoundNotBinding,
+            PeakReason::PickerDeclined,
+            PeakReason::PickOnWindowStart,
+            PeakReason::DeconvolutionFailed,
+        ] {
+            assert_eq!(failed_guard(&peak(reason)), None, "{reason:?}");
+        }
+        assert_eq!(
+            failed_guard(&peak(PeakReason::EdgeFollowing {
+                repick: Some(10_471)
+            })),
+            Some(Some(10_471))
+        );
+        assert_eq!(
+            failed_guard(&peak(PeakReason::EdgeFollowing { repick: None })),
+            Some(None)
+        );
+    }
+
     #[test]
     fn short_onset_rule_flags_a_pick_that_follows_the_window_edge() {
         let rule = "AIC change-point pick over a 10.0 ms window; window start at sample 10463, \

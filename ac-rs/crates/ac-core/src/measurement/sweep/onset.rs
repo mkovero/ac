@@ -91,11 +91,13 @@ pub enum WindowLimit {
 /// variance and moves a correct pick (the rejected revision-2 guard,
 /// tested against in `peak.rs`).
 ///
-/// Known limits, both pointing to the peak or later-than-truth, never
-/// earlier: the check refuses some correct picks (the arrival falls back
-/// to the peak), and a pick that follows the bound on a noisy capture can
-/// still pass (it lies in `[bound, peak)`, so it is no later than the
-/// peak).
+/// Known limits. The check refuses some correct picks (the arrival falls
+/// back to the peak), and a pick that follows the bound on a noisy capture
+/// can still pass. A promoted pick lies in `[bound, peak)`, so its error
+/// is bounded on both sides: it is never later than the peak, and it is
+/// earlier than the true onset by at most the bound's own error. The bound
+/// comes from a taped distance, so that earlier error is at most the tape
+/// uncertainty (≤ 5 cm); every other known error points late.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeGuard {
     /// The re-pick is within [`EDGE_GUARD_TOLERANCE_SAMPLES`] of the pick.
@@ -658,12 +660,15 @@ mod tests {
         );
     }
 
-    /// #346 acceptance criterion 3, restated for #378's window: a
-    /// bandlimited pre-ring sits below the sample pure flight time
-    /// allows, with the real wavefront above it. An unbounded search
-    /// lands on the pre-ring (computed here directly, per "test against
-    /// the rejected implementation"); supplying the causal bound as the
-    /// search window's lower limit puts the non-causal candidate outside
+    /// #378's window against the unbounded AIC pick: a bandlimited
+    /// pre-ring sits below the sample pure flight time allows, with the
+    /// real wavefront above it. The pre-ring here peaks at 2 % of the peak,
+    /// so a 10 %-of-peak threshold is causal on this fixture; #346 AC3's
+    /// threshold comparison is
+    /// `bounded_onset_is_causal_where_a_ten_percent_threshold_is_not`.
+    /// An unbounded search lands on the pre-ring (computed here directly,
+    /// per "test against the rejected implementation"); supplying the
+    /// causal bound as the search window's lower limit puts the non-causal candidate outside
     /// the picker's reach entirely rather than clamping it after the
     /// fact, which is what changed under #378.
     #[test]
@@ -697,6 +702,48 @@ mod tests {
         );
         assert_ne!(bounded.index, unbounded.index);
         assert!(bounded.rule.contains("causal bound enforced"));
+    }
+
+    /// #346 acceptance criterion 3, against the rejected rule it names: a
+    /// band-limited pre-ring above 10 % of the peak, entirely before the
+    /// sample pure flight time allows. The 10 %-of-peak threshold is
+    /// computed inline (it is not an estimator this crate returns) and
+    /// asserted non-causal as test setup, so a fixture on which the
+    /// threshold happens to be causal fails here instead of passing.
+    #[test]
+    fn bounded_onset_is_causal_where_a_ten_percent_threshold_is_not() {
+        let sigma_n = 1e-4;
+        let peak_index = 300usize;
+        let bound = 280usize; // earliest sample pure flight time allows
+        let wavefront = 285usize;
+        let mut ir = onset_noise(512, sigma_n, 0xABCD_EF01);
+        for (i, v) in ir.iter_mut().enumerate() {
+            if (245..bound).contains(&i) {
+                *v += 0.15 * ((i - 245) as f64 * 0.7).sin();
+            } else if (wavefront..peak_index).contains(&i) {
+                *v += 0.3 * (i - wavefront + 1) as f64 / 16.0;
+            }
+        }
+        ir[peak_index] = 1.0;
+
+        let threshold = 0.1 * ir[peak_index].abs();
+        let naive = ir
+            .iter()
+            .position(|v| v.abs() > threshold)
+            .expect("test setup: something crosses 10 % of peak");
+        assert!(
+            naive < bound,
+            "test setup: the 10 % crossing must be non-causal, got {naive}"
+        );
+
+        let est = estimate_onset(&ir, peak_index, 48_000, sigma_n, &bounded(bound));
+        assert!(
+            est.index >= bound,
+            "bounded onset went non-causal: {}",
+            est.index
+        );
+        assert_ne!(est.index, naive);
+        assert_ne!(est.index, peak_index, "must not fall back to argmax|h|");
     }
 
     /// #346 acceptance criterion 4: the rule string must say whether a
