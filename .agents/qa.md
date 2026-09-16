@@ -87,7 +87,8 @@ Route an unresolved gap by what can close it:
   derivation. This is developer work.
 - Evidence only a physical rig can produce, while the implementation correctly
   enforces the specified value → `rig-pending` and `requires-rig`, as specified
-  in the dedicated section below. Do **not** apply `needs-work`: sending this to a
+  in the dedicated section below. So is any PR whose **issue** carries
+  `requires-rig`: read the issue's labels, not only the PR's. Do **not** apply `needs-work`: sending this to a
   developer cannot produce the measurement and creates a dev→QA loop with no
   possible source change.
 - The implementation does not enforce the specified value correctly →
@@ -211,10 +212,10 @@ would falsify the claim. See step 5.}
 
 ### step 5 — apply label
 - Approving → apply `claude-approved`, leave `in-review` in place
-- Rig pending → apply `requires-rig`, remove `claude-approved` and
-  `needs-work`, and leave `in-review` in place. The human clears
-  `requires-rig` after recording the measurement; the next full QA pass can
-  then approve at the same commit.
+- Rig pending → apply `requires-rig` to the PR, remove `claude-approved` and
+  `needs-work`, and leave `in-review` in place. The runner then runs the rig
+  session at this commit and sends the PR back to you for a full pass with the
+  record.
 - Requesting changes → apply `needs-work`, remove `in-review`. Do **not** apply
   `claude-approved`; the pairing of `claude-approved` with a request-changes
   verdict is what tells a reader the finding came from Codex, so never produce
@@ -279,7 +280,7 @@ these. Use it when you can state what the *spec* got wrong.
 ### loopback IR testing
 see docs/runbooks/loopback-ir.md
 
-### `requires-rig` — you set it, only a human clear it
+### `requires-rig` — you set it, and you clear it on a passing record
 
 Some claims cannot be settled by reading code or running the workspace suite.
 They need the rig. When a PR's correctness rest on one of those, apply
@@ -307,20 +308,32 @@ This includes an unresolved `derived`/`assumed` acceptance criterion when the
 implementation correctly enforces the specified value and only physical rig
 evidence can validate that value. Step 1 routes that case here explicitly.
 
-After the measurement record exists and a human clears `requires-rig`, run a
-full QA pass even when the commit is unchanged. Verify the record closes the
-named falsification test before applying `claude-approved`.
+Name the check in *rig verification required* so it can run unattended. If
+the issue's triage spec or architect comment already names one (**rig check**),
+use it and say so; add to it only what this diff makes necessary. Levels stay
+at or below −40 dBFS (standing consent, `AGENTS.md`).
 
-Where the measurement is one the rig role would take, say which block of
-`$AC_HOME/rig-verify-queue.md` it belong to, or that it needs a new one. The
-rig role produce the measurement record; you do not run the session and you do
-not act on a result that does not exist yet.
+The rig role produces the measurement record; you do not run the session. The
+runner (`bin/rig.sh`) runs it at the commit you reviewed and posts a
+`<!-- agent: rig -->` comment naming that commit and a **rig verdict**:
+`pass`, `fail` or `decline`. Your next pass is a full pass at the same commit,
+with the record as evidence:
 
-**You never remove `requires-rig`.** Only a human does, after the measurement
-exist. A re-review on a later push leave the label in place — a new commit does
-not retire a measurement that was never made. If a later push makes the rig
-question moot (the code stop depending on the unmeasured value), say so in the
-comment and let the human clear it.
+- **record at the current head, verdict `pass`, and it closes the named
+  falsification test** → remove `requires-rig` from the PR **and** the issue,
+  say which record settled it and what it does not cover, and continue to your
+  normal verdict. Approve only if everything else holds.
+- **verdict `fail`, and the record shows the code is wrong** →
+  `request-changes`, `needs-work`, record cited as evidence. Leave
+  `requires-rig`: the fix needs measuring too.
+- **verdict `decline`, a record that does not close the named test, or no
+  record at the current head** → stay `rig-pending` and leave the label. Say
+  what is unresolved. That is a human's call, like any unmeasurable criterion.
+
+A later push voids a rig record the same way it voids an approval: the record
+must name the head you are reviewing. If a later push makes the rig question
+moot (the code stops depending on the unmeasured value), say so and remove the
+label, with the reason.
 
 Nothing here license approving a PR you would otherwise reject. `requires-rig`
 is for a claim unverifiable in the tree, not for one that is verifiable here
@@ -347,7 +360,7 @@ them.
 - Do not merge. Approve or request-changes only; merge to main is a human gate.
 - No cite location you not opened. A `Grep` hit is a candidate, not a verified read. Cite what you opened, or open it. Same rule as standards: consult document, no memory.
 - No approve PRs where acceptance criteria not fully covered.
-- No remove `requires-rig`. Human-only, after the measurement exist.
+- No remove `requires-rig` except on a rig record at the current head whose verdict is `pass` and that closes the named check, or when a push made the question moot (say why).
 - No approve PRs with failing `cargo test` or `cargo clippy` output in PR body.
 - No flag style preferences as correctness issues. Clippy is style arbiter.
 - Bug found outside PR scope → open new issue, no block this PR for it.

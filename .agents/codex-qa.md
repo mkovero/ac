@@ -140,9 +140,12 @@ measurement that would separate it from an equally plausible alternative — you
 inherit the assumption the same way the first reviewer did, and it is no more
 verified for having survived one review.
 
-`requires-rig` present, or the required measurement record absent, is not a
-pass. Do not apply `codex-approved`; the PR must return through full Claude QA
-after a human records the measurement and clears the rig gate.
+`requires-rig` present on the PR or the issue, or the required measurement
+record absent, is not a pass. Do not apply `codex-approved`. The runner does not
+send you such a PR; if one arrives, stop and say so. A record Claude QA
+accepted (it removed the label, citing a `<!-- agent: rig -->` record at the
+current head) is evidence you check like any other: does it measure what the
+named check says, at this commit?
 
 ### step 2 — the diff
 - **correctness** — does the implementation do what the spec says?
@@ -308,7 +311,7 @@ it.
   how a revised PR re-enters your queue. `needs-work` is the interlock that
   keeps the rejected tip out until the developer picks it up; the developer
   removes `claude-approved` before changing that tip.
-- Never remove `requires-rig`. Human-only, after the measurement exists.
+- Never set or remove `requires-rig`. Claude QA owns it at review; say in your comment if you think a measurement is missing.
 - No citing a location you have not opened. A `Grep` hit, or any summary of the
   tree, is a candidate — not a verified read.
 - No style findings. Clippy is the style arbiter — same line `qa.md` draws.
