@@ -1,6 +1,8 @@
 # cargo-nextest settings, used by bin/gate.sh.
 #
-# Nothing to configure: the ac-cli integration tests that spawn daemons used
-# to need serial test groups here, because their per-binary port cursors
-# collide across processes. They now take a cross-process lease per port pair
-# (crates/ac-cli/tests/support/mod.rs).
+# Nothing to configure: no test groups, no port leases. Every test that spawns
+# a daemon takes OS-assigned ports and accepts the daemon only when `status`
+# reports its own child's pid and its own HOME, retrying on a fresh pair
+# otherwise (#486). The three copies of that rule:
+# crates/ac-cli/tests/support/mod.rs, crates/ac-view/tests/support.rs,
+# crates/ac-daemon/tests/common/mod.rs.

@@ -16,45 +16,17 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::sync::atomic::AtomicU16;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 /// Fake backend's fixed loopback delay — `FAKE_LOOPBACK_DELAY_SAMPLES` in
 /// `ac-daemon/src/audio/fake.rs`, at the fake backend's 48 kHz.
 const FAKE_LOOPBACK_DELAY_SAMPLES: i64 = 32;
 
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(26_400);
-
-/// Path to a sibling binary in the same target dir as this test's own
-/// executable. `CARGO_BIN_EXE_ac` covers `ac` (same package), but
-/// `ac-daemon` lives in another package and gets no such variable.
-fn sibling_binary(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("test exe path");
-    // target/debug/deps/it_plot_ir-<hash> → target/debug/<name>
-    let dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target dir above deps/");
-    let p = dir.join(name);
-    assert!(
-        p.exists(),
-        "{} not built at {} — this test needs the whole workspace built \
-         (`cargo test --workspace`), not just `-p ac-cli`",
-        name,
-        p.display()
-    );
-    p
-}
-
 struct Rig {
-    daemon: Child,
+    daemon: support::DaemonGuard,
     home: PathBuf,
     ctrl: u16,
     data: u16,
-    /// Held until the daemon is gone: `Drop for Rig` runs before fields drop.
-    _ports: support::PortLease,
 }
 
 impl Rig {
@@ -65,11 +37,8 @@ impl Rig {
     /// [`Self::start`] with extra config keys merged in (#460: a reference
     /// pair for the same-capture reference leg).
     fn start_with(extra_config: serde_json::Value) -> Self {
-        let ports = support::lease(&PORT_CURSOR);
-        let (ctrl, data, base) = (ports.ctrl, ports.data, ports.ctrl);
-        let home = std::env::temp_dir().join(format!("ac-cli-it-{}-{base}", std::process::id()));
+        let home = support::alloc_home("ac-cli-it");
         let cfg_dir = home.join(".config").join("ac");
-        fs::create_dir_all(&cfg_dir).expect("create scratch config dir");
         let report_dir = home.join("reports");
         fs::create_dir_all(&report_dir).expect("create report dir");
 
@@ -89,53 +58,13 @@ impl Rig {
         )
         .expect("seed config.json");
 
-        let daemon = Command::new(sibling_binary("ac-daemon"))
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl.to_string(),
-                "--data-port",
-                &data.to_string(),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn ac-daemon");
-
-        let rig = Self {
+        let daemon = support::spawn_daemon(&home, true, "127.0.0.1", None);
+        let (ctrl, data) = (daemon.ctrl, daemon.data);
+        Self {
             daemon,
             home,
             ctrl,
             data,
-            _ports: ports,
-        };
-        rig.wait_until_up();
-        rig
-    }
-
-    fn wait_until_up(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() < deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{}", self.ctrl))
-                .is_err()
-            {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                return;
-            }
         }
     }
 
@@ -166,8 +95,8 @@ impl Rig {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        let _ = self.daemon.kill();
-        let _ = self.daemon.wait();
+        // Runs before the fields drop, so kill the daemon here first.
+        self.daemon.kill();
         let _ = fs::remove_dir_all(&self.home);
     }
 }

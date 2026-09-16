@@ -10,33 +10,8 @@
 mod support;
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::sync::atomic::AtomicU16;
-use std::thread;
-use std::time::{Duration, Instant};
-
-static PORT_CURSOR: AtomicU16 = AtomicU16::new(26_800);
-
-/// Path to a sibling binary in the same target dir as this test's own
-/// executable — `ac-daemon` lives in another package, so it gets no
-/// `CARGO_BIN_EXE_ac-daemon` (see `it_plot_ir.rs`).
-fn sibling_binary(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("test exe path");
-    let dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target dir above deps/");
-    let p = dir.join(name);
-    assert!(
-        p.exists(),
-        "{} not built at {} — this test needs the whole workspace built \
-         (`cargo test --workspace`), not just `-p ac-cli`",
-        name,
-        p.display()
-    );
-    p
-}
+use std::path::PathBuf;
+use std::process::Command;
 
 fn scratch_home(tag: &str) -> PathBuf {
     let home =
@@ -46,67 +21,22 @@ fn scratch_home(tag: &str) -> PathBuf {
 }
 
 struct ForeignDaemon {
-    child: Child,
+    daemon: support::DaemonGuard,
     home: PathBuf,
     ctrl_port: u16,
     data_port: u16,
-    /// Held until the daemon is gone: `Drop for ForeignDaemon` runs first.
-    _ports: support::PortLease,
 }
 
 impl ForeignDaemon {
     fn spawn() -> Self {
-        let ports = support::lease(&PORT_CURSOR);
-        let (ctrl_port, data_port) = (ports.ctrl, ports.data);
         let home = scratch_home("foreign");
-
-        let child = Command::new(sibling_binary("ac-daemon"))
-            .env("HOME", &home)
-            .args([
-                "--fake-audio",
-                "--local",
-                "--ctrl-port",
-                &ctrl_port.to_string(),
-                "--data-port",
-                &data_port.to_string(),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn foreign ac-daemon");
-
-        let d = Self {
-            child,
+        let daemon = support::spawn_daemon(&home, true, "127.0.0.1", None);
+        let (ctrl_port, data_port) = (daemon.ctrl, daemon.data);
+        Self {
+            daemon,
             home,
             ctrl_port,
             data_port,
-            _ports: ports,
-        };
-        d.wait_until_up();
-        d
-    }
-
-    fn wait_until_up(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() < deadline, "foreign daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{}", self.ctrl_port))
-                .is_err()
-            {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                return;
-            }
         }
     }
 
@@ -132,8 +62,8 @@ impl ForeignDaemon {
 
 impl Drop for ForeignDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Runs before the fields drop, so kill the daemon here first.
+        self.daemon.kill();
         let _ = fs::remove_dir_all(&self.home);
     }
 }
@@ -202,46 +132,10 @@ fn ac_refuses_and_never_quits_a_daemon_under_a_different_home() {
 /// interface aliasing required).
 #[test]
 fn ac_proceeds_against_a_remote_host_with_a_different_home() {
-    // Declared before the daemon, so it is released after the daemon is killed.
-    let ports = support::lease(&PORT_CURSOR);
-    let (ctrl_port, data_port) = (ports.ctrl, ports.data);
     let remote_home = scratch_home("remote");
-
-    let mut child = Command::new(sibling_binary("ac-daemon"))
-        .env("HOME", &remote_home)
-        .args([
-            "--fake-audio",
-            "--ctrl-port",
-            &ctrl_port.to_string(),
-            "--data-port",
-            &data_port.to_string(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn ac-daemon");
-
-    {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() < deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.2:{ctrl_port}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-    }
+    // Public mode (no `--local`), probed on 127.0.0.2 like the client below.
+    let daemon = support::spawn_daemon(&remote_home, false, "127.0.0.2", None);
+    let (ctrl_port, data_port) = (daemon.ctrl, daemon.data);
 
     let caller_home = scratch_home("remote-caller");
     fs::write(
@@ -276,8 +170,7 @@ fn ac_proceeds_against_a_remote_host_with_a_different_home() {
         "`server connections` should still display the remote daemon's real Home: {stdout}"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     let _ = fs::remove_dir_all(&remote_home);
     let _ = fs::remove_dir_all(&caller_home);
 }
@@ -286,50 +179,10 @@ fn ac_proceeds_against_a_remote_host_with_a_different_home() {
 /// Regression guard for the "no output when HOME matches" half of the ux spec.
 #[test]
 fn ac_stays_silent_and_proceeds_when_home_matches() {
-    // Declared before the daemon, so it is released after the daemon is killed.
-    let ports = support::lease(&PORT_CURSOR);
-    let (ctrl_port, data_port) = (ports.ctrl, ports.data);
     let home = scratch_home("matching");
+    let daemon = support::spawn_daemon(&home, true, "127.0.0.1", None);
+    let (ctrl_port, data_port) = (daemon.ctrl, daemon.data);
 
-    let child = Command::new(sibling_binary("ac-daemon"))
-        .env("HOME", &home)
-        .args([
-            "--fake-audio",
-            "--local",
-            "--ctrl-port",
-            &ctrl_port.to_string(),
-            "--data-port",
-            &data_port.to_string(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn ac-daemon");
-
-    // Wait for it to come up before pointing `ac` at it.
-    {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let ctx = zmq::Context::new();
-        loop {
-            assert!(Instant::now() < deadline, "daemon never came up");
-            thread::sleep(Duration::from_millis(50));
-            let s = ctx.socket(zmq::REQ).unwrap();
-            s.set_linger(0).ok();
-            s.set_rcvtimeo(300).ok();
-            s.set_sndtimeo(300).ok();
-            if s.connect(&format!("tcp://127.0.0.1:{ctrl_port}")).is_err() {
-                continue;
-            }
-            if s.send(br#"{"cmd":"status"}"#.as_ref(), 0).is_err() {
-                continue;
-            }
-            if s.recv_bytes(0).is_ok() {
-                break;
-            }
-        }
-    }
-
-    let mut child = child;
     let output = Command::new(env!("CARGO_BIN_EXE_ac"))
         .env("HOME", &home)
         .env("AC_CTRL_PORT", ctrl_port.to_string())
@@ -354,7 +207,6 @@ fn ac_stays_silent_and_proceeds_when_home_matches() {
         "`server connections` should print the matching Home: {stdout}"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(daemon);
     let _ = fs::remove_dir_all(&home);
 }
