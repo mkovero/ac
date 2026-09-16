@@ -953,6 +953,7 @@ mod tests {
         let measured = ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s: 1711.0 / 96_000.0,
             pre_impulse_snr_db: Some(61.8),
+            pre_impulse_snr_floor_db: Some(64.5),
             method: "farina_same_capture_reference_v1".into(),
             output_port: "system:playback_2".into(),
             input_port: "system:capture_2".into(),
@@ -965,6 +966,7 @@ mod tests {
         let silent_floor = ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s: 20.0 / 48_000.0,
             pre_impulse_snr_db: None,
+            pre_impulse_snr_floor_db: None,
             method: "farina_same_capture_reference_v1".into(),
             output_port: "fake:playback_1".into(),
             input_port: "fake:capture_1".into(),
@@ -1055,6 +1057,7 @@ mod tests {
         let long_tau = ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s: 0.123_456_7,
             pre_impulse_snr_db: Some(104.3),
+            pre_impulse_snr_floor_db: Some(107.0),
             method: String::new(),
             output_port: String::new(),
             input_port: String::new(),

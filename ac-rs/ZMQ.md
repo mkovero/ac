@@ -111,7 +111,7 @@ External SUB subscribers must switch to the tier-prefixed names.
 Emitted once at the end of a `plot` run. Carries the full archival
 `MeasurementReport` JSON — the same shape written to
 `cfg.report_dir/<ISO8601>-plot.json` when that directory is
-configured. Schema is versioned (currently `schema_version: 7`); the
+configured. Schema is versioned (currently `schema_version: 8`); the
 capture backend is archived at report top level. Example payload:
 
 ```json
@@ -119,7 +119,7 @@ capture backend is archived at report top level. Example payload:
   "type":   "measurement/report",
   "cmd":    "plot",
   "report": {
-    "schema_version": 7,
+    "schema_version": 8,
     "ac_version":     "0.1.0",
     "timestamp_utc":  "2026-04-21T20:00:00Z",
     "backend":        "jack",
@@ -1166,7 +1166,7 @@ single-ended. No reference configured is a legitimate state: the report records
   "window_len_requested": 4096, "window_len_used": [4096, 2818, 1999, 1551, 1551] }
 
 // topic: measurement/report
-{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 7, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, ... } }
+{ "cmd": "plot_ir", "backend": "jack", "report": { "schema_version": 8, "backend": "jack", "notes": "ISO 18233 §6.3.2 ...\nThe decaying tail ... §B.5.", "interface_latency": { ... }, "reference_latency": { ... }, ... } }
 
 // topic: done
 { "cmd": "plot_ir" }
@@ -1227,7 +1227,12 @@ latency, which at 48 kHz is routinely tens of samples of phantom path.
 
 `reference_latency` (schema v7, #460) is τ of the **reference loopback pair**,
 read from the reference leg captured in this same run under `calibrate`'s
-single-reading gates (pre-impulse SNR, window-edge margin, xrun). It describes
+window-edge and xrun gates. Its **SNR gate is not `calibrate`'s**: from schema
+v8 the reference leg is judged against its own stimulus's noiseless
+deconvolution floor, less 3 dB (#471). That statistic is a property of the
+sweep — it ranges ~17 dB at 20–20000 Hz to ~35 dB at 500–4000 Hz, and does not
+move with capture noise — so a fixed threshold refused a correct loopback at
+`plot ir`'s own default sweep. It describes
 a *different* port pair from `interface_latency`: a reader must never subtract
 it from the arrival as though it were the capture pair's own τ — τ is per
 channel pair. Its only consumer is the onset search's causal bound
@@ -1238,6 +1243,7 @@ FireWire SYT interval on every device enumeration (#461). Tagged union on
 
 ```json
 { "state": "measured", "tau_s": 0.017822917, "pre_impulse_snr_db": 61.8,
+  "pre_impulse_snr_floor_db": 64.5,
   "method": "farina_same_capture_reference_v1",
   "output_port": "system:playback_2", "input_port": "system:capture_2" }
 
@@ -1245,7 +1251,12 @@ FireWire SYT interval on every device enumeration (#461). Tagged union on
 ```
 
 `pre_impulse_snr_db` is omitted when the pre-impulse region measured true
-silence (an infinite SNR, which JSON cannot carry). `reason` names what was
+silence (an infinite SNR, which JSON cannot carry). `pre_impulse_snr_floor_db`
+(v8) is the derived floor the reading was judged against, so an archived
+reading stays re-judgeable once the threshold is no longer a constant; it is
+absent on v7 reports and on a reading that fell back to the fixed 24 dB gate
+because no floor could be established. The `unavailable` reason keeps its exact
+shape — only the `need` figure now varies per run. `reason` names what was
 observed and, after `; check: `, where to look — never a cause. `plot_ir`
 always records the field, so `unavailable` with `no reference configured (ac
 setup reference)` is what no reference looks like; reports written before v7

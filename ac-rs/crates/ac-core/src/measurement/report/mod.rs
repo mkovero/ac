@@ -91,7 +91,17 @@ pub use provenance::{
 ///   (#461). Also from v7, `position` may be present with only
 ///   `distance_m`. v1-v6 reports decode with the field absent, which
 ///   readers treat as no reference, so no causal bound.
-pub const SCHEMA_VERSION: u32 = 7;
+/// - v8: `MeasuredReferenceLatency` gains optional
+///   `pre_impulse_snr_floor_db` — the noiseless deconvolution floor the
+///   reference reading was judged against (#471). The reference leg's SNR
+///   threshold is derived from its own stimulus rather than fixed, because
+///   the statistic is a property of the sweep shape and not of the capture's
+///   noise: it moves ~18 dB between `plot ir`'s default band and a narrow
+///   one, while 100 dB of added noise moves it by nothing. Absent on v1-v7
+///   reports and on any reading judged by the fixed threshold instead (no
+///   floor could be established); a reader that finds it absent knows only
+///   that the reading passed *some* threshold, not which.
+pub const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MeasurementReport {
@@ -205,7 +215,7 @@ mod tests {
     fn schema_version_present() {
         let r = sample_report();
         let json = r.to_json().unwrap();
-        assert!(json.contains("\"schema_version\": 7"));
+        assert!(json.contains("\"schema_version\": 8"));
     }
 
     #[test]
@@ -229,7 +239,7 @@ mod tests {
             let mut r = sample_report();
             r.data[0].standard = vec![c.clone()];
             let json = r.to_json().unwrap();
-            assert!(json.contains("\"schema_version\": 7"));
+            assert!(json.contains("\"schema_version\": 8"));
             let r2: MeasurementReport = serde_json::from_str(&json).unwrap();
             assert_eq!(r, r2);
         }

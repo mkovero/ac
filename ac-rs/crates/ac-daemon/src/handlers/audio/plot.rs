@@ -34,7 +34,10 @@ use super::super::{
     resolve_ref_output, send_pub, snapshot_from_cal, spawn_worker, sweep_point_frame, Tier1Ctx,
     MAX_IR_HARMONICS, MAX_IR_WINDOW_SAMPLES, MAX_STIMULUS_DURATION_S, MAX_SWEEP_POINTS,
 };
-use crate::handlers::calibrate::{analyse_tau_leg, EdgeRefusal, LowSnrRefusal, TailTooShort};
+use crate::handlers::calibrate::{
+    analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
+    TauLegReading,
+};
 use crate::handlers::mic;
 
 /// Method tag on a same-capture reference reading (#460).
@@ -46,9 +49,15 @@ enum ReferenceLeg {
     Unavailable(String),
 }
 
-/// τ of the reference pair from its captured leg, judged by the single-reading
-/// gates `calibrate` applies (#460). `xruns` is handled by the caller before
-/// this runs, so the SNR gate is never skipped here.
+/// τ of the reference pair from its captured leg (#460). `xruns` is handled by
+/// the caller before this runs, so the SNR gate is never skipped here.
+///
+/// Window-edge and tail gates are `calibrate`'s. The **SNR gate is not**: this
+/// leg carries whatever sweep the operator asked `plot ir` for, and that
+/// statistic is a property of the sweep rather than of the capture's noise, so
+/// it is judged against its own stimulus's noiseless floor (#471). The fixed
+/// 24 dB constant refused a mathematically perfect loopback at the command's
+/// own default band.
 fn reference_latency_from_leg(
     reference: &[f32],
     params: &SweepParams,
@@ -56,12 +65,22 @@ fn reference_latency_from_leg(
     output_port: &str,
     input_port: &str,
 ) -> ReferenceLatency {
-    match analyse_tau_leg(reference, params, tail_s, 0) {
-        Ok((tau_s, pre_impulse_snr_db)) => ReferenceLatency::Measured(MeasuredReferenceLatency {
+    let gate = SnrGate::DerivedFloor {
+        margin_db: ref_snr_margin_db(),
+    };
+    match analyse_tau_leg(reference, params, tail_s, 0, gate) {
+        Ok(TauLegReading {
+            tau_s,
+            snr_db,
+            snr_floor_db,
+        }) => ReferenceLatency::Measured(MeasuredReferenceLatency {
             tau_s,
             // Infinite over a true-silent pre-impulse region, which JSON
             // cannot carry; recorded as absent rather than as a number.
-            pre_impulse_snr_db: pre_impulse_snr_db.is_finite().then_some(pre_impulse_snr_db),
+            pre_impulse_snr_db: snr_db.is_finite().then_some(snr_db),
+            // Carried out of the analysis rather than recomputed: the floor is
+            // a full deconvolution (#471).
+            pre_impulse_snr_floor_db: snr_floor_db,
             method: REFERENCE_LATENCY_METHOD.to_string(),
             output_port: output_port.to_string(),
             input_port: input_port.to_string(),

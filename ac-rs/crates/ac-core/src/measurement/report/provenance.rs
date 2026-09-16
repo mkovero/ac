@@ -145,6 +145,17 @@ pub struct MeasuredReferenceLatency {
     /// infinite, which JSON cannot carry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_impulse_snr_db: Option<f64>,
+    /// The noiseless floor this reading was judged against (#471, schema v8),
+    /// from [`crate::measurement::sweep::pre_impulse_snr_floor_db`] for this
+    /// run's sweep at this reading's own peak index.
+    ///
+    /// Carried because the threshold is no longer a constant in the source:
+    /// without it, "SNR 28.6 dB" cannot be re-judged a year later, since
+    /// whether that passed depends on the sweep it was measured under. `None`
+    /// on v7 reports, and on a reading judged by the fixed threshold because
+    /// no floor could be established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_impulse_snr_floor_db: Option<f64>,
     /// How τ was read, e.g. `"farina_same_capture_reference_v1"`.
     pub method: String,
     /// The reference pair's ports: not the capture's own pair.

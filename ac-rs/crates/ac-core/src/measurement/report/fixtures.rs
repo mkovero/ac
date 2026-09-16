@@ -232,6 +232,7 @@ pub(super) fn measured_reference(tau_s: f64) -> ReferenceLatency {
     ReferenceLatency::Measured(MeasuredReferenceLatency {
         tau_s,
         pre_impulse_snr_db: Some(60.0),
+        pre_impulse_snr_floor_db: Some(63.0),
         method: "farina_same_capture_reference_v1".into(),
         output_port: "ref_out".into(),
         input_port: "ref_in".into(),
