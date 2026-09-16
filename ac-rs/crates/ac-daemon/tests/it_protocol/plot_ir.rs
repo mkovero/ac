@@ -65,7 +65,7 @@ fn plot_ir_emits_impulse_response_with_expected_delay_peak() {
                     v["report"]["data"][0]["data"]["kind"],
                     json!("impulse_response")
                 );
-                assert_eq!(v["report"]["schema_version"], json!(7));
+                assert_eq!(v["report"]["schema_version"], json!(8));
                 // #282 acceptance criterion 6: the ISO 18233 §6.3.2
                 // tail-decay verdict rides in `notes`, not a silent default.
                 let notes = v["report"]["notes"].as_str().expect("notes present");
@@ -710,6 +710,44 @@ fn plot_ir_reports_a_failed_reference_reading_as_unavailable_with_its_check() {
         stats.onset_rule.contains("reference latency unavailable"),
         "{}",
         stats.onset_rule
+    );
+}
+
+/// #471: a good reference leg at `plot ir`'s **default** sweep must measure.
+/// Before the derived floor it was refused — the default 20–20000 Hz band
+/// floors at ~17 dB against a fixed 24 dB gate, so a mathematically perfect
+/// loopback could not pass. Omits `f1_hz`/`f2_hz`/`duration` so the daemon's
+/// own defaults apply; that is the whole point of the test.
+#[test]
+fn plot_ir_measures_the_reference_at_the_default_sweep() {
+    let d = Daemon::spawn_with_config(Some(reference_config()));
+    let c = Client::new(&d);
+    let (_, report) = report_for(
+        &c,
+        json!({
+            "cmd": "plot_ir",
+            "level_dbfs": -6.0,
+            "tail_s": 0.3,
+            "window_len": 4096,
+            "n_harmonics": 3,
+            "distance_m": 0.05,
+        }),
+    );
+    match report.reference_latency.as_ref() {
+        Some(ReferenceLatency::Measured(m)) => {
+            assert!(
+                (m.tau_s - FAKE_REF_DELAY_SAMPLES as f64 / FAKE_SR).abs() < 1e-12,
+                "reference τ {} is not the fake reference leg's delay",
+                m.tau_s
+            );
+        }
+        other => panic!("default sweep must measure the reference, got {other:?}"),
+    }
+    let stats = report.ir_stats().expect("ir_stats");
+    assert!(
+        stats.causal_bound.min_admissible_index().is_some(),
+        "a measured reference and a distance must still build the bound: {:?}",
+        stats.causal_bound
     );
 }
 

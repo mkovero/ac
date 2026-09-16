@@ -80,6 +80,35 @@ const TAU_EDGE_MARGIN_FRAC: f64 = 0.10;
 /// evidence — which is why they are two constants and not one.
 pub(super) const TAU_SNR_THRESHOLD_DB: f64 = 24.0;
 
+/// How far below its own stimulus's noiseless floor a *reference* leg's peak
+/// may sit before the reading is refused (#471).
+///
+/// [`TAU_SNR_THRESHOLD_DB`] above is a constant because `calibrate` fixes its
+/// own stimulus. The #460 reference leg does not: it carries whatever sweep the
+/// operator asked `plot ir` for, and the pre-impulse figure is a property of
+/// that sweep rather than of the capture's noise. Measured on pupu 2026-09-16
+/// and reproduced synthetically within 0.5 dB: white noise from −120 through
+/// −20 dBFS moves it by 0.0 dB, a route attenuated 40 dB reads like a good
+/// cable, and the value ranges 17.2 dB (20–20000 Hz) to 35.1 dB (500–4000 Hz).
+/// So the reference gate compares against
+/// [`ac_core::measurement::sweep::pre_impulse_snr_floor_db`] for the sweep in
+/// hand, and this is the only free parameter left.
+///
+/// Provenance: derived. The shipped 24.0 dB sits 2.8 dB under `calibrate`'s own
+/// ESS floor of 26.8 dB, so 3 dB is that same allowance rounded toward the
+/// reject side. It leaves at least 3.6 dB of separation from a disconnected
+/// input on every characterised shape (the no-cable reading is a noise draw,
+/// ~10–17 dB depending on the seed), and it is six times the 0.5 dB spread
+/// between the rig's measured readings and their synthetic floors. Wired
+/// through the same `tau-window-override` env mechanism as the other two
+/// constants so a rig session can widen it without a rebuild.
+///
+/// What this gate still cannot do, stated so it is not re-derived: it does not
+/// detect wrong or attenuated routing. Peak and deconvolution residue scale
+/// together, so a 40 dB-down path reads exactly like a correct one. Routing is
+/// caught by port resolution (#225) and the level read-out.
+pub(super) const REF_SNR_MARGIN_DB: f64 = 3.0;
+
 /// Rig-instrument overrides for the two τ window constants (#350).
 ///
 /// Compiled in only under the `tau-window-override` feature, which is off
@@ -136,6 +165,43 @@ pub(super) fn tau_snr_threshold_db() -> f64 {
 #[cfg(not(feature = "tau-window-override"))]
 pub(super) fn tau_snr_threshold_db() -> f64 {
     TAU_SNR_THRESHOLD_DB
+}
+
+#[cfg(feature = "tau-window-override")]
+pub(crate) fn ref_snr_margin_db() -> f64 {
+    tau_env_f64("AC_REF_SNR_MARGIN_DB", REF_SNR_MARGIN_DB)
+}
+
+#[cfg(not(feature = "tau-window-override"))]
+pub(crate) fn ref_snr_margin_db() -> f64 {
+    REF_SNR_MARGIN_DB
+}
+
+/// Which threshold a τ reading's SNR is judged against (#471).
+///
+/// One [`analyse_tau_leg`], two policies — `calibrate` fixes its stimulus and
+/// keeps the constant; the #460 reference leg derives its threshold from the
+/// sweep it actually carried. Splitting the *function* instead would have let
+/// the two definitions of "a τ reading" drift, which #460 exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SnrGate {
+    /// [`TAU_SNR_THRESHOLD_DB`], possibly overridden on a rig.
+    Constant,
+    /// This stimulus's own noiseless floor, less `margin_db`. Falls back to
+    /// [`SnrGate::Constant`] when no floor can be established, so the gate can
+    /// never become unclearable.
+    DerivedFloor { margin_db: f64 },
+}
+
+/// One reference or calibration leg, analysed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TauLegReading {
+    pub(crate) tau_s: f64,
+    pub(crate) snr_db: f64,
+    /// The derived floor this reading was judged against, when one applied —
+    /// carried out so the caller can archive it without recomputing it
+    /// (#471 schema v8).
+    pub(crate) snr_floor_db: Option<f64>,
 }
 
 /// Per-reading τ diagnostic (#350). `snr_db` is the real gate value —
@@ -333,22 +399,35 @@ fn check_peak_within_window(
 /// Reuses the Farina machinery from `ac_core::measurement::sweep` exactly
 /// as `plot_ir` does — see `handlers/audio/plot.rs` for the longer-form
 /// version of the same technique.
+/// `calibrate`'s own τ stimulus, as one definition.
+///
+/// Extracted from [`measure_tau`] because #471 made the *shape* of this sweep
+/// load-bearing outside the measurement itself: [`REF_SNR_MARGIN_DB`]'s
+/// provenance is that this stimulus's noiseless floor, less that margin,
+/// reproduces [`TAU_SNR_THRESHOLD_DB`]. A test asserts that, and it has to
+/// judge the sweep the daemon actually plays — a second copy of the
+/// expression here would keep passing after someone edited the first.
+fn tau_sweep_params(sample_rate: u32) -> SweepParams {
+    SweepParams {
+        f1_hz: TAU_F1_HZ,
+        // Nyquist-limited, capped at the top of the audio band.
+        f2_hz: (sample_rate as f64 * 0.45).min(20_000.0),
+        duration_s: TAU_DURATION_S,
+        sample_rate,
+    }
+}
+
 pub(super) fn measure_tau(eng: &mut dyn AudioEngine, amp: f64) -> anyhow::Result<(f64, f64, u32)> {
     let sr = eng.sample_rate();
-    let f2_hz = (sr as f64 * 0.45).min(20_000.0);
-    let params = SweepParams {
-        f1_hz: TAU_F1_HZ,
-        f2_hz,
-        duration_s: TAU_DURATION_S,
-        sample_rate: sr,
-    };
+    let params = tau_sweep_params(sr);
     let sweep = log_sweep(&params)?;
     let amp = amp as f32;
     let scaled: Vec<f32> = sweep.iter().map(|&s| s * amp).collect();
     let xruns_before = eng.xruns();
     let captured = eng.play_and_capture(&scaled, TAU_TAIL_S)?;
     let xruns = eng.xruns().saturating_sub(xruns_before);
-    let (tau_s, snr_db) = analyse_tau_leg(&captured, &params, TAU_TAIL_S, xruns)?;
+    let TauLegReading { tau_s, snr_db, .. } =
+        analyse_tau_leg(&captured, &params, TAU_TAIL_S, xruns, SnrGate::Constant)?;
     Ok((tau_s, snr_db, xruns))
 }
 
@@ -369,7 +448,8 @@ pub(crate) fn analyse_tau_leg(
     params: &SweepParams,
     tail_s: f64,
     xruns: u32,
-) -> anyhow::Result<(f64, f64)> {
+    gate: SnrGate,
+) -> anyhow::Result<TauLegReading> {
     let sr = params.sample_rate;
     let half_window_s = tau_half_window_s();
     if 2.0 * half_window_s > tail_s {
@@ -411,12 +491,30 @@ pub(crate) fn analyse_tau_leg(
     // are in, regardless of what this figure would have said. A clean
     // lifecycle keeps the original #368 order: SNR gate before the
     // edge-margin check.
+    // #471: the reference leg's threshold comes from its own stimulus. A
+    // non-finite floor (guard band eats the pre-peak region — reachable on a
+    // noise-only leg that argmaxes near index 0) falls back to the constant
+    // rather than producing a gate no reading could clear.
+    let snr_floor_db = match gate {
+        SnrGate::Constant => None,
+        SnrGate::DerivedFloor { .. } => {
+            ac_core::measurement::sweep::pre_impulse_snr_floor_db(params, window_len, peak_idx)
+        }
+    };
+    let threshold_db = match (gate, snr_floor_db) {
+        (SnrGate::DerivedFloor { margin_db }, Some(floor)) => floor - margin_db,
+        _ => tau_snr_threshold_db(),
+    };
     if xruns == 0 {
-        check_peak_snr(snr_db, tau_snr_threshold_db())?;
+        check_peak_snr(snr_db, threshold_db)?;
     }
     check_peak_within_window(peak_idx, window_len, tau_edge_margin_frac())?;
     let offset_samples = peak_idx as i64 - half as i64;
-    Ok((offset_samples as f64 / sr as f64, snr_db))
+    Ok(TauLegReading {
+        tau_s: offset_samples as f64 / sr as f64,
+        snr_db,
+        snr_floor_db,
+    })
 }
 
 #[cfg(test)]
@@ -561,6 +659,40 @@ mod tests {
                 "{bad:?} is not a usable window and must fall back, not be coerced"
             );
         }
+    }
+
+    /// Coupled-constants guard (QA, PR #473). [`REF_SNR_MARGIN_DB`]'s
+    /// provenance is a *relationship*: `calibrate`'s own ESS floors at
+    /// ≈26.8 dB, and 26.8 − 3 ≈ the shipped [`TAU_SNR_THRESHOLD_DB`] of 24.0,
+    /// which is the evidence that deriving the reference leg's threshold
+    /// generalises rather than inventing a new policy. Nothing enforced that
+    /// relationship: either constant could move alone and silently falsify the
+    /// doc comment on the other.
+    ///
+    /// Judges the sweep [`measure_tau`] actually plays, via
+    /// [`tau_sweep_params`], so an edit to calibrate's stimulus fails here too
+    /// — that is the coupling, and a second copy of the expression would hide
+    /// exactly the change worth catching.
+    #[test]
+    fn ref_snr_margin_reproduces_calibrates_shipped_threshold() {
+        let sr = 96_000;
+        let params = tau_sweep_params(sr);
+        let half = (tau_half_window_s() * sr as f64).ceil() as usize;
+        let window_len = 2 * half;
+        // Any interior peak serves; the floor varies only across the ~27→30 dB
+        // range #471 characterised, well inside the 1 dB bar below.
+        let peak = half + 1711;
+        let floor =
+            ac_core::measurement::sweep::pre_impulse_snr_floor_db(&params, window_len, peak)
+                .expect("calibrate's own ESS must have a floor");
+        let derived_equivalent = floor - REF_SNR_MARGIN_DB;
+        assert!(
+            (derived_equivalent - TAU_SNR_THRESHOLD_DB).abs() < 1.0,
+            "REF_SNR_MARGIN_DB no longer reproduces TAU_SNR_THRESHOLD_DB against calibrate's own \
+             stimulus: floor {floor:.1} - margin {REF_SNR_MARGIN_DB} = {derived_equivalent:.1}, \
+             shipped constant is {TAU_SNR_THRESHOLD_DB}. If that is intentional, update whichever \
+             doc comment still claims the other"
+        );
     }
 
     /// #368: `check_peak_snr` mirrors `check_peak_within_window`'s shape —

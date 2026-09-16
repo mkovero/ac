@@ -15,7 +15,10 @@ use ac_core::shared::calibration::{compare_tau_readings, TauComparison, TauCondi
 
 use crate::audio::make_engine;
 
-pub(crate) use measure::{analyse_tau_leg, EdgeRefusal, LowSnrRefusal, TailTooShort};
+pub(crate) use measure::{
+    analyse_tau_leg, ref_snr_margin_db, EdgeRefusal, LowSnrRefusal, SnrGate, TailTooShort,
+    TauLegReading,
+};
 use measure::{measure_tau, tau_snr_threshold_db};
 
 /// Method tag stored on every [`TauEntry`] this handler produces. Bumped

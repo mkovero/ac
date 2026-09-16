@@ -39,12 +39,14 @@ use anyhow::{bail, Result};
 use crate::measurement::report::StandardsCitation;
 
 mod deconv;
+mod floor;
 mod gated;
 mod harmonics;
 mod onset;
 mod tail_decay;
 
 pub use deconv::{deconvolve_full, inverse_sweep, log_sweep};
+pub use floor::pre_impulse_snr_floor_db;
 pub use gated::{gated_frequency_response, tukey_window, GatedResponsePoint};
 pub use harmonics::{
     extract_irs, pre_impulse_region_len, pre_impulse_snr_db, DeconvolvedIrs, HarmonicIr,
